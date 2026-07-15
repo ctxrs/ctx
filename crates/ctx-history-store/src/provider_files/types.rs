@@ -1,7 +1,9 @@
 const CATALOG_INVENTORY_FAMILY: &str = "catalog_sessions";
 const SOURCE_IMPORT_INVENTORY_FAMILY: &str = "source_import_files";
-const STAGING_SCHEMA: &str = "provider_replacement_stage";
 const STAGING_DIR_PREFIX: &str = "stage";
+const STAGING_SEEN_TABLE: &str = "provider_file_publication_seen";
+const STAGING_PRIOR_SOURCES_TABLE: &str = "provider_file_publication_prior_sources";
+const STAGING_BATCH_TABLE: &str = "provider_file_publication_batch";
 pub const PROVIDER_FILE_PREPARATION_MAX_ROWS: usize = 100_000;
 pub const PROVIDER_FILE_RECONCILIATION_MAX_ROWS: usize = 100_000;
 pub const PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES: usize = 64 * 1024;
@@ -151,6 +153,16 @@ pub enum ProviderFilePublicationKind {
     Replacement,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFilePublicationRetirementWork {
+    pub provider: CaptureProvider,
+    pub material_source_format: String,
+    pub material_source_root: String,
+    pub source_path: String,
+    pub estimated_bytes: u64,
+    pub last_attempt_at_ms: i64,
+}
+
 impl ProviderFilePublicationKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -192,6 +204,7 @@ pub struct ProviderFilePublicationScope {
     owner_id: String,
     staging_id: String,
     tracks_prior_material: bool,
+    reuse_staging_state: bool,
     retires_observation: bool,
     lifecycle: Arc<AtomicBool>,
     _owner_lock: File,
@@ -207,6 +220,10 @@ impl Drop for ProviderFilePublicationScope {
 impl ProviderFilePublicationScope {
     pub fn kind(&self) -> ProviderFilePublicationKind {
         self.kind
+    }
+
+    pub fn tracks_prior_material(&self) -> bool {
+        self.tracks_prior_material
     }
 }
 
@@ -332,6 +349,20 @@ pub enum ProviderFileMaintenanceWarning {
     },
 }
 
+impl std::fmt::Display for ProviderFileMaintenanceWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StagingCleanupDeferred {
+                publication_id,
+                operation,
+            } => write!(
+                formatter,
+                "provider publication {publication_id} staging cleanup deferred during {operation}"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderFileFinalizeOutcome {
     pub reconciliation: ProviderFileReconciliationCounts,
@@ -349,12 +380,6 @@ pub(crate) struct ActiveProviderFilePublication {
     retires_observation: bool,
     _owner_lock_path: PathBuf,
     attached: bool,
-    staging_dir_path: Option<PathBuf>,
-    staging_path: Option<PathBuf>,
-    #[cfg(test)]
-    staging_file_mode: Option<u32>,
-    #[cfg(test)]
-    staging_dir_mode: Option<u32>,
 }
 
 struct ProviderFileWriteScopeReset<'a> {
@@ -410,6 +435,8 @@ struct DurableProviderFilePublication {
     import_revision: u32,
     metadata_json: Option<String>,
     mutation_started: bool,
+    tracks_prior_material: bool,
+    staging_initialized: bool,
 }
 
 struct ReconciliationBatch {

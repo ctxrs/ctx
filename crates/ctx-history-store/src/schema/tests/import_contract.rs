@@ -346,6 +346,505 @@ fn real_schema_v49_fixture_adds_provider_file_contract_tables() {
     assert_schema_object_parity(&store.conn, &fresh.conn);
 }
 
+#[test]
+fn real_schema_v49_fixture_stages_pending_reason_repairs() {
+    let temp = tempdir();
+    let path = temp.path().join("pending-reasons.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(include_str!("../fixtures/schema_v49.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../fixtures/pending_reason_v49_rows.sql"))
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let repairs = store
+        .conn
+        .prepare(
+            "SELECT inventory_family, cursor_provider, cursor_source_root, \
+                    cursor_source_path, completed \
+             FROM import_pending_reason_repairs ORDER BY inventory_family",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        repairs,
+        vec![
+            ("catalog_sessions".into(), None, None, None, false),
+            ("source_import_files".into(), None, None, None, false),
+        ]
+    );
+
+    let pending_reason_count: usize = store
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM catalog_sessions WHERE pending_reason IS NOT NULL) + \
+                    (SELECT COUNT(*) FROM source_import_files WHERE pending_reason IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_reason_count, 0);
+}
+
+#[test]
+fn v52_migration_preserves_rows_and_repair_progress_when_retried() {
+    let temp = tempdir();
+    let path = temp.path().join("v52-failure-reasons.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+    for (index, prior_reason) in [
+        (1, Some("fresh_append")),
+        (2, Some("recovery_retry")),
+        (3, Some("fresh_changed")),
+        (4, Some("recovery_replacement")),
+        (5, None),
+    ] {
+        conn.execute(
+            r#"
+            INSERT INTO source_import_files (
+                provider, source_format, source_root, source_path,
+                file_size_bytes, file_modified_at_ms, observed_at_ms,
+                indexed_status, pending_reason
+            ) VALUES ('pi', 'pi_session_jsonl', ?1, ?2, 1, 1, 1, 'failed', ?3)
+            "#,
+            params![
+                format!("/fixture/failure-{index}"),
+                format!("/fixture/failure-{index}/session.jsonl"),
+                prior_reason,
+            ],
+        )
+        .unwrap();
+    }
+
+    migrate_fresh_scheduling_to_v52(&conn).unwrap();
+    let reasons = conn
+        .prepare("SELECT pending_reason FROM source_import_files ORDER BY source_root")
+        .unwrap()
+        .query_map([], |row| row.get::<_, Option<String>>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        reasons,
+        vec![
+            Some("fresh_append".into()),
+            Some("recovery_retry".into()),
+            Some("fresh_changed".into()),
+            Some("recovery_replacement".into()),
+            None,
+        ]
+    );
+
+    conn.execute(
+        r#"
+        UPDATE import_pending_reason_repairs
+        SET cursor_provider = 'pi', cursor_source_root = '/fixture/failure-5',
+            cursor_source_path = '/fixture/failure-5/session.jsonl', completed = 1
+        WHERE inventory_family = 'source_import_files'
+        "#,
+        [],
+    )
+    .unwrap();
+    migrate_fresh_scheduling_to_v52(&conn).unwrap();
+
+    let repair = conn
+        .query_row(
+            r#"
+            SELECT cursor_provider, cursor_source_root, cursor_source_path, completed
+            FROM import_pending_reason_repairs
+            WHERE inventory_family = 'source_import_files'
+            "#,
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        repair,
+        (
+            "pi".into(),
+            "/fixture/failure-5".into(),
+            "/fixture/failure-5/session.jsonl".into(),
+            true,
+        )
+    );
+}
+
+#[test]
+fn v52_legacy_publications_reconstruct_without_sidecars_and_match_fresh_schema() {
+    let temp = tempdir();
+    let path = temp.path().join("v52-publication-staging.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        let legacy_sql = CREATE_TABLES_SQL
+            .replace(
+                "    tracks_prior_material INTEGER NOT NULL DEFAULT 0 CHECK (tracks_prior_material IN (0, 1)),\n",
+                "",
+            )
+            .replace(
+                "    staging_initialized INTEGER NOT NULL DEFAULT 0 CHECK (staging_initialized IN (0, 1)),\n",
+                "",
+            )
+            .replace(
+                ",\n    pending_reason TEXT CHECK (pending_reason IS NULL OR pending_reason IN ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', 'recovery_replacement', 'parser_revision', 'missing_material', 'abandoned_publication', 'legacy', 'explicit_rescan'))",
+                "",
+            );
+        assert!(!legacy_sql.contains("staging_initialized"));
+        assert!(!legacy_sql.contains("tracks_prior_material"));
+        conn.execute_batch(&legacy_sql).unwrap();
+        assert!(!table_has_column(&conn, "catalog_sessions", "pending_reason").unwrap());
+        assert!(!table_has_column(&conn, "source_import_files", "pending_reason").unwrap());
+        conn.execute_batch("PRAGMA user_version = 49;").unwrap();
+        migrate_provider_publication_to_v51(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO provider_file_publications (
+              replacement_id, owner_id, publication_kind, staging_id, provider,
+              inventory_family, inventory_source_format, inventory_source_root,
+              source_path, material_source_format, material_source_root,
+              inventory_generation, file_size_bytes, file_modified_at_ms,
+              import_revision, mutation_started, preparation_complete, preparation_cursor,
+              cleanup_phase, cleanup_source_cursor, cleanup_entity_cursor,
+              removed_events, started_at_ms, updated_at_ms
+            ) VALUES
+            (
+              'legacy-mutated', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              'replacement', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'codex',
+              'catalog_sessions', 'codex_session_jsonl', '/legacy/inventory',
+              '/legacy/mutated.jsonl', 'codex_session_jsonl', '/legacy/material',
+              1, 10, 20, 1, 1, 1, 'prior-source', 4, 'prior-source', 'event-cursor',
+              7, 30, 30
+            ),
+            (
+              'legacy-unmutated', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+              'replacement', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 'codex',
+              'catalog_sessions', 'codex_session_jsonl', '/legacy/inventory',
+              '/legacy/unmutated.jsonl', 'codex_session_jsonl', '/legacy/material',
+              1, 10, 20, 1, 0, 1, 'prior-source', 0, NULL, NULL,
+              0, 31, 31
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    let upgraded = Store::open(&path).unwrap();
+    let mut statement = upgraded
+        .conn
+        .prepare(
+            "SELECT replacement_id, mutation_started, staging_initialized, \
+                    preparation_complete, preparation_cursor, cleanup_phase, \
+                    cleanup_source_cursor, cleanup_entity_cursor, removed_events \
+             FROM provider_file_publications ORDER BY replacement_id",
+        )
+        .unwrap();
+    let publications = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .unwrap();
+    let publications = publications.collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(
+        publications,
+        vec![
+            (
+                "legacy-mutated".into(),
+                true,
+                false,
+                false,
+                None,
+                0,
+                None,
+                None,
+                0,
+            ),
+            (
+                "legacy-unmutated".into(),
+                false,
+                false,
+                false,
+                None,
+                0,
+                None,
+                None,
+                0,
+            ),
+        ]
+    );
+    for table in [
+        "provider_file_publication_seen",
+        "provider_file_publication_prior_sources",
+        "provider_file_publication_batch",
+    ] {
+        let count: i64 = upgraded
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+    let default_value: String = upgraded
+        .conn
+        .query_row(
+            "SELECT dflt_value FROM pragma_table_info('provider_file_publications') \
+             WHERE name = 'staging_initialized'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(default_value, "0");
+
+    let fresh = Store::open(temp.path().join("fresh-v52.sqlite")).unwrap();
+    assert_schema_object_parity(&upgraded.conn, &fresh.conn);
+}
+
+#[test]
+fn v52_migration_defers_material_classification_to_bounded_repair() {
+    let temp = tempdir();
+    let path = temp.path().join("v52-material-owners.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+    conn.execute_batch(
+        r#"
+        INSERT INTO catalog_sessions (
+          source_path, provider, source_format, source_root, external_session_id,
+          agent_type, file_size_bytes, file_modified_at_ms, import_revision,
+          cataloged_at_ms, indexed_at_ms, indexed_file_size_bytes,
+          indexed_file_modified_at_ms, indexed_status, indexed_import_revision
+        ) VALUES
+          ('/fixture/catalog/correct.jsonl', 'codex', 'codex_session_jsonl',
+           '/fixture/catalog', 'correct', 'primary', 1, 1, 1, 1, 2, 1, 1, 'indexed', 1),
+          ('/fixture/catalog/unowned.jsonl', 'codex', 'codex_session_jsonl',
+           '/fixture/catalog', 'unowned', 'primary', 1, 1, 1, 1, 2, 1, 1, 'indexed', 1),
+          ('/fixture/catalog/wrong-format.jsonl', 'codex', 'codex_session_jsonl',
+           '/fixture/catalog', 'wrong-format', 'primary', 1, 1, 1, 1, 2, 1, 1, 'indexed', 1),
+          ('/fixture/catalog/wrong-root.jsonl', 'codex', 'codex_session_jsonl',
+           '/fixture/catalog', 'wrong-root', 'primary', 1, 1, 1, 1, 2, 1, 1, 'indexed', 1);
+
+        INSERT INTO source_import_files (
+          provider, source_format, source_root, source_path, file_size_bytes,
+          file_modified_at_ms, import_revision, observed_at_ms, indexed_at_ms,
+          indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status,
+          indexed_import_revision, metadata_json
+        ) VALUES
+          ('pi', 'pi_session_jsonl', '/fixture/source', '/fixture/source/correct.jsonl',
+           1, 1, 1, 1, 2, 1, 1, 'indexed', 1, '{"inventory_unit":"logical_import_unit"}'),
+          ('mistral_vibe', 'mistral_vibe_session_jsonl_tree', '/fixture/source',
+           '/fixture/source/mistral/messages.jsonl',
+           1, 1, 1, 1, 2, 1, 1, 'indexed', 1, '{"inventory_unit":"logical_import_unit"}'),
+          ('pi', 'pi_session_jsonl', '/fixture/source', '/fixture/source/wrong-format.jsonl',
+           1, 1, 1, 1, 2, 1, 1, 'indexed', 1, '{"inventory_unit":"logical_import_unit"}'),
+          ('pi', 'pi_session_jsonl', '/fixture/source', '/fixture/source/wrong-root.jsonl',
+           1, 1, 1, 1, 2, 1, 1, 'indexed', 1, '{"inventory_unit":"logical_import_unit"}');
+
+        INSERT INTO capture_sources (
+          id, kind, provider, machine_id, raw_source_path, source_format,
+          source_root, external_session_id, started_at_ms, fidelity
+        ) VALUES
+          ('catalog-correct', 'provider_import', 'codex', 'fixture',
+           '/fixture/catalog/correct.jsonl', 'codex_session_jsonl',
+           '/fixture/catalog', 'correct', 1, 'imported'),
+          ('catalog-wrong-format', 'provider_import', 'codex', 'fixture',
+           '/fixture/catalog/wrong-format.jsonl', 'codex_session_jsonl_tree',
+           '/fixture/catalog', 'wrong-format', 1, 'imported'),
+          ('catalog-wrong-root', 'provider_import', 'codex', 'fixture',
+           '/fixture/catalog/wrong-root.jsonl', 'codex_session_jsonl',
+           '/fixture/catalog/other', 'wrong-root', 1, 'imported'),
+          ('source-correct', 'provider_import', 'pi', 'fixture',
+           '/fixture/source/correct.jsonl', 'pi_session_jsonl',
+           '/fixture/source', NULL, 1, 'imported'),
+          ('source-mistral', 'provider_import', 'mistral_vibe', 'fixture',
+           '/fixture/source/mistral/messages.jsonl', 'mistral_vibe_session_jsonl',
+           '/fixture/source/mistral/messages.jsonl', NULL, 1, 'imported'),
+          ('source-wrong-format', 'provider_import', 'pi', 'fixture',
+           '/fixture/source/wrong-format.jsonl', 'pi_session_json',
+           '/fixture/source', NULL, 1, 'imported'),
+          ('source-wrong-root', 'provider_import', 'pi', 'fixture',
+           '/fixture/source/wrong-root.jsonl', 'pi_session_jsonl',
+           '/fixture/source/other', NULL, 1, 'imported');
+
+        INSERT INTO sessions (
+          id, capture_source_id, provider, external_session_id, agent_type,
+          status, fidelity, started_at_ms, created_at_ms, updated_at_ms
+        ) VALUES
+          ('session-correct', 'catalog-correct', 'codex', 'correct',
+           'primary', 'imported', 'imported', 1, 1, 1),
+          ('session-unowned', NULL, 'codex', 'unowned',
+           'primary', 'imported', 'imported', 1, 1, 1),
+          ('session-wrong-format', 'catalog-wrong-format', 'codex', 'wrong-format',
+           'primary', 'imported', 'imported', 1, 1, 1),
+          ('session-wrong-root', 'catalog-wrong-root', 'codex', 'wrong-root',
+           'primary', 'imported', 'imported', 1, 1, 1);
+        "#,
+    )
+    .unwrap();
+
+    migrate_fresh_scheduling_to_v52(&conn).unwrap();
+
+    let catalog_reasons = conn
+        .prepare("SELECT source_path, pending_reason FROM catalog_sessions ORDER BY source_path")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        catalog_reasons,
+        vec![
+            ("/fixture/catalog/correct.jsonl".into(), None),
+            ("/fixture/catalog/unowned.jsonl".into(), None),
+            ("/fixture/catalog/wrong-format.jsonl".into(), None),
+            ("/fixture/catalog/wrong-root.jsonl".into(), None),
+        ]
+    );
+    let source_reasons = conn
+        .prepare("SELECT source_path, pending_reason FROM source_import_files ORDER BY source_path")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        source_reasons,
+        vec![
+            ("/fixture/source/correct.jsonl".into(), None),
+            ("/fixture/source/mistral/messages.jsonl".into(), None),
+            ("/fixture/source/wrong-format.jsonl".into(), None),
+            ("/fixture/source/wrong-root.jsonl".into(), None),
+        ]
+    );
+    let incomplete_repairs: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM import_pending_reason_repairs WHERE completed = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(incomplete_repairs, 2);
+}
+
+#[test]
+fn v52_migration_does_not_rewrite_inventory_rows_or_churn_indexes() {
+    let temp = tempdir();
+    let path = temp.path().join("v52-no-rebuild.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(include_str!("../fixtures/schema_v49.sql"))
+        .unwrap();
+    migrate_provider_publication_to_v51(&conn).unwrap();
+    let rootpages_before = ["catalog_sessions", "source_import_files"].map(|table| {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    let total_changes_before = conn.total_changes();
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let callback_observed = Arc::clone(&observed);
+    conn.authorizer(Some(move |context: AuthContext<'_>| {
+        let (description, forbidden) = match context.action {
+            AuthAction::AlterTable { table_name, .. }
+                if matches!(table_name, "catalog_sessions" | "source_import_files") =>
+            {
+                (format!("alter:{table_name}"), false)
+            }
+            AuthAction::Update { table_name, .. }
+                if matches!(table_name, "catalog_sessions" | "source_import_files") =>
+            {
+                (format!("forbidden-update:{table_name}"), true)
+            }
+            AuthAction::CreateIndex { table_name, .. }
+                if matches!(
+                    table_name,
+                    "capture_sources" | "catalog_sessions" | "source_import_files"
+                ) =>
+            {
+                (format!("forbidden-index:{table_name}"), true)
+            }
+            AuthAction::CreateTable { table_name }
+            | AuthAction::DropTable { table_name }
+            | AuthAction::Insert { table_name }
+                if matches!(
+                    table_name,
+                    "catalog_sessions"
+                        | "catalog_sessions_new"
+                        | "source_import_files"
+                        | "source_import_files_new"
+                ) =>
+            {
+                (format!("forbidden:{table_name}"), true)
+            }
+            _ => return Authorization::Allow,
+        };
+        callback_observed.lock().unwrap().push(description);
+        if forbidden {
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }));
+
+    migrate_fresh_scheduling_to_v52(&conn).unwrap();
+    let observed = observed.lock().unwrap();
+    assert!(observed
+        .iter()
+        .any(|action| action == "alter:catalog_sessions"));
+    assert!(observed
+        .iter()
+        .any(|action| action == "alter:source_import_files"));
+    assert!(!observed
+        .iter()
+        .any(|action| action.starts_with("forbidden")));
+    drop(observed);
+    assert_eq!(conn.total_changes() - total_changes_before, 2);
+
+    let rootpages_after = ["catalog_sessions", "source_import_files"].map(|table| {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(rootpages_after, rootpages_before);
+}
+
 fn schema_object_signature(conn: &Connection) -> Vec<(String, String, String)> {
     conn.prepare(
         r#"

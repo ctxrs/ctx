@@ -69,6 +69,89 @@ text_enum! {
     default Unknown
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderMaterialSourceFormat {
+    pub provider: CaptureProvider,
+    pub inventory_source_format: &'static str,
+    pub material_source_format: &'static str,
+}
+
+pub const PROVIDER_MATERIAL_SOURCE_FORMATS: &[ProviderMaterialSourceFormat] = &[
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Codex,
+        inventory_source_format: "codex_session_jsonl_tree",
+        material_source_format: "codex_session_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Codex,
+        inventory_source_format: "codex_session_jsonl",
+        material_source_format: "codex_session_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Pi,
+        inventory_source_format: "pi_session_jsonl",
+        material_source_format: "pi_session_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Claude,
+        inventory_source_format: "claude_projects_jsonl_tree",
+        material_source_format: "claude_projects_jsonl_tree",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Tabnine,
+        inventory_source_format: "tabnine_cli_chat_recording_jsonl",
+        material_source_format: "tabnine_cli_chat_recording_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Cursor,
+        inventory_source_format: "cursor_agent_transcript_jsonl_tree",
+        material_source_format: "cursor_agent_transcript_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Qoder,
+        inventory_source_format: "qoder_transcript_jsonl_tree",
+        material_source_format: "qoder_transcript_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::QwenCode,
+        inventory_source_format: "qwen_code_chat_jsonl_tree",
+        material_source_format: "qwen_code_chat_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::KimiCodeCli,
+        inventory_source_format: "kimi_code_cli_wire_jsonl_tree",
+        material_source_format: "kimi_code_cli_wire_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::MistralVibe,
+        inventory_source_format: "mistral_vibe_session_jsonl_tree",
+        material_source_format: "mistral_vibe_session_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Mux,
+        inventory_source_format: "mux_session_jsonl_tree",
+        material_source_format: "mux_session_jsonl",
+    },
+    ProviderMaterialSourceFormat {
+        provider: CaptureProvider::Windsurf,
+        inventory_source_format: "windsurf_cascade_hook_transcript_jsonl_tree",
+        material_source_format: "windsurf_cascade_hook_transcript_jsonl",
+    },
+];
+
+pub fn canonical_provider_material_source_format(
+    provider: CaptureProvider,
+    inventory_source_format: &str,
+) -> Option<&'static str> {
+    PROVIDER_MATERIAL_SOURCE_FORMATS
+        .iter()
+        .find(|mapping| {
+            mapping.provider == provider
+                && mapping.inventory_source_format == inventory_source_format
+        })
+        .map(|mapping| mapping.material_source_format)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaptureSourceDescriptor {
     pub kind: CaptureSourceKind,

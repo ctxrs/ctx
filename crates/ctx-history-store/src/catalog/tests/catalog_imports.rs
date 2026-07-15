@@ -48,6 +48,33 @@ fn imported_source(source_id: Uuid, source_root: &str, external_session_id: &str
     }
 }
 
+fn upsert_catalog_material(
+    store: &Store,
+    source_root: &str,
+    source_path: &str,
+    external_session_id: &str,
+) {
+    let source_id = new_id();
+    let mut source = imported_source(source_id, source_root, external_session_id);
+    source.descriptor.raw_source_path = Some(source_path.to_owned());
+    store.upsert_capture_source(&source).unwrap();
+    store
+        .upsert_session(&source_scoped_imported_session(
+            external_session_id,
+            source_id,
+        ))
+        .unwrap();
+}
+
+fn upsert_source_material(store: &Store, file: &SourceImportFile) {
+    let mut source = imported_source(new_id(), &file.source_root, "source-material");
+    source.descriptor.provider = file.provider;
+    source.descriptor.raw_source_path = Some(file.source_path.clone());
+    source.descriptor.source_format =
+        Some(expected_material_source_format(file.provider, &file.source_format).to_owned());
+    store.upsert_capture_source(&source).unwrap();
+}
+
 fn session_event(session_id: Uuid, index: u64) -> Event {
     Event {
         id: new_id(),
@@ -237,9 +264,12 @@ fn catalog_sessions_count_indexed_and_stale_rows() {
         1
     );
 
-    store
-        .upsert_session(&imported_session("codex-session-1"))
-        .unwrap();
+    upsert_catalog_material(
+        &store,
+        "/home/user/.codex/sessions",
+        "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+        "codex-session-1",
+    );
     store
         .mark_catalog_source_indexed(
             CaptureProvider::Codex,
@@ -327,9 +357,12 @@ fn catalog_import_planning_requires_current_index_state_and_matching_session() {
     assert_eq!(pending.len(), 1);
     assert_eq!(store.catalog_session_counts().unwrap().indexed, 0);
 
-    store
-        .upsert_session(&imported_session("codex-session-1"))
-        .unwrap();
+    upsert_catalog_material(
+        &store,
+        "/home/user/.codex/sessions",
+        "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+        "codex-session-1",
+    );
     let pending = store
         .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
         .unwrap();
@@ -384,20 +417,7 @@ fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
             .unwrap();
     }
 
-    let first_source_id = new_id();
-    store
-        .upsert_capture_source(&imported_source(
-            first_source_id,
-            first_root,
-            external_session_id,
-        ))
-        .unwrap();
-    store
-        .upsert_session(&source_scoped_imported_session(
-            external_session_id,
-            first_source_id,
-        ))
-        .unwrap();
+    upsert_catalog_material(&store, first_root, first_path, external_session_id);
 
     assert!(store
         .list_pending_catalog_sessions(CaptureProvider::Codex, first_root)
@@ -411,6 +431,81 @@ fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
     let counts = store.catalog_session_counts().unwrap();
     assert_eq!(counts.indexed, 1);
     assert_eq!(counts.pending, 1);
+}
+
+#[test]
+fn catalog_material_requires_the_exact_owned_codex_tuple() {
+    for scenario in ["unowned", "wrong_format", "wrong_root", "wrong_external"] {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join(format!("{scenario}.sqlite"))).unwrap();
+        let root = "/fixture/codex/sessions";
+        let path = "/fixture/codex/sessions/session.jsonl";
+        let external_session_id = "exact-owner";
+        let observed_at_ms = timestamp_ms(fixed_time());
+        let mut catalog = catalog_session_for_root(root, path, external_session_id, observed_at_ms);
+        upsert_catalog_inventory(&store, std::slice::from_ref(&catalog));
+        store
+            .mark_catalog_source_indexed(
+                catalog.provider,
+                CatalogSourceIndexUpdate {
+                    source_root: root,
+                    source_path: path,
+                    file_size_bytes: catalog.file_size_bytes,
+                    file_modified_at_ms: catalog.file_modified_at_ms,
+                    import_revision: catalog.import_revision,
+                    inventory_generation: current_catalog_generation(
+                        &store,
+                        catalog.provider,
+                        root,
+                    ),
+                    file_sha256: None,
+                    event_count: Some(1),
+                    indexed_at_ms: observed_at_ms + 1,
+                },
+            )
+            .unwrap();
+
+        if scenario == "unowned" {
+            store
+                .upsert_session(&imported_session(external_session_id))
+                .unwrap();
+        } else {
+            let source_id = new_id();
+            let mut source = imported_source(source_id, root, external_session_id);
+            source.descriptor.raw_source_path = Some(path.to_owned());
+            match scenario {
+                "wrong_format" => {
+                    source.descriptor.source_format = Some("codex_session_jsonl_tree".into())
+                }
+                "wrong_root" => source.descriptor.source_root = Some("/fixture/other".into()),
+                "wrong_external" => {
+                    source.descriptor.external_session_id = Some("other-session".into())
+                }
+                _ => unreachable!(),
+            }
+            store.upsert_capture_source(&source).unwrap();
+            store
+                .upsert_session(&source_scoped_imported_session(
+                    external_session_id,
+                    source_id,
+                ))
+                .unwrap();
+        }
+
+        catalog.cataloged_at_ms += 1;
+        upsert_catalog_inventory(&store, std::slice::from_ref(&catalog));
+        let recovery = store
+            .list_catalog_import_work(catalog.provider, root, ImportWorkClass::Recovery, 10)
+            .unwrap();
+        assert_eq!(
+            recovery[0].reason,
+            ImportPendingReason::MissingMaterial,
+            "{scenario}"
+        );
+        let counts = store.catalog_session_counts().unwrap();
+        assert_eq!(counts.indexed, 0, "{scenario}");
+        assert_eq!(counts.pending, 1, "{scenario}");
+    }
 }
 
 #[test]
@@ -481,9 +576,12 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
             cataloged_at_ms,
         )],
     );
-    store
-        .upsert_session(&imported_session("codex-session-1"))
-        .unwrap();
+    upsert_catalog_material(
+        &store,
+        "/home/user/.codex/sessions",
+        source_path,
+        "codex-session-1",
+    );
     store
         .mark_catalog_source_indexed(
             CaptureProvider::Codex,
@@ -581,16 +679,28 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
 }
 
 #[test]
-fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint() {
+fn completed_with_rejections_self_rooted_material_resumes_from_safe_tail() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let observed_at_ms = timestamp_ms(fixed_time());
     let source_path = "/home/user/.codex/sessions/2026/06/24/mixed-tail.jsonl";
     let initial = catalog_session(source_path, "mixed-tail", observed_at_ms);
-    upsert_catalog_inventory(&store, &[initial]);
+    upsert_catalog_inventory(&store, &[initial.clone()]);
+    upsert_catalog_material(
+        &store,
+        "/home/user/.codex/sessions",
+        source_path,
+        "mixed-tail",
+    );
     store
-        .upsert_session(&imported_session("mixed-tail"))
+        .conn
+        .execute(
+            "UPDATE capture_sources SET source_root = raw_source_path \
+             WHERE provider = 'codex' AND external_session_id = 'mixed-tail'",
+            [],
+        )
         .unwrap();
+    assert!(store.catalog_session_material_exists(&initial).unwrap());
     store
         .mark_catalog_source_indexed(
             CaptureProvider::Codex,
@@ -615,28 +725,31 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
     let mut appended = catalog_session(source_path, "mixed-tail", observed_at_ms + 1);
     appended.file_size_bytes = 64;
     upsert_catalog_inventory(&store, &[appended]);
-    store
-        .record_catalog_source_import_result(
-            CaptureProvider::Codex,
-            CatalogSourceIndexUpdate {
-                source_root: "/home/user/.codex/sessions",
-                source_path,
-                file_size_bytes: 64,
-                file_modified_at_ms: observed_at_ms + 1,
-                import_revision: 1,
-                inventory_generation: current_catalog_generation(
-                    &store,
-                    CaptureProvider::Codex,
-                    "/home/user/.codex/sessions",
-                ),
-                file_sha256: None,
-                event_count: Some(4),
-                indexed_at_ms: observed_at_ms + 20,
-            },
-            CatalogIndexedStatus::CompletedWithRejections,
-            Some("line 4: malformed record"),
-        )
-        .unwrap();
+    assert_eq!(
+        store
+            .record_catalog_source_import_result(
+                CaptureProvider::Codex,
+                CatalogSourceIndexUpdate {
+                    source_root: "/home/user/.codex/sessions",
+                    source_path,
+                    file_size_bytes: 64,
+                    file_modified_at_ms: observed_at_ms + 1,
+                    import_revision: 1,
+                    inventory_generation: current_catalog_generation(
+                        &store,
+                        CaptureProvider::Codex,
+                        "/home/user/.codex/sessions",
+                    ),
+                    file_sha256: None,
+                    event_count: Some(4),
+                    indexed_at_ms: observed_at_ms + 20,
+                },
+                CatalogIndexedStatus::CompletedWithRejections,
+                Some("line 4: malformed record"),
+            )
+            .unwrap(),
+        1
+    );
 
     assert!(store
         .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
@@ -947,6 +1060,7 @@ fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
             )
             .unwrap();
     }
+    upsert_source_material(&store, &claude);
 
     assert!(store
         .list_pending_source_import_files(CaptureProvider::Claude, claude_root)

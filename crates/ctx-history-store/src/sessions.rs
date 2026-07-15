@@ -88,7 +88,7 @@ impl Store {
                 (SELECT session_id FROM session_aliases WHERE alias_id = ?1),
                 ?1
             ) AND {}",
-            crate::provider_files::session_material_visible_predicate("sessions")
+            self.importer_session_material_visible_predicate("sessions")
         );
         self.conn
             .query_row(
@@ -119,7 +119,7 @@ impl Store {
         provider: CaptureProvider,
         external_session_id: &str,
     ) -> Result<Option<Session>> {
-        let visible = crate::provider_files::session_material_visible_predicate("sessions");
+        let visible = self.importer_session_material_visible_predicate("sessions");
         self.conn
                 .query_row(
                     session_select_sql(&format!(
@@ -139,7 +139,7 @@ impl Store {
         provider: CaptureProvider,
         external_session_id: &str,
     ) -> Result<Option<Session>> {
-        let visible = crate::provider_files::session_material_visible_predicate("sessions");
+        let visible = self.importer_session_material_visible_predicate("sessions");
         self.conn
             .query_row(
                 session_select_sql(&format!(
@@ -165,7 +165,7 @@ impl Store {
     ) -> Result<Vec<Session>> {
         let tail = format!(
             "WHERE provider = ?1 AND external_session_id = ?2 AND {} ORDER BY started_at_ms DESC LIMIT ?3",
-            crate::provider_files::session_material_visible_predicate("sessions")
+            self.importer_session_material_visible_predicate("sessions")
         );
         let mut stmt = self.conn.prepare(session_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(

@@ -25,6 +25,365 @@ impl Store {
         collect_rows(rows)
     }
 
+    pub fn repair_import_pending_reasons(
+        &self,
+        limit: usize,
+    ) -> Result<ImportPendingReasonRepairProgress> {
+        with_immediate_transaction(&self.conn, || {
+            self.conn.execute_batch(
+                r#"
+                INSERT OR IGNORE INTO import_pending_reason_repairs (
+                  inventory_family, completed
+                )
+                SELECT 'catalog_sessions', NOT EXISTS (SELECT 1 FROM catalog_sessions)
+                UNION ALL
+                SELECT 'source_import_files', NOT EXISTS (SELECT 1 FROM source_import_files);
+                "#,
+            )?;
+
+            let mut progress = ImportPendingReasonRepairProgress::default();
+            let mut remaining = limit;
+            for family in ImportPendingReasonRepairFamily::ALL {
+                let (cursor_provider, cursor_source_root, cursor_source_path, completed) =
+                    self.conn.query_row(
+                        r#"
+                        SELECT cursor_provider, cursor_source_root, cursor_source_path, completed
+                        FROM import_pending_reason_repairs
+                        WHERE inventory_family = ?1
+                        "#,
+                        [family.as_str()],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<String>>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, bool>(3)?,
+                            ))
+                        },
+                    )?;
+                if completed || remaining == 0 {
+                    continue;
+                }
+
+                let batch_limit = remaining;
+                let rows = self.list_import_pending_reason_repair_rows(
+                    family,
+                    cursor_provider.as_deref(),
+                    cursor_source_root.as_deref(),
+                    cursor_source_path.as_deref(),
+                    batch_limit,
+                )?;
+                if rows.is_empty() {
+                    self.conn.execute(
+                        "UPDATE import_pending_reason_repairs SET completed = 1 \
+                         WHERE inventory_family = ?1",
+                        [family.as_str()],
+                    )?;
+                    continue;
+                }
+
+                let processed = rows.len();
+                for row in &rows {
+                    if row.requires_work {
+                        progress.classified_rows +=
+                            self.classify_legacy_pending_reason_row(family, row)?;
+                    }
+                }
+                progress.processed_rows += processed;
+                remaining -= processed;
+
+                let last = rows.last().expect("non-empty repair batch");
+                let family_completed = processed < batch_limit
+                    || !self.import_pending_reason_repair_rows_remain(family, last)?;
+                self.conn.execute(
+                    r#"
+                    UPDATE import_pending_reason_repairs
+                    SET cursor_provider = ?2, cursor_source_root = ?3,
+                        cursor_source_path = ?4, completed = ?5
+                    WHERE inventory_family = ?1
+                    "#,
+                    params![
+                        family.as_str(),
+                        &last.provider,
+                        &last.source_root,
+                        &last.source_path,
+                        family_completed,
+                    ],
+                )?;
+            }
+
+            progress.completed_families = self.conn.query_row(
+                "SELECT COUNT(*) FROM import_pending_reason_repairs WHERE completed = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            progress.complete =
+                progress.completed_families == ImportPendingReasonRepairFamily::ALL.len();
+            Ok(progress)
+        })
+    }
+
+    fn list_import_pending_reason_repair_rows(
+        &self,
+        family: ImportPendingReasonRepairFamily,
+        cursor_provider: Option<&str>,
+        cursor_source_root: Option<&str>,
+        cursor_source_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ImportPendingReasonRepairRow>> {
+        let (sql, query_params): (String, Vec<rusqlite::types::Value>) = match family {
+            ImportPendingReasonRepairFamily::CatalogSessions => {
+                let material_exists = catalog_material_exists_sql("catalog");
+                (
+                    format!(
+                        r#"
+                        SELECT provider, source_root, source_path,
+                               pending_reason IS NULL AND is_stale = 0 AND (
+                                 indexed_status IN ('pending', 'failed')
+                                 OR (
+                                   indexed_status IN ('indexed', 'completed_with_rejections')
+                                   AND (
+                                     indexed_file_size_bytes IS NULL
+                                     OR indexed_file_modified_at_ms IS NULL
+                                     OR indexed_file_size_bytes != file_size_bytes
+                                     OR indexed_file_modified_at_ms != file_modified_at_ms
+                                     OR indexed_import_revision IS NULL
+                                     OR indexed_import_revision != import_revision
+                                     OR NOT ({material_exists})
+                                   )
+                                 )
+                               )
+                        FROM catalog_sessions AS catalog
+                        WHERE ?1 IS NULL OR source_path > ?1
+                        ORDER BY source_path
+                        LIMIT ?2
+                        "#
+                    ),
+                    vec![
+                        cursor_source_path.map(str::to_owned).into(),
+                        capped_i64(limit as u64).into(),
+                    ],
+                )
+            }
+            ImportPendingReasonRepairFamily::SourceImportFiles => {
+                let material_exists = source_import_material_exists_sql("source_file");
+                (
+                    format!(
+                        r#"
+                        SELECT provider, source_root, source_path,
+                               pending_reason IS NULL AND is_stale = 0 AND (
+                                 indexed_status IN ('pending', 'failed')
+                                 OR (
+                                   indexed_status IN ('indexed', 'completed_with_rejections')
+                                   AND (
+                                     indexed_file_size_bytes IS NULL
+                                     OR indexed_file_modified_at_ms IS NULL
+                                     OR indexed_file_size_bytes != file_size_bytes
+                                     OR indexed_file_modified_at_ms != file_modified_at_ms
+                                     OR indexed_import_revision IS NULL
+                                     OR indexed_import_revision != import_revision
+                                     OR NOT ({material_exists})
+                                   )
+                                 )
+                               )
+                        FROM source_import_files AS source_file
+                        WHERE (
+                            ?1 IS NULL
+                            OR provider > ?1
+                            OR (provider = ?1 AND source_root > ?2)
+                            OR (
+                              provider = ?1 AND source_root = ?2
+                              AND source_path > ?3
+                            )
+                          )
+                        ORDER BY provider, source_root, source_path
+                        LIMIT ?4
+                        "#
+                    ),
+                    vec![
+                        cursor_provider.map(str::to_owned).into(),
+                        cursor_source_root.map(str::to_owned).into(),
+                        cursor_source_path.map(str::to_owned).into(),
+                        capped_i64(limit as u64).into(),
+                    ],
+                )
+            }
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(query_params), |row| {
+            Ok(ImportPendingReasonRepairRow {
+                provider: row.get(0)?,
+                source_root: row.get(1)?,
+                source_path: row.get(2)?,
+                requires_work: row.get(3)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    fn import_pending_reason_repair_rows_remain(
+        &self,
+        family: ImportPendingReasonRepairFamily,
+        cursor: &ImportPendingReasonRepairRow,
+    ) -> Result<bool> {
+        match family {
+            ImportPendingReasonRepairFamily::CatalogSessions => self
+                .conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM catalog_sessions WHERE source_path > ?1)",
+                    [&cursor.source_path],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into),
+            ImportPendingReasonRepairFamily::SourceImportFiles => self
+                .conn
+                .query_row(
+                    r#"
+                    SELECT EXISTS (
+                      SELECT 1 FROM source_import_files
+                      WHERE provider > ?1
+                         OR (provider = ?1 AND source_root > ?2)
+                         OR (
+                           provider = ?1 AND source_root = ?2
+                           AND source_path > ?3
+                         )
+                    )
+                    "#,
+                    params![&cursor.provider, &cursor.source_root, &cursor.source_path],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into),
+        }
+    }
+
+    fn classify_legacy_pending_reason_row(
+        &self,
+        family: ImportPendingReasonRepairFamily,
+        row: &ImportPendingReasonRepairRow,
+    ) -> Result<usize> {
+        let changed = match family {
+            ImportPendingReasonRepairFamily::CatalogSessions => self.conn.execute(
+                r#"
+                UPDATE catalog_sessions SET pending_reason = 'legacy'
+                WHERE source_path = ?1 AND pending_reason IS NULL
+                "#,
+                [&row.source_path],
+            )?,
+            ImportPendingReasonRepairFamily::SourceImportFiles => self.conn.execute(
+                r#"
+                UPDATE source_import_files SET pending_reason = 'legacy'
+                WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
+                  AND pending_reason IS NULL
+                "#,
+                params![&row.provider, &row.source_root, &row.source_path],
+            )?,
+        };
+        Ok(changed)
+    }
+
+    pub fn list_catalog_import_work(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        class: ImportWorkClass,
+        limit: usize,
+    ) -> Result<Vec<CatalogImportWork>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let predicate = import_work_class_predicate("catalog", class);
+        let order = import_work_order("catalog", class);
+        let mut stmt = self.conn.prepare(&format!(
+            r#"
+            SELECT source_path, provider, source_format, source_root,
+                   external_session_id, parent_external_session_id, agent_type, role_hint,
+                   external_agent_id, cwd, session_started_at_ms, file_size_bytes,
+                   file_modified_at_ms, import_revision, cataloged_at_ms, metadata_json,
+                   pending_reason,
+                   CASE
+                     WHEN pending_reason = 'fresh_append' THEN MAX(
+                       file_size_bytes - COALESCE((
+                         SELECT checkpoint.committed_byte_offset
+                         FROM provider_file_checkpoints AS checkpoint
+                         WHERE checkpoint.provider = catalog.provider
+                           AND checkpoint.source_format = catalog.source_format
+                           AND checkpoint.source_root = catalog.source_root
+                           AND checkpoint.source_path = catalog.source_path
+                       ), 0),
+                       0
+                     )
+                     ELSE file_size_bytes
+                   END,
+                   indexed_at_ms
+            FROM catalog_sessions AS catalog
+            WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
+              AND {predicate}
+            ORDER BY {order}
+            LIMIT ?3
+            "#
+        ))?;
+        let rows = stmt.query_map(
+            params![provider.as_str(), source_root, capped_i64(limit as u64)],
+            |row| {
+                Ok(CatalogImportWork {
+                    session: catalog_session_from_row(row)?,
+                    reason: parse_text_enum(row.get(16)?)?,
+                    estimated_bytes: nonnegative_i64_to_u64(row.get(17)?)?,
+                    last_attempt_at_ms: row.get(18)?,
+                })
+            },
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn catalog_import_work_count(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        class: ImportWorkClass,
+    ) -> Result<usize> {
+        let predicate = import_work_class_predicate("catalog", class);
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM catalog_sessions AS catalog \
+                     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
+                       AND {predicate}"
+                ),
+                params![provider.as_str(), source_root],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn schedule_catalog_source_explicit_rescan(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<usize> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE catalog_sessions
+                SET pending_reason = 'explicit_rescan'
+                WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
+                  AND EXISTS (
+                    SELECT 1 FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = ?1 AND inventory.source_root = ?2
+                      AND inventory.inventory_family = 'catalog_sessions'
+                      AND inventory.current_generation = ?3
+                  )
+                "#,
+                params![
+                    provider.as_str(),
+                    source_root,
+                    capped_i64(inventory_generation)
+                ],
+            )
+            .map_err(Into::into)
+    }
+
     pub fn list_active_catalog_sessions_for_source(
         &self,
         provider: CaptureProvider,
@@ -122,6 +481,15 @@ impl Store {
                     indexed_error = ?10,
                     indexed_event_count = ?7,
                     indexed_import_revision = ?12,
+                    pending_reason = CASE
+                        WHEN ?8 = 'failed' THEN CASE
+                            WHEN pending_reason IN ('fresh_append', 'recovery_retry')
+                                THEN 'recovery_retry'
+                            ELSE 'recovery_replacement'
+                        END
+                        WHEN ?8 = 'pending' THEN COALESCE(pending_reason, 'legacy')
+                        ELSE NULL
+                    END,
                     last_imported_at_ms = CASE WHEN ?11 THEN ?4 ELSE last_imported_at_ms END,
                     last_imported_file_size_bytes = CASE WHEN ?11 THEN ?5 ELSE last_imported_file_size_bytes END,
                     last_imported_file_modified_at_ms = CASE WHEN ?11 THEN ?6 ELSE last_imported_file_modified_at_ms END,

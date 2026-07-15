@@ -39,7 +39,6 @@ impl Store {
         if self.provider_file_publication.borrow().is_some() {
             return Err(StoreError::InvalidProviderFilePublicationScope);
         }
-
         let lifecycle = Arc::new(AtomicBool::new(true));
         let owner_id = opaque_provider_file_owner_id(
             provider,
@@ -64,14 +63,11 @@ impl Store {
             else {
                 return Ok(None);
             };
-            if !publication.mutation_started
-                || self.provider_file_owner_has_current_observation(
-                    provider,
-                    &publication.inventory_source_root,
-                    &publication.source_path,
-                )?
-            {
+            if !publication.mutation_started {
                 return Err(StoreError::InvalidProviderFilePublicationScope);
+            }
+            if self.provider_file_publication_has_current_observation(publication.scope_id)? {
+                return Ok(None);
             }
 
             let mut scope = ProviderFilePublicationScope {
@@ -92,7 +88,8 @@ impl Store {
                 kind: ProviderFilePublicationKind::Replacement,
                 owner_id,
                 staging_id: publication.staging_id,
-                tracks_prior_material: true,
+                tracks_prior_material: publication.tracks_prior_material,
+                reuse_staging_state: publication.staging_initialized,
                 retires_observation: true,
                 lifecycle: Arc::clone(&lifecycle),
                 _owner_lock: owner_lock,
@@ -118,22 +115,18 @@ impl Store {
                 retires_observation: true,
                 _owner_lock_path: owner_lock_path,
                 attached: false,
-                staging_dir_path: None,
-                staging_path: None,
-                #[cfg(test)]
-                staging_file_mode: None,
-                #[cfg(test)]
-                staging_dir_mode: None,
             }));
         if let Err(error) = self.reclaim_orphaned_provider_staging(&scope) {
             lifecycle.store(false, Ordering::Release);
             let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
             return Err(error);
         }
-        if let Err(error) = self.attach_provider_file_publication_staging(&scope) {
-            lifecycle.store(false, Ordering::Release);
-            let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
-            return Err(error);
+        if scope.tracks_prior_material {
+            if let Err(error) = self.attach_provider_file_publication_staging(&scope) {
+                lifecycle.store(false, Ordering::Release);
+                let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
+                return Err(error);
+            }
         }
         Ok(Some(scope))
     }
@@ -191,6 +184,7 @@ impl Store {
             owner_id,
             staging_id,
             tracks_prior_material: false,
+            reuse_staging_state: false,
             retires_observation: false,
             lifecycle: Arc::clone(&lifecycle),
             _owner_lock: owner_lock,
@@ -219,19 +213,16 @@ impl Store {
                 retires_observation: false,
                 _owner_lock_path: owner_lock_path,
                 attached: false,
-                staging_dir_path: None,
-                staging_path: None,
-                #[cfg(test)]
-                staging_file_mode: None,
-                #[cfg(test)]
-                staging_dir_mode: None,
             }));
         if let Err(error) = self.reclaim_orphaned_provider_staging(&scope) {
             lifecycle.store(false, Ordering::Release);
             let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
             return Err(error);
         }
-        if scope.kind == ProviderFilePublicationKind::Replacement && scope.tracks_prior_material {
+        // Replacement staging also records material written by a first import.
+        // That durable seen-set is required if the process dies after mutation
+        // and the source observation later disappears or is revived.
+        if scope.kind == ProviderFilePublicationKind::Replacement {
             if let Err(error) = self.attach_provider_file_publication_staging(&scope) {
                 lifecycle.store(false, Ordering::Release);
                 let _ = self.cleanup_active_provider_file_publication(scope.scope_id);

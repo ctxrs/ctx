@@ -153,7 +153,7 @@ fn run_index_wait(args: IndexWaitArgs, data_root: &Path, quiet: bool) -> Result<
     }
 }
 
-fn index_status_snapshot(data_root: &Path) -> Result<Value> {
+pub(crate) fn index_status_snapshot(data_root: &Path) -> Result<Value> {
     let db_path = database_path(data_root.to_path_buf());
     let initialized = db_path.exists();
     let config_path = data_root.join(CONFIG_FILE);
@@ -166,6 +166,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         pending_inventory_units,
         failed_inventory_units,
         stale_inventory_units,
+        pending_provider_publication_retirements,
         semantic,
         daemon,
     ) = if initialized {
@@ -173,12 +174,16 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         let indexed_counts = store.indexed_history_counts()?;
         let catalog_counts = store.catalog_session_counts()?;
         let source_import_file_counts = store.source_import_file_counts()?;
+        let pending_provider_publication_retirements =
+            store.provider_file_publication_retirement_work_count()?;
         let inventory_units = catalog_counts
             .total
-            .saturating_add(source_import_file_counts.total);
+            .saturating_add(source_import_file_counts.total)
+            .saturating_add(pending_provider_publication_retirements);
         let pending_inventory_units = catalog_counts
             .pending
-            .saturating_add(source_import_file_counts.pending);
+            .saturating_add(source_import_file_counts.pending)
+            .saturating_add(pending_provider_publication_retirements);
         let failed_inventory_units = catalog_counts
             .failed
             .saturating_add(source_import_file_counts.failed);
@@ -195,6 +200,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             pending_inventory_units,
             failed_inventory_units,
             stale_inventory_units,
+            pending_provider_publication_retirements,
             semantic_worker_report_configured_json(&config, &semantic_report),
             daemon,
         )
@@ -202,6 +208,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         let semantic_report = semantic_worker_report_cached(data_root, None)?;
         let daemon = daemon_report(data_root, &semantic_report);
         (
+            0,
             0,
             0,
             0,
@@ -234,6 +241,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             "pending_inventory_units": pending_inventory_units,
             "failed_inventory_units": failed_inventory_units,
             "stale_inventory_units": stale_inventory_units,
+            "pending_provider_publication_retirements": pending_provider_publication_retirements,
         },
         "semantic": semantic,
         "daemon": daemon,
@@ -277,6 +285,13 @@ fn print_index_status_human(status: &Value) {
     println!(
         "lexical_pending_units: {}",
         usize_at(status, &["lexical", "pending_inventory_units"])
+    );
+    println!(
+        "lexical_pending_provider_publication_retirements: {}",
+        usize_at(
+            status,
+            &["lexical", "pending_provider_publication_retirements"]
+        )
     );
     println!("semantic_status: {}", semantic_job_status(status));
     println!(

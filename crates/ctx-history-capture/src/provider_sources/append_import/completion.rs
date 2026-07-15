@@ -310,19 +310,7 @@ pub fn provider_canonical_material_source_format(
     provider: CaptureProvider,
     inventory_source_format: &str,
 ) -> Option<&'static str> {
-    match (provider, inventory_source_format) {
-        (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl") => {
-            Some(CODEX_SESSION_SOURCE_FORMAT)
-        }
-        (CaptureProvider::Pi, "pi_session_jsonl") => Some("pi_session_jsonl"),
-        (CaptureProvider::Claude, "claude_projects_jsonl_tree") => {
-            Some(CLAUDE_PROJECTS_SOURCE_FORMAT)
-        }
-        (CaptureProvider::Tabnine, "tabnine_cli_chat_recording_jsonl") => {
-            Some(TABNINE_CLI_SOURCE_FORMAT)
-        }
-        _ => None,
-    }
+    canonical_provider_material_source_format(provider, inventory_source_format)
 }
 
 fn finish_import(

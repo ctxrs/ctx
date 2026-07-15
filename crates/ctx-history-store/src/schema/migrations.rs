@@ -15,7 +15,9 @@ use crate::schema::provider_session_identity::{
     backfill_capture_source_identity_columns, prepare_provider_session_migrations,
     restore_invariants_after_capture_source_rebuild, suspend_invariants_for_capture_source_rebuild,
 };
-use crate::schema::rebuild::rebuild_v44_current_schema_tables;
+use crate::schema::rebuild::{
+    rebuild_table_from_current_schema, rebuild_v44_current_schema_tables,
+};
 use crate::schema::scriptgram::migrate_to_v45;
 use crate::schema::views::{
     create_stable_sql_views, drop_stable_sql_views, stable_sql_views_exist,
@@ -104,6 +106,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     }
     if user_version < 51 {
         migrate_provider_publication_to_v51(conn)?;
+    }
+    if user_version < 52 {
+        migrate_fresh_scheduling_to_v52(conn)?;
     }
     Ok(())
 }
@@ -846,7 +851,7 @@ fn migrate_inventory_completion_to_v50(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_provider_publication_to_v51(conn: &Connection) -> Result<()> {
+pub(super) fn migrate_provider_publication_to_v51(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         if stable_sql_views_exist(conn)? {
@@ -859,6 +864,163 @@ fn migrate_provider_publication_to_v51(conn: &Connection) -> Result<()> {
             "INSERT OR IGNORE INTO semantic_replacement_revision (singleton, current_revision) VALUES (1, 0);\
              PRAGMA user_version = 51;",
         )?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+pub(super) fn migrate_fresh_scheduling_to_v52(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        let legacy_provider_staging =
+            !table_has_column(conn, "provider_file_publications", "staging_initialized")?;
+        let legacy_prior_material_scope =
+            !table_has_column(conn, "provider_file_publications", "tracks_prior_material")?;
+        if legacy_provider_staging || legacy_prior_material_scope {
+            let recreate_views = stable_sql_views_exist(conn)?;
+            if recreate_views {
+                drop_stable_sql_views(conn)?;
+            }
+            if legacy_prior_material_scope {
+                conn.execute_batch(
+                    "ALTER TABLE provider_file_publications ADD COLUMN tracks_prior_material INTEGER \
+                     NOT NULL DEFAULT 0 CHECK (tracks_prior_material IN (0, 1));",
+                )?;
+            }
+            if legacy_provider_staging {
+                conn.execute_batch(
+                    "ALTER TABLE provider_file_publications ADD COLUMN staging_initialized INTEGER \
+                     NOT NULL DEFAULT 0 CHECK (staging_initialized IN (0, 1));",
+                )?;
+            }
+            rebuild_table_from_current_schema(conn, "provider_file_publications")?;
+            if recreate_views {
+                create_stable_sql_views(conn)?;
+            }
+        }
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS provider_file_publication_seen (
+                replacement_id TEXT NOT NULL,
+                entity_kind TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                PRIMARY KEY (replacement_id, entity_kind, entity_id),
+                FOREIGN KEY (replacement_id) REFERENCES provider_file_publications(replacement_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS provider_file_publication_prior_sources (
+                replacement_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                PRIMARY KEY (replacement_id, source_id),
+                FOREIGN KEY (replacement_id) REFERENCES provider_file_publications(replacement_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS provider_file_publication_batch (
+                replacement_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                PRIMARY KEY (replacement_id, source_id, entity_id),
+                FOREIGN KEY (replacement_id) REFERENCES provider_file_publications(replacement_id) ON DELETE CASCADE
+            );
+            "#,
+        )?;
+        if legacy_prior_material_scope {
+            conn.execute_batch(
+                r#"
+                UPDATE provider_file_publications AS publication
+                SET tracks_prior_material = CASE
+                    WHEN publication.mutation_started = 0 THEN 0
+                    WHEN publication.publication_kind = 'replacement' THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM provider_file_checkpoints AS checkpoint
+                        WHERE checkpoint.provider = publication.provider
+                          AND checkpoint.source_format = publication.inventory_source_format
+                          AND checkpoint.source_root = publication.inventory_source_root
+                          AND checkpoint.source_path = publication.source_path
+                    ) THEN 1
+                    ELSE 0
+                END;
+                "#,
+            )?;
+        }
+        if legacy_provider_staging {
+            // v51 staging lived in an unlinked Unix sidecar and cannot be trusted
+            // after restart. Keep mutation fencing, but rewind every cursor whose
+            // corresponding staged rows must be reconstructed in the main database.
+            conn.execute_batch(
+                r#"
+                UPDATE provider_file_publications
+                SET staging_initialized = 0,
+                    preparation_complete = CASE
+                        WHEN publication_kind = 'incremental' THEN 1 ELSE 0
+                    END,
+                    preparation_cursor = NULL,
+                    cleanup_phase = 0,
+                    cleanup_source_cursor = NULL,
+                    cleanup_entity_cursor = NULL,
+                    removed_artifacts = 0,
+                    removed_summaries = 0,
+                    removed_history_record_links = 0,
+                    removed_history_records = 0,
+                    removed_history_record_tags = 0,
+                    removed_record_edges = 0,
+                    removed_audit_log_entries = 0,
+                    removed_vcs_workspaces = 0,
+                    removed_vcs_changes = 0,
+                    removed_events = 0,
+                    removed_runs = 0,
+                    removed_files_touched = 0,
+                    removed_session_edges = 0,
+                    tombstoned_sessions = 0;
+                "#,
+            )?;
+        }
+        if !table_has_column(conn, "catalog_sessions", "pending_reason")? {
+            conn.execute_batch(
+                "ALTER TABLE catalog_sessions ADD COLUMN pending_reason TEXT \
+                 CHECK (pending_reason IS NULL OR pending_reason IN \
+                 ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', \
+                  'recovery_replacement', 'parser_revision', 'missing_material', \
+                  'abandoned_publication', 'legacy', 'explicit_rescan'));",
+            )?;
+        }
+        if !table_has_column(conn, "source_import_files", "pending_reason")? {
+            conn.execute_batch(
+                "ALTER TABLE source_import_files ADD COLUMN pending_reason TEXT \
+                 CHECK (pending_reason IS NULL OR pending_reason IN \
+                 ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', \
+                  'recovery_replacement', 'parser_revision', 'missing_material', \
+                 'abandoned_publication', 'legacy', 'explicit_rescan'));",
+            )?;
+        }
+        conn.execute_batch(
+            r#"
+            -- Existing inventory rows are classified by bounded maintenance. These
+            -- cursors make that work durable without rewriting the corpus here.
+            CREATE TABLE IF NOT EXISTS import_pending_reason_repairs (
+              inventory_family TEXT PRIMARY KEY NOT NULL
+                CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+              cursor_provider TEXT,
+              cursor_source_root TEXT,
+              cursor_source_path TEXT,
+              completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
+            );
+
+            INSERT OR IGNORE INTO import_pending_reason_repairs (inventory_family)
+            VALUES ('catalog_sessions'), ('source_import_files');
+            "#,
+        )?;
+        conn.execute_batch("PRAGMA user_version = 52;")?;
         Ok(())
     })();
 

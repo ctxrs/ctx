@@ -41,7 +41,8 @@ use ctx_history_store::{EventEmbeddingDocument, Store};
 use crate::commands::{
     import::{error_summary, import_totals_json, ImportTotals},
     search::{
-        refresh_sources_for_search, search_refresh_plugin_sources, search_refresh_sources,
+        refresh_sources_for_search, search_refresh_has_retirement_work,
+        search_refresh_failure_totals, search_refresh_plugin_sources, search_refresh_sources,
         RefreshArg,
     },
 };

@@ -1,5 +1,4 @@
 use super::*;
-use crate::commands::import::manifest::collect_source_import_paths;
 use ctx_history_capture::{observe_sqlite_source_generation, SqliteObservedFile};
 use sha2::{Digest, Sha256};
 
@@ -7,6 +6,35 @@ pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+fn catalog_batch_outcome(
+    summary: &ProviderImportSummary,
+    completed_units: usize,
+    completed_bytes: u64,
+    deferred_units: usize,
+) -> super::native::ProviderImportBatchOutcome {
+    super::native::ProviderImportBatchOutcome {
+        summary: summary.clone(),
+        completed_units,
+        completed_bytes,
+        deferred_units,
+        post_import_inventory_generation: None,
+        post_import_preinventory: None,
+    }
+}
+
+fn catalog_batch_error(
+    summary: &ProviderImportSummary,
+    completed_units: usize,
+    completed_bytes: u64,
+    deferred_units: usize,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    super::native::provider_import_batch_error(
+        catalog_batch_outcome(summary, completed_units, completed_bytes, deferred_units),
+        error,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18,7 +46,8 @@ pub(crate) fn import_incremental_codex_session_tree(
     preinventory_catalog: Option<&CatalogSummary>,
     preinventory_generation: Option<u64>,
     force_selection: bool,
-) -> Result<ProviderImportSummary> {
+    selection: Option<&SelectedImportWork>,
+) -> Result<super::native::ProviderImportBatchOutcome> {
     let source_root = codex_catalog_root_identity(&source.path)?.to_owned();
     let inventory_generation = match preinventory_generation {
         Some(generation) => generation,
@@ -27,6 +56,9 @@ pub(crate) fn import_incremental_codex_session_tree(
         }
     };
     let mut summary = ProviderImportSummary::default();
+    let mut completed_units = 0;
+    let mut completed_bytes = 0_u64;
+    let mut deferred_units = 0;
     if let Some(catalog) = preinventory_catalog {
         summary.failed += catalog.failed_sessions;
         summary.failures.extend(catalog.failures.clone());
@@ -45,10 +77,106 @@ pub(crate) fn import_incremental_codex_session_tree(
         summary.failures.extend(catalog.failures);
     }
 
-    let selected_sessions = if force_selection {
-        store.list_active_catalog_sessions_for_source(CaptureProvider::Codex, &source_root)?
-    } else {
-        store.list_pending_catalog_sessions(CaptureProvider::Codex, &source_root)?
+    if let Some(SelectedImportWork::Catalog(work)) = selection {
+        for unit in work {
+            let outcome = match super::native::import_append_capable_catalog_work(
+                store,
+                unit,
+                inventory_generation,
+                record_id,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if super::native::publication_recovery_required(&error) {
+                        return Err(catalog_batch_error(
+                            &summary,
+                            completed_units,
+                            completed_bytes,
+                            deferred_units,
+                            error,
+                        ));
+                    }
+                    let rejected_summary = rejected_source_summary(&error);
+                    let status = if rejected_summary.is_some() {
+                        CatalogIndexedStatus::Rejected
+                    } else {
+                        catalog_import_error_status(&error)
+                    };
+                    if let Err(persist_error) = store.record_catalog_source_import_result(
+                        unit.session.provider,
+                        CatalogSourceIndexUpdate {
+                            source_root: &unit.session.source_root,
+                            source_path: &unit.session.source_path,
+                            file_size_bytes: unit.session.file_size_bytes,
+                            file_modified_at_ms: unit.session.file_modified_at_ms,
+                            import_revision: unit.session.import_revision,
+                            inventory_generation,
+                            file_sha256: None,
+                            event_count: None,
+                            indexed_at_ms: utc_now().timestamp_millis(),
+                        },
+                        status,
+                        Some(&error_summary(&error)),
+                    ) {
+                        return Err(catalog_batch_error(
+                            &summary,
+                            completed_units,
+                            completed_bytes,
+                            deferred_units,
+                            persist_error.into(),
+                        ));
+                    }
+                    if let Some(mut rejected_summary) = rejected_summary {
+                        completed_units += 1;
+                        completed_bytes = completed_bytes.saturating_add(unit.estimated_bytes);
+                        for failure in &mut rejected_summary.failures {
+                            failure.error =
+                                format!("{}: {}", unit.session.source_path, failure.error);
+                        }
+                        summary.merge_from(rejected_summary);
+                        continue;
+                    }
+                    return Err(catalog_batch_error(
+                        &summary,
+                        completed_units,
+                        completed_bytes,
+                        deferred_units,
+                        error,
+                    ));
+                }
+            };
+            match outcome {
+                super::native::AppendImportOutcome::Imported(unit_summary) => {
+                    summary.merge_from(unit_summary);
+                    completed_units += 1;
+                    completed_bytes = completed_bytes.saturating_add(unit.estimated_bytes);
+                }
+                super::native::AppendImportOutcome::Deferred => deferred_units += 1,
+            }
+        }
+        return Ok(super::native::ProviderImportBatchOutcome {
+            summary,
+            completed_units,
+            completed_bytes,
+            deferred_units,
+            post_import_inventory_generation: None,
+            post_import_preinventory: None,
+        });
+    }
+
+    let selected_sessions = match selection {
+        Some(SelectedImportWork::Catalog(work)) => {
+            work.iter().map(|work| work.session.clone()).collect()
+        }
+        Some(SelectedImportWork::SourceFiles(_)) => {
+            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                "source-file work selected for a catalog source",
+            )))
+        }
+        None if force_selection => {
+            store.list_active_catalog_sessions_for_source(CaptureProvider::Codex, &source_root)?
+        }
+        None => store.list_pending_catalog_sessions(CaptureProvider::Codex, &source_root)?,
     };
     if selected_sessions.is_empty() {
         if !store.catalog_inventory_generation_is_complete(
@@ -58,7 +186,9 @@ pub(crate) fn import_incremental_codex_session_tree(
         )? {
             return Err(anyhow::Error::new(CaptureError::InventorySuperseded));
         }
-        return Ok(summary);
+        return Ok(super::native::ProviderImportBatchOutcome::completed(
+            summary, 0,
+        ));
     }
 
     let mut full_import_sessions = Vec::new();
@@ -67,11 +197,22 @@ pub(crate) fn import_incremental_codex_session_tree(
             full_import_sessions.push(session.clone());
             continue;
         }
-        let state = store.catalog_source_index_state(
+        let state = match store.catalog_source_index_state(
             CaptureProvider::Codex,
             &source_root,
             &session.source_path,
-        )?;
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(catalog_batch_error(
+                    &summary,
+                    completed_units,
+                    completed_bytes,
+                    deferred_units,
+                    error.into(),
+                ))
+            }
+        };
         let tail_start = state
             .as_ref()
             .and_then(|state| state.last_imported_file_size_bytes)
@@ -88,14 +229,28 @@ pub(crate) fn import_incremental_codex_session_tree(
                 Ok(matches) => matches,
                 Err(err) => {
                     let error = error_summary(&err);
-                    mark_catalog_sessions_error(
+                    if let Err(persist_error) = mark_catalog_sessions_error(
                         store,
                         std::slice::from_ref(session),
                         &error,
                         catalog_import_error_status(&err),
                         inventory_generation,
-                    )?;
-                    return Err(err);
+                    ) {
+                        return Err(catalog_batch_error(
+                            &summary,
+                            completed_units,
+                            completed_bytes,
+                            deferred_units,
+                            persist_error,
+                        ));
+                    }
+                    return Err(catalog_batch_error(
+                        &summary,
+                        completed_units,
+                        completed_bytes,
+                        deferred_units,
+                        err,
+                    ));
                 }
             };
             if !checkpoint_matches {
@@ -117,14 +272,28 @@ pub(crate) fn import_incremental_codex_session_tree(
             {
                 Ok(summary) => summary,
                 Err(err) => {
-                    mark_catalog_sessions_error(
+                    if let Err(persist_error) = mark_catalog_sessions_error(
                         store,
                         std::slice::from_ref(session),
                         &err.to_string(),
                         catalog_import_error_status(&err),
                         inventory_generation,
-                    )?;
-                    return Err(err);
+                    ) {
+                        return Err(catalog_batch_error(
+                            &summary,
+                            completed_units,
+                            completed_bytes,
+                            deferred_units,
+                            persist_error,
+                        ));
+                    }
+                    return Err(catalog_batch_error(
+                        &summary,
+                        completed_units,
+                        completed_bytes,
+                        deferred_units,
+                        err,
+                    ));
                 }
             };
             let tail_event_count = tail_summary
@@ -141,7 +310,7 @@ pub(crate) fn import_incremental_codex_session_tree(
             };
             let error =
                 (tail_summary.failed > 0).then(|| catalog_session_import_failure(&tail_summary));
-            mark_catalog_session_result(
+            if let Err(persist_error) = mark_catalog_session_result(
                 store,
                 session,
                 event_count,
@@ -149,7 +318,19 @@ pub(crate) fn import_incremental_codex_session_tree(
                 status,
                 error.as_deref(),
                 inventory_generation,
-            )?;
+            ) {
+                let mut partial_summary = summary.clone();
+                partial_summary.merge_from(tail_summary);
+                return Err(catalog_batch_error(
+                    &partial_summary,
+                    completed_units,
+                    completed_bytes,
+                    deferred_units,
+                    persist_error,
+                ));
+            }
+            completed_units += 1;
+            completed_bytes = completed_bytes.saturating_add(session.file_size_bytes);
             summary.merge_from(tail_summary);
         } else {
             full_import_sessions.push(session.clone());
@@ -175,16 +356,32 @@ pub(crate) fn import_incremental_codex_session_tree(
                 Err(err) => {
                     let failure_scope = import_error_scope(&err);
                     let error = error_summary(&err);
-                    mark_catalog_sessions_error(
+                    if let Err(persist_error) = mark_catalog_sessions_error(
                         store,
                         std::slice::from_ref(session),
                         &error,
                         catalog_import_error_status(&err),
                         inventory_generation,
-                    )?;
-                    if failure_scope == ImportFailureScope::System {
-                        return Err(err);
+                    ) {
+                        return Err(catalog_batch_error(
+                            &summary,
+                            completed_units,
+                            completed_bytes,
+                            deferred_units,
+                            persist_error,
+                        ));
                     }
+                    if failure_scope == ImportFailureScope::System {
+                        return Err(catalog_batch_error(
+                            &summary,
+                            completed_units,
+                            completed_bytes,
+                            deferred_units,
+                            err,
+                        ));
+                    }
+                    completed_units += 1;
+                    completed_bytes = completed_bytes.saturating_add(session.file_size_bytes);
                     summary.failed += 1;
                     summary
                         .failures
@@ -192,16 +389,33 @@ pub(crate) fn import_incremental_codex_session_tree(
                     continue;
                 }
             };
-            mark_catalog_sessions_result(
+            if let Err(persist_error) = mark_catalog_sessions_result(
                 store,
                 std::slice::from_ref(session),
                 &file_summary,
                 inventory_generation,
-            )?;
+            ) {
+                let mut partial_summary = summary.clone();
+                partial_summary.merge_from(file_summary);
+                return Err(catalog_batch_error(
+                    &partial_summary,
+                    completed_units,
+                    completed_bytes,
+                    deferred_units,
+                    persist_error,
+                ));
+            }
+            completed_units += 1;
+            completed_bytes = completed_bytes.saturating_add(session.file_size_bytes);
             summary.merge_from(file_summary);
         }
     }
-    Ok(summary)
+    Ok(catalog_batch_outcome(
+        &summary,
+        completed_units,
+        completed_bytes,
+        deferred_units,
+    ))
 }
 
 pub(crate) fn codex_catalog_root_identity(path: &Path) -> Result<&str> {
@@ -377,6 +591,7 @@ fn catalog_import_error_status(error: &anyhow::Error) -> CatalogIndexedStatus {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
     // Every importable provider persists events through Store APIs that update
     // the event-search projection transactionally. Unsupported sources have no
@@ -569,17 +784,6 @@ pub(crate) fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 3
         }
     }
     hasher.finalize().into()
-}
-
-pub(crate) fn source_import_stats(source: &SourceInfo) -> Result<SourceStats> {
-    let mut stats = SourceStats::default();
-    for path in collect_source_import_paths(source)? {
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("stat import source file {}", path.display()))?;
-        stats.files += 1;
-        stats.bytes = stats.bytes.saturating_add(metadata.len());
-    }
-    Ok(stats)
 }
 
 pub(crate) fn import_record_for_source(source: &SourceInfo) -> HistoryRecord {
