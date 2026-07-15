@@ -286,21 +286,16 @@ pub(crate) fn failed_inventory_pending_counts(
         let Some(source_root) = failure.source.path.to_str() else {
             continue;
         };
-        for class in [ImportWorkClass::Fresh, ImportWorkClass::Recovery] {
-            let count = store
-                .catalog_import_work_count(failure.source.provider, source_root, class)?
-                .saturating_add(store.source_import_file_work_count(
-                    failure.source.provider,
-                    source_root,
-                    class,
-                )?);
-            match class {
-                ImportWorkClass::Fresh => fresh = fresh.saturating_add(count),
-                ImportWorkClass::Recovery => recovery = recovery.saturating_add(count),
-            }
-        }
+        let counts =
+            bounded_unplanned_root_work_counts(store, failure.source.provider, source_root)?;
+        fresh = capped_pending_add(fresh, counts.0);
+        recovery = capped_pending_add(recovery, counts.1);
     }
     Ok((fresh, recovery))
+}
+
+pub(crate) fn capped_pending_add(left: usize, right: usize) -> usize {
+    left.saturating_add(right).min(IMPORT_PENDING_REPORT_LIMIT)
 }
 
 #[derive(Debug, Clone)]

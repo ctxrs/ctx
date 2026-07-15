@@ -35,11 +35,12 @@ pub use identity::{LocalDeviceIdentity, LocalWorkspaceIdentity};
 pub use provider_files::{
     ProviderFileCheckpoint, ProviderFileCheckpointKey, ProviderFileFinalizeOutcome,
     ProviderFileImportOutcome, ProviderFileInventoryObservation, ProviderFileMaintenanceWarning,
-    ProviderFilePreparationProgress, ProviderFilePublicationCommit, ProviderFilePublicationKind,
+    ProviderFilePreparationProgress, ProviderFilePublicationCommit,
+    ProviderFilePublicationCompletion, ProviderFilePublicationKind, ProviderFilePublicationPhase,
     ProviderFilePublicationRetirementWork, ProviderFilePublicationScope,
     ProviderFileReconciliationCounts, ProviderFileReconciliationProgress,
     PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES, PROVIDER_FILE_PREPARATION_MAX_ROWS,
-    PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+    PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES, PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
 };
 pub use raw_sql::{
     RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult, RawSqlTruncation, RawSqlValue,
@@ -59,7 +60,7 @@ use std::{
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 51;
+pub(crate) const SCHEMA_VERSION: i64 = 52;
 
 pub struct Store {
     path: PathBuf,

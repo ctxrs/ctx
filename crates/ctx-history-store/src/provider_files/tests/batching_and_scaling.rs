@@ -142,6 +142,274 @@ fn replacement_preparation_pages_prior_source_identity_snapshot_without_a_total_
 }
 
 #[test]
+fn publication_phases_resume_after_single_1024_row_slices_without_advancing_outcome() {
+    const ROW_COUNT: u128 = 1_025;
+    const SLICE_ROWS: usize = 1_024;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let original = source_file(10, 90);
+    let changed = source_file(20, 100);
+    let old_checkpoint = checkpoint(10, 3, "unix:2049:phased", 95);
+    let new_checkpoint = checkpoint(20, 5, "unix:2049:phased", 150);
+    let completion = ProviderFilePublicationCompletion {
+        version: 1,
+        payload: json!({
+            "summary": {"imported": 0, "skipped": 1025},
+            "checkpoint": {"committed_byte_offset": 20}
+        }),
+    };
+    let changed_generation;
+    let pending_indexed_state;
+
+    {
+        let store = Store::open(&path).unwrap();
+        let original_generation = store
+            .allocate_source_import_inventory_generation(original.provider, &original.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(original_generation, std::slice::from_ref(&original))
+            .unwrap();
+        store
+            .upsert_provider_file_checkpoint(
+                source_outcome(&original, original_generation, 95),
+                &old_checkpoint,
+            )
+            .unwrap();
+        store.begin_immediate_batch().unwrap();
+        for index in 0..ROW_COUNT {
+            let source_id = Uuid::from_u128(150_000 + index);
+            insert_capture_source(&store, source_id, PATH_A, &format!("phased-source-{index}"));
+            insert_raw_event(
+                &store,
+                Uuid::from_u128(160_000 + index),
+                160_000 + index as i64,
+                source_id,
+                "stale phased event",
+            );
+        }
+        store.commit_batch().unwrap();
+        changed_generation = store
+            .allocate_source_import_inventory_generation(changed.provider, &changed.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(changed_generation, std::slice::from_ref(&changed))
+            .unwrap();
+        pending_indexed_state = store
+            .conn
+            .query_row(
+                "SELECT indexed_status, indexed_file_size_bytes, \
+                        indexed_file_modified_at_ms \
+                 FROM source_import_files WHERE provider = 'claude' \
+                   AND source_root = ?1 AND source_path = ?2",
+                params![ROOT, PATH_A],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let scope = store
+            .begin_provider_file_publication(
+                changed.provider,
+                source_outcome(&changed, changed_generation, 150).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        assert_eq!(
+            store.provider_file_publication_phase(&scope).unwrap(),
+            ProviderFilePublicationPhase::Preparing
+        );
+        let preparation = store
+            .prepare_provider_file_publication_slice(&scope, SLICE_ROWS)
+            .unwrap();
+        assert_eq!(preparation.source_ids_staged, SLICE_ROWS);
+        assert!(!preparation.complete);
+        assert_eq!(staged_prior_source_count(&store), SLICE_ROWS as i64);
+        store.abandon_provider_file_publication(scope).unwrap();
+    }
+
+    {
+        let store = Store::open(&path).unwrap();
+        let outcome = source_outcome(&changed, changed_generation, 150);
+        let scope = store
+            .begin_provider_file_publication(
+                changed.provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                110,
+            )
+            .unwrap();
+        assert_eq!(
+            store.provider_file_publication_phase(&scope).unwrap(),
+            ProviderFilePublicationPhase::Preparing
+        );
+        let preparation = store
+            .prepare_provider_file_publication_slice(&scope, SLICE_ROWS)
+            .unwrap();
+        assert_eq!(preparation.source_ids_staged, 1);
+        assert!(preparation.complete);
+        assert_eq!(staged_prior_source_count(&store), ROW_COUNT as i64);
+        assert_eq!(
+            store.provider_file_publication_phase(&scope).unwrap(),
+            ProviderFilePublicationPhase::Importing
+        );
+        store
+            .stage_provider_file_publication_completion(&scope, &completion)
+            .unwrap();
+        assert_eq!(
+            store.provider_file_publication_phase(&scope).unwrap(),
+            ProviderFilePublicationPhase::Reconciling
+        );
+        store.abandon_provider_file_publication(scope).unwrap();
+    }
+
+    {
+        let store = Store::open(&path).unwrap();
+        let outcome = source_outcome(&changed, changed_generation, 150);
+        let scope = store
+            .begin_provider_file_publication(
+                changed.provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                120,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_provider_file_publication_completion(&scope)
+                .unwrap(),
+            Some(completion.clone())
+        );
+        let reconciliation = store
+            .reconcile_provider_file_publication_slice(&scope, SLICE_ROWS)
+            .unwrap();
+        assert_eq!(reconciliation.rows_scanned, SLICE_ROWS);
+        assert_eq!(
+            reconciliation.counts,
+            ProviderFileReconciliationCounts::default()
+        );
+        assert!(!reconciliation.complete);
+        let cleanup_cursor: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT cleanup_source_cursor FROM provider_file_publications",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cleanup_cursor.is_some());
+        assert_eq!(
+            store
+                .provider_file_checkpoint(old_checkpoint.key())
+                .unwrap(),
+            Some(old_checkpoint.clone())
+        );
+        let visible_indexed_state: (String, Option<i64>, Option<i64>) = store
+            .conn
+            .query_row(
+                "SELECT indexed_status, indexed_file_size_bytes, \
+                        indexed_file_modified_at_ms \
+                 FROM source_import_files WHERE provider = 'claude' \
+                   AND source_root = ?1 AND source_path = ?2",
+                params![ROOT, PATH_A],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(visible_indexed_state, pending_indexed_state);
+        store.abandon_provider_file_publication(scope).unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let outcome = source_outcome(&changed, changed_generation, 150);
+    let scope = store
+        .begin_provider_file_publication(
+            changed.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            130,
+        )
+        .unwrap();
+    assert_eq!(
+        store.provider_file_publication_phase(&scope).unwrap(),
+        ProviderFilePublicationPhase::Reconciling
+    );
+    assert_eq!(
+        store
+            .load_provider_file_publication_completion(&scope)
+            .unwrap(),
+        Some(completion)
+    );
+    let reconciliation = loop {
+        let reconciliation = store
+            .reconcile_provider_file_publication_slice(&scope, SLICE_ROWS)
+            .unwrap();
+        assert!(reconciliation.rows_scanned <= SLICE_ROWS);
+        if reconciliation.complete {
+            break reconciliation;
+        }
+    };
+    assert_eq!(reconciliation.counts.events, ROW_COUNT as usize);
+    assert_eq!(
+        store.provider_file_publication_phase(&scope).unwrap(),
+        ProviderFilePublicationPhase::ReadyToFinalize
+    );
+    assert_eq!(
+        store
+            .provider_file_checkpoint(old_checkpoint.key())
+            .unwrap(),
+        Some(old_checkpoint)
+    );
+    let visible_indexed_state: (String, Option<i64>, Option<i64>) = store
+        .conn
+        .query_row(
+            "SELECT indexed_status, indexed_file_size_bytes, indexed_file_modified_at_ms \
+             FROM source_import_files WHERE provider = 'claude' \
+               AND source_root = ?1 AND source_path = ?2",
+            params![ROOT, PATH_A],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(visible_indexed_state, pending_indexed_state);
+
+    store
+        .finalize_provider_file_publication(
+            scope,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(Some(&new_checkpoint)),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .provider_file_checkpoint(new_checkpoint.key())
+            .unwrap(),
+        Some(new_checkpoint)
+    );
+    let finalized_indexed_state: (String, Option<i64>, Option<i64>) = store
+        .conn
+        .query_row(
+            "SELECT indexed_status, indexed_file_size_bytes, indexed_file_modified_at_ms \
+             FROM source_import_files WHERE provider = 'claude' \
+               AND source_root = ?1 AND source_path = ?2",
+            params![ROOT, PATH_A],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        finalized_indexed_state,
+        ("indexed".into(), Some(20), Some(100))
+    );
+}
+
+#[test]
 fn reconciliation_queries_owner_indexes_without_visiting_unrelated_corpus_rows() {
     const UNRELATED_EVENTS: u128 = 5_000;
 
@@ -276,6 +544,7 @@ fn large_owner_tiny_slices_keep_candidate_work_linear_across_interrupted_retry()
             )
             .unwrap();
         prepare_all(&store, &scope, 1);
+        stage_test_completion(&store, &scope);
         for _ in 0..FIRST_ATTEMPT_SLICES {
             let progress = store
                 .reconcile_provider_file_publication_slice(&scope, 1)

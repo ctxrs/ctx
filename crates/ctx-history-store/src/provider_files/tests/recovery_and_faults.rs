@@ -638,19 +638,14 @@ fn transaction_boundary_faults_roll_back_and_restart_converges() {
         )
         .unwrap();
     assert_eq!(scope.kind(), ProviderFilePublicationKind::Replacement);
-    prepare_all(&store, &scope, 1);
-    let mut replacement = event_fixture(
-        new_event,
-        2,
-        source,
-        "transaction-boundary-faults".to_owned(),
-        "new generation",
+    assert_eq!(
+        store.provider_file_publication_phase(&scope).unwrap(),
+        ProviderFilePublicationPhase::ReadyToFinalize
     );
-    replacement.dedupe_key = None;
-    store
-        .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&replacement))
-        .unwrap();
-    reconcile_all(&store, &scope, 1);
+    assert!(store
+        .load_provider_file_publication_completion(&scope)
+        .unwrap()
+        .is_some());
     let mut new_checkpoint = old_checkpoint.clone();
     new_checkpoint.updated_at_ms = 130;
     store

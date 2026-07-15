@@ -20,7 +20,7 @@ use crate::schema::ddl::{table_exists, table_has_column, CREATE_TABLES_SQL};
 use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::migrations::{
-    migrate_to_v50, migrate_to_v51, rebuild_capture_sources_provider_check,
+    migrate_to_v50, migrate_to_v51, migrate_to_v52, rebuild_capture_sources_provider_check,
     rebuild_catalog_sessions_provider_check,
 };
 use crate::{Store, SCHEMA_VERSION};
