@@ -1,5 +1,5 @@
 #[test]
-fn large_batched_seen_scope_spills_outside_work_database() {
+fn large_batched_seen_scope_is_stored_in_main_database() {
     const EVENT_COUNT: u128 = 5_000;
     const BATCH: u128 = 100;
 
@@ -26,8 +26,6 @@ fn large_batched_seen_scope_spills_outside_work_database() {
         );
     }
     store.commit_batch().unwrap();
-    store.checkpoint_wal_truncate().unwrap();
-    let main_before = main_database_footprint(&store, &path);
     let outcome = source_outcome(&file, generation, 120);
     let scope = store
         .begin_provider_file_publication(
@@ -39,51 +37,16 @@ fn large_batched_seen_scope_spills_outside_work_database() {
         )
         .unwrap();
     assert!(scope.tracks_prior_material);
-    assert_eq!(
-        pragma_i64(&store, "PRAGMA provider_replacement_stage.cache_size"),
-        -8192
-    );
-    assert!(pragma_i64(&store, "PRAGMA provider_replacement_stage.page_count") <= 16);
-    let prior_entity_table: bool = store
+    let attached_staging: bool = store
         .conn
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM provider_replacement_stage.sqlite_master WHERE type = 'table' AND name = 'prior_entities')",
+            "SELECT EXISTS (SELECT 1 FROM pragma_database_list WHERE name = 'provider_replacement_stage')",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!prior_entity_table);
-    let staging_dir = store
-        .provider_file_publication
-        .borrow()
-        .as_ref()
-        .and_then(|active| active.staging_dir_path.clone())
-        .unwrap();
-    assert!(staging_dir.is_dir());
-    #[cfg(unix)]
-    assert!(store
-        .provider_file_publication
-        .borrow()
-        .as_ref()
-        .unwrap()
-        .staging_path
-        .is_none());
-    assert_eq!(
-        store
-            .provider_file_publication
-            .borrow()
-            .as_ref()
-            .and_then(|active| active.staging_file_mode),
-        Some(0o600)
-    );
-    assert_eq!(
-        store
-            .provider_file_publication
-            .borrow()
-            .as_ref()
-            .and_then(|active| active.staging_dir_mode),
-        Some(0o700)
-    );
+    assert!(!attached_staging);
+    assert!(main_table_exists(&store, "provider_file_publication_seen"));
 
     for start in (0..EVENT_COUNT).step_by(BATCH as usize) {
         store.begin_immediate_batch().unwrap();
@@ -96,12 +59,6 @@ fn large_batched_seen_scope_spills_outside_work_database() {
     }
 
     assert_eq!(staged_seen_count(&store), EVENT_COUNT as i64);
-    assert!(pragma_i64(&store, "PRAGMA provider_replacement_stage.page_count") > 1);
-    let main_after_staging = main_database_footprint(&store, &path);
-    assert_eq!(main_after_staging.0, main_before.0);
-    assert_eq!(main_after_staging.1, main_before.1);
-    assert_eq!(main_after_staging.2, main_before.2);
-    assert!(main_after_staging.3 <= 64 * 1024);
     reconcile_all(&store, &scope, 127);
     let counts = store
         .finalize_provider_file_publication(
@@ -117,8 +74,17 @@ fn large_batched_seen_scope_spills_outside_work_database() {
         .unwrap();
     assert_eq!(counts.reconciliation.events, 0);
     assert!(store.provider_file_publication.borrow().is_none());
-    assert!(!staging_dir.exists());
+    let staged_seen: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_file_publication_seen",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(staged_seen, 0);
 }
+
 #[test]
 fn replacement_preparation_pages_prior_source_identity_snapshot_without_a_total_cap() {
     const SOURCE_COUNT: u128 = 4_097;
@@ -174,6 +140,7 @@ fn replacement_preparation_pages_prior_source_identity_snapshot_without_a_total_
     assert_eq!(staged_prior_source_count(&store), SOURCE_COUNT as i64);
     store.abandon_provider_file_publication(scope).unwrap();
 }
+
 #[test]
 fn reconciliation_queries_owner_indexes_without_visiting_unrelated_corpus_rows() {
     const UNRELATED_EVENTS: u128 = 5_000;
@@ -222,7 +189,13 @@ fn reconciliation_queries_owner_indexes_without_visiting_unrelated_corpus_rows()
         .unwrap();
     prepare_all(&store, &scope, 1);
     let scan = store
-        .reconciliation_batch_rows(CLEANUP_PHASE_EVENTS, None, None, 1)
+        .reconciliation_batch_rows(
+            &scope.scope_id.to_string(),
+            CLEANUP_PHASE_EVENTS,
+            None,
+            None,
+            1,
+        )
         .unwrap();
     assert_eq!(scan.visited, 1);
     assert_eq!(scan.owned_entity_ids, vec![owner_event.to_string()]);
@@ -259,6 +232,7 @@ fn reconciliation_queries_owner_indexes_without_visiting_unrelated_corpus_rows()
     }
     store.abandon_provider_file_publication(scope).unwrap();
 }
+
 #[test]
 fn large_owner_tiny_slices_keep_candidate_work_linear_across_interrupted_retry() {
     const EVENT_COUNT: usize = 600;

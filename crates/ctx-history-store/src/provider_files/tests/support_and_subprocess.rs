@@ -319,6 +319,96 @@ fn session_fixture(id: Uuid, source_id: Uuid, external_session_id: &str) -> Sess
     }
 }
 
+fn session_edge_fixture(
+    id: Uuid,
+    from_session_id: Uuid,
+    to_session_id: Uuid,
+    source_id: Option<Uuid>,
+) -> SessionEdge {
+    let now = DateTime::parse_from_rfc3339("2026-07-14T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    SessionEdge {
+        id,
+        from_session_id,
+        to_session_id,
+        edge_type: SessionEdgeType::ParentChild,
+        confidence: Confidence::Explicit,
+        source_id,
+        timestamps: EntityTimestamps {
+            created_at: now,
+            updated_at: now,
+        },
+        sync: SyncMetadata {
+            visibility: Visibility::LocalOnly,
+            fidelity: Fidelity::Imported,
+            sync_state: SyncState::LocalOnly,
+            sync_version: 0,
+            deleted_at: None,
+            metadata: json!({}),
+        },
+    }
+}
+
+fn begin_parent_child_ownership_publication(
+    store: &Store,
+) -> (ProviderFilePublicationScope, Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let file = source_file(20, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+
+    let child_source = Uuid::from_u128(80_000);
+    let sibling_source = Uuid::from_u128(80_001);
+    let parent_session = Uuid::from_u128(80_002);
+    let sibling_peer = Uuid::from_u128(80_003);
+    let sibling_edge = Uuid::from_u128(80_004);
+    insert_capture_source(store, child_source, PATH_A, "publication-child");
+    insert_capture_source(
+        store,
+        sibling_source,
+        "/history/claude/projects/parent.jsonl",
+        "publication-parent",
+    );
+    insert_raw_session(store, parent_session, sibling_source, "publication-parent");
+    insert_raw_session(
+        store,
+        sibling_peer,
+        sibling_source,
+        "publication-sibling-peer",
+    );
+    store
+        .upsert_session_edge(&session_edge_fixture(
+            sibling_edge,
+            parent_session,
+            sibling_peer,
+            Some(sibling_source),
+        ))
+        .unwrap();
+
+    let outcome = source_outcome(&file, generation, 120);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            110,
+        )
+        .unwrap();
+    (
+        scope,
+        child_source,
+        sibling_source,
+        parent_session,
+        sibling_peer,
+        sibling_edge,
+    )
+}
+
 fn event_fixture(id: Uuid, seq: u64, source_id: Uuid, dedupe_key: String, text: &str) -> Event {
     Event {
         id,
@@ -366,22 +456,37 @@ fn insert_raw_session(store: &Store, session_id: Uuid, source_id: Uuid, external
 }
 
 fn staged_seen_count(store: &Store) -> i64 {
+    let replacement_id = store
+        .provider_file_publication
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .scope_id
+        .to_string();
     store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM provider_replacement_stage.seen",
-            [],
+            "SELECT COUNT(*) FROM provider_file_publication_seen WHERE replacement_id = ?1",
+            params![replacement_id],
             |row| row.get(0),
         )
         .unwrap()
 }
 
 fn staged_prior_source_count(store: &Store) -> i64 {
+    let replacement_id = store
+        .provider_file_publication
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .scope_id
+        .to_string();
     store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM provider_replacement_stage.prior_sources",
-            [],
+            "SELECT COUNT(*) FROM provider_file_publication_prior_sources \
+             WHERE replacement_id = ?1",
+            params![replacement_id],
             |row| row.get(0),
         )
         .unwrap()
@@ -396,22 +501,6 @@ fn main_table_exists(store: &Store, table: &str) -> bool {
             |row| row.get(0),
         )
         .unwrap()
-}
-
-fn pragma_i64(store: &Store, pragma: &str) -> i64 {
-    store.conn.query_row(pragma, [], |row| row.get(0)).unwrap()
-}
-
-fn main_database_footprint(store: &Store, path: &std::path::Path) -> (i64, i64, u64, u64) {
-    let page_count = pragma_i64(store, "PRAGMA main.page_count");
-    let freelist_count = pragma_i64(store, "PRAGMA main.freelist_count");
-    let main_bytes = std::fs::metadata(path).unwrap().len();
-    let mut wal_path = path.as_os_str().to_os_string();
-    wal_path.push("-wal");
-    let wal_bytes = std::fs::metadata(std::path::PathBuf::from(wal_path))
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    (page_count, freelist_count, main_bytes, wal_bytes)
 }
 
 fn table_row_count(store: &Store, table: &str) -> i64 {
@@ -578,6 +667,29 @@ fn provider_file_subprocess_helper() {
                 store.upsert_vcs_change(&change).unwrap_err(),
                 StoreError::ProviderFileReplacementBusy { .. }
             ));
+        }
+        "non-utf8-private-root" => {
+            let store = Store::open(&store_path).unwrap();
+            let generation = std::env::var("CTX_PROVIDER_FILE_HELPER_GENERATION")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            let file = source_file(20, 100);
+            let scope = store
+                .begin_provider_file_publication(
+                    file.provider,
+                    source_outcome(&file, generation, 120).observation,
+                    MATERIAL_FORMAT,
+                    ProviderFilePublicationKind::Replacement,
+                    110,
+                )
+                .unwrap();
+            assert!(matches!(
+                store.abort_provider_file_publication(scope).unwrap(),
+                std::ops::ControlFlow::Continue(None)
+            ));
+            assert!(!store.has_pending_provider_file_publications().unwrap());
+            assert_eq!(store.list_events().unwrap().len(), 1);
         }
         "partial-crash" => {
             let store = Store::open(&store_path).unwrap();

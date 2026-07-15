@@ -54,6 +54,11 @@ pub(crate) fn import_report_json(report: &ImportReport) -> Value {
 
 pub(crate) fn import_totals_json(totals: &ImportTotals) -> Value {
     json!({
+        "durable_progress": totals.durable_progress,
+        "fresh_units_processed": totals.fresh_units_processed,
+        "recovery_units_processed": totals.recovery_units_processed,
+        "fresh_units_pending": totals.fresh_units_pending,
+        "recovery_units_pending": totals.recovery_units_pending,
         "source_files": totals.source_files,
         "source_bytes": totals.source_bytes,
         "imported_sources": totals.imported_sources,
@@ -94,8 +99,28 @@ pub(crate) fn print_import_report_human(report: &ImportReport) {
     println!("skipped_edges: {}", report.totals.skipped_edges);
     println!("skipped: {}", report.totals.skipped);
     println!("rejected_records: {}", report.totals.failed);
+    for line in import_pending_backlog_lines(&report.totals) {
+        println!("{line}");
+    }
     println!("resume: {}", report.resume);
     println!("resume_mode: {}", report.resume_mode());
+}
+
+fn import_pending_backlog_lines(totals: &ImportTotals) -> Vec<String> {
+    let mut lines = Vec::new();
+    if totals.fresh_units_pending > 0 {
+        lines.push(format!(
+            "fresh_units_pending: {}",
+            totals.fresh_units_pending
+        ));
+    }
+    if totals.recovery_units_pending > 0 {
+        lines.push(format!(
+            "recovery_units_pending: {}",
+            totals.recovery_units_pending
+        ));
+    }
+    lines
 }
 
 pub(crate) fn source_import_json(
@@ -891,5 +916,21 @@ mod tests {
             assert_eq!(import_report_analytics_outcome(&totals), expected_outcome);
             assert_eq!(import_report_failure_type(&totals), expected_type);
         }
+    }
+
+    #[test]
+    fn human_report_lines_expose_nonzero_pending_backlogs() {
+        assert!(import_pending_backlog_lines(&ImportTotals::default()).is_empty());
+        assert_eq!(
+            import_pending_backlog_lines(&ImportTotals {
+                fresh_units_pending: 3,
+                recovery_units_pending: 7,
+                ..ImportTotals::default()
+            }),
+            vec![
+                "fresh_units_pending: 3".to_owned(),
+                "recovery_units_pending: 7".to_owned(),
+            ]
+        );
     }
 }

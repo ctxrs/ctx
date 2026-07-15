@@ -130,7 +130,11 @@ pub use provider::{
     ProviderSupportStatus, PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
 };
-pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
+pub use source::{
+    canonical_provider_material_source_format, CaptureProvider, CaptureSource,
+    CaptureSourceDescriptor, CaptureSourceKind, ProviderMaterialSourceFormat,
+    PROVIDER_MATERIAL_SOURCE_FORMATS,
+};
 pub use sync::{
     AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,
     SyncBatch, SyncBatchStatus, SyncCursor, SyncDirection, SyncMetadata, SyncOutboxItem,

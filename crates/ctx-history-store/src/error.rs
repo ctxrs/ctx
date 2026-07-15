@@ -19,6 +19,8 @@ pub enum StoreError {
     NotFound(Uuid),
     #[error("unsupported history store schema version: {0}")]
     UnsupportedSchemaVersion(i64),
+    #[error("invalid import pending reason: {0}")]
+    InvalidImportPendingReason(String),
     #[error("unsafe or ambiguous history store identity")]
     UnsafeStoreIdentity,
     #[error("unsupported session history archive version: {0}")]

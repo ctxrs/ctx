@@ -24,9 +24,10 @@ mod vcs;
 pub use archive::validate_archive_version;
 pub use bulk_search::EventSearchBulkGuard;
 pub use catalog::{
-    CatalogCounts, CatalogIndexedStatus, CatalogSession, CatalogSourceIndexState,
-    CatalogSourceIndexUpdate, IndexedHistoryCounts, SourceImportFile, SourceImportFileCounts,
-    SourceImportFileIndexUpdate,
+    CatalogCounts, CatalogImportWork, CatalogIndexedStatus, CatalogSession,
+    CatalogSourceIndexState, CatalogSourceIndexUpdate, ImportPendingReason,
+    ImportPendingReasonRepairProgress, ImportWorkClass, IndexedHistoryCounts, SourceImportFile,
+    SourceImportFileCounts, SourceImportFileIndexUpdate, SourceImportFileWork,
 };
 pub use error::{Result, StoreError};
 pub use files::FileTouchScope;
@@ -35,9 +36,10 @@ pub use provider_files::{
     ProviderFileCheckpoint, ProviderFileCheckpointKey, ProviderFileFinalizeOutcome,
     ProviderFileImportOutcome, ProviderFileInventoryObservation, ProviderFileMaintenanceWarning,
     ProviderFilePreparationProgress, ProviderFilePublicationCommit, ProviderFilePublicationKind,
-    ProviderFilePublicationScope, ProviderFileReconciliationCounts,
-    ProviderFileReconciliationProgress, PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES,
-    PROVIDER_FILE_PREPARATION_MAX_ROWS, PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+    ProviderFilePublicationRetirementWork, ProviderFilePublicationScope,
+    ProviderFileReconciliationCounts, ProviderFileReconciliationProgress,
+    PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES, PROVIDER_FILE_PREPARATION_MAX_ROWS,
+    PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
 };
 pub use raw_sql::{
     RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult, RawSqlTruncation, RawSqlValue,
@@ -57,7 +59,7 @@ use std::{
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 50;
+pub(crate) const SCHEMA_VERSION: i64 = 51;
 
 pub struct Store {
     path: PathBuf,

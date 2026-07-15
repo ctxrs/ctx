@@ -1,5 +1,10 @@
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ImportTotals {
+    pub(crate) durable_progress: bool,
+    pub(crate) fresh_units_processed: usize,
+    pub(crate) recovery_units_processed: usize,
+    pub(crate) fresh_units_pending: usize,
+    pub(crate) recovery_units_pending: usize,
     pub(crate) source_files: usize,
     pub(crate) source_bytes: u64,
     pub(crate) imported_sources: usize,
@@ -269,6 +274,33 @@ pub(crate) struct SourceStats {
     pub(crate) files: usize,
     pub(crate) bytes: u64,
     pub(crate) change_token: Option<[u8; 32]>,
+}
+
+pub(crate) fn failed_inventory_pending_counts(
+    store: &Store,
+    failures: &[ImportSourceFailure],
+) -> Result<(usize, usize)> {
+    let mut fresh = 0usize;
+    let mut recovery = 0usize;
+    for failure in failures {
+        let Some(source_root) = failure.source.path.to_str() else {
+            continue;
+        };
+        for class in [ImportWorkClass::Fresh, ImportWorkClass::Recovery] {
+            let count = store
+                .catalog_import_work_count(failure.source.provider, source_root, class)?
+                .saturating_add(store.source_import_file_work_count(
+                    failure.source.provider,
+                    source_root,
+                    class,
+                )?);
+            match class {
+                ImportWorkClass::Fresh => fresh = fresh.saturating_add(count),
+                ImportWorkClass::Recovery => recovery = recovery.saturating_add(count),
+            }
+        }
+    }
+    Ok((fresh, recovery))
 }
 
 #[derive(Debug, Clone)]

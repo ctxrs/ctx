@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::BTreeSet,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -6,14 +10,18 @@ use ctx_history_core::{
     Event, EventRole, EventType, Fidelity, Session, SessionHistoryArchive, SessionStatus,
     SyncMetadata, SyncState, Visibility,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{
+    hooks::{AuthAction, AuthContext, Authorization},
+    params, Connection,
+};
 use uuid::Uuid;
 
 use crate::schema::ddl::{table_exists, table_has_column, CREATE_TABLES_SQL};
 use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::migrations::{
-    rebuild_capture_sources_provider_check, rebuild_catalog_sessions_provider_check,
+    migrate_to_v50, migrate_to_v51, rebuild_capture_sources_provider_check,
+    rebuild_catalog_sessions_provider_check,
 };
 use crate::{Store, SCHEMA_VERSION};
 
@@ -1444,4 +1452,5 @@ fn schema_v46_adds_mimocode_provider_checks() {
         "/tmp/mimocode/mimocode.db",
     );
 }
+
 include!("tests/import_contract.rs");

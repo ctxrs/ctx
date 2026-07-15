@@ -170,13 +170,7 @@ pub(crate) fn run_setup(
             "data_root": data_root,
             "database_path": db_path,
             "config_path": config_path,
-            "mode": if args.catalog_only {
-                "catalog_only"
-            } else if foreground_import {
-                "ready"
-            } else {
-                "background"
-            },
+            "mode": setup_mode(args.catalog_only, foreground_import, import_report.as_ref()),
             "indexed_items": indexed_items,
             "sources": sources_json(&sources),
             "inventory": inventory_totals_json(
@@ -292,6 +286,24 @@ pub(crate) fn run_setup(
         bail!("all setup import sources failed");
     }
     Ok(())
+}
+
+fn setup_mode(
+    catalog_only: bool,
+    foreground_import: bool,
+    report: Option<&ImportReport>,
+) -> &'static str {
+    if catalog_only {
+        "catalog_only"
+    } else if !foreground_import {
+        "background"
+    } else if report.is_some_and(|report| {
+        report.totals.fresh_units_pending > 0 || report.totals.recovery_units_pending > 0
+    }) {
+        "partial"
+    } else {
+        "ready"
+    }
 }
 
 fn setup_progress_arg(progress: ProgressArg, quiet: bool) -> ProgressArg {
@@ -419,7 +431,15 @@ pub(crate) fn print_setup_status_line(
         println!("ctx is initialized; no local history was indexed");
         return;
     };
-    if setup_has_indexed_content(indexed_items) && report.totals.failed_sources > 0 {
+    let pending_units = report
+        .totals
+        .fresh_units_pending
+        .saturating_add(report.totals.recovery_units_pending);
+    if setup_has_indexed_content(indexed_items) && pending_units > 0 {
+        println!(
+            "ctx indexed available local agent history; {pending_units} history unit(s) are still pending"
+        );
+    } else if setup_has_indexed_content(indexed_items) && report.totals.failed_sources > 0 {
         println!("ctx indexed available local agent history; some sources were skipped");
     } else if setup_has_indexed_content(indexed_items) {
         println!("ctx local agent history search is ready");
@@ -692,5 +712,19 @@ mod setup_estimate_tests {
     #[test]
     fn duration_estimate_carries_rounded_minutes_into_hours() {
         assert_eq!(format_duration_estimate(7_199), "2 hours");
+    }
+
+    #[test]
+    fn foreground_setup_json_is_partial_while_import_work_remains() {
+        let mut report = ImportReport::empty(false);
+        report.totals.fresh_units_pending = 1;
+        assert_eq!(setup_mode(false, true, Some(&report)), "partial");
+
+        report.totals.fresh_units_pending = 0;
+        report.totals.recovery_units_pending = 1;
+        assert_eq!(setup_mode(false, true, Some(&report)), "partial");
+
+        report.totals.recovery_units_pending = 0;
+        assert_eq!(setup_mode(false, true, Some(&report)), "ready");
     }
 }

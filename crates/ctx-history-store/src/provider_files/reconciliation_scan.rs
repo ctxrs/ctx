@@ -7,7 +7,14 @@ impl Store {
         entity_cursor: Option<&str>,
         limit: usize,
     ) -> Result<ReconciliationBatch> {
-        let scan = self.reconciliation_batch_rows(phase, source_cursor, entity_cursor, limit)?;
+        let replacement_id = scope.scope_id.to_string();
+        let scan = self.reconciliation_batch_rows(
+            &replacement_id,
+            phase,
+            source_cursor,
+            entity_cursor,
+            limit,
+        )?;
         if scan.owned_entity_ids.is_empty() {
             return Ok(ReconciliationBatch {
                 visited: scan.visited,
@@ -17,11 +24,14 @@ impl Store {
                 removed: ProviderFileReconciliationCounts::default(),
             });
         }
-        self.conn
-            .execute(&format!("DELETE FROM {STAGING_SCHEMA}.batch"), [])?;
+        self.conn.execute(
+            &format!("DELETE FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1"),
+            params![&replacement_id],
+        )?;
         {
             let mut insert = self.conn.prepare_cached(&format!(
-                "INSERT INTO {STAGING_SCHEMA}.batch (source_id, entity_id) VALUES (?1, ?2)"
+                "INSERT INTO {STAGING_BATCH_TABLE} \
+                 (replacement_id, source_id, entity_id) VALUES (?1, ?2, ?3)"
             ))?;
             let source_id = scan.batch_source_id.as_deref().ok_or(
                 StoreError::ProviderFileReconciliationInconsistent {
@@ -29,33 +39,44 @@ impl Store {
                 },
             )?;
             for entity_id in &scan.owned_entity_ids {
-                insert.execute(params![source_id, entity_id])?;
+                insert.execute(params![&replacement_id, source_id, entity_id])?;
             }
         }
         let removed = match phase {
             CLEANUP_PHASE_LINKS => ProviderFileReconciliationCounts {
-                history_record_links: self
-                    .delete_unseen_batch("history_record_link", "history_record_links")?,
+                history_record_links: self.delete_unseen_batch(
+                    &replacement_id,
+                    "history_record_link",
+                    "history_record_links",
+                )?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_FILES => ProviderFileReconciliationCounts {
-                files_touched: self.delete_unseen_batch("file_touched", "files_touched")?,
+                files_touched: self.delete_unseen_batch(
+                    &replacement_id,
+                    "file_touched",
+                    "files_touched",
+                )?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_EDGES => ProviderFileReconciliationCounts {
-                session_edges: self.delete_unseen_batch("session_edge", "session_edges")?,
+                session_edges: self.delete_unseen_batch(
+                    &replacement_id,
+                    "session_edge",
+                    "session_edges",
+                )?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_SUMMARIES => ProviderFileReconciliationCounts {
-                summaries: self.delete_unseen_batch("summary", "summaries")?,
+                summaries: self.delete_unseen_batch(&replacement_id, "summary", "summaries")?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_EVENTS => ProviderFileReconciliationCounts {
-                events: self.delete_unseen_event_batch()?,
+                events: self.delete_unseen_event_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_RUNS => ProviderFileReconciliationCounts {
-                runs: self.delete_unseen_run_batch()?,
+                runs: self.delete_unseen_run_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_SESSIONS => ProviderFileReconciliationCounts {
@@ -63,31 +84,39 @@ impl Store {
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_VCS_CHANGES => ProviderFileReconciliationCounts {
-                vcs_changes: self.delete_unseen_vcs_change_batch()?,
+                vcs_changes: self.delete_unseen_vcs_change_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_ARTIFACTS => ProviderFileReconciliationCounts {
-                artifacts: self.delete_unseen_artifact_batch()?,
+                artifacts: self.delete_unseen_artifact_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_HISTORY_RECORD_TAGS => ProviderFileReconciliationCounts {
-                history_record_tags: self.delete_history_record_tag_batch()?,
+                history_record_tags: self.delete_history_record_tag_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_RECORD_EDGES => ProviderFileReconciliationCounts {
-                record_edges: self.delete_unseen_batch("record_edge", "record_edges")?,
+                record_edges: self.delete_unseen_batch(
+                    &replacement_id,
+                    "record_edge",
+                    "record_edges",
+                )?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_HISTORY_RECORDS => ProviderFileReconciliationCounts {
-                history_records: self.delete_unseen_history_record_batch()?,
+                history_records: self.delete_unseen_history_record_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_VCS_WORKSPACES => ProviderFileReconciliationCounts {
-                vcs_workspaces: self.delete_unseen_vcs_workspace_batch()?,
+                vcs_workspaces: self.delete_unseen_vcs_workspace_batch(&replacement_id)?,
                 ..ProviderFileReconciliationCounts::default()
             },
             CLEANUP_PHASE_AUDIT_LOG => ProviderFileReconciliationCounts {
-                audit_log_entries: self.delete_unseen_batch("audit_log", "audit_log")?,
+                audit_log_entries: self.delete_unseen_batch(
+                    &replacement_id,
+                    "audit_log",
+                    "audit_log",
+                )?,
                 ..ProviderFileReconciliationCounts::default()
             },
             _ => unreachable!(),
@@ -103,6 +132,7 @@ impl Store {
 
     fn reconciliation_batch_rows(
         &self,
+        replacement_id: &str,
         phase: i64,
         source_cursor: Option<&str>,
         entity_cursor: Option<&str>,
@@ -114,16 +144,22 @@ impl Store {
             Some(source_id) => self
                 .conn
                 .query_row(
-                    &format!("SELECT id FROM {STAGING_SCHEMA}.prior_sources WHERE id = ?1"),
-                    params![source_id],
+                    &format!(
+                        "SELECT source_id FROM {STAGING_PRIOR_SOURCES_TABLE} \
+                         WHERE replacement_id = ?1 AND source_id = ?2"
+                    ),
+                    params![replacement_id, source_id],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?,
             None => self
                 .conn
                 .query_row(
-                    &format!("SELECT id FROM {STAGING_SCHEMA}.prior_sources ORDER BY id LIMIT 1"),
-                    [],
+                    &format!(
+                        "SELECT source_id FROM {STAGING_PRIOR_SOURCES_TABLE} \
+                         WHERE replacement_id = ?1 ORDER BY source_id LIMIT 1"
+                    ),
+                    params![replacement_id],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?,
@@ -182,9 +218,11 @@ impl Store {
                 .conn
                 .query_row(
                     &format!(
-                        "SELECT id FROM {STAGING_SCHEMA}.prior_sources WHERE id > ?1 ORDER BY id LIMIT 1"
+                        "SELECT source_id FROM {STAGING_PRIOR_SOURCES_TABLE} \
+                         WHERE replacement_id = ?1 AND source_id > ?2 \
+                         ORDER BY source_id LIMIT 1"
                     ),
-                    params![&current_source],
+                    params![replacement_id, &current_source],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;

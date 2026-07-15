@@ -54,6 +54,7 @@ fn checkpoint_round_trip_preserves_exact_boundary_data_and_version() {
         );
     }
 }
+
 #[test]
 fn stale_generation_is_typed_and_never_advances_checkpoint() {
     let temp = tempdir().unwrap();
@@ -99,6 +100,7 @@ fn stale_generation_is_typed_and_never_advances_checkpoint() {
         .unwrap();
     assert_eq!(status, "pending");
 }
+
 #[test]
 fn imported_content_without_finalization_replays_before_checkpoint_advances() {
     let temp = tempdir().unwrap();
@@ -142,6 +144,8 @@ fn imported_content_without_finalization_replays_before_checkpoint_advances() {
     );
 
     let second_checkpoint = checkpoint(20, 5, "unix:2049:881", 130);
+    let mut second_checkpoint = second_checkpoint;
+    second_checkpoint.head_sha256 = "f".repeat(64);
     store
         .upsert_provider_file_checkpoint(
             source_outcome(&appended, second_generation, 130),
@@ -156,6 +160,7 @@ fn imported_content_without_finalization_replays_before_checkpoint_advances() {
         second_checkpoint
     );
 }
+
 #[test]
 fn deferred_partial_completion_retains_checkpoint_and_completes_exact_observation() {
     let temp = tempdir().unwrap();
@@ -207,6 +212,7 @@ fn deferred_partial_completion_retains_checkpoint_and_completes_exact_observatio
         .unwrap();
     assert_eq!(state, ("indexed".to_owned(), 15, 120));
 }
+
 #[test]
 fn changed_checkpoint_version_requires_replacement_without_completing_observation() {
     let temp = tempdir().unwrap();
@@ -263,6 +269,7 @@ fn changed_checkpoint_version_requires_replacement_without_completing_observatio
         .unwrap();
     assert_eq!(status, "pending");
 }
+
 #[test]
 fn catalog_observation_can_finalize_a_provider_file_checkpoint() {
     let temp = tempdir().unwrap();
@@ -338,6 +345,7 @@ fn catalog_observation_can_finalize_a_provider_file_checkpoint() {
         checkpoint
     );
 }
+
 #[test]
 fn catalog_append_completion_preserves_rejections_and_accumulates_event_count() {
     let temp = tempdir().unwrap();
@@ -472,6 +480,7 @@ fn catalog_append_completion_preserves_rejections_and_accumulates_event_count() 
         )
     );
 }
+
 #[test]
 fn append_and_retained_tail_share_the_owner_lease_and_atomic_publication() {
     let temp = tempdir().unwrap();
@@ -621,6 +630,7 @@ fn append_and_retained_tail_share_the_owner_lease_and_atomic_publication() {
         Some(second_checkpoint)
     );
 }
+
 #[test]
 fn initial_import_uses_zero_seen_staging_rows() {
     let temp = tempdir().unwrap();
@@ -647,13 +657,14 @@ fn initial_import_uses_zero_seen_staging_rows() {
     assert!(!scope.tracks_prior_material);
     assert!(store.provider_file_publication.borrow().is_some());
     assert!(
-        !store
+        store
             .provider_file_publication
             .borrow()
             .as_ref()
             .unwrap()
             .attached
     );
+    assert_eq!(staged_seen_count(&store), 0);
     assert!(store.has_pending_provider_file_publications().unwrap());
     assert!(matches!(
         store

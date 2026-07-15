@@ -1,21 +1,15 @@
 impl Store {
-    fn session_reference_source_ids(
+    fn session_owned_reference_source_ids(
         &self,
-        parent: Option<Uuid>,
-        root: Option<Uuid>,
         transcript: Option<Uuid>,
         record: Option<Uuid>,
     ) -> Result<Vec<Option<Uuid>>> {
         let mut sources = Vec::new();
-        for (table, id) in [
-            ("sessions", parent),
-            ("sessions", root),
-            ("artifacts", transcript),
-            ("history_records", record),
-        ] {
-            if let Some(id) = id {
-                sources.push(self.direct_entity_source_id(table, id)?);
-            }
+        if let Some(transcript) = transcript {
+            sources.push(self.direct_entity_source_id("artifacts", transcript)?);
+        }
+        if let Some(record) = record {
+            self.push_history_record_reference_source(&mut sources, record)?;
         }
         Ok(sources)
     }
@@ -38,7 +32,7 @@ impl Store {
             sources.push(self.direct_entity_source_id("artifacts", artifact)?);
         }
         if let Some(record) = record {
-            sources.push(self.direct_entity_source_id("history_records", record)?);
+            self.push_history_record_reference_source(&mut sources, record)?;
         }
         Ok(sources)
     }
@@ -58,7 +52,7 @@ impl Store {
             sources.push(self.direct_entity_source_id("artifacts", artifact)?);
         }
         if let Some(record) = record {
-            sources.push(self.direct_entity_source_id("history_records", record)?);
+            self.push_history_record_reference_source(&mut sources, record)?;
         }
         Ok(sources)
     }
@@ -81,9 +75,30 @@ impl Store {
             sources.push(self.direct_entity_source_id("vcs_workspaces", workspace)?);
         }
         if let Some(record) = record {
-            sources.push(self.direct_entity_source_id("history_records", record)?);
+            self.push_history_record_reference_source(&mut sources, record)?;
         }
         Ok(sources)
+    }
+
+    fn push_history_record_reference_source(
+        &self,
+        sources: &mut Vec<Option<Uuid>>,
+        record_id: Uuid,
+    ) -> Result<()> {
+        let source_id = self.direct_entity_source_id("history_records", record_id)?;
+        if source_id.is_some() {
+            sources.push(source_id);
+            return Ok(());
+        }
+        let exists = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM history_records WHERE id = ?1)",
+            params![record_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            sources.push(None);
+        }
+        Ok(())
     }
 
     fn link_target_source_id(&self, target_type: &str, target_id: Uuid) -> Result<Option<Uuid>> {
@@ -213,22 +228,25 @@ impl Store {
         effective_source_predicate: &'static str,
     ) -> Result<()> {
         self.cleanup_abandoned_provider_file_publication()?;
-        if !self
+        let replacement_id = self
             .provider_file_publication
             .borrow()
             .as_ref()
-            .is_some_and(|active| active.attached)
-        {
+            .filter(|active| active.attached)
+            .map(|active| active.scope_id.to_string());
+        let Some(replacement_id) = replacement_id else {
             return Ok(());
-        }
+        };
         let sql = format!(
             r#"
-            INSERT OR IGNORE INTO {STAGING_SCHEMA}.seen (entity_kind, entity_id)
-            SELECT ?1, entity.id
+            INSERT OR IGNORE INTO {STAGING_SEEN_TABLE}
+                (replacement_id, entity_kind, entity_id)
+            SELECT scope.replacement_id, ?2, entity.id
             FROM {table} AS entity
             JOIN capture_sources AS source ON ({effective_source_predicate})
-            JOIN {STAGING_SCHEMA}.scope AS scope
-              ON scope.provider = source.provider
+            JOIN provider_file_publications AS scope
+              ON scope.replacement_id = ?1
+             AND scope.provider = source.provider
              AND scope.material_source_format = source.source_format
              AND (
                 (source.raw_source_path = scope.source_path AND (
@@ -238,11 +256,13 @@ impl Store {
                 ))
                 OR (source.raw_source_path IS NULL AND source.source_root = scope.source_path)
              )
-            WHERE entity.id = ?2
+            WHERE entity.id = ?3
             "#
         );
-        self.conn
-            .execute(&sql, params![entity_kind, entity_id.to_string()])?;
+        self.conn.execute(
+            &sql,
+            params![replacement_id, entity_kind, entity_id.to_string()],
+        )?;
         Ok(())
     }
 

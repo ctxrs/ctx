@@ -12,16 +12,16 @@ impl Store {
                 INSERT INTO source_import_files (
                     provider, source_format, source_root, source_path,
                     file_size_bytes, file_modified_at_ms, import_revision, observed_at_ms, is_stale,
-                    metadata_json
+                    pending_reason, metadata_json
                 )
-                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10
                 WHERE EXISTS (
                     SELECT 1
                     FROM import_inventory_generations AS inventory
                     WHERE inventory.provider = ?1
                       AND inventory.source_root = ?3
                       AND inventory.inventory_family = 'source_import_files'
-                      AND inventory.current_generation = ?10
+                      AND inventory.current_generation = ?11
                 )
                 ON CONFLICT(provider, source_root, source_path) DO UPDATE SET
                     source_format = excluded.source_format,
@@ -112,6 +112,7 @@ impl Store {
                         THEN source_import_files.indexed_import_revision
                         ELSE NULL
                     END,
+                    pending_reason = excluded.pending_reason,
                     metadata_json = excluded.metadata_json
                 WHERE EXISTS (
                     SELECT 1
@@ -119,7 +120,7 @@ impl Store {
                     WHERE inventory.provider = excluded.provider
                       AND inventory.source_root = excluded.source_root
                       AND inventory.inventory_family = 'source_import_files'
-                      AND inventory.current_generation = ?10
+                      AND inventory.current_generation = ?11
                 )
                   AND (
                        source_import_files.source_format IS NOT excluded.source_format
@@ -128,11 +129,13 @@ impl Store {
                     OR source_import_files.import_revision != excluded.import_revision
                     OR source_import_files.is_stale != 0
                     OR source_import_files.metadata_json IS NOT excluded.metadata_json
+                    OR source_import_files.pending_reason IS NOT excluded.pending_reason
                   )
                 "#,
         )?;
         let mut changed = 0;
         for file in files {
+            let pending_reason = self.classify_source_import_pending_reason(file)?;
             changed += stmt.execute(params![
                 file.provider.as_str(),
                 file.source_format.as_str(),
@@ -142,6 +145,7 @@ impl Store {
                 file.file_modified_at_ms,
                 i64::from(file.import_revision),
                 file.observed_at_ms,
+                pending_reason.map(ImportPendingReason::as_str),
                 serde_json::to_string(&file.metadata)?,
                 capped_i64(inventory_generation),
             ])?;
@@ -231,6 +235,107 @@ impl Store {
         collect_rows(rows)
     }
 
+    pub fn list_source_import_file_work(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        class: ImportWorkClass,
+        limit: usize,
+    ) -> Result<Vec<SourceImportFileWork>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let predicate = import_work_class_predicate("source_file", class);
+        let order = import_work_order("source_file", class);
+        let mut stmt = self.conn.prepare(&format!(
+            r#"
+            SELECT provider, source_format, source_root, source_path,
+                   file_size_bytes, file_modified_at_ms, import_revision,
+                   observed_at_ms, metadata_json, pending_reason,
+                   CASE
+                     WHEN pending_reason = 'fresh_append' THEN MAX(
+                       file_size_bytes - COALESCE((
+                         SELECT checkpoint.committed_byte_offset
+                         FROM provider_file_checkpoints AS checkpoint
+                         WHERE checkpoint.provider = source_file.provider
+                           AND checkpoint.source_format = source_file.source_format
+                           AND checkpoint.source_root = source_file.source_root
+                           AND checkpoint.source_path = source_file.source_path
+                       ), 0),
+                       0
+                     )
+                     ELSE file_size_bytes
+                   END,
+                   indexed_at_ms
+            FROM source_import_files AS source_file
+            WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
+              AND {predicate}
+            ORDER BY {order}
+            LIMIT ?3
+            "#
+        ))?;
+        let rows = stmt.query_map(
+            params![provider.as_str(), source_root, capped_i64(limit as u64)],
+            |row| {
+                Ok(SourceImportFileWork {
+                    file: source_import_file_from_row(row)?,
+                    reason: parse_text_enum(row.get(9)?)?,
+                    estimated_bytes: nonnegative_i64_to_u64(row.get(10)?)?,
+                    last_attempt_at_ms: row.get(11)?,
+                })
+            },
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn source_import_file_work_count(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        class: ImportWorkClass,
+    ) -> Result<usize> {
+        let predicate = import_work_class_predicate("source_file", class);
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM source_import_files AS source_file \
+                     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
+                       AND {predicate}"
+                ),
+                params![provider.as_str(), source_root],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn schedule_source_import_explicit_rescan(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<usize> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE source_import_files
+                SET pending_reason = 'explicit_rescan'
+                WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
+                  AND EXISTS (
+                    SELECT 1 FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = ?1 AND inventory.source_root = ?2
+                      AND inventory.inventory_family = 'source_import_files'
+                      AND inventory.current_generation = ?3
+                  )
+                "#,
+                params![
+                    provider.as_str(),
+                    source_root,
+                    capped_i64(inventory_generation)
+                ],
+            )
+            .map_err(Into::into)
+    }
+
     pub fn mark_source_import_file_indexed(
         &self,
         provider: CaptureProvider,
@@ -269,7 +374,16 @@ impl Store {
                     indexed_file_modified_at_ms = ?6,
                     indexed_status = ?7,
                     indexed_error = ?8,
-                    indexed_import_revision = ?9
+                    indexed_import_revision = ?9,
+                    pending_reason = CASE
+                        WHEN ?7 = 'failed' THEN CASE
+                            WHEN pending_reason IN ('fresh_append', 'recovery_retry')
+                                THEN 'recovery_retry'
+                            ELSE 'recovery_replacement'
+                        END
+                        WHEN ?7 = 'pending' THEN COALESCE(pending_reason, 'legacy')
+                        ELSE NULL
+                    END
                 WHERE provider = ?1
                   AND source_root = ?2
                   AND source_path = ?3

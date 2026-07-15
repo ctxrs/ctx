@@ -163,10 +163,12 @@ impl Store {
                 ids.pop();
             }
             let mut insert = self.conn.prepare_cached(&format!(
-                "INSERT OR IGNORE INTO {STAGING_SCHEMA}.prior_sources (id) VALUES (?1)"
+                "INSERT OR IGNORE INTO {STAGING_PRIOR_SOURCES_TABLE} \
+                 (replacement_id, source_id) VALUES (?1, ?2)"
             ))?;
+            let replacement_id = scope.scope_id.to_string();
             for id in &ids {
-                insert.execute(params![id])?;
+                insert.execute(params![&replacement_id, id])?;
             }
             marker.preparation_cursor = ids.last().cloned();
             marker.preparation_complete = complete;
@@ -197,10 +199,73 @@ impl Store {
     pub fn abandon_provider_file_publication(
         &self,
         scope: ProviderFilePublicationScope,
-    ) -> Result<()> {
+    ) -> Result<Option<ProviderFileMaintenanceWarning>> {
         self.validate_provider_file_publication_scope(&scope)?;
+        let durable_result = if scope.retires_observation {
+            self.advance_provider_file_publication_attempt(&scope, utc_now().timestamp_millis())
+        } else {
+            Ok(())
+        };
         scope.lifecycle.store(false, Ordering::Release);
-        self.cleanup_active_provider_file_publication(scope.scope_id)
-            .map_err(maintenance_warning_as_error)
+        let maintenance_warning = self
+            .cleanup_active_provider_file_publication(scope.scope_id)
+            .err();
+        durable_result?;
+        Ok(maintenance_warning)
+    }
+
+    /// Releases a failed publication and removes its durable marker only when
+    /// importer writes have not started. `Continue` means the publication was
+    /// cancelled; `Break` means mutation started and the durable marker remains
+    /// fenced for replacement or retirement recovery. Either outcome carries
+    /// a non-fatal staging cleanup warning when local maintenance was deferred.
+    pub fn abort_provider_file_publication(
+        &self,
+        scope: ProviderFilePublicationScope,
+    ) -> Result<
+        ControlFlow<Option<ProviderFileMaintenanceWarning>, Option<ProviderFileMaintenanceWarning>>,
+    > {
+        let durable_result = self.abort_provider_file_publication_durable(&scope);
+
+        scope.lifecycle.store(false, Ordering::Release);
+        let maintenance_warning = self
+            .cleanup_active_provider_file_publication(scope.scope_id)
+            .err();
+        let cancelled = durable_result?;
+        Ok(if cancelled {
+            ControlFlow::Continue(maintenance_warning)
+        } else {
+            ControlFlow::Break(maintenance_warning)
+        })
+    }
+
+    fn abort_provider_file_publication_durable(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<bool> {
+        self.validate_provider_file_publication_scope(scope)?;
+        if scope.retires_observation {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        self.ensure_active_provider_file_publication(scope)?;
+
+        self.with_atomic_provider_file_update(|| {
+            let marker = self.load_replacement_marker(scope)?;
+            if marker.publication_kind != scope.kind {
+                return Err(StoreError::InvalidProviderFilePublicationScope);
+            }
+            if marker.mutation_started {
+                return Ok(false);
+            }
+            let deleted = self.conn.execute(
+                "DELETE FROM provider_file_publications WHERE replacement_id = ?1 AND mutation_started = 0",
+                params![scope.scope_id.to_string()],
+            )?;
+            if deleted != 1 {
+                return Err(StoreError::InvalidProviderFilePublicationScope);
+            }
+            invalidate_semantic_searchable_item_stats(&self.conn)?;
+            Ok(true)
+        })
     }
 }

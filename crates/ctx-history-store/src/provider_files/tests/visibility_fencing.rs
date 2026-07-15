@@ -99,6 +99,7 @@ fn pending_owner_is_hidden_from_views_external_hydration_and_export() {
     assert_eq!(observer.list_events().unwrap().len(), 1);
     assert!(observer.file_touched_exists(touched).unwrap());
 }
+
 #[test]
 fn durable_marker_blocks_cross_connection_entity_and_archive_contamination() {
     let temp = tempdir().unwrap();
@@ -235,6 +236,7 @@ fn durable_marker_blocks_cross_connection_entity_and_archive_contamination() {
     );
     store.abandon_provider_file_publication(scope).unwrap();
 }
+
 #[test]
 fn raw_sql_rejects_base_table_reads_while_crash_marker_fences_owner() {
     let temp = tempdir().unwrap();
@@ -287,6 +289,7 @@ fn raw_sql_rejects_base_table_reads_while_crash_marker_fences_owner() {
         ));
     }
 }
+
 #[test]
 fn first_owner_write_in_pre_marker_window_is_serialized_into_reconciliation() {
     let temp = tempdir().unwrap();
@@ -354,6 +357,7 @@ fn first_owner_write_in_pre_marker_window_is_serialized_into_reconciliation() {
     assert_eq!(counts.sessions_tombstoned, 1);
     assert!(session_deleted_at(&writer, session_id).is_some());
 }
+
 #[test]
 fn catalog_results_are_fenced_across_connections_and_unmutated_supersession_releases_them() {
     let temp = tempdir().unwrap();
@@ -547,6 +551,7 @@ fn catalog_results_are_fenced_across_connections_and_unmutated_supersession_rele
         1
     );
 }
+
 #[test]
 fn source_import_publication_blocks_cross_family_catalog_status_and_legacy_cursor() {
     let temp = tempdir().unwrap();
@@ -616,6 +621,7 @@ fn source_import_publication_blocks_cross_family_catalog_status_and_legacy_curso
     assert_eq!(status, "pending");
     assert_eq!(cursor, (None, None, None, None, None));
 }
+
 #[test]
 fn catalog_publication_blocks_cross_family_source_import_status() {
     let temp = tempdir().unwrap();
@@ -686,6 +692,7 @@ fn catalog_publication_blocks_cross_family_source_import_status() {
         .unwrap();
     assert_eq!(status, "pending");
 }
+
 #[test]
 fn superseded_mutated_catalog_publication_keeps_new_generation_noncurrent() {
     let temp = tempdir().unwrap();
@@ -744,6 +751,7 @@ fn superseded_mutated_catalog_publication_keeps_new_generation_noncurrent() {
         .unwrap());
     drop(scope);
 }
+
 #[test]
 fn obsolete_unmutated_catalog_publication_does_not_fence_new_generation() {
     let temp = tempdir().unwrap();
@@ -794,6 +802,7 @@ fn obsolete_unmutated_catalog_publication_does_not_fence_new_generation() {
         .unwrap());
     drop(scope);
 }
+
 #[test]
 fn obsolete_unmutated_marker_does_not_block_raw_sql_or_unrelated_archive() {
     let temp = tempdir().unwrap();

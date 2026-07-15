@@ -133,6 +133,7 @@ fn first_owner_lock_blocks_other_store_and_stale_marker_is_adopted() {
     assert!(!observer.has_pending_provider_file_publications().unwrap());
     assert_eq!(observer.get_capture_source(source).unwrap().id, source);
 }
+
 #[test]
 fn dropping_publication_scope_releases_owner_lock_for_durable_marker_adoption() {
     let temp = tempdir().unwrap();
@@ -192,6 +193,184 @@ fn dropping_publication_scope_releases_owner_lock_for_durable_marker_adoption() 
         )
         .unwrap();
     first.abandon_provider_file_publication(readopted).unwrap();
+}
+
+#[test]
+fn abort_publication_discards_only_unmutated_markers_and_releases_the_scope() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let outcome = source_outcome(&file, generation, 110);
+    let unmutated = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            105,
+        )
+        .unwrap();
+    assert!(matches!(
+        store.abort_provider_file_publication(unmutated).unwrap(),
+        std::ops::ControlFlow::Continue(None)
+    ));
+    assert!(store.provider_file_publication.borrow().is_none());
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+
+    let source = Uuid::from_u128(64_050);
+    insert_capture_source(&store, source, PATH_A, "abort-after-mutation");
+    let mutated = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            106,
+        )
+        .unwrap();
+    let event = event_fixture(
+        Uuid::from_u128(64_051),
+        1,
+        source,
+        "abort-after-mutation".to_owned(),
+        "durably fenced",
+    );
+    store
+        .with_provider_file_publication_writes(&mutated, |store| store.upsert_event(&event))
+        .unwrap();
+    assert!(matches!(
+        store.abort_provider_file_publication(mutated).unwrap(),
+        std::ops::ControlFlow::Break(None)
+    ));
+    assert!(store.provider_file_publication.borrow().is_none());
+    assert!(store.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
+fn abort_outcome_surfaces_cleanup_warning_without_losing_recovery_state() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            source_outcome(&file, generation, 110).observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            105,
+        )
+        .unwrap();
+    let source = Uuid::from_u128(64_060);
+    insert_capture_source(&store, source, PATH_A, "abort-warning");
+    let mut event = event_fixture(
+        Uuid::from_u128(64_061),
+        1,
+        source,
+        "abort-warning".to_owned(),
+        "durably fenced",
+    );
+    event.dedupe_key = None;
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&event))
+        .unwrap();
+
+    store.inject_provider_file_fault(ProviderFileFaultPoint::Cleanup);
+    assert!(matches!(
+        store.abort_provider_file_publication(scope).unwrap(),
+        std::ops::ControlFlow::Break(Some(
+            ProviderFileMaintenanceWarning::StagingCleanupDeferred { .. }
+        ))
+    ));
+    assert!(store.has_pending_provider_file_publications().unwrap());
+    store.cleanup_abandoned_provider_file_publication().unwrap();
+    assert!(store.provider_file_publication.borrow().is_none());
+}
+
+#[test]
+fn invalid_finalize_discards_an_unmutated_marker_before_consuming_the_scope() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let outcome = source_outcome(&file, generation, 110);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            105,
+        )
+        .unwrap();
+    assert_eq!(scope.kind(), ProviderFilePublicationKind::Incremental);
+
+    assert!(matches!(
+        store
+            .finalize_provider_file_publication(
+                scope,
+                outcome,
+                ProviderFilePublicationCommit::Replacement(None),
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFilePublicationScope
+    ));
+    assert!(store.provider_file_publication.borrow().is_none());
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
+fn mutable_publication_write_scope_resets_after_panic() {
+    let temp = tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let outcome = source_outcome(&file, generation, 110);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            105,
+        )
+        .unwrap();
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = store.with_provider_file_publication_writes_mut::<(), StoreError>(&scope, |_| {
+            panic!("publication write panic")
+        });
+    }));
+    assert!(panicked.is_err());
+    assert!(store.provider_file_write_scope.get().is_none());
+    store
+        .with_provider_file_publication_writes_mut::<(), StoreError>(&scope, |_| Ok(()))
+        .unwrap();
+    assert!(matches!(
+        store.abort_provider_file_publication(scope).unwrap(),
+        std::ops::ControlFlow::Continue(None)
+    ));
 }
 
 #[test]
