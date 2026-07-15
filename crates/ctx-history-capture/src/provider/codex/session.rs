@@ -57,6 +57,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         let mut reader = BufReader::new(file);
         let mut result = ProviderNormalizationResult::default();
         let mut header = None;
+        let mut session_meta_seen = false;
         let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
         let mut has_real_message_content = false;
         let mut skipped_oversized_events = 0usize;
@@ -113,6 +114,10 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
             if entry_type == "session_meta" {
+                if session_meta_seen {
+                    continue;
+                }
+                session_meta_seen = true;
                 match codex_session_header(value) {
                     Ok(parsed) => {
                         let capture = codex_session_capture(
@@ -132,6 +137,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                             line: line_number,
                             error: err.to_string(),
                         });
+                        return Ok(result);
                     }
                 }
                 continue;
@@ -413,16 +419,12 @@ pub fn import_codex_session_jsonl(
     if options.fast_event_inserts {
         return import_codex_session_paths_fast(vec![path.to_path_buf()], store, options, 0);
     }
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
     let normalization = CodexSessionJsonlAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
+            source_path: Some(path.to_path_buf()),
+            source_root: options.source_path.clone(),
             imported_at: options.imported_at,
         },
     )?;
@@ -480,7 +482,7 @@ fn import_codex_session_jsonl_tail_bounded(
     let context = ProviderAdapterContext {
         machine_id: options.machine_id.clone(),
         source_path: Some(path.to_path_buf()),
-        source_root: None,
+        source_root: options.source_path.clone(),
         imported_at: options.imported_at,
     };
     let import_options = NormalizedProviderImportOptions {

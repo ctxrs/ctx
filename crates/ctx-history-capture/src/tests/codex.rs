@@ -94,6 +94,83 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
 }
 
 #[test]
+fn codex_slow_import_preserves_file_path_and_source_root() {
+    let temp = tempdir();
+    let source_root = provider_history_fixture("codex-sessions");
+    let path = source_root.join("2026/06/23/root.jsonl");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            source_path: Some(source_root.clone()),
+            fast_event_inserts: false,
+            imported_at: "2026-06-23T16:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    let source = store.list_capture_sources().unwrap().pop().unwrap();
+    assert_eq!(source.descriptor.raw_source_path.as_deref(), path.to_str());
+    assert_eq!(
+        source.descriptor.source_root.as_deref(),
+        source_root.to_str()
+    );
+}
+
+#[test]
+fn codex_session_does_not_replace_a_malformed_first_meta() {
+    let temp = tempdir();
+    let path = temp.path().join("malformed-first-meta.jsonl");
+    fs::write(
+        &path,
+        [
+            jsonl_line(json!({"type": "session_meta", "payload": {}})),
+            jsonl_line(json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "must-not-take-over",
+                    "timestamp": "2026-06-23T16:00:00Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-06-23T16:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "must not attach to second meta"}
+                ]}
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    for fast_event_inserts in [false, true] {
+        let mut store = Store::open(
+            temp.path()
+                .join(format!("work-{fast_event_inserts}.sqlite")),
+        )
+        .unwrap();
+        let summary = import_codex_session_jsonl(
+            &path,
+            &mut store,
+            CodexSessionImportOptions {
+                fast_event_inserts,
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn codex_parallel_join_panic_is_a_typed_system_failure() {
     let error = std::thread::scope(|scope| {
         let handle = scope.spawn(|| -> crate::Result<()> {
@@ -1229,7 +1306,9 @@ fn codex_session_jsonl_fast_rejects_malformed_event_timestamp_atomically() {
 #[test]
 fn codex_session_tail_keeps_valid_append_when_another_row_is_rejected() {
     let temp = tempdir();
-    let path = temp.path().join("tail-bad-timestamp-codex.jsonl");
+    let source_root = temp.path().join("sessions");
+    fs::create_dir(&source_root).unwrap();
+    let path = source_root.join("tail-bad-timestamp-codex.jsonl");
     let initial = [
         jsonl_line(json!({
             "timestamp": "2026-07-03T12:00:00Z",
@@ -1260,6 +1339,7 @@ fn codex_session_tail_keeps_valid_append_when_another_row_is_rejected() {
         &path,
         &mut store,
         CodexSessionImportOptions {
+            source_path: Some(source_root.clone()),
             imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
             ..CodexSessionImportOptions::default()
         },
@@ -1299,6 +1379,7 @@ fn codex_session_tail_keeps_valid_append_when_another_row_is_rejected() {
         tail_start,
         &mut store,
         CodexSessionImportOptions {
+            source_path: Some(source_root.clone()),
             imported_at: "2026-07-03T12:31:00Z".parse().unwrap(),
             ..CodexSessionImportOptions::default()
         },
@@ -1306,14 +1387,21 @@ fn codex_session_tail_keeps_valid_append_when_another_row_is_rejected() {
     .unwrap();
 
     assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    let session_id = provider_import_session_id_for_path(
-        CaptureProvider::Codex,
-        "codex_session_jsonl",
-        &path,
-        "codex-tail-bad-timestamp",
-    );
     assert_eq!(summary.imported_events, 1, "{:?}", summary.failures);
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 2);
+    let session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.external_session_id.as_deref() == Some("codex-tail-bad-timestamp"))
+        .unwrap();
+    assert_eq!(store.events_for_session(session.id).unwrap().len(), 2);
+    let source = store
+        .get_capture_source(session.capture_source_id.unwrap())
+        .unwrap();
+    assert_eq!(
+        source.descriptor.source_root.as_deref(),
+        source_root.to_str()
+    );
     assert_eq!(store.search_event_hits("initial", 10).unwrap().len(), 1);
     assert_eq!(
         store

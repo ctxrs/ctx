@@ -222,6 +222,7 @@ pub(crate) fn import_codex_session_path_fast(
         .map(|path| path.display().to_string());
 
     let mut header = None;
+    let mut session_meta_seen = false;
     let mut header_persisted = false;
     let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
     let mut line_number = 0usize;
@@ -271,6 +272,10 @@ pub(crate) fn import_codex_session_path_fast(
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         if entry_type == "session_meta" {
+            if session_meta_seen {
+                continue;
+            }
+            session_meta_seen = true;
             match codex_session_header(value) {
                 Ok(parsed) => {
                     call_contexts.clear();
@@ -283,6 +288,7 @@ pub(crate) fn import_codex_session_path_fast(
                         line: line_number,
                         error: codex_session_file_failure(path, err.to_string()),
                     });
+                    return Ok(());
                 }
             }
             continue;
