@@ -7,6 +7,7 @@ const STAGING_BATCH_TABLE: &str = "provider_file_publication_batch";
 pub const PROVIDER_FILE_PREPARATION_MAX_ROWS: usize = 100_000;
 pub const PROVIDER_FILE_RECONCILIATION_MAX_ROWS: usize = 100_000;
 pub const PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES: usize = 64 * 1024;
+pub const PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES: usize = 256 * 1024;
 const CLEANUP_PHASE_LINKS: i64 = 0;
 const CLEANUP_PHASE_FILES: i64 = 1;
 const CLEANUP_PHASE_EDGES: i64 = 2;
@@ -151,6 +152,20 @@ pub struct ProviderFileImportOutcome<'a> {
 pub enum ProviderFilePublicationKind {
     Incremental,
     Replacement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFilePublicationPhase {
+    Preparing,
+    Importing,
+    Reconciling,
+    ReadyToFinalize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFilePublicationCompletion {
+    pub version: u32,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,6 +419,7 @@ pub(crate) enum ProviderFileFaultPoint {
     BeginAfterStaging,
     MutationBeforeCommit,
     PreparationBeforeCommit,
+    CompletionBeforeCommit,
     FinalizeBeforeCommit,
     #[cfg(test)]
     RetirementFinalizeProcessExit,
@@ -419,6 +435,7 @@ struct ReplacementMarker {
     cleanup_phase: i64,
     source_cursor: Option<String>,
     entity_cursor: Option<String>,
+    completion_payload_json: Option<String>,
     counts: ProviderFileReconciliationCounts,
 }
 

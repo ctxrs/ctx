@@ -109,8 +109,25 @@ impl Store {
         scope: &ProviderFilePublicationScope,
         writes: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
+        self.with_provider_file_publication_writes_inner(scope, false, writes)
+    }
+
+    fn with_provider_file_publication_writes_inner<T>(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        allow_staged_completion: bool,
+        writes: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
         self.ensure_active_provider_file_publication(scope)?;
         if scope.retires_observation || self.provider_file_write_scope.get().is_some() {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        if !allow_staged_completion
+            && self
+                .load_replacement_marker(scope)?
+                .completion_payload_json
+                .is_some()
+        {
             return Err(StoreError::InvalidProviderFilePublicationScope);
         }
         self.provider_file_write_scope.set(Some(scope.scope_id));
@@ -133,6 +150,14 @@ impl Store {
         self.ensure_active_provider_file_publication(scope)
             .map_err(E::from)?;
         if scope.retires_observation || self.provider_file_write_scope.get().is_some() {
+            return Err(E::from(StoreError::InvalidProviderFilePublicationScope));
+        }
+        if self
+            .load_replacement_marker(scope)
+            .map_err(E::from)?
+            .completion_payload_json
+            .is_some()
+        {
             return Err(E::from(StoreError::InvalidProviderFilePublicationScope));
         }
         self.provider_file_write_scope.set(Some(scope.scope_id));

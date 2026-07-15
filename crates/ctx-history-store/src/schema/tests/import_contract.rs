@@ -845,6 +845,177 @@ fn v51_migration_does_not_rewrite_inventory_rows_or_churn_indexes() {
     assert_eq!(rootpages_after, rootpages_before);
 }
 
+#[test]
+fn v52_migration_adds_bounded_completion_without_row_or_index_churn() {
+    let temp = tempdir();
+    let path = temp.path().join("v52-publication-completion.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    let legacy_sql = CREATE_TABLES_SQL.replace(
+        "    completion_payload_json TEXT CHECK (\n        completion_payload_json IS NULL OR\n        length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144\n    ),\n",
+        "",
+    );
+    assert!(!legacy_sql.contains("completion_payload_json"));
+    conn.execute_batch(&legacy_sql).unwrap();
+    conn.execute_batch(INDEXES_SQL).unwrap();
+    conn.execute_batch("PRAGMA user_version = 51;").unwrap();
+    conn.execute_batch(
+        r#"
+        INSERT INTO provider_file_publications (
+          replacement_id, owner_id, publication_kind, staging_id, provider,
+          inventory_family, inventory_source_format, inventory_source_root,
+          source_path, material_source_format, material_source_root,
+          inventory_generation, file_size_bytes, file_modified_at_ms,
+          import_revision, preparation_complete, started_at_ms, updated_at_ms
+        ) VALUES (
+          'v51-publication',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'replacement',
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          'claude', 'source_import_files', 'claude_projects_jsonl_tree',
+          '/history/claude/projects', '/history/claude/projects/a.jsonl',
+          'claude_projects_jsonl', '/history/claude/projects',
+          1, 20, 100, 7, 1, 105, 105
+        );
+        "#,
+    )
+    .unwrap();
+    let schema_objects = [
+        "provider_file_publications",
+        "idx_provider_file_publications_owner",
+        "idx_provider_file_publications_fence",
+    ];
+    let rootpages_before = schema_objects.map(|name| {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    let total_changes_before = conn.total_changes();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let callback_observed = Arc::clone(&observed);
+    conn.authorizer(Some(move |context: AuthContext<'_>| {
+        let (description, forbidden) = match context.action {
+            AuthAction::AlterTable { table_name, .. }
+                if table_name == "provider_file_publications" =>
+            {
+                (format!("alter:{table_name}"), false)
+            }
+            AuthAction::CreateIndex { table_name, .. }
+                if table_name == "provider_file_publications" =>
+            {
+                (format!("forbidden-index:{table_name}"), true)
+            }
+            AuthAction::CreateTable { table_name } | AuthAction::DropTable { table_name }
+                if matches!(
+                    table_name,
+                    "provider_file_publications" | "provider_file_publications_new"
+                ) =>
+            {
+                (format!("forbidden-table:{table_name}"), true)
+            }
+            AuthAction::Insert { table_name }
+            | AuthAction::Update { table_name, .. }
+            | AuthAction::Delete { table_name }
+                if table_name == "provider_file_publications" =>
+            {
+                (format!("forbidden-row-write:{table_name}"), true)
+            }
+            _ => return Authorization::Allow,
+        };
+        callback_observed.lock().unwrap().push(description);
+        if forbidden {
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }));
+
+    migrate_to_v52(&conn).unwrap();
+    assert_eq!(conn.total_changes(), total_changes_before);
+    assert!(table_has_column(
+        &conn,
+        "provider_file_publications",
+        "completion_payload_json"
+    )
+    .unwrap());
+    let row: (String, Option<String>) = conn
+        .query_row(
+            "SELECT replacement_id, completion_payload_json \
+             FROM provider_file_publications",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("v51-publication".into(), None));
+    let rootpages_after = schema_objects.map(|name| {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(rootpages_after, rootpages_before);
+    let observed = observed.lock().unwrap();
+    assert!(observed
+        .iter()
+        .any(|action| action == "alter:provider_file_publications"));
+    assert!(!observed
+        .iter()
+        .any(|action| action.starts_with("forbidden")));
+    drop(observed);
+    drop(conn);
+
+    let conn = Connection::open(&path).unwrap();
+    let maximum_json = format!("\"{}\"", "x".repeat(65_534));
+    assert_eq!(maximum_json.len(), 65_536);
+    conn.execute(
+        "UPDATE provider_file_publications SET completion_payload_json = ?1",
+        [&maximum_json],
+    )
+    .unwrap();
+    let oversized_json = format!("\"{}\"", "x".repeat(65_535));
+    assert!(conn
+        .execute(
+            "UPDATE provider_file_publications SET completion_payload_json = ?1",
+            [&oversized_json],
+        )
+        .is_err());
+    migrate_to_v52(&conn).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT completion_payload_json FROM provider_file_publications",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        maximum_json
+    );
+
+    drop(conn);
+    let upgraded = Store::open(&path).unwrap();
+    let fresh = Store::open(temp.path().join("fresh-v52.sqlite")).unwrap();
+    let publication_schema = |conn: &Connection| {
+        schema_object_signature(conn)
+            .into_iter()
+            .filter(|(_, name, _)| {
+                matches!(
+                    name.as_str(),
+                    "provider_file_publications"
+                        | "idx_provider_file_publications_owner"
+                        | "idx_provider_file_publications_fence"
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        publication_schema(&upgraded.conn),
+        publication_schema(&fresh.conn)
+    );
+}
+
 fn schema_object_signature(conn: &Connection) -> Vec<(String, String, String)> {
     conn.prepare(
         r#"

@@ -154,10 +154,17 @@ fn run_single_fresh_unit(
     assert_eq!(summary.completed_bytes, selected_bytes);
     assert_eq!(summary.deferred_units, 0);
     if source_file_work {
-        assert!(
-            summary.post_import_inventory_generation > pre_import_inventory_generation,
-            "source-file completion must return its committed post-import generation"
-        );
+        if source_uses_import_file_manifest(&source_plan.source) {
+            assert_eq!(
+                summary.post_import_inventory_generation, pre_import_inventory_generation,
+                "manifested completion must stay on its selected generation"
+            );
+        } else {
+            assert!(
+                summary.post_import_inventory_generation > pre_import_inventory_generation,
+                "whole-source completion must return its committed post-import generation"
+            );
+        }
         assert_eq!(
             summary
                 .post_import_preinventory

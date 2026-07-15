@@ -693,3 +693,117 @@ fn initial_import_uses_zero_seen_staging_rows() {
     );
     assert_eq!(store.semantic_replacement_revision().unwrap(), 0);
 }
+
+#[test]
+fn staged_completion_is_bounded_atomic_and_survives_abandon_and_reopen() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(10, 100);
+    let generation;
+    let completion = ProviderFilePublicationCompletion {
+        version: 1,
+        payload: json!({"summary": {"imported": 3}, "checkpoint": "opaque"}),
+    };
+    {
+        let store = Store::open(&path).unwrap();
+        generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        assert_eq!(
+            store.provider_file_publication_phase(&scope).unwrap(),
+            ProviderFilePublicationPhase::Importing
+        );
+        assert!(matches!(
+            store
+                .stage_provider_file_publication_completion(
+                    &scope,
+                    &ProviderFilePublicationCompletion {
+                        version: 0,
+                        payload: json!({}),
+                    },
+                )
+                .unwrap_err(),
+            StoreError::InvalidProviderFilePublicationScope
+        ));
+        assert!(matches!(
+            store
+                .stage_provider_file_publication_completion(
+                    &scope,
+                    &ProviderFilePublicationCompletion {
+                        version: 1,
+                        payload: json!("x".repeat(PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES)),
+                    },
+                )
+                .unwrap_err(),
+            StoreError::InvalidProviderFilePublicationScope
+        ));
+        store.inject_provider_file_fault(ProviderFileFaultPoint::CompletionBeforeCommit);
+        assert!(matches!(
+            store
+                .stage_provider_file_publication_completion(&scope, &completion)
+                .unwrap_err(),
+            StoreError::ProviderFileStaging
+        ));
+        assert_eq!(
+            store
+                .load_provider_file_publication_completion(&scope)
+                .unwrap(),
+            None
+        );
+        store
+            .stage_provider_file_publication_completion(&scope, &completion)
+            .unwrap();
+        store
+            .stage_provider_file_publication_completion(&scope, &completion)
+            .unwrap();
+        assert_eq!(
+            store.provider_file_publication_phase(&scope).unwrap(),
+            ProviderFilePublicationPhase::ReadyToFinalize
+        );
+        assert!(matches!(
+            store
+                .with_provider_file_publication_writes(&scope, |_| Ok(()))
+                .unwrap_err(),
+            StoreError::InvalidProviderFilePublicationScope
+        ));
+        store.abandon_provider_file_publication(scope).unwrap();
+    }
+
+    let reopened = Store::open(&path).unwrap();
+    let scope = reopened
+        .begin_provider_file_publication(
+            file.provider,
+            source_outcome(&file, generation, 120).observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            115,
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .load_provider_file_publication_completion(&scope)
+            .unwrap(),
+        Some(completion)
+    );
+    assert_eq!(
+        reopened.provider_file_publication_phase(&scope).unwrap(),
+        ProviderFilePublicationPhase::ReadyToFinalize
+    );
+    assert!(matches!(
+        reopened.abort_provider_file_publication(scope).unwrap(),
+        std::ops::ControlFlow::Continue(None)
+    ));
+    assert!(!reopened.has_pending_provider_file_publications().unwrap());
+}

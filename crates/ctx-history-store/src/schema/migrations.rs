@@ -96,6 +96,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 51 {
         migrate_to_v51(conn)?;
     }
+    if user_version < 52 {
+        migrate_to_v52(conn)?;
+    }
     Ok(())
 }
 
@@ -1007,6 +1010,42 @@ pub(super) fn migrate_to_v51(conn: &Connection) -> Result<()> {
             "#,
         )?;
         conn.execute_batch("PRAGMA user_version = 51;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+pub(super) fn migrate_to_v52(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        if !table_has_column(
+            conn,
+            "provider_file_publications",
+            "completion_payload_json",
+        )? {
+            conn.execute_batch(
+                r#"
+                ALTER TABLE main.provider_file_publications
+                ADD COLUMN completion_payload_json TEXT CHECK (
+                    completion_payload_json IS NULL OR
+                    length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144
+                );
+                "#,
+            )?;
+        }
+        conn.execute_batch("PRAGMA user_version = 52;")?;
         Ok(())
     })();
 
