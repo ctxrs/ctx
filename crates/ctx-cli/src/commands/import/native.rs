@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{ControlFlow, Deref};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
 use super::*;
 use crate::commands::import::inventory::observe_source_root;
 use crate::commands::import::manifest::{
-    collect_source_import_files, persist_new_source_import_observation,
-    persist_source_import_observation_with_outcomes, persisted_import_identity,
-    source_uses_import_file_manifest, SourceImportObservationOutcome,
+    collect_source_import_files, observe_selected_source_import_file,
+    persist_new_source_import_observation, persist_source_import_observation_with_outcomes,
+    persisted_import_identity, same_source_import_observation, source_uses_import_file_manifest,
+    SourceImportObservationOutcome,
 };
 #[cfg(test)]
 use crate::commands::import::manifest::{
@@ -83,6 +86,7 @@ pub(crate) struct SelectedSourceImportOutcome {
     pub(crate) completed_units: usize,
     pub(crate) completed_bytes: u64,
     pub(crate) deferred_units: usize,
+    pub(crate) durable_progress: bool,
     #[allow(dead_code)]
     pub(crate) post_import_inventory_generation: Option<u64>,
     pub(crate) post_import_preinventory: Option<SourcePreinventory>,
@@ -90,7 +94,7 @@ pub(crate) struct SelectedSourceImportOutcome {
 
 impl SelectedSourceImportOutcome {
     pub(crate) fn made_durable_progress(&self) -> bool {
-        self.completed_units > 0 || self.summary.has_accepted_content()
+        self.durable_progress || self.completed_units > 0 || self.summary.has_accepted_content()
     }
 }
 
@@ -108,6 +112,7 @@ pub(crate) struct ProviderImportBatchOutcome {
     pub(crate) completed_units: usize,
     pub(crate) completed_bytes: u64,
     pub(crate) deferred_units: usize,
+    pub(crate) durable_progress: bool,
     pub(crate) post_import_inventory_generation: Option<u64>,
     pub(crate) post_import_preinventory: Option<SourcePreinventory>,
 }
@@ -119,13 +124,14 @@ impl ProviderImportBatchOutcome {
             completed_units,
             completed_bytes: 0,
             deferred_units: 0,
+            durable_progress: false,
             post_import_inventory_generation: None,
             post_import_preinventory: None,
         }
     }
 
     fn made_durable_progress(&self) -> bool {
-        self.completed_units > 0 || self.summary.has_accepted_content()
+        self.durable_progress || self.completed_units > 0 || self.summary.has_accepted_content()
     }
 }
 
@@ -273,13 +279,35 @@ enum AppendInventoryUnit<'a> {
 
 pub(crate) enum AppendImportOutcome {
     Imported(ProviderImportSummary),
-    Deferred,
+    Deferred { durable_progress: bool },
 }
 
 enum AppendPublicationAttempt {
     Imported(ProviderImportSummary),
-    Deferred,
+    Deferred { durable_progress: bool },
     RetryReplacement,
+}
+
+const STAGED_APPEND_PUBLICATION_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct StagedAppendPublicationCompletion {
+    summary: ProviderImportSummary,
+    checkpoint: Option<StagedProviderFileCheckpoint>,
+    indexed_at_ms: i64,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct StagedProviderFileCheckpoint {
+    import_revision: u32,
+    checkpoint_version: u32,
+    stable_file_identity: String,
+    committed_byte_offset: u64,
+    committed_complete_line_count: u64,
+    head_sha256: String,
+    boundary_sha256: String,
+    resume_state_base64: Option<String>,
+    updated_at_ms: i64,
 }
 
 impl AppendInventoryUnit<'_> {
@@ -496,16 +524,87 @@ fn import_append_capable_work(
             let effective_replacement =
                 publication.kind() == ProviderFilePublicationKind::Replacement;
             if effective_replacement {
-                loop {
-                    let progress = store
-                        .prepare_provider_file_publication_slice(
-                            publication,
-                            PROVIDER_PUBLICATION_SLICE_ROWS,
-                        )
-                        .context("prepare append-capable replacement publication")?;
-                    if progress.complete {
-                        break;
+                match store.provider_file_publication_phase(publication)? {
+                    ProviderFilePublicationPhase::Preparing => {
+                        store
+                            .prepare_provider_file_publication_slice(
+                                publication,
+                                PROVIDER_PUBLICATION_SLICE_ROWS,
+                            )
+                            .context("prepare append-capable replacement publication")?;
+                        store.abandon_provider_file_publication(
+                            scope.take().expect("append publication scope must exist"),
+                        )?;
+                        return Ok(AppendPublicationAttempt::Deferred {
+                            durable_progress: true,
+                        });
                     }
+                    ProviderFilePublicationPhase::Reconciling => {
+                        store
+                            .reconcile_provider_file_publication_slice(
+                                publication,
+                                PROVIDER_PUBLICATION_SLICE_ROWS,
+                            )
+                            .context("reconcile append-capable replacement publication")?;
+                        store.abandon_provider_file_publication(
+                            scope.take().expect("append publication scope must exist"),
+                        )?;
+                        return Ok(AppendPublicationAttempt::Deferred {
+                            durable_progress: true,
+                        });
+                    }
+                    ProviderFilePublicationPhase::ReadyToFinalize => {
+                        let completion = store
+                            .load_provider_file_publication_completion(publication)?
+                            .ok_or_else(|| {
+                                anyhow::Error::new(CaptureError::SystemInvariant(
+                                    "ready provider publication has no staged completion",
+                                ))
+                            })?;
+                        let staged = decode_staged_append_completion(completion)?;
+                        let mut summary = staged.summary;
+                        let status = provider_summary_import_status(&summary);
+                        if status == CatalogIndexedStatus::Rejected {
+                            return Err(provider_import_summary_failure_for_unit(
+                                provider,
+                                unit.source_path(),
+                                &summary,
+                            ));
+                        }
+                        let outcome_error =
+                            (summary.failed > 0).then(|| source_import_file_failure(&summary));
+                        let event_count = Some(
+                            summary
+                                .imported_events
+                                .saturating_add(summary.skipped_events)
+                                as u64,
+                        );
+                        let outcome = ProviderFileImportOutcome {
+                            provider,
+                            observation: unit.observation(staged.indexed_at_ms, event_count),
+                            status,
+                            error: outcome_error.as_deref(),
+                        };
+                        let checkpoint = staged
+                            .checkpoint
+                            .map(|checkpoint| checkpoint.into_store_checkpoint(&unit))
+                            .transpose()?;
+                        let commit = ProviderFilePublicationCommit::Replacement(
+                            (summary.failed == 0)
+                                .then_some(checkpoint.as_ref())
+                                .flatten(),
+                        );
+                        let finalized = store.finalize_provider_file_publication(
+                            scope.take().expect("append publication scope must exist"),
+                            outcome,
+                            commit,
+                        )?;
+                        if let Some(warning) = finalized.maintenance_warning {
+                            push_publication_maintenance_warning(&mut summary, warning);
+                        }
+                        return Ok(AppendPublicationAttempt::Imported(summary));
+                    }
+                    ProviderFilePublicationPhase::Importing => {}
                 }
             }
 
@@ -591,7 +690,9 @@ fn import_append_capable_work(
                         warning,
                     ));
                 }
-                return Ok(AppendPublicationAttempt::Deferred);
+                return Ok(AppendPublicationAttempt::Deferred {
+                    durable_progress: false,
+                });
             }
 
             let (mut summary, checkpoint, retain_checkpoint) = match decision {
@@ -613,7 +714,9 @@ fn import_append_capable_work(
                             warning,
                         ));
                     }
-                    return Ok(AppendPublicationAttempt::Deferred);
+                    return Ok(AppendPublicationAttempt::Deferred {
+                        durable_progress: false,
+                    });
                 }
                 ProviderAppendFileImportDecision::ReplacementRequired(_) => unreachable!(),
             };
@@ -656,19 +759,6 @@ fn import_append_capable_work(
                     &summary,
                 ));
             }
-            if effective_replacement {
-                loop {
-                    let progress = store
-                        .reconcile_provider_file_publication_slice(
-                            publication,
-                            PROVIDER_PUBLICATION_SLICE_ROWS,
-                        )
-                        .context("reconcile append-capable replacement publication")?;
-                    if progress.complete {
-                        break;
-                    }
-                }
-            }
             let event_count = Some(
                 summary
                     .imported_events
@@ -687,6 +777,17 @@ fn import_append_capable_work(
                 .map(|checkpoint| store_checkpoint_from_capture(&unit, checkpoint, indexed_at_ms))
                 .transpose()?;
             let retain_safe_checkpoint = summary.failed > 0;
+            if effective_replacement {
+                let completion =
+                    encode_staged_append_completion(summary, stored_checkpoint, indexed_at_ms)?;
+                store.stage_provider_file_publication_completion(publication, &completion)?;
+                store.abandon_provider_file_publication(
+                    scope.take().expect("append publication scope must exist"),
+                )?;
+                return Ok(AppendPublicationAttempt::Deferred {
+                    durable_progress: true,
+                });
+            }
             let commit = if effective_replacement {
                 ProviderFilePublicationCommit::Replacement(if retain_safe_checkpoint {
                     None
@@ -719,7 +820,9 @@ fn import_append_capable_work(
             Ok(AppendPublicationAttempt::Imported(summary)) => {
                 return Ok(AppendImportOutcome::Imported(summary));
             }
-            Ok(AppendPublicationAttempt::Deferred) => return Ok(AppendImportOutcome::Deferred),
+            Ok(AppendPublicationAttempt::Deferred { durable_progress }) => {
+                return Ok(AppendImportOutcome::Deferred { durable_progress });
+            }
             Ok(AppendPublicationAttempt::RetryReplacement) => {
                 replacement = true;
             }
@@ -820,6 +923,78 @@ fn store_checkpoint_from_capture(
         resume_state,
         updated_at_ms,
     })
+}
+
+fn encode_staged_append_completion(
+    summary: ProviderImportSummary,
+    checkpoint: Option<ProviderFileCheckpoint>,
+    indexed_at_ms: i64,
+) -> Result<ProviderFilePublicationCompletion> {
+    let staged = StagedAppendPublicationCompletion {
+        summary,
+        checkpoint: checkpoint.map(StagedProviderFileCheckpoint::from_store_checkpoint),
+        indexed_at_ms,
+    };
+    Ok(ProviderFilePublicationCompletion {
+        version: STAGED_APPEND_PUBLICATION_VERSION,
+        payload: serde_json::to_value(staged).context("encode staged append completion")?,
+    })
+}
+
+fn decode_staged_append_completion(
+    completion: ProviderFilePublicationCompletion,
+) -> Result<StagedAppendPublicationCompletion> {
+    if completion.version != STAGED_APPEND_PUBLICATION_VERSION {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "unsupported staged append publication version",
+        )));
+    }
+    serde_json::from_value(completion.payload).context("decode staged append completion")
+}
+
+impl StagedProviderFileCheckpoint {
+    fn from_store_checkpoint(checkpoint: ProviderFileCheckpoint) -> Self {
+        Self {
+            import_revision: checkpoint.import_revision,
+            checkpoint_version: checkpoint.checkpoint_version,
+            stable_file_identity: checkpoint.stable_file_identity,
+            committed_byte_offset: checkpoint.committed_byte_offset,
+            committed_complete_line_count: checkpoint.committed_complete_line_count,
+            head_sha256: checkpoint.head_sha256,
+            boundary_sha256: checkpoint.boundary_sha256,
+            resume_state_base64: checkpoint.resume_state.map(|bytes| BASE64.encode(bytes)),
+            updated_at_ms: checkpoint.updated_at_ms,
+        }
+    }
+
+    fn into_store_checkpoint(
+        self,
+        unit: &AppendInventoryUnit<'_>,
+    ) -> Result<ProviderFileCheckpoint> {
+        let resume_state = self
+            .resume_state_base64
+            .map(|value| {
+                BASE64
+                    .decode(value)
+                    .context("decode staged append resume state")
+            })
+            .transpose()?;
+        Ok(ProviderFileCheckpoint {
+            provider: unit.provider(),
+            source_format: unit.source_format().to_owned(),
+            source_root: unit.source_root().to_owned(),
+            source_path: unit.source_path().to_owned(),
+            import_revision: self.import_revision,
+            checkpoint_version: self.checkpoint_version,
+            stable_file_identity: self.stable_file_identity,
+            committed_byte_offset: self.committed_byte_offset,
+            committed_complete_line_count: self.committed_complete_line_count,
+            head_sha256: self.head_sha256,
+            boundary_sha256: self.boundary_sha256,
+            resume_state,
+            updated_at_ms: self.updated_at_ms,
+        })
+    }
 }
 
 fn provider_import_summary_failure_for_unit(

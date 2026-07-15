@@ -99,7 +99,7 @@ impl Store {
             }
             self.ensure_active_provider_file_publication(&scope)?;
 
-            self.with_provider_file_publication_writes(&scope, |_| {
+            self.with_provider_file_publication_writes_inner(&scope, true, |_| {
                 self.with_atomic_provider_file_update(|| {
                     self.ensure_provider_file_observation_is_current(
                         outcome.provider,

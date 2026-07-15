@@ -66,8 +66,86 @@ fn manifested_current_result_reports_exact_completion_and_post_import_generation
 
     assert_eq!(outcome.completed_units, 1);
     assert_eq!(outcome.deferred_units, 0);
-    assert!(outcome.post_import_inventory_generation > Some(pre_import.inventory_generation));
+    assert_eq!(
+        outcome.post_import_inventory_generation,
+        Some(pre_import.inventory_generation)
+    );
+    assert!(outcome.post_import_preinventory.is_none());
     assert_eq!(outcome.imported_events, 1);
+}
+
+#[test]
+fn manifested_130_unit_drain_keeps_one_generation_across_three_slices() {
+    let temp = tempdir();
+    let source_path = temp.path().join("sessions");
+    fs::create_dir(&source_path).unwrap();
+    for index in 0..130 {
+        let session_path = source_path.join(format!("session-{index:03}"));
+        fs::create_dir(&session_path).unwrap();
+        fs::write(session_path.join("messages.jsonl"), b"{}\n").unwrap();
+    }
+    let source = explicit_path_source(CaptureProvider::MistralVibe, source_path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let files = collect_source_import_files(&source).unwrap();
+    assert_eq!(files.len(), 130);
+    let persisted = persist_new_source_import_observation(&store, &source, &files).unwrap();
+    let plan = ImportPlan::build(
+        &store,
+        vec![PlannedImportSource {
+            source: source.clone(),
+            stats: SourceStats::default(),
+            preinventory: SourcePreinventory::SourceImportFiles {
+                files: files.clone(),
+                inventory_generation: persisted.inventory_generation,
+            },
+        }],
+    )
+    .unwrap();
+    assert_eq!(plan.fresh_units, 130);
+    let mut completed = 0usize;
+    let mut slices = 0usize;
+    let mut import_file =
+        |_store: &mut Store, _pending_source: &SourceInfo| Ok(successful_file_summary());
+
+    loop {
+        let slice = plan
+            .select_slice(&store, ImportWorkClass::Fresh, IMPORT_SLICE_MAX_UNITS)
+            .unwrap();
+        if slice.is_empty() {
+            break;
+        }
+        slices += 1;
+        let selected = &slice.sources[0];
+        let outcome = import_manifested_source_with_importer(
+            &mut store,
+            &source,
+            ManifestedImportOptions::new(
+                Some(&files),
+                Some(persisted.inventory_generation),
+                false,
+                Some(&selected.work),
+            ),
+            &mut import_file,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.post_import_inventory_generation,
+            Some(persisted.inventory_generation)
+        );
+        completed += outcome.completed_units;
+    }
+
+    assert_eq!(slices, 3);
+    assert_eq!(completed, 130);
+    assert!(store
+        .list_source_import_file_work(
+            source.provider,
+            source.path.to_str().unwrap(),
+            ImportWorkClass::Fresh,
+            1,
+        )
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -413,6 +491,13 @@ fn removed_and_new_manifest_units_are_stale_and_pending() {
         .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
         .unwrap();
     assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source_path, old_path.display().to_string());
+    let current_files = collect_source_import_files(&source).unwrap();
+    persist_new_source_import_observation(&store, &source, &current_files).unwrap();
+    let pending = store
+        .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
+        .unwrap();
+    assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].source_path, new_path.display().to_string());
     let counts = store.source_import_file_counts().unwrap();
     assert_eq!(counts.stale, 1);
@@ -449,6 +534,13 @@ fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
     assert_eq!(summary.completed_units, 0);
     assert_eq!(summary.deferred_units, 0);
     assert!(summary.post_import_inventory_generation.is_some());
+    let counts = store.source_import_file_counts().unwrap();
+    assert_eq!(counts.stale, 0);
+    assert_eq!(counts.failed, 0);
+    assert_eq!(counts.rejected, 0);
+    let current_files = collect_source_import_files(&source).unwrap();
+    assert!(current_files.is_empty());
+    persist_new_source_import_observation(&store, &source, &current_files).unwrap();
     let counts = store.source_import_file_counts().unwrap();
     assert_eq!(counts.stale, 1);
     assert_eq!(counts.failed, 0);

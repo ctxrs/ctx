@@ -38,6 +38,16 @@ fn changed_observation_adoption_resets_prior_staging_progress() {
         store
             .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&event))
             .unwrap();
+        let completion = ProviderFilePublicationCompletion {
+            version: 1,
+            payload: json!({"attempt": "old-observation"}),
+        };
+        store
+            .stage_provider_file_publication_completion(&scope, &completion)
+            .unwrap();
+        store
+            .reconcile_provider_file_publication_slice(&scope, 1)
+            .unwrap();
         assert_eq!(staged_seen_count(&store), 1);
         drop(scope);
     }
@@ -60,6 +70,26 @@ fn changed_observation_adoption_resets_prior_staging_progress() {
         )
         .unwrap();
     assert_eq!(staged_seen_count(&store), 0);
+    assert_eq!(
+        store
+            .load_provider_file_publication_completion(&adopted)
+            .unwrap(),
+        None
+    );
+    let reset_progress: (i64, Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT cleanup_phase, cleanup_source_cursor, cleanup_entity_cursor \
+             FROM provider_file_publications",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(reset_progress, (0, None, None));
+    assert_eq!(
+        store.provider_file_publication_phase(&adopted).unwrap(),
+        ProviderFilePublicationPhase::Preparing
+    );
     assert!(matches!(
         store.abort_provider_file_publication(adopted).unwrap(),
         std::ops::ControlFlow::Break(None)

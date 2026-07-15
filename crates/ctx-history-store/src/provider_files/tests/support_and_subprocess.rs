@@ -514,6 +514,7 @@ fn table_row_count(store: &Store, table: &str) -> i64 {
 
 fn reconcile_all(store: &Store, scope: &ProviderFilePublicationScope, max_rows: usize) {
     prepare_all(store, scope, max_rows);
+    stage_test_completion(store, scope);
     loop {
         let progress = store
             .reconcile_provider_file_publication_slice(scope, max_rows)
@@ -523,6 +524,26 @@ fn reconcile_all(store: &Store, scope: &ProviderFilePublicationScope, max_rows: 
             break;
         }
     }
+}
+
+fn stage_test_completion(store: &Store, scope: &ProviderFilePublicationScope) {
+    if scope.retires_observation
+        || store
+            .load_provider_file_publication_completion(scope)
+            .unwrap()
+            .is_some()
+    {
+        return;
+    }
+    store
+        .stage_provider_file_publication_completion(
+            scope,
+            &ProviderFilePublicationCompletion {
+                version: 1,
+                payload: json!({"test": "complete"}),
+            },
+        )
+        .unwrap();
 }
 
 fn prepare_all(store: &Store, scope: &ProviderFilePublicationScope, max_rows: usize) {
@@ -711,6 +732,7 @@ fn provider_file_subprocess_helper() {
                 )
                 .unwrap();
             prepare_all(&store, &scope, 1);
+            stage_test_completion(&store, &scope);
             for _ in 0..100 {
                 store
                     .reconcile_provider_file_publication_slice(&scope, 1)

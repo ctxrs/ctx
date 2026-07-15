@@ -56,8 +56,9 @@ use ctx_history_store::{
     CatalogImportWork, CatalogIndexedStatus, CatalogSession, CatalogSourceIndexUpdate,
     ImportPendingReason, ImportWorkClass, ProviderFileCheckpoint, ProviderFileCheckpointKey,
     ProviderFileImportOutcome, ProviderFileInventoryObservation, ProviderFilePublicationCommit,
-    ProviderFilePublicationKind, ProviderFilePublicationRetirementWork, SourceImportFile,
-    SourceImportFileIndexUpdate, SourceImportFileWork, Store, StoreError,
+    ProviderFilePublicationCompletion, ProviderFilePublicationKind, ProviderFilePublicationPhase,
+    ProviderFilePublicationRetirementWork, SourceImportFile, SourceImportFileIndexUpdate,
+    SourceImportFileWork, Store, StoreError,
 };
 
 use crate::analytics::AnalyticsProperties;
@@ -114,10 +115,10 @@ pub(crate) use report::{
 pub(crate) use report::{ImportFailureScope, ImportFailureType, ImportRetryability};
 pub(crate) use requests::import_history_source_plugin;
 use requests::{history_source_plugin_import_requests, import_requests, validate_import_args};
-use scheduler::SelectedImportWork;
+use scheduler::{bounded_unplanned_root_work_counts, SelectedImportWork};
 pub(crate) use scheduler::{
     ExecutableImportSlice, ImportExecutionPolicy, ImportExecutionResult, ImportExecutionState,
-    ImportPlan,
+    ImportPlan, IMPORT_PENDING_REPORT_LIMIT,
 };
 
 const PENDING_REASON_REPAIR_BATCH_ROWS: usize = 512;
@@ -324,7 +325,9 @@ pub(crate) fn run_import_internal(
         &data_root,
         options.include_history_source_plugins,
     )?;
-    let has_retirement_work = store.provider_file_publication_retirement_work_count()? > 0;
+    let has_retirement_work = !store
+        .list_provider_file_publication_retirement_work(1)?
+        .is_empty();
     if requests.is_empty() && plugin_requests.is_empty() && !has_retirement_work {
         let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
         totals.durable_progress = maintenance.processed_rows > 0;
@@ -524,10 +527,12 @@ pub(crate) fn run_import_internal(
     )?;
 
     let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(&store)?;
-    totals.fresh_units_pending = fresh_units_pending.saturating_add(failed_inventory_pending.0);
-    totals.recovery_units_pending = recovery_units_pending
-        .saturating_add(failed_inventory_pending.1)
-        .saturating_add(usize::from(!maintenance.complete));
+    totals.fresh_units_pending =
+        capped_pending_add(fresh_units_pending, failed_inventory_pending.0);
+    totals.recovery_units_pending = capped_pending_add(
+        capped_pending_add(recovery_units_pending, failed_inventory_pending.1),
+        usize::from(!maintenance.complete),
+    );
 
     if store.event_search_projection_needs_backfill()? {
         progress.message("finalizing", "Refreshing search index...");

@@ -108,6 +108,9 @@ impl Store {
                     removed_files_touched = CASE WHEN ?17 THEN removed_files_touched ELSE 0 END,
                     removed_session_edges = CASE WHEN ?17 THEN removed_session_edges ELSE 0 END,
                     tombstoned_sessions = CASE WHEN ?17 THEN tombstoned_sessions ELSE 0 END,
+                    completion_payload_json = CASE
+                        WHEN ?17 THEN completion_payload_json ELSE NULL
+                    END,
                     started_at_ms = ?18,
                     updated_at_ms = MAX(updated_at_ms + 1, ?18)
                 WHERE owner_id = ?3 AND replacement_id = ?1
@@ -150,12 +153,12 @@ impl Store {
                      removed_audit_log_entries,
                      removed_vcs_workspaces, removed_vcs_changes, removed_events, removed_runs,
                      removed_files_touched, removed_session_edges, tombstoned_sessions,
-                     started_at_ms, updated_at_ms)
+                     started_at_ms, updated_at_ms, completion_payload_json)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, 0, ?17, 0,
                         CASE WHEN ?3 = 'incremental' THEN 1 ELSE 0 END, NULL,
                         0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                        ?18, ?18)
+                        ?18, ?18, NULL)
                 "#,
                 params![
                     scope.scope_id.to_string(),
@@ -203,6 +206,7 @@ impl Store {
                 r#"
                 SELECT publication_kind, mutation_started, preparation_complete, preparation_cursor,
                        cleanup_phase, cleanup_source_cursor, cleanup_entity_cursor,
+                       completion_payload_json,
                        removed_artifacts, removed_summaries, removed_history_record_links,
                        removed_history_records, removed_history_record_tags, removed_record_edges,
                        removed_audit_log_entries, removed_vcs_workspaces, removed_vcs_changes,
@@ -243,21 +247,22 @@ impl Store {
                         cleanup_phase: row.get(4)?,
                         source_cursor: row.get(5)?,
                         entity_cursor: row.get(6)?,
+                        completion_payload_json: row.get(7)?,
                         counts: ProviderFileReconciliationCounts {
-                            artifacts: nonnegative_i64_to_usize(row.get(7)?)?,
-                            summaries: nonnegative_i64_to_usize(row.get(8)?)?,
-                            history_record_links: nonnegative_i64_to_usize(row.get(9)?)?,
-                            history_records: nonnegative_i64_to_usize(row.get(10)?)?,
-                            history_record_tags: nonnegative_i64_to_usize(row.get(11)?)?,
-                            record_edges: nonnegative_i64_to_usize(row.get(12)?)?,
-                            audit_log_entries: nonnegative_i64_to_usize(row.get(13)?)?,
-                            vcs_workspaces: nonnegative_i64_to_usize(row.get(14)?)?,
-                            vcs_changes: nonnegative_i64_to_usize(row.get(15)?)?,
-                            events: nonnegative_i64_to_usize(row.get(16)?)?,
-                            runs: nonnegative_i64_to_usize(row.get(17)?)?,
-                            files_touched: nonnegative_i64_to_usize(row.get(18)?)?,
-                            session_edges: nonnegative_i64_to_usize(row.get(19)?)?,
-                            sessions_tombstoned: nonnegative_i64_to_usize(row.get(20)?)?,
+                            artifacts: nonnegative_i64_to_usize(row.get(8)?)?,
+                            summaries: nonnegative_i64_to_usize(row.get(9)?)?,
+                            history_record_links: nonnegative_i64_to_usize(row.get(10)?)?,
+                            history_records: nonnegative_i64_to_usize(row.get(11)?)?,
+                            history_record_tags: nonnegative_i64_to_usize(row.get(12)?)?,
+                            record_edges: nonnegative_i64_to_usize(row.get(13)?)?,
+                            audit_log_entries: nonnegative_i64_to_usize(row.get(14)?)?,
+                            vcs_workspaces: nonnegative_i64_to_usize(row.get(15)?)?,
+                            vcs_changes: nonnegative_i64_to_usize(row.get(16)?)?,
+                            events: nonnegative_i64_to_usize(row.get(17)?)?,
+                            runs: nonnegative_i64_to_usize(row.get(18)?)?,
+                            files_touched: nonnegative_i64_to_usize(row.get(19)?)?,
+                            session_edges: nonnegative_i64_to_usize(row.get(20)?)?,
+                            sessions_tombstoned: nonnegative_i64_to_usize(row.get(21)?)?,
                         },
                     })
                 },
@@ -390,6 +395,8 @@ impl Store {
                     || marker.cleanup_phase != CLEANUP_PHASE_LINKS
                     || marker.source_cursor.is_some()
                     || marker.entity_cursor.is_some()
+                    || (scope.tracks_prior_material
+                        && marker.completion_payload_json.is_some())
                     || marker.counts != ProviderFileReconciliationCounts::default());
             if !scope.reuse_staging_state || progress_without_state {
                 self.reset_provider_file_publication_staging(scope)?;
@@ -455,7 +462,8 @@ impl Store {
                 removed_runs = 0,
                 removed_files_touched = 0,
                 removed_session_edges = 0,
-                tombstoned_sessions = 0
+                tombstoned_sessions = 0,
+                completion_payload_json = NULL
              WHERE replacement_id = ?1
             "#,
             params![&replacement_id, scope.tracks_prior_material],

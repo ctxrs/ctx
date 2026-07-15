@@ -3,9 +3,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use ctx_history_capture::{catalog_codex_session_tree, CaptureError, CodexSessionCatalogOptions};
-use ctx_history_core::CaptureProvider;
+use anyhow::Result;
 use ctx_history_store::{
     CatalogImportWork, CatalogIndexedStatus, EventSearchBulkGuard, ImportWorkClass,
     ProviderFilePublicationRetirementWork, SourceImportFileWork, Store,
@@ -13,7 +11,8 @@ use ctx_history_store::{
 
 use super::inventory::observe_source_root;
 use super::manifest::{
-    collect_source_import_files, persist_new_source_import_observation, persisted_import_identity,
+    observe_selected_source_import_file, persist_new_source_import_observation,
+    persisted_import_identity, same_source_import_observation,
 };
 use super::{
     import_error_scope, ImportFailureScope, PlannedImportSource, SourcePreinventory, SourceStats,
@@ -21,6 +20,7 @@ use super::{
 
 pub(crate) const IMPORT_SLICE_MAX_UNITS: usize = 64;
 pub(crate) const IMPORT_SLICE_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const IMPORT_PENDING_REPORT_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImportExecutionPolicy {
@@ -128,6 +128,7 @@ pub(crate) struct SelectedImportSource {
     pub(crate) preinventory: SourcePreinventory,
     pub(crate) work: SelectedImportWork,
     pub(crate) stats: SourceStats,
+    attempts_persisted: bool,
 }
 
 #[derive(Debug)]
@@ -199,6 +200,9 @@ impl ImportExecutionState {
 
 impl SelectedImportSource {
     pub(crate) fn persist_attempt_started(&self, store: &Store) -> Result<usize> {
+        if self.attempts_persisted {
+            return Ok(self.work.unit_count());
+        }
         match &self.work {
             SelectedImportWork::Catalog(selected) => {
                 let SourcePreinventory::CodexSessionCatalog {
@@ -208,36 +212,13 @@ impl SelectedImportSource {
                 else {
                     return Ok(0);
                 };
-                let mut persisted = 0usize;
-                for work in selected {
-                    let state = store.catalog_source_index_state(
-                        work.session.provider,
-                        &work.session.source_root,
-                        &work.session.source_path,
-                    )?;
-                    let changed = store.record_catalog_source_import_result(
-                        work.session.provider,
-                        ctx_history_store::CatalogSourceIndexUpdate {
-                            source_root: &work.session.source_root,
-                            source_path: &work.session.source_path,
-                            file_size_bytes: work.session.file_size_bytes,
-                            file_modified_at_ms: work.session.file_modified_at_ms,
-                            import_revision: work.session.import_revision,
-                            inventory_generation: *inventory_generation,
-                            file_sha256: state
-                                .as_ref()
-                                .and_then(|state| state.last_imported_file_sha256.as_deref()),
-                            event_count: state
-                                .as_ref()
-                                .and_then(|state| state.last_imported_event_count),
-                            indexed_at_ms: ctx_history_core::utc_now().timestamp_millis(),
-                        },
-                        CatalogIndexedStatus::Pending,
-                        None,
-                    )?;
-                    persisted = persisted.saturating_add(changed);
-                }
-                Ok(persisted)
+                selected.iter().try_fold(0usize, |persisted, work| {
+                    Ok(persisted.saturating_add(persist_catalog_attempt_started(
+                        store,
+                        work,
+                        *inventory_generation,
+                    )?))
+                })
             }
             SelectedImportWork::SourceFiles(selected) => {
                 let inventory_generation = match &self.preinventory {
@@ -253,29 +234,76 @@ impl SelectedImportSource {
                         return Ok(0)
                     }
                 };
-                let mut persisted = 0usize;
-                for work in selected {
-                    let changed = store.record_source_import_file_result(
-                        work.file.provider,
-                        ctx_history_store::SourceImportFileIndexUpdate {
-                            source_root: &work.file.source_root,
-                            source_path: &work.file.source_path,
-                            file_size_bytes: work.file.file_size_bytes,
-                            file_modified_at_ms: work.file.file_modified_at_ms,
-                            import_revision: work.file.import_revision,
+                selected.iter().try_fold(0usize, |persisted, work| {
+                    Ok(
+                        persisted.saturating_add(persist_source_file_attempt_started(
+                            store,
+                            work,
                             inventory_generation,
-                            metadata: &work.file.metadata,
-                            indexed_at_ms: ctx_history_core::utc_now().timestamp_millis(),
-                        },
-                        CatalogIndexedStatus::Pending,
-                        None,
-                    )?;
-                    persisted = persisted.saturating_add(changed);
-                }
-                Ok(persisted)
+                        )?),
+                    )
+                })
             }
         }
     }
+}
+
+fn persist_catalog_attempt_started(
+    store: &Store,
+    work: &CatalogImportWork,
+    inventory_generation: u64,
+) -> Result<usize> {
+    let state = store.catalog_source_index_state(
+        work.session.provider,
+        &work.session.source_root,
+        &work.session.source_path,
+    )?;
+    store
+        .record_catalog_source_import_result(
+            work.session.provider,
+            ctx_history_store::CatalogSourceIndexUpdate {
+                source_root: &work.session.source_root,
+                source_path: &work.session.source_path,
+                file_size_bytes: work.session.file_size_bytes,
+                file_modified_at_ms: work.session.file_modified_at_ms,
+                import_revision: work.session.import_revision,
+                inventory_generation,
+                file_sha256: state
+                    .as_ref()
+                    .and_then(|state| state.last_imported_file_sha256.as_deref()),
+                event_count: state
+                    .as_ref()
+                    .and_then(|state| state.last_imported_event_count),
+                indexed_at_ms: ctx_history_core::utc_now().timestamp_millis(),
+            },
+            CatalogIndexedStatus::Pending,
+            None,
+        )
+        .map_err(Into::into)
+}
+
+fn persist_source_file_attempt_started(
+    store: &Store,
+    work: &SourceImportFileWork,
+    inventory_generation: u64,
+) -> Result<usize> {
+    store
+        .record_source_import_file_result(
+            work.file.provider,
+            ctx_history_store::SourceImportFileIndexUpdate {
+                source_root: &work.file.source_root,
+                source_path: &work.file.source_path,
+                file_size_bytes: work.file.file_size_bytes,
+                file_modified_at_ms: work.file.file_modified_at_ms,
+                import_revision: work.file.import_revision,
+                inventory_generation,
+                metadata: &work.file.metadata,
+                indexed_at_ms: ctx_history_core::utc_now().timestamp_millis(),
+            },
+            CatalogIndexedStatus::Pending,
+            None,
+        )
+        .map_err(Into::into)
 }
 
 impl ImportPlan {
@@ -283,8 +311,8 @@ impl ImportPlan {
         let (fresh_units, recovery_units) = import_work_counts(store, &sources)?;
         Ok(Self {
             sources,
-            fresh_units,
-            recovery_units,
+            fresh_units: execution_budget(fresh_units),
+            recovery_units: execution_budget(recovery_units),
         })
     }
 
@@ -333,11 +361,11 @@ impl ImportPlan {
     }
 
     pub(crate) fn pending_count(&self, store: &Store, class: ImportWorkClass) -> Result<usize> {
-        let (fresh, recovery) = self.pending_counts(store)?;
-        Ok(match class {
-            ImportWorkClass::Fresh => fresh,
-            ImportWorkClass::Recovery => recovery,
-        })
+        Ok(execution_budget(import_work_count(
+            store,
+            &self.sources,
+            class,
+        )?))
     }
 
     fn select_slice_with_state(
@@ -473,7 +501,13 @@ impl ImportPlan {
         let mut eligible_sources = BTreeSet::new();
         let mut validation_failures = Vec::new();
         for selected in &provisional.sources {
-            if state.observed_preinventories[selected.source_index].is_none() {
+            let needs_whole_source_observation = matches!(
+                &self.sources[selected.source_index].preinventory,
+                SourcePreinventory::SourceRoot { .. }
+            );
+            if needs_whole_source_observation
+                && state.observed_preinventories[selected.source_index].is_none()
+            {
                 let plan = &self.sources[selected.source_index];
                 match observe_current_preinventory(store, plan) {
                     Ok(preinventory) => {
@@ -495,8 +529,76 @@ impl ImportPlan {
         }
         let mut slice =
             self.select_slice_with_state(store, class, max_units, state, Some(&eligible_sources))?;
-        retain_current_file_observations(&mut slice, state);
+        validation_failures.extend(self.retain_current_file_observations(&mut slice, state)?);
+        retain_current_generations(store, &mut slice, state)?;
         Ok((slice, validation_failures))
+    }
+
+    fn retain_current_file_observations(
+        &self,
+        slice: &mut ImportSlice,
+        state: &mut ImportExecutionState,
+    ) -> Result<Vec<SourceValidationFailure>> {
+        let mut failures = Vec::new();
+        for selected in &mut slice.sources {
+            let source = &self.sources[selected.source_index].source;
+            match &mut selected.work {
+                SelectedImportWork::Catalog(work) => work.retain(|work| {
+                    let current = file_observation_is_current(
+                        Path::new(&work.session.source_path),
+                        work.session.file_size_bytes,
+                        work.session.file_modified_at_ms,
+                    );
+                    if !current {
+                        state.mark_validation_skip(catalog_work_identity(work));
+                    }
+                    current
+                }),
+                SelectedImportWork::SourceFiles(_)
+                    if matches!(
+                        &selected.preinventory,
+                        SourcePreinventory::SourceRoot { .. }
+                    ) => {}
+                SelectedImportWork::SourceFiles(work) => {
+                    let mut retained = Vec::with_capacity(work.len());
+                    for candidate in std::mem::take(work) {
+                        match observe_selected_source_import_file(
+                            source,
+                            &candidate.file.source_path,
+                        ) {
+                            Ok(Some(current))
+                                if same_source_import_observation(&candidate.file, &current) =>
+                            {
+                                retained.push(candidate);
+                            }
+                            Ok(Some(_)) | Ok(None) => {
+                                state.mark_validation_skip(source_file_work_identity(&candidate));
+                            }
+                            Err(error)
+                                if import_error_scope(&error) == ImportFailureScope::Source =>
+                            {
+                                state.mark_validation_skip(source_file_work_identity(&candidate));
+                                failures.push(SourceValidationFailure {
+                                    source_index: selected.source_index,
+                                    stats: SourceStats {
+                                        files: 1,
+                                        bytes: candidate.estimated_bytes,
+                                        change_token: None,
+                                    },
+                                    error,
+                                });
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    *work = retained;
+                }
+            }
+            selected.stats.files = selected.work.unit_count();
+            selected.stats.bytes = selected_work_bytes(&selected.work);
+        }
+        recompute_slice_totals(slice);
+        Ok(failures)
     }
 }
 
@@ -603,45 +705,73 @@ fn push_source_candidate(
             bytes,
             change_token: None,
         },
+        attempts_persisted: false,
     });
 }
 
-fn retain_current_file_observations(slice: &mut ImportSlice, state: &mut ImportExecutionState) {
+fn retain_current_generations(
+    store: &Store,
+    slice: &mut ImportSlice,
+    state: &mut ImportExecutionState,
+) -> Result<()> {
     for selected in &mut slice.sources {
-        match &mut selected.work {
-            SelectedImportWork::Catalog(work) => work.retain(|work| {
-                let current = file_observation_is_current(
-                    Path::new(&work.session.source_path),
-                    work.session.file_size_bytes,
-                    work.session.file_modified_at_ms,
-                );
-                if !current {
-                    state.mark_validation_skip(catalog_work_identity(work));
-                }
-                current
-            }),
-            SelectedImportWork::SourceFiles(work) => {
-                let source_root_was_reobserved = matches!(
-                    &selected.preinventory,
-                    SourcePreinventory::SourceRoot { .. }
-                );
-                work.retain(|work| {
-                    let current = source_root_was_reobserved
-                        || file_observation_is_current(
-                            Path::new(&work.file.source_path),
-                            work.file.file_size_bytes,
-                            work.file.file_modified_at_ms,
-                        );
-                    if !current {
-                        state.mark_validation_skip(source_file_work_identity(work));
+        match (&selected.preinventory, &mut selected.work) {
+            (
+                SourcePreinventory::CodexSessionCatalog {
+                    inventory_generation,
+                    ..
+                },
+                SelectedImportWork::Catalog(work),
+            ) => {
+                let mut retained = Vec::with_capacity(work.len());
+                for candidate in std::mem::take(work) {
+                    if persist_catalog_attempt_started(store, &candidate, *inventory_generation)?
+                        == 1
+                    {
+                        retained.push(candidate);
+                    } else {
+                        state.mark_validation_skip(catalog_work_identity(&candidate));
                     }
-                    current
-                });
+                }
+                *work = retained;
             }
+            (
+                SourcePreinventory::SourceRoot {
+                    inventory_generation,
+                    ..
+                }
+                | SourcePreinventory::SourceImportFiles {
+                    inventory_generation,
+                    ..
+                },
+                SelectedImportWork::SourceFiles(work),
+            ) => {
+                let mut retained = Vec::with_capacity(work.len());
+                for candidate in std::mem::take(work) {
+                    if persist_source_file_attempt_started(
+                        store,
+                        &candidate,
+                        *inventory_generation,
+                    )? == 1
+                    {
+                        retained.push(candidate);
+                    } else {
+                        state.mark_validation_skip(source_file_work_identity(&candidate));
+                    }
+                }
+                *work = retained;
+            }
+            _ => {}
         }
         selected.stats.files = selected.work.unit_count();
         selected.stats.bytes = selected_work_bytes(&selected.work);
+        selected.attempts_persisted = true;
     }
+    recompute_slice_totals(slice);
+    Ok(())
+}
+
+fn recompute_slice_totals(slice: &mut ImportSlice) {
     slice
         .sources
         .retain(|selected| selected.work.unit_count() > 0);
@@ -751,52 +881,9 @@ fn observe_current_preinventory(
                 inventory_generation: persisted.inventory_generation,
             })
         }
-        SourcePreinventory::SourceImportFiles { .. } => {
-            let files = collect_source_import_files(&plan.source).with_context(|| {
-                format!(
-                    "re-inventory import files from {}",
-                    plan.source.path.display()
-                )
-            })?;
-            let persisted = persist_new_source_import_observation(store, &plan.source, &files)?;
-            Ok(SourcePreinventory::SourceImportFiles {
-                files,
-                inventory_generation: persisted.inventory_generation,
-            })
-        }
-        SourcePreinventory::CodexSessionCatalog { .. } => {
-            let source_root =
-                super::catalog::codex_catalog_root_identity(&plan.source.path)?.to_owned();
-            let inventory_generation = store
-                .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?;
-            let summary = catalog_codex_session_tree(
-                &plan.source.path,
-                store,
-                CodexSessionCatalogOptions {
-                    source_root: Some(plan.source.path.clone()),
-                    observation_generation: Some(inventory_generation),
-                    ..CodexSessionCatalogOptions::default()
-                },
-            )
-            .map_err(|error| {
-                anyhow::Error::new(error).context(format!(
-                    "re-inventory Codex sessions from {}",
-                    plan.source.path.display()
-                ))
-            })?;
-            if !store.catalog_inventory_generation_is_complete(
-                CaptureProvider::Codex,
-                &source_root,
-                inventory_generation,
-            )? {
-                return Err(anyhow::Error::new(CaptureError::InventorySuperseded));
-            }
-            Ok(SourcePreinventory::CodexSessionCatalog {
-                summary,
-                inventory_generation,
-            })
-        }
-        SourcePreinventory::None => Ok(SourcePreinventory::None),
+        SourcePreinventory::SourceImportFiles { .. }
+        | SourcePreinventory::CodexSessionCatalog { .. }
+        | SourcePreinventory::None => Ok(plan.preinventory.clone()),
     }
 }
 
@@ -842,59 +929,105 @@ fn list_source_work(
 }
 
 fn import_work_counts(store: &Store, sources: &[PlannedImportSource]) -> Result<(usize, usize)> {
-    let mut fresh = 0usize;
-    let mut recovery = store.provider_file_publication_retirement_work_count()?;
-    for plan in sources {
-        let counts = match &plan.preinventory {
-            SourcePreinventory::CodexSessionCatalog { .. } => {
-                let source_root = super::catalog::codex_catalog_root_identity(&plan.source.path)?;
-                (
-                    store.catalog_import_work_count(
-                        plan.source.provider,
-                        source_root,
-                        ImportWorkClass::Fresh,
-                    )?,
-                    store.catalog_import_work_count(
-                        plan.source.provider,
-                        source_root,
-                        ImportWorkClass::Recovery,
-                    )?,
-                )
-            }
-            SourcePreinventory::SourceImportFiles { files, .. } => {
-                let Some(first) = files.first() else {
-                    continue;
-                };
-                source_import_counts(store, plan, &first.source_root)?
-            }
-            SourcePreinventory::SourceRoot { file, .. } => {
-                source_import_counts(store, plan, &file.source_root)?
-            }
-            SourcePreinventory::None => continue,
-        };
-        fresh = fresh.saturating_add(counts.0);
-        recovery = recovery.saturating_add(counts.1);
-    }
-    Ok((fresh, recovery))
+    Ok((
+        import_work_count(store, sources, ImportWorkClass::Fresh)?,
+        import_work_count(store, sources, ImportWorkClass::Recovery)?,
+    ))
 }
 
-fn source_import_counts(
+fn import_work_count(
     store: &Store,
-    plan: &PlannedImportSource,
+    sources: &[PlannedImportSource],
+    class: ImportWorkClass,
+) -> Result<usize> {
+    let mut count = 0usize;
+    if class == ImportWorkClass::Recovery {
+        count = store
+            .list_provider_file_publication_retirement_work(IMPORT_PENDING_REPORT_LIMIT)?
+            .len();
+    }
+    for plan in sources {
+        let remaining = IMPORT_PENDING_REPORT_LIMIT.saturating_sub(count);
+        if remaining == 0 {
+            break;
+        }
+        let source_count = match &plan.preinventory {
+            SourcePreinventory::CodexSessionCatalog { .. } => {
+                let source_root = super::catalog::codex_catalog_root_identity(&plan.source.path)?;
+                store
+                    .list_catalog_import_work(plan.source.provider, source_root, class, remaining)?
+                    .len()
+            }
+            SourcePreinventory::SourceImportFiles { files, .. } => {
+                let source_root = files
+                    .first()
+                    .map(|file| file.source_root.as_str())
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        persisted_import_identity(&plan.source.path, "source root")
+                    })?;
+                store
+                    .list_source_import_file_work(
+                        plan.source.provider,
+                        source_root,
+                        class,
+                        remaining,
+                    )?
+                    .len()
+            }
+            SourcePreinventory::SourceRoot { file, .. } => store
+                .list_source_import_file_work(
+                    plan.source.provider,
+                    &file.source_root,
+                    class,
+                    remaining,
+                )?
+                .len(),
+            SourcePreinventory::None => continue,
+        };
+        count = count.saturating_add(source_count);
+    }
+    Ok(count.min(IMPORT_PENDING_REPORT_LIMIT))
+}
+
+pub(crate) fn bounded_unplanned_root_work_counts(
+    store: &Store,
+    provider: ctx_history_core::CaptureProvider,
     source_root: &str,
 ) -> Result<(usize, usize)> {
     Ok((
-        store.source_import_file_work_count(
-            plan.source.provider,
-            source_root,
-            ImportWorkClass::Fresh,
-        )?,
-        store.source_import_file_work_count(
-            plan.source.provider,
-            source_root,
-            ImportWorkClass::Recovery,
-        )?,
+        bounded_unplanned_root_work_count(store, provider, source_root, ImportWorkClass::Fresh)?,
+        bounded_unplanned_root_work_count(store, provider, source_root, ImportWorkClass::Recovery)?,
     ))
+}
+
+fn bounded_unplanned_root_work_count(
+    store: &Store,
+    provider: ctx_history_core::CaptureProvider,
+    source_root: &str,
+    class: ImportWorkClass,
+) -> Result<usize> {
+    let catalog = store.list_catalog_import_work(
+        provider,
+        source_root,
+        class,
+        IMPORT_PENDING_REPORT_LIMIT,
+    )?;
+    let remaining = IMPORT_PENDING_REPORT_LIMIT.saturating_sub(catalog.len());
+    let source_files =
+        store.list_source_import_file_work(provider, source_root, class, remaining)?;
+    Ok(catalog
+        .len()
+        .saturating_add(source_files.len())
+        .min(IMPORT_PENDING_REPORT_LIMIT))
+}
+
+fn execution_budget(reported_units: usize) -> usize {
+    if reported_units >= IMPORT_PENDING_REPORT_LIMIT {
+        usize::MAX
+    } else {
+        reported_units
+    }
 }
 
 #[cfg(test)]
@@ -1183,7 +1316,60 @@ mod tests {
         assert_eq!(snapshot["fresh_units_processed"], 3);
         assert_eq!(snapshot["recovery_units_processed"], 2);
         assert_eq!(snapshot["fresh_units_pending"], 1);
+        assert_eq!(snapshot["fresh_units_pending_exact"], true);
         assert_eq!(snapshot["recovery_units_pending"], 4);
+        assert_eq!(snapshot["recovery_units_pending_exact"], true);
+    }
+
+    #[test]
+    fn large_backlog_reporting_is_a_bounded_lower_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let root = "/fixture/large-backlog";
+        let source = explicit_path_source(CaptureProvider::Pi, root.into());
+        let files = (0..10_000)
+            .map(|index| SourceImportFile {
+                provider: CaptureProvider::Pi,
+                source_format: source.source_format.to_owned(),
+                source_root: root.to_owned(),
+                source_path: format!("{root}/{index:05}.jsonl"),
+                file_size_bytes: 1,
+                file_modified_at_ms: 1,
+                import_revision: 1,
+                observed_at_ms: 1,
+                metadata: json!({}),
+            })
+            .collect::<Vec<_>>();
+        let generation = store
+            .allocate_source_import_inventory_generation(CaptureProvider::Pi, root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, &files)
+            .unwrap();
+        let plan = ImportPlan::build(
+            &store,
+            vec![PlannedImportSource {
+                source,
+                stats: SourceStats::default(),
+                preinventory: SourcePreinventory::SourceImportFiles {
+                    files,
+                    inventory_generation: generation,
+                },
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(plan.fresh_units, usize::MAX);
+        assert_eq!(
+            plan.pending_counts(&store).unwrap(),
+            (IMPORT_PENDING_REPORT_LIMIT, 0)
+        );
+        let snapshot = import_totals_json(&ImportTotals {
+            fresh_units_pending: IMPORT_PENDING_REPORT_LIMIT,
+            ..ImportTotals::default()
+        });
+        assert_eq!(snapshot["fresh_units_pending"], IMPORT_PENDING_REPORT_LIMIT);
+        assert_eq!(snapshot["fresh_units_pending_exact"], false);
     }
 
     #[test]
