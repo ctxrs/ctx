@@ -210,7 +210,3 @@ fn four_optional_uuids_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Opt
         optional_uuid_at(row, 3)?,
     ))
 }
-
-fn two_uuids_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Uuid, Uuid)> {
-    Ok((parse_uuid_text(row.get(0)?)?, parse_uuid_text(row.get(1)?)?))
-}

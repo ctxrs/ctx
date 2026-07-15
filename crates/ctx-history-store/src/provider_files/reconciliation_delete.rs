@@ -1,24 +1,33 @@
 impl Store {
-    fn delete_unseen_batch(&self, entity_kind: &'static str, table: &'static str) -> Result<usize> {
+    fn delete_unseen_batch(
+        &self,
+        replacement_id: &str,
+        entity_kind: &'static str,
+        table: &'static str,
+    ) -> Result<usize> {
         self.conn
             .execute(
                 &format!(
                     r#"
                     DELETE FROM {table}
-                    WHERE id IN (SELECT entity_id FROM {STAGING_SCHEMA}.batch)
+                    WHERE id IN (
+                        SELECT entity_id FROM {STAGING_BATCH_TABLE}
+                        WHERE replacement_id = ?1
+                    )
                       AND NOT EXISTS (
-                        SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                        WHERE seen.entity_kind = ?1 AND seen.entity_id = {table}.id
+                        SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                        WHERE seen.replacement_id = ?1
+                          AND seen.entity_kind = ?2 AND seen.entity_id = {table}.id
                       )
                     "#
                 ),
-                params![entity_kind],
+                params![replacement_id, entity_kind],
             )
             .map_err(StoreError::from)
     }
 
-    fn delete_unseen_event_batch(&self) -> Result<usize> {
-        let stale_ids = self.unseen_batch_ids("event")?;
+    fn delete_unseen_event_batch(&self, replacement_id: &str) -> Result<usize> {
+        let stale_ids = self.unseen_batch_ids(replacement_id, "event")?;
         if stale_ids.is_empty() {
             return Ok(0);
         }
@@ -28,17 +37,19 @@ impl Store {
                 SELECT EXISTS (
                     SELECT 1 FROM files_touched AS file
                     WHERE file.event_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                            WHERE seen.entity_kind = 'event'
-                              AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (
+                            SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                            WHERE seen.replacement_id = batch.replacement_id
+                              AND seen.entity_kind = 'event'
+                              AND seen.entity_id = batch.entity_id
                         )
                     )
                 )
                 "#
             ),
-            [],
+            params![replacement_id],
             |row| row.get(0),
         )?;
         if surviving_reference {
@@ -60,60 +71,66 @@ impl Store {
                 self.conn.execute(
                     &format!(
                         "DELETE FROM {table} WHERE event_id IN (
-                            SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                            WHERE NOT EXISTS (
-                                SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                                WHERE seen.entity_kind = 'event'
-                                  AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id
+                            SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                            WHERE batch.replacement_id = ?1
+                              AND NOT EXISTS (
+                                SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                                WHERE seen.replacement_id = batch.replacement_id
+                                  AND seen.entity_kind = 'event'
+                                  AND seen.entity_id = batch.entity_id
                             )
                         )"
                     ),
-                    [],
+                    params![replacement_id],
                 )?;
             }
         }
-        let removed = self.delete_unseen_batch("event", "events")?;
+        let removed = self.delete_unseen_batch(replacement_id, "event", "events")?;
         decrement_semantic_searchable_item_stats_if_cached(&self.conn, semantic_removed)?;
         Ok(removed)
     }
 
-    fn delete_unseen_run_batch(&self) -> Result<usize> {
+    fn delete_unseen_run_batch(&self, replacement_id: &str) -> Result<usize> {
         let surviving_reference: bool = self.conn.query_row(
             &format!(
                 r#"
                 SELECT EXISTS (
                     SELECT 1 FROM events AS event
                     WHERE event.run_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                            WHERE seen.entity_kind = 'run'
-                              AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (
+                            SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                            WHERE seen.replacement_id = batch.replacement_id
+                              AND seen.entity_kind = 'run'
+                              AND seen.entity_id = batch.entity_id
                         )
                     )
                     UNION ALL
                     SELECT 1 FROM files_touched AS file
                     WHERE file.run_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                            WHERE seen.entity_kind = 'run'
-                              AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (
+                            SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                            WHERE seen.replacement_id = batch.replacement_id
+                              AND seen.entity_kind = 'run'
+                              AND seen.entity_id = batch.entity_id
                         )
                     )
                 )
                 "#
             ),
-            [],
+            params![replacement_id],
             |row| row.get(0),
         )?;
         if surviving_reference {
             return Err(StoreError::ProviderFileReconciliationInconsistent { entity: "run" });
         }
-        self.delete_unseen_batch("run", "runs")
+        self.delete_unseen_batch(replacement_id, "run", "runs")
     }
 
-    fn delete_unseen_vcs_change_batch(&self) -> Result<usize> {
+    fn delete_unseen_vcs_change_batch(&self, replacement_id: &str) -> Result<usize> {
         let surviving_link: bool = self.conn.query_row(
             &format!(
                 r#"
@@ -121,17 +138,19 @@ impl Store {
                     SELECT 1 FROM history_record_links AS link
                     WHERE link.target_type = 'vcs_change'
                       AND link.target_id IN (
-                          SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                          WHERE NOT EXISTS (
-                              SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                              WHERE seen.entity_kind = 'vcs_change'
-                                AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id
+                          SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                          WHERE batch.replacement_id = ?1
+                            AND NOT EXISTS (
+                              SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                              WHERE seen.replacement_id = batch.replacement_id
+                                AND seen.entity_kind = 'vcs_change'
+                                AND seen.entity_id = batch.entity_id
                           )
                       )
                 )
                 "#
             ),
-            [],
+            params![replacement_id],
             |row| row.get(0),
         )?;
         if surviving_link {
@@ -139,16 +158,19 @@ impl Store {
                 entity: "VCS change",
             });
         }
-        self.delete_unseen_batch("vcs_change", "vcs_changes")
+        self.delete_unseen_batch(replacement_id, "vcs_change", "vcs_changes")
     }
 
-    fn delete_unseen_artifact_batch(&self) -> Result<usize> {
+    fn delete_unseen_artifact_batch(&self, replacement_id: &str) -> Result<usize> {
         let eligible = format!(
             r#"
-            id IN (SELECT entity_id FROM {STAGING_SCHEMA}.batch)
+            id IN (
+                SELECT entity_id FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1
+            )
             AND NOT EXISTS (
-                SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                WHERE seen.entity_kind = 'artifact' AND seen.entity_id = artifacts.id
+                SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                WHERE seen.replacement_id = ?1
+                  AND seen.entity_kind = 'artifact' AND seen.entity_id = artifacts.id
             )
             AND NOT EXISTS (SELECT 1 FROM sessions WHERE transcript_blob_id = artifacts.id)
             AND NOT EXISTS (
@@ -169,47 +191,55 @@ impl Store {
                         SELECT id FROM artifacts WHERE {eligible}
                     )"
                 ),
-                [],
+                params![replacement_id],
             )?;
         }
         self.conn
-            .execute(&format!("DELETE FROM artifacts WHERE {eligible}"), [])
+            .execute(
+                &format!("DELETE FROM artifacts WHERE {eligible}"),
+                params![replacement_id],
+            )
             .map_err(StoreError::from)
     }
 
-    fn delete_unseen_vcs_workspace_batch(&self) -> Result<usize> {
+    fn delete_unseen_vcs_workspace_batch(&self, replacement_id: &str) -> Result<usize> {
         let surviving_reference: bool = self.conn.query_row(
             &format!(
                 r#"
                 SELECT EXISTS (
                     SELECT 1 FROM vcs_changes WHERE vcs_workspace_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen WHERE seen.entity_kind = 'vcs_workspace' AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id)
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen WHERE seen.replacement_id = batch.replacement_id AND seen.entity_kind = 'vcs_workspace' AND seen.entity_id = batch.entity_id)
                     )
                     UNION ALL
                     SELECT 1 FROM files_touched WHERE vcs_workspace_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen WHERE seen.entity_kind = 'vcs_workspace' AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id)
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen WHERE seen.replacement_id = batch.replacement_id AND seen.entity_kind = 'vcs_workspace' AND seen.entity_id = batch.entity_id)
                     )
                     UNION ALL
                     SELECT 1 FROM history_records WHERE primary_vcs_workspace_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen WHERE seen.entity_kind = 'vcs_workspace' AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id)
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen WHERE seen.replacement_id = batch.replacement_id AND seen.entity_kind = 'vcs_workspace' AND seen.entity_id = batch.entity_id)
                     )
                     UNION ALL
                     SELECT 1 FROM local_workspaces WHERE vcs_workspace_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen WHERE seen.entity_kind = 'vcs_workspace' AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id)
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen WHERE seen.replacement_id = batch.replacement_id AND seen.entity_kind = 'vcs_workspace' AND seen.entity_id = batch.entity_id)
                     )
                     UNION ALL
                     SELECT 1 FROM history_record_links WHERE target_type = 'vcs_workspace' AND target_id IN (
-                        SELECT entity_id FROM {STAGING_SCHEMA}.batch
-                        WHERE NOT EXISTS (SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen WHERE seen.entity_kind = 'vcs_workspace' AND seen.entity_id = {STAGING_SCHEMA}.batch.entity_id)
+                        SELECT batch.entity_id FROM {STAGING_BATCH_TABLE} AS batch
+                        WHERE batch.replacement_id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen WHERE seen.replacement_id = batch.replacement_id AND seen.entity_kind = 'vcs_workspace' AND seen.entity_id = batch.entity_id)
                     )
                 )
                 "#
             ),
-            [],
+            params![replacement_id],
             |row| row.get(0),
         )?;
         if surviving_reference {
@@ -217,29 +247,33 @@ impl Store {
                 entity: "VCS workspace",
             });
         }
-        self.delete_unseen_batch("vcs_workspace", "vcs_workspaces")
+        self.delete_unseen_batch(replacement_id, "vcs_workspace", "vcs_workspaces")
     }
 
-    fn delete_history_record_tag_batch(&self) -> Result<usize> {
+    fn delete_history_record_tag_batch(&self, replacement_id: &str) -> Result<usize> {
         self.conn
             .execute(
                 &format!(
                     "DELETE FROM history_record_tags WHERE rowid IN (
-                        SELECT CAST(entity_id AS INTEGER) FROM {STAGING_SCHEMA}.batch
+                        SELECT CAST(entity_id AS INTEGER) FROM {STAGING_BATCH_TABLE}
+                        WHERE replacement_id = ?1
                     )"
                 ),
-                [],
+                params![replacement_id],
             )
             .map_err(StoreError::from)
     }
 
-    fn delete_unseen_history_record_batch(&self) -> Result<usize> {
+    fn delete_unseen_history_record_batch(&self, replacement_id: &str) -> Result<usize> {
         let eligible = format!(
             r#"
-            id IN (SELECT entity_id FROM {STAGING_SCHEMA}.batch)
+            id IN (
+                SELECT entity_id FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1
+            )
             AND NOT EXISTS (
-                SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                WHERE seen.entity_kind = 'history_record'
+                SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                WHERE seen.replacement_id = ?1
+                  AND seen.entity_kind = 'history_record'
                   AND seen.entity_id = history_records.id
             )
             AND NOT EXISTS (SELECT 1 FROM sessions WHERE history_record_id = history_records.id)
@@ -269,27 +303,36 @@ impl Store {
                             SELECT id FROM history_records WHERE {eligible}
                         )"
                     ),
-                    [],
+                    params![replacement_id],
                 )?;
             }
         }
         self.conn
-            .execute(&format!("DELETE FROM history_records WHERE {eligible}"), [])
+            .execute(
+                &format!("DELETE FROM history_records WHERE {eligible}"),
+                params![replacement_id],
+            )
             .map_err(StoreError::from)
     }
 
-    fn unseen_batch_ids(&self, entity_kind: &'static str) -> Result<Vec<String>> {
+    fn unseen_batch_ids(
+        &self,
+        replacement_id: &str,
+        entity_kind: &'static str,
+    ) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(&format!(
             r#"
             SELECT batch.entity_id
-            FROM {STAGING_SCHEMA}.batch AS batch
-            WHERE NOT EXISTS (
-                SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                WHERE seen.entity_kind = ?1 AND seen.entity_id = batch.entity_id
+            FROM {STAGING_BATCH_TABLE} AS batch
+            WHERE batch.replacement_id = ?1
+              AND NOT EXISTS (
+                SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                WHERE seen.replacement_id = batch.replacement_id
+                  AND seen.entity_kind = ?2 AND seen.entity_id = batch.entity_id
             )
             "#
         ))?;
-        let rows = stmt.query_map(params![entity_kind], |row| row.get(0))?;
+        let rows = stmt.query_map(params![replacement_id, entity_kind], |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(StoreError::from)
     }
@@ -305,11 +348,15 @@ impl Store {
                     UPDATE sessions
                     SET deleted_at_ms = ?1, updated_at_ms = max(updated_at_ms, ?1),
                         transcript_blob_id = NULL
-                    WHERE id IN (SELECT entity_id FROM {STAGING_SCHEMA}.batch)
+                    WHERE id IN (
+                        SELECT entity_id FROM {STAGING_BATCH_TABLE}
+                        WHERE replacement_id = ?2
+                    )
                       AND deleted_at_ms IS NULL
                       AND NOT EXISTS (
-                        SELECT 1 FROM {STAGING_SCHEMA}.seen AS seen
-                        WHERE seen.entity_kind = 'session' AND seen.entity_id = sessions.id
+                        SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                        WHERE seen.replacement_id = ?2
+                          AND seen.entity_kind = 'session' AND seen.entity_id = sessions.id
                       )
                       AND NOT EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.id)
                       AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.session_id = sessions.id)
@@ -339,7 +386,8 @@ impl Store {
                           AND (
                             related.capture_source_id IS NULL
                             OR related.capture_source_id NOT IN (
-                                SELECT id FROM {STAGING_SCHEMA}.prior_sources
+                                SELECT source_id FROM {STAGING_PRIOR_SOURCES_TABLE}
+                                WHERE replacement_id = ?2
                             )
                           )
                           AND (
@@ -349,7 +397,7 @@ impl Store {
                       )
                     "#
                 ),
-                params![scope.file_modified_at_ms],
+                params![scope.file_modified_at_ms, scope.scope_id.to_string()],
             )
             .map_err(StoreError::from)
     }

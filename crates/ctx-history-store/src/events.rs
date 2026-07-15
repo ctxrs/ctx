@@ -198,7 +198,7 @@ impl Store {
     }
 
     pub fn event_id_by_dedupe_key(&self, dedupe_key: &str) -> Result<Uuid> {
-        let visible = crate::provider_files::event_material_visible_predicate("events");
+        let visible = self.importer_event_material_visible_predicate("events");
         self.conn
             .query_row(
                 &format!("SELECT id FROM events WHERE dedupe_key = ?1 AND {visible}"),
@@ -209,7 +209,7 @@ impl Store {
     }
 
     pub fn event_id_by_seq(&self, seq: u64) -> Result<Uuid> {
-        let visible = crate::provider_files::event_material_visible_predicate("events");
+        let visible = self.importer_event_material_visible_predicate("events");
         self.conn
             .query_row(
                 &format!("SELECT id FROM events WHERE seq = ?1 AND {visible}"),
@@ -235,7 +235,7 @@ impl Store {
                 (SELECT event_id FROM event_aliases WHERE alias_id = ?1),
                 ?1
             ) AND {}",
-            crate::provider_files::event_material_visible_predicate("events")
+            self.importer_event_material_visible_predicate("events")
         );
         self.conn
             .query_row(
@@ -275,7 +275,7 @@ impl Store {
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<Event>> {
         let tail = format!(
             "WHERE session_id = ?1 AND {} ORDER BY seq, occurred_at_ms",
-            crate::provider_files::event_material_visible_predicate("events")
+            self.importer_event_material_visible_predicate("events")
         );
         let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(params![session_id.to_string()], event_from_row)?;
@@ -285,7 +285,7 @@ impl Store {
     pub fn events_for_session_limited(&self, session_id: Uuid, limit: usize) -> Result<Vec<Event>> {
         let tail = format!(
             "WHERE session_id = ?1 AND {} ORDER BY seq, occurred_at_ms LIMIT ?2",
-            crate::provider_files::event_material_visible_predicate("events")
+            self.importer_event_material_visible_predicate("events")
         );
         let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(
@@ -318,7 +318,7 @@ impl Store {
         } else {
             let tail = format!(
                 "WHERE session_id = ?1 AND seq < ?2 AND {} ORDER BY seq DESC, occurred_at_ms DESC LIMIT ?3",
-                crate::provider_files::event_material_visible_predicate("events")
+                self.importer_event_material_visible_predicate("events")
             );
             let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
             let rows = stmt.query_map(
@@ -337,7 +337,7 @@ impl Store {
         if after > 0 {
             let tail = format!(
                 "WHERE session_id = ?1 AND seq > ?2 AND {} ORDER BY seq, occurred_at_ms LIMIT ?3",
-                crate::provider_files::event_material_visible_predicate("events")
+                self.importer_event_material_visible_predicate("events")
             );
             let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
             let rows = stmt.query_map(

@@ -5,12 +5,14 @@ use ctx_history_core::{
     new_id, AgentType, Artifact, ArtifactKind, CaptureProvider, CaptureSource,
     CaptureSourceDescriptor, CaptureSourceKind, EntityTimestamps, Event, EventRole, EventType,
     Fidelity, Session, SessionStatus, SyncMetadata, SyncState, Visibility,
+    PROVIDER_MATERIAL_SOURCE_FORMATS,
 };
 use rusqlite::{ffi::ErrorCode, params};
 use uuid::Uuid;
 
 use crate::catalog::{
-    CatalogIndexedStatus, CatalogSession, CatalogSourceIndexUpdate, SourceImportFile,
+    expected_material_source_format, CatalogIndexedStatus, CatalogSession,
+    CatalogSourceIndexUpdate, ImportPendingReason, ImportWorkClass, SourceImportFile,
     SourceImportFileIndexUpdate,
 };
 use crate::connection::timestamp_ms;
@@ -186,6 +188,7 @@ fn current_source_generation(store: &Store, provider: CaptureProvider, source_ro
     current_inventory_generation(store, provider, source_root, "source_import_files")
 }
 
+include!("tests/pending_reasons.rs");
 include!("tests/catalog_imports.rs");
 include!("tests/source_imports.rs");
 include!("tests/queries.rs");

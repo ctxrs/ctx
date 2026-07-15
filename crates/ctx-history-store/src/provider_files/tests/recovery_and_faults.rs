@@ -98,8 +98,9 @@ fn catalog_retain_completion_preserves_every_legacy_import_cursor_field() {
         .unwrap();
     assert_eq!(indexed, (130, 15, 120));
 }
+
 #[test]
-fn crashed_replacement_keeps_old_rows_and_checkpoint_without_main_staging() {
+fn crashed_replacement_keeps_rows_checkpoint_and_main_staging_transactionally() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("work.sqlite");
     let old_event = Uuid::from_u128(80);
@@ -207,7 +208,16 @@ fn crashed_replacement_keeps_old_rows_and_checkpoint_without_main_staging() {
         .unwrap()
         .is_empty());
     assert!(store.provider_file_publication.borrow().is_none());
-    assert!(!main_table_exists(&store, "provider_file_publication_seen"));
+    assert!(main_table_exists(&store, "provider_file_publication_seen"));
+    let staged_seen: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_file_publication_seen",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(staged_seen, 1);
 
     let rewritten = source_file(20, 120);
     let generation = store
@@ -244,6 +254,198 @@ fn crashed_replacement_keeps_old_rows_and_checkpoint_without_main_staging() {
     assert_eq!(store.list_events().unwrap().len(), 1);
     assert!(!store.search_event_hits("new", 10).unwrap().is_empty());
 }
+
+#[test]
+fn replacement_reopen_reconstructs_when_cursor_outlives_staging_rows() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(20, 100);
+    let source = Uuid::from_u128(329_000);
+    let stale_event = Uuid::from_u128(329_001);
+    let (generation, replacement_id) = {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        insert_capture_source(&store, source, PATH_A, "missing-replacement-staging");
+        insert_raw_event(&store, stale_event, 1, source, "stale replacement event");
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        prepare_all(&store, &scope, 1);
+        assert_eq!(staged_prior_source_count(&store), 1);
+        let replacement_id = scope.scope_id.to_string();
+        drop(scope);
+        (generation, replacement_id)
+    };
+
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM provider_file_publication_prior_sources \
+                 WHERE replacement_id = ?1",
+                params![&replacement_id],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            source_outcome(&file, generation, 120).observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            115,
+        )
+        .unwrap();
+
+    assert_eq!(scope.scope_id.to_string(), replacement_id);
+    assert_eq!(staged_prior_source_count(&store), 0);
+    assert!(store.has_pending_provider_file_publications().unwrap());
+    assert!(row_exists(&store, "events", stale_event));
+    assert!(store.list_events().unwrap().is_empty());
+    prepare_all(&store, &scope, 1);
+    assert_eq!(staged_prior_source_count(&store), 1);
+    reconcile_all(&store, &scope, 1);
+    store
+        .finalize_provider_file_publication(
+            scope,
+            source_outcome(&file, generation, 120),
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+    assert!(!row_exists(&store, "events", stale_event));
+}
+
+#[test]
+fn retirement_reopen_reconstructs_when_cursor_outlives_staging_rows() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(20, 100);
+    let source = Uuid::from_u128(329_010);
+    let retained_event = Uuid::from_u128(329_011);
+    let replacement_id = {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        insert_capture_source(&store, source, PATH_A, "missing-retirement-staging");
+        insert_raw_event(
+            &store,
+            retained_event,
+            1,
+            source,
+            "retained retirement event",
+        );
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        prepare_all(&store, &scope, 1);
+        store
+            .track_provider_file_publication_event(retained_event)
+            .unwrap();
+        let mut mutation = event_fixture(
+            Uuid::from_u128(329_012),
+            2,
+            source,
+            "missing-retirement-staging".to_owned(),
+            "mutation before retirement",
+        );
+        mutation.dedupe_key = None;
+        store
+            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&mutation))
+            .unwrap();
+        assert!(matches!(
+            store.abort_provider_file_publication(scope).unwrap(),
+            std::ops::ControlFlow::Break(None)
+        ));
+        store
+            .mark_source_import_missing_paths_stale(
+                file.provider,
+                &file.source_root,
+                &[],
+                120,
+                generation,
+            )
+            .unwrap();
+
+        let retirement = store
+            .begin_provider_file_publication_retirement(
+                file.provider,
+                MATERIAL_FORMAT,
+                &file.source_root,
+                &file.source_path,
+                125,
+            )
+            .unwrap()
+            .unwrap();
+        let progress = store
+            .reconcile_provider_file_publication_slice(&retirement, 1)
+            .unwrap();
+        assert!(!progress.complete);
+        let replacement_id = retirement.scope_id.to_string();
+        store.abandon_provider_file_publication(retirement).unwrap();
+        replacement_id
+    };
+
+    {
+        let store = Store::open(&path).unwrap();
+        for table in [
+            "provider_file_publication_seen",
+            "provider_file_publication_prior_sources",
+        ] {
+            store
+                .conn
+                .execute(
+                    &format!("DELETE FROM {table} WHERE replacement_id = ?1"),
+                    params![&replacement_id],
+                )
+                .unwrap();
+        }
+    }
+    let store = Store::open(&path).unwrap();
+    let retirement = store
+        .begin_provider_file_publication_retirement(
+            file.provider,
+            MATERIAL_FORMAT,
+            &file.source_root,
+            &file.source_path,
+            130,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retirement.scope_id.to_string(), replacement_id);
+    assert!(store.has_pending_provider_file_publications().unwrap());
+    assert!(row_exists(&store, "events", retained_event));
+    assert!(store.list_events().unwrap().is_empty());
+    prepare_all(&store, &retirement, 1);
+    reconcile_all(&store, &retirement, 1);
+    store.retire_provider_file_publication(retirement).unwrap();
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+    assert!(!row_exists(&store, "events", retained_event));
+}
+
 #[test]
 fn replacement_scope_fails_if_same_generation_observation_changes() {
     let temp = tempdir().unwrap();
@@ -289,6 +491,7 @@ fn replacement_scope_fails_if_same_generation_observation_changes() {
     assert!(row_exists(&store, "events", old_event));
     assert!(store.provider_file_publication.borrow().is_none());
 }
+
 #[test]
 fn transaction_boundary_faults_roll_back_and_restart_converges() {
     let temp = tempdir().unwrap();

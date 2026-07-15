@@ -120,6 +120,30 @@ impl Store {
         writes(self)
     }
 
+    /// Mutable counterpart for importers whose established API requires a
+    /// mutable store reference while publishing provider-file material.
+    pub fn with_provider_file_publication_writes_mut<T, E>(
+        &mut self,
+        scope: &ProviderFilePublicationScope,
+        writes: impl FnOnce(&mut Self) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<StoreError>,
+    {
+        self.ensure_active_provider_file_publication(scope)
+            .map_err(E::from)?;
+        if scope.retires_observation || self.provider_file_write_scope.get().is_some() {
+            return Err(E::from(StoreError::InvalidProviderFilePublicationScope));
+        }
+        self.provider_file_write_scope.set(Some(scope.scope_id));
+        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writes(self)));
+        self.provider_file_write_scope.set(None);
+        match write_result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     pub(crate) fn with_provider_file_publication_write<T>(
         &self,
         write: impl FnOnce() -> Result<T>,
@@ -221,8 +245,11 @@ impl Store {
                         ))
                     },
                 )?;
-                let preserve_rejections = prior_status == "completed_with_rejections"
-                    && completion_kind != ProviderFileCompletionKind::Replacement;
+                let preserve_rejections = completion_kind
+                    != ProviderFileCompletionKind::Replacement
+                    && (prior_status == "completed_with_rejections"
+                        || (prior_status == "indexed"
+                            && outcome.status == CatalogIndexedStatus::Rejected));
                 let status = if preserve_rejections {
                     CatalogIndexedStatus::CompletedWithRejections
                 } else {

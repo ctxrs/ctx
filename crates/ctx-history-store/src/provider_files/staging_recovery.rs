@@ -12,7 +12,6 @@ impl Store {
             &scope.source_path,
         );
         let prefix = format!("{STAGING_DIR_PREFIX}-{lock_owner_id}-");
-        let current = format!("{prefix}{}", scope.staging_id);
         let root = self.store_identity.private_root();
         let mut reclaimed = 0usize;
         for entry in fs::read_dir(&root)? {
@@ -24,7 +23,7 @@ impl Store {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if !name.starts_with(&prefix) || name == current {
+            if !name.starts_with(&prefix) {
                 continue;
             }
             let metadata = fs::symlink_metadata(entry.path())?;
@@ -84,56 +83,6 @@ impl Store {
             });
         }
 
-        let attached = self
-            .provider_file_publication
-            .borrow()
-            .as_ref()
-            .is_some_and(|active| active.attached);
-        if attached {
-            if self
-                .conn
-                .execute_batch(&format!("DETACH DATABASE {STAGING_SCHEMA}"))
-                .is_err()
-            {
-                return Err(ProviderFileMaintenanceWarning::StagingCleanupDeferred {
-                    publication_id: scope_id.to_string(),
-                    operation: "detach",
-                });
-            }
-            if let Some(active) = self.provider_file_publication.borrow_mut().as_mut() {
-                active.attached = false;
-            }
-        }
-        let staging_path = self
-            .provider_file_publication
-            .borrow()
-            .as_ref()
-            .and_then(|active| active.staging_path.clone());
-        if let Some(path) = &staging_path {
-            if let Err(error) = fs::remove_file(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(ProviderFileMaintenanceWarning::StagingCleanupDeferred {
-                        publication_id: scope_id.to_string(),
-                        operation: "remove-file",
-                    });
-                }
-            }
-        }
-        let staging_dir_path = self
-            .provider_file_publication
-            .borrow()
-            .as_ref()
-            .and_then(|active| active.staging_dir_path.clone());
-        if let Some(path) = &staging_dir_path {
-            if let Err(error) = fs::remove_dir(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(ProviderFileMaintenanceWarning::StagingCleanupDeferred {
-                        publication_id: scope_id.to_string(),
-                        operation: "remove-directory",
-                    });
-                }
-            }
-        }
         self.provider_file_publication.replace(None);
         Ok(())
     }

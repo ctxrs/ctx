@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{canonical_provider_material_source_format, CaptureProvider};
 use ctx_history_store::Store;
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -32,8 +32,7 @@ use crate::{
     ProviderFileMutationContract, ProviderImportFailure, ProviderImportSummary,
     ProviderJsonlAppendCheckpoint, ProviderJsonlOpenDecision, ProviderJsonlOpenMode,
     ProviderJsonlReader, ProviderJsonlRecordRead, ProviderJsonlReplacementReason,
-    ProviderJsonlResumeState, Result, TabnineJsonlResumeState, CLAUDE_PROJECTS_SOURCE_FORMAT,
-    CODEX_SESSION_SOURCE_FORMAT, TABNINE_CLI_SOURCE_FORMAT,
+    ProviderJsonlResumeState, Result, TabnineJsonlResumeState, TABNINE_CLI_SOURCE_FORMAT,
 };
 
 use super::{ClaudeProjectsJsonlResumeState, CodexSessionJsonlResumeState};

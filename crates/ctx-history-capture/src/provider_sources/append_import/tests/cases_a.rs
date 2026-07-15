@@ -30,6 +30,13 @@ fn canonical_material_formats_preserve_existing_capture_identities() {
         Some("tabnine_cli_chat_recording_jsonl")
     );
     assert_eq!(
+        provider_canonical_material_source_format(
+            CaptureProvider::MistralVibe,
+            "mistral_vibe_session_jsonl_tree"
+        ),
+        Some("mistral_vibe_session_jsonl")
+    );
+    assert_eq!(
         provider_file_mutation_contract(CaptureProvider::Codex, "codex_history_jsonl"),
         ProviderFileMutationContract::WholeReplacement
     );

@@ -144,6 +144,11 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
             },
         )
         .unwrap();
+    let mut material_source = imported_source(new_id(), &file.source_root, "claude-session");
+    material_source.descriptor.provider = CaptureProvider::Claude;
+    material_source.descriptor.raw_source_path = Some(file.source_path.clone());
+    material_source.descriptor.source_format = Some(file.source_format.clone());
+    store.upsert_capture_source(&material_source).unwrap();
     let after_indexed: i64 = store
         .conn
         .query_row("SELECT total_changes()", [], |row| row.get(0))
@@ -160,6 +165,272 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
     assert_eq!(after_noop, after_indexed);
     assert!(store
         .list_pending_source_import_files(CaptureProvider::Claude, "/home/user/.claude/projects")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn manifested_inventory_formats_map_to_their_canonical_material_formats() {
+    for (index, mapping) in PROVIDER_MATERIAL_SOURCE_FORMATS.iter().enumerate() {
+        let provider = mapping.provider;
+        let inventory = mapping.inventory_source_format;
+        let material = mapping.material_source_format;
+        assert_eq!(
+            expected_material_source_format(provider, inventory),
+            material
+        );
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let root = format!("/fixture/material-format/{index}");
+        let path = format!("{root}/session.jsonl");
+        let observed_at_ms = timestamp_ms(fixed_time());
+        let mut file = source_import_file(provider, inventory, &root, &path, observed_at_ms);
+        file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        store
+            .mark_source_import_file_indexed(
+                provider,
+                SourceImportFileIndexUpdate {
+                    source_root: &root,
+                    source_path: &path,
+                    file_size_bytes: file.file_size_bytes,
+                    file_modified_at_ms: file.file_modified_at_ms,
+                    import_revision: file.import_revision,
+                    inventory_generation: current_source_generation(&store, provider, &root),
+                    metadata: &file.metadata,
+                    indexed_at_ms: observed_at_ms + 1,
+                },
+            )
+            .unwrap();
+        let mut source = imported_source(new_id(), &path, "material-format-session");
+        source.descriptor.provider = provider;
+        source.descriptor.raw_source_path = Some(path.clone());
+        source.descriptor.source_format = Some(material.into());
+        store.upsert_capture_source(&source).unwrap();
+        assert!(store.source_import_material_exists(&file).unwrap());
+
+        file.observed_at_ms += 1;
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        assert!(
+            store
+                .list_pending_source_import_files(provider, &root)
+                .unwrap()
+                .is_empty(),
+            "SQL material mapping disagreed for {}:{inventory}",
+            provider.as_str()
+        );
+    }
+    assert_eq!(
+        expected_material_source_format(CaptureProvider::Trae, "trae_state_vscdb"),
+        "trae_state_vscdb"
+    );
+}
+
+#[test]
+fn file_owned_source_import_material_does_not_match_a_sibling_capture_source() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.claude/projects";
+    let mut file = source_import_file(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        root,
+        "/home/user/.claude/projects/owned.jsonl",
+        observed_at_ms,
+    );
+    file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    let mut sibling = imported_source(new_id(), root, "sibling-session");
+    sibling.descriptor.provider = file.provider;
+    sibling.descriptor.raw_source_path = Some(format!("{root}/sibling.jsonl"));
+    sibling.descriptor.source_format = Some(file.source_format.clone());
+    store.upsert_capture_source(&sibling).unwrap();
+
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    let recovery = store
+        .list_source_import_file_work(file.provider, root, ImportWorkClass::Recovery, 10)
+        .unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(recovery[0].reason, ImportPendingReason::MissingMaterial);
+}
+
+#[test]
+fn file_owned_source_import_material_accepts_an_exact_self_rooted_capture_source() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.mistral-vibe/logs";
+    let mut file = source_import_file(
+        CaptureProvider::MistralVibe,
+        "mistral_vibe_session_jsonl_tree",
+        root,
+        "/home/user/.mistral-vibe/logs/session/messages.jsonl",
+        observed_at_ms,
+    );
+    file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    let mut source = imported_source(new_id(), &file.source_path, "mistral-session");
+    source.descriptor.provider = file.provider;
+    source.descriptor.raw_source_path = Some(file.source_path.clone());
+    source.descriptor.source_format = Some("mistral_vibe_session_jsonl".into());
+    store.upsert_capture_source(&source).unwrap();
+    let material: (String, String, Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT provider, source_format, source_root, raw_source_path FROM capture_sources WHERE id = ?1",
+            params![source.id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        material,
+        (
+            file.provider.as_str().to_owned(),
+            "mistral_vibe_session_jsonl".to_owned(),
+            Some(file.source_path.clone()),
+            Some(file.source_path.clone()),
+        )
+    );
+    assert!(store.source_import_material_exists(&file).unwrap());
+
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    assert!(store
+        .list_pending_source_import_files(file.provider, root)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn source_import_material_requires_expected_format_and_exact_root() {
+    for scenario in ["wrong_format", "wrong_root"] {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join(format!("{scenario}.sqlite"))).unwrap();
+        let observed_at_ms = timestamp_ms(fixed_time());
+        let root = "/fixture/pi";
+        let mut file = source_import_file(
+            CaptureProvider::Pi,
+            "pi_session_jsonl",
+            root,
+            "/fixture/pi/session.jsonl",
+            observed_at_ms,
+        );
+        file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        store
+            .mark_source_import_file_indexed(
+                file.provider,
+                SourceImportFileIndexUpdate {
+                    source_root: root,
+                    source_path: &file.source_path,
+                    file_size_bytes: file.file_size_bytes,
+                    file_modified_at_ms: file.file_modified_at_ms,
+                    import_revision: file.import_revision,
+                    inventory_generation: current_source_generation(&store, file.provider, root),
+                    metadata: &file.metadata,
+                    indexed_at_ms: observed_at_ms + 1,
+                },
+            )
+            .unwrap();
+        let mut source = imported_source(new_id(), root, "pi-session");
+        source.descriptor.provider = file.provider;
+        source.descriptor.raw_source_path = Some(file.source_path.clone());
+        source.descriptor.source_format = Some(file.source_format.clone());
+        if scenario == "wrong_format" {
+            source.descriptor.source_format = Some("pi_session_json".into());
+        } else {
+            source.descriptor.source_root = Some("/fixture/pi-other".into());
+        }
+        store.upsert_capture_source(&source).unwrap();
+
+        file.observed_at_ms += 1;
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        let recovery = store
+            .list_source_import_file_work(file.provider, root, ImportWorkClass::Recovery, 10)
+            .unwrap();
+        assert_eq!(
+            recovery[0].reason,
+            ImportPendingReason::MissingMaterial,
+            "{scenario}"
+        );
+        let counts = store.source_import_file_counts().unwrap();
+        assert_eq!(counts.indexed, 0, "{scenario}");
+        assert_eq!(counts.pending, 1, "{scenario}");
+    }
+}
+
+#[test]
+fn source_root_import_material_accepts_a_capture_source_for_the_same_root() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.hermes";
+    let mut file = source_import_file(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        root,
+        "/home/user/.hermes/state.db",
+        observed_at_ms,
+    );
+    file.metadata = serde_json::json!({"inventory_unit": "source_root"});
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    let mut root_source = imported_source(new_id(), root, "root-session");
+    root_source.descriptor.provider = file.provider;
+    root_source.descriptor.raw_source_path = Some(format!("{root}/sibling.db"));
+    root_source.descriptor.source_format = Some(file.source_format.clone());
+    store.upsert_capture_source(&root_source).unwrap();
+
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    assert!(store
+        .list_pending_source_import_files(file.provider, root)
         .unwrap()
         .is_empty());
 }
@@ -205,6 +476,7 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
             },
         )
         .unwrap();
+    upsert_source_material(&store, &file);
     assert!(store
         .list_pending_source_import_files(CaptureProvider::Hermes, root)
         .unwrap()
@@ -263,6 +535,7 @@ fn logical_import_unit_change_token_marks_same_owner_stat_pending() {
             },
         )
         .unwrap();
+    upsert_source_material(&store, &file);
     assert!(store
         .list_pending_source_import_files(CaptureProvider::OpenCode, root)
         .unwrap()
@@ -371,6 +644,7 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
             },
         )
         .unwrap();
+    upsert_source_material(&store, &files[0]);
     store
         .record_source_import_file_result(
             CaptureProvider::Claude,

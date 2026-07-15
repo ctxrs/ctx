@@ -11,6 +11,7 @@ fn existing_owner_lock_directory_must_already_be_private() {
     let error = create_or_validate_private_lock_dir(&lock_dir).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
+
 #[cfg(windows)]
 #[test]
 fn windows_private_paths_validate_exact_acl_and_reject_wrong_object_type() {
@@ -25,6 +26,7 @@ fn windows_private_paths_validate_exact_acl_and_reject_wrong_object_type() {
     validate_existing_private_windows_path(&file_path, false).unwrap();
     assert!(validate_existing_private_windows_path(&file_path, true).is_err());
 }
+
 #[cfg(unix)]
 #[test]
 fn unix_owner_lock_rejects_symlink_hardlink_permissive_owner_and_inode_swap() {
@@ -78,6 +80,63 @@ fn unix_owner_lock_rejects_symlink_hardlink_permissive_owner_and_inode_swap() {
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(validate_open_private_owner_lock_file(&opened, &target).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_private_root_does_not_block_main_database_staging() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(20, 100);
+    let retained_event = Uuid::from_u128(69_900);
+    let generation = {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let source = Uuid::from_u128(69_901);
+        insert_capture_source(&store, source, PATH_A, "non-utf8-staging-root");
+        insert_raw_event(&store, retained_event, 1, source, "retained visible event");
+        generation
+    };
+    let invalid_temp_root = temp
+        .path()
+        .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+    std::fs::create_dir(&invalid_temp_root).unwrap();
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("provider_files::tests::provider_file_subprocess_helper")
+        .arg("--test-threads=1")
+        .env("CTX_PROVIDER_FILE_HELPER_ACTION", "non-utf8-private-root")
+        .env("CTX_PROVIDER_FILE_HELPER_STORE", &path)
+        .env(
+            "CTX_PROVIDER_FILE_HELPER_GENERATION",
+            generation.to_string(),
+        )
+        .env("TMPDIR", &invalid_temp_root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "subprocess failed with {}:\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reopened = Store::open(&path).unwrap();
+    assert!(!reopened.has_pending_provider_file_publications().unwrap());
+    assert!(row_exists(&reopened, "events", retained_event));
+    assert_eq!(reopened.list_events().unwrap().len(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn canonical_store_lock_identity_survives_rename_hardlink_and_symlink_aliases() {
@@ -105,6 +164,7 @@ fn canonical_store_lock_identity_survives_rename_hardlink_and_symlink_aliases() 
         crate::store_identity::CanonicalStoreIdentity::open_target(&renamed, false).unwrap();
     assert_eq!(first.digest(), moved.digest());
 }
+
 #[cfg(unix)]
 #[test]
 fn subprocess_owner_lock_excludes_aliases_and_releases_on_process_exit() {
@@ -168,6 +228,7 @@ fn subprocess_owner_lock_excludes_aliases_and_releases_on_process_exit() {
         std::fs::read_to_string(second_digest).unwrap()
     );
 }
+
 #[test]
 fn subprocess_partial_cleanup_supersession_stays_hidden_and_is_adopted() {
     let temp = tempdir().unwrap();

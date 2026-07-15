@@ -192,11 +192,7 @@ impl Store {
             return self.ensure_scope_observation_is_current(scope);
         }
         if !marker.mutation_started
-            || self.provider_file_owner_has_current_observation(
-                scope.provider,
-                &scope.inventory_source_root,
-                &scope.source_path,
-            )?
+            || self.provider_file_publication_has_current_observation(scope.scope_id)?
         {
             return Err(StoreError::ProviderFileObservationChanged {
                 provider: scope.provider.as_str().to_owned(),
@@ -219,27 +215,21 @@ impl Store {
         Ok(())
     }
 
-    fn provider_file_owner_has_current_observation(
-        &self,
-        provider: CaptureProvider,
-        source_root: &str,
-        source_path: &str,
-    ) -> Result<bool> {
+    fn provider_file_publication_has_current_observation(&self, scope_id: Uuid) -> Result<bool> {
+        let current_observation =
+            provider_file_retirement_observation_current_predicate("publication");
         self.conn
             .query_row(
-                r#"
+                &format!(
+                    r#"
                 SELECT EXISTS (
-                    SELECT 1 FROM catalog_sessions
-                    WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
-                      AND is_stale = 0
-                    UNION ALL
-                    SELECT 1 FROM source_import_files
-                    WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
-                      AND is_stale = 0
-                    LIMIT 1
+                    SELECT 1 FROM provider_file_publications AS publication
+                    WHERE publication.replacement_id = ?1
+                      AND ({current_observation})
                 )
-                "#,
-                params![provider.as_str(), source_root, source_path],
+                "#
+                ),
+                params![scope_id.to_string()],
                 |row| row.get(0),
             )
             .map_err(StoreError::from)
@@ -259,7 +249,9 @@ impl Store {
                 SELECT replacement_id, staging_id, inventory_family,
                        inventory_source_format, inventory_source_root, source_path,
                        inventory_generation, file_size_bytes, file_modified_at_ms,
-                       import_revision, metadata_json, mutation_started
+                       import_revision, metadata_json, mutation_started,
+                       tracks_prior_material,
+                       staging_initialized
                 FROM provider_file_publications
                 WHERE owner_id = ?1 AND provider = ?2 AND material_source_format = ?3
                   AND material_source_root = ?4 AND source_path = ?5
@@ -287,6 +279,8 @@ impl Store {
                         import_revision: nonnegative_i64_to_u32(row.get(9)?)?,
                         metadata_json: row.get(10)?,
                         mutation_started: row.get(11)?,
+                        tracks_prior_material: row.get(12)?,
+                        staging_initialized: row.get(13)?,
                     })
                 },
             )
@@ -299,7 +293,6 @@ impl Store {
             let compatible = existing.import_revision == checkpoint.import_revision
                 && existing.checkpoint_version == checkpoint.checkpoint_version
                 && existing.stable_file_identity == checkpoint.stable_file_identity
-                && existing.head_sha256 == checkpoint.head_sha256
                 && existing.committed_byte_offset <= checkpoint.committed_byte_offset
                 && existing.committed_complete_line_count
                     <= checkpoint.committed_complete_line_count
@@ -377,12 +370,13 @@ impl Store {
         self.conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE provider = ?1 AND source_root = ?2 \
-                 AND source_path = ?3 AND is_stale != 0"
+                 AND source_path = ?3 AND source_format = ?4 AND is_stale != 0"
             ),
             params![
                 scope.provider.as_str(),
                 &scope.inventory_source_root,
                 &scope.source_path,
+                &scope.inventory_source_format,
             ],
         )?;
         Ok(())

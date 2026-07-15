@@ -49,7 +49,7 @@ fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
 }
 
 #[test]
-fn mixed_source_replay_remains_completed_with_rejections() {
+fn unchanged_mixed_source_resume_is_a_noop() {
     let temp = tempdir();
     let brain = write_antigravity_valid_and_malformed_file_tree(&temp);
     let path = brain.to_str().unwrap();
@@ -77,18 +77,18 @@ fn mixed_source_replay_remains_completed_with_rejections() {
         "--progress",
         "none",
     ]));
-    assert_eq!(replay["outcome"], "completed_with_rejections", "{replay:#}");
-    assert_eq!(replay["failure_scope"], "record", "{replay:#}");
+    assert_eq!(replay["outcome"], "success", "{replay:#}");
+    assert_eq!(replay["failure_scope"], "none", "{replay:#}");
     assert_eq!(replay["totals"]["failed_sources"], 0, "{replay:#}");
-    assert_eq!(replay["totals"]["rejected_records"], 1, "{replay:#}");
-    assert_eq!(
-        replay["sources"][0]["status"], "completed_with_rejections",
+    assert_eq!(replay["totals"]["rejected_records"], 0, "{replay:#}");
+    assert!(
+        replay["sources"].as_array().unwrap().is_empty(),
         "{replay:#}"
     );
 }
 
 #[test]
-fn codex_mixed_session_replay_remains_completed_with_rejections() {
+fn unchanged_codex_mixed_session_resume_is_a_noop() {
     let temp = tempdir();
     let session = temp.path().join("codex-mixed-replay.jsonl");
     fs::write(
@@ -105,29 +105,34 @@ fn codex_mixed_session_replay_remains_completed_with_rejections() {
     .unwrap();
     let path = session.to_str().unwrap();
 
-    for resume in [false, true] {
-        let mut command = ctx(&temp);
-        command.args([
-            "import",
-            "--provider",
-            "codex",
-            "--path",
-            path,
-            "--json",
-            "--progress",
-            "none",
-        ]);
-        if resume {
-            command.arg("--resume");
-        }
-        let report = json_output(&mut command);
-        assert_eq!(
-            report["outcome"], "completed_with_rejections",
-            "resume={resume}: {report:#}"
-        );
-        assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
-        assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
-    }
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        path,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(first["outcome"], "completed_with_rejections", "{first:#}");
+    assert_eq!(first["totals"]["failed_sources"], 0, "{first:#}");
+    assert_eq!(first["totals"]["rejected_records"], 1, "{first:#}");
+
+    let replay = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        path,
+        "--resume",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(replay["outcome"], "success", "{replay:#}");
+    assert_eq!(replay["totals"]["failed_sources"], 0, "{replay:#}");
+    assert_eq!(replay["totals"]["rejected_records"], 0, "{replay:#}");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -248,15 +253,16 @@ fn codex_append_after_mixed_tail_preserves_the_earlier_safe_checkpoint() {
         "{first_mixed:#}"
     );
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    let checkpoint_after_rejection: (i64, i64) = conn
+    let checkpoint_after_rejection: (i64, i64, i64) = conn
         .query_row(
-            "SELECT last_imported_file_size_bytes, indexed_file_size_bytes FROM catalog_sessions WHERE source_path = ?1",
+            "SELECT catalog.last_imported_file_size_bytes, catalog.indexed_file_size_bytes, checkpoint.committed_byte_offset FROM catalog_sessions AS catalog JOIN provider_file_checkpoints AS checkpoint ON checkpoint.provider = catalog.provider AND checkpoint.source_format = catalog.source_format AND checkpoint.source_root = catalog.source_root AND checkpoint.source_path = catalog.source_path WHERE catalog.source_path = ?1",
             [session.to_str().unwrap()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(checkpoint_after_rejection.0, initial.len() as i64);
     assert_eq!(checkpoint_after_rejection.1, mixed.len() as i64);
+    assert_eq!(checkpoint_after_rejection.2, initial.len() as i64);
     drop(conn);
 
     let accepted = r#"{"timestamp":"2026-07-13T12:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"mixed append accepted after rejection"}]}}"#;
@@ -268,15 +274,16 @@ fn codex_append_after_mixed_tail_preserves_the_earlier_safe_checkpoint() {
         "{appended_result:#}"
     );
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    let checkpoint_after_append: (i64, i64) = conn
+    let checkpoint_after_append: (Option<i64>, i64, i64) = conn
         .query_row(
-            "SELECT last_imported_file_size_bytes, indexed_file_size_bytes FROM catalog_sessions WHERE source_path = ?1",
+            "SELECT catalog.last_imported_file_size_bytes, catalog.indexed_file_size_bytes, checkpoint.committed_byte_offset FROM catalog_sessions AS catalog JOIN provider_file_checkpoints AS checkpoint ON checkpoint.provider = catalog.provider AND checkpoint.source_format = catalog.source_format AND checkpoint.source_root = catalog.source_root AND checkpoint.source_path = catalog.source_path WHERE catalog.source_path = ?1",
             [session.to_str().unwrap()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(checkpoint_after_append.0, initial.len() as i64);
+    assert_eq!(checkpoint_after_append.0, Some(initial.len() as i64));
     assert_eq!(checkpoint_after_append.1, appended.len() as i64);
+    assert_eq!(checkpoint_after_append.2, initial.len() as i64);
     drop(conn);
 
     let unchanged = json_output(ctx(&temp).args(args));
