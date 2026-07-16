@@ -234,6 +234,7 @@ impl SearchRefreshSourceWatcher {
         std::mem::take(&mut *changes)
     }
 
+    #[cfg(test)]
     fn mark_path_dirty(&self, path: &Path) {
         self.changes
             .lock()
@@ -389,7 +390,7 @@ fn watched_source_path_identities(paths: &[PathBuf]) -> Vec<WatchedSourcePathIde
                     exists: true,
                     is_dir: metadata.is_dir(),
                     stable_id,
-                    fallback_len: stable_id.is_none().then(|| metadata.len()),
+                    fallback_len: stable_id.is_none().then_some(metadata.len()),
                     fallback_modified_at: stable_id
                         .is_none()
                         .then(|| metadata.modified().ok())
