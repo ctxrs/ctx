@@ -69,22 +69,16 @@ public struct AgentHistoryClient: Sendable {
         return try ImportResponse(envelope: localEnvelope(operation: .sync, arguments: arguments))
     }
 
-    public func search(_ query: String? = nil, options: SearchOptions = SearchOptions()) throws -> SearchResponse {
+    public func search(_ query: SearchQueryV1? = nil, options: SearchOptions = SearchOptions()) throws -> SearchResponse {
         try requireSearchIntent(query: query, options: options)
         var arguments = ["search"]
         if let query {
-            arguments.append(query)
-        }
-        for term in options.terms {
-            arguments.append(contentsOf: ["--term", term])
+            arguments.append(contentsOf: ["--query-json", try query.jsonString()])
         }
         if let limit = options.limit {
             arguments.append(contentsOf: ["--limit", String(limit)])
         }
         appendOption(&arguments, "--backend", options.backend)
-        if let semanticWeight = options.semanticWeight {
-            arguments.append(contentsOf: ["--semantic-weight", String(semanticWeight)])
-        }
         appendOption(&arguments, "--provider", options.provider)
         appendOption(&arguments, "--workspace", options.workspace)
         appendOption(&arguments, "--since", options.since)
@@ -241,7 +235,7 @@ public struct AgentHistoryClient: Sendable {
             return AgentHistoryEnvelope(
                 operation: operation,
                 backend: backendWithRawDataRoot(backend, raw),
-                search: try decodeTyped(normalizeSearch(raw), as: AgentHistorySearchResult.self, context: "search")
+                search: try decodeTyped(try normalizeSearch(raw), as: AgentHistorySearchResult.self, context: "search")
             )
         case .showEvent:
             return AgentHistoryEnvelope(
@@ -298,13 +292,17 @@ private func appendOption(_ arguments: inout [String], _ name: String, _ value: 
     }
 }
 
-private func requireSearchIntent(query: String?, options: SearchOptions) throws {
-    if hasSearchText(query) || hasSearchText(options.file) || options.terms.contains(where: { hasSearchText($0) }) {
+private func requireSearchIntent(query: SearchQueryV1?, options: SearchOptions) throws {
+    if let query {
+        try query.validate()
+        return
+    }
+    if hasSearchText(options.file) {
         return
     }
     throw CtxAgentHistorySDKError(
         code: .invalidRequest,
-        message: "search requires a query, term, or file option"
+        message: "search requires a ctx-search-v1 query or file option"
     )
 }
 
@@ -417,12 +415,25 @@ private func normalizeImport(_ raw: JSONValue) -> JSONValue {
     ]).droppingNulls()
 }
 
-private func normalizeSearch(_ raw: JSONValue) -> JSONValue {
+private func normalizeSearch(_ raw: JSONValue) throws -> JSONValue {
     guard case let .object(object) = raw else {
-        return .object(["query": .null, "results": .array([])]).droppingNulls()
+        throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search returned a non-object payload")
+    }
+    guard object["schema_version"]?.intValue == 2 else {
+        throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search returned an unsupported schema version")
+    }
+    guard object["query"] == nil || object["query"] == .null || object["query"]?.objectValue != nil else {
+        throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search response contains a non-object canonical query")
+    }
+    guard object["query_execution"]?.objectValue != nil else {
+        throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search response is missing query execution diagnostics")
     }
     var search = raw.camelizedPublicJSON().objectValue ?? [:]
+    search.removeValue(forKey: "schemaVersion")
+    search.removeValue(forKey: "queryExecution")
+    search["schema_version"] = .number(2)
     search["query"] = object["query"] ?? search["query"] ?? .null
+    search["query_execution"] = object["query_execution"]
     search["filters"] = (object["filters"] ?? .object([:])).camelizedPublicJSON()
     search["freshness"] = (object["freshness"] ?? .object([:])).camelizedPublicJSON()
     search["generatedAt"] = object["generated_at"] ?? object["generatedAt"] ?? search["generatedAt"] ?? .null

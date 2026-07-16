@@ -37,7 +37,11 @@ var imported = await client.ImportHistoryAsync(new ImportOptions
 
 var results = await client.SearchAsync(new SearchOptions
 {
-    Query = "local agent history",
+    Query = new SearchQueryV1
+    {
+        Any = [SearchClause.All("local agent history"), SearchClause.Semantic("related indexing work")],
+        Must = [SearchClause.All("codex")]
+    },
     Provider = "codex",
     Refresh = "off",
     Limit = 10
@@ -55,7 +59,7 @@ Console.WriteLine(results.ToJsonObject().ToJsonString());
 - `SourcesAsync()`
 - `ImportHistoryAsync(ImportOptions?)`
 - `SyncAsync(ImportOptions?)`
-- `SearchAsync(SearchOptions)` with a query, term, or file option
+- `SearchAsync(SearchOptions)` with a structured `ctx-search-v1` query or file option
 - `ShowEventAsync(string, ShowEventOptions?)`
 - `ShowSessionAsync(string, ShowSessionOptions?)`
 - `ShowSessionAsync(ShowSessionOptions)`
@@ -73,6 +77,11 @@ future fields remain additive and accessible. SDK failures derive from
 `CtxAgentHistoryException` and expose `Code`, `Retryable`, `Details`, and
 `ToAgentHistoryError()`.
 
+`SearchQueryV1` validates matcher placement and byte limits before execution.
+Schema-v2 results expose the complete bounded `SearchQueryExecution` model,
+including resolved and consumed budgets, semantic readiness and coverage, and
+typed truncation diagnostics.
+
 ## Local CLI Adapter
 
 `LocalCliAdapter` maps public operations to the local CLI:
@@ -81,7 +90,7 @@ future fields remain additive and accessible. SDK failures derive from
 - `ctx setup --json`
 - `ctx sources --json`
 - `ctx import --json`
-- `ctx search <query>|--term <term>|--file <path> --json`
+- `ctx search --query-json <ctx-search-v1>|--file <path> --json`
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
 - `ctx locate event ... --format json`

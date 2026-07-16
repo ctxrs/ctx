@@ -113,7 +113,7 @@ public class AgentHistoryEnvelope {
                 fields.put("import", camel);
                 break;
             case "search":
-                fields.put("search", camel);
+                fields.put("search", normalizeSearch(raw));
                 break;
             case "showEvent":
                 fields.put("event", eventResult(camel));
@@ -165,6 +165,41 @@ public class AgentHistoryEnvelope {
             }
         }
         return out;
+    }
+
+    private static Map<String, Object> normalizeSearch(Map<String, Object> raw) {
+        Integer schema = AgentHistoryValue.integer(raw.get("schema_version"));
+        if (schema == null || schema.intValue() != 2) {
+            Map<String,Object> details = new LinkedHashMap<>();
+            details.put("expectedSchemaVersion", Integer.valueOf(2)); details.put("actualSchemaVersion", schema);
+            throw new CtxAgentHistoryException.Protocol("ctx search returned an unsupported schema version", details, null);
+        }
+        Object rawQuery = raw.get("query");
+        SearchQuery query = null;
+        if (rawQuery != null) {
+            Map<String,Object> queryMap = AgentHistoryValue.objectOrNull(rawQuery);
+            if (queryMap == null) {
+                Map<String,Object> details = new LinkedHashMap<>(); details.put("field", "query");
+                throw new CtxAgentHistoryException.Protocol("ctx search response contains a non-object canonical query", details, null);
+            }
+            try {
+                query = SearchQuery.fromMap(queryMap);
+            } catch (CtxAgentHistoryException.Validation error) {
+                Map<String,Object> details = new LinkedHashMap<>(); details.put("field", "query"); details.put("validation", error.getMessage());
+                throw new CtxAgentHistoryException.Protocol("ctx search returned an invalid canonical query", details, error);
+            }
+        }
+        Map<String,Object> execution = AgentHistoryValue.objectOrNull(raw.get("query_execution"));
+        if (execution == null) {
+            Map<String,Object> details = new LinkedHashMap<>(); details.put("field", "query_execution");
+            throw new CtxAgentHistoryException.Protocol("ctx search response is missing query execution diagnostics", details, null);
+        }
+        Map<String,Object> search = new LinkedHashMap<>(AgentHistoryValue.camelizeObject(raw));
+        search.remove("schemaVersion"); search.remove("queryExecution");
+        search.put("schema_version", Integer.valueOf(2));
+        search.put("query", query == null ? null : query.asMap());
+        search.put("query_execution", AgentHistoryValue.copyObject(execution));
+        return AgentHistoryValue.copyObject(search);
     }
 
     private static Map<String, Object> pick(Map<String, Object> raw, String... keys) {

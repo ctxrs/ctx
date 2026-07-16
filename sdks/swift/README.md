@@ -28,7 +28,10 @@ let client = AgentHistoryClient.local(dataRoot: "/tmp/ctx")
 
 let status = try client.status()
 let results = try client.search(
-    "retry handling",
+    try SearchQueryV1(
+        any: [.all("retry handling"), .semantic("related retry failures")],
+        must: [.all("codex")]
+    ),
     options: SearchOptions(provider: "codex", limit: 10, refresh: "off")
 )
 
@@ -45,7 +48,7 @@ The public client mirrors the `agent-history-v1` operations:
 - `sources()`
 - `importHistory()`
 - `sync()`
-- `search()` with a query, term, or file option
+- `search()` with a structured `ctx-search-v1` query or file option
 - `showEvent()`
 - `showSession()`
 - `locateEvent()`
@@ -54,6 +57,11 @@ The public client mirrors the `agent-history-v1` operations:
 
 Swift reserves `init` for initializers, so the agent-history-v1 `init` operation is
 exposed as `initialize()`. Returned envelopes still use `operation: "init"`.
+
+Search validation enforces the canonical matcher placements and byte limits
+before invoking `ctx search --query-json`. Schema-v2 results include typed
+resolved and consumed budgets, semantic readiness and coverage, and truncation
+diagnostics in `SearchQueryExecution`.
 
 ## Local CLI Adapter
 

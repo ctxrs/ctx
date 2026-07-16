@@ -115,7 +115,9 @@ public struct AgentHistoryImportResult: Codable, Equatable, Sendable {
 }
 
 public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
-    public var query: String?
+    public var schemaVersion: Int
+    public var query: SearchQueryV1?
+    public var queryExecution: SearchQueryExecution
     public var filters: JSONValue?
     public var freshness: AgentHistoryFreshness?
     public var generatedAt: String?
@@ -125,7 +127,9 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
     public var truncation: AgentHistoryTruncation?
 
     public init(
-        query: String? = nil,
+        schemaVersion: Int = 2,
+        query: SearchQueryV1? = nil,
+        queryExecution: SearchQueryExecution,
         filters: JSONValue? = nil,
         freshness: AgentHistoryFreshness? = nil,
         generatedAt: String? = nil,
@@ -134,7 +138,9 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
         pagination: AgentHistoryPagination? = nil,
         truncation: AgentHistoryTruncation? = nil
     ) {
+        self.schemaVersion = schemaVersion
         self.query = query
+        self.queryExecution = queryExecution
         self.filters = filters
         self.freshness = freshness
         self.generatedAt = generatedAt
@@ -145,7 +151,9 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
         case query
+        case queryExecution = "query_execution"
         case filters
         case freshness
         case generatedAt
@@ -157,7 +165,12 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        query = try container.decodeIfPresent(String.self, forKey: .query)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        guard schemaVersion == 2 else {
+            throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "unsupported search schema version")
+        }
+        query = try container.decodeIfPresent(SearchQueryV1.self, forKey: .query)
+        queryExecution = try container.decode(SearchQueryExecution.self, forKey: .queryExecution)
         filters = try container.decodeIfPresent(JSONValue.self, forKey: .filters)
         freshness = try container.decodeIfPresent(AgentHistoryFreshness.self, forKey: .freshness)
         generatedAt = try container.decodeIfPresent(String.self, forKey: .generatedAt)

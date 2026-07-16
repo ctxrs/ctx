@@ -29,18 +29,19 @@ final class CtxAgentHistoryTests: XCTestCase {
     }
 
     func testBuildsSearchFlags() throws {
-        let runner = CapturingRunner { _ in CommandResult(stdout: #"{"results":[]}"#) }
+        let runner = CapturingRunner { _ in CommandResult(stdout: Self.searchJSON) }
         let client = AgentHistoryClient(
             adapter: LocalCLIAdapter(dataRoot: "/tmp/ctx-sdk-test", runner: runner)
         )
 
         _ = try client.search(
-            "retry handling",
+            try SearchQueryV1(
+                any: [.all("retry handling"), .semantic("timeout backoff behavior")],
+                must: [.all("ctx")]
+            ),
             options: SearchOptions(
-                terms: ["timeout", "backoff"],
                 limit: 5,
                 backend: "hybrid",
-                semanticWeight: 0.35,
                 provider: "codex",
                 workspace: "ctx",
                 since: "30d",
@@ -58,12 +59,9 @@ final class CtxAgentHistoryTests: XCTestCase {
             runner.requests[0].arguments,
             [
                 "--data-root", "/tmp/ctx-sdk-test",
-                "search", "retry handling",
-                "--term", "timeout",
-                "--term", "backoff",
+                "search", "--query-json", #"{"any":[{"all":"retry handling"},{"semantic":"timeout backoff behavior"}],"must":[{"all":"ctx"}],"version":"ctx-search-v1"}"#,
                 "--limit", "5",
                 "--backend", "hybrid",
-                "--semantic-weight", "0.35",
                 "--provider", "codex",
                 "--workspace", "ctx",
                 "--since", "30d",
@@ -113,7 +111,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             switch Array(request.arguments.dropFirst(2).prefix(2)) {
             case ["status", "--json"]:
                 return CommandResult(stdout: Self.statusJSON)
-            case ["search", "local agent history"]:
+            case ["search", "--query-json"]:
                 return CommandResult(stdout: Self.searchJSON)
             case ["show", "event"]:
                 return CommandResult(stdout: Self.eventJSON)
@@ -133,15 +131,12 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(status.status.initialized, true)
         XCTAssertEqual(status.status.indexedItems, 3)
 
-        let search = try client.search("local agent history", options: SearchOptions(limit: 1, refresh: "off"))
-        XCTAssertEqual(search.search.query, "local agent history")
-        XCTAssertEqual(search.search.retrieval?["requestedMode"]?.stringValue, "hybrid")
-        XCTAssertEqual(search.search.retrieval?["effectiveMode"]?.stringValue, "lexical")
-        XCTAssertEqual(search.search.retrieval?["semanticWeight"], .number(0.0))
-        XCTAssertEqual(search.search.retrieval?["semanticFallbackCode"]?.stringValue, "semantic_retrieval_failed")
-        XCTAssertEqual(search.search.retrieval?["semanticFallback"]?.stringValue, "semantic_retrieval_failed")
-        XCTAssertEqual(search.search.retrieval?["coverage"]?["embeddedItems"]?.intValue, 4)
-        XCTAssertEqual(search.search.retrieval?["diagnostics"]?["queryEmbedMs"]?.intValue, 2)
+        let search = try client.search(try .all("local agent history"), options: SearchOptions(limit: 1, refresh: "off"))
+        XCTAssertEqual(search.search.schemaVersion, 2)
+        XCTAssertEqual(search.search.query?.any.first?.value, "local agent history")
+        XCTAssertEqual(search.search.queryExecution.queryVersion, CTX_SEARCH_V1_VERSION)
+        XCTAssertEqual(search.search.queryExecution.resolved.candidateRows, 16_384)
+        XCTAssertEqual(search.search.queryExecution.semantic.effectiveBackend, "lexical")
         XCTAssertEqual(search.search.results.first?.resultType, "event")
         XCTAssertEqual(search.search.results.first?.resultScope, "event")
         XCTAssertEqual(search.search.results.first?.citations.first?.targetType, "event")
@@ -204,7 +199,10 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertThrowsError(try parse.search(options: SearchOptions(refresh: "off"))) { error in
             XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
         }
-        XCTAssertThrowsError(try parse.search("   ")) { error in
+        XCTAssertThrowsError(try parse.search(try SearchQueryV1(mustNot: [.all("negative only")]))) { error in
+            XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
+        }
+        XCTAssertThrowsError(try parse.search(try SearchQueryV1(must: [.semantic("invalid placement")]))) { error in
             XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
         }
     }
@@ -311,7 +309,9 @@ final class CtxAgentHistoryTests: XCTestCase {
     }
 
     private static let statusJSON = #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-sdk-test","indexed_items":3,"indexed_sources":1,"cataloged_sessions":1}"#
-    private static let searchJSON = #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","retrieval":{"requested_mode":"hybrid","effective_mode":"lexical","semantic_weight":0.0,"semantic_fallback_code":"semantic_retrieval_failed","semantic_fallback":"semantic_retrieval_failed","coverage":{"embedded_items":4,"indexed_now":1},"diagnostics":{"query_embed_ms":2}},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx locate event 11111111-1111-4111-8111-111111111111","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222","ctx locate session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"pagination":{"limit":20},"truncation":{"truncated":false}}"#
+    private static let searchJSON = """
+    {"schema_version":2,"query":{"version":"ctx-search-v1","any":[{"all":"local agent history"}]},"query_execution":{"query_version":"ctx-search-v1","candidate_strategy":"bounded_fts","resolved":{"query_bytes":8192,"clauses":32,"analyzed_tokens_per_clause":32,"candidates_per_positive_seed":1024,"candidate_rows":16384,"retained_candidate_ids":8192,"residual_rows":8192,"verification_bytes":16777216,"verification_lookup_bytes":16384,"hydrated_rows":256,"hydration_input_bytes":8388608,"hydration_input_bytes_per_event":65536,"snippet_input_bytes":8388608,"returned_text_bytes":524288,"serialized_response_bytes":2097152,"results":200,"elapsed_ms":1000},"consumed":{"query_bytes":19,"clauses":1,"analyzed_tokens":3,"largest_analyzed_tokens_per_clause":3,"largest_positive_seed_candidates":1,"candidate_rows":1,"retained_candidate_ids":1,"residual_rows":1,"verification_bytes":16,"largest_verification_lookup_bytes":16,"hydrated_rows":1,"legacy_fallback_rows":0,"hydration_input_bytes":32,"largest_hydration_input_bytes":32,"snippet_input_bytes":32,"returned_results":1,"returned_text_bytes":32,"serialized_response_bytes":1000,"elapsed_ms":2},"semantic":{"attempted":false,"required":false,"readiness":"unavailable","effective_backend":"lexical","requested_candidates":0,"eligible_candidates":0,"candidates_supplied":0,"candidates_consumed":0,"candidates_used":0,"coverage":{},"completeness":"not_attempted","positive_text_rule_version":"ctx-search-positive-text-v1"},"rrf_k":60,"per_branch_candidate_rows":1024,"requested_result_limit":1,"result_limit":1,"max_result_limit":200,"clauses_executed":1,"verification_dropped":0,"filter_verification_dropped":0,"candidate_budget_exhausted":false,"timed_out":false,"truncated":false},"filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped"},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","result_type":"event","result_scope":"event","provider":"codex","snippet":"local agent history search result","citations":[{"target_type":"event","label":"codex event"}]}]}
+    """
     private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","source":"codex","cursor":"line:2","text":"local agent history search result","redaction_state":"redacted"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","source":"codex","cursor":"line:2","text":"local agent history search result","redaction_state":"redacted"}],"source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","cursor":"line:2","exists":true,"source_id":"33333333-3333-4333-8333-333333333333","source_format":"codex_session_jsonl"}}"#
     private static let sessionJSON = #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result"}],"source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","exists":true,"source_format":"codex_session_jsonl"},"mode":"lite","format":"json"}"#
     private static let locationJSON = #"{"ctx_session_id":"22222222-2222-4222-8222-222222222222","ctx_event_id":"11111111-1111-4111-8111-111111111111","provider":"codex","provider_session_id":"codex-fixture-session","source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","cursor":"line:2","exists":true,"source_id":"33333333-3333-4333-8333-333333333333","source_format":"codex_session_jsonl"},"resume":{"cursor":"line:2"}}"#
