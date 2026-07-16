@@ -1,8 +1,6 @@
-#![allow(dead_code)]
-
 use std::{
     fmt, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -12,7 +10,6 @@ const SEMANTIC_MODEL_RETRY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticModelRetryPolicy {
-    pub(crate) max_attempts: u32,
     pub(crate) initial_backoff: Duration,
     pub(crate) max_backoff: Duration,
 }
@@ -20,7 +17,6 @@ pub(crate) struct SemanticModelRetryPolicy {
 impl Default for SemanticModelRetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 5,
             initial_backoff: Duration::from_secs(30),
             max_backoff: Duration::from_secs(30 * 60),
         }
@@ -29,11 +25,6 @@ impl Default for SemanticModelRetryPolicy {
 
 impl SemanticModelRetryPolicy {
     pub(crate) fn validate(self) -> Result<Self, SemanticModelRetryPolicyError> {
-        if self.max_attempts == 0 {
-            return Err(SemanticModelRetryPolicyError(
-                "semantic model retry max_attempts must be positive".to_owned(),
-            ));
-        }
         if self.initial_backoff.is_zero() {
             return Err(SemanticModelRetryPolicyError(
                 "semantic model retry initial_backoff must be positive".to_owned(),
@@ -77,9 +68,7 @@ pub(crate) enum SemanticModelFailureClass {
     MemoryDeferred,
     Acquisition,
     Integrity,
-    Initialization,
     Inference,
-    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,22 +120,6 @@ impl SemanticModelRetryState {
         }
     }
 
-    pub(crate) fn model_key(&self) -> &str {
-        &self.model_key
-    }
-
-    pub(crate) fn attempt(&self) -> u32 {
-        self.attempt
-    }
-
-    pub(crate) fn next_eligible_at_ms(&self) -> Option<i64> {
-        self.next_eligible_at_ms
-    }
-
-    pub(crate) fn last_failure(&self) -> Option<&SemanticModelFailure> {
-        self.last_failure.as_ref()
-    }
-
     pub(crate) fn reset_for_model(&mut self, model_key: &str) -> bool {
         if self.model_key == model_key {
             return false;
@@ -168,12 +141,6 @@ impl SemanticModelRetryState {
         };
         if !failure.retryable {
             return Ok(SemanticModelRetryEligibility::Terminal {
-                attempt: self.attempt,
-                failure: failure.clone(),
-            });
-        }
-        if self.attempt >= policy.max_attempts {
-            return Ok(SemanticModelRetryEligibility::AttemptsExhausted {
                 attempt: self.attempt,
                 failure: failure.clone(),
             });
@@ -202,8 +169,8 @@ impl SemanticModelRetryState {
     ) -> Result<SemanticModelRetryEligibility, SemanticModelRetryPolicyError> {
         let policy = policy.validate()?;
         self.reset_for_model(model_key);
-        self.attempt = self.attempt.saturating_add(1).min(policy.max_attempts);
-        self.next_eligible_at_ms = if failure.retryable && self.attempt < policy.max_attempts {
+        self.attempt = self.attempt.saturating_add(1);
+        self.next_eligible_at_ms = if failure.retryable {
             let delay_ms = policy
                 .backoff_after_failure(self.attempt)
                 .as_millis()
@@ -214,10 +181,6 @@ impl SemanticModelRetryState {
         };
         self.last_failure = Some(failure);
         self.eligibility(now_ms, policy)
-    }
-
-    pub(crate) fn record_success(&mut self, model_key: &str) {
-        *self = Self::new(model_key);
     }
 
     pub(crate) fn status(
@@ -236,17 +199,12 @@ impl SemanticModelRetryState {
         Ok(SemanticModelRetryStatus {
             failure_class: self.last_failure.as_ref().map(|failure| failure.class),
             attempt: self.attempt,
-            max_attempts: policy.max_attempts,
             next_retry_at_ms,
             retryable: self
                 .last_failure
                 .as_ref()
                 .is_some_and(|failure| failure.retryable),
-            exhausted: matches!(
-                eligibility,
-                SemanticModelRetryEligibility::AttemptsExhausted { .. }
-                    | SemanticModelRetryEligibility::Terminal { .. }
-            ),
+            terminal: matches!(eligibility, SemanticModelRetryEligibility::Terminal { .. }),
         })
     }
 }
@@ -259,10 +217,6 @@ pub(crate) enum SemanticModelRetryEligibility {
     Deferred {
         attempt: u32,
         next_eligible_at_ms: i64,
-        failure: SemanticModelFailure,
-    },
-    AttemptsExhausted {
-        attempt: u32,
         failure: SemanticModelFailure,
     },
     Terminal {
@@ -284,9 +238,6 @@ impl SemanticModelRetryEligibility {
                 next_eligible_at_ms,
                 failure,
             }),
-            Self::AttemptsExhausted { attempt, failure } => {
-                Some(SemanticModelRetryFailure::AttemptsExhausted { attempt, failure })
-            }
             Self::Terminal { attempt, failure } => {
                 Some(SemanticModelRetryFailure::Terminal { attempt, failure })
             }
@@ -299,10 +250,6 @@ pub(crate) enum SemanticModelRetryFailure {
     Deferred {
         attempt: u32,
         next_eligible_at_ms: i64,
-        failure: SemanticModelFailure,
-    },
-    AttemptsExhausted {
-        attempt: u32,
         failure: SemanticModelFailure,
     },
     Terminal {
@@ -323,11 +270,6 @@ impl fmt::Display for SemanticModelRetryFailure {
                 "semantic model retry attempt {attempt} is deferred until {next_eligible_at_ms}: {}",
                 failure.message
             ),
-            Self::AttemptsExhausted { attempt, failure } => write!(
-                formatter,
-                "semantic model retry attempts exhausted after {attempt} attempts: {}",
-                failure.message
-            ),
             Self::Terminal { attempt, failure } => write!(
                 formatter,
                 "semantic model failure is terminal after attempt {attempt}: {}",
@@ -345,22 +287,20 @@ pub(crate) struct SemanticModelRetryStatus {
     #[serde(default)]
     pub(crate) failure_class: Option<SemanticModelFailureClass>,
     pub(crate) attempt: u32,
-    pub(crate) max_attempts: u32,
     #[serde(default)]
     pub(crate) next_retry_at_ms: Option<i64>,
     pub(crate) retryable: bool,
-    pub(crate) exhausted: bool,
+    pub(crate) terminal: bool,
 }
 
 impl SemanticModelRetryStatus {
-    pub(crate) fn clear(max_attempts: u32) -> Self {
+    pub(crate) fn clear() -> Self {
         Self {
             failure_class: None,
             attempt: 0,
-            max_attempts,
             next_retry_at_ms: None,
             retryable: false,
-            exhausted: false,
+            terminal: false,
         }
     }
 }
@@ -377,10 +317,6 @@ impl SemanticModelRetryStore {
             path: path.into(),
             policy,
         }
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 
     pub(crate) fn load_for_model(
@@ -406,7 +342,7 @@ impl SemanticModelRetryStore {
             )));
         }
         let reset = state.reset_for_model(model_key);
-        let normalized = state.normalize(self.policy);
+        let normalized = state.normalize();
         if reset || normalized {
             self.save(&state)?;
         }
@@ -475,7 +411,7 @@ impl SemanticModelRetryStore {
 }
 
 impl SemanticModelRetryState {
-    fn normalize(&mut self, policy: SemanticModelRetryPolicy) -> bool {
+    fn normalize(&mut self) -> bool {
         let original = self.clone();
         match self.last_failure.as_ref() {
             None => {
@@ -483,8 +419,8 @@ impl SemanticModelRetryState {
                 self.next_eligible_at_ms = None;
             }
             Some(failure) => {
-                self.attempt = self.attempt.max(1).min(policy.max_attempts);
-                if !failure.retryable || self.attempt >= policy.max_attempts {
+                self.attempt = self.attempt.max(1);
+                if !failure.retryable {
                     self.next_eligible_at_ms = None;
                 }
             }

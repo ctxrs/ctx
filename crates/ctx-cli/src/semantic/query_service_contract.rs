@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -9,6 +7,11 @@ use ring::constant_time;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use ctx_protocol::{
+    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED, SEARCH_MAX_CLAUSE_BYTES,
+    SEARCH_MAX_TOTAL_CLAUSE_BYTES,
+};
+
 use super::readiness::{
     SemanticEffectiveBackend, SemanticReadinessBlocker, SemanticReadinessBlockerCode,
     SemanticReadinessDiagnostics, SemanticReadinessState, SemanticRetrievalDiagnostics,
@@ -16,12 +19,15 @@ use super::readiness::{
 };
 
 pub(crate) const SEMANTIC_QUERY_RPC_SCHEMA_VERSION: u32 = 1;
-pub(crate) const SEMANTIC_QUERY_MAX_CLAUSES: usize = 16;
-pub(crate) const SEMANTIC_QUERY_MAX_TEXT_BYTES_PER_CLAUSE: usize = 16 * 1024;
-pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_TEXT_BYTES: usize = 64 * 1024;
-pub(crate) const SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS: usize = 4_096;
-pub(crate) const SEMANTIC_QUERY_MAX_HITS_PER_CLAUSE: usize = 512;
-pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_HITS: usize = 2_048;
+pub(crate) const SEMANTIC_QUERY_MAX_CLAUSES: usize = 1;
+pub(crate) const SEMANTIC_QUERY_MAX_TEXT_BYTES_PER_CLAUSE: usize = SEARCH_MAX_CLAUSE_BYTES;
+pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_TEXT_BYTES: usize = SEARCH_MAX_TOTAL_CLAUSE_BYTES;
+pub(crate) const SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS: usize =
+    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
+pub(crate) const SEMANTIC_QUERY_MAX_HITS_PER_CLAUSE: usize =
+    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
+pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_HITS: usize =
+    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,15 +83,6 @@ impl SemanticQueryServiceRequest {
         expected_token: &str,
         expected_model_key: &str,
     ) -> Result<AuthenticatedSemanticQueryRequest, SemanticQueryContractError> {
-        if self.schema_version != SEMANTIC_QUERY_RPC_SCHEMA_VERSION {
-            return Err(SemanticQueryContractError::new(
-                SemanticQueryFailureCode::UnsupportedSchema,
-                format!(
-                    "unsupported semantic query schema version {}",
-                    self.schema_version
-                ),
-            ));
-        }
         if expected_token.is_empty()
             || constant_time::verify_slices_are_equal(
                 self.token.as_bytes(),
@@ -98,6 +95,27 @@ impl SemanticQueryServiceRequest {
                 "semantic query authentication failed",
             ));
         }
+        self.validate_for_model(expected_model_key)?;
+        Ok(AuthenticatedSemanticQueryRequest {
+            model_key: self.model_key,
+            request_mode: self.request_mode,
+            clauses: self.clauses,
+        })
+    }
+
+    pub(crate) fn validate_for_model(
+        &self,
+        expected_model_key: &str,
+    ) -> Result<(), SemanticQueryContractError> {
+        if self.schema_version != SEMANTIC_QUERY_RPC_SCHEMA_VERSION {
+            return Err(SemanticQueryContractError::new(
+                SemanticQueryFailureCode::UnsupportedSchema,
+                format!(
+                    "unsupported semantic query schema version {}",
+                    self.schema_version
+                ),
+            ));
+        }
         if self.model_key != expected_model_key {
             return Err(SemanticQueryContractError::new(
                 SemanticQueryFailureCode::ModelMismatch,
@@ -105,11 +123,19 @@ impl SemanticQueryServiceRequest {
             ));
         }
         validate_semantic_query_clauses(&self.clauses)?;
-        Ok(AuthenticatedSemanticQueryRequest {
-            model_key: self.model_key,
-            request_mode: self.request_mode,
-            clauses: self.clauses,
-        })
+        if self.request_mode == SemanticRetrievalRequestMode::AutomaticRerank
+            && self.clauses.iter().any(|clause| {
+                clause
+                    .candidate_event_ids
+                    .as_ref()
+                    .map_or(true, Vec::is_empty)
+            })
+        {
+            return Err(SemanticQueryContractError::invalid_request(
+                "automatic semantic reranking requires a non-empty bounded lexical candidate set",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -285,6 +311,60 @@ impl SemanticQueryServiceResponse {
         response.readiness = Some(readiness.clone());
         response
     }
+
+    pub(crate) fn validate_for_request(
+        &self,
+        request: &SemanticQueryServiceRequest,
+        expected_model_key: &str,
+    ) -> Result<(), SemanticQueryContractError> {
+        request.validate_for_model(expected_model_key)?;
+        if self.schema_version != SEMANTIC_QUERY_RPC_SCHEMA_VERSION {
+            return Err(SemanticQueryContractError::invalid_response(format!(
+                "unsupported semantic query response schema version {}",
+                self.schema_version
+            )));
+        }
+        if self.ok {
+            if self.error.is_some() {
+                return Err(SemanticQueryContractError::invalid_response(
+                    "semantic query success must not contain an error",
+                ));
+            }
+            if self.model_key.as_deref() != Some(expected_model_key) {
+                return Err(SemanticQueryContractError::invalid_response(
+                    "semantic query response model key mismatch",
+                ));
+            }
+            let readiness = self.readiness.as_ref().ok_or_else(|| {
+                SemanticQueryContractError::invalid_response(
+                    "semantic query success is missing readiness diagnostics",
+                )
+            })?;
+            if !readiness.retrieval_available {
+                return Err(SemanticQueryContractError::invalid_response(
+                    "semantic query success requires retrieval-ready state",
+                ));
+            }
+            let authenticated = AuthenticatedSemanticQueryRequest {
+                model_key: request.model_key.clone(),
+                request_mode: request.request_mode,
+                clauses: request.clauses.clone(),
+            };
+            validate_semantic_query_response(&authenticated, &self.clauses)?;
+        } else {
+            if self.error.is_none() {
+                return Err(SemanticQueryContractError::invalid_response(
+                    "semantic query failure is missing an error",
+                ));
+            }
+            if !self.clauses.is_empty() {
+                return Err(SemanticQueryContractError::invalid_response(
+                    "semantic query failure must not contain clause results",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_semantic_query_response(
@@ -421,23 +501,11 @@ impl SemanticQueryFailure {
         }
     }
 
-    pub(crate) fn retry_at(mut self, next_eligible_at_ms: i64) -> Self {
-        self.retryable = true;
-        self.next_eligible_at_ms = Some(next_eligible_at_ms);
-        self
-    }
-
     pub(crate) fn from_readiness(readiness: &SemanticReadinessDiagnostics) -> Self {
         let blocker = readiness.primary_blocker();
         let code = match blocker {
             Some(SemanticReadinessBlocker::ModelRetryDeferred { .. }) => {
                 SemanticQueryFailureCode::RetryDeferred
-            }
-            Some(SemanticReadinessBlocker::CandidateLimitExceeded { .. }) => {
-                SemanticQueryFailureCode::CandidateLimitExceeded
-            }
-            Some(SemanticReadinessBlocker::VectorByteLimitExceeded { .. }) => {
-                SemanticQueryFailureCode::VectorByteLimitExceeded
             }
             _ => SemanticQueryFailureCode::NotReady,
         };
@@ -446,10 +514,7 @@ impl SemanticQueryFailure {
             Some(
                 SemanticReadinessBlocker::SemanticDisabled
                     | SemanticReadinessBlocker::UnsupportedPlatform
-                    | SemanticReadinessBlocker::ModelRetryExhausted { .. }
                     | SemanticReadinessBlocker::ModelFailureTerminal { .. }
-                    | SemanticReadinessBlocker::CandidateLimitExceeded { .. }
-                    | SemanticReadinessBlocker::VectorByteLimitExceeded { .. }
             )
         );
         Self {
@@ -483,10 +548,6 @@ impl SemanticQueryContractError {
 
     fn invalid_response(message: impl Into<String>) -> Self {
         Self::new(SemanticQueryFailureCode::Internal, message)
-    }
-
-    pub(crate) fn code(&self) -> SemanticQueryFailureCode {
-        self.code
     }
 
     pub(crate) fn into_failure(self) -> SemanticQueryFailure {

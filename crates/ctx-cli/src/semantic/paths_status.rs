@@ -39,6 +39,89 @@ fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(DAEMON_SEMANTIC_JOB_FILE)
 }
 
+fn semantic_model_retry_path(data_root: &Path) -> PathBuf {
+    daemon_jobs_path(data_root).join("semantic-model-retry.json")
+}
+
+fn semantic_model_retry_store(data_root: &Path) -> model_retry::SemanticModelRetryStore {
+    model_retry::SemanticModelRetryStore::new(
+        semantic_model_retry_path(data_root),
+        model_retry::SemanticModelRetryPolicy::default(),
+    )
+}
+
+fn semantic_model_retry_status(
+    data_root: &Path,
+) -> Result<model_retry::SemanticModelRetryStatus> {
+    semantic_model_retry_store(data_root)
+        .status(semantic_model_key(), utc_now().timestamp_millis())
+        .map_err(|error| anyhow!(error))
+}
+
+fn semantic_readiness_for_report(
+    data_root: &Path,
+    report: &SemanticWorkerReport,
+    model_resident: bool,
+    sidecar_available: bool,
+    vector_backend_available: bool,
+) -> Result<readiness::SemanticReadinessDiagnostics> {
+    let enabled = AppConfig::load(data_root)
+        .map(|config| config.semantic_search_enabled())
+        .unwrap_or_else(|_| AppConfig::default().semantic_search_enabled());
+    Ok(readiness::SemanticReadinessDiagnostics::evaluate(
+        readiness::SemanticReadinessInputs {
+            enabled,
+            supported: semantic_query_service_supported(),
+            model_available: model_resident,
+            sidecar_available,
+            vector_backend_available,
+            coverage: readiness::SemanticCoverageDiagnostics {
+                indexed_items: report.embedded_items,
+                indexed_chunks: report.embedded_chunks,
+                searchable_items: report
+                    .searchable_items_known
+                    .then_some(report.searchable_items),
+                dirty_items: report.dirty_items,
+                queued_items: report.queued_items_estimate,
+            },
+            model_retry: semantic_model_retry_status(data_root)?,
+        },
+    ))
+}
+
+fn semantic_readiness_for_status(
+    data_root: &Path,
+    report: &SemanticWorkerReport,
+) -> readiness::SemanticReadinessDiagnostics {
+    let sidecar_available = report.vector_path.exists() && report.status != "unavailable";
+    semantic_readiness_for_report(
+        data_root,
+        report,
+        false,
+        sidecar_available,
+        sidecar_available,
+    )
+    .unwrap_or_else(|_| {
+        readiness::SemanticReadinessDiagnostics::evaluate(readiness::SemanticReadinessInputs {
+            enabled: semantic_enabled_for_status(data_root),
+            supported: semantic_query_service_supported(),
+            model_available: false,
+            sidecar_available,
+            vector_backend_available: sidecar_available,
+            coverage: readiness::SemanticCoverageDiagnostics {
+                indexed_items: report.embedded_items,
+                indexed_chunks: report.embedded_chunks,
+                searchable_items: report
+                    .searchable_items_known
+                    .then_some(report.searchable_items),
+                dirty_items: report.dirty_items,
+                queued_items: report.queued_items_estimate,
+            },
+            model_retry: model_retry::SemanticModelRetryStatus::clear(),
+        })
+    })
+}
+
 fn daemon_cloud_sync_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(DAEMON_CLOUD_SYNC_JOB_FILE)
 }
@@ -818,6 +901,7 @@ fn daemon_semantic_job_report(
     let semantic_supported = semantic_query_service_supported();
     let status_value = read_daemon_job_status(&daemon_semantic_job_path(data_root))
         .filter(|value| semantic_status_file_model_matches(Some(value)));
+    let fallback_readiness = semantic_readiness_for_status(data_root, semantic_report);
     let disabled = (!daemon_enabled || !semantic_enabled || !semantic_supported)
         && disabled_overrides_lifecycle
         && !semantic_report.running;
@@ -921,6 +1005,21 @@ fn daemon_semantic_job_report(
             .as_ref()
             .and_then(|value| value.get("embedding_runtime").cloned())
             .or_else(|| semantic_report.embedding_runtime.clone()),
+        "model_resident": status_value
+            .as_ref()
+            .and_then(|value| value.get("model_resident").and_then(Value::as_bool))
+            .unwrap_or(false),
+        "model_retry": status_value
+            .as_ref()
+            .and_then(|value| value.get("model_retry").cloned())
+            .unwrap_or_else(|| serde_json::to_value(&fallback_readiness.model_retry).unwrap_or(Value::Null)),
+        "readiness": status_value
+            .as_ref()
+            .and_then(|value| value.get("readiness").cloned())
+            .unwrap_or_else(|| serde_json::to_value(&fallback_readiness).unwrap_or(Value::Null)),
+        "query_priority": status_value
+            .as_ref()
+            .and_then(|value| value.get("query_priority").cloned()),
         "worker_status": semantic_report.status,
         "coverage": {
             "searchable_items": semantic_report.searchable_items,

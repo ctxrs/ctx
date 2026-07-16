@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use super::model_retry::{SemanticModelFailureClass, SemanticModelRetryStatus};
@@ -31,11 +29,6 @@ pub(crate) struct SemanticCoverageDiagnostics {
 }
 
 impl SemanticCoverageDiagnostics {
-    pub(crate) fn missing_items(&self) -> Option<usize> {
-        self.searchable_items
-            .map(|searchable| searchable.saturating_sub(self.indexed_items))
-    }
-
     pub(crate) fn is_complete(&self) -> bool {
         self.searchable_items.is_some_and(|searchable| {
             self.indexed_items >= searchable && self.dirty_items == 0 && self.queued_items == 0
@@ -56,12 +49,9 @@ pub(crate) enum SemanticReadinessBlockerCode {
     QueuedItems,
     ModelUnavailable,
     ModelRetryDeferred,
-    ModelRetryExhausted,
     ModelFailureTerminal,
     SidecarUnavailable,
     VectorBackendUnavailable,
-    CandidateLimitExceeded,
-    VectorByteLimitExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,11 +78,6 @@ pub(crate) enum SemanticReadinessBlocker {
         attempt: u32,
         next_retry_at_ms: i64,
     },
-    ModelRetryExhausted {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failure_class: Option<SemanticModelFailureClass>,
-        attempt: u32,
-    },
     ModelFailureTerminal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure_class: Option<SemanticModelFailureClass>,
@@ -100,14 +85,6 @@ pub(crate) enum SemanticReadinessBlocker {
     },
     SidecarUnavailable,
     VectorBackendUnavailable,
-    CandidateLimitExceeded {
-        candidate_items: usize,
-        candidate_limit: usize,
-    },
-    VectorByteLimitExceeded {
-        vector_bytes: u64,
-        vector_byte_limit: u64,
-    },
 }
 
 impl SemanticReadinessBlocker {
@@ -123,17 +100,10 @@ impl SemanticReadinessBlocker {
             Self::QueuedItems { .. } => SemanticReadinessBlockerCode::QueuedItems,
             Self::ModelUnavailable => SemanticReadinessBlockerCode::ModelUnavailable,
             Self::ModelRetryDeferred { .. } => SemanticReadinessBlockerCode::ModelRetryDeferred,
-            Self::ModelRetryExhausted { .. } => SemanticReadinessBlockerCode::ModelRetryExhausted,
             Self::ModelFailureTerminal { .. } => SemanticReadinessBlockerCode::ModelFailureTerminal,
             Self::SidecarUnavailable => SemanticReadinessBlockerCode::SidecarUnavailable,
             Self::VectorBackendUnavailable => {
                 SemanticReadinessBlockerCode::VectorBackendUnavailable
-            }
-            Self::CandidateLimitExceeded { .. } => {
-                SemanticReadinessBlockerCode::CandidateLimitExceeded
-            }
-            Self::VectorByteLimitExceeded { .. } => {
-                SemanticReadinessBlockerCode::VectorByteLimitExceeded
             }
         }
     }
@@ -201,19 +171,11 @@ impl SemanticReadinessDiagnostics {
             });
         }
         if !inputs.model_available {
-            if inputs.model_retry.exhausted {
-                let blocker = if inputs.model_retry.retryable {
-                    SemanticReadinessBlocker::ModelRetryExhausted {
-                        failure_class: inputs.model_retry.failure_class,
-                        attempt: inputs.model_retry.attempt,
-                    }
-                } else {
-                    SemanticReadinessBlocker::ModelFailureTerminal {
-                        failure_class: inputs.model_retry.failure_class,
-                        attempt: inputs.model_retry.attempt,
-                    }
-                };
-                blockers.push(blocker);
+            if inputs.model_retry.terminal {
+                blockers.push(SemanticReadinessBlocker::ModelFailureTerminal {
+                    failure_class: inputs.model_retry.failure_class,
+                    attempt: inputs.model_retry.attempt,
+                });
             } else if let Some(next_retry_at_ms) = inputs.model_retry.next_retry_at_ms {
                 blockers.push(SemanticReadinessBlocker::ModelRetryDeferred {
                     failure_class: inputs.model_retry.failure_class,
@@ -239,7 +201,7 @@ impl SemanticReadinessDiagnostics {
             SemanticReadinessState::Unsupported
         } else if inputs.coverage.searchable_items == Some(0) {
             SemanticReadinessState::Empty
-        } else if !inputs.model_available && inputs.model_retry.exhausted {
+        } else if !inputs.model_available && inputs.model_retry.terminal {
             SemanticReadinessState::Failed
         } else if !inputs.model_available && inputs.model_retry.next_retry_at_ms.is_some() {
             SemanticReadinessState::RetryDeferred
@@ -282,21 +244,6 @@ pub(crate) enum SemanticEffectiveBackend {
     Lexical,
     Hybrid,
     Semantic,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SemanticRetrievalLimit {
-    CandidateItems,
-    VectorBytes,
-}
-
-impl SemanticRetrievalLimit {
-    pub(crate) fn blocker(self) -> SemanticReadinessBlockerCode {
-        match self {
-            Self::CandidateItems => SemanticReadinessBlockerCode::CandidateLimitExceeded,
-            Self::VectorBytes => SemanticReadinessBlockerCode::VectorByteLimitExceeded,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -371,33 +318,6 @@ impl SemanticRetrievalDiagnostics {
         )
     }
 
-    pub(crate) fn automatic_limit_fallback(
-        readiness: SemanticReadinessState,
-        attempted: bool,
-        limit: SemanticRetrievalLimit,
-    ) -> Self {
-        Self {
-            attempted,
-            request_mode: SemanticRetrievalRequestMode::AutomaticRerank,
-            readiness,
-            effective_backend: SemanticEffectiveBackend::Lexical,
-            lexical_eligibility_preserved: true,
-            lexical_order_preserved: true,
-            blocker: Some(limit.blocker()),
-            candidate_items: None,
-            candidate_limit: None,
-            vector_bytes_estimate: None,
-            vector_byte_limit: None,
-            vector_bytes_read: None,
-            vector_backend: None,
-            query_embed_ms: None,
-            vector_scan_ms: None,
-            chunks_scanned: None,
-            events_scored: None,
-            hits_returned: None,
-        }
-    }
-
     pub(crate) fn explicit_success(readiness: SemanticReadinessState) -> Self {
         Self::success(
             SemanticRetrievalRequestMode::ExplicitSemantic,
@@ -454,26 +374,5 @@ impl SemanticRetrievalDiagnostics {
         self.vector_byte_limit = Some(limit);
         self.vector_bytes_read = bytes_read;
         self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SemanticDiagnostics {
-    pub(crate) schema_version: u32,
-    pub(crate) readiness: SemanticReadinessDiagnostics,
-    pub(crate) retrieval: SemanticRetrievalDiagnostics,
-}
-
-impl SemanticDiagnostics {
-    pub(crate) fn new(
-        readiness: SemanticReadinessDiagnostics,
-        retrieval: SemanticRetrievalDiagnostics,
-    ) -> Self {
-        Self {
-            schema_version: SEMANTIC_READINESS_SCHEMA_VERSION,
-            readiness,
-            retrieval,
-        }
     }
 }
