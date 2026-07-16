@@ -26,6 +26,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-search:lib",
     "//crates/ctx-history-store:lib",
+    "//crates/ctx-protocol:lib",
 ]
 
 CTX_CLI_COMPILE_DATA = [

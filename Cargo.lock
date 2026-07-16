@@ -455,6 +455,7 @@ dependencies = [
  "ctx-history-core",
  "ctx-history-search",
  "ctx-history-store",
+ "ctx-protocol",
  "fastembed",
  "flate2",
  "fs2",
