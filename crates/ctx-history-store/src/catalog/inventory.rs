@@ -202,46 +202,6 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub fn catalog_sessions_have_external_path_owners(
-        &self,
-        provider: CaptureProvider,
-        source_root: &str,
-        sessions: &[CatalogSession],
-    ) -> Result<bool> {
-        if sessions.is_empty()
-            || !self.conn.query_row(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1 FROM catalog_sessions
-                    WHERE provider != ?1 OR source_root != ?2
-                )
-                "#,
-                params![provider.as_str(), source_root],
-                |row| row.get(0),
-            )?
-        {
-            return Ok(false);
-        }
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT EXISTS (
-                SELECT 1 FROM catalog_sessions
-                WHERE source_path = ?1
-                  AND (provider != ?2 OR source_root != ?3)
-            )
-            "#,
-        )?;
-        for session in sessions {
-            if stmt.query_row(
-                params![&session.source_path, provider.as_str(), source_root],
-                |row| row.get(0),
-            )? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     pub fn catalog_inventory_generation_is_complete(
         &self,
         provider: CaptureProvider,
