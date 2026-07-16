@@ -22,10 +22,11 @@ updates the current PowerShell session. Use `sh -s -- --no-modify-path` on Unix,
 to manage `PATH` yourself.
 
 The install script installs `ctx`, runs the bundled agent-history skill
-installer, and runs `ctx setup` so discovered local history is indexed before it
-exits. If daemon maintenance has been explicitly enabled, that setup run can
-also start the ctx-owned background daemon for native-history freshness and
-semantic catch-up. The skill installer opens an agent picker when interactive;
+installer, and runs `ctx setup`. With the default daemon-disabled configuration,
+setup performs lexical indexing in the foreground. If daemon maintenance has
+been explicitly enabled, setup can schedule bounded background indexing and
+return while the daemon continues native-history freshness and semantic
+catch-up. The skill installer opens an agent picker when interactive;
 otherwise it installs the universal `~/.agents/skills` copy plus detected
 agent-specific folders for tools that need them. Use `sh -s -- --no-setup` on
 Unix, or set `CTX_INSTALL_NO_SETUP=1` on Windows, for install-only CI or
@@ -56,15 +57,39 @@ ctx status
 ```
 
 Setup creates the configured ctx data root, initializes SQLite, discovers known
-provider history paths, inventories local history sources, imports discovered
-native provider sources, optimizes the local search index, and prints next
-steps. It does not write `config.toml` for implicit defaults and does not
-execute history-source plugin commands. The default data root is `~/.ctx`. The
-daemon is disabled by default during the prerelease; enable it with
-`ctx daemon enable` when you want daemon-owned background maintenance. Use
-`ctx setup --no-daemon` for a one-run opt-out after daemon maintenance is
-enabled. `ctx setup --catalog-only` and `ctx setup --json` do
-not autostart daemon maintenance.
+provider history paths, inventories local history sources, prepares searchable
+indexes, and prints next steps. It does not write `config.toml` for implicit
+defaults or execute history-source plugin commands. The default data root is
+`~/.ctx`.
+
+The daemon is disabled by default during the prerelease. Enable bounded
+background lexical maintenance with:
+
+```bash
+ctx daemon enable
+ctx setup
+ctx index watch
+```
+
+With the daemon enabled, setup can schedule indexing, print separate lexical
+and semantic readiness estimates, and return while work continues. Use
+`ctx setup --wait` to wait for foreground lexical indexing, or
+`ctx setup --no-daemon` for a one-run autostart opt-out. `ctx setup
+--catalog-only` and `ctx setup --json` do not autostart daemon maintenance.
+
+Semantic search is a second explicit opt-in and requires the daemon:
+
+```toml
+# ~/.ctx/config.toml
+[daemon]
+enabled = true
+
+[search]
+semantic = true
+```
+
+Rerun `ctx setup` after enabling it, then use `ctx index watch` or
+`ctx index wait --semantic` to observe readiness.
 
 Use a different root when testing:
 
@@ -75,10 +100,11 @@ CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 
 Setup does not write to source repositories, call model APIs, download embedding
 models, or require API keys while semantic search is disabled. If daemon and
-semantic search are explicitly enabled, daemon maintenance may acquire the local
-ONNX Runtime asset and embedding model needed for the installed platform.
-Daemon maintenance is local-only; cloud sync remains disabled and reports
-`network_allowed: false`. Official
+semantic search are explicitly enabled, daemon maintenance may download only
+the pinned, verified local runtime/model artifacts from their documented
+sources. It uploads no query or local history data. Foreground search, MCP, and
+SDK calls never acquire a model. Daemon maintenance is local-only; cloud sync
+remains disabled and reports `network_allowed: false`. Official
 installer-managed binaries can run a signed background auto-upgrade check after
 later successful non-JSON commands other than `ctx status`; that updater does
 not collect provider history.
@@ -137,27 +163,36 @@ Native provider `--path` imports require `--provider`. Custom JSONL imports use
 
 ```bash
 ctx search "failed migration"
-ctx search "failed migration" --term sqlite --term rollback
+ctx search --term "failed migration" --term "schema rollback"
+ctx search --phrase "database is locked" --must sqlite
+ctx search --literal "logs_2.db"
 ctx show event <ctx-event-id> --window 3
 ctx show session <ctx-session-id>
 ```
 
-Lexical search treats words in a multi-word query as alternatives and ranks
-results matching more of those words ahead of partial matches. Repeated
-`--term` values merge additional queries or keywords into the same result set.
+A positional query requires every analyzed word in the same indexed event;
+order does not matter. `ctx search "failed migration"` means
+`failed AND migration`, not OR and not an exact phrase. Repeated `--term`
+values are genuine alternatives, with AND inside each value and OR between
+values. Use `--phrase` when order and adjacency matter, `--literal` for a
+punctuation-preserving filename/symbol/value, `--must` for a requirement that
+applies to every alternative, and `--exclude` for a global exclusion.
 
 Use `ctx_event_id` with `ctx show event` when you need a hit plus surrounding
 events. Use `ctx_session_id` with `ctx show session` when you need the
 transcript. Commands accept full ctx IDs or unambiguous ID prefixes of at least
-eight hex characters. Search also accepts filters such as `--provider`,
+eight hex characters. Search also accepts `--semantic` for one explicit
+conceptual-recall alternative and `--query-file` for the canonical
+`ctx-search-v1` JSON object, plus filters such as `--provider`,
 `--workspace`, `--since`, `--event-type`, `--file`, `--include-subagents`,
-`--include-current-session`, `--term`, `--limit`, and
+`--include-current-session`, `--limit`, and
 `--refresh background|off|wait`.
 `--limit` is capped at `200`.
-Search defaults to `--refresh background`, which serves existing indexes while
-daemon maintenance refreshes lexical and semantic indexes when enabled. Use
-`--refresh wait` for foreground text refresh, or `ctx import --all` for an
-explicit import catch-up.
+Search defaults to `--refresh background`, which serves committed indexes while
+daemon maintenance catches up when enabled. With the daemon disabled it uses a
+bounded in-process lexical refresh. `--refresh wait` waits for currently
+discovered lexical and enabled semantic work to converge; `ctx import --all`
+performs an explicit import catch-up.
 
 When ctx runs inside Codex, search excludes the active Codex session tree by
 default when it can identify it. Use `--include-current-session` if the current
@@ -165,15 +200,14 @@ session or its subagent work is the history you want to search. Use
 `--refresh off` when you need a strictly read-only query over the existing ctx
 index.
 
-Semantic and hybrid search read existing local sidecar coverage. With semantic
-enabled and default background refresh, search may start the configured daemon
-so the daemon-owned query service can embed the query; `--refresh off` skips
-that autostart. Search does not run semantic catch-up or download embedding
-models. Hybrid uses semantic evidence only after coverage is complete and dirty
-work is drained; until then it falls back to lexical search with a structured
-reason. Explicit semantic search can query partial coverage for diagnostics,
-but reports a local error when the model cache is missing or the semantic worker
-is actively indexing.
+Backend selection never changes query meaning. `lexical` rejects semantic
+clauses. `semantic` requires one semantic clause as the sole positive
+alternative and still enforces lexical requirements and filters. `hybrid` can
+union explicit lexical and semantic alternatives. Without `--semantic`, hybrid
+may only rerank already-eligible lexical results. If that optional reranker is
+unavailable, the lexical set/order is unchanged and diagnostics say why. An
+explicit semantic request returns a typed readiness error rather than silently
+becoming lexical. Search never runs semantic catch-up or downloads a model.
 
 ## 6. Use JSON For Scripts
 
@@ -185,8 +219,11 @@ ctx show session <ctx-session-id> --format json
 
 Default text output is usually better for agent reading. Search JSON is the
 supported machine-readable retrieval API for scripts and exact field
-extraction. It contains cited snippets and source metadata, but it is retrieved
-source material rather than generated analysis.
+extraction. Search schema version 2 includes the canonical query and
+`query_execution` with resolved/consumed work budgets, truncation reasons,
+semantic readiness/coverage, completeness, and effective backend. It contains
+cited snippets and source metadata, but it is retrieved source material rather
+than generated analysis.
 
 ## 7. Built-In Docs And Upgrades
 
