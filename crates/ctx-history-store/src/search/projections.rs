@@ -30,6 +30,18 @@ pub(crate) const SEARCH_PROJECTION_REBUILD_REQUIRED_STAT_KEY: &str =
     "search_projection_rebuild_required_v1";
 const SEMANTIC_TURN_TEXT_MAX_CHARS: usize = 64 * 1024;
 
+pub(crate) struct SearchProjectionReadGuard<'a> {
+    conn: &'a Connection,
+}
+
+impl Drop for SearchProjectionReadGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .conn
+            .execute_batch("RELEASE ctx_search_projection_read;");
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SearchProjectionRebuild {
     Full,
@@ -161,6 +173,7 @@ impl Store {
         if match_clauses.is_empty() && scriptgram_clauses.is_empty() {
             return Ok(Vec::new());
         }
+        let _projection_snapshot = self.begin_readable_search_projection()?;
 
         if scriptgram_clauses.is_empty() {
             return self.search_event_hits_page_lexical(
@@ -247,6 +260,7 @@ impl Store {
         if chunk_ranges.is_empty() {
             return Ok(Vec::new());
         }
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         let event_ids = chunk_ranges.keys().copied().collect::<Vec<_>>();
         let placeholders = (0..event_ids.len())
             .map(|_| "?")
@@ -326,6 +340,7 @@ impl Store {
         if event_ids.is_empty() {
             return Ok(HashSet::new());
         }
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         let placeholders = (0..event_ids.len())
             .map(|_| "?")
             .collect::<Vec<_>>()
@@ -360,6 +375,7 @@ impl Store {
     }
 
     pub fn count_event_embedding_documents_exact(&self) -> Result<usize> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         semantic_searchable_item_count_exact(&self.conn)
     }
 
@@ -368,6 +384,7 @@ impl Store {
     }
 
     pub fn event_embedding_document_count_cached_or_exact(&self) -> Result<usize> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if let Some(count) = self.cached_event_embedding_document_count()? {
             return Ok(count);
         }
@@ -375,6 +392,7 @@ impl Store {
     }
 
     pub fn refresh_event_embedding_document_count_cache(&self) -> Result<()> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         refresh_semantic_searchable_item_stats(&self.conn).map(|_| ())
     }
 
@@ -383,6 +401,7 @@ impl Store {
         before: Option<(i64, u64)>,
         limit: usize,
     ) -> Result<Vec<EventEmbeddingDocument>> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         let sql = semantic_lite_turn_document_select_sql(
             &format!(
                 r#"
@@ -419,6 +438,7 @@ impl Store {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         let next_user_predicate =
             semantic_lite_turn_user_eligible_predicate("next_user", "next_user_search");
         let clauses = terms
@@ -520,6 +540,7 @@ impl Store {
         if event_ids.is_empty() {
             return Ok(Vec::new());
         }
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         let placeholders = (0..event_ids.len())
             .map(|_| "?")
             .collect::<Vec<_>>()
@@ -556,6 +577,25 @@ impl Store {
             if cached_semantic_searchable_item_count(&self.conn)?.is_none() {
                 refresh_semantic_searchable_item_stats(&self.conn)?;
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_readable_search_projection(&self) -> Result<SearchProjectionReadGuard<'_>> {
+        self.conn
+            .execute_batch("SAVEPOINT ctx_search_projection_read;")?;
+        if let Err(error) = self.ensure_search_projection_readable() {
+            let _ = self.conn.execute_batch(
+                "ROLLBACK TO ctx_search_projection_read; RELEASE ctx_search_projection_read;",
+            );
+            return Err(error);
+        }
+        Ok(SearchProjectionReadGuard { conn: &self.conn })
+    }
+
+    fn ensure_search_projection_readable(&self) -> Result<()> {
+        if search_projection_rebuild_pending(&self.conn)? {
+            return Err(crate::StoreError::SearchProjectionRebuildPending);
         }
         Ok(())
     }
@@ -697,33 +737,7 @@ fn populate_record_search_projection_bounded(
                 + record.body.len()
                 + record.tags.iter().map(String::len).sum::<usize>();
             transaction.prepare_unit(store, unit_bytes)?;
-            store.conn.execute(
-                r#"
-                INSERT INTO ctx_history_search
-                (record_id, title, summary, primary_user_text, decision_text, context_text, tag_text)
-                VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)
-                "#,
-                params![
-                    record.id.to_string(),
-                    local_preview(&record.title, 512),
-                    local_preview(&record.body, 2048),
-                    local_preview(&record.body, 2048),
-                    "",
-                    local_preview(&record.tags.join(" "), 1024),
-                ],
-            )?;
-            if has_record_scriptgram {
-                let token_text = scriptgram_index_text(&record_search_scriptgram_source(&record));
-                if !token_text.is_empty() {
-                    store.conn.execute(
-                        r#"
-                        INSERT INTO ctx_history_search_scriptgram (record_id, token_text)
-                        VALUES (?1, ?2)
-                        "#,
-                        params![record.id.to_string(), token_text],
-                    )?;
-                }
-            }
+            replace_record_search_projection(&store.conn, &record, has_record_scriptgram)?;
             transaction.record_unit(store, unit_bytes)?;
         }
     }
@@ -771,11 +785,19 @@ pub(crate) fn upsert_record_search_projection(
     if !table_exists(conn, "ctx_history_search")? {
         return Ok(());
     }
+    replace_record_search_projection(conn, record, record_scriptgram_table_ready(conn)?)
+}
+
+fn replace_record_search_projection(
+    conn: &Connection,
+    record: &HistoryRecord,
+    has_record_scriptgram: bool,
+) -> Result<()> {
     conn.execute(
         "DELETE FROM ctx_history_search WHERE record_id = ?1",
         params![record.id.to_string()],
     )?;
-    if record_scriptgram_table_ready(conn)? {
+    if has_record_scriptgram {
         conn.execute(
             "DELETE FROM ctx_history_search_scriptgram WHERE record_id = ?1",
             params![record.id.to_string()],
@@ -796,7 +818,7 @@ pub(crate) fn upsert_record_search_projection(
             local_preview(&record.tags.join(" "), 1024),
         ],
     )?;
-    if record_scriptgram_table_ready(conn)? {
+    if has_record_scriptgram {
         let token_text = scriptgram_index_text(&record_search_scriptgram_source(record));
         if !token_text.is_empty() {
             conn.execute(
@@ -865,16 +887,7 @@ fn required_search_projection_rebuild(
     if !table_exists(conn, "ctx_history_search")? {
         return Ok(None);
     }
-    if table_exists(conn, "search_projection_stats")?
-        && conn
-            .query_row(
-                "SELECT 1 FROM search_projection_stats WHERE key = ?1",
-                [SEARCH_PROJECTION_REBUILD_REQUIRED_STAT_KEY],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
-    {
+    if search_projection_rebuild_pending(conn)? {
         return Ok(Some(SearchProjectionRebuild::Full));
     }
 
@@ -915,6 +928,18 @@ fn required_search_projection_rebuild(
     }
 
     Ok(None)
+}
+
+fn search_projection_rebuild_pending(conn: &Connection) -> Result<bool> {
+    Ok(table_exists(conn, "search_projection_stats")?
+        && conn
+            .query_row(
+                "SELECT 1 FROM search_projection_stats WHERE key = ?1",
+                [SEARCH_PROJECTION_REBUILD_REQUIRED_STAT_KEY],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
 }
 
 fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {

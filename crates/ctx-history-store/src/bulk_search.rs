@@ -281,7 +281,7 @@ impl Store {
         }
     }
 
-    /// Run at most one best-effort maintenance pass.
+    /// Finish maintenance when possible, deferring only recoverable pressure.
     ///
     /// Callers drop `guard` after this returns. A maintenance failure is
     /// deliberately deferred: its committed import data stays searchable and

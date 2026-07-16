@@ -66,13 +66,11 @@ fn refresh_search_index_stops_on_pinned_wal_and_restarts_idempotently() {
     let db_path = temp.path().join("work.sqlite");
     let store =
         Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let mut event_ids = Vec::new();
     for seq in 0..600 {
-        store
-            .upsert_event(&local_preview_event(
-                seq,
-                &format!("bounded-refresh-sentinel-{seq}"),
-            ))
-            .unwrap();
+        let event = local_preview_event(seq, &format!("bounded-refresh-sentinel-{seq}"));
+        event_ids.push(event.id);
+        store.upsert_event(&event).unwrap();
     }
 
     let writer = Connection::open(&db_path).unwrap();
@@ -107,6 +105,73 @@ fn refresh_search_index_stops_on_pinned_wal_and_restarts_idempotently() {
             .unwrap(),
         1
     );
+
+    let reopen_error =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10))
+            .err()
+            .unwrap();
+    assert!(matches!(reopen_error, StoreError::WalCheckpointBusy { .. }));
+
+    let read_only = Store::open_read_only(&db_path).unwrap();
+    assert!(matches!(
+        read_only
+            .search_event_hits("bounded-refresh-sentinel", 1000)
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .search_records("bounded-refresh-sentinel", 1000)
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    let chunks = HashMap::from([(event_ids[0], (0, 8))]);
+    assert!(matches!(
+        read_only.semantic_event_hits_by_id(&chunks).unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .semantic_eligible_event_ids(&event_ids[..1])
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .count_event_embedding_documents_exact()
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only.count_event_embedding_documents().unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .refresh_event_embedding_document_count_cache()
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .recent_event_embedding_documents(None, 10)
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .event_embedding_documents_matching_terms(&["bounded".to_owned()], 10)
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    assert!(matches!(
+        read_only
+            .event_embedding_documents_by_ids(&event_ids[..1])
+            .unwrap_err(),
+        StoreError::SearchProjectionRebuildPending
+    ));
+    drop(read_only);
+
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
     drop(store);
@@ -1013,7 +1078,9 @@ fn upsert_record_updates_record_search_without_rebuilding_event_search() {
         )
         .unwrap();
 
-    let record = stable_tie_record(5);
+    let mut record = stable_tie_record(5);
+    record.title.push_str(" 認証");
+    store.upsert_record(&record).unwrap();
     store.upsert_record(&record).unwrap();
 
     let sentinel_count: i64 = store
@@ -1025,6 +1092,17 @@ fn upsert_record_updates_record_search_without_rebuilding_event_search() {
         )
         .unwrap();
     assert_eq!(sentinel_count, 1);
+    for table in ["ctx_history_search", "ctx_history_search_scriptgram"] {
+        let projection_rows: i64 = store
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE record_id = ?1"),
+                [record.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projection_rows, 1, "duplicate projection rows in {table}");
+    }
     assert_search_order(&store, &[record.id]);
 }
 

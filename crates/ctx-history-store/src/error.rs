@@ -32,6 +32,10 @@ pub enum StoreError {
     BulkSearchImportBusy,
     #[error("bulk search guard belongs to a different ctx index")]
     InvalidBulkSearchGuard,
+    #[error(
+        "ctx search index rebuild is incomplete; run a writable command such as `ctx setup` or `ctx import` to resume it"
+    )]
+    SearchProjectionRebuildPending,
     #[error("archive conflicts with existing {kind}: {id}")]
     ImportConflict { kind: &'static str, id: Uuid },
     #[error("archive artifact {id} content does not match its blob hash")]

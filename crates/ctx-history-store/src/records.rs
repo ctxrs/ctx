@@ -239,6 +239,7 @@ impl Store {
         if fts_match_query(query).is_none() && scriptgram_match_query(query).is_none() {
             return Ok(Vec::new());
         }
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if let Some(records) = self.search_records_fts(query, limit, offset)? {
             return Ok(records);
         }
