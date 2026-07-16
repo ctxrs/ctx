@@ -98,9 +98,25 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     }
     assert!(search_tool["inputSchema"]["properties"]["backend"]["default"].is_null());
     assert_eq!(
-        search_tool["inputSchema"]["properties"]["semantic_weight"]["default"],
-        0.35
+        search_tool["inputSchema"]["anyOf"],
+        json!([{"required":["query"]},{"required":["file"]}])
     );
+    let query_schema = &search_tool["inputSchema"]["properties"]["query"];
+    assert_eq!(query_schema["additionalProperties"], false);
+    assert_eq!(query_schema["properties"]["any"]["maxContains"], 1);
+    assert_eq!(
+        query_schema["properties"]["any"]["items"]["oneOf"][3]["properties"]["semantic"]
+            ["maxLength"],
+        1024
+    );
+    assert_eq!(
+        query_schema["properties"]["must"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(search_tool["inputSchema"]["properties"]["semantic_weight"].is_null());
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
@@ -152,6 +168,76 @@ fn mcp_initialize_negotiates_client_supported_protocol_version() {
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(responses[0]["result"]["serverInfo"]["name"], "ctx");
+}
+
+#[test]
+fn mcp_search_rejects_invalid_structured_queries_before_opening_store() {
+    let temp = tempdir();
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": {
+                            "version": "ctx-search-v1",
+                            "must": [{"semantic": "conceptual lookup"}]
+                        }
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {"query": "legacy opaque query"}
+                }
+            }),
+        ],
+    );
+
+    for result in [&responses[1]["result"], &responses[2]["result"]] {
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["schema_version"], 2);
+        assert_eq!(result["structuredContent"]["payload_type"], "search_error");
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "invalid_request"
+        );
+        assert_eq!(result["structuredContent"]["error"]["retryable"], false);
+    }
+    assert!(
+        responses[1]["result"]["structuredContent"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("semantic clauses are allowed only in any")
+    );
+    assert!(
+        responses[2]["result"]["structuredContent"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid ctx-search-v1 query JSON")
+    );
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "MCP query validation must happen before opening the store"
+    );
 }
 
 #[test]
@@ -437,28 +523,32 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "onboarding",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"onboarding"}]},
                         "provider": "codex",
                         "limit": 5,
-                        "backend": "hybrid",
-                        "semantic_weight": 0.4
+                        "backend": "hybrid"
                     }
                 }
             }),
         ],
     );
     let search = &search_responses[1]["result"]["structuredContent"];
-    assert_eq!(search["schema_version"], 1);
+    assert_eq!(search["schema_version"], 2);
     assert_eq!(search["payload_type"], "search_results");
-    assert_eq!(search["query"], "onboarding");
+    assert_eq!(
+        search["query"],
+        json!({"version":"ctx-search-v1","any":[{"all":"onboarding"}]})
+    );
+    assert_eq!(search["query_execution"]["query_version"], "ctx-search-v1");
+    assert!(search["query_execution"]["resolved"]["candidate_rows"].is_u64());
+    assert!(search["query_execution"]["consumed"]["candidate_rows"].is_u64());
     assert_eq!(search["freshness"]["mode"], "off");
     assert_eq!(search["freshness"]["status"], "skipped");
     assert_eq!(search["retrieval"]["requested_mode"], "hybrid");
     assert_eq!(search["retrieval"]["effective_mode"], "lexical");
-    assert_eq!(search["retrieval"]["semantic_weight"], 0.0);
     assert_eq!(
-        search["retrieval"]["semantic_fallback_code"],
-        "semantic_disabled"
+        search["query_execution"]["semantic"]["effective_backend"],
+        "lexical"
     );
     assert_useful_mcp_text(
         &search_responses[1]["result"],
@@ -467,8 +557,6 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
             "query: onboarding",
             "freshness: off/skipped",
             "retrieval: requested=hybrid, effective=lexical",
-            "semantic_weight=0",
-            "semantic_fallback: semantic_disabled",
             "semantic_coverage:",
             "filters: provider=codex",
             "results: 1",
@@ -597,7 +685,7 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "hidden provider probe",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"hidden provider probe"}]},
                         "provider": "not-a-real-provider",
                         "limit": 5
                     }
@@ -610,7 +698,7 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "provider alias probe",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"provider alias probe"}]},
                         "provider": "roo_code",
                         "limit": 5
                     }
@@ -621,21 +709,26 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
 
     let result = &responses[1]["result"];
     assert_eq!(result["isError"], true);
-    assert!(result["structuredContent"]["error"]
+    assert_eq!(result["structuredContent"]["schema_version"], 2);
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "invalid_request"
+    );
+    assert!(result["structuredContent"]["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("search needs a query or file"));
-    assert!(mcp_content_text(result).contains("search needs a query or file"));
+        .contains("search needs a ctx-search-v1 query or file filter"));
+    assert!(mcp_content_text(result).contains("search needs a ctx-search-v1 query or file filter"));
     let hidden_provider = &responses[2]["result"];
     assert_eq!(hidden_provider["isError"], true);
-    assert!(hidden_provider["structuredContent"]["error"]
+    assert!(hidden_provider["structuredContent"]["error"]["message"]
         .as_str()
         .unwrap()
         .contains("provider must be one of"));
     assert!(mcp_content_text(hidden_provider).contains("provider must be one of"));
     let alias_result = &responses[3]["result"];
     assert_eq!(alias_result["isError"], true);
-    assert!(alias_result["structuredContent"]["error"]
+    assert!(alias_result["structuredContent"]["error"]["message"]
         .as_str()
         .unwrap()
         .contains("ctx store is not initialized"));
@@ -692,7 +785,7 @@ fn mcp_sources_and_search_support_history_source_plugins() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "hermes plugin initial marker",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"hermes plugin initial marker"}]},
                         "provider": "custom",
                         "history_source": "hermes/default",
                         "limit": 5
@@ -778,7 +871,7 @@ fn mcp_search_excludes_active_codex_session_by_default_when_available() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "onboarding",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"onboarding"}]},
                         "provider": "codex",
                         "limit": 5
                     }
@@ -814,7 +907,7 @@ fn mcp_search_excludes_active_codex_session_by_default_when_available() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "onboarding",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"onboarding"}]},
                         "provider": "codex",
                         "limit": 5,
                         "include_current_session": true
@@ -852,7 +945,7 @@ fn mcp_rejects_unknown_tool_arguments() {
                 "params": {
                     "name": "search",
                     "arguments": {
-                        "query": "onboarding",
+                        "query": {"version":"ctx-search-v1","any":[{"all":"onboarding"}]},
                         "refresh": "wait"
                     }
                 }

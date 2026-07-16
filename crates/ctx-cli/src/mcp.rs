@@ -13,6 +13,12 @@ use ctx_history_store::{
     RAW_SQL_MAX_COLUMNS_CAP, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
     RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
+use ctx_protocol::{
+    AgentHistoryErrorBody, AgentHistoryErrorCode, JsonObject,
+    SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE, SEARCH_MAX_CLAUSES, SEARCH_MAX_CLAUSE_BYTES,
+    SEARCH_MAX_LITERAL_BYTES, SEARCH_MAX_QUERY_JSON_BYTES, SEARCH_MAX_RESULTS,
+    SEARCH_MAX_TOTAL_CLAUSE_BYTES, SEARCH_MIN_LITERAL_BYTES,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -23,15 +29,15 @@ use text::render_tool_text;
 use super::{
     cli_supported_provider, compact_json, config, config::CONFIG_FILE,
     discovered_plugin_sources_json, discovered_sources, event_window, event_window_json,
-    raw_sql_result_json, search_filters, search_has_intent, session_transcript_json, sources_json,
-    OutputFormat, ProviderArg, RefreshArg, SearchBackendArg, SearchDto, SearchFilterInput,
-    SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode,
-    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    raw_sql_result_json, search_filters, session_transcript_json, sources_json, OutputFormat,
+    ProviderArg, RefreshArg, SearchBackendArg, SearchDto, SearchFilterInput, SearchRefreshReport,
+    SourceIdentityFilterArgs, TranscriptMode, MAX_EVENT_WINDOW,
 };
 use crate::commands::search::resolve_search_backend;
+use crate::search_query_input::parse_search_query_value;
 use crate::semantic::{
-    daemon_report, search_packet_with_backend, semantic_worker_report_cached,
-    semantic_worker_report_configured_json,
+    daemon_report, search_packet_file_filter_with_backend, search_packet_query_with_backend,
+    semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
 use crate::store_util::open_existing_store_read_only;
 
@@ -331,7 +337,6 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
                     "events",
                     "include_current_session",
                     "backend",
-                    "semantic_weight",
                 ],
             )?;
             tool_search(&arguments, data_root)
@@ -369,6 +374,7 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
 
     Ok(match result {
         Ok(value) => tool_result(value),
+        Err(err) if name == "search" => search_tool_error_result(err),
         Err(err) => tool_error_result(err),
     })
 }
@@ -513,10 +519,17 @@ fn tool_sources(data_root: &Path) -> Result<Value> {
 }
 
 fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
-    let query = optional_string(arguments, "query")?.unwrap_or_default();
+    let file = optional_string(arguments, "file")?.map(PathBuf::from);
+    let query = arguments
+        .get("query")
+        .map(parse_search_query_value)
+        .transpose()?;
+    if query.is_none() && file.is_none() {
+        return Err(anyhow!("search needs a ctx-search-v1 query or file filter"));
+    }
     let limit = optional_usize(arguments, "limit")?.unwrap_or(20);
-    if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
-        return Err(anyhow!("limit must be between 1 and {MAX_SEARCH_LIMIT}"));
+    if !(1..=SEARCH_MAX_RESULTS).contains(&limit) {
+        return Err(anyhow!("limit must be between 1 and {SEARCH_MAX_RESULTS}"));
     }
     let provider = optional_provider(arguments, "provider")?;
     let history_source = optional_string(arguments, "history_source")?;
@@ -529,20 +542,8 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
     let primary_only = optional_bool(arguments, "primary_only")?.unwrap_or(false);
     let include_subagents = optional_bool(arguments, "include_subagents")?.unwrap_or(false);
     let event_type = optional_string(arguments, "event_type")?;
-    let file = optional_string(arguments, "file")?.map(PathBuf::from);
     let config = config::AppConfig::load(data_root)?;
     let backend = resolve_search_backend(optional_search_backend(arguments, "backend")?, &config)?;
-    let semantic_weight = optional_f32(arguments, "semantic_weight")?.unwrap_or(0.35);
-    if !(0.0..=1.0).contains(&semantic_weight) || !semantic_weight.is_finite() {
-        return Err(anyhow!("semantic_weight must be between 0.0 and 1.0"));
-    }
-    if !search_has_intent(SearchIntentInput {
-        query: Some(&query),
-        terms: &[],
-        file: file.as_deref(),
-    }) {
-        return Err(anyhow!("search needs a query or file"));
-    }
     let store = open_existing_store(data_root)?;
     let events = optional_bool(arguments, "events")?.unwrap_or(false) || session.is_some();
     let include_current_session =
@@ -577,26 +578,38 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
         },
         ..ctx_history_search::PacketOptions::default()
     };
-    let (packet, retrieval) = search_packet_with_backend(
-        &store,
-        data_root,
-        &query,
-        &[],
-        &options,
-        backend,
-        config.semantic_search_enabled(),
-        semantic_weight,
-        RefreshArg::Off,
-        false,
-    )?;
+    let (packet, retrieval) = if let Some(query) = query.as_ref() {
+        search_packet_query_with_backend(
+            &store,
+            data_root,
+            query,
+            &options,
+            backend,
+            config.semantic_search_enabled(),
+            RefreshArg::Off,
+            false,
+        )?
+    } else {
+        search_packet_file_filter_with_backend(&store, &options, backend, false)?
+    };
     let refresh = SearchRefreshReport::skipped(RefreshArg::Off, "skipped");
-    Ok(SearchDto::packet(
-        &store,
-        &packet,
-        &refresh,
-        &retrieval,
-        Some(&query),
-    ))
+    let mut result = SearchDto::packet(&store, &packet, &refresh, &retrieval, None);
+    if let Some(object) = result.as_object_mut() {
+        object.insert("schema_version".to_owned(), json!(2));
+        object.insert("query".to_owned(), json!(query));
+        object.remove("query_spec");
+        object.insert(
+            "query_execution".to_owned(),
+            serde_json::to_value(&packet.query_execution)
+                .context("serialize search execution diagnostics")?,
+        );
+        if let Some(retrieval) = object.get_mut("retrieval").and_then(Value::as_object_mut) {
+            retrieval.remove("semantic_weight");
+            retrieval.remove("semantic_fallback_code");
+            retrieval.remove("semantic_fallback");
+        }
+    }
+    Ok(result)
 }
 
 fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
@@ -716,8 +729,176 @@ fn tool_error_result(err: anyhow::Error) -> Value {
     })
 }
 
+fn search_tool_error_result(err: anyhow::Error) -> Value {
+    let message = err.to_string();
+    let mut error = AgentHistoryErrorBody::new(
+        AgentHistoryErrorCode::InvalidRequest,
+        message.clone(),
+        false,
+    );
+    let mut query_execution = None;
+
+    if let Some(search_error) = err
+        .chain()
+        .find_map(|source| source.downcast_ref::<ctx_history_search::SearchError>())
+    {
+        match search_error {
+            ctx_history_search::SearchError::Query(_)
+            | ctx_history_search::SearchError::Envelope(_)
+            | ctx_history_search::SearchError::InvalidSemanticCandidateId(_) => {}
+            ctx_history_search::SearchError::SemanticNotReady { readiness } => {
+                error.code = AgentHistoryErrorCode::BackendUnavailable;
+                error.retryable = true;
+                let mut details = JsonObject::new();
+                details.insert("readiness".to_owned(), json!(readiness));
+                details.insert(
+                    "search_error_code".to_owned(),
+                    json!("explicit_semantic_unavailable"),
+                );
+                error.details = Some(details);
+            }
+            ctx_history_search::SearchError::TimedOut { diagnostics, .. } => {
+                error.code = AgentHistoryErrorCode::Timeout;
+                error.retryable = true;
+                let mut details = JsonObject::new();
+                details.insert(
+                    "search_error_code".to_owned(),
+                    json!(ctx_history_search::SEARCH_BUDGET_EXHAUSTED_ERROR_CODE),
+                );
+                error.details = Some(details);
+                query_execution = Some(json!(diagnostics.as_ref()));
+            }
+            _ => {
+                error.code = AgentHistoryErrorCode::Unknown;
+            }
+        }
+    } else if message.contains("store is not initialized") {
+        error.code = AgentHistoryErrorCode::NotInitialized;
+    }
+
+    let structured = compact_json(json!({
+        "schema_version": 2,
+        "payload_type": "search_error",
+        "error": error,
+        "query_execution": query_execution,
+    }));
+    json!({
+        "isError": true,
+        "content": [
+            {
+                "type": "text",
+                "text": message,
+            }
+        ],
+        "structuredContent": structured,
+    })
+}
+
+fn lexical_search_clause_schema() -> Value {
+    json!({
+        "oneOf": [
+            object_schema(json!({
+                "all": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": SEARCH_MAX_CLAUSE_BYTES,
+                    "description": format!("All analyzed words must match the same indexed event. Runtime limits this value to {SEARCH_MAX_CLAUSE_BYTES} UTF-8 bytes and {SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE} analyzed tokens.")
+                }
+            }), vec!["all"]),
+            object_schema(json!({
+                "phrase": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": SEARCH_MAX_CLAUSE_BYTES,
+                    "description": format!("Analyzed words must match in order at adjacent positions. Runtime limits this value to {SEARCH_MAX_CLAUSE_BYTES} UTF-8 bytes and {SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE} analyzed tokens.")
+                }
+            }), vec!["phrase"]),
+            object_schema(json!({
+                "literal": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": SEARCH_MAX_LITERAL_BYTES,
+                    "description": format!("Match punctuation-preserving contiguous text. Runtime requires {SEARCH_MIN_LITERAL_BYTES}..={SEARCH_MAX_LITERAL_BYTES} UTF-8 bytes and an indexed anchor; JSON Schema string lengths count Unicode code points.")
+                }
+            }), vec!["literal"])
+        ]
+    })
+}
+
+fn semantic_search_clause_schema() -> Value {
+    object_schema(
+        json!({
+            "semantic": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SEARCH_MAX_CLAUSE_BYTES,
+                "description": format!("Retrieve bounded vector candidates without model acquisition or backfill. Runtime limits this value to {SEARCH_MAX_CLAUSE_BYTES} UTF-8 bytes.")
+            }
+        }),
+        vec!["semantic"],
+    )
+}
+
+fn any_search_clause_schema() -> Value {
+    let lexical = lexical_search_clause_schema();
+    let lexical_variants = lexical
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut variants = lexical_variants;
+    variants.push(semantic_search_clause_schema());
+    json!({ "oneOf": variants })
+}
+
+fn search_query_schema() -> Value {
+    let mut schema = object_schema(
+        json!({
+            "version": { "type": "string", "const": "ctx-search-v1" },
+            "any": {
+                "type": "array",
+                "maxItems": SEARCH_MAX_CLAUSES,
+                "items": any_search_clause_schema(),
+                "contains": semantic_search_clause_schema(),
+                "minContains": 0,
+                "maxContains": 1,
+                "description": "Alternatives. At most one semantic clause may appear here."
+            },
+            "must": {
+                "type": "array",
+                "maxItems": SEARCH_MAX_CLAUSES,
+                "items": lexical_search_clause_schema(),
+                "description": "Every lexical clause is required."
+            },
+            "must_not": {
+                "type": "array",
+                "maxItems": SEARCH_MAX_CLAUSES,
+                "items": lexical_search_clause_schema(),
+                "description": "A candidate matching any lexical clause is excluded."
+            }
+        }),
+        vec!["version"],
+    );
+    if let Some(object) = schema.as_object_mut() {
+        object.insert(
+            "description".to_owned(),
+            json!(format!(
+                "Canonical ctx-search-v1 query. Runtime allows {SEARCH_MAX_CLAUSES} clauses and {SEARCH_MAX_TOTAL_CLAUSE_BYTES} total clause bytes; adapters do not reinterpret it."
+            )),
+        );
+        object.insert(
+            "anyOf".to_owned(),
+            json!([
+                {"required": ["any"], "properties": {"any": {"minItems": 1}}},
+                {"required": ["must"], "properties": {"must": {"minItems": 1}}}
+            ]),
+        );
+    }
+    schema
+}
+
 fn tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "status",
             "title": "Status",
@@ -735,10 +916,10 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "search",
             "title": "Search",
-            "description": "Search the existing local ctx index by query text or touched-file path. This does not refresh or import provider history.",
+            "description": "Search the existing local ctx index with one bounded ctx-search-v1 query and optional metadata filters. any clauses are alternatives, must clauses are required, and must_not clauses exclude. The tool is read-only and never refreshes, downloads a model, or starts indexing.",
             "inputSchema": object_schema(json!({
-                "query": { "type": "string", "description": "Non-empty text query. Required unless file is provided." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "default": 20 },
+                "query": search_query_schema(),
+                "limit": { "type": "integer", "minimum": 1, "maximum": SEARCH_MAX_RESULTS, "default": 20 },
                 "provider": { "type": "string", "enum": provider_names() },
                 "history_source": { "type": "string", "description": "Custom history source selector as plugin/source or provider_key/source_id." },
                 "provider_key": { "type": "string", "description": "Custom history provider_key." },
@@ -746,14 +927,14 @@ fn tool_definitions() -> Vec<Value> {
                 "source_format": { "type": "string", "description": "Custom history source_format." },
                 "workspace": { "type": "string", "description": "Workspace path or name text." },
                 "since": { "type": "string", "description": "RFC3339 timestamp or day window such as 30d." },
+                "primary_only": { "type": "boolean", "default": false, "description": "Include only primary-agent sessions." },
                 "include_subagents": { "type": "boolean", "default": false, "description": "Include subagent sessions in addition to primary-agent sessions." },
                 "event_type": { "type": "string", "enum": event_type_names() },
-                "file": { "type": "string", "description": "Indexed touched-file path. Required unless query is provided." },
+                "file": { "type": "string", "description": "Optional indexed touched-file path filter. Required only when query is omitted." },
                 "session": { "type": "string", "description": "ctx session id." },
                 "events": { "type": "boolean", "default": false },
                 "include_current_session": { "type": "boolean", "default": false, "description": "Include the active Codex session tree when CODEX_THREAD_ID is set." },
-                "backend": { "type": "string", "enum": ["hybrid", "semantic", "lexical"], "description": "Optional backend override. Defaults to lexical unless local semantic search is enabled in ctx config, then hybrid." },
-                "semantic_weight": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.35 }
+                "backend": { "type": "string", "enum": ["hybrid", "semantic", "lexical"], "description": "Execution backend. Backend choice never changes clause meaning." }
             }), vec![]),
             "annotations": { "readOnlyHint": true },
         }),
@@ -798,7 +979,20 @@ fn tool_definitions() -> Vec<Value> {
             }), vec!["ctx_event_id"]),
             "annotations": { "readOnlyHint": true },
         }),
-    ]
+    ];
+    if let Some(search) = tools
+        .iter_mut()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("search"))
+    {
+        search["inputSchema"]["anyOf"] = json!([
+            {"required": ["query"]},
+            {"required": ["file"]}
+        ]);
+        search["inputSchema"]["description"] = json!(format!(
+            "Search input is limited to {SEARCH_MAX_QUERY_JSON_BYTES} serialized query bytes and {SEARCH_MAX_CLAUSES} total query clauses."
+        ));
+    }
+    tools
 }
 
 fn object_schema(properties: Value, required: Vec<&str>) -> Value {
@@ -862,18 +1056,6 @@ fn optional_usize(arguments: &Value, key: &str) -> Result<Option<usize>> {
                 .map_err(|_| anyhow!("{key} is too large"))
         }
         Some(_) => Err(anyhow!("{key} must be a non-negative integer")),
-    }
-}
-
-fn optional_f32(arguments: &Value, key: &str) -> Result<Option<f32>> {
-    match arguments.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => value
-            .as_f64()
-            .map(|value| value as f32)
-            .ok_or_else(|| anyhow!("{key} must be a number"))
-            .map(Some),
-        Some(_) => Err(anyhow!("{key} must be a number")),
     }
 }
 
@@ -968,4 +1150,36 @@ fn json_rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
         "message": message,
         "data": data,
     }))
+}
+
+#[cfg(test)]
+mod search_contract_tests {
+    use super::*;
+
+    #[test]
+    fn timeout_error_keeps_typed_snake_case_diagnostics() {
+        let diagnostics = ctx_history_search::SearchExecutionDiagnostics {
+            timed_out: true,
+            truncated: true,
+            ..ctx_history_search::SearchExecutionDiagnostics::default()
+        };
+        let result = search_tool_error_result(anyhow::Error::new(
+            ctx_history_search::SearchError::TimedOut {
+                timeout_ms: 10_000,
+                diagnostics: Box::new(diagnostics),
+            },
+        ));
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["schema_version"], 2);
+        assert_eq!(structured["error"]["code"], "timeout");
+        assert_eq!(
+            structured["error"]["details"]["search_error_code"],
+            ctx_history_search::SEARCH_BUDGET_EXHAUSTED_ERROR_CODE
+        );
+        assert_eq!(structured["query_execution"]["timed_out"], true);
+        assert_eq!(
+            structured["query_execution"]["query_version"],
+            ctx_protocol::SEARCH_QUERY_VERSION
+        );
+    }
 }

@@ -18,6 +18,9 @@ release tooling, or raw Rust crate shapes as their public API.
 
 - Contract id: `agent-history-v1`
 - Current schema version: `1`
+- Raw CLI search JSON and MCP search `structuredContent` use their own
+  `schema_version: 2` result contract. This does not change the enclosing SDK
+  contract version.
 - SDKs expose their own SDK version separately from `contractVersion`.
 - Unknown JSON fields are additive and must be ignored or preserved.
 - Required fields can only change in a future contract id.
@@ -58,10 +61,20 @@ Important reusable records:
 - `Freshness`: pre-search refresh mode/status/totals.
 - `Status.semantic` and `Status.daemon`: extensible local diagnostic objects for
   semantic coverage and the ctx-owned daemon coordinator.
-- `SearchRetrieval`: requested/effective retrieval mode, applied semantic
-  weight, semantic coverage, optional fallback code/message, and optional
-  diagnostics. The CLI adapter camel-cases raw CLI retrieval fields for this
-  contract.
+- `SearchQueryV1`: the shared CLI, MCP, and SDK query DTO. `any` contains
+  explicit alternatives, `must` contains required lexical clauses, and
+  `must_not` contains lexical exclusions. At most one `semantic` clause is
+  allowed, and only under `any`. Adapters preserve these snake_case placement
+  keys and delegate canonicalization and validation to the shared protocol.
+- `SearchExecution`: resolved and consumed query, candidate, verification,
+  hydration, output, and elapsed-time budgets, plus truncation and semantic
+  readiness/coverage diagnostics. Successful searches include it even when
+  no budget was exhausted. Its wire key is `query_execution`, and that object
+  and all of its descendants use `snake_case` exactly like raw CLI and MCP
+  search JSON; adapters must not add camelCase aliases.
+- `SearchRetrieval`: additive backend readiness and local diagnostic metadata.
+  Query meaning and ranking are owned by `SearchQueryV1` and the shared search
+  executor, not by transport-specific weights or fallback rules.
 - `Citation`: ctx event/session/file/source citation fields.
 - `SourceLocation`: path/cursor/source id/source format/existence.
 - Structured error: `code`, `message`, `retryable`, optional `details`, and
@@ -76,7 +89,7 @@ them into `agent-history-v1` wrappers:
 - `ctx setup --json`
 - `ctx sources --json`
 - `ctx import --json`
-- `ctx search <query>|--term <term>|--file <path> --json`
+- `ctx search --query-json <ctx-search-v1-json>|--file <path> --json`
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
 - `ctx locate event ... --format json`
