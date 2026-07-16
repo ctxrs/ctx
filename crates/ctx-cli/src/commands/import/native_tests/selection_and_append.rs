@@ -106,7 +106,7 @@ fn write_valid_codex_session(root: &Path, session_id: &str) {
 }
 
 #[test]
-fn catalog_batch_commits_one_sibling_before_reporting_later_error() {
+fn fresh_new_batch_commits_stable_sibling_and_defers_missing_path() {
     let temp = tempdir();
     let source_path = temp.path().join("sessions");
     write_valid_codex_session(&source_path, "a-good");
@@ -123,32 +123,21 @@ fn catalog_batch_commits_one_sibling_before_reporting_later_error() {
     fs::remove_file(source_path.join("z-retry.jsonl")).unwrap();
     let source_plan = &plan.sources[selected.source_index];
 
-    let mut completed = None;
-    for _ in 0..32 {
-        let result = import_selected_source(
-            &mut store,
-            &source_plan.source,
-            None,
-            &selected.preinventory,
-            &selected.work,
-        )
-        .unwrap();
-        let remaining_error = result.remaining_error;
-        if result.outcome.completed_units == 1 {
-            completed = Some((result.outcome, remaining_error));
-            break;
-        }
-        assert_eq!(result.outcome.deferred_units, 1);
-        assert!(result.outcome.made_durable_progress());
-        assert!(remaining_error.is_none());
-    }
-    let (outcome, remaining_error) =
-        completed.expect("healthy sibling must publish after bounded phases");
+    let result = import_selected_source(
+        &mut store,
+        &source_plan.source,
+        None,
+        &selected.preinventory,
+        &selected.work,
+    )
+    .unwrap();
+    let outcome = result.outcome;
 
     assert_eq!(outcome.completed_units, 1);
+    assert_eq!(outcome.deferred_units, 1);
     assert!(outcome.summary.imported_events > 0);
     assert!(outcome.made_durable_progress());
-    let _error = remaining_error.expect("the missing sibling must remain an error");
+    assert!(result.remaining_error.is_none());
 
     let inventory = inventory_import_sources(
         &store,
@@ -204,6 +193,7 @@ fn run_single_fresh_unit(
     };
     let source_plan = &plan.sources[selected.source_index];
     let mut completed = None;
+    let selected_fresh_new = selected.work.is_fresh_new_group();
     for _ in 0..32 {
         let result = import_selected_source(
             store,
@@ -239,10 +229,10 @@ fn run_single_fresh_unit(
     assert_eq!(summary.completed_bytes, selected_bytes);
     assert_eq!(summary.deferred_units, 0);
     if source_file_work {
-        if source_uses_import_file_manifest(&source_plan.source) {
+        if source_uses_import_file_manifest(&source_plan.source) || selected_fresh_new {
             assert_eq!(
                 summary.post_import_inventory_generation, pre_import_inventory_generation,
-                "manifested completion must stay on its selected generation"
+                "atomic or manifested completion must stay on its selected generation"
             );
         } else {
             assert!(
