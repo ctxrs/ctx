@@ -393,6 +393,7 @@ impl Store {
         limit: usize,
         timeout: Duration,
     ) -> Result<EventSearchCandidateBatch> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if !table_exists(&self.conn, "event_search")? {
             return Ok(EventSearchCandidateBatch {
                 candidates: Vec::new(),

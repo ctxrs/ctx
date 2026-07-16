@@ -99,6 +99,7 @@ impl Store {
         maximum_bytes: usize,
         timeout: Duration,
     ) -> Result<Option<RecordSearchDocument>> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         run_bounded_record_lookup(&self.conn, timeout, || {
             let visible =
                 crate::provider_files::history_record_material_visible_predicate("records");
@@ -229,6 +230,7 @@ impl Store {
         limit: usize,
         timeout: Duration,
     ) -> Result<RecordSearchCandidateBatch> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if !table_exists(&self.conn, "ctx_history_search")? {
             return Ok(RecordSearchCandidateBatch {
                 candidates: Vec::new(),
@@ -634,6 +636,7 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<HistoryRecord>> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if fts_match_query(query).is_none() && scriptgram_match_query(query).is_none() {
             return Ok(Vec::new());
         }

@@ -742,6 +742,36 @@ pub(crate) fn ensure_columns(conn: &Connection, table: &str, columns: &[ColumnSp
     Ok(())
 }
 
+pub(crate) fn create_event_search_lookup_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS event_search_lookup (
+            event_id TEXT PRIMARY KEY NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+            history_record_id TEXT REFERENCES history_records(id),
+            session_id TEXT REFERENCES sessions(id),
+            role TEXT CHECK (role IS NULL OR role IN ('user', 'assistant', 'system', 'tool', 'unknown')),
+            preview_text TEXT NOT NULL,
+            rank_bucket TEXT NOT NULL
+        );
+        "#,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn ensure_search_projection_stats_table(conn: &Connection) -> Result<()> {
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS search_projection_stats (
+            key TEXT PRIMARY KEY NOT NULL,
+            value INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        )
+        "#,
+        [],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("PRAGMA table_info({table})");
     let mut stmt = conn.prepare(&sql)?;

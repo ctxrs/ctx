@@ -7,8 +7,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     new_id, AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, EntityTimestamps,
-    Event, EventRole, EventType, Fidelity, Session, SessionHistoryArchive, SessionStatus,
-    SyncMetadata, SyncState, Visibility,
+    Event, EventRole, EventType, Fidelity, HistoryRecord, Session, SessionHistoryArchive,
+    SessionStatus, SyncMetadata, SyncState, Visibility,
 };
 use rusqlite::{
     hooks::{AuthAction, AuthContext, Authorization},
@@ -21,11 +21,13 @@ use crate::schema::ddl::{table_exists, table_has_column, CREATE_TABLES_SQL};
 use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::migrations::{
-    migrate_fresh_scheduling_to_v52, migrate_provider_publication_to_v51,
-    migrate_publication_completion_to_v53, migrate_publication_retirement_to_v54,
-    rebuild_capture_sources_provider_check, rebuild_catalog_sessions_provider_check,
+    migrate_fresh_scheduling_to_v52, migrate_lightweight_event_index_to_v56,
+    migrate_provider_publication_to_v51, migrate_publication_completion_to_v53,
+    migrate_publication_retirement_to_v54, rebuild_capture_sources_provider_check,
+    rebuild_catalog_sessions_provider_check,
 };
-use crate::{Store, SCHEMA_VERSION};
+use crate::schema::scriptgram::migrate_to_v45;
+use crate::{Store, StoreError, SCHEMA_VERSION};
 
 fn tempdir() -> tempfile::TempDir {
     let root = std::env::var_os("TEST_TMPDIR")
@@ -125,6 +127,274 @@ fn schema_v8_migrates_legacy_history_record_table_names() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
+}
+
+#[test]
+fn schema_v56_trusts_compatible_v55_projection_without_corpus_reads() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let store = Store::open(&path).unwrap();
+    let record = HistoryRecord::new(
+        "Trusted v55 projection",
+        "compatiblev55needle",
+        Vec::new(),
+        "task",
+        None,
+    );
+    store.insert_record(&record).unwrap();
+    store
+        .conn
+        .execute(
+            "DELETE FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+            [],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute_batch("PRAGMA user_version = 55;")
+        .unwrap();
+
+    let denied_reads = Arc::new(Mutex::new(Vec::new()));
+    let callback_denied_reads = Arc::clone(&denied_reads);
+    store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+        if let AuthAction::Read { table_name, .. } = context.action {
+            if matches!(
+                table_name,
+                "history_records"
+                    | "events"
+                    | "artifacts"
+                    | "ctx_history_search"
+                    | "ctx_history_search_scriptgram"
+                    | "event_search"
+                    | "event_search_scriptgram"
+                    | "event_search_lookup"
+                    | "artifact_search"
+            ) {
+                callback_denied_reads
+                    .lock()
+                    .unwrap()
+                    .push(table_name.to_owned());
+                return Authorization::Deny;
+            }
+        }
+        Authorization::Allow
+    }));
+
+    migrate_lightweight_event_index_to_v56(&store.conn).unwrap();
+    assert!(
+        denied_reads.lock().unwrap().is_empty(),
+        "v56 trust migration attempted a corpus read"
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'search_projection_rebuild_required_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert!(reopened
+        .search_records("compatiblev55needle", 10)
+        .unwrap()
+        .iter()
+        .any(|hit| hit.id == record.id));
+}
+
+#[test]
+fn schema_v56_fences_a_malformed_v55_projection_without_reading_the_corpus() {
+    let temp = tempdir();
+    let path = temp.path().join("malformed-v55.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            DELETE FROM search_projection_stats
+            WHERE key = 'search_projection_ready_version_v1';
+            DROP TABLE event_search_lookup;
+            CREATE TABLE event_search_lookup (
+                event_id TEXT NOT NULL,
+                history_record_id TEXT,
+                session_id TEXT,
+                role TEXT,
+                preview_text TEXT NOT NULL,
+                rank_bucket TEXT NOT NULL
+            );
+            DROP TABLE event_search;
+            CREATE VIRTUAL TABLE event_search USING fts5(
+                event_id,
+                history_record_id UNINDEXED,
+                session_id UNINDEXED,
+                role UNINDEXED,
+                preview_text,
+                rank_bucket UNINDEXED
+            );
+            PRAGMA user_version = 55;
+            "#,
+        )
+        .unwrap();
+
+    migrate_lightweight_event_index_to_v56(&store.conn).unwrap();
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_rebuild_required_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn schema_v56_does_not_normalize_lookup_check_literal_case() {
+    let temp = tempdir();
+    let path = temp.path().join("literal-case-v55.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            DELETE FROM search_projection_stats
+            WHERE key = 'search_projection_ready_version_v1';
+            DROP TABLE event_search_lookup;
+            CREATE TABLE event_search_lookup (
+                event_id TEXT PRIMARY KEY NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                history_record_id TEXT REFERENCES history_records(id),
+                session_id TEXT REFERENCES sessions(id),
+                role TEXT CHECK (role IS NULL OR role IN ('USER', 'ASSISTANT', 'SYSTEM', 'TOOL', 'UNKNOWN')),
+                preview_text TEXT NOT NULL,
+                rank_bucket TEXT NOT NULL
+            );
+            PRAGMA user_version = 55;
+            "#,
+        )
+        .unwrap();
+
+    migrate_lightweight_event_index_to_v56(&store.conn).unwrap();
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_rebuild_required_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn schema_v56_preserves_pending_marker_from_destructive_v45_migration() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let store = Store::open(&path).unwrap();
+    let record = HistoryRecord::new(
+        "Destructive migration projection",
+        "destructivemigrationneedle",
+        Vec::new(),
+        "task",
+        None,
+    );
+    store.insert_record(&record).unwrap();
+    store
+        .conn
+        .execute_batch("PRAGMA user_version = 44;")
+        .unwrap();
+
+    let denied_reads = Arc::new(Mutex::new(Vec::new()));
+    let callback_denied_reads = Arc::clone(&denied_reads);
+    store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+        if let AuthAction::Read { table_name, .. } = context.action {
+            if matches!(table_name, "history_records" | "events" | "artifacts") {
+                callback_denied_reads
+                    .lock()
+                    .unwrap()
+                    .push(table_name.to_owned());
+                return Authorization::Deny;
+            }
+        }
+        Authorization::Allow
+    }));
+
+    migrate_to_v45(&store.conn).unwrap();
+    store
+        .conn
+        .execute_batch("PRAGMA user_version = 55;")
+        .unwrap();
+    migrate_lightweight_event_index_to_v56(&store.conn).unwrap();
+    assert!(
+        denied_reads.lock().unwrap().is_empty(),
+        "sidecar migrations attempted an eager corpus rebuild"
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_rebuild_required_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert!(matches!(
+        store.search_records("destructivemigrationneedle", 10),
+        Err(StoreError::SearchProjectionRebuildPending)
+    ));
 }
 
 #[test]

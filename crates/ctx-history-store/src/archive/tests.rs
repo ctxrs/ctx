@@ -2,14 +2,14 @@ use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    new_id, Artifact, ArtifactKind, EntityTimestamps, Fidelity, SessionHistoryArchive,
-    SyncMetadata, SyncState, Visibility,
+    new_id, Artifact, ArtifactKind, EntityTimestamps, Fidelity, HistoryRecord,
+    SessionHistoryArchive, SyncMetadata, SyncState, Visibility,
 };
 use uuid::Uuid;
 
 use crate::archive::{validate_archive_artifact_record_blob, validate_archive_version};
 use crate::object_store::{object_relative_path, sha256_hex};
-use crate::StoreError;
+use crate::{Store, StoreError};
 
 fn tempdir() -> tempfile::TempDir {
     let root = std::env::var_os("TEST_TMPDIR")
@@ -158,4 +158,55 @@ fn archive_version_validation_rejects_future_version() {
         error,
         StoreError::UnsupportedArchiveVersion(version) if version == 3
     ));
+}
+
+#[test]
+fn committed_archive_remains_fenced_when_projection_recovery_is_interrupted() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    let bulk_owner = Store::open(&path).unwrap();
+    let bulk_guard = bulk_owner.begin_event_search_bulk_mode().unwrap();
+    let record = HistoryRecord::new(
+        "Archived projection fence",
+        "archive-crash-window-needle",
+        Vec::new(),
+        "task",
+        None,
+    );
+    let archive = SessionHistoryArchive {
+        records: vec![record.clone()],
+        ..SessionHistoryArchive::default()
+    };
+
+    store.import_archive(&archive, false).unwrap();
+    assert_eq!(store.get_record(record.id).unwrap().id, record.id);
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_rebuild_required_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert!(matches!(
+        store.search_records("archive-crash-window-needle", 10),
+        Err(StoreError::SearchProjectionRebuildPending)
+    ));
+
+    drop(bulk_guard);
 }

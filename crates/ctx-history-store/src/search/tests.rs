@@ -1,15 +1,23 @@
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
 use ctx_history_core::{
     new_id, Event, EventRole, EventType, Fidelity, HistoryRecord, SyncMetadata, SyncState,
     Visibility,
 };
-use rusqlite::params;
+use ctx_protocol::SearchClause;
+use rusqlite::{
+    hooks::{AuthAction, AuthContext, Authorization},
+    params,
+};
 use uuid::Uuid;
 
-use crate::Store;
+use crate::connection::with_immediate_transaction;
+use crate::search::projections::mark_search_projection_rebuild_required;
+use crate::{EventSearchBulkMaintenanceOutcome, Store, StoreError};
 
 #[path = "event_query_tests.rs"]
 mod event_query_tests;
@@ -340,6 +348,238 @@ fn record_with_id(id: &str, title: &str, body: &str) -> HistoryRecord {
     record.created_at = fixed_time();
     record.updated_at = fixed_time();
     record
+}
+
+fn assert_search_projection_fenced<T>(result: crate::Result<T>) {
+    match result {
+        Err(StoreError::SearchProjectionRebuildPending) => {}
+        Err(error) => panic!("unexpected search projection error: {error}"),
+        Ok(_) => panic!("search projection reader was not fenced"),
+    }
+}
+
+#[test]
+fn ready_projection_initialization_does_not_read_corpus_tables() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    store.insert_record(&stable_tie_record(1)).unwrap();
+    store
+        .upsert_event(&local_preview_event(1, "ready projection event"))
+        .unwrap();
+
+    let denied_reads = Arc::new(Mutex::new(Vec::new()));
+    let callback_denied_reads = Arc::clone(&denied_reads);
+    store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+        if let AuthAction::Read { table_name, .. } = context.action {
+            if matches!(
+                table_name,
+                "history_records"
+                    | "events"
+                    | "artifacts"
+                    | "ctx_history_search"
+                    | "ctx_history_search_scriptgram"
+                    | "event_search"
+                    | "event_search_scriptgram"
+                    | "event_search_lookup"
+                    | "artifact_search"
+            ) {
+                callback_denied_reads
+                    .lock()
+                    .unwrap()
+                    .push(table_name.to_owned());
+                return Authorization::Deny;
+            }
+        }
+        Authorization::Allow
+    }));
+
+    let outcome = store.ensure_search_projection_initialized();
+    let denied_reads = denied_reads.lock().unwrap();
+    assert!(
+        denied_reads.is_empty(),
+        "ready initialization attempted corpus reads: {denied_reads:?}"
+    );
+    assert_eq!(
+        outcome.unwrap(),
+        EventSearchBulkMaintenanceOutcome::Complete
+    );
+}
+
+#[test]
+fn projection_rebuild_is_bounded_fenced_and_resumes_after_reopen() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let store = Store::open(&path).unwrap();
+    for index in 1..=130 {
+        store.insert_record(&stable_tie_record(index)).unwrap();
+    }
+
+    assert_eq!(
+        store.refresh_search_index().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    let rows_after_one_slice: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        (66..=130).contains(&rows_after_one_slice),
+        "one recovery call must delete at most 64 projection units, got {rows_after_one_slice} rows"
+    );
+    assert_search_projection_fenced(store.search_records("stabletie", 10));
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_search_projection_fenced(reopened.search_records("stabletie", 10));
+    let mut outcome = EventSearchBulkMaintenanceOutcome::Pending;
+    for _ in 0..64 {
+        outcome = reopened.ensure_search_projection_initialized().unwrap();
+        if outcome.is_complete() {
+            break;
+        }
+    }
+    assert_eq!(outcome, EventSearchBulkMaintenanceOutcome::Complete);
+    assert_eq!(
+        reopened
+            .conn
+            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        130
+    );
+    assert_eq!(
+        reopened
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        reopened.search_records("stabletie", 200).unwrap().len(),
+        130
+    );
+}
+
+#[test]
+fn projection_rebuild_rejects_an_oversized_event_before_hydrating_it() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("oversized-rebuild.sqlite")).unwrap();
+    let event = local_preview_event(1, "small initial payload");
+    store.upsert_event(&event).unwrap();
+    let oversized = format!("{{\"text\":\"{}\"}}", "x".repeat(300 * 1024));
+    store
+        .conn
+        .execute(
+            "UPDATE events SET payload_json = ?2 WHERE id = ?1",
+            params![event.id.to_string(), oversized],
+        )
+        .unwrap();
+    with_immediate_transaction(&store.conn, || {
+        mark_search_projection_rebuild_required(&store.conn)
+    })
+    .unwrap();
+
+    let error = store.ensure_search_projection_initialized().unwrap_err();
+    assert!(matches!(
+        error,
+        StoreError::SearchProjectionRebuildUnitTooLarge {
+            max_bytes: 262_144,
+            ..
+        }
+    ));
+    assert_search_projection_fenced(store.search_event_hits("small", 10));
+}
+
+#[test]
+fn semantic_count_cache_rebuilds_in_bounded_pages_without_query_fallback() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("bounded-count.sqlite")).unwrap();
+    for seq in 1..=130 {
+        store
+            .upsert_event(&local_preview_event(seq, &format!("semantic event {seq}")))
+            .unwrap();
+    }
+    store
+        .conn
+        .execute(
+            "DELETE FROM search_projection_stats WHERE key = 'semantic_searchable_lite_turn_items_v3'",
+            [],
+        )
+        .unwrap();
+
+    store
+        .refresh_event_embedding_document_count_cache()
+        .unwrap();
+    assert_eq!(store.cached_event_embedding_document_count().unwrap(), None);
+    assert!(matches!(
+        store.count_event_embedding_documents(),
+        Err(StoreError::SemanticSearchableItemCountPending)
+    ));
+    let cursor: i64 = store
+        .conn
+        .query_row(
+            "SELECT value FROM search_projection_stats WHERE key = 'semantic_searchable_lite_turn_build_cursor_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(cursor > 0);
+
+    for _ in 0..3 {
+        store
+            .refresh_event_embedding_document_count_cache()
+            .unwrap();
+    }
+    assert_eq!(
+        store.cached_event_embedding_document_count().unwrap(),
+        Some(130)
+    );
+    assert_eq!(store.count_event_embedding_documents().unwrap(), 130);
+}
+
+#[test]
+fn all_projection_reader_families_share_the_pending_fence() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let record = stable_tie_record(1);
+    let event = local_preview_event(1, "projection fence event");
+    store.insert_record(&record).unwrap();
+    store.upsert_event(&event).unwrap();
+    with_immediate_transaction(&store.conn, || {
+        mark_search_projection_rebuild_required(&store.conn)
+    })
+    .unwrap();
+
+    let timeout = StdDuration::from_secs(1);
+    assert_search_projection_fenced(store.search_event_candidates_for_clause(
+        &SearchClause::all("projection"),
+        10,
+        timeout,
+    ));
+    assert_search_projection_fenced(store.search_record_candidates_for_clause(
+        &SearchClause::all("stabletie"),
+        10,
+        timeout,
+    ));
+    assert_search_projection_fenced(store.event_search_previews_by_ids_bounded_visible(
+        &[event.id],
+        10,
+        1024,
+        1024,
+        timeout,
+    ));
+    assert_search_projection_fenced(store.search_event_hits("projection", 10));
+    assert_search_projection_fenced(store.search_records("stabletie", 10));
+    assert_search_projection_fenced(store.get_record_search_document(record.id));
+    assert_search_projection_fenced(store.semantic_eligible_event_ids(&[event.id]));
+    assert_search_projection_fenced(store.event_embedding_documents_by_ids(&[event.id]));
 }
 
 fn assert_search_order(store: &Store, expected: &[Uuid]) {
@@ -970,7 +1210,10 @@ fn semantic_embedding_documents_use_user_assistant_lite_turns() {
         )
         .unwrap();
     assert_eq!(store.cached_event_embedding_document_count().unwrap(), None);
-    assert_eq!(store.count_event_embedding_documents().unwrap(), 1);
+    assert!(matches!(
+        store.count_event_embedding_documents(),
+        Err(StoreError::SemanticSearchableItemCountPending)
+    ));
     assert_eq!(store.cached_event_embedding_document_count().unwrap(), None);
     store
         .refresh_event_embedding_document_count_cache()

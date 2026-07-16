@@ -21,6 +21,7 @@ use crate::object_store::{
     ensure_regular_blob_file, object_relative_path, sha256_hex, BlobWriteGuard, LEGACY_BLOBS_DIR,
 };
 use crate::provider_files::ensure_archive_provider_file_writes_allowed;
+use crate::search::projections::mark_search_projection_rebuild_required;
 use crate::{Result, Store, StoreError};
 
 impl Store {
@@ -77,6 +78,7 @@ impl Store {
         if !overwrite {
             reject_import_conflicts(&tx, archive)?;
         }
+        mark_search_projection_rebuild_required(&tx)?;
         let mut blob_guard = BlobWriteGuard::default();
         for record in &archive.records {
             upsert_record_tx(&tx, record, None)?;
@@ -84,7 +86,7 @@ impl Store {
         import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
         tx.commit()?;
         blob_guard.commit();
-        self.rebuild_search_projection()?;
+        let _ = self.ensure_search_projection_initialized()?;
         Ok(())
     }
 
@@ -109,6 +111,7 @@ impl Store {
             reject_capture_source_import_conflict(&tx, source_id)?;
             reject_import_conflicts(&tx, archive)?;
         }
+        mark_search_projection_rebuild_required(&tx)?;
         let mut blob_guard = BlobWriteGuard::default();
         upsert_capture_source_tx(&tx, source_id, source, occurred_at, fidelity)?;
         for record in &archive.records {
@@ -117,7 +120,7 @@ impl Store {
         import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
         tx.commit()?;
         blob_guard.commit();
-        self.rebuild_search_projection()?;
+        let _ = self.ensure_search_projection_initialized()?;
         Ok(())
     }
 }

@@ -36,6 +36,22 @@ pub enum StoreError {
     BulkSearchImportBusy,
     #[error("bulk search guard belongs to a different ctx index")]
     InvalidBulkSearchGuard,
+    #[error(
+        "ctx search index rebuild is incomplete; run a writable command such as `ctx setup` or `ctx import` to resume it"
+    )]
+    SearchProjectionRebuildPending,
+    #[error("invalid search projection rebuild phase: {0}")]
+    InvalidSearchProjectionRebuildPhase(i64),
+    #[error(
+        "search projection rebuild unit is {bytes} bytes; bounded maximum is {max_bytes} bytes"
+    )]
+    SearchProjectionRebuildUnitTooLarge { bytes: usize, max_bytes: usize },
+    #[error("ctx search projection rebuild made no progress within {timeout_ms}ms at its one-unit floor")]
+    SearchProjectionRebuildTimedOut { timeout_ms: u64 },
+    #[error("ctx search projection schema is incompatible: {0}")]
+    SearchProjectionSchemaIncompatible(&'static str),
+    #[error("ctx semantic document count is pending bounded maintenance")]
+    SemanticSearchableItemCountPending,
     #[error("archive conflicts with existing {kind}: {id}")]
     ImportConflict { kind: &'static str, id: Uuid },
     #[error("archive artifact {id} content does not match its blob hash")]
@@ -116,6 +132,19 @@ pub enum StoreError {
     RawSqlTimedOut { timeout_ms: u64 },
     #[error("bounded search lookup timed out after {timeout_ms}ms")]
     BoundedSearchTimedOut { timeout_ms: u64 },
+}
+
+impl StoreError {
+    pub(crate) fn is_retryable_search_projection_recovery(&self) -> bool {
+        match self {
+            Self::WalCheckpointBusy { .. } | Self::BulkSearchImportBusy => true,
+            Self::Sql(rusqlite::Error::SqliteFailure(error, _)) => matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
