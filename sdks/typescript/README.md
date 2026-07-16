@@ -11,7 +11,11 @@ const client = createLocalAgentHistoryClient({ dataRoot: "/tmp/ctx" });
 
 await client.init();
 const status = await client.status();
-const results = await client.search("sqlite storage", { refresh: "off" });
+const query = {
+  version: "ctx-search-v1",
+  any: [{ all: "sqlite storage" }],
+};
+const results = await client.search(query, { refresh: "off" });
 ```
 
 ## API
@@ -21,8 +25,8 @@ const results = await client.search("sqlite storage", { refresh: "off" });
 - `sources()` wraps `ctx sources --json`.
 - `import(options)` wraps `ctx import --json`.
 - `sync(options)` is an alias for `import(options)`.
-- `search(query, options)` and file/term-based `search(options)` wrap
-  `ctx search <query>|--term <term>|--file <path> --json`.
+- `search(query, options)` and file-based `search(options)` wrap
+  `ctx search --query-json <ctx-search-v1>|--file <path> --json`.
 - `showEvent(id, { before, after, window })` wraps `ctx show event --format json`.
 - `showSession(id, { mode })` wraps `ctx show session --format json`.
 - `showSession({ provider, providerSession, mode })` looks up by provider-owned session ID.
@@ -34,6 +38,32 @@ All data methods return a `agent-history-v1` envelope with `contractVersion`,
 `schemaVersion`, `operation`, and an operation-specific field such as `status`,
 `search`, or `location`. TypeScript consumers get operation-specific return
 types discriminated by `operation`; CLI JSON remains an adapter detail.
+
+Search uses one canonical structured DTO across local and future hosted adapters:
+
+```ts
+import type { SearchQueryV1 } from "@ctx/agent-history";
+
+const query: SearchQueryV1 = {
+  version: "ctx-search-v1",
+  any: [
+    { all: "disk io pressure" },
+    { phrase: "storage latency" },
+    { literal: "logs_2.db" },
+    { semantic: "the indexing job made the workstation sluggish" },
+  ],
+  must: [{ all: "codex" }],
+  must_not: [{ all: "postgres vacuum" }],
+};
+
+const response = await client.search(query, { backend: "hybrid", refresh: "off" });
+```
+
+`any` clauses are alternatives, every `must` clause is required, and any
+`must_not` match excludes the candidate. A semantic clause is allowed only once
+and only in `any`. Search payloads expose `schema_version: 2`, the canonical query,
+and `query_execution` with resolved and consumed work budgets, truncation reasons,
+semantic readiness, coverage, and completeness.
 
 ## Dogfood Example
 

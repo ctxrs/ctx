@@ -20,6 +20,39 @@ Operation = Literal[
 ]
 BackendKind = Literal["local", "hosted"]
 SearchBackendMode = Literal["hybrid", "semantic", "lexical"]
+SearchSemanticReadiness = Literal["ready", "not_ready", "unsupported", "unavailable"]
+SearchEffectiveBackend = Literal["none", "lexical", "semantic", "hybrid"]
+SearchCompleteness = Literal["complete", "partial"]
+
+
+class SearchAllClause(TypedDict):
+    all: str
+
+
+class SearchPhraseClause(TypedDict):
+    phrase: str
+
+
+class SearchLiteralClause(TypedDict):
+    literal: str
+
+
+class SearchSemanticClause(TypedDict):
+    semantic: str
+
+
+SearchLexicalClause = Union[SearchAllClause, SearchPhraseClause, SearchLiteralClause]
+SearchClause = Union[SearchLexicalClause, SearchSemanticClause]
+
+
+class _SearchQueryRequired(TypedDict):
+    version: Literal["ctx-search-v1"]
+
+
+class SearchQueryV1(_SearchQueryRequired, total=False):
+    any: list[SearchClause]
+    must: list[SearchLexicalClause]
+    must_not: list[SearchLexicalClause]
 
 
 class _BackendRequired(TypedDict):
@@ -159,8 +192,91 @@ class SearchRetrieval(TypedDict, total=False):
     diagnostics: JsonObject
 
 
+class SearchExecutionLimits(TypedDict):
+    query_bytes: int
+    clauses: int
+    analyzed_tokens_per_clause: int
+    candidates_per_positive_seed: int
+    candidate_rows: int
+    retained_candidate_ids: int
+    residual_rows: int
+    verification_bytes: int
+    verification_lookup_bytes: int
+    hydrated_rows: int
+    hydration_input_bytes: int
+    hydration_input_bytes_per_event: int
+    snippet_input_bytes: int
+    returned_text_bytes: int
+    serialized_response_bytes: int
+    results: int
+    elapsed_ms: int
+
+
+class SearchExecutionConsumption(TypedDict):
+    query_bytes: int
+    clauses: int
+    analyzed_tokens: int
+    largest_analyzed_tokens_per_clause: int
+    largest_positive_seed_candidates: int
+    candidate_rows: int
+    retained_candidate_ids: int
+    residual_rows: int
+    verification_bytes: int
+    largest_verification_lookup_bytes: int
+    hydrated_rows: int
+    legacy_fallback_rows: int
+    hydration_input_bytes: int
+    largest_hydration_input_bytes: int
+    snippet_input_bytes: int
+    returned_results: int
+    returned_text_bytes: int
+    serialized_response_bytes: int
+    elapsed_ms: int
+
+
+class SearchSemanticCoverage(TypedDict):
+    indexed_documents: int
+    searchable_documents: int
+
+
+class _SearchSemanticExecutionRequired(TypedDict):
+    attempted: bool
+    required: bool
+    readiness: SearchSemanticReadiness
+    effective_backend: SearchEffectiveBackend
+    candidates_supplied: int
+    candidates_consumed: int
+    candidates_used: int
+    positive_text_rule_version: str
+
+
+class SearchSemanticExecution(_SearchSemanticExecutionRequired, total=False):
+    backend: Optional[str]
+    requested_candidates: int
+    eligible_candidates: int
+    coverage: SearchSemanticCoverage
+    completeness: SearchCompleteness
+    incompleteness_reasons: list[str]
+    skip_reason: Optional[str]
+
+
+class SearchQueryExecution(TypedDict):
+    query_version: Literal["ctx-search-v1"]
+    candidate_strategy: str
+    resolved: SearchExecutionLimits
+    consumed: SearchExecutionConsumption
+    semantic: SearchSemanticExecution
+    requested_result_limit: int
+    result_limit: int
+    max_result_limit: int
+    truncated: bool
+    truncation_reasons: list[str]
+
+
 class _SearchResultRequired(TypedDict):
-    query: Optional[str]
+    schema_version: Literal[2]
+    query: Optional[SearchQueryV1]
+    query_execution: SearchQueryExecution
     results: list[SearchHit]
 
 

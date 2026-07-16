@@ -1,4 +1,5 @@
 export declare const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
+export declare const CTX_SEARCH_V1_VERSION = "ctx-search-v1";
 export declare const SDK_VERSION = "0.0.0";
 
 export type Provider =
@@ -16,6 +17,23 @@ export type RefreshMode = "background" | "off" | "wait";
 export type ProgressMode = "auto" | "plain" | "json" | "none";
 export type TranscriptMode = "lite" | "full" | "log";
 export type SearchBackendMode = "hybrid" | "semantic" | "lexical";
+export type SearchSemanticReadiness = "ready" | "not_ready" | "unsupported" | "unavailable";
+export type SearchEffectiveBackend = "none" | "lexical" | "semantic" | "hybrid";
+export type SearchCompleteness = "complete" | "partial";
+
+export type SearchAllClause = { all: string };
+export type SearchPhraseClause = { phrase: string };
+export type SearchLiteralClause = { literal: string };
+export type SearchSemanticClause = { semantic: string };
+export type SearchLexicalClause = SearchAllClause | SearchPhraseClause | SearchLiteralClause;
+export type SearchClause = SearchLexicalClause | SearchSemanticClause;
+
+export interface SearchQueryV1 {
+  version: typeof CTX_SEARCH_V1_VERSION;
+  any?: SearchClause[];
+  must?: SearchLexicalClause[];
+  must_not?: SearchLexicalClause[];
+}
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -75,9 +93,7 @@ export interface ImportOptions {
 }
 
 export interface SearchOptions {
-  query?: string;
-  term?: string | string[];
-  terms?: string[];
+  query?: SearchQueryV1;
   limit?: number;
   provider?: Provider;
   workspace?: string;
@@ -89,15 +105,12 @@ export interface SearchOptions {
   session?: string;
   events?: boolean;
   backend?: SearchBackendMode;
-  semanticWeight?: number;
   refresh?: RefreshMode;
   includeCurrentSession?: boolean;
 }
 
 export type SearchIntentOptions = SearchOptions & (
-  | { query: string }
-  | { term: string | string[] }
-  | { terms: [string, ...string[]] }
+  | { query: SearchQueryV1 }
   | { file: string }
 );
 
@@ -198,7 +211,9 @@ export interface ImportResult {
 }
 
 export interface SearchResult {
-  query: string | null;
+  schema_version: 2;
+  query: SearchQueryV1 | null;
+  query_execution: SearchQueryExecution;
   filters?: JsonObject;
   freshness?: Freshness;
   retrieval?: SearchRetrieval;
@@ -206,6 +221,84 @@ export interface SearchResult {
   results: SearchHit[];
   pagination?: JsonObject;
   truncation?: JsonObject;
+}
+
+export interface SearchExecutionLimits {
+  query_bytes: number;
+  clauses: number;
+  analyzed_tokens_per_clause: number;
+  candidates_per_positive_seed: number;
+  candidate_rows: number;
+  retained_candidate_ids: number;
+  residual_rows: number;
+  verification_bytes: number;
+  verification_lookup_bytes: number;
+  hydrated_rows: number;
+  hydration_input_bytes: number;
+  hydration_input_bytes_per_event: number;
+  snippet_input_bytes: number;
+  returned_text_bytes: number;
+  serialized_response_bytes: number;
+  results: number;
+  elapsed_ms: number;
+}
+
+export interface SearchExecutionConsumption {
+  query_bytes: number;
+  clauses: number;
+  analyzed_tokens: number;
+  largest_analyzed_tokens_per_clause: number;
+  largest_positive_seed_candidates: number;
+  candidate_rows: number;
+  retained_candidate_ids: number;
+  residual_rows: number;
+  verification_bytes: number;
+  largest_verification_lookup_bytes: number;
+  hydrated_rows: number;
+  legacy_fallback_rows: number;
+  hydration_input_bytes: number;
+  largest_hydration_input_bytes: number;
+  snippet_input_bytes: number;
+  returned_results: number;
+  returned_text_bytes: number;
+  serialized_response_bytes: number;
+  elapsed_ms: number;
+}
+
+export interface SearchSemanticCoverage {
+  indexed_documents: number;
+  searchable_documents: number;
+}
+
+export interface SearchSemanticExecution {
+  attempted: boolean;
+  required: boolean;
+  readiness: SearchSemanticReadiness;
+  effective_backend: SearchEffectiveBackend;
+  backend?: string | null;
+  requested_candidates?: number;
+  eligible_candidates?: number;
+  candidates_supplied: number;
+  candidates_consumed: number;
+  candidates_used: number;
+  coverage?: SearchSemanticCoverage;
+  completeness?: SearchCompleteness;
+  incompleteness_reasons?: string[];
+  skip_reason?: string | null;
+  positive_text_rule_version: string;
+}
+
+export interface SearchQueryExecution {
+  query_version: typeof CTX_SEARCH_V1_VERSION;
+  candidate_strategy: string;
+  resolved: SearchExecutionLimits;
+  consumed: SearchExecutionConsumption;
+  semantic: SearchSemanticExecution;
+  requested_result_limit: number;
+  result_limit: number;
+  max_result_limit: number;
+  truncated: boolean;
+  truncation_reasons: string[];
 }
 
 export interface SearchHit {
@@ -444,7 +537,7 @@ export declare class LocalAgentHistoryClient {
   sources(): Promise<SourcesEnvelope>;
   import(options?: ImportOptions): Promise<ImportEnvelope<"import">>;
   sync(options?: ImportOptions): Promise<ImportEnvelope<"sync">>;
-  search(query: string, options?: Omit<SearchOptions, "query">): Promise<SearchEnvelope>;
+  search(query: SearchQueryV1, options?: Omit<SearchOptions, "query">): Promise<SearchEnvelope>;
   search(options: SearchIntentOptions): Promise<SearchEnvelope>;
   showEvent(id: string, options?: ShowEventOptions): Promise<ShowEventEnvelope>;
   showSession(id: string, options?: Omit<ShowSessionOptions, "id">): Promise<ShowSessionEnvelope>;
@@ -465,7 +558,8 @@ export declare class HostedAgentHistoryClient {
   sources(): Promise<never>;
   import(): Promise<never>;
   sync(): Promise<never>;
-  search(): Promise<never>;
+  search(query: SearchQueryV1, options?: Omit<SearchOptions, "query">): Promise<never>;
+  search(options: SearchIntentOptions): Promise<never>;
   showEvent(): Promise<never>;
   showSession(): Promise<never>;
   locateEvent(): Promise<never>;
@@ -478,6 +572,8 @@ export declare function createHostedAgentHistoryClient(options?: HostedAgentHist
 export declare function createAgentHistoryClient(
   options?: LocalAgentHistoryClientOptions | HostedAgentHistoryClientOptions,
 ): LocalAgentHistoryClient | HostedAgentHistoryClient;
+export declare function validateSearchQuery(query: SearchQueryV1): SearchQueryV1;
+export declare function serializeSearchQuery(query: SearchQueryV1): string;
 export declare function toAgentHistoryEnvelope<TOperation extends ClientAgentHistoryOperation>(
   operation: TOperation,
   source: unknown,

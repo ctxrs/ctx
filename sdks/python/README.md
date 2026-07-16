@@ -25,7 +25,11 @@ client = AgentHistoryClient.local(ctx_binary="ctx", data_root="/tmp/ctx")
 
 status = client.status()
 sources = client.sources()
-response = client.search("sqlite storage", limit=5, refresh="off")
+query = {
+    "version": "ctx-search-v1",
+    "any": [{"all": "sqlite storage"}],
+}
+response = client.search(query, limit=5, refresh="off")
 
 for hit in response["search"].get("results", []):
     print(hit.get("ctxSessionId"), hit.get("snippet"))
@@ -39,7 +43,7 @@ The public methods mirror the agent-history-v1 client surface:
 - `init()` for `ctx setup --json`
 - `sources()`
 - `import_()` and `sync()` (`import` is a reserved Python keyword)
-- `search()` with a query, term, or file option
+- `search()` with a `ctx-search-v1` query or file option
 - `show_event()` / `showEvent()`
 - `show_session()` / `showSession()`
 - `locate_event()` / `locateEvent()`
@@ -50,6 +54,30 @@ Every operation returns a dictionary with `contractVersion: "agent-history-v1"`,
 `schemaVersion: 1`, `operation`, `backend`, and an operation-specific payload
 such as `status`, `sources`, `import`, `search`, `event`, `session`, or
 `location`.
+
+Search is an intentional structured-query cutover. The SDK accepts one canonical
+`ctx-search-v1` object and sends it unchanged through `ctx search --query-json`:
+
+```python
+query = {
+    "version": "ctx-search-v1",
+    "any": [
+        {"all": "disk io pressure"},
+        {"phrase": "storage latency"},
+        {"literal": "logs_2.db"},
+        {"semantic": "the indexing job made the workstation sluggish"},
+    ],
+    "must": [{"all": "codex"}],
+    "must_not": [{"all": "postgres vacuum"}],
+}
+response = client.search(query, backend="hybrid", refresh="off")
+```
+
+`any` clauses are alternatives, every `must` clause is required, and any
+`must_not` match excludes the candidate. A semantic clause is allowed only once
+and only in `any`. Search payloads expose `schema_version: 2`, the canonical query,
+and `query_execution` with resolved and consumed work budgets, truncation reasons,
+semantic readiness, coverage, and completeness.
 
 The package includes PEP 561 type metadata and exports operation-specific
 `TypedDict` envelopes such as `StatusResponse`, `SearchResponse`,
