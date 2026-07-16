@@ -34,6 +34,7 @@ from .types import (
     LocateEventResponse,
     LocateSessionResponse,
     SearchBackendMode,
+    SearchQueryV1,
     SearchResponse,
     ShowEventResponse,
     ShowSessionResponse,
@@ -41,7 +42,7 @@ from .types import (
     StatusResponse,
     SyncResponse,
 )
-from .validation import validate_search_intent
+from .validation import serialize_search_query, validate_search_intent
 
 
 class AgentHistoryTransport(Protocol):
@@ -80,7 +81,7 @@ class AgentHistoryTransport(Protocol):
 
     def search(
         self,
-        query: Optional[str] = None,
+        query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
         workspace: Optional[str] = None,
@@ -88,10 +89,8 @@ class AgentHistoryTransport(Protocol):
         event_type: Optional[str] = None,
         file: Optional[str] = None,
         session: Optional[str] = None,
-        terms: Optional[Sequence[str]] = None,
         events: bool = False,
         backend: Optional[SearchBackendMode] = None,
-        semantic_weight: Optional[float] = None,
         primary_only: bool = False,
         include_subagents: bool = False,
         limit: Optional[int] = None,
@@ -223,7 +222,7 @@ class LocalCliAdapter:
 
     def search(
         self,
-        query: Optional[str] = None,
+        query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
         workspace: Optional[str] = None,
@@ -231,33 +230,27 @@ class LocalCliAdapter:
         event_type: Optional[str] = None,
         file: Optional[str] = None,
         session: Optional[str] = None,
-        terms: Optional[Sequence[str]] = None,
         events: bool = False,
         backend: Optional[SearchBackendMode] = None,
-        semantic_weight: Optional[float] = None,
         primary_only: bool = False,
         include_subagents: bool = False,
         limit: Optional[int] = None,
         refresh: Optional[str] = None,
         include_current_session: bool = False,
     ) -> SearchResponse:
-        validate_search_intent(query=query, terms=terms, file=file)
-        args = ["search", "--json"]
+        validate_search_intent(query=query, file=file)
+        args = ["search"]
         if query is not None:
-            args.append(query)
+            args.extend(["--query-json", serialize_search_query(query)])
         _extend_option(args, "--provider", provider)
         _extend_option(args, "--workspace", workspace)
         _extend_option(args, "--since", since)
         _extend_option(args, "--event-type", event_type)
         _extend_option(args, "--file", file)
         _extend_option(args, "--session", session)
-        for term in terms or []:
-            args.extend(["--term", term])
         if events:
             args.append("--events")
         _extend_option(args, "--backend", backend)
-        if semantic_weight is not None:
-            args.extend(["--semantic-weight", str(semantic_weight)])
         if primary_only:
             args.append("--primary-only")
         if include_subagents:
@@ -267,6 +260,7 @@ class LocalCliAdapter:
         _extend_option(args, "--refresh", refresh)
         if include_current_session:
             args.append("--include-current-session")
+        args.append("--json")
         raw = self._json(args)
         return cast(
             SearchResponse,
@@ -479,7 +473,27 @@ class HostedAdapter:
     ) -> SyncResponse:
         raise HostedTransportNotImplementedError("sync")
 
-    def search(self, query: Optional[str] = None, **kwargs: Any) -> SearchResponse:
+    def search(
+        self,
+        query: Optional[SearchQueryV1] = None,
+        *,
+        provider: Optional[str] = None,
+        workspace: Optional[str] = None,
+        since: Optional[str] = None,
+        event_type: Optional[str] = None,
+        file: Optional[str] = None,
+        session: Optional[str] = None,
+        events: bool = False,
+        backend: Optional[SearchBackendMode] = None,
+        primary_only: bool = False,
+        include_subagents: bool = False,
+        limit: Optional[int] = None,
+        refresh: Optional[str] = None,
+        include_current_session: bool = False,
+    ) -> SearchResponse:
+        validate_search_intent(query=query, file=file)
+        if query is not None:
+            serialize_search_query(query)
         raise HostedTransportNotImplementedError("search")
 
     def show_event(self, event_id: str, **kwargs: Any) -> ShowEventResponse:

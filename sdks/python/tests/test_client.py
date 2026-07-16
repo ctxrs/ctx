@@ -20,12 +20,94 @@ from ctx_agent_history import (
     HostedConfig,
     HostedTransportNotImplementedError,
     AgentHistoryClient,
+    SearchQueryV1,
+    serialize_search_query,
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
 from ctx_agent_history.transport import LocalCliAdapter
 from ctx_agent_history.types import AgentHistoryErrorCode
 import dogfood_local
+
+
+SEARCH_QUERY: SearchQueryV1 = {
+    "version": "ctx-search-v1",
+    "any": [
+        {"all": "disk io pressure"},
+        {"phrase": "storage latency"},
+        {"literal": "logs_2.db"},
+        {"semantic": "the indexing job made the workstation sluggish"},
+    ],
+    "must": [{"all": "codex"}],
+    "must_not": [{"phrase": "postgres vacuum"}],
+}
+
+
+def search_execution() -> dict[str, object]:
+    return {
+        "query_version": "ctx-search-v1",
+        "candidate_strategy": "bounded_rrf_v1",
+        "resolved": {
+            "query_bytes": 8192,
+            "clauses": 32,
+            "analyzed_tokens_per_clause": 32,
+            "candidates_per_positive_seed": 1024,
+            "candidate_rows": 16384,
+            "retained_candidate_ids": 8192,
+            "residual_rows": 8192,
+            "verification_bytes": 16777216,
+            "verification_lookup_bytes": 16384,
+            "hydrated_rows": 256,
+            "hydration_input_bytes": 8388608,
+            "hydration_input_bytes_per_event": 65536,
+            "snippet_input_bytes": 8388608,
+            "returned_text_bytes": 524288,
+            "serialized_response_bytes": 2097152,
+            "results": 5,
+            "elapsed_ms": 2500,
+        },
+        "consumed": {
+            "query_bytes": 96,
+            "clauses": 7,
+            "analyzed_tokens": 18,
+            "largest_analyzed_tokens_per_clause": 6,
+            "largest_positive_seed_candidates": 20,
+            "candidate_rows": 48,
+            "retained_candidate_ids": 31,
+            "residual_rows": 12,
+            "verification_bytes": 4096,
+            "largest_verification_lookup_bytes": 512,
+            "hydrated_rows": 5,
+            "legacy_fallback_rows": 0,
+            "hydration_input_bytes": 2048,
+            "largest_hydration_input_bytes": 800,
+            "snippet_input_bytes": 1200,
+            "returned_results": 1,
+            "returned_text_bytes": 128,
+            "serialized_response_bytes": 2048,
+            "elapsed_ms": 12,
+        },
+        "semantic": {
+            "attempted": True,
+            "required": True,
+            "readiness": "ready",
+            "effective_backend": "hybrid",
+            "requested_candidates": 20,
+            "eligible_candidates": 18,
+            "candidates_supplied": 20,
+            "candidates_consumed": 18,
+            "candidates_used": 4,
+            "coverage": {"indexed_documents": 990, "searchable_documents": 1000},
+            "completeness": "partial",
+            "incompleteness_reasons": ["semantic_coverage_incomplete"],
+            "positive_text_rule_version": "ctx-search-positive-text-v1",
+        },
+        "requested_result_limit": 5,
+        "result_limit": 5,
+        "max_result_limit": 200,
+        "truncated": True,
+        "truncation_reasons": ["semantic_coverage_incomplete"],
+    }
 
 
 class LocalCliAdapterTests(unittest.TestCase):
@@ -71,14 +153,13 @@ class LocalCliAdapterTests(unittest.TestCase):
             )
             self.assertEqual(
                 client.search(
-                    "sqlite",
+                    SEARCH_QUERY,
                     provider="codex",
                     workspace="repo",
                     since="30d",
                     event_type="message",
                     file="src/lib.rs",
                     session="session-1",
-                    terms=["storage", "fts"],
                     events=True,
                     primary_only=True,
                     include_subagents=True,
@@ -100,49 +181,59 @@ class LocalCliAdapterTests(unittest.TestCase):
             self.assertEqual(client.locate_session("session-1")["operation"], "locateSession")
             self.assertEqual(client.locateSession("session-1")["operation"], "locateSession")
 
-    def test_search_requires_query_term_or_file_before_cli(self) -> None:
+    def test_search_requires_structured_query_or_file_before_cli(self) -> None:
         with fake_ctx(fail=True) as cli:
             client = AgentHistoryClient.local(ctx_binary=str(cli))
 
             for call in (
                 lambda: client.search(),
                 lambda: client.search(refresh="off", limit=5),
-                lambda: client.search("   "),
+                lambda: client.search(typing.cast(typing.Any, "   ")),
             ):
                 with self.subTest(call=call):
                     with self.assertRaises(CtxAgentHistoryValidationError) as raised:
                         call()
                     self.assertEqual(raised.exception.code, "invalid_request")
 
-    def test_search_backend_and_semantic_weight_flags_are_optional(self) -> None:
+    def test_search_serializes_ctx_search_v1_and_optional_backend(self) -> None:
         adapter = RecordingSearchAdapter()
         client = AgentHistoryClient(adapter)
 
-        client.search("semantic defaults")
-        client.search("semantic override", backend="hybrid", semantic_weight=0.8, refresh="off")
+        client.search(SEARCH_QUERY)
+        client.search(SEARCH_QUERY, backend="hybrid", refresh="off")
 
+        self.assertEqual(adapter.calls[0][:2], ["search", "--query-json"])
+        self.assertEqual(json.loads(adapter.calls[0][2]), SEARCH_QUERY)
         self.assertNotIn("--backend", adapter.calls[0])
-        self.assertNotIn("--semantic-weight", adapter.calls[0])
         self.assertEqual(
-            adapter.calls[1],
-            [
-                "search",
-                "--json",
-                "semantic override",
-                "--backend",
-                "hybrid",
-                "--semantic-weight",
-                "0.8",
-                "--refresh",
-                "off",
-            ],
+            adapter.calls[1][3:],
+            ["--backend", "hybrid", "--refresh", "off", "--json"],
         )
+
+    def test_search_query_validation_rejects_ambiguous_or_unbounded_shapes(self) -> None:
+        invalid = [
+            {"version": "ctx-search-v1", "must_not": [{"all": "only negative"}]},
+            {"version": "ctx-search-v1", "any": [{"semantic": "one"}, {"semantic": "two"}]},
+            {"version": "ctx-search-v1", "must": [{"semantic": "wrong placement"}]},
+            {"version": "ctx-search-v1", "any": [{"all": "x", "phrase": "x"}]},
+            {"version": "ctx-search-v1", "any": [{"literal": "x"}]},
+            {"version": "ctx-search-v1", "any": [{"all": "x"}], "unknown": True},
+            {"version": "ctx-search-v1", "any": [{"all": "x"}], "mustNot": []},
+            {"version": "ctx-search-v1", "any": [{"all": "x"}] * 33},
+            {"version": "ctx-search-v1", "any": [{"all": "x" * 1025}]},
+        ]
+        for query in invalid:
+            with self.subTest(query=query):
+                with self.assertRaises(CtxAgentHistoryValidationError):
+                    serialize_search_query(typing.cast(typing.Any, query))
 
     def test_search_normalization_camelizes_retrieval_json(self) -> None:
         adapter = RecordingSearchAdapter(
             {
                 "payloadType": "search_results",
-                "query": "semantic retrieval",
+                "schema_version": 2,
+                "query": SEARCH_QUERY,
+                "query_execution": search_execution(),
                 "retrieval": {
                     "requested_mode": "hybrid",
                     "effective_mode": "lexical",
@@ -171,7 +262,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         )
         client = AgentHistoryClient(adapter)
 
-        result = client.search("semantic retrieval")
+        result = client.search(SEARCH_QUERY)
 
         retrieval = result["search"]["retrieval"]
         self.assertEqual(retrieval["requestedMode"], "hybrid")
@@ -182,12 +273,45 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(retrieval["coverage"]["embeddedItems"], 4)
         self.assertEqual(retrieval["coverage"]["indexedNow"], 1)
         self.assertEqual(retrieval["diagnostics"]["queryEmbedMs"], 2)
+        self.assertEqual(result["search"]["schema_version"], 2)
+        self.assertEqual(result["search"]["query"]["must_not"], SEARCH_QUERY["must_not"])
+        execution = result["search"]["query_execution"]
+        self.assertEqual(execution["resolved"]["verification_bytes"], 16777216)
+        self.assertEqual(execution["consumed"]["snippet_input_bytes"], 1200)
+        self.assertEqual(execution["requested_result_limit"], 5)
+        self.assertEqual(execution["consumed"]["candidate_rows"], 48)
+        self.assertEqual(execution["semantic"]["readiness"], "ready")
+        self.assertEqual(execution["semantic"]["coverage"]["indexed_documents"], 990)
+        self.assertEqual(execution["semantic"]["completeness"], "partial")
+        self.assertNotIn("queryExecution", result["search"])
+        self.assertNotIn("verificationBytes", execution["resolved"])
         hit = result["search"]["results"][0]
         self.assertNotIn("payloadType", result["search"])
         self.assertNotIn("recordType", hit)
         self.assertNotIn("itemType", hit)
         self.assertEqual(hit["resultType"], "event")
         self.assertEqual(hit["citations"][0]["targetType"], "event")
+
+    def test_search_rejects_pre_v2_response_shape(self) -> None:
+        client = AgentHistoryClient(
+            RecordingSearchAdapter({"schema_version": 1, "query": "old ambiguous query", "results": []})
+        )
+
+        with self.assertRaises(CtxAgentHistoryProtocolError):
+            client.search(SEARCH_QUERY)
+
+        client = AgentHistoryClient(
+            RecordingSearchAdapter(
+                {
+                    "schema_version": 2,
+                    "query": SEARCH_QUERY,
+                    "queryExecution": search_execution(),
+                    "results": [],
+                }
+            )
+        )
+        with self.assertRaises(CtxAgentHistoryProtocolError):
+            client.search(SEARCH_QUERY)
 
     def test_versioning_reports_sdk_api_transport_and_ctx_version(self) -> None:
         with fake_ctx() as cli:
@@ -274,6 +398,15 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "not_supported")
         self.assertEqual(raised.exception.details["method"], "status")
         self.assertEqual(raised.exception.details["backend"], "hosted")
+        with self.assertRaises(HostedTransportNotImplementedError):
+            client.search(SEARCH_QUERY)
+        with self.assertRaises(CtxAgentHistoryValidationError):
+            client.search(
+                typing.cast(
+                    typing.Any,
+                    {"version": "ctx-search-v1", "must_not": [{"all": "negative"}]},
+                )
+            )
         self.assertIsNone(client.version().ctx_version)
         self.assertEqual(client.version().transport, "hosted")
 
@@ -329,7 +462,12 @@ class DogfoodExampleTests(unittest.TestCase):
 class RecordingSearchAdapter(LocalCliAdapter):
     def __init__(self, raw: dict[str, object] | None = None) -> None:
         super().__init__()
-        self.raw = raw or {"query": "semantic defaults", "results": []}
+        self.raw = raw or {
+            "schema_version": 2,
+            "query": SEARCH_QUERY,
+            "query_execution": search_execution(),
+            "results": [],
+        }
         self.calls: list[list[str]] = []
 
     def _json(self, args: typing.Sequence[str]) -> dict[str, object]:
@@ -456,9 +594,19 @@ def _fake_ctx_script(
                 }
             )
         elif command == "search":
+            query = json.loads(args[args.index("--query-json") + 1])
             payload.update(
                 {
-                    "query": "sqlite",
+                    "schema_version": 2,
+                    "query": query,
+                    "query_execution": {
+                        "query_version": "ctx-search-v1",
+                        "resolved": {},
+                        "consumed": {},
+                        "semantic": {},
+                        "truncated": False,
+                        "truncation_reasons": [],
+                    },
                     "payload_type": "search_results",
                     "results": [
                         {

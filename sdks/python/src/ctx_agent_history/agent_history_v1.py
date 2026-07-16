@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional, cast
 
 from .config import HostedConfig, LocalConfig
+from .errors import CtxAgentHistoryProtocolError, CtxAgentHistoryValidationError
 from .types import (
     Backend,
     EventResult,
@@ -16,6 +17,7 @@ from .types import (
     SessionResult,
     Status,
 )
+from .validation import validate_search_query
 from .version import API_VERSION
 
 SCHEMA_VERSION = 1
@@ -96,11 +98,42 @@ def normalize_import(raw: Mapping[str, Any]) -> ImportResult:
 
 
 def normalize_search(raw: Mapping[str, Any]) -> SearchResult:
+    schema_version = raw.get("schema_version")
+    if schema_version != 2:
+        raise CtxAgentHistoryProtocolError(
+            "ctx search returned an unsupported schema version",
+            details={"expectedSchemaVersion": 2, "actualSchemaVersion": schema_version},
+        )
+    raw_query = raw.get("query")
+    if raw_query is None:
+        query = None
+    elif not isinstance(raw_query, Mapping):
+        raise CtxAgentHistoryProtocolError(
+            "ctx search response contains a non-object canonical query",
+            details={"field": "query"},
+        )
+    else:
+        try:
+            query = validate_search_query(cast(Any, raw_query))
+        except CtxAgentHistoryValidationError as exc:
+            raise CtxAgentHistoryProtocolError(
+                "ctx search returned an invalid canonical query",
+                details={"field": "query", "validation": exc.details},
+                cause=exc,
+            ) from exc
+    query_execution = raw.get("query_execution")
+    if not isinstance(query_execution, Mapping):
+        raise CtxAgentHistoryProtocolError(
+            "ctx search response is missing query execution diagnostics",
+            details={"field": "query_execution"},
+        )
     return cast(
         SearchResult,
         _drop_none(
             {
-                "query": raw.get("query"),
+                "schema_version": 2,
+                "query": query,
+                "query_execution": dict(query_execution),
                 "filters": _camelize_public(raw.get("filters", {})),
                 "freshness": _camelize_public(raw.get("freshness", {})),
                 "retrieval": _camelize_public(raw.get("retrieval")),

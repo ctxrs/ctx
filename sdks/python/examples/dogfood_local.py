@@ -66,7 +66,12 @@ def run_demo(client: AgentHistoryClient) -> DogfoodSnapshot:
         init=client.init(catalog_only=True),
         imported=client.import_(provider="codex", resume=True),
         synced=client.sync(all=True),
-        search=client.search("local agent history", provider="codex", limit=5, refresh="off"),
+        search=client.search(
+            {"version": "ctx-search-v1", "any": [{"all": "local agent history"}]},
+            provider="codex",
+            limit=5,
+            refresh="off",
+        ),
         event=client.show_event(EVENT_ID, window=1),
         session=client.show_session(SESSION_ID, mode="lite"),
         event_location=client.locate_event(EVENT_ID),
@@ -156,10 +161,20 @@ def _fake_ctx_script() -> str:
                     ],
                 }}
             )
-        elif args[:2] == ["search", "--json"]:
+        elif args and args[0] == "search":
+            query = json.loads(args[args.index("--query-json") + 1])
             payload.update(
                 {{
-                    "query": "local agent history",
+                    "schema_version": 2,
+                    "query": query,
+                    "query_execution": {{
+                        "query_version": "ctx-search-v1",
+                        "resolved": {{}},
+                        "consumed": {{}},
+                        "semantic": {{}},
+                        "truncated": False,
+                        "truncation_reasons": [],
+                    }},
                     "filters": {{"provider": "codex"}},
                     "freshness": {{"mode": "off", "status": "skipped"}},
                     "results": [

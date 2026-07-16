@@ -1,7 +1,18 @@
 import { spawn } from "node:child_process";
 
 export const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
+export const CTX_SEARCH_V1_VERSION = "ctx-search-v1";
 export const SDK_VERSION = "0.0.0";
+
+const SEARCH_MAX_CLAUSES = 32;
+const SEARCH_MAX_CLAUSE_BYTES = 1_024;
+const SEARCH_MAX_TOTAL_CLAUSE_BYTES = 8_192;
+const SEARCH_MAX_QUERY_JSON_BYTES = 64 * 1_024;
+const SEARCH_MIN_LITERAL_BYTES = 3;
+const SEARCH_MAX_LITERAL_BYTES = 256;
+const SEARCH_QUERY_FIELDS = new Set(["version", "any", "must", "must_not"]);
+const SEARCH_LEXICAL_MATCHERS = new Set(["all", "phrase", "literal"]);
+const SEARCH_ANY_MATCHERS = new Set([...SEARCH_LEXICAL_MATCHERS, "semantic"]);
 
 export class CtxError extends Error {
   constructor(message, options = {}) {
@@ -159,14 +170,11 @@ export class LocalAgentHistoryClient {
   }
 
   async search(queryOrOptions = undefined, maybeOptions = {}) {
-    const options =
-      typeof queryOrOptions === "string"
-        ? { ...maybeOptions, query: queryOrOptions }
-        : { ...queryOrOptions };
+    const options = searchCallOptions(queryOrOptions, maybeOptions);
     validateSearchIntent(options);
     const args = ["search"];
     if (options.query) {
-      args.push(options.query);
+      args.push("--query-json", serializeSearchQuery(options.query));
     }
     appendSearchArgs(args, options);
     args.push("--json");
@@ -277,7 +285,12 @@ export class HostedAgentHistoryClient {
     return hostedUnsupported();
   }
 
-  search() {
+  async search(queryOrOptions = undefined, maybeOptions = {}) {
+    const options = searchCallOptions(queryOrOptions, maybeOptions);
+    validateSearchIntent(options);
+    if (options.query) {
+      serializeSearchQuery(options.query);
+    }
     return hostedUnsupported();
   }
 
@@ -353,7 +366,7 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
       envelope.import = camelizeKeys(raw);
       break;
     case "search":
-      envelope.search = camelizeKeys(raw);
+      envelope.search = normalizeSearchResponse(raw);
       break;
     case "showEvent":
       envelope.event = {
@@ -423,7 +436,6 @@ function appendImportArgs(args, options) {
 }
 
 function appendSearchArgs(args, options) {
-  appendRepeated(args, "--term", options.terms ?? options.term);
   appendOptional(args, "--limit", options.limit);
   appendOptional(args, "--provider", options.provider);
   appendOptional(args, "--workspace", options.workspace);
@@ -435,26 +447,36 @@ function appendSearchArgs(args, options) {
   appendOptional(args, "--session", options.session);
   appendFlag(args, "--events", options.events);
   appendOptional(args, "--backend", options.backend);
-  appendOptional(args, "--semantic-weight", options.semanticWeight);
   appendOptional(args, "--refresh", options.refresh);
   appendFlag(args, "--include-current-session", options.includeCurrentSession);
 }
 
 function validateSearchIntent(options) {
-  if (hasSearchText(options.query) || hasSearchText(options.file) || hasSearchTerm(options)) {
+  if (options.query !== undefined) {
+    validateSearchQuery(options.query);
     return;
   }
-  throw new CtxValidationError("search requires a query, term, or file option", {
+  if (hasSearchText(options.file)) {
+    return;
+  }
+  throw new CtxValidationError("search requires a ctx-search-v1 query or file option", {
     details: { options },
   });
 }
 
-function hasSearchTerm(options) {
-  const value = options.terms ?? options.term;
-  if (Array.isArray(value)) {
-    return value.some(hasSearchText);
+function searchCallOptions(queryOrOptions, maybeOptions) {
+  if (looksLikeSearchQuery(queryOrOptions)) {
+    return { ...maybeOptions, query: queryOrOptions };
   }
-  return hasSearchText(value);
+  if (queryOrOptions === undefined) {
+    return {};
+  }
+  if (isObject(queryOrOptions)) {
+    return { ...queryOrOptions };
+  }
+  throw new CtxValidationError("search input must be a ctx-search-v1 query or options object", {
+    details: { inputType: typeof queryOrOptions },
+  });
 }
 
 function hasSearchText(value) {
@@ -476,11 +498,188 @@ function appendSessionLookupArgs(args, options) {
   }
 }
 
-function appendRepeated(args, flag, value) {
-  const values = Array.isArray(value) ? value : value ? [value] : [];
-  for (const item of values) {
-    args.push(flag, item);
+export function serializeSearchQuery(query) {
+  const canonical = validateSearchQuery(query);
+  const serialized = JSON.stringify(canonical);
+  const encodedBytes = Buffer.byteLength(serialized, "utf8");
+  if (encodedBytes > SEARCH_MAX_QUERY_JSON_BYTES) {
+    invalidSearchQuery("search query JSON exceeds the 65536-byte limit", {
+      actualBytes: encodedBytes,
+      maximumBytes: SEARCH_MAX_QUERY_JSON_BYTES,
+    });
   }
+  return serialized;
+}
+
+export function validateSearchQuery(query) {
+  if (!isObject(query)) {
+    invalidSearchQuery("search query must be an object", { queryType: typeof query });
+  }
+  const unknown = firstUnknownOwnField(query, SEARCH_QUERY_FIELDS);
+  if (unknown !== undefined) {
+    invalidSearchQuery("search query contains an unknown field", { field: unknown });
+  }
+  if (query.version !== CTX_SEARCH_V1_VERSION) {
+    invalidSearchQuery("search query version must be ctx-search-v1", {
+      version: query.version,
+    });
+  }
+
+  const canonical = { version: CTX_SEARCH_V1_VERSION };
+  let totalClauses = 0;
+  let totalClauseBytes = 0;
+  let semanticClauses = 0;
+  let positiveClauses = 0;
+  for (const placement of ["any", "must", "must_not"]) {
+    const rawClauses = query[placement] ?? [];
+    if (!Array.isArray(rawClauses)) {
+      invalidSearchQuery(`search query ${placement} must be an array`, { placement });
+    }
+    const allowed = placement === "any" ? SEARCH_ANY_MATCHERS : SEARCH_LEXICAL_MATCHERS;
+    const clauses = [];
+    for (const rawClause of rawClauses) {
+      if (!isObject(rawClause)) {
+        invalidSearchQuery("search clause must be an object", { placement });
+      }
+      const matchers = firstOwnFields(rawClause, 2);
+      if (matchers.length !== 1 || !allowed.has(matchers[0])) {
+        invalidSearchQuery("search clause must contain exactly one allowed matcher", {
+          placement,
+          matchers,
+        });
+      }
+      const matcher = matchers[0];
+      const value = rawClause[matcher];
+      if (!hasSearchText(value)) {
+        invalidSearchQuery("search clause value must be a non-empty string", {
+          placement,
+          matcher,
+        });
+      }
+      const valueBytes = Buffer.byteLength(value, "utf8");
+      if (valueBytes > SEARCH_MAX_CLAUSE_BYTES) {
+        invalidSearchQuery("search clause exceeds the 1024-byte limit", {
+          matcher,
+          actualBytes: valueBytes,
+        });
+      }
+      if (
+        matcher === "literal" &&
+        (valueBytes < SEARCH_MIN_LITERAL_BYTES || valueBytes > SEARCH_MAX_LITERAL_BYTES)
+      ) {
+        invalidSearchQuery("literal search clause must be between 3 and 256 bytes", {
+          actualBytes: valueBytes,
+        });
+      }
+      if (matcher === "semantic") {
+        semanticClauses += 1;
+      }
+      clauses.push({ [matcher]: value });
+      totalClauses += 1;
+      totalClauseBytes += valueBytes;
+      if (totalClauses > SEARCH_MAX_CLAUSES) {
+        invalidSearchQuery("search query exceeds the 32-clause limit", {
+          actualClauses: totalClauses,
+          maximumClauses: SEARCH_MAX_CLAUSES,
+        });
+      }
+      if (totalClauseBytes > SEARCH_MAX_TOTAL_CLAUSE_BYTES) {
+        invalidSearchQuery("search query exceeds the 8192-byte clause limit", {
+          actualBytes: totalClauseBytes,
+          maximumBytes: SEARCH_MAX_TOTAL_CLAUSE_BYTES,
+        });
+      }
+      if (semanticClauses > 1) {
+        invalidSearchQuery("search query allows at most one semantic clause in any", {});
+      }
+    }
+    if (Object.hasOwn(query, placement) || clauses.length > 0) {
+      canonical[placement] = clauses;
+    }
+    if (placement === "any" || placement === "must") {
+      positiveClauses += clauses.length;
+    }
+  }
+
+  if (positiveClauses === 0) {
+    invalidSearchQuery("search query needs a positive any or must clause", {});
+  }
+  return canonical;
+}
+
+function normalizeSearchResponse(raw) {
+  const schemaVersion = raw?.schema_version;
+  if (schemaVersion !== 2) {
+    throw new CtxParseError("ctx search returned an unsupported schema version", {
+      details: { expectedSchemaVersion: 2, actualSchemaVersion: schemaVersion },
+    });
+  }
+  if (raw.query !== null && raw.query !== undefined && !isObject(raw.query)) {
+    throw new CtxParseError("ctx search response contains a non-object canonical query", {
+      details: { field: "query" },
+    });
+  }
+  let query = null;
+  if (isObject(raw.query)) {
+    try {
+      query = validateSearchQuery(raw.query);
+    } catch (cause) {
+      throw new CtxParseError("ctx search returned an invalid canonical query", {
+        details: { field: "query" },
+        cause,
+      });
+    }
+  }
+  const queryExecution = raw.query_execution;
+  if (!isObject(queryExecution)) {
+    throw new CtxParseError("ctx search response is missing query execution diagnostics", {
+      details: { field: "query_execution" },
+    });
+  }
+  const { schema_version, query: _query, query_execution, ...legacyFields } = raw;
+  return {
+    ...camelizeKeys(legacyFields),
+    schema_version,
+    query,
+    query_execution: queryExecution,
+  };
+}
+
+function looksLikeSearchQuery(value) {
+  return (
+    isObject(value) &&
+    ["version", "any", "must", "must_not"].some((field) => Object.hasOwn(value, field))
+  );
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function firstUnknownOwnField(value, allowed) {
+  for (const field in value) {
+    if (Object.hasOwn(value, field) && !allowed.has(field)) {
+      return field;
+    }
+  }
+  return undefined;
+}
+
+function firstOwnFields(value, limit) {
+  const fields = [];
+  for (const field in value) {
+    if (Object.hasOwn(value, field)) {
+      fields.push(field);
+      if (fields.length >= limit) {
+        break;
+      }
+    }
+  }
+  return fields;
+}
+
+function invalidSearchQuery(message, details) {
+  throw new CtxValidationError(message, { details });
 }
 
 function appendOptional(args, flag, value) {

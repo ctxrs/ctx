@@ -26,7 +26,10 @@ export function createDogfoodClient(options = {}) {
 export async function runDogfoodToy(options = {}) {
   const client = options.client ?? createDogfoodClient(options);
   const status = await client.status();
-  const search = await client.search("local agent history", {
+  const search = await client.search({
+    version: "ctx-search-v1",
+    any: [{ all: "local agent history" }],
+  }, {
     limit: 3,
     provider: "codex",
     refresh: "off",
@@ -42,7 +45,7 @@ export async function runDogfoodToy(options = {}) {
 
   return {
     ready: status.status.initialized,
-    query: search.search.query,
+    query: search.search.query.any?.[0]?.all ?? null,
     firstScope: firstHit?.resultScope ?? null,
     eventCount: event.event.events.length,
     sessionMode: session.session.mode,
@@ -76,8 +79,18 @@ function mockResponse(args) {
     };
   }
   if (command === "search") {
+    const query = JSON.parse(args[args.indexOf("--query-json") + 1]);
     return {
-      query: args[1] ?? null,
+      schema_version: 2,
+      query,
+      query_execution: {
+        query_version: "ctx-search-v1",
+        resolved: {},
+        consumed: {},
+        semantic: {},
+        truncated: false,
+        truncation_reasons: [],
+      },
       generated_at: "2026-07-01T12:00:00Z",
       freshness: { mode: "off", status: "skipped", source_count: 0, totals: {} },
       results: [

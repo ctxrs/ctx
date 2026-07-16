@@ -12,10 +12,89 @@ import {
   AGENT_HISTORY_V1_VERSION,
   createHostedAgentHistoryClient,
   createLocalAgentHistoryClient,
+  serializeSearchQuery,
 } from "../src/index.js";
 import { runDogfoodToy } from "../examples/dogfood-toy.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const SEARCH_QUERY = {
+  version: "ctx-search-v1",
+  any: [
+    { all: "disk io pressure" },
+    { phrase: "storage latency" },
+    { literal: "logs_2.db" },
+    { semantic: "the indexing job made the workstation sluggish" },
+  ],
+  must: [{ all: "codex" }],
+  must_not: [{ phrase: "postgres vacuum" }],
+};
+
+function searchExecution() {
+  return {
+    query_version: "ctx-search-v1",
+    candidate_strategy: "bounded_rrf_v1",
+    resolved: {
+      query_bytes: 8192,
+      clauses: 32,
+      analyzed_tokens_per_clause: 32,
+      candidates_per_positive_seed: 1024,
+      candidate_rows: 16384,
+      retained_candidate_ids: 8192,
+      residual_rows: 8192,
+      verification_bytes: 16777216,
+      verification_lookup_bytes: 16384,
+      hydrated_rows: 256,
+      hydration_input_bytes: 8388608,
+      hydration_input_bytes_per_event: 65536,
+      snippet_input_bytes: 8388608,
+      returned_text_bytes: 524288,
+      serialized_response_bytes: 2097152,
+      results: 5,
+      elapsed_ms: 2500,
+    },
+    consumed: {
+      query_bytes: 96,
+      clauses: 7,
+      analyzed_tokens: 18,
+      largest_analyzed_tokens_per_clause: 6,
+      largest_positive_seed_candidates: 20,
+      candidate_rows: 48,
+      retained_candidate_ids: 31,
+      residual_rows: 12,
+      verification_bytes: 4096,
+      largest_verification_lookup_bytes: 512,
+      hydrated_rows: 5,
+      legacy_fallback_rows: 0,
+      hydration_input_bytes: 2048,
+      largest_hydration_input_bytes: 800,
+      snippet_input_bytes: 1200,
+      returned_results: 1,
+      returned_text_bytes: 128,
+      serialized_response_bytes: 2048,
+      elapsed_ms: 12,
+    },
+    semantic: {
+      attempted: true,
+      required: true,
+      readiness: "ready",
+      effective_backend: "hybrid",
+      requested_candidates: 20,
+      eligible_candidates: 18,
+      candidates_supplied: 20,
+      candidates_consumed: 18,
+      candidates_used: 4,
+      coverage: { indexed_documents: 990, searchable_documents: 1000 },
+      completeness: "partial",
+      incompleteness_reasons: ["semantic_coverage_incomplete"],
+      positive_text_rule_version: "ctx-search-positive-text-v1",
+    },
+    requested_result_limit: 5,
+    result_limit: 5,
+    max_result_limit: 200,
+    truncated: true,
+    truncation_reasons: ["semantic_coverage_incomplete"],
+  };
+}
 
 function mockClient(handler) {
   const calls = [];
@@ -87,7 +166,9 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
 test("builds search flags and normalizes nested CLI search output", async () => {
   const { client, calls } = mockClient(() =>
     JSON.stringify({
-      query: "retry handling",
+      schema_version: 2,
+      query: SEARCH_QUERY,
+      query_execution: searchExecution(),
       generated_at: "2026-07-01T12:00:00Z",
       freshness: { mode: "off", status: "skipped", source_count: 1, totals: {} },
       retrieval: {
@@ -132,8 +213,7 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     }),
   );
 
-  const result = await client.search("retry handling", {
-    terms: ["timeout", "backoff"],
+  const result = await client.search(SEARCH_QUERY, {
     limit: 5,
     provider: "codex",
     workspace: "ctx",
@@ -144,7 +224,6 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     session: "00000000-0000-0000-0000-000000000001",
     events: true,
     backend: "hybrid",
-    semanticWeight: 0.8,
     refresh: "off",
     includeCurrentSession: true,
   });
@@ -174,16 +253,24 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   assert.equal(result.search.retrieval.diagnostics.queryEmbedMs, 2);
   assert.equal(result.search.pagination.nextCursor, "page-2");
   assert.equal(result.search.pagination.hasMore, true);
+  assert.equal(result.search.schema_version, 2);
+  assert.deepEqual(result.search.query.must_not, SEARCH_QUERY.must_not);
+  assert.equal(result.search.query_execution.resolved.verification_bytes, 16777216);
+  assert.equal(result.search.query_execution.consumed.snippet_input_bytes, 1200);
+  assert.equal(result.search.query_execution.requested_result_limit, 5);
+  assert.equal(result.search.query_execution.consumed.candidate_rows, 48);
+  assert.equal(result.search.query_execution.semantic.readiness, "ready");
+  assert.equal(result.search.query_execution.semantic.coverage.indexed_documents, 990);
+  assert.equal(result.search.query_execution.semantic.completeness, "partial");
+  assert.equal("queryExecution" in result.search, false);
+  assert.equal("verificationBytes" in result.search.query_execution.resolved, false);
 
   assert.deepEqual(calls[0].args, [
     "--data-root",
     "/tmp/ctx-sdk-test",
     "search",
-    "retry handling",
-    "--term",
-    "timeout",
-    "--term",
-    "backoff",
+    "--query-json",
+    serializeSearchQuery(SEARCH_QUERY),
     "--limit",
     "5",
     "--provider",
@@ -202,8 +289,6 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     "--events",
     "--backend",
     "hybrid",
-    "--semantic-weight",
-    "0.8",
     "--refresh",
     "off",
     "--include-current-session",
@@ -211,16 +296,22 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   ]);
 });
 
-test("omits semantic search override flags when unset", async () => {
-  const { client, calls } = mockClient(() => JSON.stringify({ query: "default", results: [] }));
+test("omits backend override when unset", async () => {
+  const { client, calls } = mockClient(() =>
+    JSON.stringify({
+      schema_version: 2,
+      query: SEARCH_QUERY,
+      query_execution: searchExecution(),
+      results: [],
+    }),
+  );
 
-  await client.search("default");
+  await client.search(SEARCH_QUERY);
 
   assert.equal(calls[0].args.includes("--backend"), false);
-  assert.equal(calls[0].args.includes("--semantic-weight"), false);
 });
 
-test("rejects search without query, term, or file before invoking CLI", async () => {
+test("rejects search without a structured query or file before invoking CLI", async () => {
   const { client, calls } = mockClient(() => {
     throw new Error("runner should not be called");
   });
@@ -230,6 +321,42 @@ test("rejects search without query, term, or file before invoking CLI", async ()
   await assert.rejects(() => client.search("   "), CtxValidationError);
 
   assert.equal(calls.length, 0);
+});
+
+test("validates every ctx-search-v1 matcher and rejects ambiguous shapes", () => {
+  assert.deepEqual(JSON.parse(serializeSearchQuery(SEARCH_QUERY)), SEARCH_QUERY);
+  const invalid = [
+    { version: "ctx-search-v1", must_not: [{ all: "only negative" }] },
+    { version: "ctx-search-v1", any: [{ semantic: "one" }, { semantic: "two" }] },
+    { version: "ctx-search-v1", must: [{ semantic: "wrong placement" }] },
+    { version: "ctx-search-v1", any: [{ all: "x", phrase: "x" }] },
+    { version: "ctx-search-v1", any: [{ literal: "x" }] },
+    { version: "ctx-search-v1", any: [{ all: "x" }], unknown: true },
+    { version: "ctx-search-v1", any: [{ all: "x" }], mustNot: [] },
+    { version: "ctx-search-v1", any: Array.from({ length: 33 }, () => ({ all: "x" })) },
+    { version: "ctx-search-v1", any: [{ all: "x".repeat(1025) }] },
+  ];
+  for (const query of invalid) {
+    assert.throws(() => serializeSearchQuery(query), CtxValidationError);
+  }
+});
+
+test("rejects the pre-v2 ambiguous search response", async () => {
+  const { client } = mockClient(() =>
+    JSON.stringify({ schema_version: 1, query: "old ambiguous query", results: [] }),
+  );
+
+  await assert.rejects(() => client.search(SEARCH_QUERY), CtxParseError);
+
+  const aliasOnly = mockClient(() =>
+    JSON.stringify({
+      schema_version: 2,
+      query: SEARCH_QUERY,
+      queryExecution: searchExecution(),
+      results: [],
+    }),
+  );
+  await assert.rejects(() => aliasOnly.client.search(SEARCH_QUERY), CtxParseError);
 });
 
 test("wraps show and locate commands by ctx id and provider session id", async () => {
@@ -330,6 +457,11 @@ test("hosted client is an explicit placeholder", async () => {
 
   assert.equal((await client.version()).adapter, "hosted-placeholder");
   await assert.rejects(() => client.status(), CtxUnsupportedError);
+  await assert.rejects(() => client.search(SEARCH_QUERY), CtxUnsupportedError);
+  await assert.rejects(
+    () => client.search({ version: "ctx-search-v1", must_not: [{ all: "negative" }] }),
+    CtxValidationError,
+  );
 });
 
 test("dogfood toy app runs status/search/show/locate with mocked ctx", async () => {

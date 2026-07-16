@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping, Optional, Sequence, Union
+from typing import Mapping, Optional, Union
 
 from .config import HostedConfig, LocalConfig
 from .transport import HostedAdapter, LocalCliAdapter, AgentHistoryTransport
@@ -14,6 +14,7 @@ from .types import (
     LocateEventResponse,
     LocateSessionResponse,
     SearchBackendMode,
+    SearchQueryV1,
     SearchResponse,
     ShowEventResponse,
     ShowSessionResponse,
@@ -120,7 +121,7 @@ class AgentHistoryClient:
 
     def search(
         self,
-        query: Optional[str] = None,
+        query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
         workspace: Optional[str] = None,
@@ -128,10 +129,8 @@ class AgentHistoryClient:
         event_type: Optional[str] = None,
         file: Optional[Pathish] = None,
         session: Optional[str] = None,
-        terms: Optional[Sequence[str]] = None,
         events: bool = False,
         backend: Optional[SearchBackendMode] = None,
-        semantic_weight: Optional[float] = None,
         primary_only: bool = False,
         include_subagents: bool = False,
         limit: Optional[int] = None,
@@ -139,7 +138,7 @@ class AgentHistoryClient:
         include_current_session: bool = False,
     ) -> SearchResponse:
         file_value = str(file) if file is not None else None
-        validate_search_intent(query=query, terms=terms, file=file_value)
+        validate_search_intent(query=query, file=file_value)
         return self._transport.search(
             query=query,
             provider=provider,
@@ -148,10 +147,8 @@ class AgentHistoryClient:
             event_type=event_type,
             file=file_value,
             session=session,
-            terms=list(terms) if terms is not None else None,
             events=events,
             backend=backend,
-            semantic_weight=semantic_weight,
             primary_only=primary_only,
             include_subagents=include_subagents,
             limit=limit,
