@@ -1,4 +1,8 @@
 include!("semantic/preamble.rs");
+pub(crate) mod model_retry;
+pub(crate) mod query_priority;
+pub(crate) mod query_service_contract;
+pub(crate) mod readiness;
 #[cfg(any(target_os = "macos", test))]
 mod model_bundle {
     include!("semantic/model_bundle.rs");
