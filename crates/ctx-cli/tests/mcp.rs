@@ -116,7 +116,25 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
             .len(),
         3
     );
-    assert!(search_tool["inputSchema"]["properties"]["semantic_weight"].is_null());
+    assert_eq!(
+        query_schema["properties"]["must_not"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        search_tool["inputSchema"]["properties"]["limit"]["maximum"],
+        200
+    );
+    assert_omits_keys(
+        search_tool,
+        &[
+            "semantic_weight",
+            "semantic_fallback",
+            "semantic_fallback_code",
+        ],
+    );
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
@@ -530,6 +548,22 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
                     }
                 }
             }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "semantic-unavailable",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": {
+                            "version": "ctx-search-v1",
+                            "any": [{"semantic": "onboarding guidance"}]
+                        },
+                        "limit": 5,
+                        "backend": "semantic"
+                    }
+                }
+            }),
         ],
     );
     let search = &search_responses[1]["result"]["structuredContent"];
@@ -542,6 +576,15 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
     assert_eq!(search["query_execution"]["query_version"], "ctx-search-v1");
     assert!(search["query_execution"]["resolved"]["candidate_rows"].is_u64());
     assert!(search["query_execution"]["consumed"]["candidate_rows"].is_u64());
+    assert_eq!(search["query_execution"]["requested_result_limit"], 5);
+    assert_eq!(search["query_execution"]["result_limit"], 5);
+    assert_eq!(search["query_execution"]["max_result_limit"], 200);
+    assert!(
+        search["query_execution"]["consumed"]["returned_results"]
+            .as_u64()
+            .unwrap()
+            <= 5
+    );
     assert_eq!(search["freshness"]["mode"], "off");
     assert_eq!(search["freshness"]["status"], "skipped");
     assert_eq!(search["retrieval"]["requested_mode"], "hybrid");
@@ -549,6 +592,28 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
     assert_eq!(
         search["query_execution"]["semantic"]["effective_backend"],
         "lexical"
+    );
+    assert_eq!(search["query_execution"]["semantic"]["attempted"], true);
+    assert_eq!(search["query_execution"]["semantic"]["required"], false);
+    assert_eq!(
+        search["query_execution"]["semantic"]["readiness"],
+        "not_ready"
+    );
+    assert_eq!(
+        search["query_execution"]["semantic"]["completeness"],
+        "skipped"
+    );
+    assert_eq!(
+        search["query_execution"]["semantic"]["skip_reason"],
+        "not_ready"
+    );
+    assert_omits_keys(
+        search,
+        &[
+            "semantic_weight",
+            "semantic_fallback",
+            "semantic_fallback_code",
+        ],
     );
     assert_useful_mcp_text(
         &search_responses[1]["result"],
@@ -570,6 +635,30 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
     assert!(first_result["result_type"].is_string());
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap();
     let ctx_event_id = first_result["ctx_event_id"].as_str().unwrap();
+
+    let semantic_error = &search_responses[2]["result"];
+    assert_eq!(semantic_error["isError"], true);
+    assert_eq!(semantic_error["structuredContent"]["schema_version"], 2);
+    assert_eq!(
+        semantic_error["structuredContent"]["payload_type"],
+        "search_error"
+    );
+    assert_eq!(
+        semantic_error["structuredContent"]["error"]["code"],
+        "backend_unavailable"
+    );
+    assert_eq!(
+        semantic_error["structuredContent"]["error"]["retryable"],
+        true
+    );
+    assert_eq!(
+        semantic_error["structuredContent"]["error"]["details"]["search_error_code"],
+        "explicit_semantic_unavailable"
+    );
+    assert_eq!(
+        semantic_error["structuredContent"]["error"]["details"]["readiness"],
+        "not_ready"
+    );
 
     let show_responses = mcp_roundtrip(
         &temp,

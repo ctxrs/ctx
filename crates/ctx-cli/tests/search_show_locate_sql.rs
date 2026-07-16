@@ -255,7 +255,7 @@ fn fresh_home_search_mvp_flow() {
 
     let search =
         json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
-    assert_eq!(search["schema_version"], 1);
+    assert_eq!(search["schema_version"], 2);
     assert_omits_keys(
         &search,
         &[
@@ -287,7 +287,13 @@ fn fresh_home_search_mvp_flow() {
         "codex",
         "--json",
     ]));
-    assert_eq!(term_search["query"], "zzzz-no-match OR onboarding");
+    assert_eq!(
+        term_search["query"],
+        json!({
+            "version":"ctx-search-v1",
+            "any":[{"all":"zzzz-no-match"},{"all":"onboarding"}]
+        })
+    );
     assert!(!term_search["results"].as_array().unwrap().is_empty());
     assert!(term_search["results"]
         .as_array()
@@ -384,7 +390,7 @@ fn fresh_home_search_mvp_flow() {
 
     let file_search =
         json_output(ctx(&temp).args(["search", "--file", "crates/foo/src/lib.rs", "--json"]));
-    assert_eq!(file_search["query"], "");
+    assert!(file_search["query"].is_null());
     assert!(file_search["results"].is_array());
 
     let show_event = json_output(ctx(&temp).args([
@@ -563,7 +569,7 @@ fn fresh_home_search_mvp_flow() {
 }
 
 #[test]
-fn search_backend_defaults_and_supported_semantic_config_are_reported() {
+fn search_backend_defaults_and_semantic_readiness_are_reported() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
     json_output(ctx(&temp).args([
@@ -586,7 +592,38 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     ]));
     assert_eq!(default_search["retrieval"]["requested_mode"], "lexical");
     assert_eq!(default_search["retrieval"]["effective_mode"], "lexical");
-    assert!(default_search["retrieval"]["semantic_fallback_code"].is_null());
+    assert_eq!(
+        default_search["query_execution"]["query_version"],
+        "ctx-search-v1"
+    );
+    assert_eq!(
+        default_search["query_execution"]["requested_result_limit"],
+        20
+    );
+    assert_eq!(default_search["query_execution"]["result_limit"], 20);
+    assert_eq!(default_search["query_execution"]["max_result_limit"], 200);
+    assert_eq!(
+        default_search["query_execution"]["semantic"]["attempted"],
+        false
+    );
+    assert_eq!(
+        default_search["query_execution"]["semantic"]["effective_backend"],
+        "lexical"
+    );
+    assert!(
+        default_search["query_execution"]["consumed"]["returned_results"]
+            .as_u64()
+            .unwrap()
+            <= 20
+    );
+    assert_omits_keys(
+        &default_search,
+        &[
+            "semantic_weight",
+            "semantic_fallback",
+            "semantic_fallback_code",
+        ],
+    );
 
     let hybrid = json_output(ctx(&temp).args([
         "search",
@@ -599,15 +636,38 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     ]));
     assert_eq!(hybrid["retrieval"]["requested_mode"], "hybrid");
     assert_eq!(hybrid["retrieval"]["effective_mode"], "lexical");
+    assert_eq!(hybrid["query_execution"]["semantic"]["attempted"], true);
+    assert_eq!(hybrid["query_execution"]["semantic"]["required"], false);
     assert_eq!(
-        hybrid["retrieval"]["semantic_fallback_code"],
-        "semantic_disabled"
+        hybrid["query_execution"]["semantic"]["readiness"],
+        "not_ready"
+    );
+    assert_eq!(
+        hybrid["query_execution"]["semantic"]["effective_backend"],
+        "lexical"
+    );
+    assert_eq!(
+        hybrid["query_execution"]["semantic"]["completeness"],
+        "skipped"
+    );
+    assert_eq!(
+        hybrid["query_execution"]["semantic"]["skip_reason"],
+        "not_ready"
+    );
+    assert_omits_keys(
+        &hybrid,
+        &[
+            "semantic_weight",
+            "semantic_fallback",
+            "semantic_fallback_code",
+        ],
     );
 
-    let disabled_strict_semantic = ctx(&temp)
+    let disabled_explicit_semantic = ctx(&temp)
         .args([
             "search",
-            "onboarding",
+            "--semantic",
+            "onboarding guidance",
             "--backend",
             "semantic",
             "--refresh",
@@ -619,10 +679,10 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         .get_output()
         .stderr
         .clone();
-    let disabled_strict_semantic = String::from_utf8(disabled_strict_semantic).unwrap();
+    let disabled_explicit_semantic = String::from_utf8(disabled_explicit_semantic).unwrap();
     assert!(
-        disabled_strict_semantic.contains("semantic search is disabled"),
-        "{disabled_strict_semantic}"
+        disabled_explicit_semantic.contains("semantic search is disabled"),
+        "{disabled_explicit_semantic}"
     );
 
     fs::write(
@@ -630,6 +690,22 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
     )
     .unwrap();
+
+    let mixed_semantic = failure_stderr(ctx(&temp).args([
+        "search",
+        "--term",
+        "onboarding",
+        "--semantic",
+        "onboarding guidance",
+        "--backend",
+        "semantic",
+        "--refresh",
+        "off",
+    ]));
+    assert!(
+        mixed_semantic.contains("semantic as its sole positive any clause"),
+        "{mixed_semantic}"
+    );
 
     let supported_hybrid = json_output(ctx(&temp).args([
         "search",
@@ -643,14 +719,43 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     assert_eq!(supported_hybrid["retrieval"]["requested_mode"], "hybrid");
     assert_eq!(supported_hybrid["retrieval"]["effective_mode"], "lexical");
     assert_eq!(
-        supported_hybrid["retrieval"]["semantic_fallback_code"],
-        "semantic_index_missing"
+        supported_hybrid["query_execution"]["semantic"]["attempted"],
+        true
+    );
+    assert_eq!(
+        supported_hybrid["query_execution"]["semantic"]["required"],
+        false
+    );
+    assert_eq!(
+        supported_hybrid["query_execution"]["semantic"]["readiness"],
+        "unavailable"
+    );
+    assert_eq!(
+        supported_hybrid["query_execution"]["semantic"]["effective_backend"],
+        "lexical"
+    );
+    assert_eq!(
+        supported_hybrid["query_execution"]["semantic"]["completeness"],
+        "skipped"
+    );
+    assert_eq!(
+        supported_hybrid["query_execution"]["semantic"]["skip_reason"],
+        "unavailable"
+    );
+    assert_omits_keys(
+        &supported_hybrid,
+        &[
+            "semantic_weight",
+            "semantic_fallback",
+            "semantic_fallback_code",
+        ],
     );
 
-    let missing_index_strict_semantic = ctx(&temp)
+    let missing_index_explicit_semantic = ctx(&temp)
         .args([
             "search",
-            "onboarding",
+            "--semantic",
+            "onboarding guidance",
             "--backend",
             "semantic",
             "--refresh",
@@ -662,10 +767,12 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         .get_output()
         .stderr
         .clone();
-    let missing_index_strict_semantic = String::from_utf8(missing_index_strict_semantic).unwrap();
+    let missing_index_explicit_semantic =
+        String::from_utf8(missing_index_explicit_semantic).unwrap();
     assert!(
-        missing_index_strict_semantic.contains("semantic index is not available yet"),
-        "{missing_index_strict_semantic}"
+        missing_index_explicit_semantic
+            .contains("explicit semantic unavailable [daemon_query_service_unavailable]"),
+        "{missing_index_explicit_semantic}"
     );
 
     let explicit_lexical = json_output(ctx(&temp).args([
@@ -1071,7 +1178,7 @@ fn human_search_reports_no_results() {
         .clone();
     let indexed = String::from_utf8(indexed).unwrap();
     assert!(indexed.contains("no results for definitely-no-results-here"));
-    assert!(indexed.contains("next: try broader terms with ctx search --term \"<term>\""));
+    assert!(indexed.contains("next: add an alternative with ctx search --term \"<all words>\""));
 
     let term_only = ctx(&temp)
         .args(["search", "--term", "term-only-no-results"])
@@ -1081,7 +1188,7 @@ fn human_search_reports_no_results() {
         .stdout
         .clone();
     let term_only = String::from_utf8(term_only).unwrap();
-    assert!(term_only.contains("no results for --term term-only-no-results"));
+    assert!(term_only.contains("no results for term-only-no-results"));
 }
 
 #[test]
@@ -1089,7 +1196,9 @@ fn search_requires_query_term_or_file_before_refreshing() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["search", "--provider", "codex"]));
     assert!(
-        stderr.contains("search needs a query, --term, or --file"),
+        stderr.contains(
+            "search needs a query, --term, --phrase, --literal, --semantic, --must, --query-file, or --file"
+        ),
         "{stderr}"
     );
     assert!(
@@ -1103,17 +1212,17 @@ fn search_requires_query_term_or_file_before_refreshing() {
 
     let punctuation = failure_stderr(ctx(&temp).args(["search", "!!!"]));
     assert!(
-        punctuation.contains("search needs a query, --term, or --file"),
+        punctuation.contains("all clause has no searchable tokens"),
         "{punctuation}"
     );
     let hyphen_only = failure_stderr(ctx(&temp).args(["search", "--", "---"]));
     assert!(
-        hyphen_only.contains("search needs a query, --term, or --file"),
+        hyphen_only.contains("all clause has no searchable tokens"),
         "{hyphen_only}"
     );
     let underscore_term = failure_stderr(ctx(&temp).args(["search", "--term", "___"]));
     assert!(
-        underscore_term.contains("search needs a query, --term, or --file"),
+        underscore_term.contains("all clause has no searchable tokens"),
         "{underscore_term}"
     );
 }
@@ -1144,7 +1253,7 @@ fn file_only_search_returns_touched_file_matches() {
     ]));
 
     let search = json_output(ctx(&temp).args(["search", "--file", "src/main.rs", "--json"]));
-    assert_eq!(search["query"], "");
+    assert!(search["query"].is_null());
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0]["why_matched"]
@@ -1268,7 +1377,9 @@ fn pi_cli_imports_directory_tree_path() {
         "pi",
         "--json",
     ]));
-    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 2, "message");
+    // A positional query is one all-words clause, so the alpha-only session
+    // is not a partial-match result.
+    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 1, "message");
     assert!(search["results"][0]["snippet"]
         .as_str()
         .unwrap()
