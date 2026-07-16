@@ -10,7 +10,7 @@ use crate::connection::{
     capped_i64, collect_rows, nonnegative_i64_to_u32, nonnegative_i64_to_u64, parse_json,
     parse_text_enum, with_immediate_transaction,
 };
-use crate::{Result, Store, StoreError};
+use crate::{ProviderFileCheckpointKey, ProviderFileInventoryFamily, Result, Store, StoreError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogSession {
@@ -166,6 +166,7 @@ pub struct CatalogImportWork {
     pub reason: ImportPendingReason,
     pub estimated_bytes: u64,
     pub last_attempt_at_ms: Option<i64>,
+    pub has_active_publication: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +175,7 @@ pub struct SourceImportFileWork {
     pub reason: ImportPendingReason,
     pub estimated_bytes: u64,
     pub last_attempt_at_ms: Option<i64>,
+    pub has_active_publication: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -282,6 +284,7 @@ struct CatalogPendingState {
     indexed_status: CatalogIndexedStatus,
     indexed_import_revision: Option<u32>,
     pending_reason: Option<ImportPendingReason>,
+    metadata_json: String,
 }
 
 #[derive(Debug)]
@@ -318,9 +321,34 @@ impl FromStr for CatalogIndexedStatus {
 
 include!("catalog/inventory.rs");
 include!("catalog/pending_work.rs");
-include!("catalog/source_pending_work.rs");
 include!("catalog/source_imports.rs");
 include!("catalog/counts.rs");
+
+fn source_import_metadata_matches_owner_growth(prior_json: &str, current: &Value) -> bool {
+    let Ok(mut prior) = serde_json::from_str::<Value>(prior_json) else {
+        return false;
+    };
+    let mut current = current.clone();
+    for metadata in [&mut prior, &mut current] {
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("change_token_v1");
+        }
+    }
+    prior == current
+}
+
+fn catalog_observation_metadata_matches(prior_json: &str, current: &Value) -> bool {
+    let Ok(prior) = serde_json::from_str::<Value>(prior_json) else {
+        return false;
+    };
+    catalog_observation_token(&prior) == catalog_observation_token(current)
+}
+
+fn catalog_observation_token(metadata: &Value) -> Option<&str> {
+    metadata
+        .get("file_observation_token_v1")
+        .and_then(Value::as_str)
+}
 
 fn catalog_session_select_sql(tail: &str) -> String {
     format!(
@@ -348,6 +376,18 @@ fn source_import_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sour
     })
 }
 
+fn source_import_file_work_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SourceImportFileWork> {
+    Ok(SourceImportFileWork {
+        file: source_import_file_from_row(row)?,
+        reason: parse_text_enum(row.get(9)?)?,
+        estimated_bytes: nonnegative_i64_to_u64(row.get(10)?)?,
+        last_attempt_at_ms: row.get(11)?,
+        has_active_publication: row.get(12)?,
+    })
+}
+
 fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogSession> {
     Ok(CatalogSession {
         source_path: row.get(0)?,
@@ -366,6 +406,16 @@ fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Catalog
         import_revision: nonnegative_i64_to_u32(row.get(13)?)?,
         cataloged_at_ms: row.get(14)?,
         metadata: parse_json(row.get::<_, String>(15)?)?,
+    })
+}
+
+fn catalog_import_work_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogImportWork> {
+    Ok(CatalogImportWork {
+        session: catalog_session_from_row(row)?,
+        reason: parse_text_enum(row.get(16)?)?,
+        estimated_bytes: nonnegative_i64_to_u64(row.get(17)?)?,
+        last_attempt_at_ms: row.get(18)?,
+        has_active_publication: row.get(19)?,
     })
 }
 

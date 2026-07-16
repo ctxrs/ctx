@@ -489,3 +489,293 @@ fn crashed_mutated_replacement_cannot_be_adopted_or_finalized_as_incremental() {
     assert_eq!(second.list_events().unwrap()[0].id, new_event);
     assert!(!row_exists(&second, "events", old_event));
 }
+
+#[test]
+fn changed_observation_adoption_resets_prior_staging_progress() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let original = source_file(20, 100);
+    let source = Uuid::from_u128(64_200);
+    let replacement_event = Uuid::from_u128(64_201);
+    let prior_event = Uuid::from_u128(64_202);
+
+    {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(original.provider, &original.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&original))
+            .unwrap();
+        insert_capture_source(&store, source, PATH_A, "changed-staging-adoption");
+        insert_raw_event(&store, prior_event, 1, source, "prior generation");
+        let scope = store
+            .begin_provider_file_publication(
+                original.provider,
+                source_outcome(&original, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        prepare_all(&store, &scope, 1);
+        let mut event = event_fixture(
+            replacement_event,
+            2,
+            source,
+            "changed-staging-adoption".to_owned(),
+            "old attempt",
+        );
+        event.dedupe_key = None;
+        store
+            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&event))
+            .unwrap();
+        let completion = ProviderFilePublicationCompletion {
+            version: 1,
+            payload: json!({"attempt": "old-observation"}),
+        };
+        store
+            .stage_provider_file_publication_completion(&scope, &completion)
+            .unwrap();
+        store
+            .reconcile_provider_file_publication_slice(&scope, 1)
+            .unwrap();
+        assert_eq!(staged_seen_count(&store), 1);
+        drop(scope);
+    }
+
+    let store = Store::open(&path).unwrap();
+    let changed = source_file(30, 120);
+    let generation = store
+        .allocate_source_import_inventory_generation(changed.provider, &changed.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&changed))
+        .unwrap();
+    let adopted = store
+        .begin_provider_file_publication(
+            changed.provider,
+            source_outcome(&changed, generation, 130).observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            125,
+        )
+        .unwrap();
+    assert_eq!(staged_seen_count(&store), 0);
+    assert_eq!(
+        store
+            .load_provider_file_publication_completion(&adopted)
+            .unwrap(),
+        None
+    );
+    let reset_progress: (i64, Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT cleanup_phase, cleanup_source_cursor, cleanup_entity_cursor \
+             FROM provider_file_publications",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(reset_progress, (0, None, None));
+    assert_eq!(
+        store.provider_file_publication_phase(&adopted).unwrap(),
+        ProviderFilePublicationPhase::Preparing
+    );
+    assert!(matches!(
+        store.abort_provider_file_publication(adopted).unwrap(),
+        std::ops::ControlFlow::Break(None)
+    ));
+}
+
+#[test]
+fn changed_observation_adoption_cleans_first_attempt_material() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let original = source_file(20, 100);
+    let source_id = Uuid::from_u128(64_210);
+    let event_id = Uuid::from_u128(64_211);
+    let record_id = Uuid::from_u128(64_212);
+
+    {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(original.provider, &original.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&original))
+            .unwrap();
+        let scope = store
+            .begin_provider_file_publication(
+                original.provider,
+                source_outcome(&original, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        assert!(!scope.tracks_prior_material());
+        let source = capture_source_fixture(source_id, PATH_A, "first-attempt-source");
+        let mut event = event_fixture(
+            event_id,
+            1,
+            source_id,
+            "first-attempt-event".to_owned(),
+            "must be removed after changed adoption",
+        );
+        event.dedupe_key = None;
+        let mut record = ctx_history_core::HistoryRecord::new(
+            "first-attempt-record",
+            "must be removed after changed adoption",
+            Vec::new(),
+            "note",
+            None,
+        );
+        record.id = record_id;
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_capture_source(&source)?;
+                store.upsert_event(&event)?;
+                store.upsert_record(&record)
+            })
+            .unwrap();
+        drop(scope);
+    }
+
+    let store = Store::open(&path).unwrap();
+    let changed = source_file(30, 120);
+    let generation = store
+        .allocate_source_import_inventory_generation(changed.provider, &changed.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&changed))
+        .unwrap();
+    let outcome = source_outcome(&changed, generation, 130);
+    let adopted = store
+        .begin_provider_file_publication(
+            changed.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            125,
+        )
+        .unwrap();
+    assert!(adopted.tracks_prior_material());
+    assert!(store.list_events().unwrap().is_empty());
+    assert!(store.list_records(10).unwrap().is_empty());
+    reconcile_all(&store, &adopted, 1);
+    store
+        .finalize_provider_file_publication(
+            adopted,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+
+    assert!(!row_exists(&store, "events", event_id));
+    assert!(!row_exists(&store, "history_records", record_id));
+    assert!(!row_exists(&store, "capture_sources", source_id));
+}
+
+#[test]
+fn retirement_cleans_source_less_record_from_crashed_first_attempt() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(20, 100);
+    let record_ids = [
+        Uuid::from_u128(64_220),
+        Uuid::from_u128(64_221),
+        Uuid::from_u128(64_222),
+    ];
+    let generation = {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        let records = record_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut record = ctx_history_core::HistoryRecord::new(
+                    format!("retired-first-attempt-record-{index}"),
+                    "must remain hidden until retirement removes it",
+                    Vec::new(),
+                    "note",
+                    None,
+                );
+                record.id = *id;
+                record
+            })
+            .collect::<Vec<_>>();
+        store
+            .with_provider_file_publication_writes(&scope, |store| store.upsert_records(&records))
+            .unwrap();
+        drop(scope);
+        generation
+    };
+
+    let store = Store::open(&path).unwrap();
+    store
+        .mark_source_import_missing_paths_stale(
+            file.provider,
+            &file.source_root,
+            &[],
+            120,
+            generation,
+        )
+        .unwrap();
+    let retirement = store
+        .begin_provider_file_publication_retirement(
+            file.provider,
+            MATERIAL_FORMAT,
+            &file.source_root,
+            &file.source_path,
+            125,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(retirement.tracks_prior_material());
+    assert!(store.list_records(10).unwrap().is_empty());
+    prepare_all(&store, &retirement, 1);
+    let first_slice = store
+        .reconcile_provider_file_publication_slice(&retirement, 1)
+        .unwrap();
+    assert_eq!(first_slice.rows_scanned, 1);
+    assert!(!first_slice.complete);
+    store.abandon_provider_file_publication(retirement).unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    let retirement = reopened
+        .begin_provider_file_publication_retirement(
+            file.provider,
+            MATERIAL_FORMAT,
+            &file.source_root,
+            &file.source_path,
+            130,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(reopened.list_records(10).unwrap().is_empty());
+    reconcile_all(&reopened, &retirement, 1);
+    reopened
+        .retire_provider_file_publication(retirement)
+        .unwrap();
+
+    for record_id in record_ids {
+        assert!(!row_exists(&reopened, "history_records", record_id));
+    }
+    assert!(reopened.list_records(10).unwrap().is_empty());
+}

@@ -16,13 +16,14 @@ use rusqlite::{
 };
 use uuid::Uuid;
 
+use crate::provider_files::PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES;
 use crate::schema::ddl::{table_exists, table_has_column, CREATE_TABLES_SQL};
 use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::migrations::{
     migrate_fresh_scheduling_to_v52, migrate_provider_publication_to_v51,
-    migrate_publication_completion_to_v53, rebuild_capture_sources_provider_check,
-    rebuild_catalog_sessions_provider_check,
+    migrate_publication_completion_to_v53, migrate_publication_retirement_to_v54,
+    rebuild_capture_sources_provider_check, rebuild_catalog_sessions_provider_check,
 };
 use crate::{Store, SCHEMA_VERSION};
 

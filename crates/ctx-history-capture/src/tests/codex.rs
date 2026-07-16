@@ -316,11 +316,11 @@ fn codex_catalog_cache_rejects_an_older_parser_revision() {
         .unwrap()
         .pop()
         .unwrap();
-    let metadata = fs::metadata(&session.source_path).unwrap();
+    let observation = crate::observe_ordinary_file(&session.source_path).unwrap();
 
     assert!(cached_catalog_session_if_unchanged(
         Some(&session),
-        &metadata,
+        &observation,
         session.cataloged_at_ms + 1,
         session.import_revision + 1,
     )
@@ -332,7 +332,7 @@ fn codex_session_catalog_skips_oversized_metadata_probe_line() {
     let temp = tempdir();
     let root = temp.path().join("sessions/2026/07/03");
     fs::create_dir_all(&root).unwrap();
-    write_oversized_jsonl_line(&root.join("oversized.jsonl"));
+    fs::write(root.join("oversized.jsonl"), oversized_jsonl_line()).unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let summary = catalog_codex_session_tree(

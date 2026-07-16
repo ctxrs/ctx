@@ -490,10 +490,19 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
 
     fn finish_bulk_search(&mut self) -> Result<()> {
         match self.bulk_search_guard.take() {
-            Some(guard) => self
-                .store
-                .finish_event_search_bulk_mode(&guard)
-                .map_err(CaptureError::from),
+            Some(guard) => {
+                let outcome = self
+                    .store
+                    .finish_event_search_bulk_mode(&guard)
+                    .map_err(CaptureError::from)?;
+                if outcome == ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending {
+                    self.summary.push_maintenance_warning(
+                        crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
+                        "event search maintenance remains queued",
+                    );
+                }
+                Ok(())
+            }
             None => Ok(()),
         }
     }

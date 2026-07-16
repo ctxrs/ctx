@@ -22,7 +22,7 @@ mod sync;
 mod vcs;
 
 pub use archive::validate_archive_version;
-pub use bulk_search::EventSearchBulkGuard;
+pub use bulk_search::{EventSearchBulkGuard, EventSearchBulkMaintenanceOutcome};
 pub use catalog::{
     CatalogCounts, CatalogImportWork, CatalogIndexedStatus, CatalogSession,
     CatalogSourceIndexState, CatalogSourceIndexUpdate, ImportPendingReason,
@@ -34,9 +34,10 @@ pub use files::FileTouchScope;
 pub use identity::{LocalDeviceIdentity, LocalWorkspaceIdentity};
 pub use provider_files::{
     ProviderFileCheckpoint, ProviderFileCheckpointKey, ProviderFileFinalizeOutcome,
-    ProviderFileImportOutcome, ProviderFileInventoryObservation, ProviderFileMaintenanceWarning,
-    ProviderFilePreparationProgress, ProviderFilePublicationCommit,
-    ProviderFilePublicationCompletion, ProviderFilePublicationKind, ProviderFilePublicationPhase,
+    ProviderFileImportOutcome, ProviderFileInventoryFamily, ProviderFileInventoryObservation,
+    ProviderFileMaintenanceWarning, ProviderFilePreparationProgress, ProviderFilePublicationCommit,
+    ProviderFilePublicationCompletion, ProviderFilePublicationInventoryOwner,
+    ProviderFilePublicationKind, ProviderFilePublicationPhase,
     ProviderFilePublicationRetirementWork, ProviderFilePublicationScope,
     ProviderFileReconciliationCounts, ProviderFileReconciliationProgress,
     PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES, PROVIDER_FILE_PREPARATION_MAX_ROWS,
@@ -60,7 +61,7 @@ use std::{
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 53;
+pub(crate) const SCHEMA_VERSION: i64 = 54;
 
 pub struct Store {
     path: PathBuf,

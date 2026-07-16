@@ -1,12 +1,14 @@
 pub mod provider_sources;
 pub use provider_sources::{
     discover_provider_sources, discover_provider_sources_for_provider,
-    import_append_capable_provider_file, open_provider_jsonl,
+    import_append_capable_provider_file, observe_ordinary_file, open_provider_jsonl,
     provider_canonical_material_source_format, provider_file_mutation_contract,
-    provider_source_for_path, provider_source_spec, provider_source_specs,
+    provider_jsonl_checkpoint_matches_file, provider_source_for_path,
+    provider_source_for_persisted_format, provider_source_spec, provider_source_specs,
     ClaudeProjectsJsonlResumeState, CodexSessionJsonlResumeState, CodexToolCallResumeContext,
-    ProviderAdmittedJsonlAppendCheckpoint, ProviderAppendFileImportDecision,
-    ProviderAppendFileImportMode, ProviderAppendFileImportOptions, ProviderAppendFileImportResult,
+    OrdinaryFileObservation, ProviderAdmittedJsonlAppendCheckpoint,
+    ProviderAppendFileImportDecision, ProviderAppendFileImportMode,
+    ProviderAppendFileImportOptions, ProviderAppendFileImportResult,
     ProviderAppendFileImportWithoutCheckpoint, ProviderCatalogSupport, ProviderDefaultLocation,
     ProviderFileMutationContract, ProviderFileStableIdentity, ProviderImportDependency,
     ProviderImportSupport, ProviderImportUnitGrouping, ProviderImportUnitOwner,
@@ -16,8 +18,14 @@ pub use provider_sources::{
     ProviderSourceSpec, ProviderSourceStatus, TabnineJsonlResumeState,
 };
 
+mod disk_io_pacing;
+#[doc(hidden)]
+pub use disk_io_pacing::{
+    install_disk_io_pacer, pace_current_disk_io, DiskIoPacer, DiskIoPacingGuard,
+};
+
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
-pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_PROVIDER_SQLITE_VALUE_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_PATHS: usize = 256;
@@ -104,6 +112,7 @@ pub(crate) mod common {
 }
 pub use common::identity::{compute_payload_hash, stable_capture_uuid};
 pub(crate) use common::identity::{default_machine_id, fnv1a64, sanitize_filename_component};
+pub use common::io::provider_jsonl_range_has_complete_line;
 #[doc(hidden)]
 pub use provider::sqlite_observation::{
     observe_sqlite_source_generation, SqliteObservedFile, SqliteSourceGeneration,

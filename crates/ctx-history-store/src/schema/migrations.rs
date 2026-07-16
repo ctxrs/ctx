@@ -113,6 +113,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 53 {
         migrate_publication_completion_to_v53(conn)?;
     }
+    if user_version < 54 {
+        migrate_publication_retirement_to_v54(conn)?;
+    }
     Ok(())
 }
 
@@ -938,20 +941,15 @@ pub(super) fn migrate_fresh_scheduling_to_v52(conn: &Connection) -> Result<()> {
             "#,
         )?;
         if legacy_prior_material_scope {
+            // v50 sidecar state is unavailable after restart. Once mutation
+            // began, classify conservatively so recovery reconciles any rows
+            // committed before the crash, even without an append checkpoint.
             conn.execute_batch(
                 r#"
                 UPDATE provider_file_publications AS publication
                 SET tracks_prior_material = CASE
                     WHEN publication.mutation_started = 0 THEN 0
-                    WHEN publication.publication_kind = 'replacement' THEN 1
-                    WHEN EXISTS (
-                        SELECT 1 FROM provider_file_checkpoints AS checkpoint
-                        WHERE checkpoint.provider = publication.provider
-                          AND checkpoint.source_format = publication.inventory_source_format
-                          AND checkpoint.source_root = publication.inventory_source_root
-                          AND checkpoint.source_path = publication.source_path
-                    ) THEN 1
-                    ELSE 0
+                    ELSE 1
                 END;
                 "#,
             )?;
@@ -1060,6 +1058,60 @@ pub(super) fn migrate_publication_completion_to_v53(conn: &Connection) -> Result
             )?;
         }
         conn.execute_batch("PRAGMA user_version = 53;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+pub(super) fn migrate_publication_retirement_to_v54(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        if !table_has_column(
+            conn,
+            "provider_file_publications",
+            "inventory_observation_invalidated",
+        )? {
+            conn.execute_batch(
+                r#"
+                ALTER TABLE main.provider_file_publications
+                ADD COLUMN inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0
+                    CHECK (inventory_observation_invalidated IN (0, 1));
+                "#,
+            )?;
+        }
+        if !table_has_column(conn, "provider_file_publications", "retirement_started")? {
+            conn.execute_batch(
+                r#"
+                ALTER TABLE main.provider_file_publications
+                ADD COLUMN retirement_started INTEGER NOT NULL DEFAULT 0
+                    CHECK (retirement_started IN (0, 1));
+                "#,
+            )?;
+        }
+        // v52 originally classified some mutated incremental publications as
+        // not tracking prior material. Recovery must reconcile conservatively
+        // after any mutation, even when no append checkpoint survived.
+        conn.execute_batch(
+            r#"
+            UPDATE provider_file_publications
+            SET tracks_prior_material = 1
+            WHERE mutation_started != 0
+              AND tracks_prior_material = 0;
+            "#,
+        )?;
+        conn.execute_batch("PRAGMA user_version = 54;")?;
         Ok(())
     })();
 

@@ -1,4 +1,319 @@
 #[test]
+fn retirement_without_child_material_prepares_in_bounded_slices() {
+    const SOURCE_COUNT: u128 = 130;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(10, 100);
+    {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        for index in 0..SOURCE_COUNT {
+            insert_capture_source(
+                &store,
+                Uuid::from_u128(66_000 + index),
+                PATH_A,
+                &format!("retirement-preparation-{index}"),
+            );
+        }
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Incremental,
+                105,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE provider_file_publications SET mutation_started = 1 WHERE replacement_id = ?1",
+                params![scope.scope_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.abort_provider_file_publication(scope).unwrap(),
+            std::ops::ControlFlow::Break(None)
+        ));
+        store
+            .mark_source_import_missing_paths_stale(
+                file.provider,
+                &file.source_root,
+                &[],
+                120,
+                generation,
+            )
+            .unwrap();
+    }
+
+    let mut staged = 0;
+    let mut completed = false;
+    for cycle in 0..64 {
+        let store = Store::open(&path).unwrap();
+        let scope = store
+            .begin_provider_file_publication_retirement(
+                file.provider,
+                MATERIAL_FORMAT,
+                &file.source_root,
+                &file.source_path,
+                130 + cycle,
+            )
+            .unwrap()
+            .unwrap();
+        match store.provider_file_publication_phase(&scope).unwrap() {
+            ProviderFilePublicationPhase::Preparing => {
+                let progress = store
+                    .prepare_provider_file_publication_slice(&scope, 64)
+                    .unwrap();
+                assert!(progress.rows_processed <= 64, "{progress:?}");
+                staged += progress.source_ids_staged;
+            }
+            ProviderFilePublicationPhase::Reconciling => {
+                let progress = store
+                    .reconcile_provider_file_publication_slice(&scope, 64)
+                    .unwrap();
+                assert!(progress.rows_scanned <= 64, "{progress:?}");
+            }
+            ProviderFilePublicationPhase::ReadyToFinalize => {
+                store.retire_provider_file_publication(scope).unwrap();
+                completed = true;
+                break;
+            }
+            ProviderFilePublicationPhase::Importing => {
+                panic!("retirement entered importer phase")
+            }
+        }
+        assert!(store
+            .abandon_provider_file_publication(scope)
+            .unwrap()
+            .is_none());
+    }
+
+    assert_eq!(staged, SOURCE_COUNT as usize);
+    assert!(completed);
+    let store = Store::open(&path).unwrap();
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
+fn completed_empty_retirement_preparation_survives_reopen() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(10, 100);
+    {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Incremental,
+                105,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE provider_file_publications SET mutation_started = 1 WHERE replacement_id = ?1",
+                params![scope.scope_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.abort_provider_file_publication(scope).unwrap(),
+            std::ops::ControlFlow::Break(None)
+        ));
+        store
+            .mark_source_import_missing_paths_stale(
+                file.provider,
+                &file.source_root,
+                &[],
+                120,
+                generation,
+            )
+            .unwrap();
+    }
+
+    {
+        let store = Store::open(&path).unwrap();
+        let retirement = store
+            .begin_provider_file_publication_retirement(
+                file.provider,
+                MATERIAL_FORMAT,
+                &file.source_root,
+                &file.source_path,
+                125,
+            )
+            .unwrap()
+            .unwrap();
+        let progress = store
+            .prepare_provider_file_publication_slice(&retirement, 1)
+            .unwrap();
+        assert_eq!(progress.source_ids_staged, 0);
+        assert!(progress.complete);
+        assert_eq!(
+            store.provider_file_publication_phase(&retirement).unwrap(),
+            ProviderFilePublicationPhase::ReadyToFinalize
+        );
+        store.abandon_provider_file_publication(retirement).unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let retirement = store
+        .begin_provider_file_publication_retirement(
+            file.provider,
+            MATERIAL_FORMAT,
+            &file.source_root,
+            &file.source_path,
+            130,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.provider_file_publication_phase(&retirement).unwrap(),
+        ProviderFilePublicationPhase::ReadyToFinalize
+    );
+    store.retire_provider_file_publication(retirement).unwrap();
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+    assert_eq!(table_row_count(&store, "source_import_files"), 0);
+}
+
+#[test]
+fn retirement_reconciliation_discards_seen_candidates_across_reopen_cycles() {
+    const EVENT_COUNT: u128 = 130;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(10, 100);
+    let source = Uuid::from_u128(67_000);
+    {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        insert_capture_source(&store, source, PATH_A, "retirement-retained");
+        for index in 0..EVENT_COUNT {
+            insert_raw_event(
+                &store,
+                Uuid::from_u128(67_100 + index),
+                index as i64,
+                source,
+                &format!("retained event {index}"),
+            );
+        }
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        prepare_all(&store, &scope, 64);
+        for index in 0..EVENT_COUNT {
+            store
+                .track_provider_file_publication_event(Uuid::from_u128(67_100 + index))
+                .unwrap();
+        }
+        let mut mutation = event_fixture(
+            Uuid::from_u128(67_500),
+            500,
+            source,
+            "retirement-retained".to_owned(),
+            "retained mutation",
+        );
+        mutation.dedupe_key = None;
+        store
+            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&mutation))
+            .unwrap();
+        assert!(matches!(
+            store.abort_provider_file_publication(scope).unwrap(),
+            std::ops::ControlFlow::Break(None)
+        ));
+        store
+            .mark_source_import_missing_paths_stale(
+                file.provider,
+                &file.source_root,
+                &[],
+                120,
+                generation,
+            )
+            .unwrap();
+    }
+
+    let mut completed = false;
+    let mut cycles = 0;
+    for cycle in 0..32 {
+        let store = Store::open(&path).unwrap();
+        let scope = store
+            .begin_provider_file_publication_retirement(
+                file.provider,
+                MATERIAL_FORMAT,
+                &file.source_root,
+                &file.source_path,
+                130 + cycle,
+            )
+            .unwrap()
+            .unwrap();
+        if cycle == 0 {
+            let staged_events: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_file_publication_seen \
+                     WHERE replacement_id = ?1 AND entity_kind = 'event'",
+                    params![scope.scope_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(staged_events, EVENT_COUNT as i64 + 1);
+        }
+        let preparation = store
+            .prepare_provider_file_publication_slice(&scope, 64)
+            .unwrap();
+        assert!(preparation.rows_processed <= 64);
+        if !preparation.complete {
+            cycles += 1;
+            store.abandon_provider_file_publication(scope).unwrap();
+            continue;
+        }
+        let progress = store
+            .reconcile_provider_file_publication_slice(&scope, 64)
+            .unwrap();
+        cycles += 1;
+        if progress.complete {
+            store.retire_provider_file_publication(scope).unwrap();
+            completed = true;
+            break;
+        }
+        assert!(store
+            .abandon_provider_file_publication(scope)
+            .unwrap()
+            .is_none());
+    }
+
+    assert!(completed, "bounded retirement did not converge");
+    assert!(cycles >= 3);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(table_row_count(&store, "events"), 0);
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
 fn tombstoned_unmutated_marker_does_not_block_ordinary_owner_entity_writes() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("work.sqlite");
@@ -253,12 +568,12 @@ fn mutated_publication_with_permanently_missing_observation_can_retire() {
     prepare_all(&store, &retirement, 1);
     reconcile_all(&store, &retirement, 1);
     store.retire_provider_file_publication(retirement).unwrap();
-    assert!(row_exists(&store, "events", event_id));
+    assert!(!row_exists(&store, "events", event_id));
     assert!(!store.has_pending_provider_file_publications().unwrap());
 }
 
 #[test]
-fn observation_revival_before_retirement_finalization_preserves_the_marker() {
+fn newer_generation_reclaims_retirement_marker_through_fresh_import() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("work.sqlite");
     let file = source_file(20, 100);
@@ -335,10 +650,8 @@ fn observation_revival_before_retirement_finalization_preserves_the_marker() {
         .upsert_source_import_files(revived_generation, std::slice::from_ref(&file))
         .unwrap();
     assert!(matches!(
-        retiring
-            .retire_provider_file_publication(retirement)
-            .unwrap_err(),
-        StoreError::ProviderFileObservationChanged { .. }
+        retiring.retire_provider_file_publication(retirement),
+        Err(StoreError::ProviderFileObservationChanged { .. })
     ));
     assert!(reviver.has_pending_provider_file_publications().unwrap());
     assert!(reviver.list_events().unwrap().is_empty());
@@ -349,11 +662,12 @@ fn observation_revival_before_retirement_finalization_preserves_the_marker() {
             file.provider,
             outcome.observation,
             MATERIAL_FORMAT,
-            ProviderFilePublicationKind::Incremental,
+            ProviderFilePublicationKind::Replacement,
             135,
         )
         .unwrap();
     assert_eq!(adopted.kind(), ProviderFilePublicationKind::Replacement);
+    prepare_all(&reviver, &adopted, 1);
     reconcile_all(&reviver, &adopted, 1);
     reviver
         .finalize_provider_file_publication(
@@ -363,7 +677,7 @@ fn observation_revival_before_retirement_finalization_preserves_the_marker() {
         )
         .unwrap();
     assert!(!reviver.has_pending_provider_file_publications().unwrap());
-    assert_eq!(table_row_count(&reviver, "events"), 1);
+    assert_eq!(table_row_count(&reviver, "events"), 0);
     assert!(generation < revived_generation);
 }
 
@@ -454,7 +768,7 @@ fn process_exit_during_retirement_finalization_rolls_back_and_restarts() {
         .retire_provider_file_publication(retirement)
         .unwrap();
     assert!(!restarted.has_pending_provider_file_publications().unwrap());
-    assert_eq!(table_row_count(&restarted, "events"), 1);
+    assert_eq!(table_row_count(&restarted, "events"), 0);
     assert_eq!(restarted.semantic_replacement_revision().unwrap(), 1);
 }
 

@@ -4,6 +4,15 @@ const STAGING_DIR_PREFIX: &str = "stage";
 const STAGING_SEEN_TABLE: &str = "provider_file_publication_seen";
 const STAGING_PRIOR_SOURCES_TABLE: &str = "provider_file_publication_prior_sources";
 const STAGING_BATCH_TABLE: &str = "provider_file_publication_batch";
+const CURRENT_CAPTURE_SOURCE_KIND: &str = "capture_source";
+const PRIOR_CAPTURE_SOURCE_KIND: &str = "prior_capture_source";
+const PRIOR_HISTORY_RECORD_KIND: &str = "prior_history_record";
+const PRIOR_HISTORY_RECORD_CURSOR: &str = "__prior_history_record__";
+const PRIOR_CAPTURE_SOURCE_CURSOR: &str = "__prior_capture_source__";
+const RETIREMENT_RESET_BATCH_CURSOR: &str = "__retirement_reset_batch__";
+const RETIREMENT_RESET_HISTORY_RECORD_CURSOR: &str = "__retirement_reset_history_record__";
+const RETIREMENT_RESET_CAPTURE_SOURCE_CURSOR: &str = "__retirement_reset_capture_source__";
+const RETIREMENT_RESET_SEEN_CURSOR: &str = "__retirement_reset_seen__";
 pub const PROVIDER_FILE_PREPARATION_MAX_ROWS: usize = 100_000;
 pub const PROVIDER_FILE_RECONCILIATION_MAX_ROWS: usize = 100_000;
 pub const PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES: usize = 64 * 1024;
@@ -23,6 +32,16 @@ const CLEANUP_PHASE_HISTORY_RECORDS: i64 = 11;
 const CLEANUP_PHASE_VCS_WORKSPACES: i64 = 12;
 const CLEANUP_PHASE_AUDIT_LOG: i64 = 13;
 const CLEANUP_PHASE_COMPLETE: i64 = 14;
+
+fn is_retirement_reset_cursor(cursor: &str) -> bool {
+    matches!(
+        cursor,
+        RETIREMENT_RESET_BATCH_CURSOR
+            | RETIREMENT_RESET_HISTORY_RECORD_CURSOR
+            | RETIREMENT_RESET_CAPTURE_SOURCE_CURSOR
+            | RETIREMENT_RESET_SEEN_CURSOR
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderFileCheckpointKey<'a> {
@@ -62,9 +81,10 @@ impl ProviderFileCheckpoint {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ProviderFileInventoryObservation<'a> {
-    Catalog {
+    ObservedCatalog {
         source_format: &'a str,
         update: CatalogSourceIndexUpdate<'a>,
+        metadata: &'a serde_json::Value,
     },
     SourceImport {
         source_format: &'a str,
@@ -75,67 +95,77 @@ pub enum ProviderFileInventoryObservation<'a> {
 impl<'a> ProviderFileInventoryObservation<'a> {
     fn source_format(self) -> &'a str {
         match self {
-            Self::Catalog { source_format, .. } | Self::SourceImport { source_format, .. } => {
-                source_format
-            }
+            Self::ObservedCatalog { source_format, .. }
+            | Self::SourceImport { source_format, .. } => source_format,
         }
     }
 
     fn source_root(self) -> &'a str {
         match self {
-            Self::Catalog { update, .. } => update.source_root,
+            Self::ObservedCatalog { update, .. } => update.source_root,
             Self::SourceImport { update, .. } => update.source_root,
         }
     }
 
     fn source_path(self) -> &'a str {
         match self {
-            Self::Catalog { update, .. } => update.source_path,
+            Self::ObservedCatalog { update, .. } => update.source_path,
             Self::SourceImport { update, .. } => update.source_path,
         }
     }
 
     fn file_size_bytes(self) -> u64 {
         match self {
-            Self::Catalog { update, .. } => update.file_size_bytes,
+            Self::ObservedCatalog { update, .. } => update.file_size_bytes,
             Self::SourceImport { update, .. } => update.file_size_bytes,
         }
     }
 
     fn file_modified_at_ms(self) -> i64 {
         match self {
-            Self::Catalog { update, .. } => update.file_modified_at_ms,
+            Self::ObservedCatalog { update, .. } => update.file_modified_at_ms,
             Self::SourceImport { update, .. } => update.file_modified_at_ms,
         }
     }
 
     fn import_revision(self) -> u32 {
         match self {
-            Self::Catalog { update, .. } => update.import_revision,
+            Self::ObservedCatalog { update, .. } => update.import_revision,
             Self::SourceImport { update, .. } => update.import_revision,
         }
     }
 
     fn inventory_generation(self) -> u64 {
         match self {
-            Self::Catalog { update, .. } => update.inventory_generation,
+            Self::ObservedCatalog { update, .. } => update.inventory_generation,
             Self::SourceImport { update, .. } => update.inventory_generation,
         }
     }
 
     fn inventory_family(self) -> &'static str {
         match self {
-            Self::Catalog { .. } => CATALOG_INVENTORY_FAMILY,
+            Self::ObservedCatalog { .. } => CATALOG_INVENTORY_FAMILY,
             Self::SourceImport { .. } => SOURCE_IMPORT_INVENTORY_FAMILY,
         }
     }
 
     fn metadata_json(self) -> Result<Option<String>> {
         match self {
-            Self::Catalog { .. } => Ok(None),
+            Self::ObservedCatalog { metadata, .. } => serde_json::to_string(metadata)
+                .map(Some)
+                .map_err(Into::into),
             Self::SourceImport { update, .. } => serde_json::to_string(update.metadata)
                 .map(Some)
                 .map_err(Into::into),
+        }
+    }
+
+    fn catalog_update(self) -> Option<(CatalogSourceIndexUpdate<'a>, &'a serde_json::Value)> {
+        match self {
+            Self::ObservedCatalog {
+                update, metadata, ..
+            } => Some((update, metadata)),
+            Self::SourceImport { .. } => None,
         }
     }
 }
@@ -176,6 +206,26 @@ pub struct ProviderFilePublicationRetirementWork {
     pub source_path: String,
     pub estimated_bytes: u64,
     pub last_attempt_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFileInventoryFamily {
+    Catalog,
+    SourceImport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFilePublicationInventoryOwner {
+    pub provider: CaptureProvider,
+    pub inventory_family: ProviderFileInventoryFamily,
+    pub source_format: String,
+    pub source_root: String,
+    pub source_path: String,
+    pub inventory_generation: u64,
+    pub file_size_bytes: u64,
+    pub file_modified_at_ms: i64,
+    pub import_revision: u32,
+    pub metadata_json: Option<String>,
 }
 
 impl ProviderFilePublicationKind {
@@ -353,6 +403,7 @@ pub struct ProviderFileReconciliationProgress {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderFilePreparationProgress {
     pub source_ids_staged: usize,
+    pub rows_processed: usize,
     pub complete: bool,
 }
 
@@ -442,6 +493,7 @@ struct ReplacementMarker {
 struct DurableProviderFilePublication {
     scope_id: Uuid,
     staging_id: String,
+    publication_kind: ProviderFilePublicationKind,
     inventory_family: &'static str,
     inventory_source_format: String,
     inventory_source_root: String,

@@ -91,6 +91,7 @@ fn append_main_file_identity(
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        pace_current_disk_io(buffer.len() as u64);
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -159,7 +160,7 @@ fn wal_sentinel(path: &Path, file: &mut File, len: u64) -> io::Result<WalSentine
                 Some(WAL_RESOURCE_REASON),
             ));
         }
-        file.read_exact(&mut page)?;
+        read_exact_paced(file, &mut page)?;
         if be_u32(&frame_header[0..4]) == 0 {
             churning_suffix = true;
             break;
@@ -298,7 +299,7 @@ fn wal_frame_end_within_snapshot_ceiling(offset: u64, frame_size: u64) -> io::Re
 fn read_wal_frame_header(file: &mut File, offset: u64) -> io::Result<[u8; 24]> {
     let mut header = [0_u8; WAL_FRAME_HEADER_BYTES];
     file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut header)?;
+    read_exact_paced(file, &mut header)?;
     Ok(header)
 }
 
@@ -453,6 +454,7 @@ fn native_super_journal_path(name: Vec<u8>) -> io::Result<PathBuf> {
 fn read_prefix(file: &mut File, limit: usize) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = vec![0_u8; limit];
+    pace_current_disk_io(bytes.len() as u64);
     let read = file.read(&mut bytes)?;
     bytes.truncate(read);
     Ok(bytes)
@@ -462,15 +464,31 @@ fn read_tail(file: &mut File, len: u64, limit: usize) -> io::Result<Vec<u8>> {
     let count = usize::try_from(len.min(limit as u64)).unwrap_or(limit);
     file.seek(SeekFrom::Start(len.saturating_sub(count as u64)))?;
     let mut bytes = vec![0_u8; count];
-    file.read_exact(&mut bytes)?;
+    read_exact_paced(file, &mut bytes)?;
     Ok(bytes)
 }
 
 fn read_at(file: &mut File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = vec![0_u8; len];
-    file.read_exact(&mut bytes)?;
+    read_exact_paced(file, &mut bytes)?;
     Ok(bytes)
+}
+
+fn read_exact_paced(file: &mut File, bytes: &mut [u8]) -> io::Result<()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        pace_current_disk_io((bytes.len() - offset) as u64);
+        let read = file.read(&mut bytes[offset..])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "SQLite source changed while reading observed bytes",
+            ));
+        }
+        offset += read;
+    }
+    Ok(())
 }
 
 fn be_u32(bytes: &[u8]) -> u32 {

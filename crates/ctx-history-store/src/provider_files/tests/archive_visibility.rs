@@ -527,7 +527,7 @@ fn pending_catalog_owner_is_hidden_from_ctx_sources_view() {
         file_modified_at_ms: 100,
         import_revision: 1,
         cataloged_at_ms: 101,
-        metadata: json!({}),
+        metadata: json!({"file_observation_token_v1": "archive-catalog-token"}),
     };
     let generation = store
         .allocate_catalog_inventory_generation(catalog.provider, &catalog.source_root)
@@ -548,9 +548,10 @@ fn pending_catalog_owner_is_hidden_from_ctx_sources_view() {
     };
     let outcome = ProviderFileImportOutcome {
         provider: catalog.provider,
-        observation: ProviderFileInventoryObservation::Catalog {
+        observation: ProviderFileInventoryObservation::ObservedCatalog {
             source_format: &catalog.source_format,
             update,
+            metadata: &catalog.metadata,
         },
         status: CatalogIndexedStatus::Indexed,
         error: None,

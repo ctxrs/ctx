@@ -94,7 +94,7 @@ fn catalog_file(size: u64, modified_at_ms: i64) -> CatalogSession {
         file_modified_at_ms: modified_at_ms,
         import_revision: 7,
         cataloged_at_ms: modified_at_ms + 1,
-        metadata: json!({}),
+        metadata: json!({"file_observation_token_v1": "test-catalog-token"}),
     }
 }
 
@@ -150,7 +150,7 @@ fn catalog_observation(
     inventory_generation: u64,
     indexed_at_ms: i64,
 ) -> ProviderFileInventoryObservation<'_> {
-    ProviderFileInventoryObservation::Catalog {
+    ProviderFileInventoryObservation::ObservedCatalog {
         source_format: &catalog.source_format,
         update: CatalogSourceIndexUpdate {
             source_root: &catalog.source_root,
@@ -163,6 +163,7 @@ fn catalog_observation(
             event_count: None,
             indexed_at_ms,
         },
+        metadata: &catalog.metadata,
     }
 }
 

@@ -541,6 +541,14 @@ fn v52_legacy_publications_reconstruct_without_sidecars_and_match_fresh_schema()
               '/legacy/unmutated.jsonl', 'codex_session_jsonl', '/legacy/material',
               1, 10, 20, 1, 0, 1, 'prior-source', 0, NULL, NULL,
               0, 31, 31
+            ),
+            (
+              'legacy-mutated-incremental', 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+              'incremental', 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', 'codex',
+              'catalog_sessions', 'codex_session_jsonl', '/legacy/inventory',
+              '/legacy/incremental.jsonl', 'codex_session_jsonl', '/legacy/material',
+              1, 10, 20, 1, 1, 1, NULL, 0, NULL, NULL,
+              0, 32, 32
             );
             "#,
         )
@@ -551,7 +559,7 @@ fn v52_legacy_publications_reconstruct_without_sidecars_and_match_fresh_schema()
     let mut statement = upgraded
         .conn
         .prepare(
-            "SELECT replacement_id, mutation_started, staging_initialized, \
+            "SELECT replacement_id, mutation_started, tracks_prior_material, staging_initialized, \
                     preparation_complete, preparation_cursor, cleanup_phase, \
                     cleanup_source_cursor, cleanup_entity_cursor, removed_events \
              FROM provider_file_publications ORDER BY replacement_id",
@@ -564,11 +572,12 @@ fn v52_legacy_publications_reconstruct_without_sidecars_and_match_fresh_schema()
                 row.get::<_, bool>(1)?,
                 row.get::<_, bool>(2)?,
                 row.get::<_, bool>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<String>>(6)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
                 row.get::<_, Option<String>>(7)?,
-                row.get::<_, i64>(8)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, i64>(9)?,
             ))
         })
         .unwrap();
@@ -579,6 +588,7 @@ fn v52_legacy_publications_reconstruct_without_sidecars_and_match_fresh_schema()
             (
                 "legacy-mutated".into(),
                 true,
+                true,
                 false,
                 false,
                 None,
@@ -588,7 +598,20 @@ fn v52_legacy_publications_reconstruct_without_sidecars_and_match_fresh_schema()
                 0,
             ),
             (
+                "legacy-mutated-incremental".into(),
+                true,
+                true,
+                false,
+                true,
+                None,
+                0,
+                None,
+                None,
+                0,
+            ),
+            (
                 "legacy-unmutated".into(),
+                false,
                 false,
                 false,
                 false,
@@ -850,11 +873,22 @@ fn v53_migration_adds_bounded_completion_without_row_or_index_churn() {
     let temp = tempdir();
     let path = temp.path().join("v53-publication-completion.sqlite");
     let conn = Connection::open(&path).unwrap();
-    let legacy_sql = CREATE_TABLES_SQL.replace(
-        "    completion_payload_json TEXT CHECK (\n        completion_payload_json IS NULL OR\n        length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144\n    ),\n",
-        "",
-    );
+    let legacy_sql = CREATE_TABLES_SQL
+        .replace(
+            "    completion_payload_json TEXT CHECK (\n        completion_payload_json IS NULL OR\n        length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144\n    ),\n",
+            "",
+        )
+        .replace(
+            "    inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0\n        CHECK (inventory_observation_invalidated IN (0, 1)),\n",
+            "",
+        )
+        .replace(
+            "    retirement_started INTEGER NOT NULL DEFAULT 0 CHECK (retirement_started IN (0, 1)),\n",
+            "",
+        );
     assert!(!legacy_sql.contains("completion_payload_json"));
+    assert!(!legacy_sql.contains("inventory_observation_invalidated"));
+    assert!(!legacy_sql.contains("retirement_started"));
     conn.execute_batch(&legacy_sql).unwrap();
     conn.execute_batch(INDEXES_SQL).unwrap();
     conn.execute_batch("PRAGMA user_version = 52;").unwrap();
@@ -969,14 +1003,23 @@ fn v53_migration_adds_bounded_completion_without_row_or_index_churn() {
     drop(conn);
 
     let conn = Connection::open(&path).unwrap();
-    let maximum_json = format!("\"{}\"", "x".repeat(65_534));
-    assert_eq!(maximum_json.len(), 65_536);
+    let maximum_json = format!(
+        "\"{}\"",
+        "x".repeat(PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES - 2)
+    );
+    assert_eq!(
+        maximum_json.len(),
+        PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES
+    );
     conn.execute(
         "UPDATE provider_file_publications SET completion_payload_json = ?1",
         [&maximum_json],
     )
     .unwrap();
-    let oversized_json = format!("\"{}\"", "x".repeat(65_535));
+    let oversized_json = format!(
+        "\"{}\"",
+        "x".repeat(PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES - 1)
+    );
     assert!(conn
         .execute(
             "UPDATE provider_file_publications SET completion_payload_json = ?1",
@@ -1014,6 +1057,151 @@ fn v53_migration_adds_bounded_completion_without_row_or_index_churn() {
         publication_schema(&upgraded.conn),
         publication_schema(&fresh.conn)
     );
+}
+
+#[test]
+fn v54_migration_adds_durable_retirement_state_without_row_or_index_churn() {
+    let temp = tempdir();
+    let path = temp.path().join("v54-publication-retirement.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    let legacy_sql = CREATE_TABLES_SQL
+        .replace(
+            "    inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0\n        CHECK (inventory_observation_invalidated IN (0, 1)),\n",
+            "",
+        )
+        .replace(
+            "    retirement_started INTEGER NOT NULL DEFAULT 0 CHECK (retirement_started IN (0, 1)),\n",
+            "",
+        );
+    assert!(!legacy_sql.contains("retirement_started"));
+    assert!(!legacy_sql.contains("inventory_observation_invalidated"));
+    conn.execute_batch(&legacy_sql).unwrap();
+    conn.execute_batch(INDEXES_SQL).unwrap();
+    conn.execute_batch("PRAGMA user_version = 53;").unwrap();
+    conn.execute_batch(
+        r#"
+        INSERT INTO provider_file_publications (
+          replacement_id, owner_id, publication_kind, staging_id, provider,
+          inventory_family, inventory_source_format, inventory_source_root,
+          source_path, material_source_format, material_source_root,
+          inventory_generation, file_size_bytes, file_modified_at_ms,
+          import_revision, preparation_complete, started_at_ms, updated_at_ms
+        ) VALUES (
+          'v52-publication',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'replacement',
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          'claude', 'source_import_files', 'claude_projects_jsonl_tree',
+          '/history/claude/projects', '/history/claude/projects/a.jsonl',
+          'claude_projects_jsonl', '/history/claude/projects',
+          1, 20, 100, 7, 1, 105, 105
+        );
+        "#,
+    )
+    .unwrap();
+    let rootpage_before: i64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'provider_file_publications'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let total_changes_before = conn.total_changes();
+
+    migrate_publication_retirement_to_v54(&conn).unwrap();
+    assert_eq!(conn.total_changes(), total_changes_before);
+    assert!(table_has_column(&conn, "provider_file_publications", "retirement_started").unwrap());
+    assert!(table_has_column(
+        &conn,
+        "provider_file_publications",
+        "inventory_observation_invalidated",
+    )
+    .unwrap());
+    assert!(!conn
+        .query_row(
+            "SELECT retirement_started FROM provider_file_publications",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+    assert!(!conn
+        .query_row(
+            "SELECT inventory_observation_invalidated FROM provider_file_publications",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'provider_file_publications'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        rootpage_before
+    );
+    migrate_publication_retirement_to_v54(&conn).unwrap();
+    drop(conn);
+
+    let upgraded = Store::open(&path).unwrap();
+    let fresh = Store::open(temp.path().join("fresh-v53.sqlite")).unwrap();
+    assert_eq!(
+        schema_object_signature(&upgraded.conn)
+            .into_iter()
+            .find(|(_, name, _)| name == "provider_file_publications"),
+        schema_object_signature(&fresh.conn)
+            .into_iter()
+            .find(|(_, name, _)| name == "provider_file_publications")
+    );
+}
+
+#[test]
+fn v54_migration_repairs_mutated_publications_that_lost_prior_material_scope() {
+    let conn = Connection::open_in_memory().unwrap();
+    let legacy_sql = CREATE_TABLES_SQL
+        .replace(
+            "    inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0\n        CHECK (inventory_observation_invalidated IN (0, 1)),\n",
+            "",
+        )
+        .replace(
+            "    retirement_started INTEGER NOT NULL DEFAULT 0 CHECK (retirement_started IN (0, 1)),\n",
+            "",
+        );
+    conn.execute_batch(&legacy_sql).unwrap();
+    conn.execute_batch(INDEXES_SQL).unwrap();
+    conn.execute_batch("PRAGMA user_version = 53;").unwrap();
+    conn.execute_batch(
+        r#"
+        INSERT INTO provider_file_publications (
+          replacement_id, owner_id, publication_kind, staging_id, provider,
+          inventory_family, inventory_source_format, inventory_source_root,
+          source_path, material_source_format, material_source_root,
+          inventory_generation, file_size_bytes, file_modified_at_ms,
+          import_revision, mutation_started, tracks_prior_material,
+          preparation_complete, started_at_ms, updated_at_ms
+        ) VALUES (
+          'v52-mutated-incremental',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'incremental',
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          'codex', 'source_import_files', 'codex_sessions_root',
+          '/history/codex/sessions', '/history/codex/sessions/a.jsonl',
+          'codex_session_jsonl', '/history/codex/sessions',
+          1, 20, 100, 7, 1, 0, 1, 105, 105
+        );
+        "#,
+    )
+    .unwrap();
+
+    migrate_publication_retirement_to_v54(&conn).unwrap();
+
+    assert!(conn
+        .query_row(
+            "SELECT tracks_prior_material FROM provider_file_publications",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
 }
 
 fn schema_object_signature(conn: &Connection) -> Vec<(String, String, String)> {

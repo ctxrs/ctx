@@ -70,9 +70,24 @@ pub(crate) fn import_selected_source(
             }),
         ),
     };
+    let mut summary = outcome.summary;
+    if selected_work_is_explicit_rescan(selection) {
+        summary.skipped = summary.skipped.saturating_add(summary.imported);
+        summary.imported = 0;
+        summary.skipped_sessions = summary
+            .skipped_sessions
+            .saturating_add(summary.imported_sessions);
+        summary.imported_sessions = 0;
+        summary.skipped_events = summary
+            .skipped_events
+            .saturating_add(summary.imported_events);
+        summary.imported_events = 0;
+        summary.skipped_edges = summary.skipped_edges.saturating_add(summary.imported_edges);
+        summary.imported_edges = 0;
+    }
     Ok(SelectedSourceImportResult {
         outcome: SelectedSourceImportOutcome {
-            summary: outcome.summary,
+            summary,
             completed_units: outcome.completed_units,
             completed_bytes: if outcome.completed_units == selected_units
                 && outcome.deferred_units == 0
@@ -82,11 +97,23 @@ pub(crate) fn import_selected_source(
                 outcome.completed_bytes
             },
             deferred_units: outcome.deferred_units,
+            durable_progress: outcome.durable_progress,
             post_import_inventory_generation: outcome.post_import_inventory_generation,
             post_import_preinventory: outcome.post_import_preinventory,
         },
         remaining_error,
     })
+}
+
+fn selected_work_is_explicit_rescan(selection: &SelectedImportWork) -> bool {
+    match selection {
+        SelectedImportWork::Catalog(work) => work
+            .iter()
+            .all(|unit| unit.reason == ImportPendingReason::ExplicitRescan),
+        SelectedImportWork::SourceFiles(work) => work
+            .iter()
+            .all(|unit| unit.reason == ImportPendingReason::ExplicitRescan),
+    }
 }
 
 pub(crate) fn import_one_source_inner(
@@ -164,9 +191,14 @@ fn import_one_source_inner_with_pre_lock_hook(
     })();
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     let summary = match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete)) => {
+            Ok(summary)
+        }
+        (Ok(summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending)) => {
+            Ok(summary)
+        }
         (_, Err(error)) => Err(error.into()),
-        (Err(error), Ok(())) => Err(error),
+        (Err(error), Ok(_)) => Err(error),
     }?;
     if refresh_search_after_import {
         store.refresh_search_index()?;

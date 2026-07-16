@@ -17,6 +17,28 @@ fn validate_successful_outcome(outcome: ProviderFileImportOutcome<'_>) -> Result
     Ok(())
 }
 
+fn validate_provider_file_completion_outcome(
+    outcome: ProviderFileImportOutcome<'_>,
+    completion_kind: ProviderFileCompletionKind,
+    has_safe_checkpoint: bool,
+    tracks_prior_material: bool,
+) -> Result<()> {
+    let completed = matches!(
+        outcome.status,
+        CatalogIndexedStatus::Indexed | CatalogIndexedStatus::CompletedWithRejections
+    );
+    let terminal_replacement = outcome.status == CatalogIndexedStatus::Rejected
+        && completion_kind == ProviderFileCompletionKind::Replacement
+        && !has_safe_checkpoint
+        && !tracks_prior_material;
+    if !completed && !terminal_replacement {
+        return Err(StoreError::InvalidProviderFileCheckpoint(
+            "publication finalization requires a completed outcome or checkpoint-free rejected replacement",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_observation_identity(observation: ProviderFileInventoryObservation<'_>) -> Result<()> {
     if observation.source_format().is_empty()
         || observation.source_root().is_empty()
@@ -161,7 +183,10 @@ fn derive_provider_file_publication_phase(
     scope: &ProviderFilePublicationScope,
     marker: &ReplacementMarker,
 ) -> ProviderFilePublicationPhase {
-    if !marker.preparation_complete {
+    if scope.retires_observation && scope.kind == ProviderFilePublicationKind::Incremental {
+        return ProviderFilePublicationPhase::ReadyToFinalize;
+    }
+    if scope.tracks_prior_material && !marker.preparation_complete {
         return ProviderFilePublicationPhase::Preparing;
     }
     if scope.retires_observation {

@@ -48,12 +48,17 @@ mod tests {
         fs::write(&path, b"one\ntwo\n").unwrap();
         let checkpoint = initial_checkpoint(&path);
 
+        assert!(provider_jsonl_checkpoint_matches_file(&path, &checkpoint).unwrap());
+
         assert!(matches!(
-            open_provider_jsonl(&path, ProviderJsonlOpenMode::Append(checkpoint)).unwrap(),
+            open_provider_jsonl(&path, ProviderJsonlOpenMode::Append(checkpoint.clone())).unwrap(),
             ProviderJsonlOpenDecision::ReplacementRequired(
                 ProviderJsonlReplacementReason::EqualLengthObservation
             )
         ));
+
+        fs::write(&path, b"uno\ndos\n").unwrap();
+        assert!(!provider_jsonl_checkpoint_matches_file(&path, &checkpoint).unwrap());
     }
 
     #[test]

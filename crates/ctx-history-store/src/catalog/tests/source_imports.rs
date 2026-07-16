@@ -108,6 +108,109 @@ fn catalog_index_checkpoint_event_count_can_be_unknown() {
 }
 
 #[test]
+fn catalog_observation_token_refreshes_legacy_row_once() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let source_root = "/home/user/.codex/sessions";
+    let source_path = "/home/user/.codex/sessions/legacy-token.jsonl";
+    let legacy = catalog_session(source_path, source_path, observed_at_ms);
+    upsert_catalog_inventory(&store, std::slice::from_ref(&legacy));
+    store
+        .upsert_session(&imported_session(source_path))
+        .unwrap();
+    store
+        .mark_catalog_source_indexed(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root,
+                source_path,
+                file_size_bytes: legacy.file_size_bytes,
+                file_modified_at_ms: legacy.file_modified_at_ms,
+                import_revision: legacy.import_revision,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    source_root,
+                ),
+                file_sha256: None,
+                event_count: Some(1),
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+
+    let mut observed = legacy.clone();
+    observed.cataloged_at_ms += 2;
+    observed.metadata["file_observation_token_v1"] = serde_json::json!("token-a");
+    upsert_catalog_inventory(&store, std::slice::from_ref(&observed));
+    let pending = store
+        .list_catalog_import_work(
+            CaptureProvider::Codex,
+            source_root,
+            ImportWorkClass::Fresh,
+            10,
+        )
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].reason, ImportPendingReason::FreshChanged);
+
+    let generation = current_catalog_generation(&store, CaptureProvider::Codex, source_root);
+    let update = CatalogSourceIndexUpdate {
+        source_root,
+        source_path,
+        file_size_bytes: observed.file_size_bytes,
+        file_modified_at_ms: observed.file_modified_at_ms,
+        import_revision: observed.import_revision,
+        inventory_generation: generation,
+        file_sha256: None,
+        event_count: Some(1),
+        indexed_at_ms: observed_at_ms + 3,
+    };
+    assert_eq!(
+        store
+            .mark_catalog_source_indexed(CaptureProvider::Codex, update)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .list_catalog_import_work(
+                CaptureProvider::Codex,
+                source_root,
+                ImportWorkClass::Fresh,
+                10,
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .record_observed_catalog_source_import_result(
+                CaptureProvider::Codex,
+                update,
+                &observed.metadata,
+                CatalogIndexedStatus::Indexed,
+                None,
+            )
+            .unwrap(),
+        1
+    );
+    observed.cataloged_at_ms += 1;
+    upsert_catalog_inventory(&store, &[observed]);
+    assert!(store
+        .list_catalog_import_work(
+            CaptureProvider::Codex,
+            source_root,
+            ImportWorkClass::Fresh,
+            10
+        )
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

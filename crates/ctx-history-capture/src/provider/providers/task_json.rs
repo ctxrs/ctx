@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
-    fs::{self},
+    fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -446,7 +447,10 @@ pub(crate) fn read_task_json_value(
             reason: "provider task JSON file exceeds maximum supported size",
         });
     }
-    let bytes = fs::read(path)?;
+    let file = File::open(path)?;
+    let mut reader = crate::disk_io_pacing::PacedReader::new(file);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
     serde_json::from_slice(&bytes).map_err(CaptureError::from)
 }
 

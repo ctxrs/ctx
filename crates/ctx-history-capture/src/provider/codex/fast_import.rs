@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     CaptureProvider, Event, EventType, ProviderEventEnvelope, ProviderSourceTrust,
 };
-use ctx_history_store::Store;
+use ctx_history_store::{EventSearchBulkMaintenanceOutcome, Store};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -52,7 +52,14 @@ pub(crate) fn import_codex_session_paths_fast(
         import_codex_session_paths_fast_bounded(paths, store, &options, skipped_by_bounds);
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(EventSearchBulkMaintenanceOutcome::Complete)) => Ok(summary),
+        (Ok(mut summary), Ok(EventSearchBulkMaintenanceOutcome::Pending)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
+                "event search maintenance remains queued",
+            );
+            Ok(summary)
+        }
         (Ok(mut summary), Err(error)) => {
             summary.push_maintenance_warning(
                 crate::ProviderImportMaintenanceKind::EventSearchFinalization,
@@ -60,7 +67,7 @@ pub(crate) fn import_codex_session_paths_fast(
             );
             Ok(summary)
         }
-        (Err(err), Err(_)) | (Err(err), Ok(())) => Err(err),
+        (Err(err), _) => Err(err),
     }
 }
 
@@ -576,7 +583,24 @@ pub(crate) fn import_codex_session_reader_bounded(
     })();
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(EventSearchBulkMaintenanceOutcome::Complete)) => Ok(summary),
+        (
+            Ok(CodexSessionBoundedImport::Imported {
+                mut summary,
+                boundary,
+            }),
+            Ok(EventSearchBulkMaintenanceOutcome::Pending),
+        ) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
+                "event search maintenance remains queued",
+            );
+            Ok(CodexSessionBoundedImport::Imported { summary, boundary })
+        }
+        (
+            Ok(CodexSessionBoundedImport::ReplacementRequired(reason)),
+            Ok(EventSearchBulkMaintenanceOutcome::Pending),
+        ) => Ok(CodexSessionBoundedImport::ReplacementRequired(reason)),
         (
             Ok(CodexSessionBoundedImport::Imported {
                 mut summary,

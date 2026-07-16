@@ -5,16 +5,21 @@ fn manifested_completion_requires_exact_post_import_observation() {
     fs::create_dir(&source_path).unwrap();
     fs::write(source_path.join("messages.jsonl"), b"{}\n").unwrap();
     fs::write(source_path.join("meta.json"), b"{}\n").unwrap();
+    let companion_modified = fs::metadata(source_path.join("meta.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
-        let mut meta = fs::OpenOptions::new()
-            .append(true)
-            .open(source_path.join("meta.json"))
+        let meta_path = source_path.join("meta.json");
+        fs::write(&meta_path, b"[]\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&meta_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(companion_modified))
             .unwrap();
-        use std::io::Write as _;
-        meta.write_all(b"changed\n").unwrap();
-        meta.sync_all().unwrap();
         Ok(successful_file_summary())
     };
 
@@ -707,4 +712,77 @@ fn provider_sqlite_lock_is_pending_until_the_lock_is_released() {
         .list_pending_source_import_files(source.provider, &file.source_root)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn setup_drain_imports_later_complete_files_despite_an_incomplete_earlier_file() {
+    let temp = tempdir();
+    let source_root = temp.path().join("pi-fair-source");
+    let source = write_pi_source(&source_root, "partial-first");
+    let data_root = temp.path().join("data");
+    let args = crate::ImportArgs {
+        provider: Some(NativeProviderArg::Pi),
+        path: Some(source.path.clone()),
+        history_source: None,
+        history_source_manifest: Vec::new(),
+        reset_cursor: false,
+        format: None,
+        all: false,
+        resume: false,
+        no_daemon: true,
+        json: false,
+        progress: ProgressArg::None,
+    };
+    let run = |data_root: PathBuf| {
+        crate::commands::import::run_import_internal(
+            &args,
+            data_root,
+            &mut serde_json::Map::new(),
+            crate::commands::import::ImportRunOptions {
+                progress: ProgressArg::None,
+                json: false,
+                print_human: false,
+                allow_empty_sources: false,
+                include_history_source_plugins: false,
+                operation: "setup",
+            },
+        )
+        .unwrap()
+    };
+    let baseline = run(data_root.clone());
+    assert_eq!(baseline.totals.fresh_units_pending, 0, "{baseline:?}");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(source_root.join("session.jsonl"))
+        .unwrap()
+        .write_all(br#"{"type":"message","id":"partial""#)
+        .unwrap();
+    fs::write(
+        source_root.join("later.jsonl"),
+        format!(
+            "{}{}",
+            jsonl(json!({
+                "type": "session",
+                "id": "complete-later",
+                "timestamp": "2026-07-14T12:00:00Z"
+            })),
+            jsonl(json!({
+                "type": "message",
+                "id": "complete-later-message",
+                "timestamp": "2026-07-14T12:00:01Z",
+                "message": {"role": "user", "content": "complete later foreground content"}
+            }))
+        ),
+    )
+    .unwrap();
+
+    let report = run(data_root.clone());
+
+    assert_eq!(report.totals.fresh_units_processed, 1, "{report:?}");
+    assert_eq!(report.totals.fresh_units_pending, 1, "{report:?}");
+    let store = Store::open(ctx_history_core::database_path(data_root)).unwrap();
+    assert!(serde_json::to_string(&store.export_archive().unwrap())
+        .unwrap()
+        .contains("complete later foreground content"));
+    assert!(!store.has_pending_provider_file_publications().unwrap());
 }

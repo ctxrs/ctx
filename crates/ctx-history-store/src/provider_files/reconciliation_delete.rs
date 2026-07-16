@@ -315,6 +315,43 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    fn delete_unseen_capture_source_batch(&self, replacement_id: &str) -> Result<usize> {
+        self.conn
+            .execute(
+                &format!(
+                    r#"
+                    DELETE FROM capture_sources
+                    WHERE id IN (
+                        SELECT entity_id FROM {STAGING_BATCH_TABLE}
+                        WHERE replacement_id = ?1
+                    )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {STAGING_SEEN_TABLE} AS seen
+                        WHERE seen.replacement_id = ?1
+                          AND seen.entity_kind = ?2
+                          AND seen.entity_id = capture_sources.id
+                      )
+                      AND NOT EXISTS (SELECT 1 FROM vcs_workspaces WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM history_records WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM artifacts WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM sessions WHERE capture_source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM session_edges WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM runs WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM events WHERE capture_source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM vcs_changes WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM history_record_links WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM summaries WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM files_touched WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM history_record_tags WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM record_edges WHERE source_id = capture_sources.id)
+                      AND NOT EXISTS (SELECT 1 FROM audit_log WHERE source_id = capture_sources.id)
+                    "#
+                ),
+                params![replacement_id, CURRENT_CAPTURE_SOURCE_KIND],
+            )
+            .map_err(StoreError::from)
+    }
+
     fn unseen_batch_ids(
         &self,
         replacement_id: &str,

@@ -292,7 +292,60 @@ impl Store {
             return Ok(Vec::new());
         }
         let predicate = import_work_class_predicate("catalog", class);
+        let active_publication =
+            crate::provider_files::catalog_candidate_is_global_publication("catalog");
         let order = import_work_order("catalog", class);
+        let active_path = self
+            .effective_provider_file_publication_inventory_owner()?
+            .filter(|owner| {
+                owner.inventory_family == ProviderFileInventoryFamily::Catalog
+                    && owner.provider == provider
+                    && owner.source_root == source_root
+            })
+            .map(|owner| owner.source_path);
+        let mut work = Vec::with_capacity(limit);
+        if let Some(active_path) = active_path.as_deref() {
+            let mut active_stmt = self.conn.prepare(&format!(
+                r#"
+                SELECT source_path, provider, source_format, source_root,
+                       external_session_id, parent_external_session_id, agent_type, role_hint,
+                       external_agent_id, cwd, session_started_at_ms, file_size_bytes,
+                       file_modified_at_ms, import_revision, cataloged_at_ms, metadata_json,
+                       pending_reason,
+                       CASE
+                         WHEN pending_reason = 'fresh_append' THEN MAX(
+                           file_size_bytes - COALESCE((
+                             SELECT checkpoint.committed_byte_offset
+                             FROM provider_file_checkpoints AS checkpoint
+                             WHERE checkpoint.provider = catalog.provider
+                               AND checkpoint.source_format = catalog.source_format
+                               AND checkpoint.source_root = catalog.source_root
+                               AND checkpoint.source_path = catalog.source_path
+                           ), 0),
+                           0
+                         )
+                         ELSE file_size_bytes
+                       END,
+                       indexed_at_ms, 1 AS has_active_publication
+                FROM catalog_sessions AS catalog
+                WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
+                  AND is_stale = 0 AND {predicate} AND ({active_publication})
+                LIMIT 1
+                "#
+            ))?;
+            work.extend(
+                active_stmt
+                    .query_map(
+                        params![provider.as_str(), source_root, active_path],
+                        catalog_import_work_from_row,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        if work.len() >= limit {
+            return Ok(work);
+        }
+        let ordinary_limit = limit.saturating_add(usize::from(!work.is_empty()));
         let mut stmt = self.conn.prepare(&format!(
             r#"
             SELECT source_path, provider, source_format, source_root,
@@ -314,7 +367,7 @@ impl Store {
                      )
                      ELSE file_size_bytes
                    END,
-                   indexed_at_ms
+                   indexed_at_ms, 0 AS has_active_publication
             FROM catalog_sessions AS catalog
             WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
               AND {predicate}
@@ -323,17 +376,26 @@ impl Store {
             "#
         ))?;
         let rows = stmt.query_map(
-            params![provider.as_str(), source_root, capped_i64(limit as u64)],
-            |row| {
-                Ok(CatalogImportWork {
-                    session: catalog_session_from_row(row)?,
-                    reason: parse_text_enum(row.get(16)?)?,
-                    estimated_bytes: nonnegative_i64_to_u64(row.get(17)?)?,
-                    last_attempt_at_ms: row.get(18)?,
-                })
-            },
+            params![
+                provider.as_str(),
+                source_root,
+                capped_i64(ordinary_limit as u64)
+            ],
+            catalog_import_work_from_row,
         )?;
-        collect_rows(rows)
+        let ordinary = collect_rows(rows)?;
+        let remaining = limit.saturating_sub(work.len());
+        work.extend(
+            ordinary
+                .into_iter()
+                .filter(|candidate| {
+                    active_path
+                        .as_deref()
+                        .is_none_or(|path| candidate.session.source_path != path)
+                })
+                .take(remaining),
+        );
+        Ok(work)
     }
 
     pub fn catalog_import_work_count(
@@ -362,12 +424,13 @@ impl Store {
         source_root: &str,
         inventory_generation: u64,
     ) -> Result<usize> {
-        self.conn
-            .execute(
+        with_immediate_transaction(&self.conn, || {
+            let legacy = self.conn.execute(
                 r#"
                 UPDATE catalog_sessions
-                SET pending_reason = 'explicit_rescan'
+                SET pending_reason = 'legacy'
                 WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
+                  AND indexed_status IN ('pending', 'failed') AND pending_reason IS NULL
                   AND EXISTS (
                     SELECT 1 FROM import_inventory_generations AS inventory
                     WHERE inventory.provider = ?1 AND inventory.source_root = ?2
@@ -380,8 +443,29 @@ impl Store {
                     source_root,
                     capped_i64(inventory_generation)
                 ],
-            )
-            .map_err(Into::into)
+            )?;
+            let explicit = self.conn.execute(
+                r#"
+                UPDATE catalog_sessions
+                SET pending_reason = 'explicit_rescan'
+                WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
+                  AND indexed_status = 'indexed'
+                  AND pending_reason IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = ?1 AND inventory.source_root = ?2
+                      AND inventory.inventory_family = 'catalog_sessions'
+                      AND inventory.current_generation = ?3
+                  )
+                "#,
+                params![
+                    provider.as_str(),
+                    source_root,
+                    capped_i64(inventory_generation)
+                ],
+            )?;
+            Ok(legacy.saturating_add(explicit))
+        })
     }
 
     pub fn list_active_catalog_sessions_for_source(
@@ -408,6 +492,8 @@ impl Store {
         collect_rows(rows)
     }
 
+    /// Compatibility helper for catalog rows created before observation tokens.
+    #[doc(hidden)]
     pub fn mark_catalog_source_indexed(
         &self,
         provider: CaptureProvider,
@@ -421,7 +507,7 @@ impl Store {
         )
     }
 
-    pub fn record_catalog_source_import_result(
+    pub(crate) fn record_catalog_source_import_result(
         &self,
         provider: CaptureProvider,
         update: CatalogSourceIndexUpdate<'_>,
@@ -436,6 +522,7 @@ impl Store {
                 self.record_catalog_source_import_result_inner(
                     provider,
                     update,
+                    None,
                     status,
                     error,
                     status.preserves_native_resume_checkpoint(),
@@ -444,10 +531,11 @@ impl Store {
         )
     }
 
-    pub(crate) fn record_catalog_source_import_result_preserving_legacy_cursor(
+    pub fn record_observed_catalog_source_import_result(
         &self,
         provider: CaptureProvider,
         update: CatalogSourceIndexUpdate<'_>,
+        metadata: &serde_json::Value,
         status: CatalogIndexedStatus,
         error: Option<&str>,
     ) -> Result<usize> {
@@ -457,7 +545,37 @@ impl Store {
             update.source_path,
             || {
                 self.record_catalog_source_import_result_inner(
-                    provider, update, status, error, false,
+                    provider,
+                    update,
+                    Some(metadata),
+                    status,
+                    error,
+                    status.preserves_native_resume_checkpoint(),
+                )
+            },
+        )
+    }
+
+    pub(crate) fn record_observed_catalog_source_import_result_preserving_legacy_cursor(
+        &self,
+        provider: CaptureProvider,
+        update: CatalogSourceIndexUpdate<'_>,
+        metadata: &serde_json::Value,
+        status: CatalogIndexedStatus,
+        error: Option<&str>,
+    ) -> Result<usize> {
+        self.with_provider_file_inventory_result_write(
+            provider,
+            update.source_root,
+            update.source_path,
+            || {
+                self.record_catalog_source_import_result_inner(
+                    provider,
+                    update,
+                    Some(metadata),
+                    status,
+                    error,
+                    false,
                 )
             },
         )
@@ -467,10 +585,21 @@ impl Store {
         &self,
         provider: CaptureProvider,
         update: CatalogSourceIndexUpdate<'_>,
+        metadata: Option<&serde_json::Value>,
         status: CatalogIndexedStatus,
         error: Option<&str>,
         advance_legacy_cursor: bool,
     ) -> Result<usize> {
+        if metadata.is_some_and(|metadata| {
+            metadata
+                .get("file_observation_token_v1")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+        }) {
+            return Err(StoreError::InvalidProviderFileCheckpoint(
+                "catalog observation token is required",
+            ));
+        }
         let changed = self.conn.execute(
             r#"
                 UPDATE catalog_sessions
@@ -502,6 +631,11 @@ impl Store {
                   AND file_size_bytes = ?5
                   AND file_modified_at_ms = ?6
                   AND import_revision = ?12
+                  AND ((?14 IS NULL AND json_extract(
+                            metadata_json,
+                            '$.file_observation_token_v1'
+                        ) IS NULL)
+                       OR metadata_json IS ?14)
                   AND EXISTS (
                       SELECT 1
                       FROM import_inventory_generations AS inventory
@@ -525,6 +659,7 @@ impl Store {
                 advance_legacy_cursor,
                 i64::from(update.import_revision),
                 capped_i64(update.inventory_generation),
+                metadata.map(serde_json::to_string).transpose()?,
             ],
         )?;
         Ok(changed)

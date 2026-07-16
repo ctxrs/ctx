@@ -4,6 +4,56 @@ impl Store {
         scope: &mut ProviderFilePublicationScope,
         created_at_ms: i64,
     ) -> Result<()> {
+        let global_id = global_provider_file_publication_id_sql();
+        let global_owner = self
+            .conn
+            .query_row(
+                &format!(
+                    r#"
+                    SELECT provider, owner_id, inventory_family,
+                           inventory_source_format, inventory_source_root, source_path,
+                           material_source_format, material_source_root
+                    FROM provider_file_publications
+                    WHERE replacement_id = ({global_id})
+                    "#
+                ),
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((
+            provider,
+            owner_id,
+            inventory_family,
+            inventory_source_format,
+            inventory_source_root,
+            source_path,
+            material_source_format,
+            material_source_root,
+        )) = global_owner
+        {
+            let exact_owner = owner_id == scope.owner_id
+                && inventory_family == scope.inventory_family
+                && inventory_source_format == scope.inventory_source_format
+                && inventory_source_root == scope.inventory_source_root
+                && source_path == scope.source_path
+                && material_source_format == scope.material_source_format
+                && material_source_root == scope.material_source_root;
+            if !exact_owner {
+                return Err(StoreError::ProviderFileReplacementBusy { provider, owner_id });
+            }
+        }
         let prior = self
             .conn
             .query_row(
@@ -19,7 +69,8 @@ impl Store {
                        AND file_modified_at_ms = ?9
                        AND import_revision = ?10
                        AND metadata_json IS ?11,
-                       tracks_prior_material, staging_initialized
+                       tracks_prior_material, staging_initialized, retirement_started,
+                       completion_payload_json IS NOT NULL
                 FROM provider_file_publications
                 WHERE owner_id = ?1
                 "#,
@@ -45,6 +96,8 @@ impl Store {
                         row.get::<_, bool>(4)?,
                         row.get::<_, bool>(5)?,
                         row.get::<_, bool>(6)?,
+                        row.get::<_, bool>(7)?,
+                        row.get::<_, bool>(8)?,
                     ))
                 },
             )
@@ -57,19 +110,30 @@ impl Store {
             same_observation,
             tracks_prior_material,
             staging_initialized,
+            retirement_started,
+            has_staged_completion,
         )) = prior
         {
             let prior_kind = parse_provider_file_publication_kind(&prior_kind)?;
-            scope.kind = match (prior_kind, mutation_started) {
-                (_, true) => ProviderFilePublicationKind::Replacement,
-                (_, false) => scope.kind,
+            scope.kind = match (prior_kind, mutation_started, scope.retires_observation) {
+                (prior_kind, true, true) => prior_kind,
+                (_, true, false) => ProviderFilePublicationKind::Replacement,
+                (_, false, _) => scope.kind,
             };
-            if mutation_started {
-                scope.tracks_prior_material = tracks_prior_material;
-            }
             scope.scope_id = Uuid::parse_str(&publication_id)?;
             scope.staging_id = staging_id;
-            let reuse_staging_state = same_observation && prior_kind == scope.kind;
+            if mutation_started {
+                scope.tracks_prior_material = if same_observation && has_staged_completion {
+                    tracks_prior_material
+                } else {
+                    tracks_prior_material
+                        || scope.tracks_prior_material
+                        || self.provider_file_publication_has_staged_material(scope.scope_id)?
+                };
+            }
+            let reuse_staging_state = same_observation
+                && prior_kind == scope.kind
+                && (scope.retires_observation || !retirement_started);
             let reuse_staging_state = reuse_staging_state && staging_initialized;
             scope.reuse_staging_state = reuse_staging_state;
             self.conn.execute(
@@ -83,6 +147,9 @@ impl Store {
                     file_modified_at_ms = ?12, import_revision = ?13,
                     metadata_json = ?14, mutation_started = ?15,
                     tracks_prior_material = ?16,
+                    retirement_started = CASE
+                        WHEN ?17 THEN retirement_started ELSE 0
+                    END,
                     staging_initialized = CASE
                         WHEN ?17 THEN staging_initialized ELSE 0
                     END,
@@ -378,99 +445,52 @@ impl Store {
         &self,
         scope: &ProviderFilePublicationScope,
     ) -> Result<()> {
-        self.with_atomic_provider_file_update(|| {
-            let marker = self.load_replacement_marker(scope)?;
-            let replacement_id = scope.scope_id.to_string();
-            let staged_state_count: usize = self.conn.query_row(
-                &format!(
-                    "SELECT (SELECT COUNT(*) FROM {STAGING_SEEN_TABLE} WHERE replacement_id = ?1) + \
-                            (SELECT COUNT(*) FROM {STAGING_PRIOR_SOURCES_TABLE} WHERE replacement_id = ?1)"
-                ),
-                params![&replacement_id],
-                |row| nonnegative_i64_to_usize(row.get(0)?),
-            )?;
-            let progress_without_state = staged_state_count == 0
-                && (marker.mutation_started
-                    || marker.preparation_cursor.is_some()
-                    || marker.cleanup_phase != CLEANUP_PHASE_LINKS
-                    || marker.source_cursor.is_some()
-                    || marker.entity_cursor.is_some()
-                    || (scope.tracks_prior_material
-                        && marker.completion_payload_json.is_some())
-                    || marker.counts != ProviderFileReconciliationCounts::default());
-            if !scope.reuse_staging_state || progress_without_state {
-                self.reset_provider_file_publication_staging(scope)?;
-            } else {
-                self.conn.execute(
-                    &format!("DELETE FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1"),
+        if !scope.retires_observation {
+            self.with_atomic_provider_file_update(|| {
+                let marker = self.load_replacement_marker(scope)?;
+                let replacement_id = scope.scope_id.to_string();
+                let staged_state_exists: bool = self.conn.query_row(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} WHERE replacement_id = ?1) \
+                         OR EXISTS (SELECT 1 FROM {STAGING_PRIOR_SOURCES_TABLE} WHERE replacement_id = ?1)"
+                    ),
                     params![&replacement_id],
+                    |row| row.get(0),
                 )?;
-                let changed = self.conn.execute(
-                    "UPDATE provider_file_publications SET staging_initialized = 1 \
-                     WHERE replacement_id = ?1",
-                    params![&replacement_id],
-                )?;
-                if changed != 1 {
-                    return Err(StoreError::InvalidProviderFilePublicationScope);
+                let progress_without_state = !staged_state_exists
+                    && (marker.mutation_started
+                        || marker.preparation_cursor.is_some()
+                        || marker.cleanup_phase != CLEANUP_PHASE_LINKS
+                        || marker.source_cursor.is_some()
+                        || marker.entity_cursor.is_some()
+                        || (scope.tracks_prior_material
+                            && marker.completion_payload_json.is_some())
+                        || marker.counts != ProviderFileReconciliationCounts::default());
+                if !scope.reuse_staging_state || progress_without_state {
+                    self.reset_provider_file_publication_staging(scope)?;
+                } else {
+                    self.conn.execute(
+                        &format!("DELETE FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1"),
+                        params![&replacement_id],
+                    )?;
+                    let changed = self.conn.execute(
+                        "UPDATE provider_file_publications SET staging_initialized = 1 \
+                         WHERE replacement_id = ?1",
+                        params![&replacement_id],
+                    )?;
+                    if changed != 1 {
+                        return Err(StoreError::InvalidProviderFilePublicationScope);
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
         let mut active = self.provider_file_publication.borrow_mut();
         let active = active
             .as_mut()
             .filter(|active| active.scope_id == scope.scope_id)
             .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
         active.attached = true;
-        Ok(())
-    }
-
-    fn reset_provider_file_publication_staging(
-        &self,
-        scope: &ProviderFilePublicationScope,
-    ) -> Result<()> {
-        let replacement_id = scope.scope_id.to_string();
-        for table in [
-            STAGING_BATCH_TABLE,
-            STAGING_SEEN_TABLE,
-            STAGING_PRIOR_SOURCES_TABLE,
-        ] {
-            self.conn.execute(
-                &format!("DELETE FROM {table} WHERE replacement_id = ?1"),
-                params![&replacement_id],
-            )?;
-        }
-        let changed = self.conn.execute(
-            r#"
-            UPDATE provider_file_publications
-            SET staging_initialized = 1,
-                preparation_complete = CASE WHEN ?2 THEN 0 ELSE 1 END,
-                preparation_cursor = NULL,
-                cleanup_phase = 0,
-                cleanup_source_cursor = NULL,
-                cleanup_entity_cursor = NULL,
-                removed_artifacts = 0,
-                removed_summaries = 0,
-                removed_history_record_links = 0,
-                removed_history_records = 0,
-                removed_history_record_tags = 0,
-                removed_record_edges = 0,
-                removed_audit_log_entries = 0,
-                removed_vcs_workspaces = 0,
-                removed_vcs_changes = 0,
-                removed_events = 0,
-                removed_runs = 0,
-                removed_files_touched = 0,
-                removed_session_edges = 0,
-                tombstoned_sessions = 0,
-                completion_payload_json = NULL
-             WHERE replacement_id = ?1
-            "#,
-            params![&replacement_id, scope.tracks_prior_material],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::InvalidProviderFilePublicationScope);
-        }
         Ok(())
     }
 }

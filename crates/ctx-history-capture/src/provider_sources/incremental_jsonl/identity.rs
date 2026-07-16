@@ -103,6 +103,7 @@ fn hash_range_exact(file: &mut File, start: u64, bytes: u64) -> Result<Option<St
 fn read_range_exact(file: &mut File, start: u64, bytes: u64) -> Result<Option<Vec<u8>>> {
     file.seek(SeekFrom::Start(start))?;
     let mut value = vec![0; bytes.min(usize::MAX as u64) as usize];
+    crate::pace_current_disk_io(value.len() as u64);
     match file.read_exact(&mut value) {
         Ok(()) => Ok(Some(value)),
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
