@@ -68,7 +68,7 @@ public enum JSONValue: Codable, Equatable, Sendable, CustomStringConvertible {
 
     public var intValue: Int? {
         if case let .number(value) = self {
-            return Int(value)
+            return Int(exactly: value)
         }
         return nil
     }
@@ -153,7 +153,13 @@ extension JSONValue {
         "payload_type",
         "payloadType",
         "record_type",
-        "recordType"
+        "recordType",
+        "semantic_weight",
+        "semanticWeight",
+        "semantic_fallback_code",
+        "semanticFallbackCode",
+        "semantic_fallback",
+        "semanticFallback"
     ])
 
     private static func snakeToCamel(_ value: String) -> String {

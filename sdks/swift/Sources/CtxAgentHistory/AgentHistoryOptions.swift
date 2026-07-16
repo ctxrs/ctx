@@ -36,6 +36,10 @@ public struct SearchOptions: Sendable {
     public var limit: Int?
     public var backend: String?
     public var provider: String?
+    public var historySource: String?
+    public var providerKey: String?
+    public var sourceId: String?
+    public var sourceFormat: String?
     public var workspace: String?
     public var since: String?
     public var primaryOnly: Bool
@@ -51,6 +55,10 @@ public struct SearchOptions: Sendable {
         limit: Int? = nil,
         backend: String? = nil,
         provider: String? = nil,
+        historySource: String? = nil,
+        providerKey: String? = nil,
+        sourceId: String? = nil,
+        sourceFormat: String? = nil,
         workspace: String? = nil,
         since: String? = nil,
         primaryOnly: Bool = false,
@@ -65,6 +73,10 @@ public struct SearchOptions: Sendable {
         self.limit = limit
         self.backend = backend
         self.provider = provider
+        self.historySource = historySource
+        self.providerKey = providerKey
+        self.sourceId = sourceId
+        self.sourceFormat = sourceFormat
         self.workspace = workspace
         self.since = since
         self.primaryOnly = primaryOnly
