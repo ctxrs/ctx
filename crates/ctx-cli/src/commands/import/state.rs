@@ -1,3 +1,85 @@
+const PENDING_REASON_REPAIR_BATCH_ROWS: usize = 512;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ImportMaintenanceProgress {
+    pub(crate) processed_rows: usize,
+    pub(crate) complete: bool,
+}
+
+pub(crate) fn repair_import_maintenance(
+    store: &Store,
+    policy: ImportExecutionPolicy,
+) -> Result<ImportMaintenanceProgress> {
+    let mut aggregate = ImportMaintenanceProgress::default();
+    loop {
+        let progress = store.repair_import_pending_reasons(PENDING_REASON_REPAIR_BATCH_ROWS)?;
+        let mut processed_rows = progress.processed_rows;
+        let bulk_complete = if progress.complete
+            && !store.has_pending_provider_file_publications()?
+            && !store.event_search_bulk_maintenance_outcome()?.is_complete()
+        {
+            processed_rows = processed_rows.saturating_add(1);
+            store.advance_event_search_bulk_maintenance()?.is_complete()
+        } else {
+            true
+        };
+        aggregate.processed_rows = aggregate.processed_rows.saturating_add(processed_rows);
+        aggregate.complete = progress.complete && bulk_complete;
+        if aggregate.complete || policy != ImportExecutionPolicy::Drain {
+            return Ok(aggregate);
+        }
+        if processed_rows == 0 {
+            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                "import maintenance made no progress",
+            )));
+        }
+    }
+}
+
+pub(crate) fn provider_publication_blocks_attempt(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<StoreError>(),
+            Some(StoreError::ProviderFileReplacementBusy { .. })
+        )
+    })
+}
+
+pub(crate) fn import_work_progress_message(
+    class: ImportWorkClass,
+    provider: CaptureProvider,
+) -> (&'static str, String) {
+    match class {
+        ImportWorkClass::Fresh => (
+            "indexing",
+            format!("indexing new/changed {} history", provider.as_str()),
+        ),
+        ImportWorkClass::Recovery => (
+            "repairing",
+            format!("repairing prior {} history", provider.as_str()),
+        ),
+    }
+}
+
+pub(crate) fn import_work_progress_done(
+    class: ImportWorkClass,
+    source: &SourceInfo,
+) -> (&'static str, String) {
+    match class {
+        ImportWorkClass::Fresh => (
+            "indexing",
+            format!(
+                "Indexed new/changed {} history.",
+                source_provider_label(source)
+            ),
+        ),
+        ImportWorkClass::Recovery => (
+            "repairing",
+            format!("Repaired prior {} history.", source_provider_label(source)),
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ImportTotals {
     pub(crate) durable_progress: bool,
@@ -100,6 +182,140 @@ impl ImportTotals {
         self.skipped_edges = self.skipped_edges.saturating_add(summary.skipped_edges);
         self.skipped = self.skipped.saturating_add(summary.skipped);
         self.failed = self.failed.saturating_add(summary.failed);
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NativeSourceReports {
+    sources: BTreeMap<usize, NativeSourceReport>,
+}
+
+#[derive(Debug, Default)]
+struct NativeSourceReport {
+    summary: ProviderImportSummary,
+    stats: SourceStats,
+    failure: Option<NativeSourceFailure>,
+    reportable: bool,
+}
+
+#[derive(Debug)]
+struct NativeSourceFailure {
+    error: String,
+    failure_type: ImportFailureType,
+    rejected: bool,
+}
+
+impl NativeSourceReports {
+    pub(crate) fn record_outcome(
+        &mut self,
+        source_index: usize,
+        summary: &ProviderImportSummary,
+        completed_stats: SourceStats,
+        no_op_stats: Option<SourceStats>,
+    ) {
+        let report = self.sources.entry(source_index).or_default();
+        report.summary.merge_from(summary.clone());
+        report.stats.files = report.stats.files.saturating_add(completed_stats.files);
+        report.stats.bytes = report.stats.bytes.saturating_add(completed_stats.bytes);
+        report.stats.change_token = report.stats.change_token.or(completed_stats.change_token);
+        let reportable_no_op = no_op_stats.is_some();
+        if report.stats.files == 0 {
+            if let Some(stats) = no_op_stats {
+                report.stats = stats;
+            }
+        }
+        report.reportable |= completed_stats.files > 0
+            || reportable_no_op
+            || summary != &ProviderImportSummary::default();
+    }
+
+    pub(crate) fn record_failure(
+        &mut self,
+        source_index: usize,
+        stats: SourceStats,
+        error: &anyhow::Error,
+    ) {
+        let report = self.sources.entry(source_index).or_default();
+        report.stats.files = report.stats.files.saturating_add(stats.files);
+        report.stats.bytes = report.stats.bytes.saturating_add(stats.bytes);
+        report.stats.change_token = report.stats.change_token.or(stats.change_token);
+        let rejected_summary = rejected_source_summary(error);
+        if let Some(summary) = rejected_summary.as_ref() {
+            report.summary.merge_from(summary.clone());
+        }
+        report.failure.get_or_insert_with(|| NativeSourceFailure {
+            error: error_summary(error),
+            failure_type: import_failure_type(error),
+            rejected: rejected_summary.is_some(),
+        });
+        report.reportable = true;
+    }
+
+    pub(crate) fn apply_totals(&self, totals: &mut ImportTotals) {
+        for report in self.sources.values().filter(|report| report.reportable) {
+            let rejected_without_content = report.summary.failed > 0
+                && !provider_summary_has_imported_content(&report.summary);
+            let failed_without_content =
+                report.failure.is_some() && !provider_summary_has_imported_content(&report.summary);
+            if rejected_without_content || failed_without_content {
+                if report.summary.failed > 0 {
+                    totals.add_rejected_source(&report.summary, &report.stats);
+                } else {
+                    totals.add_source_failure(&report.stats);
+                }
+                continue;
+            }
+
+            totals.add(&report.summary, &report.stats);
+            if report
+                .failure
+                .as_ref()
+                .is_some_and(|failure| !failure.rejected)
+            {
+                totals.failed_sources = totals.failed_sources.saturating_add(1);
+            }
+        }
+    }
+
+    fn append_json(self, plan: &ImportPlan, imported_sources: &mut Vec<Value>) {
+        for (source_index, report) in self
+            .sources
+            .into_iter()
+            .filter(|(_, report)| report.reportable)
+        {
+            let source = &plan.sources[source_index].source;
+            let rejected_without_content = report.summary.failed > 0
+                && !provider_summary_has_imported_content(&report.summary);
+            let failed_without_content =
+                report.failure.is_some() && !provider_summary_has_imported_content(&report.summary);
+            if rejected_without_content || failed_without_content {
+                let failure = report.failure.unwrap_or_else(|| NativeSourceFailure {
+                    error: format!(
+                        "provider import reported {} failure(s)",
+                        report.summary.failed
+                    ),
+                    failure_type: ImportFailureType::RecordRejection,
+                    rejected: true,
+                });
+                imported_sources.push(source_failure_json(&ImportSourceFailure {
+                    source: source.clone(),
+                    stats: report.stats,
+                    error: failure.error,
+                    failure_type: failure.failure_type,
+                    rejected_summary: (report.summary.failed > 0).then_some(report.summary),
+                }));
+                continue;
+            }
+
+            let mut value = source_import_json(source, &report.stats, &report.summary);
+            if let Some(failure) = report.failure.filter(|failure| !failure.rejected) {
+                value["status"] = json!("completed_with_source_failure");
+                value["failure_scope"] = json!("source");
+                value["failure_type"] = json!(failure.failure_type.as_str());
+                value["error"] = json!(source_error_reason(source, &failure.error));
+            }
+            imported_sources.push(value);
+        }
     }
 }
 

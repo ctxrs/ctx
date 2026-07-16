@@ -197,7 +197,7 @@ pub(crate) fn normalize_openclaw_jsonl_file(
 ) -> Result<ProviderNormalizationResult> {
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut result = ProviderNormalizationResult::default();
     let fallback_id = path
         .file_stem()

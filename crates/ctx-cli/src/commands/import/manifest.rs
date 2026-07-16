@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::commands::import::catalog::{source_change_token, system_time_ms, SourceChangeEntry};
 use ctx_history_capture::{
-    observe_sqlite_source_generation, ProviderImportDependency, ProviderImportUnitGrouping,
-    ProviderImportUnitOwner, ProviderImportUnitSpec,
+    observe_ordinary_file, observe_sqlite_source_generation, ProviderImportDependency,
+    ProviderImportUnitGrouping, ProviderImportUnitOwner, ProviderImportUnitSpec,
 };
 
 pub(crate) struct PersistedSourceImportObservation {
@@ -195,11 +195,7 @@ pub(crate) fn observe_selected_source_import_file(
         ));
     };
     let path = PathBuf::from(source_path);
-    let belongs_to_source = if source.path.is_dir() {
-        path.starts_with(&source.path)
-    } else {
-        path == source.path
-    };
+    let belongs_to_source = path == source.path || path.starts_with(&source.path);
     if !belongs_to_source || !import_unit_owner_matches(owner, &source.path, &path) {
         return Err(anyhow!(
             "selected import unit is outside its manifested source: {}",
@@ -604,31 +600,23 @@ fn import_unit_fingerprint(
         }
         (generation.main().len(), generation.main().modified_at())
     } else {
-        let metadata = fs::symlink_metadata(&unit.owner)
-            .with_context(|| format!("stat import unit owner {}", unit.owner.display()))?;
-        if !metadata.file_type().is_file() {
-            return Err(anyhow!(
-                "import unit owner is not a regular file: {}",
-                unit.owner.display()
-            ));
-        }
-        entries.push(SourceChangeEntry::from_metadata(
+        let observation = observe_ordinary_file(&unit.owner)
+            .with_context(|| format!("observe import unit owner {}", unit.owner.display()))?;
+        entries.push(SourceChangeEntry::from_observation(
             base,
             &unit.owner,
-            &metadata,
+            &observation,
         ));
-        (metadata.len(), metadata.modified().unwrap_or(UNIX_EPOCH))
+        (observation.len(), observation.modified_at())
     };
     for path in unit.dependencies.iter().filter(|path| *path != &unit.owner) {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("stat import unit dependency {}", path.display()))?;
-        if !metadata.file_type().is_file() {
-            return Err(anyhow!(
-                "import unit dependency is not a regular file: {}",
-                path.display()
-            ));
-        }
-        entries.push(SourceChangeEntry::from_metadata(base, path, &metadata));
+        let observation = observe_ordinary_file(path)
+            .with_context(|| format!("observe import unit dependency {}", path.display()))?;
+        entries.push(SourceChangeEntry::from_observation(
+            base,
+            path,
+            &observation,
+        ));
     }
     let observed_absences = unit
         .absence_watches

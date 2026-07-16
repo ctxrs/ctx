@@ -166,4 +166,88 @@ impl Store {
         let rows = stmt.query_map(params![session_id.to_string()], event_from_row)?;
         crate::connection::collect_rows(rows)
     }
+
+    /// Checks importer-owned record identity without exposing staged material to
+    /// ordinary readers.
+    pub fn provider_file_publication_history_record_exists(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        record_id: Uuid,
+    ) -> Result<bool> {
+        self.validate_provider_file_import_read_scope(scope)?;
+        self.conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM history_records WHERE id = ?1)",
+                params![record_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn discard_provider_file_publication_orphan_record(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        record_id: Uuid,
+    ) -> Result<Option<bool>> {
+        self.ensure_active_provider_file_publication(scope)?;
+        self.with_provider_file_publication_writes_inner(scope, false, |store| {
+            store.with_atomic_provider_file_update(|| {
+                let replacement_id = scope.scope_id.to_string();
+                let tracked: bool = store.conn.query_row(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} WHERE replacement_id = ?1 AND entity_kind = 'history_record' AND entity_id = ?2)"
+                    ),
+                    params![&replacement_id, record_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                if !tracked {
+                    return Ok(None);
+                }
+                // Keep the seen row as durable staging evidence until the
+                // publication marker is finalized. Without it, adoption would
+                // conservatively reset a mutated marker that has no material.
+                store.delete_orphan_record_row(record_id).map(Some)
+            })
+        })
+    }
+
+    pub fn discard_provider_file_publication_orphan_capture_sources(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<usize> {
+        self.ensure_active_provider_file_publication(scope)?;
+        self.with_provider_file_publication_writes_inner(scope, false, |store| {
+            store.with_atomic_provider_file_update(|| {
+                store
+                    .conn
+                    .execute(
+                        &format!(
+                            r#"
+                            DELETE FROM capture_sources
+                            WHERE id IN (
+                                SELECT entity_id FROM {STAGING_SEEN_TABLE}
+                                WHERE replacement_id = ?1 AND entity_kind = ?2
+                            )
+                              AND NOT EXISTS (SELECT 1 FROM vcs_workspaces WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM history_records WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM artifacts WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM sessions WHERE capture_source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM session_edges WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM runs WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM events WHERE capture_source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM vcs_changes WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM history_record_links WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM summaries WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM files_touched WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM history_record_tags WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM record_edges WHERE source_id = capture_sources.id)
+                              AND NOT EXISTS (SELECT 1 FROM audit_log WHERE source_id = capture_sources.id)
+                            "#
+                        ),
+                        params![scope.scope_id.to_string(), CURRENT_CAPTURE_SOURCE_KIND],
+                    )
+                    .map_err(StoreError::from)
+            })
+        })
+    }
 }

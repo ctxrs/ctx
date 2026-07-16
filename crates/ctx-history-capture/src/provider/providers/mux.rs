@@ -187,7 +187,7 @@ pub(crate) fn normalize_mux_session_source(
 
     if let Some(chat_path) = &source.chat_path {
         let file = File::open(chat_path)?;
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
         let mut line = Vec::new();
         let mut line_number = 0usize;
         while read_provider_jsonl_record_or_skip_oversized(

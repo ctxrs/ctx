@@ -131,8 +131,20 @@ fn unchanged_codex_mixed_session_resume_is_a_noop() {
         "none",
     ]));
     assert_eq!(replay["outcome"], "success", "{replay:#}");
+    assert_eq!(replay["failure_scope"], "none", "{replay:#}");
     assert_eq!(replay["totals"]["failed_sources"], 0, "{replay:#}");
     assert_eq!(replay["totals"]["rejected_records"], 0, "{replay:#}");
+    assert!(
+        replay["sources"].as_array().unwrap().is_empty(),
+        "{replay:#}"
+    );
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["pending_source_import_files"], 0, "{status:#}");
+    assert_eq!(
+        status["completed_with_rejections_source_import_files"], 1,
+        "{status:#}"
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -546,7 +558,7 @@ fn manifested_retry_retaining_existing_content_reports_completed_with_rejections
     assert_eq!(first["outcome"], "success", "{first:#}");
     assert_eq!(first["totals"]["imported_events"], 1, "{first:#}");
 
-    fs::write(&session, "{\"type\":\n").unwrap();
+    fs::write(&session, format!(" {valid}\n{{\"type\":\n")).unwrap();
     let retained = json_output(ctx(&temp).args(args));
     assert_eq!(
         retained["outcome"], "completed_with_rejections",
@@ -563,6 +575,16 @@ fn manifested_retry_retaining_existing_content_reports_completed_with_rejections
     assert_eq!(retained["totals"]["imported_sessions"], 0);
     assert_eq!(retained["totals"]["imported_events"], 0);
     assert_eq!(retained["totals"]["imported_edges"], 0);
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let pending_publications: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_file_publications",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_publications, 0);
+    drop(conn);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -733,6 +755,51 @@ fn all_invalid_source_reports_failure_json_and_exits_nonzero() {
         "--json",
     ]));
     assert_search_provider_oracle(&search, "antigravity", "write_to_file", 1, "tool_call");
+}
+
+#[test]
+fn multi_slice_all_invalid_source_reports_one_source_failure() {
+    const FILE_COUNT: usize = 65;
+
+    let temp = tempdir();
+    let brain = temp.path().join("brain");
+    for index in 0..FILE_COUNT {
+        let logs = brain
+            .join(format!("agy-bad-{index:03}"))
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(logs.join("transcript_full.jsonl"), "{\"step_index\":\n").unwrap();
+    }
+
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "antigravity",
+            "--path",
+            brain.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sources = report["sources"].as_array().unwrap();
+
+    assert_eq!(report["outcome"], "failure", "{report:#}");
+    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
+    assert_eq!(
+        report["totals"]["rejected_records"], FILE_COUNT,
+        "{report:#}"
+    );
+    assert_eq!(sources.len(), 1, "{report:#}");
+    assert_eq!(sources[0]["source_files"], FILE_COUNT, "{report:#}");
+    assert_eq!(sources[0]["rejected_records"], FILE_COUNT, "{report:#}");
+    assert_eq!(sources[0]["rejections"].as_array().unwrap().len(), 5);
 }
 
 #[test]

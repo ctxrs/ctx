@@ -85,7 +85,7 @@ impl Store {
                 file_modified_at_ms: publication.file_modified_at_ms,
                 import_revision: publication.import_revision,
                 metadata_json: publication.metadata_json,
-                kind: ProviderFilePublicationKind::Replacement,
+                kind: publication.publication_kind,
                 owner_id,
                 staging_id: publication.staging_id,
                 tracks_prior_material: publication.tracks_prior_material,
@@ -96,6 +96,7 @@ impl Store {
                 _owner_lock_path: owner_lock_path.clone(),
             };
             self.publish_provider_file_publication_marker(&mut scope, created_at_ms)?;
+            self.initialize_provider_file_publication_retirement(&mut scope)?;
             invalidate_semantic_searchable_item_stats(&self.conn)?;
             Ok(Some(scope))
         })?;
@@ -121,7 +122,7 @@ impl Store {
             let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
             return Err(error);
         }
-        if scope.tracks_prior_material {
+        if scope.kind == ProviderFilePublicationKind::Replacement && scope.tracks_prior_material {
             if let Err(error) = self.attach_provider_file_publication_staging(&scope) {
                 lifecycle.store(false, Ordering::Release);
                 let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
@@ -191,7 +192,18 @@ impl Store {
             _owner_lock_path: owner_lock_path.clone(),
         };
         self.with_atomic_provider_file_update(|| {
-            self.ensure_provider_file_observation_is_current(provider, observation)?;
+            if let Err(error) =
+                self.ensure_provider_file_observation_is_current(provider, observation)
+            {
+                if !self.provider_file_publication_matches_candidate(
+                    provider,
+                    observation,
+                    material_source_format,
+                    observation.source_root(),
+                )? {
+                    return Err(error);
+                }
+            }
             scope.tracks_prior_material = self.provider_file_owner_has_prior_material(
                 provider,
                 material_source_format,
@@ -235,5 +247,76 @@ impl Store {
             }
         }
         Ok(scope)
+    }
+
+    pub fn provider_file_publication_phase(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<ProviderFilePublicationPhase> {
+        self.ensure_active_provider_file_publication(scope)?;
+        let marker = self.load_replacement_marker(scope)?;
+        self.ensure_scope_observation_allows_progress(scope, &marker)?;
+        Ok(derive_provider_file_publication_phase(scope, &marker))
+    }
+
+    pub fn stage_provider_file_publication_completion(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        completion: &ProviderFilePublicationCompletion,
+    ) -> Result<()> {
+        self.ensure_active_provider_file_publication(scope)?;
+        if scope.retires_observation || self.provider_file_write_scope.get().is_some() {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        let payload_json = serialize_provider_file_publication_completion(completion)?;
+        self.with_atomic_provider_file_update(|| {
+            let marker = self.load_replacement_marker(scope)?;
+            self.ensure_scope_observation_allows_progress(scope, &marker)?;
+            if scope.tracks_prior_material && !marker.preparation_complete {
+                return Err(StoreError::ProviderFileReconciliationIncomplete);
+            }
+            match marker.completion_payload_json.as_deref() {
+                Some(existing) if existing == payload_json.as_str() => return Ok(()),
+                Some(_) => return Err(StoreError::InvalidProviderFilePublicationScope),
+                None => {}
+            }
+            let changed = self.conn.execute(
+                r#"
+                UPDATE main.provider_file_publications
+                SET completion_payload_json = ?2
+                WHERE replacement_id = ?1 AND completion_payload_json IS NULL
+                  AND (preparation_complete = 1 OR ?3 = 0)
+                "#,
+                params![
+                    scope.scope_id.to_string(),
+                    &payload_json,
+                    scope.tracks_prior_material
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidProviderFilePublicationScope);
+            }
+            if self.take_provider_file_fault(ProviderFileFaultPoint::CompletionBeforeCommit) {
+                return Err(StoreError::ProviderFileStaging);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn load_provider_file_publication_completion(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<Option<ProviderFilePublicationCompletion>> {
+        self.ensure_active_provider_file_publication(scope)?;
+        if scope.retires_observation {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        let marker = self.load_replacement_marker(scope)?;
+        self.ensure_scope_observation_allows_progress(scope, &marker)?;
+        marker
+            .completion_payload_json
+            .as_deref()
+            .map(parse_provider_file_publication_completion)
+            .transpose()
     }
 }

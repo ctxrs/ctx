@@ -9,6 +9,8 @@ use std::{
 #[cfg(not(any(unix, windows)))]
 use sha2::{Digest, Sha256};
 
+use crate::pace_current_disk_io;
+
 pub const SQLITE_GENERATION_MAX_ATTEMPTS: usize = 3;
 pub const SQLITE_SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SQLITE_HEADER_BYTES: usize = 100;

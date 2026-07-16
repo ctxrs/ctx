@@ -429,7 +429,7 @@ pub(crate) fn normalize_codebuddy_cli_jsonl_file(
 ) -> Result<ProviderNormalizationResult> {
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut result = ProviderNormalizationResult::default();
     let mut events = Vec::new();
     let mut row_count = 0usize;

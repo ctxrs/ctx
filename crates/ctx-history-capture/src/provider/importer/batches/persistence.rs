@@ -131,7 +131,7 @@ fn import_provider_capture_lines_with_batch_size(
         Some(guard) => store
             .finish_event_search_bulk_mode(guard)
             .map_err(CaptureError::from),
-        None => Ok(()),
+        None => Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete),
     };
     match (import_result, finish_result) {
         (Ok(mut summary), Err(error)) => {
@@ -141,7 +141,16 @@ fn import_provider_capture_lines_with_batch_size(
             );
             Ok(summary)
         }
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete)) => {
+            Ok(summary)
+        }
+        (Ok(mut summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
+                "event search maintenance remains queued",
+            );
+            Ok(summary)
+        }
         (Err(err), _) => Err(err),
     }
 }
@@ -317,6 +326,7 @@ pub(crate) struct ProviderImportTransaction {
     batch_size: Option<NonZeroUsize>,
     units: usize,
     bytes: usize,
+    byte_limit: usize,
     durable_materialization: bool,
     maintenance_warning: Option<crate::ProviderImportMaintenanceWarning>,
 }
@@ -345,6 +355,11 @@ impl ProviderImportTransaction {
             batch_size,
             units: 0,
             bytes: 0,
+            byte_limit: crate::disk_io_pacing::current_disk_io_burst_bytes()
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .map_or(IMPORT_TRANSACTION_BATCH_BYTES, |bytes| {
+                    bytes.clamp(1, IMPORT_TRANSACTION_BATCH_BYTES)
+                }),
             durable_materialization: false,
             maintenance_warning: None,
         })
@@ -376,7 +391,7 @@ impl ProviderImportTransaction {
         let result = if self.active
             && self.batch_size.is_some()
             && self.units > 0
-            && self.bytes.saturating_add(unit_bytes) > IMPORT_TRANSACTION_BATCH_BYTES
+            && self.bytes.saturating_add(unit_bytes) > self.byte_limit
         {
             self.rotate(store)
         } else {
@@ -384,6 +399,9 @@ impl ProviderImportTransaction {
         };
         if result.is_err() {
             self.rollback(store);
+        }
+        if matches!(&result, Ok(ProviderImportTransactionStep::Continue)) {
+            crate::pace_current_disk_io(unit_bytes as u64);
         }
         result
     }
@@ -404,8 +422,7 @@ impl ProviderImportTransaction {
         let below_unit_limit = self
             .batch_size
             .is_none_or(|batch_size| self.units < batch_size.get());
-        let below_byte_limit =
-            self.batch_size.is_none() || self.bytes < IMPORT_TRANSACTION_BATCH_BYTES;
+        let below_byte_limit = self.batch_size.is_none() || self.bytes < self.byte_limit;
         if below_unit_limit && below_byte_limit {
             return Ok(ProviderImportTransactionStep::Continue);
         }
@@ -417,6 +434,7 @@ impl ProviderImportTransaction {
     }
 
     fn rotate(&mut self, store: &Store) -> Result<ProviderImportTransactionStep> {
+        crate::pace_current_disk_io(u64::try_from(self.bytes).unwrap_or(u64::MAX));
         store.commit_batch()?;
         self.active = false;
         self.durable_materialization = true;
@@ -442,6 +460,7 @@ impl ProviderImportTransaction {
 
     pub(crate) fn commit(&mut self, store: &Store) -> Result<()> {
         let result = if self.active {
+            crate::pace_current_disk_io(u64::try_from(self.bytes).unwrap_or(u64::MAX));
             store.commit_batch().map_err(CaptureError::from)
         } else {
             Ok(())
@@ -486,5 +505,30 @@ impl ProviderImportTransaction {
     ) {
         self.maintenance_warning
             .get_or_insert(crate::ProviderImportMaintenanceWarning { kind, error });
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+    use crate::{install_disk_io_pacer, DiskIoPacer};
+
+    #[test]
+    fn durable_transaction_batch_charges_actual_serialized_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+        let mut transaction = ProviderImportTransaction::begin_bounded(&store, true).unwrap();
+
+        assert_eq!(
+            transaction
+                .record_unit(&store, IMPORT_TRANSACTION_BATCH_BYTES)
+                .unwrap(),
+            ProviderImportTransactionStep::Continue
+        );
+        transaction.commit(&store).unwrap();
+
+        assert_eq!(pacer.charged_bytes(), IMPORT_TRANSACTION_BATCH_BYTES as u64);
     }
 }

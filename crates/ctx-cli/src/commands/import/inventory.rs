@@ -1,5 +1,6 @@
 use std::{
     fs,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -7,13 +8,13 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    catalog_codex_session_tree, CatalogSummary, CodexSessionCatalogOptions, ProviderImportSupport,
-    ProviderSourceStatus,
+    catalog_codex_session_tree, provider_source_for_persisted_format, CaptureError, CatalogSummary,
+    CodexSessionCatalogOptions, ProviderImportSupport, ProviderSourceStatus,
 };
 use ctx_history_core::{utc_now, CaptureProvider};
 use ctx_history_store::{
-    CatalogIndexedStatus, CatalogSourceIndexUpdate, SourceImportFile, SourceImportFileIndexUpdate,
-    Store,
+    CatalogIndexedStatus, CatalogSourceIndexUpdate, ProviderFileInventoryFamily,
+    ProviderFilePublicationInventoryOwner, SourceImportFile, SourceImportFileIndexUpdate, Store,
 };
 
 use crate::commands::import::catalog::codex_catalog_root_identity;
@@ -39,10 +40,27 @@ pub(crate) struct ImportInventory {
 
 pub(crate) fn inventory_import_sources(
     store: &Store,
-    sources: Vec<SourceInfo>,
+    mut sources: Vec<SourceInfo>,
     full_rescan: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
+    if let Some(owner) = store.effective_provider_file_publication_inventory_owner()? {
+        sources.retain(|source| !source_matches_publication_owner(source, &owner));
+        let plan = publication_owner_plan(owner)?;
+        inventory.totals.sources += 1;
+        inventory.totals.source_files += 1;
+        inventory.totals.source_bytes = plan.stats.bytes;
+        match &plan.preinventory {
+            SourcePreinventory::CodexSessionCatalog { .. } => {
+                inventory.totals.codex_catalog_sources += 1;
+            }
+            SourcePreinventory::SourceImportFiles { .. } => {
+                inventory.totals.source_import_files += 1;
+            }
+            SourcePreinventory::None | SourcePreinventory::SourceRoot { .. } => {}
+        }
+        inventory.sources.push(plan);
+    }
     for source in sources {
         inventory.totals.sources += 1;
         let failure_source = source.clone();
@@ -83,6 +101,49 @@ pub(crate) fn inventory_import_sources(
         inventory.sources.push(plan);
     }
     Ok(inventory)
+}
+
+fn source_matches_publication_owner(
+    source: &SourceInfo,
+    owner: &ProviderFilePublicationInventoryOwner,
+) -> bool {
+    source.provider == owner.provider
+        && persisted_import_identity(&source.path, "source root")
+            .is_ok_and(|source_root| source_root == owner.source_root)
+}
+
+fn publication_owner_plan(
+    owner: ProviderFilePublicationInventoryOwner,
+) -> Result<PlannedImportSource> {
+    let source = provider_source_for_persisted_format(
+        owner.provider,
+        PathBuf::from(&owner.source_root),
+        &owner.source_format,
+    )
+    .ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "persisted publication owner has an unsupported source format",
+        ))
+    })?;
+    let preinventory = match owner.inventory_family {
+        ProviderFileInventoryFamily::Catalog => SourcePreinventory::CodexSessionCatalog {
+            summary: CatalogSummary::default(),
+            inventory_generation: owner.inventory_generation,
+        },
+        ProviderFileInventoryFamily::SourceImport => SourcePreinventory::SourceImportFiles {
+            files: Vec::new(),
+            inventory_generation: owner.inventory_generation,
+        },
+    };
+    Ok(PlannedImportSource {
+        source,
+        stats: SourceStats {
+            files: 1,
+            bytes: owner.file_size_bytes,
+            change_token: None,
+        },
+        preinventory,
+    })
 }
 
 pub(crate) fn inventory_available_sources(
@@ -252,7 +313,7 @@ fn schedule_pending_catalog_resume(
             &session.source_root,
             &session.source_path,
         )?;
-        store.record_catalog_source_import_result(
+        store.record_observed_catalog_source_import_result(
             session.provider,
             CatalogSourceIndexUpdate {
                 source_root: &session.source_root,
@@ -269,6 +330,7 @@ fn schedule_pending_catalog_resume(
                     .and_then(|state| state.last_imported_event_count),
                 indexed_at_ms: utc_now().timestamp_millis(),
             },
+            &session.metadata,
             CatalogIndexedStatus::Pending,
             None,
         )?;

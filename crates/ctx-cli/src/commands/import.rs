@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     fs,
     io::{Cursor, Read},
     path::{Path, PathBuf},
@@ -121,73 +121,7 @@ pub(crate) use scheduler::{
     ImportPlan, IMPORT_PENDING_REPORT_LIMIT,
 };
 
-const PENDING_REASON_REPAIR_BATCH_ROWS: usize = 512;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ImportMaintenanceProgress {
-    pub(crate) processed_rows: usize,
-    pub(crate) complete: bool,
-}
-
-pub(crate) fn repair_import_maintenance(
-    store: &Store,
-    policy: ImportExecutionPolicy,
-) -> Result<ImportMaintenanceProgress> {
-    let mut aggregate = ImportMaintenanceProgress::default();
-    loop {
-        let progress = store.repair_import_pending_reasons(PENDING_REASON_REPAIR_BATCH_ROWS)?;
-        aggregate.processed_rows = aggregate
-            .processed_rows
-            .saturating_add(progress.processed_rows);
-        aggregate.complete = progress.complete;
-        if progress.complete || policy != ImportExecutionPolicy::Drain {
-            return Ok(aggregate);
-        }
-        if progress.processed_rows == 0 {
-            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
-                "pending-reason repair made no progress",
-            )));
-        }
-    }
-}
-
-pub(crate) fn import_work_progress_message(
-    class: ImportWorkClass,
-    provider: CaptureProvider,
-) -> (&'static str, String) {
-    match class {
-        ImportWorkClass::Fresh => (
-            "indexing",
-            format!("indexing new/changed {} history", provider.as_str()),
-        ),
-        ImportWorkClass::Recovery => (
-            "repairing",
-            format!("repairing prior {} history", provider.as_str()),
-        ),
-    }
-}
-
-pub(crate) fn import_work_progress_done(
-    class: ImportWorkClass,
-    source: &SourceInfo,
-) -> (&'static str, String) {
-    match class {
-        ImportWorkClass::Fresh => (
-            "indexing",
-            format!(
-                "Indexed new/changed {} history.",
-                source_provider_label(source)
-            ),
-        ),
-        ImportWorkClass::Recovery => (
-            "repairing",
-            format!("Repaired prior {} history.", source_provider_label(source)),
-        ),
-    }
-}
-
 include!("import/state.rs");
-
 pub(crate) fn run_import(
     args: ImportArgs,
     data_root: PathBuf,
@@ -298,6 +232,8 @@ pub(crate) fn run_import_internal(
     analytics_properties: &mut AnalyticsProperties,
     options: ImportRunOptions,
 ) -> Result<ImportReport> {
+    let _disk_io_pacing =
+        ctx_history_capture::install_disk_io_pacer(ImportExecutionPolicy::Drain.disk_io_pacer());
     validate_import_args(args)?;
     fs::create_dir_all(&data_root).map_err(|source| CaptureError::SystemIo {
         operation: "initialize ctx data root",
@@ -325,10 +261,8 @@ pub(crate) fn run_import_internal(
         &data_root,
         options.include_history_source_plugins,
     )?;
-    let has_retirement_work = !store
-        .list_provider_file_publication_retirement_work(1)?
-        .is_empty();
-    if requests.is_empty() && plugin_requests.is_empty() && !has_retirement_work {
+    let has_publication_work = has_provider_file_publication_work(&store)?;
+    if requests.is_empty() && plugin_requests.is_empty() && !has_publication_work {
         let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
         totals.durable_progress = maintenance.processed_rows > 0;
         totals.recovery_units_pending = usize::from(!maintenance.complete);
@@ -420,21 +354,28 @@ pub(crate) fn run_import_internal(
     }
 
     let native_import_requested = !plan.sources.is_empty() || plan.recovery_units > 0;
-    let mut successful_native_sources = BTreeSet::new();
-    let mut failed_native_sources = BTreeSet::new();
-    execute_import_plan_class_for_report(
-        &mut store,
-        &plan,
-        &mut execution_state,
-        ImportWorkClass::Fresh,
-        plan.fresh_units,
-        &progress,
-        options,
-        &mut totals,
-        &mut imported_sources,
-        &mut successful_native_sources,
-        &mut failed_native_sources,
-    )?;
+    let mut native_reports = NativeSourceReports::default();
+    loop {
+        execution_state.begin_new_pass();
+        let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
+        if fresh_units == 0 {
+            break;
+        }
+        let result = execute_import_plan_class_for_report(
+            &mut store,
+            &plan,
+            &mut execution_state,
+            ImportWorkClass::Fresh,
+            fresh_units,
+            &progress,
+            options,
+            &mut totals,
+            &mut native_reports,
+        )?;
+        if !result.made_durable_progress() {
+            break;
+        }
+    }
 
     for plugin_source in plugin_requests {
         if options.print_human {
@@ -509,30 +450,68 @@ pub(crate) fn run_import_internal(
         }
     }
 
-    let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
-    totals.durable_progress |= maintenance.processed_rows > 0;
-    let recovery_units = plan.pending_count(&store, ImportWorkClass::Recovery)?;
-    execute_import_plan_class_for_report(
-        &mut store,
-        &plan,
-        &mut execution_state,
-        ImportWorkClass::Recovery,
-        recovery_units,
-        &progress,
-        options,
-        &mut totals,
-        &mut imported_sources,
-        &mut successful_native_sources,
-        &mut failed_native_sources,
-    )?;
+    let mut maintenance_complete = loop {
+        execution_state.begin_new_pass();
+        let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
+        totals.durable_progress |= maintenance.processed_rows > 0;
+        let recovery_units = plan.pending_count(&store, ImportWorkClass::Recovery)?;
+        let result = execute_import_plan_class_for_report(
+            &mut store,
+            &plan,
+            &mut execution_state,
+            ImportWorkClass::Recovery,
+            recovery_units,
+            &progress,
+            options,
+            &mut totals,
+            &mut native_reports,
+        )?;
+        let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
+        if fresh_units > 0 {
+            execution_state.begin_new_pass();
+            let fresh_result = execute_import_plan_class_for_report(
+                &mut store,
+                &plan,
+                &mut execution_state,
+                ImportWorkClass::Fresh,
+                fresh_units,
+                &progress,
+                options,
+                &mut totals,
+                &mut native_reports,
+            )?;
+            if fresh_result.made_durable_progress() {
+                continue;
+            }
+            let recovery_units_pending = plan.pending_count(&store, ImportWorkClass::Recovery)?;
+            if recovery_units_pending > 0
+                && (maintenance.processed_rows > 0 || result.made_durable_progress())
+            {
+                continue;
+            }
+            break maintenance.complete;
+        }
+        let (_, recovery_units_pending) = plan.pending_counts(&store)?;
+        if maintenance.complete && recovery_units_pending == 0 {
+            break true;
+        }
+        if maintenance.processed_rows == 0 && !result.made_durable_progress() {
+            break maintenance.complete;
+        }
+    };
+    let trailing_maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
+    totals.durable_progress |= trailing_maintenance.processed_rows > 0;
+    maintenance_complete &= trailing_maintenance.complete;
 
     let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(&store)?;
     totals.fresh_units_pending =
         capped_pending_add(fresh_units_pending, failed_inventory_pending.0);
     totals.recovery_units_pending = capped_pending_add(
         capped_pending_add(recovery_units_pending, failed_inventory_pending.1),
-        usize::from(!maintenance.complete),
+        usize::from(!maintenance_complete),
     );
+    native_reports.apply_totals(&mut totals);
+    native_reports.append_json(&plan, &mut imported_sources);
 
     if store.event_search_projection_needs_backfill()? {
         progress.message("finalizing", "Refreshing search index...");
@@ -604,6 +583,13 @@ pub(crate) fn run_import_internal(
     })
 }
 
+fn has_provider_file_publication_work(store: &Store) -> Result<bool> {
+    Ok(store.has_pending_provider_file_publications()?
+        || !store
+            .list_provider_file_publication_retirement_work(1)?
+            .is_empty())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_import_plan_class_for_report(
     store: &mut Store,
@@ -614,9 +600,7 @@ fn execute_import_plan_class_for_report(
     progress: &ProgressReporter,
     options: ImportRunOptions,
     totals: &mut ImportTotals,
-    imported_sources: &mut Vec<Value>,
-    successful_sources: &mut BTreeSet<usize>,
-    failed_sources: &mut BTreeSet<usize>,
+    native_reports: &mut NativeSourceReports,
 ) -> Result<ImportExecutionResult> {
     execute_import_plan_class_for_report_with_pre_lock_hook(
         store,
@@ -627,9 +611,7 @@ fn execute_import_plan_class_for_report(
         progress,
         options,
         totals,
-        imported_sources,
-        successful_sources,
-        failed_sources,
+        native_reports,
         || {},
     )
 }
@@ -644,9 +626,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
     progress: &ProgressReporter,
     options: ImportRunOptions,
     totals: &mut ImportTotals,
-    imported_sources: &mut Vec<Value>,
-    successful_sources: &mut BTreeSet<usize>,
-    failed_sources: &mut BTreeSet<usize>,
+    native_reports: &mut NativeSourceReports,
     mut before_bulk_lock: impl FnMut(),
 ) -> Result<ImportExecutionResult> {
     let mut completed_bytes = 0u64;
@@ -669,7 +649,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
         } = executable;
         if slice.is_empty() && validation_failures.is_empty() {
             store.finish_event_search_bulk_mode(&bulk_guard)?;
-            continue;
+            break;
         }
         let validation_units = validation_failures
             .iter()
@@ -684,7 +664,11 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
         let mut source_durable_progress = false;
         for validation_failure in validation_failures {
             let source_plan = &plan.sources[validation_failure.source_index];
-            let first_source_result = failed_sources.insert(validation_failure.source_index);
+            native_reports.record_failure(
+                validation_failure.source_index,
+                validation_failure.stats,
+                &validation_failure.error,
+            );
             let failure = ImportSourceFailure {
                 source: source_plan.source.clone(),
                 stats: validation_failure.stats,
@@ -692,14 +676,6 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                 failure_type: import_failure_type(&validation_failure.error),
                 rejected_summary: rejected_source_summary(&validation_failure.error),
             };
-            if let Some(summary) = failure.rejected_summary.as_ref() {
-                totals.add_rejected_source(summary, &failure.stats);
-            } else {
-                totals.add_source_failure(&failure.stats);
-            }
-            if !first_source_result {
-                totals.failed_sources = totals.failed_sources.saturating_sub(1);
-            }
             progress.done(
                 "indexing",
                 format!(
@@ -713,7 +689,6 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                 progress.finish_line();
                 print_source_failed(&failure);
             }
-            imported_sources.push(source_failure_json(&failure));
         }
         for retirement in &slice.retirements {
             execution_state.record_retirement_attempt(retirement);
@@ -759,6 +734,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                 Ok(result) => (Some(result.outcome), result.remaining_error),
                 Err(error) => (None, Some(error)),
             };
+            let outcome_has_error = import_error.is_some();
             let mut outcome_completed_units = 0usize;
             let mut outcome_completed_bytes = 0u64;
             let mut outcome_deferred_units = 0usize;
@@ -777,30 +753,31 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                 completed_units = completed_units.saturating_add(outcome.completed_units);
                 let deferred = outcome.deferred_units;
                 deferred_units = deferred_units.saturating_add(deferred);
-                if made_durable_progress {
-                    let completed_stats = SourceStats {
-                        files: outcome.completed_units,
-                        bytes: outcome.completed_bytes,
-                        change_token: selected.stats.change_token,
-                    };
+                let completed_stats = SourceStats {
+                    files: outcome.completed_units,
+                    bytes: outcome.completed_bytes,
+                    change_token: selected.stats.change_token,
+                };
+                let no_op_stats = (outcome.completed_units == 0
+                    && deferred == 0
+                    && !outcome_has_error
+                    && outcome.summary != ProviderImportSummary::default())
+                .then_some(selected.stats);
+                native_reports.record_outcome(
+                    selected.source_index,
+                    &outcome.summary,
+                    completed_stats,
+                    no_op_stats,
+                );
+                if outcome.completed_units > 0 {
                     completed_bytes = completed_bytes.saturating_add(completed_stats.bytes);
-                    let first_source_result = successful_sources.insert(selected.source_index);
-                    totals.add(&outcome.summary, &completed_stats);
-                    if !first_source_result {
-                        totals.imported_sources = totals.imported_sources.saturating_sub(1);
-                    }
                     let (phase, message) = import_work_progress_done(class, &source_plan.source);
                     progress.done(phase, message, completed_bytes);
                     if options.print_human {
                         progress.finish_line();
                         print_source_imported(&source_plan.source, &outcome.summary);
                     }
-                    imported_sources.push(source_import_json(
-                        &source_plan.source,
-                        &completed_stats,
-                        &outcome.summary,
-                    ));
-                } else {
+                } else if deferred > 0 && !made_durable_progress {
                     progress.done(
                         phase,
                         format!(
@@ -810,7 +787,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                         completed_bytes,
                     );
                 }
-                if deferred > 0 {
+                if deferred > 0 && !made_durable_progress {
                     progress.warning(format!(
                         "{} {} history unit(s) remain pending until their current write completes.",
                         deferred,
@@ -844,7 +821,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                     bytes: selected.stats.bytes.saturating_sub(outcome_completed_bytes),
                     change_token: selected.stats.change_token,
                 };
-                let first_source_result = failed_sources.insert(selected.source_index);
+                native_reports.record_failure(selected.source_index, failure_stats, &err);
                 let failure = ImportSourceFailure {
                     source: source_plan.source.clone(),
                     stats: failure_stats,
@@ -852,14 +829,6 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                     failure_type,
                     rejected_summary,
                 };
-                if let Some(summary) = failure.rejected_summary.as_ref() {
-                    totals.add_rejected_source(summary, &failure.stats);
-                } else {
-                    totals.add_source_failure(&failure.stats);
-                }
-                if !first_source_result {
-                    totals.failed_sources = totals.failed_sources.saturating_sub(1);
-                }
                 progress.done(
                     "indexing",
                     format!(
@@ -873,7 +842,9 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                     progress.finish_line();
                     print_source_failed(&failure);
                 }
-                imported_sources.push(source_failure_json(&failure));
+            }
+            if outcome_deferred_units > 0 && store.has_pending_provider_file_publications()? {
+                break;
             }
         }
         let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
@@ -902,6 +873,9 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
         if let Some(error) = system_error {
             return Err(error);
         }
+        if deferred_units > 0 && store.has_pending_provider_file_publications()? {
+            break;
+        }
     }
     Ok(execution_result)
 }
@@ -912,7 +886,7 @@ fn source_provider_label(source: &SourceInfo) -> &'static str {
         .unwrap_or_else(|| source.provider.as_str())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ImportSourceFailure {
     pub(crate) source: SourceInfo,
     pub(crate) stats: SourceStats,

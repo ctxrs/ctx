@@ -247,78 +247,89 @@ impl Store {
         completion_kind: ProviderFileCompletionKind,
         has_safe_checkpoint: bool,
     ) -> Result<()> {
-        validate_successful_outcome(outcome)?;
-        self.ensure_provider_file_observation_is_current(outcome.provider, outcome.observation)?;
-        let changed = match outcome.observation {
-            ProviderFileInventoryObservation::Catalog { mut update, .. } => {
-                let (prior_status, prior_error, prior_event_count) = self.conn.query_row(
-                    r#"
+        validate_provider_file_completion_outcome(
+            outcome,
+            completion_kind,
+            has_safe_checkpoint,
+            false,
+        )?;
+        self.ensure_provider_file_observation_matches_persisted(
+            outcome.provider,
+            outcome.observation,
+        )?;
+        let current_inventory_generation = self.current_provider_file_inventory_generation(
+            outcome.provider,
+            outcome.observation.source_root(),
+            outcome.observation.inventory_family(),
+        )?;
+        let changed = if let Some((mut update, metadata)) = outcome.observation.catalog_update() {
+            update.inventory_generation = current_inventory_generation;
+            let (prior_status, prior_error, prior_event_count) = self.conn.query_row(
+                r#"
                     SELECT indexed_status, indexed_error, last_imported_event_count
                     FROM catalog_sessions
                     WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
                     "#,
-                    params![
-                        outcome.provider.as_str(),
-                        update.source_root,
-                        update.source_path
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                        ))
-                    },
-                )?;
-                let preserve_rejections = completion_kind
-                    != ProviderFileCompletionKind::Replacement
-                    && (prior_status == "completed_with_rejections"
-                        || (prior_status == "indexed"
-                            && outcome.status == CatalogIndexedStatus::Rejected));
-                let status = if preserve_rejections {
-                    CatalogIndexedStatus::CompletedWithRejections
-                } else {
-                    outcome.status
-                };
-                let error = if preserve_rejections {
-                    prior_error.as_deref().or(outcome.error)
-                } else {
-                    outcome.error
-                };
-                let prior_event_count =
-                    prior_event_count.map(nonnegative_i64_to_u64).transpose()?;
-                update.event_count = match completion_kind {
-                    ProviderFileCompletionKind::Replacement => update.event_count,
-                    ProviderFileCompletionKind::AppendDelta => match update.event_count {
-                        Some(delta) => {
-                            Some(prior_event_count.unwrap_or(0).checked_add(delta).ok_or(
-                                StoreError::ProviderFileReconciliationInconsistent {
-                                    entity: "catalog event count",
-                                },
-                            )?)
-                        }
-                        None => prior_event_count,
-                    },
-                    ProviderFileCompletionKind::RetainCheckpoint => prior_event_count,
-                };
-                let changed = if completion_kind == ProviderFileCompletionKind::RetainCheckpoint {
-                    self.record_catalog_source_import_result_preserving_legacy_cursor(
+                params![
+                    outcome.provider.as_str(),
+                    update.source_root,
+                    update.source_path
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )?;
+            let preserve_rejections = completion_kind != ProviderFileCompletionKind::Replacement
+                && (prior_status == "completed_with_rejections"
+                    || (prior_status == "indexed"
+                        && outcome.status == CatalogIndexedStatus::Rejected));
+            let status = if preserve_rejections {
+                CatalogIndexedStatus::CompletedWithRejections
+            } else {
+                outcome.status
+            };
+            let error = if preserve_rejections {
+                prior_error.as_deref().or(outcome.error)
+            } else {
+                outcome.error
+            };
+            let prior_event_count = prior_event_count.map(nonnegative_i64_to_u64).transpose()?;
+            update.event_count = match completion_kind {
+                ProviderFileCompletionKind::Replacement => update.event_count,
+                ProviderFileCompletionKind::AppendDelta => match update.event_count {
+                    Some(delta) => Some(prior_event_count.unwrap_or(0).checked_add(delta).ok_or(
+                        StoreError::ProviderFileReconciliationInconsistent {
+                            entity: "catalog event count",
+                        },
+                    )?),
+                    None => prior_event_count,
+                },
+                ProviderFileCompletionKind::RetainCheckpoint => prior_event_count,
+            };
+            let changed = match completion_kind {
+                ProviderFileCompletionKind::RetainCheckpoint => self
+                    .record_observed_catalog_source_import_result_preserving_legacy_cursor(
                         outcome.provider,
                         update,
+                        metadata,
                         status,
                         error,
-                    )?
-                } else {
-                    self.record_catalog_source_import_result(
-                        outcome.provider,
-                        update,
-                        status,
-                        error,
-                    )?
-                };
-                if changed == 1 && has_safe_checkpoint {
-                    self.conn.execute(
-                        r#"
+                    )?,
+                _ => self.record_observed_catalog_source_import_result(
+                    outcome.provider,
+                    update,
+                    metadata,
+                    status,
+                    error,
+                )?,
+            };
+            if changed == 1 && has_safe_checkpoint {
+                self.conn.execute(
+                    r#"
                         UPDATE catalog_sessions
                         SET last_imported_at_ms = ?4,
                             last_imported_file_size_bytes = ?5,
@@ -330,49 +341,53 @@ impl Store {
                           AND indexed_file_modified_at_ms = ?6
                           AND indexed_import_revision = ?9
                         "#,
-                        params![
-                            outcome.provider.as_str(),
-                            update.source_root,
-                            update.source_path,
-                            update.indexed_at_ms,
-                            capped_i64(update.file_size_bytes),
-                            update.file_modified_at_ms,
-                            update.file_sha256,
-                            update.event_count.map(capped_i64),
-                            i64::from(update.import_revision),
-                        ],
-                    )?;
-                }
-                changed
+                    params![
+                        outcome.provider.as_str(),
+                        update.source_root,
+                        update.source_path,
+                        update.indexed_at_ms,
+                        capped_i64(update.file_size_bytes),
+                        update.file_modified_at_ms,
+                        update.file_sha256,
+                        update.event_count.map(capped_i64),
+                        i64::from(update.import_revision),
+                    ],
+                )?;
             }
-            ProviderFileInventoryObservation::SourceImport { update, .. } => {
-                let (prior_status, prior_error) = self.conn.query_row(
-                    r#"
+            changed
+        } else {
+            let ProviderFileInventoryObservation::SourceImport { mut update, .. } =
+                outcome.observation
+            else {
+                unreachable!("non-catalog provider observation must be a source import")
+            };
+            update.inventory_generation = current_inventory_generation;
+            let (prior_status, prior_error) = self.conn.query_row(
+                r#"
                     SELECT indexed_status, indexed_error
                     FROM source_import_files
                     WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
                     "#,
-                    params![
-                        outcome.provider.as_str(),
-                        update.source_root,
-                        update.source_path
-                    ],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                )?;
-                let preserve_rejections = prior_status == "completed_with_rejections"
-                    && completion_kind != ProviderFileCompletionKind::Replacement;
-                let status = if preserve_rejections {
-                    CatalogIndexedStatus::CompletedWithRejections
-                } else {
-                    outcome.status
-                };
-                let error = if preserve_rejections {
-                    prior_error.as_deref().or(outcome.error)
-                } else {
-                    outcome.error
-                };
-                self.record_source_import_file_result(outcome.provider, update, status, error)?
-            }
+                params![
+                    outcome.provider.as_str(),
+                    update.source_root,
+                    update.source_path
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
+            let preserve_rejections = prior_status == "completed_with_rejections"
+                && completion_kind != ProviderFileCompletionKind::Replacement;
+            let status = if preserve_rejections {
+                CatalogIndexedStatus::CompletedWithRejections
+            } else {
+                outcome.status
+            };
+            let error = if preserve_rejections {
+                prior_error.as_deref().or(outcome.error)
+            } else {
+                outcome.error
+            };
+            self.record_source_import_file_result(outcome.provider, update, status, error)?
         };
         if changed != 1 {
             return Err(provider_file_observation_changed(

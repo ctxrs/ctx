@@ -130,7 +130,7 @@ pub(crate) fn normalize_mistral_vibe_session_source(
     let metadata = read_mistral_vibe_metadata(&source.metadata_path, &mut result.summary);
     let mut rows = Vec::new();
     let file = File::open(&source.messages_path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut line = Vec::new();
     let mut line_number = 0usize;
 

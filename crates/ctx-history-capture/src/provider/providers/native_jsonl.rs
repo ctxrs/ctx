@@ -689,4 +689,4 @@ pub(crate) fn native_jsonl_path_session(
 include!("native_jsonl/events.rs");
 
 #[cfg(test)]
-mod tests;
+include!("native_jsonl/tests.rs");
