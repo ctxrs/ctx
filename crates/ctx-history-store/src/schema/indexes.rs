@@ -37,7 +37,6 @@ CREATE INDEX IF NOT EXISTS idx_runs_input_blob_id ON runs(input_blob_id);
 CREATE INDEX IF NOT EXISTS idx_runs_output_blob_id ON runs(output_blob_id);
 CREATE INDEX IF NOT EXISTS idx_runs_source_id ON runs(source_id);
 
-CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
 CREATE INDEX IF NOT EXISTS idx_events_history_record_occurred_at_ms ON events(history_record_id, occurred_at_ms);
 CREATE INDEX IF NOT EXISTS idx_events_session_occurred_at_ms ON events(session_id, occurred_at_ms);
 CREATE INDEX IF NOT EXISTS idx_events_history_record_id ON events(history_record_id);

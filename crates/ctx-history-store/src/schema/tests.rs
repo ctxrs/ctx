@@ -1192,6 +1192,53 @@ fn v55_migration_recreates_stable_views_with_inventory_publication_fencing() {
 }
 
 #[test]
+fn v56_omits_events_seq_index_for_fresh_stores() {
+    let temp = tempdir();
+    let path = temp.path().join("v56-fresh.sqlite");
+    let store = Store::open(&path).unwrap();
+
+    let index_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_seq'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 0);
+}
+
+#[test]
+fn v56_does_not_drop_legacy_events_seq_index_on_open() {
+    let temp = tempdir();
+    let path = temp.path().join("v56-legacy-index.sqlite");
+    drop(Store::open(&path).unwrap());
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE INDEX idx_events_seq ON events(seq); PRAGMA user_version = 55;")
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let index_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_seq'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 1);
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_v23_adds_mistral_vibe_provider_checks() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");

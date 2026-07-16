@@ -119,6 +119,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 55 {
         migrate_stable_views_to_v55(conn)?;
     }
+    if user_version < 56 {
+        migrate_lightweight_event_index_to_v56(conn)?;
+    }
     Ok(())
 }
 
@@ -1152,6 +1155,14 @@ fn migrate_stable_views_to_v55(conn: &Connection) -> Result<()> {
             Err(err)
         }
     }
+}
+
+fn migrate_lightweight_event_index_to_v56(conn: &Connection) -> Result<()> {
+    // Fresh stores no longer create idx_events_seq. Keep an existing copy until
+    // bounded idle maintenance can remove it without turning Store::open into
+    // a corpus-sized foreground write.
+    conn.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version = 56; COMMIT;")?;
+    Ok(())
 }
 fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
     if table_exists(conn, "catalog_sessions")? {
