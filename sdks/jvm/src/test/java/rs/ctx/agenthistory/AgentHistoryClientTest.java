@@ -18,6 +18,7 @@ public final class AgentHistoryClientTest {
         canonicalizesSearchQueriesBeforeBounds();
         validatesExplicitSearchLimits();
         omitsObsoleteRetrievalFields();
+        rejectsNonCanonicalSearchResponses();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
@@ -184,6 +185,8 @@ public final class AgentHistoryClientTest {
                 .providerKey("dorkos")
                 .sourceId("default")
                 .sourceFormat("dorkos-history-v1")
+                .includeSubagents(true)
+                .eventType("message")
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
@@ -196,13 +199,15 @@ public final class AgentHistoryClientTest {
         assertContainsInOrder(transport.lastOperation.args(), "--provider-key", "dorkos");
         assertContainsInOrder(transport.lastOperation.args(), "--source-id", "default");
         assertContainsInOrder(transport.lastOperation.args(), "--source-format", "dorkos-history-v1");
+        assertContains(transport.lastOperation.args(), "--include-subagents");
+        assertContainsInOrder(transport.lastOperation.args(), "--event-type", "message");
         assertContainsInOrder(transport.lastOperation.args(), "--refresh", "off");
     }
 
     private static void canonicalizesSearchQueriesBeforeBounds() {
         SearchQuery.Builder builder = SearchQuery.builder();
         for (int index = 0; index < 33; index++) {
-            builder.any(SearchClause.all("  cafe\u0301\u00a0\u4e16\u754c  "));
+            builder.any(SearchClause.all("cafe\u0301" + "\u00a0".repeat(index + 1) + "\u4e16\u754c"));
         }
         SearchQuery query = builder
                 .any(SearchClause.literal("\u3000logs_2.db  raw\u00a0"))
@@ -217,22 +222,58 @@ public final class AgentHistoryClientTest {
         assertEquals("related ctx work", query.any().get(2).value());
         assertEquals("postgres vacuum", query.mustNot().get(0).value());
 
+        StringBuilder whitespace = new StringBuilder();
+        for (int codePoint : new int[] {
+                0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x0085, 0x00a0,
+                0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+                0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000
+        }) {
+            whitespace.appendCodePoint(codePoint);
+        }
+        assertEquals("cafe\u0301 \u4e16\u754c", SearchQuery.all(
+                "cafe\u0301" + whitespace + "\u4e16\u754c").any().get(0).value());
+
         SearchQuery.Builder exactClauseLimit = SearchQuery.builder();
         for (int index = 0; index < SearchQuery.MAX_CLAUSES; index++) {
             exactClauseLimit.any(SearchClause.all("term" + index));
         }
         assertEquals(Integer.valueOf(SearchQuery.MAX_CLAUSES),
                 Integer.valueOf(exactClauseLimit.build().any().size()));
+        SearchQuery.Builder aboveClauseLimit = SearchQuery.builder();
+        for (int index = 0; index <= SearchQuery.MAX_CLAUSES; index++) {
+            aboveClauseLimit.any(SearchClause.all("term" + index));
+        }
+        assertValidation(() -> aboveClauseLimit.build());
 
         assertValidation(() -> SearchQuery.all("!!!"));
         StringBuilder boundedTokens = new StringBuilder();
         for (int index = 0; index < 32; index++) {
             if (index > 0) boundedTokens.append(' ');
-            boundedTokens.append('x');
+            boundedTokens.append("a\u0301b");
         }
         SearchQuery.all(boundedTokens.toString());
-        boundedTokens.append(" x");
+        boundedTokens.append(" a\u0301b");
         assertValidation(() -> SearchQuery.all(boundedTokens.toString()));
+        SearchQuery.all("\u00b2");
+
+        SearchQuery.all("x".repeat(SearchQuery.MAX_CLAUSE_BYTES));
+        assertValidation(() -> SearchQuery.all("x".repeat(SearchQuery.MAX_CLAUSE_BYTES + 1)));
+        SearchQuery.builder()
+                .any(SearchClause.literal("abc"))
+                .any(SearchClause.literal("x".repeat(SearchQuery.MAX_LITERAL_BYTES)))
+                .build();
+        assertValidation(() -> SearchQuery.builder().any(SearchClause.literal("ab")).build());
+        assertValidation(() -> SearchQuery.builder()
+                .any(SearchClause.literal("x".repeat(SearchQuery.MAX_LITERAL_BYTES + 1)))
+                .build());
+
+        SearchQuery.Builder exactTotalBytes = SearchQuery.builder();
+        for (int index = 0; index < 8; index++) {
+            exactTotalBytes.any(SearchClause.all(index + "x".repeat(SearchQuery.MAX_CLAUSE_BYTES - 1)));
+        }
+        exactTotalBytes.build();
+        exactTotalBytes.any(SearchClause.all("z"));
+        assertValidation(() -> exactTotalBytes.build());
     }
 
     private static void validatesExplicitSearchLimits() {
@@ -278,6 +319,23 @@ public final class AgentHistoryClientTest {
         assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(
                 AgentHistoryValue.object(retrieval.get("diagnostics")).get("queryEmbedMs")));
         assertAbsent(search.getResults().get(0).asMap(), "retrieval");
+    }
+
+    private static void rejectsNonCanonicalSearchResponses() {
+        String canonicalQuery = "\"query\":{\"version\":\"ctx-search-v1\","
+                + "\"any\":[{\"all\":\"agent history\"}]}";
+        String[] invalid = new String[] {
+                "{\"schema_version\":1," + canonicalQuery + ",\"query_execution\":{}}",
+                "{\"schema_version\":2,\"query\":\"agent history\",\"query_execution\":{}}",
+                "{\"schemaVersion\":2," + canonicalQuery + ",\"query_execution\":{}}",
+                "{\"schema_version\":2," + canonicalQuery + ",\"queryExecution\":{}}"
+        };
+        for (String response : invalid) {
+            AgentHistoryClient client = AgentHistoryClient.withTransport(
+                    new FakeTransport("local-cli", response));
+            assertProtocol(() -> client.search(AgentHistoryOptions.search()
+                    .query(SearchQuery.all("agent history"))));
+        }
     }
 
     private static void searchRequiresIntent() {
@@ -387,6 +445,16 @@ public final class AgentHistoryClientTest {
             return;
         }
         throw new AssertionError("expected validation error");
+    }
+
+    private static void assertProtocol(Runnable action) {
+        try {
+            action.run();
+        } catch (CtxAgentHistoryException.Protocol error) {
+            assertEquals("decode_error", error.code());
+            return;
+        }
+        throw new AssertionError("expected protocol error");
     }
 
     private static final class FakeTransport implements AgentHistoryTransport {
