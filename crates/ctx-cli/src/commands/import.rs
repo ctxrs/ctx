@@ -856,6 +856,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
         match store.finish_event_search_bulk_mode(&bulk_guard) {
             Ok(EventSearchBulkMaintenanceOutcome::Complete) => {}
             Ok(EventSearchBulkMaintenanceOutcome::Pending) => stop_admission = true,
+            Err(StoreError::WalCheckpointBusy { .. }) if stop_admission => {}
             Err(error) => return Err(error.into()),
         }
         match class {
