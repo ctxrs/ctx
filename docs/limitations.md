@@ -46,8 +46,10 @@ shipped.
   return metadata-driven matches.
 - Semantic embeddings depend on a compatible local ONNX Runtime backend and
   the opt-in ctx daemon query service. Release/platform combinations without a
-  validated local runtime remain lexical-safe: `hybrid` falls back to lexical
-  and explicit `semantic` reports a local unavailable/runtime error instead of
+  validated local runtime remain lexical-safe: hybrid queries without an
+  explicit semantic clause keep their bounded lexical result set and report
+  that optional reranking was unavailable. Explicit semantic intent reports a
+  typed local unavailable/runtime error instead of changing query meaning or
   linking an unsupported backend.
 - The ctx macOS CLI targets macOS 13, but ONNX Runtime 1.27 follows its upstream
   macOS 14 minimum. On macOS 13, daemon-backed lexical search remains available
