@@ -84,6 +84,10 @@ class AgentHistoryTransport(Protocol):
         query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
+        history_source: Optional[str] = None,
+        provider_key: Optional[str] = None,
+        source_id: Optional[str] = None,
+        source_format: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
         event_type: Optional[str] = None,
@@ -225,6 +229,10 @@ class LocalCliAdapter:
         query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
+        history_source: Optional[str] = None,
+        provider_key: Optional[str] = None,
+        source_id: Optional[str] = None,
+        source_format: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
         event_type: Optional[str] = None,
@@ -238,11 +246,15 @@ class LocalCliAdapter:
         refresh: Optional[str] = None,
         include_current_session: bool = False,
     ) -> SearchResponse:
-        validate_search_intent(query=query, file=file)
+        validate_search_intent(query=query, file=file, limit=limit)
         args = ["search"]
         if query is not None:
             args.extend(["--query-json", serialize_search_query(query)])
         _extend_option(args, "--provider", provider)
+        _extend_option(args, "--history-source", history_source)
+        _extend_option(args, "--provider-key", provider_key)
+        _extend_option(args, "--source-id", source_id)
+        _extend_option(args, "--source-format", source_format)
         _extend_option(args, "--workspace", workspace)
         _extend_option(args, "--since", since)
         _extend_option(args, "--event-type", event_type)
@@ -478,6 +490,10 @@ class HostedAdapter:
         query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
+        history_source: Optional[str] = None,
+        provider_key: Optional[str] = None,
+        source_id: Optional[str] = None,
+        source_format: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
         event_type: Optional[str] = None,
@@ -491,7 +507,7 @@ class HostedAdapter:
         refresh: Optional[str] = None,
         include_current_session: bool = False,
     ) -> SearchResponse:
-        validate_search_intent(query=query, file=file)
+        validate_search_intent(query=query, file=file, limit=limit)
         if query is not None:
             serialize_search_query(query)
         raise HostedTransportNotImplementedError("search")

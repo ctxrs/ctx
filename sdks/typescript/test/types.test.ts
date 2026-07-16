@@ -3,9 +3,12 @@ import {
   type JsonValue,
   type LocationEnvelope,
   type AgentHistoryEnvelope,
+  type Provider,
   type SearchBackendMode,
   type SearchEnvelope,
   type SearchQueryV1,
+  type SearchSemanticCompleteness,
+  type SearchSemanticSkipReason,
   type ShowEventEnvelope,
   type SourcesEnvelope,
   type StatusEnvelope,
@@ -30,6 +33,7 @@ const query: SearchQueryV1 = {
   must: [{ all: "codex" }],
   must_not: [{ phrase: "postgres vacuum" }],
 };
+const customProvider: Provider = "custom";
 
 const status = await client.status();
 expectType<StatusEnvelope>(status);
@@ -59,8 +63,6 @@ expectType<string>(search.search.results[0]!.resultScope);
 expectType<string | null | undefined>(search.search.results[0]!.ctxEventId);
 expectType<string | null | undefined>(search.search.results[0]!.citations?.[0]?.targetType);
 expectType<SearchBackendMode | string | null | undefined>(search.search.retrieval?.requestedMode);
-expectType<number | null | undefined>(search.search.retrieval?.semanticWeight);
-expectType<string | null | undefined>(search.search.retrieval?.semanticFallbackCode);
 expectType<number | undefined>(search.search.retrieval?.coverage?.embeddedItems);
 expectType<JsonValue | undefined>(search.search.retrieval?.diagnostics?.queryEmbedMs);
 expectType<2>(search.search.schema_version);
@@ -69,11 +71,22 @@ expectType<number>(search.search.query_execution.resolved.verification_bytes);
 expectType<number>(search.search.query_execution.consumed.snippet_input_bytes);
 expectType<number>(search.search.query_execution.requested_result_limit);
 expectType<number>(search.search.query_execution.result_limit);
+expectType<number>(search.search.query_execution.max_result_limit);
+expectType<number>(search.search.query_execution.rrf_k);
+expectType<number>(search.search.query_execution.per_branch_candidate_rows);
+expectType<number>(search.search.query_execution.clauses_executed);
+expectType<number>(search.search.query_execution.verification_dropped);
+expectType<number>(search.search.query_execution.filter_verification_dropped);
+expectType<boolean>(search.search.query_execution.candidate_budget_exhausted);
+expectType<boolean>(search.search.query_execution.timed_out);
 expectType<"ready" | "not_ready" | "unsupported" | "unavailable">(
   search.search.query_execution.semantic.readiness,
 );
-expectType<number | undefined>(search.search.query_execution.semantic.coverage?.indexed_documents);
-expectType<"complete" | "partial" | undefined>(search.search.query_execution.semantic.completeness);
+expectType<number>(search.search.query_execution.semantic.requested_candidates);
+expectType<number>(search.search.query_execution.semantic.eligible_candidates);
+expectType<number | undefined>(search.search.query_execution.semantic.coverage.indexed_documents);
+expectType<SearchSemanticCompleteness>(search.search.query_execution.semantic.completeness);
+expectType<SearchSemanticSkipReason | undefined>(search.search.query_execution.semantic.skip_reason);
 // @ts-expect-error search results expose ctxEventId, not ctx_event_id.
 search.search.results[0]!.ctx_event_id;
 
@@ -82,8 +95,21 @@ expectType<SearchEnvelope>(semanticSearch);
 
 const objectSearch = await client.search({ query, refresh: "off" });
 expectType<SearchEnvelope>(objectSearch);
+const sourceSearch = await client.search(query, {
+  provider: customProvider,
+  historySource: "dorkos/default",
+  providerKey: "dorkos",
+  sourceId: "default",
+  sourceFormat: "dorkos-history-v1",
+  limit: 200,
+});
+expectType<SearchEnvelope>(sourceSearch);
 const fileSearch = await client.search({ file: "src/lib.rs", refresh: "off" });
 expectType<SearchEnvelope>(fileSearch);
+// @ts-expect-error legacy plain query strings are not accepted.
+await client.search("local agent history");
+// @ts-expect-error semantic weighting is not part of ctx-search-v1 request options.
+await client.search(query, { semanticWeight: 0.5 });
 // @ts-expect-error search requires a structured query or file option.
 await client.search();
 // @ts-expect-error search filters alone are not a search intent.

@@ -124,6 +124,10 @@ class AgentHistoryClient:
         query: Optional[SearchQueryV1] = None,
         *,
         provider: Optional[str] = None,
+        history_source: Optional[str] = None,
+        provider_key: Optional[str] = None,
+        source_id: Optional[str] = None,
+        source_format: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
         event_type: Optional[str] = None,
@@ -138,10 +142,14 @@ class AgentHistoryClient:
         include_current_session: bool = False,
     ) -> SearchResponse:
         file_value = str(file) if file is not None else None
-        validate_search_intent(query=query, file=file_value)
+        validate_search_intent(query=query, file=file_value, limit=limit)
         return self._transport.search(
             query=query,
             provider=provider,
+            history_source=history_source,
+            provider_key=provider_key,
+            source_id=source_id,
+            source_format=source_format,
             workspace=workspace,
             since=since,
             event_type=event_type,

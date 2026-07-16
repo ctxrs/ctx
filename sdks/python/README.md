@@ -55,8 +55,9 @@ Every operation returns a dictionary with `contractVersion: "agent-history-v1"`,
 such as `status`, `sources`, `import`, `search`, `event`, `session`, or
 `location`.
 
-Search is an intentional structured-query cutover. The SDK accepts one canonical
-`ctx-search-v1` object and sends it unchanged through `ctx search --query-json`:
+Search is an intentional structured-query cutover. The SDK accepts one
+`ctx-search-v1` object, canonicalizes it, and sends it through
+`ctx search --query-json`:
 
 ```python
 query = {
@@ -70,13 +71,29 @@ query = {
     "must": [{"all": "codex"}],
     "must_not": [{"all": "postgres vacuum"}],
 }
-response = client.search(query, backend="hybrid", refresh="off")
+response = client.search(
+    query,
+    provider="custom",
+    history_source="dorkos/default",
+    provider_key="dorkos",
+    source_id="default",
+    source_format="dorkos-history-v1",
+    backend="hybrid",
+    limit=20,
+    refresh="off",
+)
 ```
 
 `any` clauses are alternatives, every `must` clause is required, and any
 `must_not` match excludes the candidate. A semantic clause is allowed only once
-and only in `any`. Search payloads expose `schema_version: 2`, the canonical query,
-and `query_execution` with resolved and consumed work budgets, truncation reasons,
+and only in `any`. Validation collapses whitespace for non-literal clauses,
+trims literals, removes duplicate clauses within each placement, and enforces
+1 to 32 analyzed tokens per clause. Search limits must be integers from 1 to
+200. The source-identity filters mirror the CLI and MCP fields
+`history_source`, `provider_key`, `source_id`, and `source_format`.
+
+Search payloads expose `schema_version: 2`, the canonical query, and
+`query_execution` with resolved and consumed work budgets, truncation reasons,
 semantic readiness, coverage, and completeness.
 
 The package includes PEP 561 type metadata and exports operation-specific

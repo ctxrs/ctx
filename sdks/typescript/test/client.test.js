@@ -91,6 +91,13 @@ function searchExecution() {
     requested_result_limit: 5,
     result_limit: 5,
     max_result_limit: 200,
+    rrf_k: 60,
+    per_branch_candidate_rows: 1024,
+    clauses_executed: 7,
+    verification_dropped: 0,
+    filter_verification_dropped: 0,
+    candidate_budget_exhausted: false,
+    timed_out: false,
     truncated: true,
     truncation_reasons: ["semantic_coverage_incomplete"],
   };
@@ -209,13 +216,21 @@ test("builds search flags and normalizes nested CLI search output", async () => 
         },
       ],
       pagination: { next_cursor: "page-2", has_more: true },
-      truncation: { truncated: false },
+      truncation: {
+        truncated: true,
+        reason: "semantic_coverage_incomplete",
+        omitted_results: 1,
+      },
     }),
   );
 
   const result = await client.search(SEARCH_QUERY, {
     limit: 5,
-    provider: "codex",
+    provider: "custom",
+    historySource: "dorkos/default",
+    providerKey: "dorkos",
+    sourceId: "default",
+    sourceFormat: "dorkos-history-v1",
     workspace: "ctx",
     since: "30d",
     primaryOnly: true,
@@ -245,9 +260,9 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   assert.equal(result.search.results[0].citations[0].sourcePath, "/tmp/session.jsonl");
   assert.equal(result.search.retrieval.requestedMode, "hybrid");
   assert.equal(result.search.retrieval.effectiveMode, "lexical");
-  assert.equal(result.search.retrieval.semanticWeight, 0.0);
-  assert.equal(result.search.retrieval.semanticFallbackCode, "semantic_retrieval_failed");
-  assert.equal(result.search.retrieval.semanticFallback, "semantic_retrieval_failed");
+  assert.equal("semanticWeight" in result.search.retrieval, false);
+  assert.equal("semanticFallbackCode" in result.search.retrieval, false);
+  assert.equal("semanticFallback" in result.search.retrieval, false);
   assert.equal(result.search.retrieval.coverage.embeddedItems, 4);
   assert.equal(result.search.retrieval.coverage.indexedNow, 1);
   assert.equal(result.search.retrieval.diagnostics.queryEmbedMs, 2);
@@ -274,7 +289,15 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     "--limit",
     "5",
     "--provider",
-    "codex",
+    "custom",
+    "--history-source",
+    "dorkos/default",
+    "--provider-key",
+    "dorkos",
+    "--source-id",
+    "default",
+    "--source-format",
+    "dorkos-history-v1",
     "--workspace",
     "ctx",
     "--since",
@@ -333,12 +356,71 @@ test("validates every ctx-search-v1 matcher and rejects ambiguous shapes", () =>
     { version: "ctx-search-v1", any: [{ literal: "x" }] },
     { version: "ctx-search-v1", any: [{ all: "x" }], unknown: true },
     { version: "ctx-search-v1", any: [{ all: "x" }], mustNot: [] },
-    { version: "ctx-search-v1", any: Array.from({ length: 33 }, () => ({ all: "x" })) },
+    {
+      version: "ctx-search-v1",
+      any: Array.from({ length: 33 }, (_, index) => ({ all: `term-${index}` })),
+    },
     { version: "ctx-search-v1", any: [{ all: "x".repeat(1025) }] },
+    { version: "ctx-search-v1", any: [{ all: "!!!" }] },
+    { version: "ctx-search-v1", any: [{ all: Array.from({ length: 33 }, () => "x").join(" ") }] },
   ];
   for (const query of invalid) {
     assert.throws(() => serializeSearchQuery(query), CtxValidationError);
   }
+});
+
+test("canonicalizes and deduplicates ctx-search-v1 clauses before enforcing bounds", () => {
+  const canonical = JSON.parse(
+    serializeSearchQuery({
+      version: "ctx-search-v1",
+      any: [
+        { all: "  disk\t io  pressure " },
+        { all: "disk io pressure" },
+        { literal: "  logs_2.db  raw  " },
+      ],
+      must: [],
+      must_not: [{ phrase: " postgres\n vacuum " }],
+    }),
+  );
+  assert.deepEqual(canonical, {
+    version: "ctx-search-v1",
+    any: [{ all: "disk io pressure" }, { literal: "logs_2.db  raw" }],
+    must_not: [{ phrase: "postgres vacuum" }],
+  });
+
+  const deduped = JSON.parse(
+    serializeSearchQuery({
+      version: "ctx-search-v1",
+      any: Array.from({ length: 33 }, () => ({ all: "  cafe\u0301\u00a0\u4e16\u754c  " })),
+    }),
+  );
+  assert.deepEqual(deduped.any, [{ all: "cafe\u0301 \u4e16\u754c" }]);
+});
+
+test("validates search limits before invoking local or hosted transports", async () => {
+  const { client, calls } = mockClient(() => {
+    throw new Error("runner should not be called");
+  });
+  const hosted = createHostedAgentHistoryClient();
+
+  for (const limit of [0, 201, 1.5, Number.NaN]) {
+    await assert.rejects(() => client.search(SEARCH_QUERY, { limit }), CtxValidationError);
+    await assert.rejects(() => hosted.search(SEARCH_QUERY, { limit }), CtxValidationError);
+  }
+  assert.equal(calls.length, 0);
+
+  const accepted = mockClient(() =>
+    JSON.stringify({
+      schema_version: 2,
+      query: SEARCH_QUERY,
+      query_execution: searchExecution(),
+      results: [],
+    }),
+  );
+  await accepted.client.search(SEARCH_QUERY, { limit: 1 });
+  await accepted.client.search(SEARCH_QUERY, { limit: 200 });
+  assert.equal(accepted.calls[0].args.includes("1"), true);
+  assert.equal(accepted.calls[1].args.includes("200"), true);
 });
 
 test("rejects the pre-v2 ambiguous search response", async () => {

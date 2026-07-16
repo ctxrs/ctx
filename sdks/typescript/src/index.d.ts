@@ -7,11 +7,44 @@ export type Provider =
   | "pi"
   | "claude"
   | "opencode"
+  | "kilo"
+  | "kiro-cli"
+  | "crush"
+  | "goose"
   | "antigravity"
   | "gemini"
+  | "tabnine"
   | "cursor"
+  | "windsurf"
+  | "zed"
   | "copilot-cli"
-  | "factory-ai-droid";
+  | "factory-ai-droid"
+  | "qwen-code"
+  | "kimi-code-cli"
+  | "auggie"
+  | "junie"
+  | "firebender"
+  | "forgecode"
+  | "deepagents"
+  | "mistral-vibe"
+  | "mux"
+  | "rovodev"
+  | "openclaw"
+  | "hermes"
+  | "nanoclaw"
+  | "astrbot"
+  | "shelley"
+  | "continue"
+  | "openhands"
+  | "cline"
+  | "roo"
+  | "lingma"
+  | "mimocode"
+  | "qoder"
+  | "warp"
+  | "codebuddy"
+  | "trae"
+  | "custom";
 
 export type RefreshMode = "background" | "off" | "wait";
 export type ProgressMode = "auto" | "plain" | "json" | "none";
@@ -19,7 +52,14 @@ export type TranscriptMode = "lite" | "full" | "log";
 export type SearchBackendMode = "hybrid" | "semantic" | "lexical";
 export type SearchSemanticReadiness = "ready" | "not_ready" | "unsupported" | "unavailable";
 export type SearchEffectiveBackend = "none" | "lexical" | "semantic" | "hybrid";
-export type SearchCompleteness = "complete" | "partial";
+export type SearchSemanticCompleteness = "not_attempted" | "complete" | "partial" | "skipped";
+export type SearchSemanticSkipReason =
+  | "disabled"
+  | "unavailable"
+  | "not_ready"
+  | "unsupported"
+  | "no_lexical_candidates"
+  | "query_shape_not_eligible";
 
 export type SearchAllClause = { all: string };
 export type SearchPhraseClause = { phrase: string };
@@ -96,6 +136,10 @@ export interface SearchOptions {
   query?: SearchQueryV1;
   limit?: number;
   provider?: Provider;
+  historySource?: string;
+  providerKey?: string;
+  sourceId?: string;
+  sourceFormat?: string;
   workspace?: string;
   since?: string;
   primaryOnly?: boolean;
@@ -266,8 +310,8 @@ export interface SearchExecutionConsumption {
 }
 
 export interface SearchSemanticCoverage {
-  indexed_documents: number;
-  searchable_documents: number;
+  indexed_documents?: number;
+  searchable_documents?: number;
 }
 
 export interface SearchSemanticExecution {
@@ -275,16 +319,16 @@ export interface SearchSemanticExecution {
   required: boolean;
   readiness: SearchSemanticReadiness;
   effective_backend: SearchEffectiveBackend;
-  backend?: string | null;
-  requested_candidates?: number;
-  eligible_candidates?: number;
+  backend?: string;
+  requested_candidates: number;
+  eligible_candidates: number;
   candidates_supplied: number;
   candidates_consumed: number;
   candidates_used: number;
-  coverage?: SearchSemanticCoverage;
-  completeness?: SearchCompleteness;
+  coverage: SearchSemanticCoverage;
+  completeness: SearchSemanticCompleteness;
   incompleteness_reasons?: string[];
-  skip_reason?: string | null;
+  skip_reason?: SearchSemanticSkipReason;
   positive_text_rule_version: string;
 }
 
@@ -294,11 +338,18 @@ export interface SearchQueryExecution {
   resolved: SearchExecutionLimits;
   consumed: SearchExecutionConsumption;
   semantic: SearchSemanticExecution;
+  rrf_k: number;
+  per_branch_candidate_rows: number;
   requested_result_limit: number;
   result_limit: number;
   max_result_limit: number;
+  clauses_executed: number;
+  verification_dropped: number;
+  filter_verification_dropped: number;
+  candidate_budget_exhausted: boolean;
+  timed_out: boolean;
   truncated: boolean;
-  truncation_reasons: string[];
+  truncation_reasons?: string[];
 }
 
 export interface SearchHit {
@@ -334,10 +385,7 @@ export interface RetrievalCoverage extends JsonObject {
 export interface SearchRetrieval extends JsonObject {
   requestedMode?: SearchBackendMode | string | null;
   effectiveMode?: SearchBackendMode | string | null;
-  semanticWeight?: number | null;
   semanticStatus?: string | null;
-  semanticFallbackCode?: string | null;
-  semanticFallback?: string | null;
   embeddingModel?: string | null;
   coverage?: RetrievalCoverage;
   worker?: JsonObject;

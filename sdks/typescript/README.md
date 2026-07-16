@@ -56,13 +56,29 @@ const query: SearchQueryV1 = {
   must_not: [{ all: "postgres vacuum" }],
 };
 
-const response = await client.search(query, { backend: "hybrid", refresh: "off" });
+const response = await client.search(query, {
+  provider: "custom",
+  historySource: "dorkos/default",
+  providerKey: "dorkos",
+  sourceId: "default",
+  sourceFormat: "dorkos-history-v1",
+  backend: "hybrid",
+  limit: 20,
+  refresh: "off",
+});
 ```
 
 `any` clauses are alternatives, every `must` clause is required, and any
 `must_not` match excludes the candidate. A semantic clause is allowed only once
-and only in `any`. Search payloads expose `schema_version: 2`, the canonical query,
-and `query_execution` with resolved and consumed work budgets, truncation reasons,
+and only in `any`. Validation collapses whitespace for non-literal clauses,
+trims literals, removes duplicate clauses within each placement, and enforces
+1 to 32 analyzed tokens per clause. Search limits must be integers from 1 to
+200. `historySource`, `providerKey`, `sourceId`, and `sourceFormat` map to the
+matching CLI and MCP source-identity filters; `provider` includes every CLI
+provider value, including `custom`.
+
+Search payloads expose `schema_version: 2`, the canonical query, and
+`query_execution` with resolved and consumed work budgets, truncation reasons,
 semantic readiness, coverage, and completeness.
 
 ## Dogfood Example

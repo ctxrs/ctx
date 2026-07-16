@@ -202,6 +202,12 @@ def _camelize_public(value: Any) -> Any:
                 "payloadType",
                 "record_type",
                 "recordType",
+                "semantic_weight",
+                "semanticWeight",
+                "semantic_fallback_code",
+                "semanticFallbackCode",
+                "semantic_fallback",
+                "semanticFallback",
             }:
                 continue
             result[_snake_to_camel(key)] = _camelize_public(nested)

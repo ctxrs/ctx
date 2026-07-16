@@ -65,7 +65,9 @@ Important reusable records:
   explicit alternatives, `must` contains required lexical clauses, and
   `must_not` contains lexical exclusions. At most one `semantic` clause is
   allowed, and only under `any`. Adapters preserve these snake_case placement
-  keys and delegate canonicalization and validation to the shared protocol.
+  keys and match shared-protocol canonicalization: non-literal whitespace is
+  collapsed, literals are trimmed, and duplicates are removed within each
+  placement before bounded validation.
 - `SearchExecution`: resolved and consumed query, candidate, verification,
   hydration, output, and elapsed-time budgets, plus truncation and semantic
   readiness/coverage diagnostics. Successful searches include it even when
@@ -75,6 +77,9 @@ Important reusable records:
 - `SearchRetrieval`: additive backend readiness and local diagnostic metadata.
   Query meaning and ranking are owned by `SearchQueryV1` and the shared search
   executor, not by transport-specific weights or fallback rules.
+- Search source-identity filters mirror CLI/MCP `history_source`,
+  `provider_key`, `source_id`, and `source_format`; language SDKs use their
+  conventional casing when mapping these fields to CLI flags.
 - `Citation`: ctx event/session/file/source citation fields.
 - `SourceLocation`: path/cursor/source id/source format/existence.
 - Structured error: `code`, `message`, `retryable`, optional `details`, and
