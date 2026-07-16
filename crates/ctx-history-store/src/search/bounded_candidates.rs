@@ -28,7 +28,9 @@ pub struct EventSearchCandidate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSearchCandidateBatch {
     pub candidates: Vec<EventSearchCandidate>,
+    /// Raw ranked FTS rows consumed before publication and filter checks.
     pub examined: usize,
+    /// The raw window reached its one-row exhaustion sentinel or timed out.
     pub truncated: bool,
     pub timed_out: bool,
 }
@@ -313,10 +315,17 @@ pub(crate) fn scoped_event_candidate_query(
     let record_visible = crate::provider_files::history_record_material_visible_predicate("wr");
     let sql = format!(
         r#"
-        SELECT candidate.event_id, candidate.rank
-        FROM {table} AS candidate
-        WHERE {table} MATCH ?1
-          AND EXISTS (
+        WITH raw_candidates AS MATERIALIZED (
+            SELECT candidate.event_id, candidate.history_record_id, candidate.rank
+            FROM {table} AS candidate
+            WHERE {table} MATCH ?1
+            ORDER BY candidate.rank
+            LIMIT ?{limit_parameter}
+        )
+        SELECT candidate.event_id, candidate.rank, raw_window.examined
+        FROM (SELECT COUNT(*) AS examined FROM raw_candidates) AS raw_window
+        LEFT JOIN raw_candidates AS candidate
+          ON EXISTS (
               SELECT 1
               FROM events AS e
               LEFT JOIN runs AS r ON r.id = e.run_id
@@ -329,8 +338,7 @@ pub(crate) fn scoped_event_candidate_query(
               WHERE e.id = candidate.event_id
                 AND {predicates}
           )
-        ORDER BY candidate.rank
-        LIMIT ?{limit_parameter}
+        ORDER BY candidate.rank, candidate.event_id
         "#,
         predicates = predicates.join("\n                AND ")
     );
@@ -359,9 +367,9 @@ impl Store {
     }
 
     /// Retrieve a bounded, id-only candidate list after applying all
-    /// representable structured predicates. Predicates live in a correlated
-    /// `EXISTS` below the FTS `LIMIT`, so a selective filter cannot be starved
-    /// by an earlier window of high-document-frequency decoys.
+    /// representable structured predicates. The raw ranked FTS window is
+    /// materialized before publication and filter verification, so selective
+    /// predicates cannot cause corpus-sized candidate work.
     pub fn search_event_candidates_for_clause_scoped(
         &self,
         clause: &SearchClause,
@@ -440,13 +448,17 @@ impl Store {
             let mut stmt = self.conn.prepare(&sql)?;
             let mut rows = stmt.query(params_from_iter(values))?;
             while let Some(row) = rows.next()? {
-                examined = examined.saturating_add(1);
-                if candidates.len() < candidate_limit {
-                    candidates.push(EventSearchCandidate {
-                        event_id: parse_uuid(row.get::<_, String>(0)?)?,
-                        rank: row.get(1)?,
-                    });
+                examined = usize::try_from(row.get::<_, i64>(2)?).unwrap_or(usize::MAX);
+                let Some(event_id) = row.get::<_, Option<String>>(0)? else {
+                    continue;
+                };
+                if candidates.len() >= candidate_limit {
+                    continue;
                 }
+                candidates.push(EventSearchCandidate {
+                    event_id: parse_uuid(event_id)?,
+                    rank: row.get(1)?,
+                });
             }
             Ok(())
         })();
@@ -469,5 +481,141 @@ impl Store {
             examined,
             timed_out,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+    use ctx_history_core::{
+        Event, EventRole, EventType, Fidelity, SyncMetadata, SyncState, Visibility,
+    };
+
+    use super::*;
+
+    fn fixed_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn event(id: Uuid, seq: u64, event_type: EventType, text: &str) -> Event {
+        Event {
+            id,
+            seq,
+            history_record_id: None,
+            session_id: None,
+            run_id: None,
+            event_type,
+            role: Some(EventRole::User),
+            occurred_at: fixed_time(),
+            capture_source_id: None,
+            payload: serde_json::json!({ "text": text }),
+            payload_blob_id: None,
+            dedupe_key: None,
+            sync: SyncMetadata {
+                visibility: Visibility::LocalOnly,
+                fidelity: Fidelity::Imported,
+                sync_state: SyncState::LocalOnly,
+                sync_version: 0,
+                deleted_at: None,
+                metadata: serde_json::json!({}),
+            },
+        }
+    }
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("bounded-candidates.sqlite")).unwrap();
+        (temp, store)
+    }
+
+    #[test]
+    fn scoped_query_caps_materialized_ranked_rows_before_verification() {
+        let scope = EventCandidateScope {
+            event_type: Some(EventType::Message),
+            ..EventCandidateScope::default()
+        };
+        let (sql, values) =
+            scoped_event_candidate_query("event_search", "common".to_owned(), 5, &scope);
+
+        let materialized = sql.find("raw_candidates AS MATERIALIZED").unwrap();
+        let raw_limit = sql.find("LIMIT ?3").unwrap();
+        let verification = sql.find("LEFT JOIN raw_candidates AS candidate").unwrap();
+        assert!(materialized < raw_limit);
+        assert!(raw_limit < verification);
+        assert!(sql.contains("SELECT COUNT(*) AS examined FROM raw_candidates"));
+        assert!(sql.contains("ORDER BY candidate.rank, candidate.event_id"));
+        assert_eq!(values[2], Value::Integer(5));
+    }
+
+    #[test]
+    fn common_token_selective_filter_accounts_for_the_raw_candidate_window() {
+        let (_temp, store) = store();
+        for seq in 1..=6 {
+            let decoy = event(
+                Uuid::new_v4(),
+                seq,
+                EventType::ToolOutput,
+                "budgetcommon budgetcommon budgetcommon",
+            );
+            store.upsert_event(&decoy).unwrap();
+        }
+        let selected = event(
+            Uuid::new_v4(),
+            7,
+            EventType::Message,
+            &format!("budgetcommon {}", "unrelated ".repeat(100)),
+        );
+        store.upsert_event(&selected).unwrap();
+
+        let batch = store
+            .search_event_candidates_for_clause_scoped(
+                &SearchClause::all("budgetcommon"),
+                &EventCandidateScope {
+                    event_type: Some(EventType::Message),
+                    ..EventCandidateScope::default()
+                },
+                2,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+
+        assert!(batch.candidates.is_empty());
+        assert_eq!(batch.examined, 3);
+        assert!(batch.truncated);
+        assert!(!batch.timed_out);
+    }
+
+    #[test]
+    fn common_token_ties_are_returned_in_event_id_order() {
+        let (_temp, store) = store();
+        let high_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000002").unwrap();
+        let low_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000001").unwrap();
+        store
+            .upsert_event(&event(high_id, 1, EventType::Message, "stablecommon"))
+            .unwrap();
+        store
+            .upsert_event(&event(low_id, 2, EventType::Message, "stablecommon"))
+            .unwrap();
+
+        let batch = store
+            .search_event_candidates_for_clause(
+                &SearchClause::all("stablecommon"),
+                2,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+
+        assert_eq!(batch.examined, 2);
+        assert!(!batch.truncated);
+        assert_eq!(
+            batch
+                .candidates
+                .iter()
+                .map(|candidate| candidate.event_id)
+                .collect::<Vec<_>>(),
+            vec![low_id, high_id]
+        );
     }
 }
