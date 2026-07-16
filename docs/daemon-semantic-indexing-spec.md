@@ -1,103 +1,61 @@
-# Daemon-Owned Indexing and Semantic Search Spec
+# Daemon And Semantic Indexing
 
-This spec records the product and architecture decision for local semantic
-search.
+The ctx daemon owns bounded background freshness and serves local semantic
+queries. Search remains an interactive read path: it queries committed indexes
+and does not perform corpus backfill, model acquisition, or an unbounded inline
+refresh.
 
-## Decision
+Daemon maintenance and semantic search are opt-in. A daemon without semantic
+search is useful: it keeps the lexical index fresh in the background. Semantic
+search requires the daemon because the daemon owns the shared local model and
+query service.
 
-ctx should make local daemon-owned indexing and hybrid semantic search the
-default path.
+## Enable It
 
-Indexing is background infrastructure. Search is an interactive read path.
-When the daemon is enabled, `ctx search` should not perform inline history
-refresh, lexical index refresh, semantic document projection, or embedding.
-It should read the current indexes, optionally signal daemon work, and return
-quickly.
+Enable daemon maintenance with:
 
-The public retrieval modes are:
-
-| Mode | Meaning |
-| --- | --- |
-| `hybrid` | Default. Query lexical and semantic indexes together, then fuse/rerank candidates. |
-| `semantic` | Semantic vector retrieval only. Useful for conceptual recall and debugging. |
-| `lexical` | SQLite FTS/path/token retrieval only. Useful for exact strings, ids, paths, flags, and symbols. |
-
-There is no public `auto` retrieval mode. `auto` made lexical and semantic feel
-like fallback tiers. The desired model is not "try lexical, then maybe rescue
-with semantic"; it is "hybrid uses both evidence sources when available."
-
-Freshness is separate from retrieval mode:
-
-| Freshness | Meaning |
-| --- | --- |
-| `background` | Default. Serve current indexes and start/poke daemon work if needed. |
-| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. |
-| `wait` | Wait for requested readiness from the daemon, then search or fail with a clear local error. |
-
-The existing `strict` behavior can map to `wait` for command-line users while
-the public docs move to `wait`. Do not add compatibility aliases unless a
-specific external contract requires them.
-
-## Semantic Corpus
-
-The primary semantic corpus is `lite_turn + deterministic rollups`.
-
-`lite_turn` is one user message plus the last assistant message before the next
-user message. Rollups are deterministic, functional documents created from
-existing structured metadata:
-
-- file rollup: touched paths/change kinds for the session
-- command rollup: command preview/status/exit code when available
-- error rollup: lines containing deterministic error markers such as `error`,
-  `failed`, `panic`, `exception`, or `traceback`
-
-No LLM is used to create semantic documents. No inferred "important findings"
-or summarization is allowed in the local indexing path.
-
-## Setup UX
-
-`ctx setup` should initialize local state, identify/index or enqueue available
-history, start daemon maintenance when enabled, and return promptly. It should
-not block for full semantic completion by default.
-
-Default human output should include a strong foreground signal:
-
-```text
-ctx is indexing your local agent history in the background.
-
-Found:
-  115,123 records
-  13.0 GB source history
-
-Estimated readiness:
-  lexical search:  ~14 min
-  semantic search: ~45 min
-
-Watch progress:
-  ctx index watch
-
-Search now:
-  ctx search "test failure"
+```bash
+ctx daemon enable
+ctx setup
 ```
 
-The exact words can change, but the output must communicate:
+That command writes the explicit daemon override to `~/.ctx/config.toml`:
 
-- background indexing is underway
-- how much source history was identified
-- lexical and semantic readiness are separate jobs
-- how to watch/wait in the foreground
-- search can run before indexing completes
+```toml
+[daemon]
+enabled = true
+```
 
-`ctx setup --json` should not autostart the daemon and should report the same
-counts/status as structured fields. `ctx setup --no-daemon` initializes local
-state without starting background work.
+To enable both daemon maintenance and local semantic search, configure both
+settings and rerun setup:
 
-## Foreground Progress Commands
+```toml
+[daemon]
+enabled = true
 
-Add an `index` command group that observes daemon state. It should not become
-the indexing worker.
+[search]
+semantic = true
+```
 
-```text
+```bash
+ctx setup
+ctx index watch
+```
+
+Unset settings keep their built-in defaults and are not written to config by
+setup. Semantic-without-daemon is invalid. `ctx daemon disable` writes an
+explicit daemon opt-out; `ctx daemon run --force` is available for a deliberate
+foreground troubleshooting run while automatic starts are disabled.
+
+## Commands
+
+```bash
+ctx daemon status
+ctx daemon run
+ctx daemon run --once --json
+ctx daemon enable
+ctx daemon disable
+
 ctx index status
 ctx index watch
 ctx index wait --lexical
@@ -105,105 +63,145 @@ ctx index wait --semantic
 ctx index wait --all
 ```
 
-`ctx index status` prints the latest known state once. `ctx index watch`
-refreshes until interrupted or complete. `ctx index wait` exits zero when the
-requested readiness is reached and non-zero on timeout/error.
+`ctx daemon run` runs the same coordinator in the foreground. The `ctx index`
+commands observe daemon/store state; they do not become a second indexing
+worker. `index status` prints one snapshot, `index watch` follows progress, and
+`index wait` exits when the requested readiness converges or fails.
 
-Example watch output:
+`ctx setup` initializes and inventories the local store. With daemon
+maintenance enabled, it schedules background indexing, prints discovered work
+and separate lexical/semantic readiness estimates, starts the daemon when
+appropriate, and returns without waiting for all semantic embeddings. Use
+`ctx setup --wait` when foreground lexical convergence is intentional and
+`ctx setup --no-daemon` for a one-run autostart opt-out. JSON and catalog-only
+setup do not autostart background maintenance.
 
-```text
-History import      [##########------]  62%  71,402 / 115,123 records
-Lexical index       [######----------]  41%  47,812 / 115,123 records
-Semantic docs       [########--------]  54%  58,090 / 105,439 docs
-Semantic embeddings [###-------------]  22%  30,480 / 139,587 chunks
-
-lexical usable: yes
-semantic usable: partial
-```
-
-Progress should use fields already available from the store, daemon jobs, and
-semantic worker reports. Estimates are allowed to be approximate and should be
-labelled as estimates.
-
-## Architecture
+## Responsibilities
 
 The daemon owns:
 
-- discovered native/provider history refresh
-- lexical projection refresh
-- semantic document projection
-- semantic embedding
-- deletion/dirty queue cleanup
-- status/job JSON for foreground observers
+- native provider and enabled history-source refresh;
+- lexical projection maintenance;
+- deterministic semantic-document projection and embedding;
+- dirty/deleted semantic sidecar cleanup;
+- the local semantic query service;
+- watcher, inventory, retry, coverage, and job status.
 
-The search command owns:
+`ctx search` owns query validation, bounded retrieval over committed indexes,
+result rendering, and optional scheduling of background freshness. When the
+daemon is enabled, search does not duplicate daemon-owned history refresh.
 
-- argument parsing
-- opening existing indexes read-only when possible
-- retrieval over the current lexical/semantic indexes
-- optional daemon signal/autostart for background freshness
-- clear freshness/retrieval status in JSON
+`ctx search --refresh background` serves current indexes while asking the
+daemon to catch up. `--refresh off` is strictly read-only and neither starts nor
+pokes the daemon. `--refresh wait` waits for currently discovered lexical and
+enabled semantic work to converge, then searches or fails clearly.
 
-The setup command owns:
+Foreground search has priority over starting another semantic document batch.
+An explicit semantic query uses the already-resident model and ready sidecar;
+it never downloads a model or initiates indexing.
 
-- creating the data root/config/store
-- source discovery/inventory
-- daemon autostart unless disabled or JSON output
-- printing initial background indexing estimates and status commands
+## Quiet Background Work
 
-The foreground `index` command owns:
+Background indexing is designed to converge without dominating normal machine
+use. The policy is internal and adaptive; there are no CPU, memory, or disk
+tuning flags in this release.
 
-- reading daemon/store/semantic status
-- displaying progress
-- waiting on readiness
-- never doing embedding itself
+- Import work is split into bounded byte/unit groups. Previously unseen small,
+  stable files can share one efficient atomic transaction; changed, appended,
+  ambiguous, interrupted, or replacement work uses a durable resumable
+  publication path.
+- Daemon mode admits at most one bounded group per scheduling slice, runs at low
+  priority, accounts for source reads, logical writes, filesystem metadata
+  operations, and observed SQLite WAL growth, then yields or backs off between
+  groups.
+- Fresh batching reduces transaction and full-text-index write amplification;
+  pacing controls when efficient transactions run rather than turning every
+  record into a separate commit.
+- Full-text merge and checkpoint work is resumable. A pinned SQLite reader
+  pauses new bulk admission at the WAL high-water mark and retries with backoff
+  instead of spinning or allowing the WAL to grow without bound.
+- Semantic thread count, batch size, duty cycle, and model-load admission are
+  selected from effective machine/cgroup memory, CPU, platform, and current
+  load. Each active embedding batch remains bounded, and a foreground query
+  prevents the next document batch from starting.
+- Semantic sidecar reads, writes, pruning, and maintenance use the same disk
+  discipline as lexical indexing.
 
-## Implementation Principles
+This is a best-effort resource policy, not a claim that every filesystem or
+device has identical performance. `ctx status`, `ctx index status`, and
+`ctx doctor` expose enough state to distinguish useful background progress from
+a stalled or degraded job.
 
-- No public `auto` retrieval mode.
-- No lexical-then-semantic fallback as the default strategy.
-- No foreground semantic embedding from `ctx search`.
-- No duplicate inline refresh when daemon is enabled and running.
-- No LLM-generated semantic documents.
-- Prefer one persisted semantic-document projection over reconstructing the
-  corpus from raw events for every worker pass.
-- Keep exact lexical search first-class inside `hybrid`; it is not a crutch.
-- Keep compatibility only where an existing external SDK/contract requires it.
-  Do not preserve old terms merely because they existed.
+## Watcher Failure And Reconciliation
 
-## End-to-End Plan
+The filesystem watcher is an optimization, not the only source of correctness.
+After watcher loss, the daemon performs one bounded reconciliation and enters a
+degraded state. Watcher registration retries with capped exponential backoff;
+fallback inventories become progressively less frequent, up to a five-minute
+cadence. Inventories are resumable, paced by source bytes and directory/stat
+operations, and never overlap each other.
 
-1. Rename retrieval mode surface:
-   remove `SearchBackendArg::Auto`, default `--backend` to `hybrid`, update
-   docs/JSON/tests to use `hybrid|semantic|lexical`.
+A daemon restart reuses minimal durable timing state so a crash loop cannot
+trigger an immediate full-tree inventory on every restart. After watcher
+recovery, ctx reconciles before resetting the degraded backoff. Even a healthy
+watcher has a paced periodic safety inventory so missed events eventually
+converge.
 
-2. Split freshness from retrieval:
-   introduce `background|off|wait` terminology for search freshness while
-   mapping or replacing the current `RefreshArg::Auto|Off|Strict` behavior.
+Status reports watcher state, the last error, current inventory progress, last
+completed inventory, and the next watcher retry or fallback inventory time.
 
-3. Make search read-only under daemon ownership:
-   when daemon is enabled or running, skip inline `refresh_before_search`,
-   serve the existing index, and signal/autostart daemon work when allowed.
+## Semantic Model And Privacy
 
-4. Make setup foreground-light:
-   keep setup initialization and source inventory visible, start daemon work,
-   print found counts/estimated readiness/watch commands, and avoid waiting for
-   full semantic indexing by default.
+Local semantic documents are deterministic projections of indexed transcript
+content and structured metadata. No LLM creates summaries, "important
+findings," or other inferred documents during local indexing.
 
-5. Add `ctx index`:
-   implement `status`, `watch`, and `wait` by reading existing daemon job and
-   semantic worker status. Reuse `daemon_report` and `semantic_worker_report`.
+When semantic maintenance is explicitly enabled, the daemon may download the
+pinned local embedding runtime and model from documented distribution
+sources. Artifacts are bound to immutable revisions and verified by the digest
+or signature required by that distribution. Acquisition failures use persisted
+exponential backoff, so a missing network or bad artifact does not create a
+retry storm. Status includes the failure class, attempt count, and next retry
+time.
 
-6. Move semantic corpus toward `lite_turn + rollups`:
-   replace raw event chunking in the semantic worker with deterministic
-   turn/rollup documents and stable document IDs. Persist projection state so
-   incremental refresh avoids full-history scans.
+The model download sources are:
 
-7. Test:
-   add CLI parsing tests for removed `auto`, default `hybrid`, and freshness
-   modes; setup output/status tests; daemon-owned search refresh tests; index
-   status/watch/wait tests; semantic corpus unit tests for deterministic docs.
+- CPU/ONNX model files from
+  `https://huggingface.co/intfloat/multilingual-e5-small` at immutable revision
+  `614241f622f53c4eeff9890bdc4f31cfecc418b3`, with required files verified
+  against compiled digests;
+- the Apple Core ML bundle at
+  `https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz`,
+  bound to the same source revision and archive SHA-256
+  `94c6fac5c4250079401d383adf1b10270fe5d370f2091dbad17bf4823222321e`.
 
-8. Verify:
-   run formatting, targeted Rust tests, search/daemon integration tests, and a
-   small real-data count/eval smoke before merge.
+Model acquisition uploads no query, transcript, snippet, result, path, provider
+metadata, or other local history. Foreground CLI search, MCP, and SDK calls
+never download a model. Disable semantic indexing and use `--refresh off` for a
+strictly read-only, no-model-acquisition search path.
+
+The semantic sidecar stores local vectors, hashes, offsets, and state beside the
+main ctx data. Both stores and all search/status output are private local data;
+they can contain transcript-derived information and are not share-safe.
+
+## Search Readiness
+
+The three retrieval backends keep fixed meanings:
+
+- `lexical` uses the local full-text/path indexes and rejects semantic clauses;
+- `semantic` performs explicit vector recall and fails with a typed readiness
+  error when the daemon query service, model, or index is unavailable;
+- `hybrid` can combine explicit lexical and semantic alternatives. Without an
+  explicit semantic clause, it may rerank only lexically eligible results.
+
+There is no general lexical-then-semantic fallback. If optional automatic
+hybrid reranking is unavailable, ctx returns the unchanged lexical set/order
+with explicit diagnostics. Explicit semantic intent is never silently replaced
+with lexical intent. Partial semantic coverage is reported as partial through
+coverage and completeness diagnostics.
+
+Machine-readable status includes lexical and semantic job progress, watcher
+degradation, semantic coverage and dirty/queued counts, model readiness,
+acquisition retry state, heartbeat/errors, and next scheduled work. Search JSON
+and MCP structured results separately report semantic attempted/readiness,
+coverage, completeness, and effective backend for that request.

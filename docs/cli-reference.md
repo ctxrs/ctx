@@ -24,6 +24,7 @@ as `search`, `show`, `sources`, and `docs` are not suppressed.
 
 ```bash
 ctx setup
+ctx setup --wait
 ctx setup --catalog-only
 ctx setup --no-daemon
 ctx setup --json
@@ -38,52 +39,74 @@ ctx daemon run
 ctx daemon run --once --json
 ctx daemon disable
 ctx daemon enable
+ctx index status
+ctx index watch
+ctx index wait --all
 ```
 
-- `setup` creates the data root, opens or creates `work.sqlite`, discovers known
-  provider history locations, inventories local history sources, imports
-  discovered native provider sources, optimizes the local search index, and
-  prints next steps. It does not write `config.toml` for implicit defaults and
-  does not execute history-source plugin commands. When `[daemon].enabled` is
-  true, setup may opportunistically start the ctx-owned background daemon after
-  foreground setup work completes. Use `setup --no-daemon` for a one-run opt-out.
+- `setup` creates the data root, opens or creates `work.sqlite`, discovers and
+  inventories local history, and prepares searchable indexes. It does not write
+  `config.toml` for implicit defaults or execute history-source plugins. When
+  daemon maintenance is enabled, setup schedules background work, prints
+  separate lexical/semantic readiness estimates and progress commands, starts
+  the daemon when appropriate, and returns without waiting for all semantic
+  work. `setup --wait` waits for foreground lexical indexing;
+  `setup --no-daemon` is a one-run autostart opt-out.
 - `setup --catalog-only` stops after source discovery and inventory. The flag
   name is kept for compatibility; it is useful for fast troubleshooting, but it
   does not make history searchable and does not autostart daemon maintenance.
 - `setup --quiet` performs setup without printing success status lines, import
   summaries, data-root details, or get-started tips. It still exits nonzero and
   prints errors on failure.
-- `status` reports the ctx root, database path, config path, indexed item
-  count, indexed source count, inventory counters, legacy Codex catalog
-  counters, semantic coverage, daemon enabled/coordinator state,
-  initialization state, local-only marker, and read-only marker. It does not
-  initialize, migrate, or repair the store.
+- `status` reports the ctx root, database/config paths, indexed source/item and
+  inventory counters, semantic coverage, daemon/job state, watcher degradation
+  and inventory timing, model acquisition retry state, initialization state,
+  local-only marker, and read-only marker. It does not initialize, migrate, or
+  repair the store.
 - `status --quiet` performs the same local checks but prints nothing on
   success. Use `status --json` when scripts need the actual state.
 - `doctor` opens local storage and reports validation findings, including
   semantic sidecar/worker and daemon lock/status problems when present.
 - `daemon status` reports the same ctx-owned daemon coordinator state without
   mutating storage.
-- `daemon run` runs bounded local maintenance in the foreground. That means
-  bounded native provider-history refresh followed by semantic catch-up when
-  semantic is enabled. The daemon may acquire the local embedding model for
-  semantic indexing. A looping daemon keeps the embedding model resident after
-  cold start and performs recent-work freshness checks before settling into idle
-  loops. Native refresh charges measured source reads, logical write work, and
-  observed FTS maintenance WAL size to an internal 8 MiB/s I/O budget with a 1
-  MiB burst; SQLite and filesystem write amplification mean this is not a hard
-  physical-device bandwidth cap. Cloud sync remains disabled with
-  `enabled: false` and `network_allowed: false`.
+- `daemon run` runs bounded local maintenance in the foreground: native and
+  enabled-plugin refresh, lexical maintenance, and semantic catch-up when
+  semantic is enabled. Work is split into bounded groups and merge slices,
+  accounts for source bytes, filesystem metadata operations, writes, and WAL
+  growth, and yields or backs off between groups. Semantic threads, batches,
+  duty cycle, and model admission adapt to effective machine resources. A
+  foreground semantic query prevents the next embedding batch from starting.
+  Cloud sync remains disabled with `enabled: false` and
+  `network_allowed: false`.
 - `daemon disable` and `daemon enable` update `[daemon].enabled` in
   `config.toml`. The prerelease default is disabled, so daemon maintenance is an
   explicit opt-in; `daemon run --force` overrides a disabled config for explicit
   manual troubleshooting.
+- `index status`, `index watch`, and `index wait` observe daemon/store
+  readiness. They do not run a second indexing worker. `index wait` accepts
+  `--lexical`, `--semantic`, or `--all`.
+
+Semantic search is a separate opt-in and requires daemon maintenance:
+
+```toml
+# ~/.ctx/config.toml
+[daemon]
+enabled = true
+
+[search]
+semantic = true
+```
+
+Rerun `ctx setup` after enabling both settings so the daemon can acquire the
+pinned local model if needed and begin semantic catch-up.
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, or require API
-keys. Without semantic opt-in they do not download embedding models; with
-semantic enabled, daemon maintenance may acquire the local embedding model.
-Daemon maintenance is local-only and bounded; cloud sync remains disabled. Core
+keys. Without semantic opt-in they do not download embedding models. With
+semantic enabled, daemon maintenance may acquire only pinned, verified local
+runtime/model artifacts from documented sources; it uploads no local
+history or query data. Foreground search, MCP, and SDK calls never acquire a
+model. Daemon maintenance is local-only and bounded; cloud sync remains disabled. Core
 storage checks use the configured data root, and JSON stdout remains structured.
 JSON-output commands do not autostart daemon maintenance. Installer-managed binaries can run a signed
 background upgrade check after successful non-JSON commands other than
@@ -369,50 +392,66 @@ ctx search "retry handling" --workspace checkout --since 60d
 ctx search "tool output" --event-type tool_output
 ctx search --file crates/foo/src/lib.rs
 ctx search "token budget" --refresh off
-ctx search "signed metadata" --term checksum --term release
+ctx search --term "signed metadata" --term "release checksum"
+ctx search --phrase "write amplification" --must sqlite
+ctx search --literal "logs_2.db" --exclude "postgres vacuum"
+ctx search "disk io pressure" --semantic "indexing made the machine sluggish" --backend hybrid
+ctx search --semantic "discussion about local search resource use" --backend semantic
+ctx search --query-file ./query.json --backend hybrid
 ctx search "token budget" --limit 5
 ctx search "token budget" --session <ctx-session-id>
 ctx search "review findings" --include-subagents
 ctx search "this current task" --include-current-session
-ctx search "mail provider throttled bulk mailbox setup" --backend hybrid
-ctx search "pricing for ctx cloud team history" --backend semantic
 ctx search "release notes" --history-source example-agent/default
 ctx search "release notes" --provider-key example-agent --source-id default
 ```
 
-`search` defaults to `--refresh background`, which serves the existing index and
-lets the ctx daemon refresh lexical and semantic indexes in the background when
-daemon maintenance is enabled. If daemon maintenance is disabled, `background`
-uses the bounded foreground text-refresh path for discovered native provider
-sources and enabled auto history-source plugins. Semantic retrieval reads
-existing local sidecar coverage when it is already available, and freshness is
-visible through `ctx status`, `ctx index status`, and the search JSON
-`retrieval.worker` report. ctx does not initialize or download embedding models
-during search, does not create the semantic sidecar from the query path, and
-does not start semantic indexing. Use `--refresh off` to search the existing
-index without refreshing or scheduling semantic work, or `--refresh wait` to run
-foreground text refresh and fail when it cannot complete. Foreground refresh skips isolated
-malformed history records with a warning and commits valid records; source-level and system-level
-failures remain fatal. Explicit-only native sources such as
-NanoClaw, plus search-only sources without native import support, are searched
-from the existing index until they are explicitly imported through a supported
-path. Supported AstrBot `data_v4.db` locations participate in bounded native
-discovery and may also be imported with an explicit `--path`. Search requires a
-non-empty query, at least one non-empty `--term`, or
-`--file <path>`; provider, workspace, time, session, event, source, and result
-flags only narrow an actual search. Default results are session-diverse: ctx
+`search` uses the versioned `ctx-search-v1` contract. Positional text is one
+lexical `all` clause: every analyzed word must match the same indexed event,
+with no order requirement. `ctx search "disk io pressure"` therefore means
+`disk AND io AND pressure`, not OR and not an exact phrase. Repeated `--term`
+values add all-words OR alternatives. `--phrase` adds an adjacent ordered
+alternative, `--literal` adds a punctuation-preserving contiguous alternative,
+and one `--semantic` may add conceptual recall. `--must` adds global all-words
+requirements; `--exclude` adds global all-words exclusions. Positional text and
+the other positive flags all belong to `any`, so combining them broadens the
+positive alternatives. There is no implicit Boolean query language, wildcard,
+regex, fuzzy matching, boost, or synonym expansion.
+
+`--query-file <path>` loads the same canonical JSON object used by MCP and the
+SDKs. It cannot be combined with positional or query-construction flags, but it
+can be combined with filters, backend, result mode, refresh, limit, and output:
+
+```json
+{
+  "version": "ctx-search-v1",
+  "any": [
+    { "all": "disk io pressure" },
+    { "phrase": "storage latency" },
+    { "literal": "logs_2.db" },
+    { "semantic": "the indexing job made the workstation sluggish" }
+  ],
+  "must": [{ "all": "codex" }],
+  "must_not": [{ "all": "postgres vacuum" }]
+}
+```
+
+Each structured clause has exactly one `all`, `phrase`, `literal`, or
+`semantic` key. `semantic` is allowed at most once and only in `any`;
+structured `must` and `must_not` accept lexical matchers. Unknown versions,
+fields, or placements fail closed.
+
+Search requires a positive text clause or `--file <path>`. A request may use
+positive `--must` clauses without `any`, but exclusions alone are invalid.
+Provider, workspace, time, session, event, source, and result flags only narrow
+an actual search. Default results are session-diverse: ctx
 returns the strongest matching span from each session, plus
 `more_matches_in_session` and `session_importance` when more indexed events from
 that session also matched. Use `--session <ctx-session-id>` after a default
 search has identified a session to inspect; scoped session search returns dense
 event hits. Session/event commands accept full ctx IDs or unambiguous ctx ID
 prefixes of at least eight hex characters. Use `--events` without `--session`
-for dense event-level results across sessions. Lexical search matches any word
-in an ordinary multi-word query and ranks results matching more query words
-ahead of partial matches. Repeat
-`--term <query-or-keyword>` when you want to broaden a search across several
-related queries or keywords and merge the ranked results; `--term` is OR-style
-broadening, not a must-include filter.
+for dense event-level results across sessions.
 Custom history imports can be filtered by `--history-source` using
 `plugin/source` or `provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. These filters imply
@@ -425,21 +464,30 @@ should be searched too.
 When ctx is run from Codex and `CODEX_THREAD_ID` is available, search excludes
 the active Codex session tree by default so the current task and its subagents
 do not dominate historical retrieval. Use `--include-current-session` to opt
-back in. Use `--refresh off` for a strictly read-only query over the existing
-ctx index. Explicit semantic or hybrid requests may read an existing semantic
-sidecar under `--refresh off`, but the command does not update the sidecar or
-download models. They may ask the daemon query service to embed the query from
-an already-cached local model.
+back in.
+
+Backend selection never reinterprets a clause. `lexical` rejects an explicit
+semantic clause. `semantic` requires semantic as the sole positive `any`
+alternative and still enforces lexical constraints and filters. `hybrid` can
+union explicit lexical and semantic alternatives. Without `--semantic`, hybrid
+may rerank only a bounded lexically eligible set; if that optional reranker is
+unavailable, it returns the unchanged lexical set/order with diagnostics. An
+explicit semantic request returns a typed readiness error when its daemon query
+service, model, or index is unavailable. It never silently falls back to a
+lexical query with different meaning. Partial semantic coverage is explicit in
+coverage and completeness diagnostics.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata
 including `provider_session_id` is included when known. Results also include
 title, snippet, rank, result scope, match reasons, source-path/cursor data,
 citations, `suggested_next_commands`, a JSON `freshness` object, a JSON
-`retrieval` object with backend, semantic coverage, worker status, and semantic
-timing/scan diagnostics when vector retrieval runs, and pagination/truncation
-fields in JSON. Default text output is compact and optimized for agent reading;
-use `--verbose` for expanded text diagnostics.
+`retrieval` object, and JSON schema version 2 `query_execution` diagnostics.
+`query_execution` is present on successful untruncated searches too and reports
+resolved/consumed query, candidate, verification, hydration, payload, response,
+result, and elapsed budgets; truncation reasons; and semantic readiness,
+coverage, completeness, and effective backend. Default text output is compact
+and optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
@@ -453,17 +501,15 @@ Filters:
 - `--file <path>`, indexed touched-file path metadata, not the current
   filesystem;
 - `--session <ctx-session-id-or-prefix>`, for dense event results within one session;
-- `--term <query-or-keyword>`, repeatable broadening queries or keywords merged with OR-style semantics;
+- `--term <text>`, repeatable all-words OR alternatives;
+- `--phrase <text>`, repeatable adjacent ordered alternatives;
+- `--literal <text>`, repeatable punctuation-preserving alternatives;
+- `--semantic <text>`, one conceptual-recall alternative;
+- `--must <text>`, repeatable global all-words requirements;
+- `--exclude <text>`, repeatable global all-words exclusions;
+- `--query-file <path>`, one canonical `ctx-search-v1` JSON object;
 - `--events`, for dense event-level results instead of the default session-diverse results;
-- `--backend hybrid|semantic|lexical`, where `hybrid` blends lexical and
-  semantic evidence only when existing sidecar coverage is complete and dirty
-  work is drained, and falls back to lexical with a structured fallback reason
-  when semantic prerequisites are missing. Explicit `semantic` reports a local
-  error instead of downloading a model during search when the cache is missing,
-  when the semantic worker is actively indexing, when filters/terms cannot be
-  honored, or when the installed build target does not include a compatible
-  local embedding/vector backend for the requested sidecar;
-- `--semantic-weight <0.0-1.0>`, for hybrid ranking;
+- `--backend hybrid|semantic|lexical`;
 - `--include-subagents`;
 - `--limit <n>`, capped at `200`;
 - `--refresh background|off|wait`;
@@ -473,28 +519,15 @@ CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as
 `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`, `kiro_cli`, `mistral_vibe`, and `roo_code`; compact IDs such as `forgecode`, `deepagents`, `mux`, `rovodev`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
 
-`search` reads discovered native provider files and runs enabled auto
-history-source plugin commands for pre-search text refresh, then queries SQLite.
-Default daemon maintenance owns native and plugin refresh when enabled. If the
-daemon is disabled, `--refresh background` bounds native and plugin work for
-interactive use; run `--refresh wait` or `ctx import` for exhaustive foreground
-plugin catch-up. Foreground refresh may write newly discovered provider or
-plugin history into the local `work.sqlite` index before querying. Semantic retrieval reads the
-`vectors.sqlite` sidecar when it already exists; search itself does not start
-semantic indexing or download models. With semantic enabled and default
-background refresh, search may start the configured daemon so the daemon-owned
-query service can embed the query; `--refresh off` skips that autostart. Use
-`ctx daemon run` for explicit foreground local native history refresh and
-semantic catch-up. JSON status includes a top-level `semantic` object with worker
-`status`, `running`, `pid`, heartbeat/error timestamps, `indexed_chunks`, and a
-`coverage` object with `searchable_items`, `embedded_items`, `embedded_chunks`,
-`dirty_items`, `queued_items_estimate`, and `coverage_ratio`, plus the private
-local sidecar and worker status paths. JSON status also includes a top-level
-`daemon` object
-with coordinator status and `history_refresh`/`semantic_index`/`cloud_sync` job
-state; cloud sync is disabled with `enabled: false` and
-`network_allowed: false`. `ctx doctor` is the diagnostic surface for semantic
-sidecar, worker, and daemon health.
+`--refresh background` is the default. With the daemon enabled it schedules
+bounded catch-up and queries current committed indexes; with the daemon disabled
+it performs bounded in-process lexical refresh. `--refresh off` is strictly
+read-only: no provider reads, plugins, daemon start/poke, model download, or
+index writes. `--refresh wait` waits for currently discovered lexical and
+enabled semantic catch-up and fails when convergence cannot complete. Search
+never downloads a model, starts semantic backfill, or writes the semantic
+corpus. `ctx status`, `ctx index status`, and `ctx doctor` expose daemon,
+watcher, inventory, semantic coverage, model retry, and readiness state.
 
 ## SQL
 
@@ -658,7 +691,7 @@ ctx show session <ctx-session-id> --format json
 ctx show event <ctx-event-id> --format json
 ctx locate session <ctx-session-id> --format json
 ctx locate event <ctx-event-id> --format json
-ctx search <query>|--term <term>|--file <path> --json
+ctx search <query>|--term <text>|--phrase <text>|--literal <text>|--semantic <text>|--must <text>|--query-file <path>|--file <path> --json
 ctx sql "SELECT COUNT(*) FROM ctx_sessions" --json
 ctx docs list --json
 ctx docs search <query> --json

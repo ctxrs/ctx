@@ -25,8 +25,10 @@ Use this skill in two modes:
   curl -fsSL https://ctx.rs/install | sh
   ```
 
-- First setup can take time while ctx indexes past sessions. If needed, keep it
-  running in the background or in tmux, or wait for it to finish.
+- First setup can take time while ctx indexes past sessions. When daemon
+  maintenance is enabled, use `ctx index status`, `ctx index watch`, or
+  `ctx index wait --all` to observe background progress. Search can use the
+  committed portion of the index before all work finishes.
 - If ctx remains unavailable, say local history search is unavailable and do not
   invent results.
 
@@ -42,7 +44,8 @@ Use this skill in two modes:
    Use `ctx status --json` or `ctx sources --json` only when a script needs
    exact fields.
 
-2. Search with normal language first. Add terms or filters when useful:
+2. Start with one focused query. Positional words are all required in the same
+   indexed event; they are not OR alternatives:
 
    ```bash
    ctx search "<query>"
@@ -51,10 +54,41 @@ Use this skill in two modes:
    ctx search "<query>" --workspace <workspace>
    ctx search "<query>" --file <path>
    ctx search "<query>" --since 30d
-   ctx search "<query>" --term "<related term>" --term "<error text>"
+   ctx search --term "<alternative concept>" --term "<other concept>"
+   ctx search --phrase "<ordered words>" --must "<required concept>"
+   ctx search --literal "<filename-or-symbol>"
+   ctx search "<lexical concept>" --semantic "<conceptual description>" --backend hybrid
+   ctx search --semantic "<conceptual description>" --backend semantic
    ctx search "<query>" --session <ctx-session-id>
    ctx search "<query>" --verbose
    ```
+
+   The `ctx-search-v1` rules are:
+
+   - positional text is one lexical `all` clause: every analyzed word is
+     required, but order does not matter;
+   - repeated `--term` values are genuine alternatives: AND inside each value,
+     OR between values;
+   - `--phrase` requires adjacent words in order;
+   - `--literal` preserves punctuation and verifies a contiguous value;
+   - `--must` applies an all-words requirement to every alternative;
+   - `--exclude` excludes a result when every word in that clause matches;
+   - one `--semantic` may add explicit conceptual recall.
+
+   Positional text, `--term`, `--phrase`, `--literal`, and
+   `--semantic` are all positive alternatives. Combining them broadens
+   `any`; use `--must` to constrain every alternative. Do not put Boolean
+   syntax, wildcards, regex, or fuzzy operators into a query string. Prefer
+   several focused searches over one giant bag of words.
+
+   Backend choice never weakens clauses. `lexical` rejects an explicit
+   semantic clause. `semantic` requires semantic as the sole positive
+   alternative and still enforces lexical constraints. `hybrid` can union
+   explicit lexical and semantic alternatives; without `--semantic`, it may
+   rerank only already-eligible lexical results. If an explicit semantic
+   request returns a typed readiness error, do not describe it as a successful
+   lexical fallback. Run a separate lexical query only when that is useful on
+   its own terms.
 
    Use default text output for agent reading. Do not add `--json` for
    search, show, or locate unless you are piping it into `jq` or a script, or
@@ -74,6 +108,12 @@ Use this skill in two modes:
 
    Use `--verbose` when you need full ctx IDs, provider IDs, citations, and
    copyable follow-up commands without switching to JSON.
+
+   If result completeness matters, inspect a small `--json` response's
+   `query_execution` object. Check `truncated`,
+   `truncation_reasons`, consumed versus resolved budgets, and semantic
+   readiness, coverage, completeness, and effective backend. A short result
+   list alone does not prove the search was complete.
 
    You can write a session transcript to a temporary file, check the file size,
    and then read the relevant parts:
@@ -142,9 +182,11 @@ material.
 1. Restate the topic, scope, and desired length if the prompt is ambiguous.
    Prefer concise reports by default; use a longer report when the user asks for
    chronology, alternatives, or detailed evidence.
-2. Run several targeted searches. Vary query terms across user wording, file or
-   module names, error text, commands, branch names, and decision terms. Start
-   with `ctx search "<topic>"`, then broaden with `--term` or narrow with
+2. Run several targeted searches. Vary focused all-word concepts across user
+   wording, file/module names, error text, commands, branch names, and decision
+   terms. Use repeated `--term` only for genuine alternatives, `--phrase`
+   or `--literal` for exact evidence, `--must` for a global constraint, and
+   one explicit `--semantic` when conceptual recall is needed. Narrow with
    `--workspace`, `--provider`, `--file`, `--since`, or
    `--session <ctx-session-id>`.
    Use `--include-subagents` when reviews, implementation attempts, test output,
@@ -197,6 +239,9 @@ Long report shape:
 - Do not say ctx inferred a decision unless the cited text explicitly states
   that decision.
 - Do not state that ctx wrote model analysis.
+- Do not claim an explicit semantic query fell back successfully. Read its typed
+  error or completeness diagnostics; lexical is a separate query with separate
+  meaning.
 - Do not paste raw transcripts, large JSON payloads, secrets, tokens, or private
   paths into a user-facing report. Summarize reviewed evidence and quote only
   short excerpts needed to support a claim.
