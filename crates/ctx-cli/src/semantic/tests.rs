@@ -1556,6 +1556,10 @@ mod model_retry_tests {
             };
             assert_eq!(attempt, expected_attempt);
             assert!(next_eligible_at_ms > now_ms);
+            assert_eq!(
+                next_eligible_at_ms - now_ms,
+                10_i64 << expected_attempt.saturating_sub(1).min(3)
+            );
             final_next_retry_at_ms = Some(next_eligible_at_ms);
             if expected_attempt < 8 {
                 now_ms = next_eligible_at_ms;
