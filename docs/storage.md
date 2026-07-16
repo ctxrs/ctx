@@ -120,19 +120,22 @@ autostart daemon maintenance.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or write
 the main store or semantic sidecar. Default `--backend hybrid --refresh off`
-uses semantic evidence only when sidecar coverage is complete and dirty work is
-drained, and otherwise falls back to lexical. Explicit semantic searches may ask
-the daemon query service to embed the query from an already-cached local model
-and read partial existing sidecar coverage, but they do not download a model or
-write semantic catch-up work during search.
+keeps lexical eligibility fixed and may semantically rerank only that bounded
+eligible set. If the optional reranker is unavailable, the lexical set and
+order are returned unchanged with explicit diagnostics. Explicit semantic
+searches may ask the daemon query service to embed the query from an
+already-cached local model and read partial existing sidecar coverage, but they
+do not download a model or write semantic catch-up work during search.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
 the semantic sidecar when the sidecar already exists; this does not create the
 sidecar, initialize the model, or embed text.
 Explicit semantic search also refuses to initialize or download the embedding
-model when the required local cache is missing; hybrid falls back to lexical in
-that case. Default `--refresh background` lets daemon maintenance own enabled
-auto history-source plugin refresh when possible, and may autostart the
-configured daemon query service for semantic/hybrid retrieval; use
+model when the required local cache is missing and returns a typed readiness
+error. Hybrid without an explicit semantic clause may skip optional reranking
+without changing lexical eligibility. Default `--refresh background` lets
+daemon maintenance own enabled auto history-source plugin refresh when
+possible, and may autostart the configured daemon query service for
+semantic/hybrid retrieval; use
 `--refresh wait` or `ctx import` for exhaustive foreground plugin catch-up.
 
 When `ctx daemon run` or setup/import autostart runs the ctx-owned background

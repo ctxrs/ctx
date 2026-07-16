@@ -123,14 +123,15 @@ and private relevance evals justify flipping the default.
 - Semantic corpus is deterministic and small enough for local backfill:
   user-turn anchored lite-turn documents, not raw event/tool-output chunks.
 - New local work is prioritized before historical backfill.
-- Search output always exposes requested/effective backend and semantic fallback
-  reason; common unsupported filters should fail clearly or fall back explicitly.
-- While semantic is disabled, default search is lexical and explicit hybrid
-  falls back with `semantic_disabled`.
-- While semantic is enabled, default and explicit `hybrid` use semantic evidence
-  only when semantic sidecar coverage is complete and dirty work is drained;
-  partial coverage is available through explicit `semantic` for diagnostics and
-  dogfood, not default ranking.
+- Search output always exposes requested/effective backend plus semantic
+  attempted, readiness, coverage, and completeness diagnostics. Unsupported
+  explicit semantic requests fail with typed errors.
+- While semantic is disabled, default search is lexical. Explicit hybrid
+  without a semantic clause keeps lexical eligibility and reports optional
+  reranking as unavailable; an explicit semantic clause is rejected.
+- While semantic is enabled, hybrid without a semantic clause may rerank only
+  the bounded lexically eligible set. Explicit semantic recall may use partial
+  coverage only when that incompleteness is unmistakable in diagnostics.
 
 ## Readiness Gates
 
@@ -176,8 +177,8 @@ and private relevance evals justify flipping the default.
 - Hybrid beats lexical on judged quality: positive Hit@5 and MRR lift, no
   material Hit@1 regression on exact-term queries, and manually inspected
   failures have acceptable explanations.
-- Hybrid fallback rate for normal unfiltered queries is low enough that default
-  hybrid is not mostly lexical in practice.
+- Automatic hybrid reranking is ready and effective often enough on normal
+  unfiltered queries to provide material value over unchanged lexical order.
 - Warm hybrid p95 is at or below the product target on the dogfood corpus; if
   the target is subsecond, vector scan/hydration should move into a daemon
   query service or equivalent optimized path before the flip.
@@ -309,8 +310,8 @@ and private relevance evals justify flipping the default.
   private repo or local-only artifacts for judged query sets.
 - Remaining outside this repo:
   - add a small JSONL manifest runner for private local dogfood/evals that
-    records query, backend requested/effective, fallback code, elapsed ms,
-    semantic diagnostics, and top result ids/snippets;
+    records query, backend requested/effective, elapsed ms, semantic readiness,
+    coverage/completeness diagnostics, and top result ids/snippets;
   - keep the harness read-only with `--refresh off` by default;
   - store real judged manifests in an internal private repo or an untracked
     local path;
@@ -384,8 +385,9 @@ and private relevance evals justify flipping the default.
 - If default cache discovery still reports `model_cache_missing` on a machine
   with a valid common cache root, stop and fix discovery before running more
   semantic timings.
-- If hybrid `effective_mode` is lexical for unfiltered queries after semantic
-  coverage exceeds the activation threshold, stop and fix fallback gating.
+- If automatic hybrid reranking remains unattempted or ineffective for
+  unfiltered queries after semantic coverage exceeds the activation threshold,
+  stop and fix readiness gating.
 - If semantic incremental freshness exceeds 60 seconds for a single new turn
   with a warm cache, stop and inspect dirty queue ordering and model reuse.
 - If daemon history refresh runs before semantic bootstrap while searchable
