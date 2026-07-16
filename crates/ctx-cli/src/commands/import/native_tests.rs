@@ -7,7 +7,9 @@ use ctx_history_core::{
     new_id, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event, EventRole, EventType,
     Fidelity, SyncMetadata, SyncState, Visibility,
 };
-use ctx_history_store::{SourceImportFile, SourceImportFileIndexUpdate};
+use ctx_history_store::{
+    ImportPendingReason, SourceImportFile, SourceImportFileIndexUpdate, SourceImportFileWork,
+};
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
@@ -17,3 +19,4 @@ include!("native_tests/retirement.rs");
 include!("native_tests/append_recovery.rs");
 include!("native_tests/root_and_inventory.rs");
 include!("native_tests/manifest_and_sqlite.rs");
+include!("native_tests/fresh_new.rs");

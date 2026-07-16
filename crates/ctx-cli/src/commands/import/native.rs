@@ -26,6 +26,7 @@ const PROVIDER_PUBLICATION_SLICE_ROWS: usize = 1024;
 const PROVIDER_RETIREMENT_SLICE_ROWS: usize = 64;
 
 include!("native/types_and_recovery.rs");
+include!("native/fresh_new.rs");
 include!("native/append.rs");
 include!("native/selection.rs");
 include!("native/batching.rs");

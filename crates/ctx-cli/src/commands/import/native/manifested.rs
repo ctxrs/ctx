@@ -225,6 +225,7 @@ fn import_manifested_source_with_importer(
             completed_bytes: 0,
             deferred_units,
             durable_progress,
+            stop_admission: false,
             post_import_inventory_generation: None,
             post_import_preinventory: None,
         });
@@ -255,6 +256,7 @@ fn import_manifested_source_with_importer(
                     completed_bytes: 0,
                     deferred_units,
                     durable_progress,
+                    stop_admission: false,
                     post_import_inventory_generation: None,
                     post_import_preinventory: None,
                 },
@@ -305,6 +307,7 @@ fn import_manifested_source_with_importer(
         completed_bytes,
         deferred_units,
         durable_progress,
+        stop_admission: false,
         post_import_inventory_generation: Some(persisted.inventory_generation),
         post_import_preinventory: None,
     };

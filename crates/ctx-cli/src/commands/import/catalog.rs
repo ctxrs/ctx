@@ -23,6 +23,7 @@ fn catalog_batch_outcome(
         completed_bytes,
         deferred_units,
         durable_progress: false,
+        stop_admission: false,
         post_import_inventory_generation: None,
         post_import_preinventory: None,
     }
@@ -43,6 +44,7 @@ fn catalog_batch_error_with_progress(
             completed_bytes,
             deferred_units,
             durable_progress,
+            stop_admission: false,
             post_import_inventory_generation: None,
             post_import_preinventory: None,
         },
@@ -199,6 +201,7 @@ pub(crate) fn import_incremental_codex_session_tree(
             completed_bytes,
             deferred_units,
             durable_progress,
+            stop_admission: false,
             post_import_inventory_generation: None,
             post_import_preinventory: None,
         });

@@ -30,7 +30,8 @@ pub(crate) const MAX_PROVIDER_SQLITE_VALUE_BYTES: usize = MAX_PROVIDER_JSONL_LIN
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_PATHS: usize = 256;
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_VISITED_PATHS: usize = 4096;
-pub(crate) const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl";
+/// Canonical Codex session transcript source format.
+pub const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl";
 pub(crate) const CLAUDE_PROJECTS_SOURCE_FORMAT: &str = "claude_projects_jsonl_tree";
 pub(crate) const CLINE_TASK_JSON_SOURCE_FORMAT: &str = "cline_task_directory_json";
 pub(crate) const ROO_TASK_JSON_SOURCE_FORMAT: &str = "roo_task_directory_json";
@@ -169,7 +170,8 @@ pub use provider::custom_history_jsonl::{
 };
 pub use provider::importer::{
     import_codex_fresh_new_batch, import_normalized_provider_captures, import_pi_fresh_new_batch,
-    FreshNewImportContext, FreshNewImportOutcome,
+    FreshNewImportContext, FreshNewImportOutcome, FRESH_NEW_BATCH_MAX_BYTES,
+    FRESH_NEW_BATCH_MAX_PATHS, PI_SESSION_SOURCE_FORMAT,
 };
 
 mod spool;

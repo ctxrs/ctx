@@ -14,19 +14,19 @@ use ctx_history_capture::{
     catalog_codex_session_tree, import_antigravity_cli_history,
     import_append_capable_provider_file, import_astrbot_sqlite, import_auggie_history,
     import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
-    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
-    import_codex_session_paths, import_continue_cli_sessions, import_copilot_cli_session_events,
-    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
-    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
-    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
-    import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history, import_mux_history,
-    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
-    import_openhands_file_events, import_pi_session_jsonl, import_qoder_history,
-    import_qwen_code_history, import_roo_task_json_history, import_rovodev_history,
-    import_shelley_sqlite, import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
-    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
+    import_codex_fresh_new_batch, import_codex_history_jsonl, import_codex_session_jsonl,
+    import_codex_session_jsonl_tail, import_codex_session_paths, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
+    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
+    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_kiro_sqlite, import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history,
+    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_openhands_file_events, import_pi_fresh_new_batch, import_pi_session_jsonl,
+    import_qoder_history, import_qwen_code_history, import_roo_task_json_history,
+    import_rovodev_history, import_shelley_sqlite, import_tabnine_cli_history, import_trae_history,
+    import_warp_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
     provider_canonical_material_source_format, provider_file_mutation_contract,
     provider_source_spec, stable_capture_uuid, AntigravityCliImportOptions,
     AstrBotSqliteImportOptions, AuggieImportOptions, CaptureError, CatalogSummary,
@@ -35,12 +35,12 @@ use ctx_history_capture::{
     CodexSessionImportProgressCallback, ContinueCliImportOptions, CopilotCliImportOptions,
     CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
     DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
-    HermesSqliteImportOptions, JunieImportOptions, KiloSqliteImportOptions,
-    KimiCodeCliImportOptions, KiroSqliteImportOptions, LingmaSqliteImportOptions,
-    MiMoCodeSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    PiSessionImportOptions, ProviderAdmittedJsonlAppendCheckpoint,
+    ForgeCodeSqliteImportOptions, FreshNewImportContext, FreshNewImportOutcome,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    LingmaSqliteImportOptions, MiMoCodeSqliteImportOptions, MistralVibeImportOptions,
+    MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
+    OpenHandsImportOptions, PiSessionImportOptions, ProviderAdmittedJsonlAppendCheckpoint,
     ProviderAppendFileImportDecision, ProviderAppendFileImportMode,
     ProviderAppendFileImportOptions, ProviderFileMutationContract, ProviderFileStableIdentity,
     ProviderImportFailure, ProviderImportSummary, ProviderImportSupport,
@@ -54,8 +54,9 @@ use ctx_history_core::{
 };
 use ctx_history_store::{
     CatalogImportWork, CatalogIndexedStatus, CatalogSession, CatalogSourceIndexUpdate,
-    ImportPendingReason, ImportWorkClass, ProviderFileCheckpoint, ProviderFileCheckpointKey,
-    ProviderFileImportOutcome, ProviderFileInventoryObservation, ProviderFilePublicationCommit,
+    EventSearchBulkMaintenanceOutcome, ImportPendingReason, ImportWorkClass,
+    ProviderFileCheckpoint, ProviderFileCheckpointKey, ProviderFileImportOutcome,
+    ProviderFileInventoryObservation, ProviderFilePublicationCommit,
     ProviderFilePublicationCompletion, ProviderFilePublicationKind, ProviderFilePublicationPhase,
     ProviderFilePublicationRetirementWork, SourceImportFile, SourceImportFileIndexUpdate,
     SourceImportFileWork, Store, StoreError,
@@ -662,6 +663,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
         let mut deferred_units = 0usize;
         let mut maintenance_progress = false;
         let mut source_durable_progress = false;
+        let mut stop_admission = false;
         for validation_failure in validation_failures {
             let source_plan = &plan.sources[validation_failure.source_index];
             native_reports.record_failure(
@@ -740,6 +742,7 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
             let mut outcome_deferred_units = 0usize;
             let had_outcome = outcome.is_some();
             if let Some(outcome) = outcome {
+                stop_admission |= outcome.stop_admission;
                 let made_durable_progress = outcome.made_durable_progress();
                 execution_state.record_source_outcome(
                     selected.source_index,
@@ -846,10 +849,14 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
             if outcome_deferred_units > 0 && store.has_pending_provider_file_publications()? {
                 break;
             }
+            if stop_admission {
+                break;
+            }
         }
-        let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
-        if let Err(error) = finish_result {
-            return Err(error.into());
+        match store.finish_event_search_bulk_mode(&bulk_guard) {
+            Ok(EventSearchBulkMaintenanceOutcome::Complete) => {}
+            Ok(EventSearchBulkMaintenanceOutcome::Pending) => stop_admission = true,
+            Err(error) => return Err(error.into()),
         }
         match class {
             ImportWorkClass::Fresh => {
@@ -868,10 +875,16 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
             deferred_units,
             maintenance_progress || source_durable_progress,
         );
+        if stop_admission {
+            execution_result.stop_admission();
+        }
         totals.durable_progress |=
             completed_units > 0 || maintenance_progress || source_durable_progress;
         if let Some(error) = system_error {
             return Err(error);
+        }
+        if stop_admission {
+            break;
         }
         if deferred_units > 0 && store.has_pending_provider_file_publications()? {
             break;

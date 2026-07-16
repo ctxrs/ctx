@@ -98,6 +98,7 @@ pub(crate) fn import_selected_source(
             },
             deferred_units: outcome.deferred_units,
             durable_progress: outcome.durable_progress,
+            stop_admission: outcome.stop_admission,
             post_import_inventory_generation: outcome.post_import_inventory_generation,
             post_import_preinventory: outcome.post_import_preinventory,
         },

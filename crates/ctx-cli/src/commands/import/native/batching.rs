@@ -10,6 +10,12 @@ fn import_one_source_inner_batched(
         super::catalog::codex_catalog_root_identity(&source.path)?;
     }
     let record = import_record_for_source(source);
+    if let Some(selection) = selection
+        && let Some(outcome) =
+            import_selected_fresh_new_group(store, source, preinventory, selection, &record)?
+    {
+        return Ok(outcome);
+    }
     let record_id = record.id;
     let record_existed =
         history_record_exists(store, record_id).context("inspect source import history record")?;
@@ -71,6 +77,7 @@ fn import_one_source_inner_batched(
                         }),
                         deferred_units: 0,
                         durable_progress: false,
+                        stop_admission: false,
                         post_import_inventory_generation: post_import
                             .as_ref()
                             .map(|observation| observation.inventory_generation),
@@ -99,6 +106,7 @@ fn import_one_source_inner_batched(
                         completed_bytes: 0,
                         deferred_units: 1,
                         durable_progress,
+                        stop_admission: false,
                         post_import_inventory_generation: post_import
                             .as_ref()
                             .map(|observation| observation.inventory_generation),
@@ -630,6 +638,7 @@ fn import_one_source_inner_batched(
                     completed_bytes,
                     deferred_units,
                     durable_progress,
+                    stop_admission: false,
                     post_import_inventory_generation,
                     post_import_preinventory,
                 });
@@ -722,6 +731,7 @@ fn import_one_source_inner_batched(
         completed_bytes,
         deferred_units,
         durable_progress,
+        stop_admission: false,
         post_import_inventory_generation,
         post_import_preinventory,
     })
