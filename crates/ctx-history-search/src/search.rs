@@ -7,13 +7,12 @@ use std::{
 use ctx_history_core::{utc_now, ContextTruncation, EventType, HistoryRecord};
 use ctx_history_store::{
     EventCandidateAgentScope, EventCandidateExcludedSession, EventCandidateFileScope,
-    EventCandidateScope, FileSearchCandidateScope, FileTouchScope, Store,
+    EventCandidateScope, FileSearchCandidateScope, FileTouchScope, Store, StoreError,
 };
 use ctx_protocol::{
     search_analyzed_token_count, SearchClause, SearchEffectiveBackend, SearchExecutionLimits,
-    SearchQuery, SearchQueryV1, SearchRequestEnvelope, SearchSemanticPolicy,
-    SearchSemanticReadiness, SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED,
-    SEARCH_POSITIVE_TEXT_RULE_VERSION, SEARCH_QUERY_VERSION,
+    SearchQuery, SearchQueryError, SearchQueryV1, SearchRequestEnvelope, SearchSemanticPolicy,
+    SearchSemanticReadiness, SEARCH_POSITIVE_TEXT_RULE_VERSION, SEARCH_QUERY_VERSION,
 };
 use uuid::Uuid;
 
@@ -23,7 +22,7 @@ use crate::filters::{
 use crate::model::CandidateSearch;
 use crate::packet::{
     empty_search_packet, pagination, SearchExecutionDiagnostics, SearchPacket, SearchPacketResult,
-    SearchResultScope, SemanticEventHit, SEARCH_PACKET_SCHEMA_VERSION,
+    SearchResultScope, SEARCH_PACKET_SCHEMA_VERSION,
 };
 use crate::query::{
     clause_matches_text, composed_search_terms, normalized_options, query_terms, PacketOptions,
@@ -32,8 +31,8 @@ use crate::query::{
 };
 use crate::ranking::{candidate_for_bounded_file, candidate_for_bounded_record, ranked_candidates};
 use crate::results::{
-    candidate_search_result, compare_search_results, event_reason, event_search_result,
-    merge_search_result, normalize_search_result_ranks, push_candidate_results, push_unique_why,
+    candidate_search_result, compare_search_results, event_search_result, merge_search_result,
+    normalize_search_result_ranks, push_candidate_results, push_unique_why,
     search_result_merge_key, session_importance,
 };
 
@@ -132,14 +131,24 @@ pub fn search_packet_envelope(
     envelope: &SearchRequestEnvelope,
     options: &PacketOptions,
 ) -> Result<SearchPacket> {
+    let started = Instant::now();
     let envelope = envelope.clone().canonicalized()?;
+    let options = normalized_options(options);
+    let resolved = SearchExecutionLimits::resolved(
+        envelope.requested_limits.as_ref(),
+        options.limit,
+        STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
+    );
+    validate_resolved_query_limits(&envelope.query, &resolved)?;
     let semantic_required = envelope.query.semantic_clause().is_some();
     let automatic_rerank_text = envelope.query.automatic_rerank_text();
     let automatic_rerank_requested = !semantic_required
         && envelope.semantic_policy == SearchSemanticPolicy::AutomaticRerank
         && automatic_rerank_text.is_some();
     let semantic = envelope.semantic.as_ref();
-    let readiness = semantic.map_or(SearchSemanticReadiness::Unavailable, |input| input.readiness);
+    let readiness = semantic.map_or(SearchSemanticReadiness::Unavailable, |input| {
+        input.readiness
+    });
     if semantic_required && readiness != SearchSemanticReadiness::Ready {
         return Err(crate::query::SearchError::SemanticNotReady { readiness });
     }
@@ -150,23 +159,14 @@ pub fn search_packet_envelope(
         .retain(|clause| !matches!(clause, SearchClause::Semantic(_)));
     let has_lexical_positive = lexical_query.positive_clause_count() > 0;
     let mut packet = if has_lexical_positive {
-        search_packet_query_lexical(
-            store,
-            &lexical_query,
-            options,
-            envelope.requested_limits.as_ref(),
-        )?
+        search_packet_query_lexical(store, &lexical_query, &options, &resolved, started)?
     } else {
-        let options = normalized_options(options);
         empty_search_packet(&envelope.query.canonical_text(), &options)
     };
     if !has_lexical_positive {
-        packet.query_execution.resolved = SearchExecutionLimits::resolved(
-            envelope.requested_limits.as_ref(),
-            options.limit,
-            STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
-        );
+        packet.query_execution.resolved = resolved.clone();
     }
+    ensure_structured_deadline(started, &packet.query_execution)?;
     packet.query = envelope.query.canonical_text();
     packet.query_spec = Some(envelope.query.clone());
     let analyzed_tokens = envelope
@@ -184,13 +184,11 @@ pub fn search_packet_envelope(
     packet
         .query_execution
         .consumed
-        .largest_analyzed_tokens_per_clause =
-        analyzed_tokens.into_iter().max().unwrap_or_default();
+        .largest_analyzed_tokens_per_clause = analyzed_tokens.into_iter().max().unwrap_or_default();
     packet.query_execution.requested_result_limit = options.limit;
     packet.query_execution.result_limit = packet.query_execution.resolved.results;
     packet.query_execution.max_result_limit = ctx_protocol::SEARCH_MAX_RESULTS;
-    packet.query_execution.semantic.attempted =
-        semantic_required || automatic_rerank_requested;
+    packet.query_execution.semantic.attempted = semantic_required || automatic_rerank_requested;
     packet.query_execution.semantic.required = semantic_required;
     packet.query_execution.semantic.readiness = readiness;
     packet.query_execution.semantic.backend = semantic.and_then(|input| input.backend.clone());
@@ -201,8 +199,11 @@ pub fn search_packet_envelope(
     packet.query_execution.semantic.candidates_supplied = supplied_candidates;
     packet.query_execution.semantic.coverage.indexed_documents =
         semantic.and_then(|input| input.indexed_documents);
-    packet.query_execution.semantic.coverage.searchable_documents =
-        semantic.and_then(|input| input.searchable_documents);
+    packet
+        .query_execution
+        .semantic
+        .coverage
+        .searchable_documents = semantic.and_then(|input| input.searchable_documents);
 
     let semantic_enabled = readiness == SearchSemanticReadiness::Ready
         && (semantic_required || automatic_rerank_requested);
@@ -226,13 +227,31 @@ pub fn search_packet_envelope(
                     .query_execution
                     .resolved
                     .retained_candidate_ids
-                    .saturating_sub(
-                        packet
-                            .query_execution
-                            .consumed
-                            .retained_candidate_ids,
-                    ),
+                    .saturating_sub(packet.query_execution.consumed.retained_candidate_ids),
             );
+        let semantic_allocation = if semantic_required && options.filters.file.is_some() {
+            semantic_allocation
+                .min(
+                    packet
+                        .query_execution
+                        .resolved
+                        .candidate_rows
+                        .saturating_sub(packet.query_execution.consumed.candidate_rows)
+                        .saturating_sub(1)
+                        / 5,
+                )
+                .min(
+                    packet
+                        .query_execution
+                        .resolved
+                        .retained_candidate_ids
+                        .saturating_sub(packet.query_execution.consumed.retained_candidate_ids)
+                        / 2,
+                )
+        } else {
+            semantic_allocation
+        };
+        ensure_structured_deadline(started, &packet.query_execution)?;
         let semantic_ids = input
             .candidates
             .iter()
@@ -245,6 +264,7 @@ pub fn search_packet_envelope(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        ensure_structured_deadline(started, &packet.query_execution)?;
         packet.query_execution.semantic.eligible_candidates = semantic_ids.len();
         packet.query_execution.semantic.candidates_consumed = semantic_ids.len();
         packet
@@ -271,13 +291,17 @@ pub fn search_packet_envelope(
             merge_explicit_semantic_candidates(
                 store,
                 &envelope.query,
-                options,
+                &options,
                 &semantic_ids,
                 &mut packet,
+                started,
+                has_lexical_positive,
             )?;
         } else {
             rerank_automatic_semantic_candidates(&semantic_ids, &mut packet);
+            packet.query_execution.candidate_strategy = "rrf_rerank_lexical_semantic".to_owned();
         }
+        ensure_structured_deadline(started, &packet.query_execution)?;
     }
     packet.query_execution.semantic.effective_backend = match (
         has_lexical_positive,
@@ -319,9 +343,7 @@ pub fn search_packet_envelope(
         {
             Some(ctx_protocol::SearchSemanticSkipReason::NoLexicalCandidates)
         }
-        SearchSemanticReadiness::NotReady => {
-            Some(ctx_protocol::SearchSemanticSkipReason::NotReady)
-        }
+        SearchSemanticReadiness::NotReady => Some(ctx_protocol::SearchSemanticSkipReason::NotReady),
         SearchSemanticReadiness::Unsupported => {
             Some(ctx_protocol::SearchSemanticSkipReason::Unsupported)
         }
@@ -358,10 +380,7 @@ pub fn search_packet_envelope(
                 .semantic
                 .incompleteness_reasons
                 .push("semantic_coverage_incomplete".to_owned());
-            push_truncation_reason(
-                &mut packet.query_execution,
-                "semantic_coverage_incomplete",
-            );
+            push_truncation_reason(&mut packet.query_execution, "semantic_coverage_incomplete");
         }
         if let Some(reason) = packet.query_execution.semantic.skip_reason {
             packet
@@ -370,15 +389,23 @@ pub fn search_packet_envelope(
                 .incompleteness_reasons
                 .push(format!("semantic_{}", semantic_skip_reason_key(reason)));
         }
+        if !packet
+            .query_execution
+            .semantic
+            .incompleteness_reasons
+            .is_empty()
+            && packet.query_execution.semantic.completeness
+                != ctx_protocol::SearchSemanticCompleteness::Skipped
+        {
+            packet.query_execution.semantic.completeness =
+                ctx_protocol::SearchSemanticCompleteness::Partial;
+        }
     }
-    finalize_structured_packet(&mut packet)?;
+    finalize_structured_packet(&mut packet, started)?;
     Ok(packet)
 }
 
-fn rerank_automatic_semantic_candidates(
-    semantic_ids: &[Uuid],
-    packet: &mut SearchPacket,
-) {
+fn rerank_automatic_semantic_candidates(semantic_ids: &[Uuid], packet: &mut SearchPacket) {
     let semantic_ranks = semantic_ids
         .iter()
         .enumerate()
@@ -420,18 +447,179 @@ fn merge_explicit_semantic_candidates(
     options: &PacketOptions,
     semantic_ids: &[Uuid],
     packet: &mut SearchPacket,
+    started: Instant,
+    has_lexical_branch: bool,
 ) -> Result<()> {
     let resolved = packet.query_execution.resolved.clone();
-    // This store seam must use the canonical lookup first and then exact-ID
-    // canonical-row fallback for missing legacy lookup entries. Both reads
-    // must apply provider-publication visibility fences and the supplied byte
-    // limits; it must never trigger a projection rebuild.
-    let remaining_residual_rows = resolved
-        .residual_rows
-        .saturating_sub(packet.query_execution.consumed.residual_rows);
-    let remaining_verification_bytes = resolved
-        .verification_bytes
-        .saturating_sub(packet.query_execution.consumed.verification_bytes);
+    let semantic_ranks = semantic_ids
+        .iter()
+        .enumerate()
+        .map(|(rank, event_id)| (*event_id, rank))
+        .collect::<BTreeMap<_, _>>();
+    let requires_hard_text_verification = !query.must.is_empty() || !query.must_not.is_empty();
+    let mut verified_scores = if requires_hard_text_verification {
+        let remaining_residual_rows = resolved
+            .residual_rows
+            .saturating_sub(packet.query_execution.consumed.residual_rows);
+        let remaining_verification_bytes = resolved
+            .verification_bytes
+            .saturating_sub(packet.query_execution.consumed.verification_bytes);
+        if remaining_residual_rows == 0 || remaining_verification_bytes == 0 {
+            packet.query_execution.verification_dropped = packet
+                .query_execution
+                .verification_dropped
+                .saturating_add(semantic_ids.len());
+            push_truncation_reason(&mut packet.query_execution, "verification_bytes_budget");
+            Vec::new()
+        } else {
+            ensure_structured_deadline(started, &packet.query_execution)?;
+            let remaining = remaining_structured_time(started, &packet.query_execution)?;
+            let previews = bounded_store_lookup(
+                store.event_search_previews_by_ids_bounded_visible(
+                    semantic_ids,
+                    semantic_ids.len().min(remaining_residual_rows),
+                    remaining_verification_bytes,
+                    resolved
+                        .verification_lookup_bytes
+                        .min(remaining_verification_bytes),
+                    remaining,
+                ),
+                started,
+                &packet.query_execution,
+            )?;
+            ensure_structured_deadline(started, &packet.query_execution)?;
+            let missing_previews = semantic_ids.len().saturating_sub(previews.len());
+            if missing_previews > 0 {
+                packet.query_execution.verification_dropped = packet
+                    .query_execution
+                    .verification_dropped
+                    .saturating_add(missing_previews);
+                push_truncation_reason(
+                    &mut packet.query_execution,
+                    "verification_preview_unavailable",
+                );
+                push_semantic_incompleteness_reason(
+                    &mut packet.query_execution,
+                    "verification_preview_unavailable",
+                );
+            }
+            let mut scores = Vec::with_capacity(previews.len());
+            for preview in previews {
+                ensure_structured_deadline(started, &packet.query_execution)?;
+                let bytes = preview.preview.len();
+                packet.query_execution.consumed.residual_rows = packet
+                    .query_execution
+                    .consumed
+                    .residual_rows
+                    .saturating_add(1);
+                packet.query_execution.consumed.verification_bytes = packet
+                    .query_execution
+                    .consumed
+                    .verification_bytes
+                    .saturating_add(bytes);
+                packet
+                    .query_execution
+                    .consumed
+                    .largest_verification_lookup_bytes = packet
+                    .query_execution
+                    .consumed
+                    .largest_verification_lookup_bytes
+                    .max(bytes);
+                if !preview.is_complete {
+                    packet.query_execution.verification_dropped = packet
+                        .query_execution
+                        .verification_dropped
+                        .saturating_add(1);
+                    push_truncation_reason(
+                        &mut packet.query_execution,
+                        "verification_preview_incomplete",
+                    );
+                    push_semantic_incompleteness_reason(
+                        &mut packet.query_execution,
+                        "verification_preview_incomplete",
+                    );
+                    continue;
+                }
+                if !query
+                    .must
+                    .iter()
+                    .all(|clause| clause_matches_text(clause, &preview.preview))
+                    || query
+                        .must_not
+                        .iter()
+                        .any(|clause| clause_matches_text(clause, &preview.preview))
+                {
+                    packet.query_execution.verification_dropped = packet
+                        .query_execution
+                        .verification_dropped
+                        .saturating_add(1);
+                    continue;
+                }
+                if let Some(rank) = semantic_ranks.get(&preview.event_id).copied() {
+                    scores.push((preview.event_id, rank as f64));
+                }
+            }
+            scores
+        }
+    } else {
+        semantic_ids
+            .iter()
+            .enumerate()
+            .map(|(rank, event_id)| (*event_id, rank as f64))
+            .collect::<Vec<_>>()
+    };
+
+    let bounded_file_records = if let Some(file) = options.filters.file.as_deref() {
+        let remaining_candidate_rows = resolved
+            .candidate_rows
+            .saturating_sub(packet.query_execution.consumed.candidate_rows);
+        let remaining_retained_ids = resolved
+            .retained_candidate_ids
+            .saturating_sub(packet.query_execution.consumed.retained_candidate_ids);
+        let file_limit = verified_scores
+            .len()
+            .min(remaining_retained_ids)
+            .min(remaining_candidate_rows.saturating_sub(1) / 4);
+        if file_limit == 0 {
+            packet.query_execution.filter_verification_dropped = packet
+                .query_execution
+                .filter_verification_dropped
+                .saturating_add(verified_scores.len());
+            packet.query_execution.candidate_budget_exhausted = true;
+            push_truncation_reason(&mut packet.query_execution, "file_candidate_rows_budget");
+            verified_scores.clear();
+            Some(BTreeSet::new())
+        } else {
+            let remaining = remaining_structured_time(started, &packet.query_execution)?;
+            let batch = store.search_file_record_candidates_scoped(
+                file,
+                &file_candidate_scope(&options.filters),
+                file_limit,
+                remaining,
+            )?;
+            if batch.timed_out {
+                return Err(structured_timeout_error(started, &packet.query_execution));
+            }
+            packet.query_execution.consumed.candidate_rows = packet
+                .query_execution
+                .consumed
+                .candidate_rows
+                .saturating_add(batch.examined);
+            packet.query_execution.consumed.retained_candidate_ids = packet
+                .query_execution
+                .consumed
+                .retained_candidate_ids
+                .saturating_add(batch.record_ids.len());
+            if batch.truncated {
+                packet.query_execution.candidate_budget_exhausted = true;
+                push_truncation_reason(&mut packet.query_execution, "file_candidate_rows_budget");
+            }
+            Some(batch.record_ids.into_iter().collect::<BTreeSet<_>>())
+        }
+    } else {
+        None
+    };
+
     let remaining_hydrated_rows = resolved
         .hydrated_rows
         .saturating_sub(packet.query_execution.consumed.hydrated_rows);
@@ -442,104 +630,74 @@ fn merge_explicit_semantic_candidates(
             .hydration_input_bytes
             .saturating_add(packet.query_execution.consumed.snippet_input_bytes),
     );
-    let hits = if remaining_residual_rows == 0
-        || remaining_verification_bytes == 0
-        || remaining_hydrated_rows == 0
-        || remaining_input_bytes == 0
-    {
+    let hits = if remaining_hydrated_rows == 0 || remaining_input_bytes == 0 {
         Vec::new()
     } else {
-        store.semantic_event_hits_by_ids_bounded_visible(
-            semantic_ids,
-            remaining_residual_rows,
-            remaining_verification_bytes,
-            resolved.verification_lookup_bytes,
-            remaining_hydrated_rows,
-            remaining_input_bytes,
-            resolved.hydration_input_bytes_per_event,
+        ensure_structured_deadline(started, &packet.query_execution)?;
+        let remaining = remaining_structured_time(started, &packet.query_execution)?;
+        bounded_store_lookup(
+            store.event_search_hits_by_scores_bounded_visible(
+                &verified_scores,
+                remaining_hydrated_rows,
+                remaining_input_bytes,
+                resolved
+                    .hydration_input_bytes_per_event
+                    .min(remaining_input_bytes),
+                remaining,
+            ),
+            started,
+            &packet.query_execution,
         )?
     };
-    let file_scope = file_filter_scope(store, &options.filters)?;
+    ensure_structured_deadline(started, &packet.query_execution)?;
+    let semantic_query = query.canonical_positive_text();
     let mut semantic_results = Vec::new();
-    for (rank, hit) in hits.into_iter().enumerate() {
+    for hit in hits {
+        ensure_structured_deadline(started, &packet.query_execution)?;
         if !consume_hydration_input(&mut packet.query_execution, hit.input_bytes()) {
             continue;
         }
-        let verification_bytes = hit.preview.len();
-        if verification_bytes > resolved.verification_lookup_bytes
-            || packet
+        let matches_file = bounded_file_records.as_ref().is_none_or(|record_ids| {
+            hit.history_record_id
+                .is_some_and(|record_id| record_ids.contains(&record_id))
+        });
+        if !matches_file || !event_hit_matches_filters(&hit, &options.filters, None) {
+            packet.query_execution.filter_verification_dropped = packet
                 .query_execution
-                .consumed
-                .verification_bytes
-                .saturating_add(verification_bytes)
-                > resolved.verification_bytes
-        {
-            packet.query_execution.verification_dropped = packet
-                .query_execution
-                .verification_dropped
-                .saturating_add(1);
-            push_truncation_reason(
-                &mut packet.query_execution,
-                "verification_bytes_budget",
-            );
-            continue;
-        }
-        packet.query_execution.consumed.residual_rows = packet
-            .query_execution
-            .consumed
-            .residual_rows
-            .saturating_add(1)
-            .min(resolved.residual_rows);
-        packet.query_execution.consumed.verification_bytes = packet
-            .query_execution
-            .consumed
-            .verification_bytes
-            .saturating_add(verification_bytes);
-        packet
-            .query_execution
-            .consumed
-            .largest_verification_lookup_bytes = packet
-            .query_execution
-            .consumed
-            .largest_verification_lookup_bytes
-            .max(verification_bytes);
-        if !query
-            .must
-            .iter()
-            .all(|clause| clause_matches_text(clause, &hit.preview))
-            || query
-                .must_not
-                .iter()
-                .any(|clause| clause_matches_text(clause, &hit.preview))
-            || !event_hit_matches_filters(&hit, &options.filters, file_scope.as_ref())
-        {
-            packet.query_execution.verification_dropped = packet
-                .query_execution
-                .verification_dropped
+                .filter_verification_dropped
                 .saturating_add(1);
             continue;
         }
         if !consume_snippet_input(&mut packet.query_execution, hit.preview.len()) {
             continue;
         }
-        let mut result = event_search_result(
-            &hit,
-            &query.canonical_positive_text(),
-            options.snippet_chars,
-        );
-        result.rank = reciprocal_rank(rank.saturating_add(1));
+        let mut result = event_search_result(&hit, &semantic_query, options.snippet_chars);
         push_unique_why(&mut result.why_matched, "semantic_similarity".to_owned());
-        semantic_results.push(result);
+        let rank = semantic_ranks
+            .get(&hit.event_id)
+            .copied()
+            .unwrap_or(usize::MAX);
+        semantic_results.push((rank, result));
     }
+    semantic_results.sort_by_key(|(rank, _)| *rank);
+    let mut seen_semantic_keys = BTreeSet::new();
+    let semantic_results = semantic_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .filter(|result| {
+            seen_semantic_keys.insert(search_result_merge_key(result, options.result_mode))
+        })
+        .collect::<Vec<_>>();
     let used = semantic_results.len();
+    let lexical_results = packet.results.drain(..).collect::<Vec<_>>();
+    packet.query_execution.candidate_strategy = if has_lexical_branch {
+        "rrf_union_lexical_semantic".to_owned()
+    } else {
+        "semantic_rank_bounded".to_owned()
+    };
     let mut combined = Vec::<SearchPacketResult>::new();
     let mut index_by_key = BTreeMap::<Uuid, usize>::new();
-    for (rank, mut result) in packet
-        .results
-        .drain(..)
-        .chain(semantic_results)
-        .enumerate()
-    {
+    for (rank, mut result) in lexical_results.into_iter().enumerate() {
         let key = search_result_merge_key(&result, options.result_mode);
         let contribution = reciprocal_rank(rank.saturating_add(1));
         if let Some(index) = index_by_key.get(&key).copied() {
@@ -551,6 +709,19 @@ fn merge_explicit_semantic_candidates(
             combined.push(result);
         }
     }
+    for (rank, mut result) in semantic_results.into_iter().enumerate() {
+        let key = search_result_merge_key(&result, options.result_mode);
+        let contribution = reciprocal_rank(rank.saturating_add(1));
+        if let Some(index) = index_by_key.get(&key).copied() {
+            combined[index].rank += contribution;
+            merge_search_result(&mut combined[index], result);
+        } else {
+            result.rank = contribution;
+            index_by_key.insert(key, combined.len());
+            combined.push(result);
+        }
+    }
+    ensure_structured_deadline(started, &packet.query_execution)?;
     combined.sort_by(compare_search_results);
     if combined.len() > resolved.results {
         combined.truncate(resolved.results);
@@ -562,11 +733,19 @@ fn merge_explicit_semantic_candidates(
     Ok(())
 }
 
-fn finalize_structured_packet(packet: &mut SearchPacket) -> Result<()> {
+fn finalize_structured_packet(packet: &mut SearchPacket, started: Instant) -> Result<()> {
+    ensure_structured_deadline(started, &packet.query_execution)?;
+    if packet.results.len() > packet.query_execution.resolved.results {
+        packet
+            .results
+            .truncate(packet.query_execution.resolved.results);
+        push_truncation_reason(&mut packet.query_execution, "result_limit");
+    }
     let text_budget = packet.query_execution.resolved.returned_text_bytes;
     let mut retained = Vec::with_capacity(packet.results.len());
     let mut text_bytes = 0usize;
     for result in packet.results.drain(..) {
+        ensure_structured_deadline(started, &packet.query_execution)?;
         let bytes = result.title.len().saturating_add(result.snippet.len());
         if text_bytes.saturating_add(bytes) > text_budget {
             push_truncation_reason(&mut packet.query_execution, "returned_text_bytes");
@@ -580,16 +759,16 @@ fn finalize_structured_packet(packet: &mut SearchPacket) -> Result<()> {
     packet.query_execution.consumed.returned_text_bytes = text_bytes;
 
     loop {
+        ensure_structured_deadline(started, &packet.query_execution)?;
+        packet.query_execution.consumed.elapsed_ms =
+            started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         packet.query_execution.truncated = !packet.query_execution.truncation_reasons.is_empty();
         if packet.query_execution.truncated {
             packet.truncation.truncated = true;
             packet.truncation.omitted_results = packet.truncation.omitted_results.max(1);
             if packet.truncation.reason.is_none() {
-                packet.truncation.reason = packet
-                    .query_execution
-                    .truncation_reasons
-                    .first()
-                    .cloned();
+                packet.truncation.reason =
+                    packet.query_execution.truncation_reasons.first().cloned();
             }
         }
         let mut bytes = 0usize;
@@ -607,6 +786,7 @@ fn finalize_structured_packet(packet: &mut SearchPacket) -> Result<()> {
         let bytes = serde_json::to_vec(packet)?.len();
         packet.query_execution.consumed.serialized_response_bytes = bytes;
         if bytes <= packet.query_execution.resolved.serialized_response_bytes {
+            ensure_structured_deadline(started, &packet.query_execution)?;
             break;
         }
         let Some(removed) = packet.results.pop() else {
@@ -620,6 +800,7 @@ fn finalize_structured_packet(packet: &mut SearchPacket) -> Result<()> {
             .returned_text_bytes
             .saturating_sub(removed.title.len().saturating_add(removed.snippet.len()));
         packet.query_execution.consumed.returned_results = packet.results.len();
+        packet.pagination.has_more = true;
         push_truncation_reason(&mut packet.query_execution, "serialized_response_bytes");
     }
     Ok(())
@@ -629,16 +810,17 @@ fn search_packet_query_lexical(
     store: &Store,
     query: &SearchQueryV1,
     options: &PacketOptions,
-    requested_limits: Option<&SearchExecutionLimits>,
+    resolved: &SearchExecutionLimits,
+    started: Instant,
 ) -> Result<SearchPacket> {
-    let started = Instant::now();
     let query = query.clone().canonicalized()?;
-    let options = normalized_options(options);
-    let resolved = SearchExecutionLimits::resolved(
-        requested_limits,
-        options.limit,
-        STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
-    );
+    ensure_structured_deadline(
+        started,
+        &SearchExecutionDiagnostics {
+            resolved: resolved.clone(),
+            ..SearchExecutionDiagnostics::default()
+        },
+    )?;
     if let Some(provider) = options.filters.provider {
         if !store.has_provider_data(provider)? {
             let mut packet = empty_search_packet(&render_structured_query(&query), &options);
@@ -659,7 +841,7 @@ fn search_packet_query_lexical(
                 .map(|clause| search_analyzed_token_count(clause.value()))
                 .max()
                 .unwrap_or_default();
-            packet.query_execution.resolved = resolved;
+            packet.query_execution.resolved = resolved.clone();
             packet.query_execution.requested_result_limit = options.limit;
             packet.query_execution.result_limit = packet.query_execution.resolved.results;
             return Ok(packet);
@@ -693,24 +875,22 @@ fn search_packet_query_lexical(
         if has_selective_record_filter || options.result_mode == SearchResultMode::Sessions {
             ctx_history_store::MAX_EVENT_CANDIDATES_PER_CLAUSE
         } else {
-            options.limit.saturating_mul(8).max(256)
+            resolved.results.saturating_mul(8).max(256)
         }
         .min(ctx_history_store::MAX_EVENT_CANDIDATES_PER_CLAUSE);
     // Reserve half of the shared work budget for exact residual verification
     // after bounded candidate retrieval. Candidate branches already intersect
     // must clauses and safe must_not clauses in FTS before the per-branch cap.
-    let row_bounded_per_clause = (resolved.candidate_rows / seeds.len().max(1) / 2)
-        .saturating_sub(1)
-        .max(1);
-    let id_bounded_per_clause =
-        (resolved.retained_candidate_ids / seeds.len().max(1)).max(1);
+    let row_bounded_per_clause =
+        (resolved.candidate_rows / seeds.len().max(1) / 2).saturating_sub(1);
+    let id_bounded_per_clause = resolved.retained_candidate_ids / seeds.len().max(1);
     let per_clause_budget = base_per_clause
-        .min(SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED)
+        .min(resolved.candidates_per_positive_seed)
         .min(row_bounded_per_clause)
         .min(id_bounded_per_clause);
     let search_record_candidates = bounded_record_branch_is_eligible(&options.filters);
     let event_clause_budget = if search_record_candidates {
-        per_clause_budget.saturating_mul(7).div_ceil(8).max(1)
+        per_clause_budget.saturating_mul(7).div_ceil(8)
     } else {
         per_clause_budget
     };
@@ -741,19 +921,25 @@ fn search_packet_query_lexical(
     let mut record_candidates = BTreeMap::<Uuid, StructuredRecordCandidate>::new();
 
     for (seed_index, seed) in seeds.iter().enumerate() {
-        let remaining = STRUCTURED_SEARCH_TIMEOUT.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err(structured_timeout_error(started, &diagnostics));
+        let remaining_candidate_rows = resolved
+            .candidate_rows
+            .saturating_sub(diagnostics.consumed.candidate_rows);
+        let event_query_budget =
+            event_clause_budget.min(remaining_candidate_rows.saturating_sub(1));
+        if event_query_budget == 0 {
+            diagnostics.candidate_budget_exhausted = true;
+            push_truncation_reason(&mut diagnostics, "candidate_rows_budget");
+            break;
         }
+        let remaining = remaining_structured_time(started, &diagnostics)?;
         let batch = store.search_event_candidates_for_branch_scoped(
             seed,
             required,
             &query.must_not,
             &candidate_scope,
-            event_clause_budget,
+            event_query_budget,
             remaining,
         )?;
-        let event_candidate_work = batch.examined.min(per_clause_budget);
         diagnostics.clauses_executed = diagnostics.clauses_executed.saturating_add(1);
         diagnostics.consumed.candidate_rows = diagnostics
             .consumed
@@ -767,9 +953,7 @@ fn search_packet_query_lexical(
             return Err(structured_timeout_error(started, &diagnostics));
         }
         let event_candidate_count = batch.candidates.len();
-        diagnostics
-            .consumed
-            .largest_positive_seed_candidates = diagnostics
+        diagnostics.consumed.largest_positive_seed_candidates = diagnostics
             .consumed
             .largest_positive_seed_candidates
             .max(event_candidate_count);
@@ -794,7 +978,9 @@ fn search_packet_query_lexical(
                 }
                 continue;
             }
-            if candidates.len() >= resolved.retained_candidate_ids {
+            if candidates.len().saturating_add(record_candidates.len())
+                >= resolved.retained_candidate_ids
+            {
                 diagnostics.candidate_budget_exhausted = true;
                 push_truncation_reason(&mut diagnostics, "retained_candidate_ids_budget");
                 continue;
@@ -811,13 +997,16 @@ fn search_packet_query_lexical(
         if !search_record_candidates {
             continue;
         }
-        let remaining = STRUCTURED_SEARCH_TIMEOUT.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err(structured_timeout_error(started, &diagnostics));
+        let record_query_budget = per_clause_budget.saturating_sub(event_candidate_count).min(
+            resolved
+                .candidate_rows
+                .saturating_sub(diagnostics.consumed.candidate_rows)
+                .saturating_sub(1),
+        );
+        if record_query_budget == 0 {
+            continue;
         }
-        let record_query_budget = per_clause_budget
-            .saturating_sub(event_candidate_work)
-            .max(1);
+        let remaining = remaining_structured_time(started, &diagnostics)?;
         let batch = store.search_record_candidates_for_branch(
             seed,
             required,
@@ -836,9 +1025,7 @@ fn search_packet_query_lexical(
         if batch.timed_out {
             return Err(structured_timeout_error(started, &diagnostics));
         }
-        diagnostics
-            .consumed
-            .largest_positive_seed_candidates = diagnostics
+        diagnostics.consumed.largest_positive_seed_candidates = diagnostics
             .consumed
             .largest_positive_seed_candidates
             .max(event_candidate_count.saturating_add(batch.candidates.len()));
@@ -918,75 +1105,86 @@ fn search_packet_query_lexical(
     // Store integration must first use event_search_lookup, then hydrate only
     // missing legacy IDs from canonical event rows under the same provider-
     // publication visibility predicate. Both paths share these hard bounds.
-    let previews = store.event_search_previews_by_ids_bounded_visible(
-        &candidate_ids,
-        resolved.residual_rows,
-        resolved.verification_bytes,
-        resolved.verification_lookup_bytes,
+    let remaining = remaining_structured_time(started, &diagnostics)?;
+    let previews = bounded_store_lookup(
+        store.event_search_previews_by_ids_bounded_visible(
+            &candidate_ids,
+            candidate_ids.len().min(
+                resolved
+                    .residual_rows
+                    .saturating_sub(diagnostics.consumed.residual_rows),
+            ),
+            resolved
+                .verification_bytes
+                .saturating_sub(diagnostics.consumed.verification_bytes),
+            resolved.verification_lookup_bytes.min(
+                resolved
+                    .verification_bytes
+                    .saturating_sub(diagnostics.consumed.verification_bytes),
+            ),
+            remaining,
+        ),
+        started,
+        &diagnostics,
     )?;
     ensure_structured_deadline(started, &diagnostics)?;
-    let has_literal = query
-        .clauses()
-        .any(|clause| matches!(clause, SearchClause::Literal(_)));
-    let mut scored_ids = previews
-        .into_iter()
-        .filter(|preview| {
-            let bytes = preview.preview.len();
-            if bytes > resolved.verification_lookup_bytes
-                || diagnostics
-                    .consumed
-                    .verification_bytes
-                    .saturating_add(bytes)
-                    > resolved.verification_bytes
-            {
-                diagnostics.verification_dropped =
-                    diagnostics.verification_dropped.saturating_add(1);
-                push_truncation_reason(&mut diagnostics, "verification_bytes_budget");
-                return false;
-            }
-            diagnostics.consumed.residual_rows =
-                diagnostics.consumed.residual_rows.saturating_add(1);
-            diagnostics.consumed.verification_bytes = diagnostics
+    let mut scored_ids = Vec::with_capacity(previews.len());
+    for preview in previews {
+        ensure_structured_deadline(started, &diagnostics)?;
+        let bytes = preview.preview.len();
+        if bytes > resolved.verification_lookup_bytes
+            || diagnostics
                 .consumed
                 .verification_bytes
-                .saturating_add(bytes);
-            diagnostics.consumed.largest_verification_lookup_bytes = diagnostics
-                .consumed
-                .largest_verification_lookup_bytes
-                .max(bytes);
+                .saturating_add(bytes)
+                > resolved.verification_bytes
+        {
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
+            push_truncation_reason(&mut diagnostics, "verification_bytes_budget");
+            continue;
+        }
+        diagnostics.consumed.residual_rows = diagnostics.consumed.residual_rows.saturating_add(1);
+        diagnostics.consumed.verification_bytes = diagnostics
+            .consumed
+            .verification_bytes
+            .saturating_add(bytes);
+        diagnostics.consumed.largest_verification_lookup_bytes = diagnostics
+            .consumed
+            .largest_verification_lookup_bytes
+            .max(bytes);
+        if !preview.is_complete {
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
+            push_truncation_reason(&mut diagnostics, "verification_preview_incomplete");
+            continue;
+        }
+        let Some(candidate) = candidates.get(&preview.event_id) else {
+            continue;
+        };
+        let matches_any = if query.any.is_empty() {
             true
-        })
-        .filter_map(|preview| {
-            let candidate = candidates.get(&preview.event_id)?;
-            let matches_any = if query.any.is_empty() {
-                true
-            } else {
-                candidate.seed_matches.iter().any(|seed_index| {
-                    query
-                        .any
-                        .get(*seed_index)
-                        .is_some_and(|clause| clause_matches_text(clause, &preview.preview))
-                })
-            };
-            let matches_must = query
-                .must
-                .iter()
-                .all(|clause| clause_matches_text(clause, &preview.preview));
-            let matches_must_not = query
-                .must_not
-                .iter()
-                .any(|clause| clause_matches_text(clause, &preview.preview));
-            if !matches_any || !matches_must || matches_must_not {
-                if has_literal {
-                    diagnostics.verification_dropped =
-                        diagnostics.verification_dropped.saturating_add(1);
-                }
-                return None;
-            }
-            // EventSearchHit historically treats a lower score as better.
-            Some((preview.event_id, -candidate.reciprocal_rank_score))
-        })
-        .collect::<Vec<_>>();
+        } else {
+            candidate.seed_matches.iter().any(|seed_index| {
+                query
+                    .any
+                    .get(*seed_index)
+                    .is_some_and(|clause| clause_matches_text(clause, &preview.preview))
+            })
+        };
+        let matches_must = query
+            .must
+            .iter()
+            .all(|clause| clause_matches_text(clause, &preview.preview));
+        let matches_must_not = query
+            .must_not
+            .iter()
+            .any(|clause| clause_matches_text(clause, &preview.preview));
+        if !matches_any || !matches_must || matches_must_not {
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
+            continue;
+        }
+        // EventSearchHit historically treats a lower score as better.
+        scored_ids.push((preview.event_id, -candidate.reciprocal_rank_score));
+    }
     scored_ids.sort_by(|left, right| {
         left.1
             .partial_cmp(&right.1)
@@ -996,7 +1194,7 @@ fn search_packet_query_lexical(
     let full_hydration_budget = (if options.result_mode == SearchResultMode::Sessions {
         event_clause_budget
     } else {
-        options.limit.saturating_mul(32).clamp(512, 2_048)
+        resolved.results.saturating_mul(32).clamp(512, 2_048)
     })
     .min(resolved.hydrated_rows);
     if scored_ids.len() > full_hydration_budget {
@@ -1004,11 +1202,19 @@ fn search_packet_query_lexical(
         diagnostics.candidate_budget_exhausted = true;
         push_truncation_reason(&mut diagnostics, "compact_hydration_budget");
     }
-    let mut hits = store.event_search_hits_by_scores_compact_bounded_visible(
-        &scored_ids,
-        resolved.hydrated_rows,
-        resolved.hydration_input_bytes,
-        resolved.hydration_input_bytes_per_event,
+    let remaining = remaining_structured_time(started, &diagnostics)?;
+    let mut hits = bounded_store_lookup(
+        store.event_search_hits_by_scores_compact_bounded_visible(
+            &scored_ids,
+            resolved.hydrated_rows,
+            resolved.hydration_input_bytes,
+            resolved
+                .hydration_input_bytes_per_event
+                .min(resolved.hydration_input_bytes),
+            remaining,
+        ),
+        started,
+        &diagnostics,
     )?;
     ensure_structured_deadline(started, &diagnostics)?;
     hits.retain(|hit| consume_hydration_input(&mut diagnostics, hit.input_bytes()));
@@ -1074,29 +1280,59 @@ fn search_packet_query_lexical(
     let mut record_results = Vec::new();
     for (record_id, reciprocal_rank_score, _, _) in record_ids {
         ensure_structured_deadline(started, &diagnostics)?;
-        let document = store.get_record_search_document(record_id)?;
+        let remaining_verification_bytes = resolved
+            .verification_bytes
+            .saturating_sub(diagnostics.consumed.verification_bytes);
+        let remaining_residual_rows = resolved
+            .residual_rows
+            .saturating_sub(diagnostics.consumed.residual_rows);
+        if remaining_verification_bytes == 0 || remaining_residual_rows == 0 {
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
+            push_truncation_reason(&mut diagnostics, "verification_bytes_budget");
+            continue;
+        }
+        let record_lookup_limit = resolved
+            .verification_lookup_bytes
+            .min(remaining_verification_bytes);
+        let remaining = remaining_structured_time(started, &diagnostics)?;
+        let document = bounded_store_lookup(
+            store.get_record_search_document_bounded(record_id, record_lookup_limit, remaining),
+            started,
+            &diagnostics,
+        )?;
         ensure_structured_deadline(started, &diagnostics)?;
         let Some(document) = document else {
             continue;
         };
-        let record = document.into_history_record();
-        let record_input_bytes = record
+        let record_input_bytes = document
             .title
             .len()
-            .saturating_add(record.body.len())
-            .saturating_add(record.tags.iter().map(String::len).sum::<usize>())
-            .saturating_add(record.kind.len())
-            .saturating_add(record.workspace.as_deref().map_or(0, str::len));
+            .saturating_add(document.body.len())
+            .saturating_add(document.tag_text.len())
+            .saturating_add(document.kind.len())
+            .saturating_add(document.workspace.as_deref().map_or(0, str::len));
+        diagnostics.consumed.residual_rows = diagnostics.consumed.residual_rows.saturating_add(1);
+        diagnostics.consumed.verification_bytes = diagnostics
+            .consumed
+            .verification_bytes
+            .saturating_add(record_input_bytes);
+        diagnostics.consumed.largest_verification_lookup_bytes = diagnostics
+            .consumed
+            .largest_verification_lookup_bytes
+            .max(record_input_bytes);
+        if !document.is_complete {
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
+            push_truncation_reason(&mut diagnostics, "verification_preview_incomplete");
+            continue;
+        }
+        let record = document.into_history_record()?;
         if !consume_hydration_input(&mut diagnostics, record_input_bytes) {
             continue;
         }
         let matches_query = record_matches_structured_query(&record, &query);
         ensure_structured_deadline(started, &diagnostics)?;
         if !matches_query {
-            if has_literal {
-                diagnostics.verification_dropped =
-                    diagnostics.verification_dropped.saturating_add(1);
-            }
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
             continue;
         }
         let candidate = candidate_for_bounded_record(record, &scoring_terms, &options.filters);
@@ -1115,7 +1351,7 @@ fn search_packet_query_lexical(
         ensure_structured_deadline(started, &diagnostics)?;
         record_results.push(result);
     }
-    let target_results = options.limit.saturating_add(1);
+    let target_results = resolved.results.saturating_add(1);
     let mut results = Vec::<SearchPacketResult>::new();
     let mut result_index = BTreeMap::<Uuid, usize>::new();
     for hit in &verified_hits {
@@ -1156,9 +1392,9 @@ fn search_packet_query_lexical(
         }
     }
 
-    let result_limit_exhausted = results.len() > options.limit;
+    let result_limit_exhausted = results.len() > resolved.results;
     if result_limit_exhausted {
-        results.truncate(options.limit);
+        results.truncate(resolved.results);
         push_truncation_reason(&mut diagnostics, "result_limit");
     }
     let final_event_scores = results
@@ -1176,30 +1412,38 @@ fn search_packet_query_lexical(
     let remaining_hydration_rows = resolved
         .hydrated_rows
         .saturating_sub(diagnostics.consumed.hydrated_rows);
-    let remaining_hydration_bytes = resolved
-        .hydration_input_bytes
-        .saturating_sub(
-            diagnostics
-                .consumed
-                .hydration_input_bytes
-                .saturating_add(diagnostics.consumed.snippet_input_bytes),
-        );
+    let remaining_hydration_bytes = resolved.hydration_input_bytes.saturating_sub(
+        diagnostics
+            .consumed
+            .hydration_input_bytes
+            .saturating_add(diagnostics.consumed.snippet_input_bytes),
+    );
     let mut full_hits = if remaining_hydration_rows == 0 || remaining_hydration_bytes == 0 {
         Vec::new()
     } else {
-        store.event_search_hits_by_scores_bounded_visible(
-            &final_event_scores,
-            remaining_hydration_rows,
-            remaining_hydration_bytes,
-            resolved.hydration_input_bytes_per_event,
+        let remaining = remaining_structured_time(started, &diagnostics)?;
+        bounded_store_lookup(
+            store.event_search_hits_by_scores_bounded_visible(
+                &final_event_scores,
+                remaining_hydration_rows,
+                remaining_hydration_bytes,
+                resolved
+                    .hydration_input_bytes_per_event
+                    .min(remaining_hydration_bytes),
+                remaining,
+            ),
+            started,
+            &diagnostics,
         )?
     };
+    ensure_structured_deadline(started, &diagnostics)?;
     full_hits.retain(|hit| consume_hydration_input(&mut diagnostics, hit.input_bytes()));
     let full_hits = full_hits
         .into_iter()
         .map(|hit| (hit.event_id, hit))
         .collect::<BTreeMap<_, _>>();
     for result in &mut results {
+        ensure_structured_deadline(started, &diagnostics)?;
         let Some(hit) = result
             .event_id
             .and_then(|event_id| full_hits.get(&event_id))
@@ -1256,6 +1500,57 @@ fn push_truncation_reason(diagnostics: &mut SearchExecutionDiagnostics, reason: 
     }
 }
 
+fn push_semantic_incompleteness_reason(diagnostics: &mut SearchExecutionDiagnostics, reason: &str) {
+    if !diagnostics
+        .semantic
+        .incompleteness_reasons
+        .iter()
+        .any(|existing| existing == reason)
+    {
+        diagnostics
+            .semantic
+            .incompleteness_reasons
+            .push(reason.to_owned());
+    }
+}
+
+fn validate_resolved_query_limits(
+    query: &SearchQuery,
+    resolved: &SearchExecutionLimits,
+) -> Result<()> {
+    let clause_count = query.clause_count();
+    if clause_count > resolved.clauses {
+        return Err(SearchQueryError::TooManyClauses {
+            actual: clause_count,
+            maximum: resolved.clauses,
+        }
+        .into());
+    }
+    let query_bytes = query
+        .clauses()
+        .map(|clause| clause.value().len())
+        .sum::<usize>();
+    if query_bytes > resolved.query_bytes {
+        return Err(SearchQueryError::QueryTooLong {
+            actual: query_bytes,
+            maximum: resolved.query_bytes,
+        }
+        .into());
+    }
+    for clause in query.clauses() {
+        let analyzed_tokens = search_analyzed_token_count(clause.value());
+        if analyzed_tokens > resolved.analyzed_tokens_per_clause {
+            return Err(SearchQueryError::TooManyAnalyzedTokens {
+                kind: clause.kind(),
+                actual: analyzed_tokens,
+                maximum: resolved.analyzed_tokens_per_clause,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn semantic_skip_reason_key(reason: ctx_protocol::SearchSemanticSkipReason) -> &'static str {
     match reason {
         ctx_protocol::SearchSemanticSkipReason::Disabled => "disabled",
@@ -1263,9 +1558,7 @@ fn semantic_skip_reason_key(reason: ctx_protocol::SearchSemanticSkipReason) -> &
         ctx_protocol::SearchSemanticSkipReason::NotReady => "not_ready",
         ctx_protocol::SearchSemanticSkipReason::Unsupported => "unsupported",
         ctx_protocol::SearchSemanticSkipReason::NoLexicalCandidates => "no_lexical_candidates",
-        ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible => {
-            "query_shape_not_eligible"
-        }
+        ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible => "query_shape_not_eligible",
     }
 }
 
@@ -1285,8 +1578,7 @@ fn consume_hydration_input(
         push_truncation_reason(diagnostics, "hydration_input_budget");
         return false;
     }
-    diagnostics.consumed.hydrated_rows =
-        diagnostics.consumed.hydrated_rows.saturating_add(1);
+    diagnostics.consumed.hydrated_rows = diagnostics.consumed.hydrated_rows.saturating_add(1);
     diagnostics.consumed.hydration_input_bytes = diagnostics
         .consumed
         .hydration_input_bytes
@@ -1298,10 +1590,35 @@ fn consume_hydration_input(
     true
 }
 
-fn consume_snippet_input(
+fn consume_additional_hydration_input(
     diagnostics: &mut SearchExecutionDiagnostics,
-    event_bytes: usize,
+    existing_event_bytes: usize,
+    input_bytes: usize,
 ) -> bool {
+    let combined_event_bytes = existing_event_bytes.saturating_add(input_bytes);
+    if combined_event_bytes > diagnostics.resolved.hydration_input_bytes_per_event
+        || diagnostics
+            .consumed
+            .hydration_input_bytes
+            .saturating_add(diagnostics.consumed.snippet_input_bytes)
+            .saturating_add(input_bytes)
+            > diagnostics.resolved.hydration_input_bytes
+    {
+        push_truncation_reason(diagnostics, "hydration_input_budget");
+        return false;
+    }
+    diagnostics.consumed.hydration_input_bytes = diagnostics
+        .consumed
+        .hydration_input_bytes
+        .saturating_add(input_bytes);
+    diagnostics.consumed.largest_hydration_input_bytes = diagnostics
+        .consumed
+        .largest_hydration_input_bytes
+        .max(combined_event_bytes);
+    true
+}
+
+fn consume_snippet_input(diagnostics: &mut SearchExecutionDiagnostics, event_bytes: usize) -> bool {
     if event_bytes > diagnostics.resolved.hydration_input_bytes_per_event
         || diagnostics
             .consumed
@@ -1331,7 +1648,7 @@ fn structured_timeout_error(
     diagnostics.truncated = true;
     push_truncation_reason(&mut diagnostics, "elapsed_time_budget");
     crate::query::SearchError::TimedOut {
-        timeout_ms: STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
+        timeout_ms: diagnostics.resolved.elapsed_ms,
         diagnostics: Box::new(diagnostics),
     }
 }
@@ -1340,10 +1657,32 @@ fn ensure_structured_deadline(
     started: Instant,
     diagnostics: &SearchExecutionDiagnostics,
 ) -> Result<()> {
-    if started.elapsed() >= STRUCTURED_SEARCH_TIMEOUT {
+    if started.elapsed() >= Duration::from_millis(diagnostics.resolved.elapsed_ms) {
         return Err(structured_timeout_error(started, diagnostics));
     }
     Ok(())
+}
+
+fn remaining_structured_time(
+    started: Instant,
+    diagnostics: &SearchExecutionDiagnostics,
+) -> Result<Duration> {
+    ensure_structured_deadline(started, diagnostics)?;
+    Ok(Duration::from_millis(diagnostics.resolved.elapsed_ms).saturating_sub(started.elapsed()))
+}
+
+fn bounded_store_lookup<T>(
+    result: std::result::Result<T, StoreError>,
+    started: Instant,
+    diagnostics: &SearchExecutionDiagnostics,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(StoreError::BoundedSearchTimedOut { .. }) => {
+            Err(structured_timeout_error(started, diagnostics))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn render_structured_query(query: &SearchQueryV1) -> String {
@@ -1468,95 +1807,168 @@ pub fn search_packet_file_filter(store: &Store, options: &PacketOptions) -> Resu
 fn bounded_file_search_packet(store: &Store, options: &PacketOptions) -> Result<SearchPacket> {
     let started = Instant::now();
     let options = normalized_options(options);
-    let Some(file) = options.filters.file.as_deref() else {
-        return Ok(empty_search_packet("", &options));
+    let resolved = SearchExecutionLimits::resolved(
+        None,
+        options.limit,
+        STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
+    );
+    let file_candidate_limit = resolved
+        .candidates_per_positive_seed
+        .min(resolved.retained_candidate_ids)
+        .min(resolved.candidate_rows.saturating_sub(1) / 4);
+    let mut diagnostics = SearchExecutionDiagnostics {
+        candidate_strategy: "indexed_file_touch_bounded".to_owned(),
+        resolved,
+        per_branch_candidate_rows: file_candidate_limit,
+        ..SearchExecutionDiagnostics::default()
     };
+    let Some(file) = options.filters.file.as_deref() else {
+        let mut packet = empty_search_packet("", &options);
+        packet.query_execution = diagnostics;
+        finalize_structured_packet(&mut packet, started)?;
+        return Ok(packet);
+    };
+    if file_candidate_limit == 0 {
+        diagnostics.candidate_budget_exhausted = true;
+        push_truncation_reason(&mut diagnostics, "file_candidate_rows_budget");
+        let mut packet = empty_search_packet("", &options);
+        packet.query_execution = diagnostics;
+        finalize_structured_packet(&mut packet, started)?;
+        return Ok(packet);
+    };
+    let remaining = remaining_structured_time(started, &diagnostics)?;
     let batch = store.search_file_record_candidates_scoped(
         file,
         &file_candidate_scope(&options.filters),
-        options.limit.saturating_add(1),
-        STRUCTURED_SEARCH_TIMEOUT,
+        file_candidate_limit,
+        remaining,
     )?;
+    diagnostics.consumed.candidate_rows = batch.examined;
+    diagnostics.consumed.retained_candidate_ids = batch.record_ids.len();
     if batch.timed_out {
-        let diagnostics = SearchExecutionDiagnostics {
-            candidate_strategy: "indexed_file_touch_bounded".to_owned(),
-            resolved: SearchExecutionLimits::resolved(
-                None,
-                options.limit,
-                STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
-            ),
-            consumed: ctx_protocol::SearchExecutionConsumption {
-                candidate_rows: batch.examined,
-                retained_candidate_ids: batch.record_ids.len(),
-                ..ctx_protocol::SearchExecutionConsumption::default()
-            },
-            per_branch_candidate_rows: options.limit.saturating_add(1),
-            ..SearchExecutionDiagnostics::default()
-        };
         return Err(structured_timeout_error(started, &diagnostics));
+    }
+    if batch.truncated {
+        diagnostics.candidate_budget_exhausted = true;
+        push_truncation_reason(&mut diagnostics, "file_candidate_rows_budget");
     }
     let mut results = Vec::new();
     for record_id in &batch.record_ids {
-        let diagnostics = SearchExecutionDiagnostics {
-            candidate_strategy: "indexed_file_touch_bounded".to_owned(),
-            resolved: SearchExecutionLimits::resolved(
-                None,
-                options.limit,
-                STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
-            ),
-            consumed: ctx_protocol::SearchExecutionConsumption {
-                candidate_rows: batch.examined,
-                retained_candidate_ids: batch.record_ids.len(),
-                hydrated_rows: results.len(),
-                ..ctx_protocol::SearchExecutionConsumption::default()
-            },
-            per_branch_candidate_rows: options.limit.saturating_add(1),
-            ..SearchExecutionDiagnostics::default()
-        };
+        if diagnostics.consumed.hydrated_rows >= diagnostics.resolved.hydrated_rows {
+            push_truncation_reason(&mut diagnostics, "hydrated_rows_budget");
+            break;
+        }
         ensure_structured_deadline(started, &diagnostics)?;
-        let record = store.get_record(*record_id)?;
+        let remaining_input = diagnostics
+            .resolved
+            .hydration_input_bytes
+            .saturating_sub(diagnostics.consumed.hydration_input_bytes);
+        if remaining_input == 0 {
+            push_truncation_reason(&mut diagnostics, "hydration_input_budget");
+            break;
+        }
+        let per_record_limit = diagnostics
+            .resolved
+            .hydration_input_bytes_per_event
+            .min(remaining_input);
+        let remaining = remaining_structured_time(started, &diagnostics)?;
+        let Some(document) = bounded_store_lookup(
+            store.get_record_search_document_bounded(*record_id, per_record_limit, remaining),
+            started,
+            &diagnostics,
+        )?
+        else {
+            continue;
+        };
+        if !document.is_complete {
+            diagnostics.verification_dropped = diagnostics.verification_dropped.saturating_add(1);
+            push_truncation_reason(&mut diagnostics, "hydration_input_budget");
+            continue;
+        }
+        let record_input_bytes = document
+            .title
+            .len()
+            .saturating_add(document.body.len())
+            .saturating_add(document.tag_text.len())
+            .saturating_add(document.kind.len())
+            .saturating_add(document.workspace.as_deref().map_or(0, str::len));
+        if !consume_hydration_input(&mut diagnostics, record_input_bytes) {
+            continue;
+        }
+        let record = document.into_history_record()?;
         let Some(touch_id) = batch.representative_touch_ids.get(record_id).copied() else {
             continue;
         };
-        let Some(mut file_touch) = store.get_file_touched(touch_id)? else {
+        let remaining_input = diagnostics.resolved.hydration_input_bytes.saturating_sub(
+            diagnostics
+                .consumed
+                .hydration_input_bytes
+                .saturating_add(diagnostics.consumed.snippet_input_bytes),
+        );
+        let remaining_event_input = diagnostics
+            .resolved
+            .hydration_input_bytes_per_event
+            .saturating_sub(record_input_bytes);
+        let remaining = remaining_structured_time(started, &diagnostics)?;
+        let Some(mut file_touch) = bounded_store_lookup(
+            store.file_touched_by_id_bounded(
+                touch_id,
+                remaining_input.min(remaining_event_input),
+                remaining,
+            ),
+            started,
+            &diagnostics,
+        )?
+        else {
+            diagnostics.filter_verification_dropped =
+                diagnostics.filter_verification_dropped.saturating_add(1);
+            push_truncation_reason(&mut diagnostics, "hydration_input_budget");
             continue;
         };
+        let file_input_bytes = file_touch
+            .path
+            .len()
+            .saturating_add(file_touch.old_path.as_deref().map_or(0, str::len));
+        if !consume_additional_hydration_input(
+            &mut diagnostics,
+            record_input_bytes,
+            file_input_bytes,
+        ) {
+            continue;
+        }
         let effective_source_id = batch
             .representative_source_ids
             .get(record_id)
             .copied()
             .or(file_touch.source_id);
         file_touch.source_id = effective_source_id;
-        let source = effective_source_id
-            .map(|source_id| store.get_capture_source(source_id))
-            .transpose()?;
+        let mut verified_filters = options.filters.clone();
+        verified_filters.provider = None;
+        verified_filters.history_source = None;
+        verified_filters.provider_key = None;
+        verified_filters.source_id = None;
+        verified_filters.source_format = None;
         if let Some(candidate) =
-            candidate_for_bounded_file(record, file_touch, source, &options.filters)
+            candidate_for_bounded_file(record, file_touch, None, &verified_filters)
         {
+            if !consume_snippet_input(&mut diagnostics, record_input_bytes) {
+                continue;
+            }
             results.push(candidate_search_result(&candidate, "", &options));
         }
     }
     results.sort_by(compare_search_results);
-    let result_limit_exhausted = results.len() > options.limit;
+    let result_limit_exhausted = results.len() > diagnostics.resolved.results;
     if result_limit_exhausted {
-        results.truncate(options.limit);
+        results.truncate(diagnostics.resolved.results);
+        push_truncation_reason(&mut diagnostics, "result_limit");
     }
     normalize_search_result_ranks(&mut results);
-    let mut reasons = Vec::new();
-    if batch.truncated {
-        reasons.push("file_candidate_rows_budget".to_owned());
-    }
-    if result_limit_exhausted {
-        reasons.push("result_limit".to_owned());
-    }
-    let truncated = !reasons.is_empty();
-    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    let result_count = results.len();
-    let returned_text_bytes = results
-        .iter()
-        .map(|result| result.title.len().saturating_add(result.snippet.len()))
-        .sum();
-    Ok(SearchPacket {
+    diagnostics.candidate_budget_exhausted =
+        diagnostics.candidate_budget_exhausted || batch.truncated;
+    let truncated = !diagnostics.truncation_reasons.is_empty();
+    let truncation_reason = diagnostics.truncation_reasons.first().cloned();
+    let mut packet = SearchPacket {
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: String::new(),
         query_spec: None,
@@ -1567,172 +1979,19 @@ fn bounded_file_search_packet(store: &Store, options: &PacketOptions) -> Result<
         truncation: if truncated {
             ContextTruncation {
                 truncated: true,
-                reason: reasons.first().cloned(),
+                reason: truncation_reason,
                 omitted_results: 1,
             }
         } else {
             ContextTruncation::default()
         },
         query_execution: SearchExecutionDiagnostics {
-            candidate_strategy: "indexed_file_touch_bounded".to_owned(),
-            resolved: SearchExecutionLimits::resolved(
-                None,
-                options.limit,
-                STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64,
-            ),
-            consumed: ctx_protocol::SearchExecutionConsumption {
-                candidate_rows: batch.examined,
-                retained_candidate_ids: batch.record_ids.len(),
-                hydrated_rows: result_count,
-                returned_results: result_count,
-                returned_text_bytes,
-                elapsed_ms,
-                ..ctx_protocol::SearchExecutionConsumption::default()
-            },
-            per_branch_candidate_rows: options.limit.saturating_add(1),
-            candidate_budget_exhausted: batch.truncated,
-            elapsed_ms,
             truncated,
-            truncation_reasons: reasons,
-            ..SearchExecutionDiagnostics::default()
+            ..diagnostics
         },
-    })
-}
-
-pub fn semantic_event_search_packet(
-    store: &Store,
-    query: &str,
-    options: &PacketOptions,
-    semantic_hits: &[SemanticEventHit],
-    semantic_weight: f32,
-    hybrid: bool,
-) -> Result<SearchPacket> {
-    let options = normalized_options(options);
-    if query.trim().is_empty() {
-        return Ok(empty_search_packet(query, &options));
-    }
-    let file_scope = file_filter_scope(store, &options.filters)?;
-    if file_scope.as_ref().is_some_and(FileTouchScope::is_empty) {
-        return Ok(empty_search_packet(query, &options));
-    }
-    let file_scope = file_scope.as_ref();
-    let target_results = options.limit.saturating_add(1);
-    let mut candidates = BTreeMap::<Uuid, HybridCandidate>::new();
-
-    if hybrid {
-        let page_size = FILTERED_SEARCH_PAGE_SIZE.max(target_results.saturating_mul(8).max(50));
-        let mut lexical_rank = 0_usize;
-        let lexical_hits = if options.filters.event_type.is_some() {
-            store.search_event_hits_page(query, page_size, 0)?
-        } else {
-            store.search_event_hits_page_prefer_conversation(query, page_size, 0)?
-        };
-        for hit in lexical_hits {
-            if !event_hit_matches_filters(&hit, &options.filters, file_scope) {
-                continue;
-            }
-            lexical_rank = lexical_rank.saturating_add(1);
-            let mut result = event_search_result(&hit, query, options.snippet_chars);
-            result.result_scope = SearchResultScope::Event;
-            candidates.insert(
-                hit.event_id,
-                HybridCandidate {
-                    result,
-                    lexical_score: Some(reciprocal_rank(lexical_rank)),
-                    semantic_score: None,
-                    occurred_at: hit.occurred_at,
-                    seq: hit.seq,
-                },
-            );
-        }
-    }
-
-    let mut semantic_rank = 0_usize;
-    for semantic_hit in semantic_hits {
-        let hit = &semantic_hit.hit;
-        if !event_hit_matches_filters(hit, &options.filters, file_scope) {
-            continue;
-        }
-        semantic_rank = semantic_rank.saturating_add(1);
-        let semantic_score = if hybrid {
-            reciprocal_rank(semantic_rank)
-        } else {
-            semantic_hit.similarity.max(0.0)
-        };
-        let entry = candidates.entry(hit.event_id).or_insert_with(|| {
-            let mut result = event_search_result(hit, query, options.snippet_chars);
-            result.result_scope = SearchResultScope::Event;
-            HybridCandidate {
-                result,
-                lexical_score: None,
-                semantic_score: None,
-                occurred_at: hit.occurred_at,
-                seq: hit.seq,
-            }
-        });
-        entry.semantic_score = Some(
-            entry
-                .semantic_score
-                .map_or(semantic_score, |existing| existing.max(semantic_score)),
-        );
-        push_unique_why(
-            &mut entry.result.why_matched,
-            "semantic_similarity".to_owned(),
-        );
-        push_unique_why(
-            &mut entry.result.why_matched,
-            format!("semantic:{}", event_reason(hit.event_type)),
-        );
-    }
-
-    let semantic_weight = semantic_weight.clamp(0.0, 1.0);
-    let mut results = candidates
-        .into_values()
-        .map(|mut candidate| {
-            candidate.result.rank = if hybrid {
-                let lexical = candidate.lexical_score.unwrap_or(0.0);
-                let semantic = candidate.semantic_score.unwrap_or(0.0);
-                ((1.0 - semantic_weight) * lexical) + (semantic_weight * semantic)
-            } else {
-                candidate.semantic_score.unwrap_or(candidate.result.rank)
-            };
-            candidate
-        })
-        .collect::<Vec<_>>();
-    results.sort_by(compare_hybrid_candidates);
-    if options.result_mode == SearchResultMode::Sessions {
-        results = cluster_hybrid_candidates_by_session(results);
-    }
-    let has_more = results.len() > options.limit;
-    if results.len() > options.limit {
-        results.truncate(options.limit);
-    }
-    let mut packet_results = results
-        .into_iter()
-        .map(|candidate| candidate.result)
-        .collect::<Vec<_>>();
-    normalize_search_result_ranks(&mut packet_results);
-    let cursor_offset = packet_results.len();
-
-    Ok(SearchPacket {
-        schema_version: SEARCH_PACKET_SCHEMA_VERSION,
-        query: query.to_owned(),
-        query_spec: None,
-        filters: options.filters,
-        generated_at: utc_now(),
-        results: packet_results,
-        pagination: pagination(Some(cursor_offset), has_more),
-        truncation: if has_more {
-            ContextTruncation {
-                truncated: true,
-                reason: Some("limit".to_owned()),
-                omitted_results: 1,
-            }
-        } else {
-            ContextTruncation::default()
-        },
-        query_execution: SearchExecutionDiagnostics::default(),
-    })
+    };
+    finalize_structured_packet(&mut packet, started)?;
+    Ok(packet)
 }
 
 pub fn search_packet_terms(
@@ -1749,58 +2008,8 @@ pub fn search_packet_terms(
     )
 }
 
-struct HybridCandidate {
-    result: SearchPacketResult,
-    lexical_score: Option<f32>,
-    semantic_score: Option<f32>,
-    occurred_at: chrono::DateTime<chrono::Utc>,
-    seq: u64,
-}
-
 fn reciprocal_rank(rank: usize) -> f32 {
     1.0 / (60.0 + rank.max(1) as f32)
-}
-
-fn compare_hybrid_candidates(left: &HybridCandidate, right: &HybridCandidate) -> Ordering {
-    right
-        .result
-        .rank
-        .partial_cmp(&left.result.rank)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| right.occurred_at.cmp(&left.occurred_at))
-        .then_with(|| right.seq.cmp(&left.seq))
-        .then_with(|| left.result.record_id.cmp(&right.result.record_id))
-}
-
-fn cluster_hybrid_candidates_by_session(candidates: Vec<HybridCandidate>) -> Vec<HybridCandidate> {
-    let mut clustered = Vec::<HybridCandidate>::new();
-    let mut index_by_cluster = BTreeMap::<Uuid, usize>::new();
-    for mut candidate in candidates {
-        let cluster_id = candidate
-            .result
-            .session_id
-            .or(candidate.result.event_id)
-            .unwrap_or(candidate.result.record_id);
-        if let Some(index) = index_by_cluster.get(&cluster_id).copied() {
-            clustered[index].result.more_matches_in_session = clustered[index]
-                .result
-                .more_matches_in_session
-                .saturating_add(1);
-        } else {
-            candidate.result.result_scope = if candidate.result.session_id.is_some() {
-                SearchResultScope::Session
-            } else {
-                SearchResultScope::Event
-            };
-            candidate.result.session_importance = session_importance(
-                candidate.result.rank,
-                candidate.result.more_matches_in_session,
-            );
-            index_by_cluster.insert(cluster_id, clustered.len());
-            clustered.push(candidate);
-        }
-    }
-    clustered
 }
 
 fn fast_event_search_packet(
@@ -2003,6 +2212,34 @@ mod timeout_tests {
         assert!(!consume_hydration_input(&mut diagnostics, oversized));
         assert_eq!(diagnostics.consumed.hydrated_rows, 0);
         assert_eq!(diagnostics.consumed.hydration_input_bytes, 0);
-        assert_eq!(diagnostics.truncation_reasons, vec!["hydration_input_budget"]);
+        assert_eq!(
+            diagnostics.truncation_reasons,
+            vec!["hydration_input_budget"]
+        );
+    }
+
+    #[test]
+    fn final_packet_reports_its_actual_serialized_size() {
+        let mut packet = empty_search_packet("", &PacketOptions::default());
+        packet.query_execution.resolved =
+            SearchExecutionLimits::resolved(None, 10, STRUCTURED_SEARCH_TIMEOUT.as_millis() as u64);
+
+        finalize_structured_packet(&mut packet, Instant::now()).expect("packet fits hard limit");
+
+        assert_eq!(
+            packet.query_execution.consumed.serialized_response_bytes,
+            serde_json::to_vec(&packet)
+                .expect("serialize finalized packet")
+                .len()
+        );
+    }
+
+    #[test]
+    fn rrf_branches_each_begin_at_rank_one() {
+        let lexical_first = reciprocal_rank(1);
+        let semantic_first = reciprocal_rank(1);
+
+        assert_eq!(lexical_first, semantic_first);
+        assert!(lexical_first > reciprocal_rank(2));
     }
 }

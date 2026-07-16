@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-search"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
@@ -542,6 +542,7 @@ version = "0.25.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
+ "ctx-protocol",
  "fs2",
  "libc",
  "rusqlite",

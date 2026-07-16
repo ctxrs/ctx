@@ -1,7 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType};
-use rusqlite::{params_from_iter, types::Value};
+use rusqlite::{params_from_iter, types::Value, ErrorCode};
 use uuid::Uuid;
 
 use crate::connection::{
@@ -10,7 +13,7 @@ use crate::connection::{
 };
 use crate::provider_files::event_material_visible_predicate;
 use crate::search::projections::EventSearchHit;
-use crate::{Result, Store};
+use crate::{Result, Store, StoreError};
 
 const BOUNDED_ID_CHUNK_SIZE: usize = 256;
 
@@ -18,6 +21,7 @@ const BOUNDED_ID_CHUNK_SIZE: usize = 256;
 pub struct EventSearchPreview {
     pub event_id: Uuid,
     pub preview: String,
+    pub is_complete: bool,
 }
 
 impl Store {
@@ -27,6 +31,7 @@ impl Store {
         row_limit: usize,
         total_byte_limit: usize,
         per_lookup_byte_limit: usize,
+        timeout: Duration,
     ) -> Result<Vec<EventSearchPreview>> {
         if event_ids.is_empty()
             || row_limit == 0
@@ -36,23 +41,22 @@ impl Store {
             return Ok(Vec::new());
         }
         let requested = bounded_unique_ids(event_ids, row_limit);
-        let previews = self.lookup_event_previews(&requested, per_lookup_byte_limit)?;
+        let mut previews = run_bounded_lookup(&self.conn, timeout, || {
+            self.lookup_event_previews(&requested, total_byte_limit, per_lookup_byte_limit)
+        })?;
         let mut total_bytes = 0usize;
         let mut result = Vec::with_capacity(previews.len());
         for event_id in requested {
-            let Some(preview) = previews.get(&event_id) else {
+            let Some(preview) = previews.remove(&event_id) else {
                 continue;
             };
-            let bytes = preview.len();
+            let bytes = preview.preview.len();
             if bytes > per_lookup_byte_limit || total_bytes.saturating_add(bytes) > total_byte_limit
             {
                 continue;
             }
             total_bytes = total_bytes.saturating_add(bytes);
-            result.push(EventSearchPreview {
-                event_id,
-                preview: preview.clone(),
-            });
+            result.push(preview);
         }
         Ok(result)
     }
@@ -63,6 +67,7 @@ impl Store {
         row_limit: usize,
         total_byte_limit: usize,
         per_event_byte_limit: usize,
+        timeout: Duration,
     ) -> Result<Vec<EventSearchHit>> {
         self.event_search_hits_by_scores_bounded_visible_inner(
             candidate_scores,
@@ -70,6 +75,7 @@ impl Store {
             total_byte_limit,
             per_event_byte_limit,
             false,
+            timeout,
         )
     }
 
@@ -79,6 +85,7 @@ impl Store {
         row_limit: usize,
         total_byte_limit: usize,
         per_event_byte_limit: usize,
+        timeout: Duration,
     ) -> Result<Vec<EventSearchHit>> {
         self.event_search_hits_by_scores_bounded_visible_inner(
             candidate_scores,
@@ -86,50 +93,8 @@ impl Store {
             total_byte_limit,
             per_event_byte_limit,
             true,
+            timeout,
         )
-    }
-
-    pub fn semantic_event_hits_by_ids_bounded_visible(
-        &self,
-        event_ids: &[Uuid],
-        residual_row_limit: usize,
-        verification_byte_limit: usize,
-        verification_per_lookup_byte_limit: usize,
-        hydration_row_limit: usize,
-        hydration_byte_limit: usize,
-        hydration_per_event_byte_limit: usize,
-    ) -> Result<Vec<EventSearchHit>> {
-        let row_limit = residual_row_limit.min(hydration_row_limit);
-        let scores = bounded_unique_ids(event_ids, row_limit)
-            .into_iter()
-            .enumerate()
-            .map(|(rank, event_id)| (event_id, rank as f64))
-            .collect::<Vec<_>>();
-        let hits = self.event_search_hits_by_scores_bounded_visible_inner(
-            &scores,
-            row_limit,
-            hydration_byte_limit,
-            hydration_per_event_byte_limit,
-            true,
-        )?;
-        let mut verification_bytes = 0usize;
-        let mut hydration_bytes = 0usize;
-        let mut result = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let preview_bytes = hit.preview.len();
-            let hit_bytes = hit.input_bytes();
-            if preview_bytes > verification_per_lookup_byte_limit
-                || verification_bytes.saturating_add(preview_bytes) > verification_byte_limit
-                || hit_bytes > hydration_per_event_byte_limit
-                || hydration_bytes.saturating_add(hit_bytes) > hydration_byte_limit
-            {
-                continue;
-            }
-            verification_bytes = verification_bytes.saturating_add(preview_bytes);
-            hydration_bytes = hydration_bytes.saturating_add(hit_bytes);
-            result.push(hit);
-        }
-        Ok(result)
     }
 
     fn event_search_hits_by_scores_bounded_visible_inner(
@@ -139,6 +104,7 @@ impl Store {
         total_byte_limit: usize,
         per_event_byte_limit: usize,
         include_cursor: bool,
+        timeout: Duration,
     ) -> Result<Vec<EventSearchHit>> {
         if candidate_scores.is_empty()
             || row_limit == 0
@@ -149,7 +115,9 @@ impl Store {
         }
         let requested = bounded_unique_scored_ids(candidate_scores, row_limit);
         let ids = requested.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        let mut hits = self.lookup_event_hits(&ids, per_event_byte_limit, include_cursor)?;
+        let mut hits = run_bounded_lookup(&self.conn, timeout, || {
+            self.lookup_event_hits(&ids, total_byte_limit, per_event_byte_limit, include_cursor)
+        })?;
         let scores = requested.iter().copied().collect::<HashMap<_, _>>();
         let mut total_bytes = 0usize;
         let mut result = Vec::with_capacity(hits.len());
@@ -172,12 +140,22 @@ impl Store {
     fn lookup_event_previews(
         &self,
         event_ids: &[Uuid],
+        total_byte_limit: usize,
         per_lookup_byte_limit: usize,
-    ) -> Result<HashMap<Uuid, String>> {
+    ) -> Result<HashMap<Uuid, EventSearchPreview>> {
         let mut result = HashMap::with_capacity(event_ids.len());
+        let mut retained_bytes = 0usize;
         for chunk in event_ids.chunks(BOUNDED_ID_CHUNK_SIZE) {
             let lookup_sql = bounded_preview_sql(chunk.len(), true, per_lookup_byte_limit);
-            collect_preview_rows(&self.conn, &lookup_sql, chunk, &mut result)?;
+            collect_preview_rows(
+                &self.conn,
+                &lookup_sql,
+                chunk,
+                total_byte_limit,
+                per_lookup_byte_limit,
+                &mut retained_bytes,
+                &mut result,
+            )?;
             let missing = chunk
                 .iter()
                 .copied()
@@ -185,7 +163,15 @@ impl Store {
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 let fallback_sql = bounded_preview_sql(missing.len(), false, per_lookup_byte_limit);
-                collect_preview_rows(&self.conn, &fallback_sql, &missing, &mut result)?;
+                collect_preview_rows(
+                    &self.conn,
+                    &fallback_sql,
+                    &missing,
+                    total_byte_limit,
+                    per_lookup_byte_limit,
+                    &mut retained_bytes,
+                    &mut result,
+                )?;
             }
         }
         Ok(result)
@@ -194,14 +180,24 @@ impl Store {
     fn lookup_event_hits(
         &self,
         event_ids: &[Uuid],
+        total_byte_limit: usize,
         per_event_byte_limit: usize,
         include_cursor: bool,
     ) -> Result<HashMap<Uuid, EventSearchHit>> {
         let mut result = HashMap::with_capacity(event_ids.len());
+        let mut retained_bytes = 0usize;
         for chunk in event_ids.chunks(BOUNDED_ID_CHUNK_SIZE) {
             let lookup_sql =
                 bounded_hit_sql(chunk.len(), true, per_event_byte_limit, include_cursor);
-            collect_hit_rows(&self.conn, &lookup_sql, chunk, &mut result)?;
+            collect_hit_rows(
+                &self.conn,
+                &lookup_sql,
+                chunk,
+                total_byte_limit,
+                per_event_byte_limit,
+                &mut retained_bytes,
+                &mut result,
+            )?;
             let missing = chunk
                 .iter()
                 .copied()
@@ -210,10 +206,41 @@ impl Store {
             if !missing.is_empty() {
                 let fallback_sql =
                     bounded_hit_sql(missing.len(), false, per_event_byte_limit, include_cursor);
-                collect_hit_rows(&self.conn, &fallback_sql, &missing, &mut result)?;
+                collect_hit_rows(
+                    &self.conn,
+                    &fallback_sql,
+                    &missing,
+                    total_byte_limit,
+                    per_event_byte_limit,
+                    &mut retained_bytes,
+                    &mut result,
+                )?;
             }
         }
         Ok(result)
+    }
+}
+
+fn run_bounded_lookup<T>(
+    conn: &rusqlite::Connection,
+    timeout: Duration,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let timeout = timeout.max(Duration::from_millis(1));
+    let started = Instant::now();
+    let progress_started = started;
+    conn.progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
+    let result = operation();
+    conn.progress_handler(0, None::<fn() -> bool>);
+    match result {
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == ErrorCode::OperationInterrupted && started.elapsed() >= timeout =>
+        {
+            Err(StoreError::BoundedSearchTimedOut {
+                timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+            })
+        }
+        result => result,
     }
 }
 
@@ -243,11 +270,18 @@ fn requested_values_sql(count: usize) -> String {
 }
 
 fn bounded_text_sql(expression: &str, maximum_bytes: usize) -> String {
-    let conservative_chars = maximum_bytes.saturating_div(4).max(1);
+    let conservative_chars = maximum_bytes.saturating_div(4);
     format!(
         "CASE WHEN {expression} IS NULL THEN NULL \
          WHEN length(CAST({expression} AS BLOB)) <= {maximum_bytes} THEN {expression} \
          ELSE substr({expression}, 1, {conservative_chars}) END"
+    )
+}
+
+fn bounded_text_complete_sql(expression: &str, maximum_bytes: usize) -> String {
+    format!(
+        "CASE WHEN {expression} IS NULL THEN 1 \
+         ELSE length(CAST({expression} AS BLOB)) <= {maximum_bytes} END"
     )
 }
 
@@ -319,10 +353,11 @@ fn bounded_preview_sql(count: usize, use_lookup: bool, maximum_bytes: usize) -> 
          WHERE existing_lookup.event_id = e.id)"
     };
     let visible = event_material_visible_predicate("e");
+    let preview_complete = bounded_text_complete_sql(&preview, maximum_bytes);
     let preview = bounded_text_sql(&preview, maximum_bytes);
     format!(
         "WITH requested(id, ordinal) AS (VALUES {requested}) \
-         SELECT e.id, {preview} \
+         SELECT e.id, {preview}, {preview_complete} \
          FROM requested \
          JOIN events AS e ON e.id = requested.id \
          {lookup_join} \
@@ -443,7 +478,10 @@ fn collect_preview_rows(
     conn: &rusqlite::Connection,
     sql: &str,
     event_ids: &[Uuid],
-    output: &mut HashMap<Uuid, String>,
+    total_byte_limit: usize,
+    per_lookup_byte_limit: usize,
+    retained_bytes: &mut usize,
+    output: &mut HashMap<Uuid, EventSearchPreview>,
 ) -> Result<()> {
     let values = event_ids
         .iter()
@@ -452,10 +490,25 @@ fn collect_preview_rows(
     let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query(params_from_iter(values))?;
     while let Some(row) = rows.next()? {
+        let event_id = parse_uuid(row.get::<_, String>(0)?)?;
         let preview = row.get::<_, Option<String>>(1)?.unwrap_or_default();
-        if !preview.trim().is_empty() {
-            output.insert(parse_uuid(row.get::<_, String>(0)?)?, preview);
+        let is_complete = row.get::<_, i64>(2)? != 0;
+        let bytes = preview.len();
+        if (preview.trim().is_empty() && is_complete)
+            || bytes > per_lookup_byte_limit
+            || retained_bytes.saturating_add(bytes) > total_byte_limit
+        {
+            continue;
         }
+        *retained_bytes = retained_bytes.saturating_add(bytes);
+        output.insert(
+            event_id,
+            EventSearchPreview {
+                event_id,
+                preview,
+                is_complete,
+            },
+        );
     }
     Ok(())
 }
@@ -464,6 +517,9 @@ fn collect_hit_rows(
     conn: &rusqlite::Connection,
     sql: &str,
     event_ids: &[Uuid],
+    total_byte_limit: usize,
+    per_event_byte_limit: usize,
+    retained_bytes: &mut usize,
     output: &mut HashMap<Uuid, EventSearchHit>,
 ) -> Result<()> {
     let values = event_ids
@@ -478,38 +534,41 @@ fn collect_hit_rows(
         if preview.trim().is_empty() {
             continue;
         }
-        output.insert(
+        let hit = EventSearchHit {
             event_id,
-            EventSearchHit {
-                event_id,
-                history_record_id: parse_optional_uuid(row.get(1)?)?,
-                session_id: parse_optional_uuid(row.get(2)?)?,
-                run_id: parse_optional_uuid(row.get(3)?)?,
-                seq: nonnegative_i64_to_u64(row.get(4)?)?,
-                event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
-                role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
-                occurred_at: ms_to_time(row.get(7)?)?,
-                preview,
-                score: row.get(9)?,
-                provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
-                session_external_session_id: row.get(11)?,
-                session_parent_session_id: parse_optional_uuid(row.get(12)?)?,
-                session_root_session_id: parse_optional_uuid(row.get(13)?)?,
-                agent_type: parse_optional_text_enum::<AgentType>(row.get(14)?)?,
-                session_is_primary: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
-                cwd: row.get(16)?,
-                raw_source_path: row.get(17)?,
-                cursor: row.get(18)?,
-                record_title: row.get(19)?,
-                record_kind: row.get(20)?,
-                record_workspace: row.get(21)?,
-                history_source: row.get(22)?,
-                history_source_plugin: row.get(23)?,
-                provider_key: row.get(24)?,
-                source_id: row.get(25)?,
-                source_format: row.get(26)?,
-            },
-        );
+            history_record_id: parse_optional_uuid(row.get(1)?)?,
+            session_id: parse_optional_uuid(row.get(2)?)?,
+            run_id: parse_optional_uuid(row.get(3)?)?,
+            seq: nonnegative_i64_to_u64(row.get(4)?)?,
+            event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
+            role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
+            occurred_at: ms_to_time(row.get(7)?)?,
+            preview,
+            score: row.get(9)?,
+            provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
+            session_external_session_id: row.get(11)?,
+            session_parent_session_id: parse_optional_uuid(row.get(12)?)?,
+            session_root_session_id: parse_optional_uuid(row.get(13)?)?,
+            agent_type: parse_optional_text_enum::<AgentType>(row.get(14)?)?,
+            session_is_primary: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
+            cwd: row.get(16)?,
+            raw_source_path: row.get(17)?,
+            cursor: row.get(18)?,
+            record_title: row.get(19)?,
+            record_kind: row.get(20)?,
+            record_workspace: row.get(21)?,
+            history_source: row.get(22)?,
+            history_source_plugin: row.get(23)?,
+            provider_key: row.get(24)?,
+            source_id: row.get(25)?,
+            source_format: row.get(26)?,
+        };
+        let bytes = hit.input_bytes();
+        if bytes > per_event_byte_limit || retained_bytes.saturating_add(bytes) > total_byte_limit {
+            continue;
+        }
+        *retained_bytes = retained_bytes.saturating_add(bytes);
+        output.insert(event_id, hit);
     }
     Ok(())
 }

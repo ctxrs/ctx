@@ -29,6 +29,12 @@ const RECORD_SEARCH_BODY_MAX_CHARS: usize = 2_048;
 const RECORD_SEARCH_TAG_TEXT_MAX_CHARS: usize = 1_024;
 const RECORD_SEARCH_KIND_MAX_CHARS: usize = 128;
 const RECORD_SEARCH_WORKSPACE_MAX_CHARS: usize = 4_096;
+const RECORD_SEARCH_DOCUMENT_MAX_BYTES: usize = (RECORD_SEARCH_TITLE_MAX_CHARS
+    + RECORD_SEARCH_BODY_MAX_CHARS
+    + RECORD_SEARCH_TAG_TEXT_MAX_CHARS
+    + RECORD_SEARCH_KIND_MAX_CHARS
+    + RECORD_SEARCH_WORKSPACE_MAX_CHARS)
+    * 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordSearchCandidate {
@@ -56,24 +62,22 @@ pub struct RecordSearchDocument {
     pub workspace: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub is_complete: bool,
 }
 
 impl RecordSearchDocument {
-    pub fn into_history_record(self) -> HistoryRecord {
-        HistoryRecord {
+    pub fn into_history_record(self) -> Result<HistoryRecord> {
+        let tags = serde_json::from_str::<Vec<String>>(&self.tag_text)?;
+        Ok(HistoryRecord {
             id: self.record_id,
             title: self.title,
             body: self.body,
-            tags: if self.tag_text.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![self.tag_text]
-            },
+            tags,
             kind: self.kind,
             workspace: self.workspace,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -82,52 +86,130 @@ impl Store {
         &self,
         record_id: Uuid,
     ) -> Result<Option<RecordSearchDocument>> {
-        if !table_exists(&self.conn, "ctx_history_search")? {
-            return Ok(None);
-        }
-        let visible = crate::provider_files::history_record_material_visible_predicate("records");
-        self.conn
-            .query_row(
-                &format!(
-                    r#"
-                    SELECT search.record_id,
-                           substr(search.title, 1, ?2),
-                           substr(search.primary_user_text, 1, ?3),
-                           substr(search.tag_text, 1, ?4),
-                           substr(records.kind, 1, ?5),
-                           substr(records.workspace, 1, ?6),
-                           records.created_at_ms,
-                           records.updated_at_ms
-                    FROM ctx_history_search AS search
-                    JOIN history_records AS records ON records.id = search.record_id
-                    WHERE search.record_id = ?1 AND {visible}
-                    ORDER BY search.rowid
-                    LIMIT 1
-                    "#,
-                ),
-                params![
-                    record_id.to_string(),
-                    RECORD_SEARCH_TITLE_MAX_CHARS as i64,
-                    RECORD_SEARCH_BODY_MAX_CHARS as i64,
-                    RECORD_SEARCH_TAG_TEXT_MAX_CHARS as i64,
-                    RECORD_SEARCH_KIND_MAX_CHARS as i64,
-                    RECORD_SEARCH_WORKSPACE_MAX_CHARS as i64,
-                ],
-                |row| {
-                    Ok(RecordSearchDocument {
-                        record_id: parse_uuid(row.get::<_, String>(0)?)?,
-                        title: row.get(1)?,
-                        body: row.get(2)?,
-                        tag_text: row.get(3)?,
-                        kind: row.get(4)?,
-                        workspace: row.get(5)?,
-                        created_at: ms_to_time(row.get(6)?)?,
-                        updated_at: ms_to_time(row.get(7)?)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
+        self.get_record_search_document_bounded(
+            record_id,
+            RECORD_SEARCH_DOCUMENT_MAX_BYTES,
+            Duration::from_secs(10),
+        )
+    }
+
+    pub fn get_record_search_document_bounded(
+        &self,
+        record_id: Uuid,
+        maximum_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Option<RecordSearchDocument>> {
+        run_bounded_record_lookup(&self.conn, timeout, || {
+            let visible =
+                crate::provider_files::history_record_material_visible_predicate("records");
+            let complete = record_search_document_complete_sql();
+            let maximum_bytes = maximum_bytes.min(i64::MAX as usize) as i64;
+            let summary = self
+                .conn
+                .query_row(
+                    &format!(
+                        r#"
+                        SELECT records.id,
+                               records.created_at_ms,
+                               records.updated_at_ms,
+                               {complete}
+                        FROM history_records AS records
+                        WHERE records.id = ?1 AND {visible}
+                        LIMIT 1
+                        "#,
+                    ),
+                    params![
+                        record_id.to_string(),
+                        RECORD_SEARCH_TITLE_MAX_CHARS as i64,
+                        RECORD_SEARCH_BODY_MAX_CHARS as i64,
+                        RECORD_SEARCH_TAG_TEXT_MAX_CHARS as i64,
+                        RECORD_SEARCH_KIND_MAX_CHARS as i64,
+                        RECORD_SEARCH_WORKSPACE_MAX_CHARS as i64,
+                        maximum_bytes,
+                    ],
+                    |row| {
+                        Ok((
+                            parse_uuid(row.get::<_, String>(0)?)?,
+                            ms_to_time(row.get(1)?)?,
+                            ms_to_time(row.get(2)?)?,
+                            row.get::<_, i64>(3)? != 0,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((record_id, created_at, updated_at, is_complete)) = summary else {
+                return Ok(None);
+            };
+            if !is_complete {
+                return Ok(Some(RecordSearchDocument {
+                    record_id,
+                    title: String::new(),
+                    body: String::new(),
+                    tag_text: String::new(),
+                    kind: String::new(),
+                    workspace: None,
+                    created_at,
+                    updated_at,
+                    is_complete: false,
+                }));
+            }
+
+            let document = self
+                .conn
+                .query_row(
+                    &format!(
+                        r#"
+                        SELECT records.id,
+                               COALESCE(records.title, ''),
+                               COALESCE(records.body, ''),
+                               COALESCE(records.tags_json, '[]'),
+                               COALESCE(records.kind, ''),
+                               records.workspace,
+                               records.created_at_ms,
+                               records.updated_at_ms
+                        FROM history_records AS records
+                        WHERE records.id = ?1 AND {visible} AND {complete}
+                        LIMIT 1
+                        "#,
+                    ),
+                    params![
+                        record_id.to_string(),
+                        RECORD_SEARCH_TITLE_MAX_CHARS as i64,
+                        RECORD_SEARCH_BODY_MAX_CHARS as i64,
+                        RECORD_SEARCH_TAG_TEXT_MAX_CHARS as i64,
+                        RECORD_SEARCH_KIND_MAX_CHARS as i64,
+                        RECORD_SEARCH_WORKSPACE_MAX_CHARS as i64,
+                        maximum_bytes,
+                    ],
+                    |row| {
+                        Ok(RecordSearchDocument {
+                            record_id: parse_uuid(row.get::<_, String>(0)?)?,
+                            title: row.get(1)?,
+                            body: row.get(2)?,
+                            tag_text: row.get(3)?,
+                            kind: row.get(4)?,
+                            workspace: row.get(5)?,
+                            created_at: ms_to_time(row.get(6)?)?,
+                            updated_at: ms_to_time(row.get(7)?)?,
+                            is_complete: true,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(document.or_else(|| {
+                Some(RecordSearchDocument {
+                    record_id,
+                    title: String::new(),
+                    body: String::new(),
+                    tag_text: String::new(),
+                    kind: String::new(),
+                    workspace: None,
+                    created_at,
+                    updated_at,
+                    is_complete: false,
+                })
+            }))
+        })
     }
 
     pub fn search_record_candidates_for_clause(
@@ -680,6 +762,44 @@ impl Store {
             records.push(self.get_record(parse_uuid(row?)?)?);
         }
         Ok(Some(records))
+    }
+}
+
+fn record_search_document_complete_sql() -> String {
+    format!(
+        "length(COALESCE(records.title, '')) <= ?2 \
+         AND length(COALESCE(records.body, '')) <= ?3 \
+         AND length(COALESCE(records.tags_json, '')) <= ?4 \
+         AND length(COALESCE(records.kind, '')) <= ?5 \
+         AND (records.workspace IS NULL OR length(records.workspace) <= ?6) \
+         AND length(CAST(COALESCE(records.title, '') AS BLOB)) \
+             + length(CAST(COALESCE(records.body, '') AS BLOB)) \
+             + length(CAST(COALESCE(records.tags_json, '') AS BLOB)) \
+             + length(CAST(COALESCE(records.kind, '') AS BLOB)) \
+             + length(CAST(COALESCE(records.workspace, '') AS BLOB)) <= ?7"
+    )
+}
+
+fn run_bounded_record_lookup<T>(
+    conn: &rusqlite::Connection,
+    timeout: Duration,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let timeout = timeout.max(Duration::from_millis(1));
+    let started = Instant::now();
+    let progress_started = started;
+    conn.progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
+    let result = operation();
+    conn.progress_handler(0, None::<fn() -> bool>);
+    match result {
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == ErrorCode::OperationInterrupted && started.elapsed() >= timeout =>
+        {
+            Err(StoreError::BoundedSearchTimedOut {
+                timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+            })
+        }
+        result => result,
     }
 }
 

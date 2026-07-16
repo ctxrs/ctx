@@ -1,7 +1,10 @@
 use ctx_history_core::{EntityTimestamps, FileTouched};
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, ErrorCode, OptionalExtension};
 use uuid::Uuid;
 
 use crate::connection::{
@@ -9,7 +12,7 @@ use crate::connection::{
     parse_text_enum, parse_uuid, timestamp_ms,
 };
 use crate::sync::sync_metadata_from_row;
-use crate::{Result, Store};
+use crate::{Result, Store, StoreError};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileTouchScope {
@@ -99,6 +102,58 @@ impl Store {
             )
             .optional()?
             .is_some())
+    }
+
+    pub fn file_touched_by_id_bounded(
+        &self,
+        id: Uuid,
+        maximum_text_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Option<FileTouched>> {
+        if maximum_text_bytes == 0 {
+            return Ok(None);
+        }
+        let visible =
+            crate::provider_files::file_touched_material_visible_predicate("files_touched");
+        let timeout = timeout.max(Duration::from_millis(1));
+        let started = Instant::now();
+        let progress_started = started;
+        self.conn
+            .progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
+        let result = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT id, history_record_id, run_id, event_id, vcs_workspace_id, path, \
+                     change_kind, old_path, line_count_delta, confidence, created_at_ms, \
+                     updated_at_ms, source_id, visibility, fidelity, sync_state, sync_version, \
+                     deleted_at_ms, '{{}}' \
+                     FROM files_touched \
+                     WHERE id = ?1 AND {visible} \
+                       AND length(CAST(path AS BLOB)) \
+                           + length(CAST(COALESCE(old_path, '') AS BLOB)) <= ?2 \
+                     LIMIT 1"
+                ),
+                params![
+                    id.to_string(),
+                    maximum_text_bytes.min(i64::MAX as usize) as i64
+                ],
+                file_touched_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from);
+        self.conn.progress_handler(0, None::<fn() -> bool>);
+        match result {
+            Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+                if error.code == ErrorCode::OperationInterrupted
+                    && started.elapsed() >= timeout =>
+            {
+                Err(StoreError::BoundedSearchTimedOut {
+                    timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                })
+            }
+            result => result,
+        }
     }
 
     pub(crate) fn list_files_touched(&self) -> Result<Vec<FileTouched>> {
