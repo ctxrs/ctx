@@ -23,6 +23,7 @@ PROD_SRCS = glob(
 CTX_HISTORY_SEARCH_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-store:lib",
+    "//crates/ctx-protocol:lib",
 ]
 
 rust_library(

@@ -3,22 +3,28 @@ use ctx_history_core::{
     ContextCitation, ContextLinks, ContextPagination, ContextTruncation, Visibility,
 };
 use ctx_history_store::EventSearchHit;
+pub use ctx_protocol::SearchExecutionDiagnostics;
+use ctx_protocol::SearchQuery;
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::query::{PacketOptions, SearchFilters};
 
-pub const SEARCH_PACKET_SCHEMA_VERSION: u32 = 1;
+pub const SEARCH_PACKET_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchPacket {
     pub schema_version: u32,
+    #[serde(skip)]
     pub query: String,
+    #[serde(rename = "query")]
+    pub query_spec: Option<SearchQuery>,
     pub filters: SearchFilters,
     pub generated_at: chrono::DateTime<Utc>,
     pub results: Vec<SearchPacketResult>,
     pub pagination: ContextPagination,
     pub truncation: ContextTruncation,
+    pub query_execution: SearchExecutionDiagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -103,21 +109,19 @@ pub(crate) fn empty_search_packet(query: &str, options: &PacketOptions) -> Searc
     SearchPacket {
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: query.to_owned(),
+        query_spec: None,
         filters: options.filters.clone(),
         generated_at: ctx_history_core::utc_now(),
         results: Vec::new(),
         pagination: pagination(Some(0), false),
         truncation: ContextTruncation::default(),
+        query_execution: SearchExecutionDiagnostics::default(),
     }
 }
 
-pub(crate) fn pagination(cursor_base: Option<usize>, has_more: bool) -> ContextPagination {
+pub(crate) fn pagination(_cursor_base: Option<usize>, has_more: bool) -> ContextPagination {
     ContextPagination {
-        cursor: if has_more {
-            cursor_base.map(|value| format!("offset:{value}"))
-        } else {
-            None
-        },
+        cursor: None,
         has_more,
     }
 }

@@ -186,6 +186,65 @@ pub(crate) fn candidate_for_record(
     }
 }
 
+/// Build a file-only candidate with exactly one matching touch. This keeps a
+/// record with millions of events from loading the entire transcript merely to
+/// render a file citation.
+pub(crate) fn candidate_for_bounded_file(
+    record: HistoryRecord,
+    file: ctx_history_core::FileTouched,
+    source: Option<ctx_history_core::CaptureSource>,
+    filters: &SearchFilters,
+) -> Option<Candidate> {
+    let sources = source
+        .into_iter()
+        .map(|source| (source.id, source))
+        .collect();
+    candidate_for_bounded_context(
+        record,
+        RecordContext {
+            files_touched: vec![file],
+            sources,
+            ..RecordContext::default()
+        },
+        &[],
+        filters,
+    )
+}
+
+/// Verify record title/body/tag candidates without loading any related event
+/// payloads. Metadata-scoped history retrieval is owned by the event surface.
+pub(crate) fn candidate_for_bounded_record(
+    record: HistoryRecord,
+    terms: &[String],
+    filters: &SearchFilters,
+) -> Option<Candidate> {
+    candidate_for_bounded_context(record, RecordContext::default(), terms, filters)
+}
+
+fn candidate_for_bounded_context(
+    record: HistoryRecord,
+    context: RecordContext,
+    terms: &[String],
+    filters: &SearchFilters,
+) -> Option<Candidate> {
+    if !record_matches_filters(&record, &context, filters, None) {
+        return None;
+    }
+    let analysis = analyze_record(&record, &context, terms, filters);
+    if !terms.is_empty() && analysis.score <= 0.0 {
+        return None;
+    }
+    Some(Candidate {
+        record,
+        context,
+        score: analysis.score.max(1.0),
+        matched_term_count: analysis.matched_term_count,
+        why_matched: analysis.why_matched,
+        citations: analysis.citations,
+        primary_hit: analysis.primary_hit,
+    })
+}
+
 pub(crate) fn hydrate_record_context(
     store: &Store,
     record_id: Uuid,

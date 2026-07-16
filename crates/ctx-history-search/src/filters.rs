@@ -24,6 +24,34 @@ pub(crate) fn event_hit_matches_filters(
             return false;
         }
     }
+    if let Some(selector) = filters.history_source.as_deref() {
+        let plugin_match = hit.history_source.as_deref() == Some(selector);
+        let provider_source_match = hit
+            .provider_key
+            .as_deref()
+            .zip(hit.source_id.as_deref())
+            .is_some_and(|(provider_key, source_id)| {
+                selector == format!("{provider_key}/{source_id}")
+            });
+        if !plugin_match && !provider_source_match {
+            return false;
+        }
+    }
+    if filters
+        .provider_key
+        .as_deref()
+        .is_some_and(|value| hit.provider_key.as_deref() != Some(value))
+        || filters
+            .source_id
+            .as_deref()
+            .is_some_and(|value| hit.source_id.as_deref() != Some(value))
+        || filters
+            .source_format
+            .as_deref()
+            .is_some_and(|value| hit.source_format.as_deref() != Some(value))
+    {
+        return false;
+    }
     if let Some(since) = filters.since {
         if hit.occurred_at < since {
             return false;
