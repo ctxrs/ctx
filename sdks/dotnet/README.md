@@ -43,6 +43,12 @@ var results = await client.SearchAsync(new SearchOptions
         Must = [SearchClause.All("codex")]
     },
     Provider = "codex",
+    HistorySource = "codex/default",
+    ProviderKey = "codex",
+    SourceId = "default",
+    SourceFormat = "codex_session_jsonl",
+    IncludeSubagents = true,
+    EventType = "message",
     Refresh = "off",
     Limit = 10
 });
@@ -77,10 +83,19 @@ future fields remain additive and accessible. SDK failures derive from
 `CtxAgentHistoryException` and expose `Code`, `Retryable`, `Details`, and
 `ToAgentHistoryError()`.
 
-`SearchQueryV1` validates matcher placement and byte limits before execution.
-Schema-v2 results expose the complete bounded `SearchQueryExecution` model,
-including resolved and consumed budgets, semantic readiness and coverage, and
-typed truncation diagnostics.
+`SearchQueryV1` collapses canonical Unicode whitespace for non-literal clauses,
+trims only literal edges, and removes duplicate clauses within each placement
+before enforcing bounds. Each clause must contain 1 to 32 analyzed tokens;
+queries allow at most 32 clauses, 1,024 bytes per clause, 8,192 clause bytes,
+3 to 256 bytes for literals, and 65,536 serialized JSON bytes. An explicit
+`SearchOptions.Limit` must be from 1 to 200 and is validated before transport.
+
+`HistorySource`, `ProviderKey`, `SourceId`, and `SourceFormat` map to the four
+CLI source-identity filters. `IncludeSubagents` and `EventType` map to their
+matching CLI filters. Schema-v2 results expose the complete bounded
+`SearchQueryExecution` model, including resolved and consumed budgets, semantic
+readiness and coverage, and typed truncation diagnostics. Retired semantic
+weight and fallback fields are omitted during response normalization.
 
 ## Local CLI Adapter
 
