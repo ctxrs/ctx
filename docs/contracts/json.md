@@ -20,23 +20,45 @@ Writes local storage and returns:
 - `data_root`;
 - `database_path`;
 - `config_path`;
-- `mode`, either `ready` or `catalog_only`;
+- `mode`, one of `ready`, `partial`, `background`, or `catalog_only`;
 - `indexed_items`;
 - `sources`;
 - `inventory`;
 - `catalog`;
 - `catalog_sources`;
 - `import`;
+- `background_indexing`;
 - `network_required: false`;
 - `repo_writes: false`.
 
-`import.ran` is true for the default setup path and false for
-`ctx setup --catalog-only`. When it runs, `import.outcome`,
+`mode` describes how setup left indexing work:
+
+- `catalog_only` means `--catalog-only` inventoried history without importing
+  it. `import.ran` is false with `import.reason: "catalog_only"`;
+- `background` means setup selected its daemon-backed, inventory-only path; it
+  does not by itself assert that a backlog exists. `import.ran` is false with
+  `import.reason: "background"`;
+- `partial` means the foreground import ran but its final import totals still
+  report fresh or recovery work pending;
+- `ready` means the foreground import ran and reports no pending import work.
+
+When the foreground import runs, `import.outcome`,
 `import.failure_scope`, `import.failure_type`, `import.totals`, and
 `import.sources` use the same semantics and shapes as `ctx import --json`.
 Setup still uses top-level schema version 1; these nested fields are additive.
 An all-failed foreground setup import prints the complete JSON result and exits
 nonzero. Mixed success and source failures remain successful.
+
+`background_indexing.enabled` is true when daemon-backed setup leaves native
+inventory work pending or has supported semantic indexing enabled. The object
+also includes `units`, `source_bytes`, `semantic_enabled`,
+`semantic_supported`, nullable `lexical_estimate_seconds`,
+`semantic_estimate_seconds`, `semantic_estimate_backend`, and
+`semantic_cpu_fallback_estimate_seconds`, plus stable follow-up command strings
+in `status_command`, `watch_command`, and `wait_command`. JSON setup never
+starts the daemon itself: when background indexing is enabled,
+`daemon_autostart.status` is `skipped` with reason `json_output`; otherwise it
+is `not_needed` with reason `not_requested`.
 
 `inventory` reports the shared local-history inventory across all native
 sources. It includes `sources`, `units`, `source_files`, `source_bytes`,
@@ -238,12 +260,33 @@ corruption, locks, unreadable source files, and malformed source data are
 source failures and do not stop independent sources. Failed sources can include
 up to five rejection details when every content record was rejected.
 
-`totals` and each source row include file, byte, session, event, edge, skipped,
-and `rejected_records` counts. Rejection details are exposed as `rejections`
-(bounded to five entries); `failed_sources` remains the count of source-level
-failures. `sources_completed_with_rejections` counts sources that committed
-accepted content while rejecting other records. `resume_mode` is currently `idempotent_rescan` when
-`--resume` is passed and `normal_scan` otherwise.
+`totals` includes these work-progress fields:
+
+- `durable_progress`, true when the invocation committed import or maintenance
+  progress, including durable progress that did not complete a whole unit;
+- `fresh_units_processed`, the exact number of new, changed, or appended units
+  completed by this invocation;
+- `recovery_units_processed`, the exact number of retry, replacement,
+  parser-revision, missing-material, abandoned-publication, legacy, or explicit
+  rescan units completed by this invocation;
+- `fresh_units_pending` and `recovery_units_pending`, bounded end-of-run backlog
+  counts;
+- `fresh_units_pending_exact` and `recovery_units_pending_exact`, which state
+  whether the corresponding pending count is exact.
+
+Pending counts are capped at 256. An `*_pending_exact` value of true means the
+reported count is exact. False means the reported value is 256 and the actual
+backlog is at least 256; consumers must not interpret it as exactly 256.
+Processed counts are not capped and describe only work completed during the
+current invocation.
+
+`totals` and each source row also include file, byte, session, event, edge,
+skipped, and `rejected_records` counts. Rejection details are exposed as
+`rejections` (bounded to five entries); `failed_sources` remains the count of
+source-level failures. `sources_completed_with_rejections` counts sources that
+committed accepted content while rejecting other records. `resume_mode` is
+currently `idempotent_rescan` when `--resume` is passed and `normal_scan`
+otherwise.
 
 Non-JSON native imports that target discovered/default provider sources may
 opportunistically start the ctx-owned background daemon maintenance profile

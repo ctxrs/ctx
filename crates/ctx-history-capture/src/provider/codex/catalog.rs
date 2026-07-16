@@ -24,6 +24,12 @@ use crate::{
 
 use crate::provider::codex::session::{apply_codex_session_import_bounds, contains_bytes};
 
+const CATALOG_PERSIST_BATCH_SESSIONS: usize = 64;
+const CATALOG_PERSIST_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const CATALOG_PERSIST_ROW_OVERHEAD_BYTES: u64 = 256;
+const QUIET_CATALOG_MAX_PARALLELISM: usize = 2;
+const INTERACTIVE_CATALOG_MAX_PARALLELISM: usize = 8;
+
 pub fn catalog_codex_session_tree(
     root: impl AsRef<Path>,
     store: &Store,
@@ -41,6 +47,8 @@ pub fn catalog_codex_session_tree(
     };
     let import_revision =
         provider_import_revision(CaptureProvider::Codex, CODEX_SESSION_SOURCE_FORMAT);
+    let initial_inventory =
+        prepare_initial_catalog_inventory(store, &source_root, observation_generation)?;
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let mut paths = Vec::new();
     collect_jsonl_paths(root, &mut paths)?;
@@ -145,18 +153,33 @@ pub fn catalog_codex_session_tree(
     }
     summary.cataloged_sessions = parsed_session_count.saturating_add(cached_session_count);
 
+    let initial_inventory_persisted = if initial_inventory && !sessions_to_persist.is_empty() {
+        persist_initial_catalog_sessions_bounded(
+            store,
+            observation_generation,
+            &sessions_to_persist,
+        )?
+    } else {
+        initial_inventory
+    };
+
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
-        if !sessions_to_persist.is_empty() {
-            store.upsert_catalog_sessions(observation_generation, &sessions_to_persist)?;
+        if !initial_inventory_persisted && !sessions_to_persist.is_empty() {
+            persist_catalog_sessions_paced_in_current_batch(
+                store,
+                observation_generation,
+                &sessions_to_persist,
+            )?;
         }
         if stale_session_count > 0 || has_missing_existing_paths {
-            store.mark_catalog_source_missing_paths_stale(
+            store.mark_catalog_source_missing_paths_stale_paced(
                 CaptureProvider::Codex,
                 &source_root,
                 &current_paths,
                 cataloged_at_ms,
                 observation_generation,
+                crate::pace_current_disk_io,
             )?;
         }
         if !store.complete_catalog_inventory_generation(
@@ -199,15 +222,26 @@ pub fn catalog_codex_session_files(
             store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?
         }
     };
+    let initial_inventory =
+        prepare_initial_catalog_inventory(store, &source_root, observation_generation)?;
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let (scan_summary, sessions) =
         catalog_codex_session_paths(paths, &source_root, cataloged_at_ms, options.parallelism)?;
     let mut summary = scan_summary;
     summary.cataloged_sessions = sessions.len();
+    let initial_inventory_persisted = if initial_inventory && !sessions.is_empty() {
+        persist_initial_catalog_sessions_bounded(store, observation_generation, &sessions)?
+    } else {
+        initial_inventory
+    };
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
-        if !sessions.is_empty() {
-            store.upsert_catalog_sessions(observation_generation, &sessions)?;
+        if !initial_inventory_persisted && !sessions.is_empty() {
+            persist_catalog_sessions_paced_in_current_batch(
+                store,
+                observation_generation,
+                &sessions,
+            )?;
         }
         if !store.complete_catalog_inventory_generation(
             CaptureProvider::Codex,
@@ -226,6 +260,192 @@ pub fn catalog_codex_session_files(
         }
     }
     Ok(summary)
+}
+
+fn prepare_initial_catalog_inventory(
+    store: &Store,
+    source_root: &str,
+    observation_generation: u64,
+) -> Result<bool> {
+    if !store.catalog_inventory_generation_is_unpublished(
+        CaptureProvider::Codex,
+        source_root,
+        observation_generation,
+    )? {
+        return Ok(false);
+    }
+    loop {
+        let Some((deleted, _bytes)) = store.delete_unpublished_catalog_sessions_batch_paced(
+            CaptureProvider::Codex,
+            source_root,
+            observation_generation,
+            CATALOG_PERSIST_BATCH_SESSIONS,
+            crate::pace_current_disk_io,
+        )?
+        else {
+            return Err(CaptureError::InventorySuperseded);
+        };
+        if deleted == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn persist_initial_catalog_sessions_bounded(
+    store: &Store,
+    observation_generation: u64,
+    sessions: &[CatalogSession],
+) -> Result<bool> {
+    persist_initial_catalog_sessions_bounded_with_observer(
+        store,
+        observation_generation,
+        sessions,
+        |_| {},
+    )
+}
+
+fn persist_catalog_sessions_paced_in_current_batch(
+    store: &Store,
+    observation_generation: u64,
+    sessions: &[CatalogSession],
+) -> Result<()> {
+    let byte_limit = crate::disk_io_pacing::current_disk_io_burst_bytes()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .map_or(CATALOG_PERSIST_BATCH_BYTES, |bytes| {
+            bytes.clamp(1, CATALOG_PERSIST_BATCH_BYTES)
+        });
+    let mut start = 0;
+    while start < sessions.len() {
+        let (count, bytes) = catalog_persist_batch(&sessions[start..], byte_limit)?;
+        crate::pace_current_disk_io(bytes);
+        store.upsert_catalog_sessions(
+            observation_generation,
+            &sessions[start..start.saturating_add(count)],
+        )?;
+        start = start.saturating_add(count);
+    }
+    Ok(())
+}
+
+fn persist_initial_catalog_sessions_bounded_with_observer(
+    store: &Store,
+    observation_generation: u64,
+    sessions: &[CatalogSession],
+    mut batch_committed: impl FnMut(usize),
+) -> Result<bool> {
+    let source_root = sessions
+        .first()
+        .map(|session| session.source_root.as_str())
+        .unwrap_or_default();
+    if store.catalog_sessions_have_external_path_owners(
+        CaptureProvider::Codex,
+        source_root,
+        sessions,
+    )? {
+        return Ok(false);
+    }
+    let byte_limit = crate::disk_io_pacing::current_disk_io_burst_bytes()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .map_or(CATALOG_PERSIST_BATCH_BYTES, |bytes| {
+            bytes.clamp(1, CATALOG_PERSIST_BATCH_BYTES)
+        });
+    let mut start = 0;
+    while start < sessions.len() {
+        let (end, bytes) = catalog_persist_batch(&sessions[start..], byte_limit)?;
+        crate::pace_current_disk_io(bytes);
+        store.begin_immediate_batch()?;
+        let persist = (|| -> Result<bool> {
+            let source_root = sessions[start].source_root.as_str();
+            if !store.catalog_inventory_generation_is_unpublished(
+                CaptureProvider::Codex,
+                source_root,
+                observation_generation,
+            )? {
+                return Err(CaptureError::InventorySuperseded);
+            }
+            if store.catalog_sessions_have_external_path_owners(
+                CaptureProvider::Codex,
+                source_root,
+                &sessions[start..start + end],
+            )? {
+                return Ok(false);
+            }
+            store.upsert_catalog_sessions(observation_generation, &sessions[start..start + end])?;
+            Ok(true)
+        })();
+        match persist {
+            Ok(true) => store.commit_batch()?,
+            Ok(false) => {
+                store.rollback_batch()?;
+                return Ok(false);
+            }
+            Err(err) => {
+                let _ = store.rollback_batch();
+                return Err(err);
+            }
+        }
+        start += end;
+        batch_committed(start);
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn persist_initial_catalog_sessions_bounded_for_test(
+    store: &Store,
+    observation_generation: u64,
+    sessions: &[CatalogSession],
+    batch_committed: impl FnMut(usize),
+) -> Result<bool> {
+    persist_initial_catalog_sessions_bounded_with_observer(
+        store,
+        observation_generation,
+        sessions,
+        batch_committed,
+    )
+}
+
+fn catalog_persist_batch(sessions: &[CatalogSession], byte_limit: usize) -> Result<(usize, u64)> {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for session in sessions.iter().take(CATALOG_PERSIST_BATCH_SESSIONS) {
+        let session_bytes = catalog_session_persist_bytes(session)?;
+        if count > 0 && bytes.saturating_add(session_bytes) > byte_limit as u64 {
+            break;
+        }
+        count += 1;
+        bytes = bytes.saturating_add(session_bytes);
+        if bytes >= byte_limit as u64 {
+            break;
+        }
+    }
+    Ok((count, bytes))
+}
+
+fn catalog_session_persist_bytes(session: &CatalogSession) -> Result<u64> {
+    let mut bytes = CATALOG_PERSIST_ROW_OVERHEAD_BYTES;
+    for value in [
+        Some(session.source_format.as_str()),
+        Some(session.source_root.as_str()),
+        Some(session.source_path.as_str()),
+        session.external_session_id.as_deref(),
+        session.parent_external_session_id.as_deref(),
+        session.role_hint.as_deref(),
+        session.external_agent_id.as_deref(),
+        session.cwd.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        bytes = bytes.saturating_add(value.len() as u64);
+    }
+    bytes = bytes.saturating_add(serde_json::to_vec(&session.metadata)?.len() as u64);
+    Ok(bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn catalog_session_persist_bytes_for_test(session: &CatalogSession) -> Result<u64> {
+    catalog_session_persist_bytes(session)
 }
 
 pub(crate) fn cached_catalog_session_if_unchanged(
@@ -361,10 +581,22 @@ pub(crate) fn catalog_parallelism(
     if path_count <= 1 {
         return 1;
     }
+    let pacing_limit = crate::disk_io_pacing::current_disk_io_pacer()
+        .map(|pacer| {
+            if pacer.bytes_per_second() <= 8 * 1024 * 1024 {
+                QUIET_CATALOG_MAX_PARALLELISM
+            } else if pacer.bytes_per_second() <= 32 * 1024 * 1024 {
+                INTERACTIVE_CATALOG_MAX_PARALLELISM
+            } else {
+                32
+            }
+        })
+        .unwrap_or(32);
     requested_parallelism
         .or_else(|| thread::available_parallelism().ok().map(usize::from))
         .unwrap_or(1)
         .clamp(1, 32)
+        .min(pacing_limit)
         .min(path_count)
 }
 pub(crate) fn catalog_codex_session_file(

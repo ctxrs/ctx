@@ -60,10 +60,23 @@ Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including
 manifested per-file imports, but its final compaction remains bounded.
 
-Import execution also applies an internal cross-platform token-bucket disk
+Import execution also applies an internal cross-platform token-bucket I/O
 pacer; it is policy, not a product flag. Exhaustive foreground setup/import and
-wait refresh use 64 MiB/s with an 8 MiB burst, bounded interactive refresh uses
-32 MiB/s with a 4 MiB burst, and daemon refresh uses 8 MiB/s with a 1 MiB burst.
+wait refresh charge source reads and logical write work at 64 MiB/s with an 8
+MiB burst, bounded interactive refresh uses 32 MiB/s with a 4 MiB burst, and
+daemon refresh uses 8 MiB/s with a 1 MiB burst. These are logical work budgets,
+not an operating-system guarantee on physical disk bandwidth: SQLite journaling,
+index maintenance, filesystem caching, and device write amplification can make
+observed device traffic differ. FTS maintenance precharges its logical merge and
+checkpoint budget, then supplements that charge to cover both the already-written
+SQLite WAL and its imminent checkpoint copy. The nominal precharge is subtracted
+from this observed two-pass target, so an amplified merge delays that checkpoint
+and the next step proportionally without charging the nominal work twice. Bounded
+transactions, checkpoints, and FTS merge steps constrain individual maintenance
+operations around that portable budget. An ordinary writable store open
+reasserts merge suppression but leaves stale FTS recovery marked; a paced import
+or daemon maintenance path resumes it in bounded slices.
+
 The daemon retains its bucket across refresh passes, and idle credit never
 exceeds one burst. Sleeps are issued in at most 25 ms quanta. A first unit may
 exceed the 8 MiB transaction/slice target, but it is committed and then charged

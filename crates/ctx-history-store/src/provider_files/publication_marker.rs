@@ -135,6 +135,7 @@ impl Store {
                 && prior_kind == scope.kind
                 && (scope.retires_observation || !retirement_started);
             let reuse_staging_state = reuse_staging_state && staging_initialized;
+            let clear_observation_invalidation = !scope.retires_observation && !same_observation;
             scope.reuse_staging_state = reuse_staging_state;
             self.conn.execute(
                 r#"
@@ -147,6 +148,9 @@ impl Store {
                     file_modified_at_ms = ?12, import_revision = ?13,
                     metadata_json = ?14, mutation_started = ?15,
                     tracks_prior_material = ?16,
+                    inventory_observation_invalidated = CASE
+                        WHEN ?19 THEN 0 ELSE inventory_observation_invalidated
+                    END,
                     retirement_started = CASE
                         WHEN ?17 THEN retirement_started ELSE 0
                     END,
@@ -201,6 +205,7 @@ impl Store {
                     scope.tracks_prior_material,
                     reuse_staging_state,
                     created_at_ms,
+                    clear_observation_invalidation,
                 ],
             )?
         } else {
