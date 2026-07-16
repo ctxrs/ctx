@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.Objects;
 
 public class AgentHistoryClient {
+    private static final int MAX_SEARCH_RESULTS = 200;
+
     private final AgentHistoryTransport transport;
 
     protected AgentHistoryClient(AgentHistoryTransport transport) {
@@ -94,6 +96,10 @@ public class AgentHistoryClient {
         }
         add(args, "--backend", safe.backend());
         add(args, "--provider", safe.provider());
+        add(args, "--history-source", safe.historySource());
+        add(args, "--provider-key", safe.providerKey());
+        add(args, "--source-id", safe.sourceId());
+        add(args, "--source-format", safe.sourceFormat());
         add(args, "--workspace", safe.workspace());
         add(args, "--since", safe.since());
         add(args, "--event-type", safe.eventType());
@@ -108,6 +114,7 @@ public class AgentHistoryClient {
     }
 
     private static void requireSearchIntent(AgentHistoryOptions.Search options) {
+        validateSearchLimit(options.limit());
         if (options.query() != null) {
             options.query().validate();
             return;
@@ -116,6 +123,13 @@ public class AgentHistoryClient {
             return;
         }
         throw new CtxAgentHistoryException.Validation("search requires a ctx-search-v1 query or file option");
+    }
+
+    private static void validateSearchLimit(Integer limit) {
+        if (limit != null && (limit.intValue() < 1 || limit.intValue() > MAX_SEARCH_RESULTS)) {
+            throw new CtxAgentHistoryException.Validation(
+                    "search limit must be an integer between 1 and 200");
+        }
     }
 
     public ShowEventResponse showEvent(String id, AgentHistoryOptions.ShowEvent options) {

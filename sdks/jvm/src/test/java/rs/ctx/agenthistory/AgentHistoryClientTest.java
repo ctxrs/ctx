@@ -15,6 +15,9 @@ public final class AgentHistoryClientTest {
         decodesAllCanonicalFixturesThroughTypedResponses();
         normalizesRawShowAndLocateResponses();
         buildsSearchCommand();
+        canonicalizesSearchQueriesBeforeBounds();
+        validatesExplicitSearchLimits();
+        omitsObsoleteRetrievalFields();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
@@ -176,6 +179,11 @@ public final class AgentHistoryClientTest {
                         .build())
                 .limit(5)
                 .backend("hybrid")
+                .provider("custom")
+                .historySource("dorkos/default")
+                .providerKey("dorkos")
+                .sourceId("default")
+                .sourceFormat("dorkos-history-v1")
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
@@ -183,7 +191,93 @@ public final class AgentHistoryClientTest {
         assertContains(transport.lastOperation.args(), "\"semantic\":\"find related ctx work\"");
         assertContainsInOrder(transport.lastOperation.args(), "--limit", "5");
         assertContainsInOrder(transport.lastOperation.args(), "--backend", "hybrid");
+        assertContainsInOrder(transport.lastOperation.args(), "--provider", "custom");
+        assertContainsInOrder(transport.lastOperation.args(), "--history-source", "dorkos/default");
+        assertContainsInOrder(transport.lastOperation.args(), "--provider-key", "dorkos");
+        assertContainsInOrder(transport.lastOperation.args(), "--source-id", "default");
+        assertContainsInOrder(transport.lastOperation.args(), "--source-format", "dorkos-history-v1");
         assertContainsInOrder(transport.lastOperation.args(), "--refresh", "off");
+    }
+
+    private static void canonicalizesSearchQueriesBeforeBounds() {
+        SearchQuery.Builder builder = SearchQuery.builder();
+        for (int index = 0; index < 33; index++) {
+            builder.any(SearchClause.all("  cafe\u0301\u00a0\u4e16\u754c  "));
+        }
+        SearchQuery query = builder
+                .any(SearchClause.literal("\u3000logs_2.db  raw\u00a0"))
+                .any(SearchClause.semantic(" related\u202fctx\nwork "))
+                .any(SearchClause.semantic("related ctx work"))
+                .mustNot(SearchClause.phrase(" postgres\u2003vacuum "))
+                .build();
+
+        assertEquals(Integer.valueOf(3), Integer.valueOf(query.any().size()));
+        assertEquals("cafe\u0301 \u4e16\u754c", query.any().get(0).value());
+        assertEquals("logs_2.db  raw", query.any().get(1).value());
+        assertEquals("related ctx work", query.any().get(2).value());
+        assertEquals("postgres vacuum", query.mustNot().get(0).value());
+
+        SearchQuery.Builder exactClauseLimit = SearchQuery.builder();
+        for (int index = 0; index < SearchQuery.MAX_CLAUSES; index++) {
+            exactClauseLimit.any(SearchClause.all("term" + index));
+        }
+        assertEquals(Integer.valueOf(SearchQuery.MAX_CLAUSES),
+                Integer.valueOf(exactClauseLimit.build().any().size()));
+
+        assertValidation(() -> SearchQuery.all("!!!"));
+        StringBuilder boundedTokens = new StringBuilder();
+        for (int index = 0; index < 32; index++) {
+            if (index > 0) boundedTokens.append(' ');
+            boundedTokens.append('x');
+        }
+        SearchQuery.all(boundedTokens.toString());
+        boundedTokens.append(" x");
+        assertValidation(() -> SearchQuery.all(boundedTokens.toString()));
+    }
+
+    private static void validatesExplicitSearchLimits() {
+        FakeTransport rejectedTransport = new FakeTransport("local-cli", emptySearchJson());
+        AgentHistoryClient rejected = AgentHistoryClient.withTransport(rejectedTransport);
+        for (int limit : new int[] {-1, 0, 201}) {
+            assertValidation(() -> rejected.search(AgentHistoryOptions.search()
+                    .query(SearchQuery.all("bounded limit"))
+                    .limit(Integer.valueOf(limit))));
+        }
+        if (rejectedTransport.lastOperation != null) {
+            throw new AssertionError("invalid limit invoked transport: " + rejectedTransport.lastOperation.args());
+        }
+
+        FakeTransport acceptedTransport = new FakeTransport("local-cli", emptySearchJson());
+        AgentHistoryClient accepted = AgentHistoryClient.withTransport(acceptedTransport);
+        accepted.search(AgentHistoryOptions.search()
+                .query(SearchQuery.all("bounded limit"))
+                .limit(Integer.valueOf(1)));
+        assertContainsInOrder(acceptedTransport.lastOperation.args(), "--limit", "1");
+        accepted.search(AgentHistoryOptions.search()
+                .query(SearchQuery.all("bounded limit"))
+                .limit(Integer.valueOf(200)));
+        assertContainsInOrder(acceptedTransport.lastOperation.args(), "--limit", "200");
+    }
+
+    private static void omitsObsoleteRetrievalFields() {
+        AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
+                "local-cli",
+                searchJsonWithObsoleteRetrieval()));
+
+        SearchResult search = client.search(AgentHistoryOptions.search()
+                .query(SearchQuery.all("agent history")))
+                .getSearch();
+        Map<String, Object> retrieval = AgentHistoryValue.object(search.getRetrieval());
+        assertEquals("hybrid", retrieval.get("requestedMode"));
+        assertEquals("lexical", retrieval.get("effectiveMode"));
+        assertAbsent(retrieval, "semanticWeight");
+        assertAbsent(retrieval, "semanticFallbackCode");
+        assertAbsent(retrieval, "semanticFallback");
+        assertEquals(Integer.valueOf(4), AgentHistoryValue.integer(
+                AgentHistoryValue.object(retrieval.get("coverage")).get("embeddedItems")));
+        assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(
+                AgentHistoryValue.object(retrieval.get("diagnostics")).get("queryEmbedMs")));
+        assertAbsent(search.getResults().get(0).asMap(), "retrieval");
     }
 
     private static void searchRequiresIntent() {
@@ -219,11 +313,27 @@ public final class AgentHistoryClientTest {
     }
 
     private static String emptySearchJson() {
+        return searchJson("\"results\":[]");
+    }
+
+    private static String searchJsonWithObsoleteRetrieval() {
+        return searchJson("\"retrieval\":{"
+                + "\"requested_mode\":\"hybrid\",\"effective_mode\":\"lexical\","
+                + "\"semantic_weight\":0.0,"
+                + "\"semantic_fallback_code\":\"semantic_retrieval_failed\","
+                + "\"semantic_fallback\":\"semantic_retrieval_failed\","
+                + "\"coverage\":{\"embedded_items\":4},"
+                + "\"diagnostics\":{\"query_embed_ms\":2}},"
+                + "\"results\":[{\"result_scope\":\"event\",\"retrieval\":{\"score\":0.8}}]");
+    }
+
+    private static String searchJson(String resultFields) {
         return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},"
                 + "\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\","
                 + "\"resolved\":" + limitsJson() + ",\"consumed\":" + consumedJson() + ","
                 + "\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},"
-                + "\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"results\":[]}";
+                + "\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},"
+                + resultFields + "}";
     }
 
     private static String limitsJson() {
@@ -260,6 +370,12 @@ public final class AgentHistoryClientTest {
     private static void assertEquals(Object want, Object got) {
         if (want == null ? got != null : !want.equals(got)) {
             throw new AssertionError("want " + want + " got " + got);
+        }
+    }
+
+    private static void assertAbsent(Map<String, Object> values, String key) {
+        if (values.containsKey(key)) {
+            throw new AssertionError("unexpected key " + key + " in " + values);
         }
     }
 

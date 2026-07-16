@@ -1,7 +1,9 @@
 package rs.ctx.agenthistory;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Canonical agent-history-v1 envelope shared by all typed responses. */
@@ -199,7 +201,23 @@ public class AgentHistoryEnvelope {
         search.put("schema_version", Integer.valueOf(2));
         search.put("query", query == null ? null : query.asMap());
         search.put("query_execution", AgentHistoryValue.copyObject(execution));
+        search.put("results", withoutPerHitRetrieval(search.get("results")));
         return AgentHistoryValue.copyObject(search);
+    }
+
+    private static List<Object> withoutPerHitRetrieval(Object value) {
+        List<Object> results = new ArrayList<>();
+        for (Object item : AgentHistoryValue.rawList(value)) {
+            Map<String, Object> fields = AgentHistoryValue.objectOrNull(item);
+            if (fields == null) {
+                results.add(item);
+                continue;
+            }
+            Map<String, Object> canonical = new LinkedHashMap<>(fields);
+            canonical.remove("retrieval");
+            results.add(canonical);
+        }
+        return AgentHistoryValue.copyList(results);
     }
 
     private static Map<String, Object> pick(Map<String, Object> raw, String... keys) {

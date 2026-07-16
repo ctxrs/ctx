@@ -22,6 +22,10 @@ public final class ToyAgentHistoryApp {
                         .must(SearchClause.all("codex"))
                         .build())
                 .provider("codex")
+                .historySource("codex/default")
+                .providerKey("codex")
+                .sourceId("default")
+                .sourceFormat("codex_session_jsonl")
                 .refresh("off")
                 .limit(Integer.valueOf(5)));
         ShowEventResponse shown = client.showEvent("evt-toy-1", AgentHistoryOptions.showEvent().window(Integer.valueOf(1)));

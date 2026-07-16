@@ -21,6 +21,10 @@ public final class SearchClause {
     public String matcher() { return matcher; }
     public String value() { return value; }
 
+    SearchClause withValue(String canonicalValue) {
+        return new SearchClause(matcher, canonicalValue);
+    }
+
     public Map<String, Object> asMap() {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put(matcher, value);
