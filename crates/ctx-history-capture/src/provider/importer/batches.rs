@@ -297,24 +297,16 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
     ) -> Result<(ProviderImportSummary, ProviderNormalizationStreamMetrics)> {
         match self.finish_import() {
             Ok(mut summary) => {
-                if let Err(error) = self.finish_bulk_search() {
-                    summary.push_maintenance_warning(
-                        crate::ProviderImportMaintenanceKind::EventSearchFinalization,
-                        error.to_string(),
-                    );
-                }
+                let finish_result = self.finish_bulk_search();
+                apply_event_search_finalization(&mut summary, finish_result)?;
                 Ok((summary, self.metrics))
             }
             Err(error) if self.transaction.record_interruption_after_commit(&error) => {
                 self.transaction.rollback(self.store);
                 self.transaction
                     .apply_maintenance_warning(&mut self.summary);
-                if let Err(finish_error) = self.finish_bulk_search() {
-                    self.summary.push_maintenance_warning(
-                        crate::ProviderImportMaintenanceKind::EventSearchFinalization,
-                        finish_error.to_string(),
-                    );
-                }
+                let finish_result = self.finish_bulk_search();
+                apply_event_search_finalization(&mut self.summary, finish_result)?;
                 Ok((std::mem::take(&mut self.summary), self.metrics))
             }
             Err(error) => {
@@ -334,12 +326,8 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
         if committed {
             self.transaction
                 .apply_maintenance_warning(&mut self.summary);
-            if let Err(finish_error) = self.finish_bulk_search() {
-                self.summary.push_maintenance_warning(
-                    crate::ProviderImportMaintenanceKind::EventSearchFinalization,
-                    finish_error.to_string(),
-                );
-            }
+            let finish_result = self.finish_bulk_search();
+            apply_event_search_finalization(&mut self.summary, finish_result)?;
             return Ok((std::mem::take(&mut self.summary), self.metrics));
         }
         let _ = self.finish_bulk_search();
@@ -488,22 +476,15 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
         Ok(std::mem::take(&mut self.summary))
     }
 
-    fn finish_bulk_search(&mut self) -> Result<()> {
+    fn finish_bulk_search(
+        &mut self,
+    ) -> Result<ctx_history_store::EventSearchBulkMaintenanceOutcome> {
         match self.bulk_search_guard.take() {
-            Some(guard) => {
-                let outcome = self
-                    .store
-                    .finish_event_search_bulk_mode(&guard)
-                    .map_err(CaptureError::from)?;
-                if outcome == ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending {
-                    self.summary.push_maintenance_warning(
-                        crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
-                        "event search maintenance remains queued",
-                    );
-                }
-                Ok(())
-            }
-            None => Ok(()),
+            Some(guard) => self
+                .store
+                .finish_event_search_bulk_mode(&guard)
+                .map_err(CaptureError::from),
+            None => Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete),
         }
     }
 }

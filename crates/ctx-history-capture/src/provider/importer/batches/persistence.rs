@@ -133,25 +133,36 @@ fn import_provider_capture_lines_with_batch_size(
             .map_err(CaptureError::from),
         None => Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete),
     };
-    match (import_result, finish_result) {
-        (Ok(mut summary), Err(error)) => {
-            summary.push_maintenance_warning(
-                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
-                error.to_string(),
-            );
+    match import_result {
+        Ok(mut summary) => {
+            apply_event_search_finalization(&mut summary, finish_result)?;
             Ok(summary)
         }
-        (Ok(summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete)) => {
-            Ok(summary)
-        }
-        (Ok(mut summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending)) => {
+        Err(error) => Err(error),
+    }
+}
+
+fn apply_event_search_finalization(
+    summary: &mut ProviderImportSummary,
+    result: Result<ctx_history_store::EventSearchBulkMaintenanceOutcome>,
+) -> Result<()> {
+    match result {
+        Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete) => Ok(()),
+        Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending) => {
             summary.push_maintenance_warning(
                 crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
                 "event search maintenance remains queued",
             );
-            Ok(summary)
+            Ok(())
         }
-        (Err(err), _) => Err(err),
+        Err(error) if is_retryable_import_pressure(&error) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
+                error.to_string(),
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -323,6 +334,7 @@ impl Write for ByteCounter {
 
 pub(crate) struct ProviderImportTransaction {
     active: bool,
+    halted: bool,
     batch_size: Option<NonZeroUsize>,
     units: usize,
     bytes: usize,
@@ -352,6 +364,7 @@ impl ProviderImportTransaction {
         }
         Ok(Self {
             active: has_work,
+            halted: false,
             batch_size,
             units: 0,
             bytes: 0,
@@ -370,6 +383,9 @@ impl ProviderImportTransaction {
     }
 
     fn ensure_active(&mut self, store: &Store) -> Result<()> {
+        if self.halted {
+            return Err(CaptureError::CommittedImportMaintenance);
+        }
         if self.active {
             return Ok(());
         }
@@ -385,7 +401,7 @@ impl ProviderImportTransaction {
         store: &Store,
         unit_bytes: usize,
     ) -> Result<ProviderImportTransactionStep> {
-        if self.maintenance_warning.is_some() {
+        if self.halted {
             return Ok(ProviderImportTransactionStep::Halted);
         }
         let result = if self.active
@@ -411,7 +427,7 @@ impl ProviderImportTransaction {
         store: &Store,
         unit_bytes: usize,
     ) -> Result<ProviderImportTransactionStep> {
-        if self.maintenance_warning.is_some() {
+        if self.halted {
             return Ok(ProviderImportTransactionStep::Halted);
         }
         if !self.active {
@@ -434,28 +450,66 @@ impl ProviderImportTransaction {
     }
 
     fn rotate(&mut self, store: &Store) -> Result<ProviderImportTransactionStep> {
+        self.rotate_with_maintenance(store, || store.maintain_event_search_bulk_mode())
+    }
+
+    fn rotate_with_maintenance<F>(
+        &mut self,
+        store: &Store,
+        maintain: F,
+    ) -> Result<ProviderImportTransactionStep>
+    where
+        F: FnOnce() -> ctx_history_store::Result<
+            ctx_history_store::EventSearchBulkMaintenanceOutcome,
+        >,
+    {
         crate::pace_current_disk_io(u64::try_from(self.bytes).unwrap_or(u64::MAX));
         store.commit_batch()?;
         self.active = false;
         self.durable_materialization = true;
+
+        match maintain() {
+            Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete) => {}
+            Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending) => {
+                self.set_maintenance_warning(
+                    crate::ProviderImportMaintenanceKind::ImportInterruptedAfterCommit,
+                    "event search maintenance paused further provider import admission".to_owned(),
+                );
+                return Ok(ProviderImportTransactionStep::Halted);
+            }
+            Err(error) => {
+                return self.defer_rotation_error(
+                    error,
+                    crate::ProviderImportMaintenanceKind::EventSearchFinalization,
+                );
+            }
+        }
         if let Err(error) = store.checkpoint_wal_truncate_required() {
-            self.set_maintenance_warning(
-                crate::ProviderImportMaintenanceKind::WalCheckpoint,
-                error.to_string(),
-            );
-            return Ok(ProviderImportTransactionStep::Halted);
+            return self
+                .defer_rotation_error(error, crate::ProviderImportMaintenanceKind::WalCheckpoint);
         }
         if let Err(error) = store.begin_immediate_batch() {
-            self.set_maintenance_warning(
+            return self.defer_rotation_error(
+                error,
                 crate::ProviderImportMaintenanceKind::TransactionContinuation,
-                error.to_string(),
             );
-            return Ok(ProviderImportTransactionStep::Halted);
         }
         self.active = true;
         self.units = 0;
         self.bytes = 0;
         Ok(ProviderImportTransactionStep::Continue)
+    }
+
+    fn defer_rotation_error(
+        &mut self,
+        error: ctx_history_store::StoreError,
+        kind: crate::ProviderImportMaintenanceKind,
+    ) -> Result<ProviderImportTransactionStep> {
+        if !is_retryable_import_pressure(&error) {
+            return Err(error.into());
+        }
+        self.set_maintenance_warning(kind, error.to_string());
+        Ok(ProviderImportTransactionStep::Halted)
     }
 
     pub(crate) fn commit(&mut self, store: &Store) -> Result<()> {
@@ -488,7 +542,9 @@ impl ProviderImportTransaction {
     }
 
     pub(crate) fn record_interruption_after_commit(&mut self, error: &CaptureError) -> bool {
-        if !self.durable_materialization {
+        let resumable = matches!(error, CaptureError::CommittedImportMaintenance)
+            || is_retryable_import_pressure(error);
+        if !self.durable_materialization || !resumable {
             return false;
         }
         self.set_maintenance_warning(
@@ -503,15 +559,58 @@ impl ProviderImportTransaction {
         kind: crate::ProviderImportMaintenanceKind,
         error: String,
     ) {
+        self.halted = true;
         self.maintenance_warning
             .get_or_insert(crate::ProviderImportMaintenanceWarning { kind, error });
     }
 }
 
+fn is_retryable_import_pressure(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if matches!(
+            error.downcast_ref::<ctx_history_store::StoreError>(),
+            Some(
+                ctx_history_store::StoreError::WalCheckpointBusy { .. }
+                    | ctx_history_store::StoreError::BulkSearchImportBusy
+            )
+        ) {
+            return true;
+        }
+        if matches!(
+            error
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code),
+            Some(rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked)
+        ) {
+            return true;
+        }
+        if matches!(
+            error.downcast_ref::<rusqlite::ffi::Error>(),
+            Some(rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseBusy
+                    | rusqlite::ffi::ErrorCode::DatabaseLocked,
+                ..
+            })
+        ) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
 #[cfg(test)]
-mod pacing_tests {
+mod transaction_tests {
     use super::*;
     use crate::{install_disk_io_pacer, DiskIoPacer};
+
+    fn sqlite_store_error(code: i32) -> ctx_history_store::StoreError {
+        ctx_history_store::StoreError::Sql(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ))
+    }
 
     #[test]
     fn durable_transaction_batch_charges_actual_serialized_bytes() {
@@ -530,5 +629,157 @@ mod pacing_tests {
         transaction.commit(&store).unwrap();
 
         assert_eq!(pacer.charged_bytes(), IMPORT_TRANSACTION_BATCH_BYTES as u64);
+    }
+
+    #[test]
+    fn retryable_pressure_is_classified_through_error_chains() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            let error = CaptureError::Store(sqlite_store_error(code));
+            assert!(is_retryable_import_pressure(&error));
+        }
+        let direct_sqlite_error = CaptureError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY_RECOVERY),
+            None,
+        ));
+        assert!(is_retryable_import_pressure(&direct_sqlite_error));
+        assert!(is_retryable_import_pressure(
+            &ctx_history_store::StoreError::WalCheckpointBusy {
+                log_frames: 2,
+                checkpointed_frames: 1,
+            }
+        ));
+        assert!(is_retryable_import_pressure(
+            &ctx_history_store::StoreError::BulkSearchImportBusy
+        ));
+
+        for code in [rusqlite::ffi::SQLITE_FULL, rusqlite::ffi::SQLITE_CORRUPT] {
+            let error = CaptureError::Store(sqlite_store_error(code));
+            assert!(!is_retryable_import_pressure(&error));
+        }
+        assert!(!is_retryable_import_pressure(
+            &ctx_history_store::StoreError::Io(std::io::Error::other("fatal test I/O failure"))
+        ));
+        assert!(!is_retryable_import_pressure(
+            &ctx_history_store::StoreError::InvalidBulkSearchGuard
+        ));
+    }
+
+    #[test]
+    fn rotation_defers_only_retryable_pressure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let errors = [
+            ctx_history_store::StoreError::WalCheckpointBusy {
+                log_frames: 2,
+                checkpointed_frames: 1,
+            },
+            ctx_history_store::StoreError::BulkSearchImportBusy,
+            sqlite_store_error(rusqlite::ffi::SQLITE_BUSY),
+            sqlite_store_error(rusqlite::ffi::SQLITE_LOCKED),
+        ];
+
+        for error in errors {
+            let mut transaction = ProviderImportTransaction::begin_bounded(&store, true).unwrap();
+            transaction.units = 1;
+            assert_eq!(
+                transaction
+                    .rotate_with_maintenance(&store, || Err(error))
+                    .unwrap(),
+                ProviderImportTransactionStep::Halted
+            );
+            assert!(transaction.durable_materialization);
+            assert!(!transaction.active);
+            assert!(transaction.halted);
+            assert!(transaction.maintenance_warning.is_some());
+        }
+    }
+
+    #[test]
+    fn rotation_propagates_disk_full_and_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        for (sqlite_code, expected_code) in [
+            (
+                rusqlite::ffi::SQLITE_FULL,
+                rusqlite::ffi::ErrorCode::DiskFull,
+            ),
+            (
+                rusqlite::ffi::SQLITE_CORRUPT,
+                rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+            ),
+        ] {
+            let mut transaction = ProviderImportTransaction::begin_bounded(&store, true).unwrap();
+            transaction.units = 1;
+            let error = transaction
+                .rotate_with_maintenance(&store, || Err(sqlite_store_error(sqlite_code)))
+                .unwrap_err();
+            assert!(matches!(
+                &error,
+                CaptureError::Store(ctx_history_store::StoreError::Sql(error))
+                    if error.sqlite_error_code() == Some(expected_code)
+            ));
+            assert!(!transaction.record_interruption_after_commit(&error));
+        }
+    }
+
+    #[test]
+    fn fts_pending_stops_further_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+        let mut transaction = ProviderImportTransaction::begin_bounded(&store, true).unwrap();
+        transaction.units = 1;
+        transaction.bytes = 256;
+
+        assert_eq!(
+            transaction
+                .rotate_with_maintenance(&store, || {
+                    Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending)
+                })
+                .unwrap(),
+            ProviderImportTransactionStep::Halted
+        );
+        assert!(transaction.durable_materialization);
+        assert!(!transaction.active);
+        assert_eq!(pacer.charged_bytes(), 256);
+        assert_eq!(
+            transaction.prepare_unit(&store, 128).unwrap(),
+            ProviderImportTransactionStep::Halted
+        );
+        assert_eq!(pacer.charged_bytes(), 256);
+        assert!(matches!(
+            transaction.maintenance_warning.as_ref(),
+            Some(crate::ProviderImportMaintenanceWarning {
+                kind: crate::ProviderImportMaintenanceKind::ImportInterruptedAfterCommit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn finalization_defers_busy_but_propagates_fatal_sqlite_errors() {
+        let mut summary = ProviderImportSummary::default();
+        for error in [
+            ctx_history_store::StoreError::BulkSearchImportBusy,
+            sqlite_store_error(rusqlite::ffi::SQLITE_BUSY),
+            sqlite_store_error(rusqlite::ffi::SQLITE_LOCKED),
+        ] {
+            apply_event_search_finalization(&mut summary, Err(CaptureError::Store(error))).unwrap();
+        }
+        assert_eq!(summary.maintenance_warnings.len(), 3);
+        assert!(summary.maintenance_warnings.iter().all(|warning| {
+            warning.kind == crate::ProviderImportMaintenanceKind::EventSearchFinalization
+        }));
+
+        for code in [rusqlite::ffi::SQLITE_FULL, rusqlite::ffi::SQLITE_CORRUPT] {
+            let error = apply_event_search_finalization(
+                &mut ProviderImportSummary::default(),
+                Err(CaptureError::Store(sqlite_store_error(code))),
+            )
+            .unwrap_err();
+            assert!(matches!(error, CaptureError::Store(_)));
+        }
     }
 }
