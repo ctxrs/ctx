@@ -727,6 +727,7 @@ impl Store {
         if self.search_projection_recovery_deferred.get()
             || search_projection_rebuild_pending(&self.conn)?
             || !search_projection_ready(&self.conn)?
+            || !search_projection_shape_compatible(&self.conn)?
         {
             return Err(StoreError::SearchProjectionRebuildPending);
         }
