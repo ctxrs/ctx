@@ -45,12 +45,12 @@ use crate::progress::{ProgressArg, ProgressReporter};
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{discovered_sources, home_dir, SourceInfo};
 use crate::search_filters::{
-    missing_search_intent_error, normalize_source_identity_filters, search_filters,
-    search_has_intent, search_no_results_target, SearchFilterInput, SearchIntentInput,
-    SourceIdentityFilterArgs, SourceIdentityFilters,
+    normalize_source_identity_filters, search_filters, search_no_results_target,
+    SearchFilterInput, SourceIdentityFilterArgs, SourceIdentityFilters,
 };
+use crate::search_query_input::search_query_from_args;
 use crate::search_render::{print_search_result_compact, print_search_result_verbose, SearchDto};
-use crate::semantic::search_packet_with_backend;
+use crate::semantic::{search_packet_file_filter_with_backend, search_packet_query_with_backend};
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::shell_quote_arg;
 use crate::{analytics, config, semantic, SearchArgs, SearchBackendArg, WAL_TRUNCATE_MIN_BYTES};

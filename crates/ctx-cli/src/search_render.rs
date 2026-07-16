@@ -19,9 +19,10 @@ impl SearchDto {
         suggested_next_query: Option<&str>,
     ) -> Value {
         compact_json(json!({
-            "schema_version": packet.schema_version,
+            "schema_version": 2,
             "payload_type": "search_results",
-            "query": packet.query,
+            "query": packet.query_spec,
+            "query_execution": packet.query_execution,
             "filters": packet.filters,
             "freshness": refresh.to_json(),
             "retrieval": retrieval.to_json(),
