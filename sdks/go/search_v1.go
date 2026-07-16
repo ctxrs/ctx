@@ -21,6 +21,7 @@ const (
 	searchMaxAnalyzedTokensPerClause = 32
 	searchMinLiteralBytes            = 3
 	searchMaxLiteralBytes            = 256
+	searchMaxResults                 = 200
 )
 
 // SearchClauseKind identifies one externally tagged ctx-search-v1 matcher.
@@ -157,14 +158,21 @@ func (query SearchQuery) Canonical() (SearchQuery, error) {
 	}
 	semanticClauses := 0
 	totalBytes := 0
-	for placement, clauses := range map[string][]SearchClause{
-		"any": query.Any, "must": query.Must, "must_not": query.MustNot,
-	} {
+	placements := []struct {
+		name    string
+		clauses []SearchClause
+	}{
+		{name: "any", clauses: query.Any},
+		{name: "must", clauses: query.Must},
+		{name: "must_not", clauses: query.MustNot},
+	}
+	for _, placement := range placements {
+		clauses := placement.clauses
 		for _, clause := range clauses {
 			if !isSearchClauseKind(clause.kind) {
 				return SearchQuery{}, fmt.Errorf("search clause has invalid matcher %q", clause.kind)
 			}
-			if placement != "any" && clause.kind == SearchClauseSemantic {
+			if placement.name != "any" && clause.kind == SearchClauseSemantic {
 				return SearchQuery{}, fmt.Errorf("semantic clauses are allowed only in any")
 			}
 			if clause.kind == SearchClauseSemantic {
@@ -235,6 +243,14 @@ func (result *SearchResult) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*result = SearchResult(wire)
+	if retrieval, ok := result.Retrieval.(map[string]any); ok {
+		delete(retrieval, "semantic_weight")
+		delete(retrieval, "semantic_fallback_code")
+		delete(retrieval, "semantic_fallback")
+		delete(retrieval, "semanticWeight")
+		delete(retrieval, "semanticFallbackCode")
+		delete(retrieval, "semanticFallback")
+	}
 	return nil
 }
 
@@ -242,9 +258,9 @@ func canonicalSearchClauses(clauses []SearchClause) []SearchClause {
 	canonical := make([]SearchClause, 0, len(clauses))
 	seen := make(map[string]struct{}, len(clauses))
 	for _, clause := range clauses {
-		value := strings.TrimSpace(clause.value)
+		value := trimSearchWhitespace(clause.value)
 		if clause.kind != SearchClauseLiteral {
-			value = strings.Join(strings.Fields(value), " ")
+			value = strings.Join(strings.FieldsFunc(value, isSearchWhitespace), " ")
 		}
 		clause.value = value
 		key := string(clause.kind) + "\x00" + value
@@ -262,10 +278,13 @@ func isSearchClauseKind(kind SearchClauseKind) bool {
 }
 
 func searchAnalyzedTokenCount(value string) int {
+	if !utf8.ValidString(value) {
+		return 0
+	}
 	count := 0
 	inToken := false
 	for _, current := range value {
-		if unicode.IsLetter(current) || unicode.IsNumber(current) || (inToken && unicode.IsMark(current)) {
+		if unicode.IsLetter(current) || unicode.IsNumber(current) || (inToken && isSearchUnicodeMark(current)) {
 			if !inToken {
 				count++
 				inToken = true
@@ -274,8 +293,26 @@ func searchAnalyzedTokenCount(value string) int {
 			inToken = false
 		}
 	}
-	if !utf8.ValidString(value) {
-		return 0
-	}
 	return count
+}
+
+func trimSearchWhitespace(value string) string {
+	return strings.TrimFunc(value, isSearchWhitespace)
+}
+
+func isSearchWhitespace(current rune) bool {
+	return current >= '\u0009' && current <= '\u000d' ||
+		current == '\u0020' || current == '\u0085' || current == '\u00a0' ||
+		current == '\u1680' || current >= '\u2000' && current <= '\u200a' ||
+		current == '\u2028' || current == '\u2029' || current == '\u202f' ||
+		current == '\u205f' || current == '\u3000'
+}
+
+func isSearchUnicodeMark(current rune) bool {
+	return current >= '\u0300' && current <= '\u036f' ||
+		current >= '\u1ab0' && current <= '\u1aff' ||
+		current >= '\u1dc0' && current <= '\u1dff' ||
+		current >= '\u20d0' && current <= '\u20ff' ||
+		current >= '\ufe20' && current <= '\ufe2f' ||
+		current == '\u200c' || current == '\u200d'
 }

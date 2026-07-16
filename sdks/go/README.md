@@ -64,16 +64,20 @@ query := ctxagenthistory.NewSearchQuery(
 )
 query.Must = []ctxagenthistory.SearchClause{ctxagenthistory.SearchAll("codex")}
 
+limit := 20
 response, err := client.Search(context.Background(), ctxagenthistory.SearchOptions{
 	Query:   &query,
 	Backend: "hybrid",
-	Limit:   20,
+	Limit:   &limit,
 })
 ```
 
 The SDK validates and canonicalizes queries before invoking `ctx`, passes them
 with `--query-json`, requires nested search schema version 2, and exposes the
 bounded `query_execution` diagnostics with their exact `snake_case` JSON keys.
+Explicit limits must be in `1..=200`; a nil limit uses the CLI default. Search
+options also expose `HistorySource`, `ProviderKey`, `SourceID`, and
+`SourceFormat` filters.
 
 ## Local CLI
 

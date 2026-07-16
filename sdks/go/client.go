@@ -64,9 +64,13 @@ type ImportOptions struct {
 // SearchOptions configures Client.Search.
 type SearchOptions struct {
 	Query                 *SearchQuery
-	Limit                 int
+	Limit                 *int
 	Backend               string
 	Provider              string
+	HistorySource         string
+	ProviderKey           string
+	SourceID              string
+	SourceFormat          string
 	Workspace             string
 	Since                 string
 	PrimaryOnly           bool
@@ -169,8 +173,11 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 		args = append(args, "--query-json", queryJSON)
 	}
 	args = append(args, "--json")
-	if opts.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(opts.Limit))
+	if opts.Limit != nil {
+		if *opts.Limit < 1 || *opts.Limit > searchMaxResults {
+			return nil, sdkError(ErrorKindInvalidArgument, "search limit must be between 1 and 200", nil)
+		}
+		args = append(args, "--limit", strconv.Itoa(*opts.Limit))
 	}
 	appendStringFlag := func(name, value string) {
 		if value != "" {
@@ -179,6 +186,10 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 	}
 	appendStringFlag("--backend", opts.Backend)
 	appendStringFlag("--provider", opts.Provider)
+	appendStringFlag("--history-source", opts.HistorySource)
+	appendStringFlag("--provider-key", opts.ProviderKey)
+	appendStringFlag("--source-id", opts.SourceID)
+	appendStringFlag("--source-format", opts.SourceFormat)
 	appendStringFlag("--workspace", opts.Workspace)
 	appendStringFlag("--since", opts.Since)
 	appendStringFlag("--event-type", opts.EventType)

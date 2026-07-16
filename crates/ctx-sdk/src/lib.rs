@@ -4,6 +4,7 @@
 //! `ctx` CLI and adapts its private JSON into the public `agent-history-v1` envelope.
 
 use std::{
+    io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -19,7 +20,8 @@ pub use ctx_protocol::{
     SearchQuery, SearchQueryError, SearchQueryVersion, SearchResult, SearchRetrieval,
     SearchRetrievalCoverage, SearchSemanticCompleteness, SearchSemanticCoverage,
     SearchSemanticDiagnostics, SearchSemanticReadiness, SearchSemanticSkipReason, SessionResult,
-    SourceLocation, Totals, CONTRACT_VERSION, SCHEMA_VERSION, SEARCH_QUERY_VERSION,
+    SourceLocation, Totals, CONTRACT_VERSION, SCHEMA_VERSION, SEARCH_MAX_RESULTS,
+    SEARCH_MAX_SERIALIZED_RESPONSE_BYTES, SEARCH_QUERY_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -95,8 +97,14 @@ pub struct SearchOptions {
     pub limit: usize,
     pub backend: Option<String>,
     pub provider: Option<String>,
+    pub history_source: Option<String>,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
+    pub source_format: Option<String>,
     pub workspace: Option<String>,
     pub since: Option<String>,
+    pub include_subagents: bool,
+    pub event_type: Option<String>,
     pub file: Option<PathBuf>,
     pub session: Option<String>,
     pub events: bool,
@@ -111,8 +119,14 @@ impl Default for SearchOptions {
             limit: 20,
             backend: None,
             provider: None,
+            history_source: None,
+            provider_key: None,
+            source_id: None,
+            source_format: None,
             workspace: None,
             since: None,
+            include_subagents: false,
+            event_type: None,
             file: None,
             session: None,
             events: false,
@@ -240,6 +254,13 @@ impl AgentHistoryClient {
                 false,
             ));
         }
+        if !(1..=SEARCH_MAX_RESULTS).contains(&options.limit) {
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::InvalidRequest,
+                format!("search limit must be between 1 and {SEARCH_MAX_RESULTS}"),
+                false,
+            ));
+        }
         let mut owned = Vec::<String>::new();
         owned.push("search".to_owned());
         if let Some(query) = options.query {
@@ -249,8 +270,16 @@ impl AgentHistoryClient {
         owned.extend(["--limit".to_owned(), options.limit.to_string()]);
         push_opt(&mut owned, "--backend", options.backend);
         push_opt(&mut owned, "--provider", options.provider);
+        push_opt(&mut owned, "--history-source", options.history_source);
+        push_opt(&mut owned, "--provider-key", options.provider_key);
+        push_opt(&mut owned, "--source-id", options.source_id);
+        push_opt(&mut owned, "--source-format", options.source_format);
         push_opt(&mut owned, "--workspace", options.workspace);
         push_opt(&mut owned, "--since", options.since);
+        if options.include_subagents {
+            owned.push("--include-subagents".to_owned());
+        }
+        push_opt(&mut owned, "--event-type", options.event_type);
         if let Some(file) = options.file {
             push_opt(
                 &mut owned,
@@ -473,43 +502,55 @@ fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, A
         )
         .with_cause(err.to_string())
     })?;
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().map_err(|err| {
-            AgentHistoryError::new(
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AgentHistoryError::new(
                 AgentHistoryErrorCode::AdapterError,
-                "failed to wait for ctx CLI",
+                "ctx CLI stdout pipe was not available",
                 true,
-            )
-            .with_cause(err.to_string())
-        })? {
-            let output = child.wait_with_output().map_err(|err| {
-                AgentHistoryError::new(
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "ctx CLI stderr pipe was not available",
+                true,
+            ));
+        }
+    };
+    let stdout_reader =
+        thread::spawn(move || drain_bounded(stdout, SEARCH_MAX_SERIALIZED_RESPONSE_BYTES));
+    let stderr_reader =
+        thread::spawn(move || drain_bounded(stderr, SEARCH_MAX_SERIALIZED_RESPONSE_BYTES));
+    let started = Instant::now();
+    let status = loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AgentHistoryError::new(
                     AgentHistoryErrorCode::AdapterError,
-                    "failed to collect ctx CLI output",
+                    "failed to wait for ctx CLI",
                     true,
                 )
-                .with_cause(err.to_string())
-            })?;
-            if !status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(AgentHistoryError::new(
-                    classify_stderr(&stderr),
-                    stderr.trim().to_owned(),
-                    false,
-                ));
+                .with_cause(error.to_string()));
             }
-            return serde_json::from_slice(&output.stdout).map_err(|err| {
-                AgentHistoryError::new(
-                    AgentHistoryErrorCode::DecodeError,
-                    "failed to decode ctx JSON",
-                    false,
-                )
-                .with_cause(err.to_string())
-            });
+        };
+        if let Some(status) = status {
+            break status;
         }
         if started.elapsed() > config.timeout {
             let _ = child.kill();
+            let _ = child.wait();
             return Err(AgentHistoryError::new(
                 AgentHistoryErrorCode::Timeout,
                 "ctx CLI command timed out",
@@ -517,7 +558,81 @@ fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, A
             ));
         }
         thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = join_output_reader(stdout_reader, "stdout")?;
+    let stderr = join_output_reader(stderr_reader, "stderr")?;
+    if !status.success() {
+        let mut message = String::from_utf8_lossy(&stderr.bytes).trim().to_owned();
+        if stderr.exceeded {
+            message.push_str(" [stderr truncated at response cap]");
+        }
+        return Err(AgentHistoryError::new(
+            classify_stderr(&message),
+            message,
+            false,
+        ));
     }
+    if stdout.exceeded {
+        return Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            format!(
+                "ctx CLI JSON exceeds the {SEARCH_MAX_SERIALIZED_RESPONSE_BYTES}-byte response cap"
+            ),
+            false,
+        ));
+    }
+    serde_json::from_slice(&stdout.bytes).map_err(|err| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            "failed to decode ctx JSON",
+            false,
+        )
+        .with_cause(err.to_string())
+    })
+}
+
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+fn drain_bounded(mut reader: impl Read, cap: usize) -> io::Result<BoundedOutput> {
+    let mut bytes = Vec::with_capacity(cap.min(64 * 1024));
+    let mut exceeded = false;
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let retained = cap.saturating_sub(bytes.len()).min(read);
+        bytes.extend_from_slice(&chunk[..retained]);
+        exceeded |= retained < read;
+    }
+    Ok(BoundedOutput { bytes, exceeded })
+}
+
+fn join_output_reader(
+    reader: thread::JoinHandle<io::Result<BoundedOutput>>,
+    stream: &str,
+) -> Result<BoundedOutput, AgentHistoryError> {
+    reader
+        .join()
+        .map_err(|_| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                format!("ctx CLI {stream} reader panicked"),
+                true,
+            )
+        })?
+        .map_err(|error| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                format!("failed to read ctx CLI {stream}"),
+                true,
+            )
+            .with_cause(error.to_string())
+        })
 }
 
 fn classify_stderr(stderr: &str) -> AgentHistoryErrorCode {
@@ -868,6 +983,13 @@ exit 2
                 query: Some(all_query("agent history")),
                 limit: 7,
                 backend: Some("hybrid".to_owned()),
+                provider: Some("custom".to_owned()),
+                history_source: Some("hermes/default".to_owned()),
+                provider_key: Some("hermes".to_owned()),
+                source_id: Some("default".to_owned()),
+                source_format: Some("hermes-history-v1".to_owned()),
+                include_subagents: true,
+                event_type: Some("message".to_owned()),
                 refresh: SearchRefresh::Off,
                 ..SearchOptions::default()
             })
@@ -885,6 +1007,19 @@ exit 2
                 "7",
                 "--backend",
                 "hybrid",
+                "--provider",
+                "custom",
+                "--history-source",
+                "hermes/default",
+                "--provider-key",
+                "hermes",
+                "--source-id",
+                "default",
+                "--source-format",
+                "hermes-history-v1",
+                "--include-subagents",
+                "--event-type",
+                "message",
                 "--refresh",
                 "off",
                 "--json",
@@ -893,7 +1028,7 @@ exit 2
     }
 
     #[test]
-    fn search_normalization_camelizes_retrieval_json() {
+    fn search_normalization_omits_obsolete_retrieval_fields() {
         let envelope = normalize(
             AgentHistoryOperation::Search,
             BackendInfo::local(None),
@@ -930,15 +1065,9 @@ exit 2
         let retrieval = search.retrieval.unwrap();
         assert_eq!(retrieval.requested_mode.as_deref(), Some("hybrid"));
         assert_eq!(retrieval.effective_mode.as_deref(), Some("lexical"));
-        assert_eq!(retrieval.semantic_weight, Some(0.0));
-        assert_eq!(
-            retrieval.semantic_fallback_code.as_deref(),
-            Some("semantic_retrieval_failed")
-        );
-        assert_eq!(
-            retrieval.semantic_fallback.as_deref(),
-            Some("semantic_retrieval_failed")
-        );
+        assert!(!retrieval.extra.contains_key("semanticWeight"));
+        assert!(!retrieval.extra.contains_key("semanticFallbackCode"));
+        assert!(!retrieval.extra.contains_key("semanticFallback"));
         assert_eq!(retrieval.coverage.as_ref().unwrap().embedded_items, Some(4));
         assert_eq!(
             retrieval.diagnostics.as_ref().unwrap().get("queryEmbedMs"),
@@ -984,6 +1113,25 @@ exit 2
     }
 
     #[test]
+    fn search_rejects_limits_outside_public_range_before_cli() {
+        let client = AgentHistoryClient::local(LocalBackendConfig {
+            ctx_binary: PathBuf::from("/definitely/missing/ctx"),
+            data_root: None,
+            timeout: Duration::from_secs(1),
+        });
+        for limit in [0, SEARCH_MAX_RESULTS + 1] {
+            let err = client
+                .search(SearchOptions {
+                    query: Some(all_query("bounded limit")),
+                    limit,
+                    ..SearchOptions::default()
+                })
+                .unwrap_err();
+            assert_eq!(err.body.code, AgentHistoryErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
     fn structured_query_validation_is_closed_and_canonical() {
         let query = SearchQuery::from_json_slice(
             br#"{"version":"ctx-search-v1","any":[{"all":"  disk   pressure "},{"all":"disk pressure"}],"must_not":[{"literal":" logs_2.db "}]}"#,
@@ -1000,6 +1148,38 @@ exit 2
         ] {
             assert!(SearchQuery::from_json_slice(raw).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_cli_drains_stderr_while_waiting_for_bounded_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("ctx-noisy");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+set -eu
+i=0
+while [ "$i" -lt 12000 ]; do
+  printf 'bounded stderr line %08d ................................\n' "$i" >&2
+  i=$((i + 1))
+done
+printf '{"ok":true}\n'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let value = run_ctx_json(
+            &LocalBackendConfig {
+                ctx_binary: script,
+                data_root: None,
+                timeout: Duration::from_secs(5),
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(value["ok"], true);
     }
 
     #[test]

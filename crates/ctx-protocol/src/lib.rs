@@ -126,7 +126,7 @@ pub struct SearchQuery {
     pub must_not: Vec<SearchClause>,
 }
 
-/// Compatibility name for integrations prepared against the original branch.
+/// Public name used by integrations that make the version explicit.
 pub type SearchQueryV1 = SearchQuery;
 
 impl SearchQuery {
@@ -275,7 +275,12 @@ impl SearchQuery {
                 maximum: SEARCH_MAX_CLAUSES,
             });
         }
-        if self.must.iter().chain(&self.must_not).any(|clause| !clause.is_lexical()) {
+        if self
+            .must
+            .iter()
+            .chain(&self.must_not)
+            .any(|clause| !clause.is_lexical())
+        {
             return Err(SearchQueryError::SemanticMustBeInAny);
         }
         let semantic_count = self
@@ -556,9 +561,9 @@ impl SearchRequestEnvelope {
                 return Err(SearchEnvelopeError::CandidatesWhileDisabled);
             }
             let mut seen = std::collections::BTreeSet::new();
-            semantic.candidates.retain(|candidate| {
-                seen.insert(candidate.ctx_event_id.trim().to_owned())
-            });
+            semantic
+                .candidates
+                .retain(|candidate| seen.insert(candidate.ctx_event_id.trim().to_owned()));
             for candidate in &mut semantic.candidates {
                 candidate.ctx_event_id = candidate.ctx_event_id.trim().to_owned();
                 let bytes = candidate.ctx_event_id.len();
@@ -598,10 +603,22 @@ impl std::fmt::Display for SearchEnvelopeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Query(error) => error.fmt(formatter),
-            Self::TooManySemanticCandidates { actual, maximum } => write!(formatter, "semantic input has {actual} candidates; maximum is {maximum}"),
-            Self::CandidatesWithoutReadiness => write!(formatter, "semantic candidates require ready semantic input"),
-            Self::CandidatesWhileDisabled => write!(formatter, "automatic semantic candidates were supplied while semantic policy is disabled"),
-            Self::InvalidCandidateIdentity { actual, maximum } => write!(formatter, "semantic candidate identity is {actual} bytes; expected 1..={maximum}"),
+            Self::TooManySemanticCandidates { actual, maximum } => write!(
+                formatter,
+                "semantic input has {actual} candidates; maximum is {maximum}"
+            ),
+            Self::CandidatesWithoutReadiness => write!(
+                formatter,
+                "semantic candidates require ready semantic input"
+            ),
+            Self::CandidatesWhileDisabled => write!(
+                formatter,
+                "automatic semantic candidates were supplied while semantic policy is disabled"
+            ),
+            Self::InvalidCandidateIdentity { actual, maximum } => write!(
+                formatter,
+                "semantic candidate identity is {actual} bytes; expected 1..={maximum}"
+            ),
         }
     }
 }
@@ -658,11 +675,7 @@ impl SearchExecutionLimits {
         }
     }
 
-    pub fn resolved(
-        requested: Option<&Self>,
-        result_limit: usize,
-        policy_elapsed_ms: u64,
-    ) -> Self {
+    pub fn resolved(requested: Option<&Self>, result_limit: usize, policy_elapsed_ms: u64) -> Self {
         let hard = Self::hard_maxima();
         let requested = requested.unwrap_or(&hard);
         let shared_hydration_input_bytes = requested
@@ -1091,13 +1104,7 @@ pub struct SearchRetrieval {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_weight: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_fallback_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_fallback: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1385,7 +1392,14 @@ pub fn camelize_object_keys(value: &Value) -> Value {
 fn omitted_public_key(key: &str) -> bool {
     matches!(
         key,
-        "itemType" | "payloadType" | "recordType" | "databasePath" | "configPath"
+        "itemType"
+            | "payloadType"
+            | "recordType"
+            | "databasePath"
+            | "configPath"
+            | "semanticWeight"
+            | "semanticFallbackCode"
+            | "semanticFallback"
     )
 }
 
@@ -1524,7 +1538,10 @@ mod tests {
         assert_eq!(query.any[0], SearchClause::all("publication fence"));
         assert_eq!(query.any[1], SearchClause::semantic("legacy lookup"));
         assert_eq!(query.canonical_positive_text(), "legacy lookup");
-        assert_eq!(SEARCH_POSITIVE_TEXT_RULE_VERSION, "ctx-search-positive-text-v1");
+        assert_eq!(
+            SEARCH_POSITIVE_TEXT_RULE_VERSION,
+            "ctx-search-positive-text-v1"
+        );
 
         let mut automatic = SearchQuery::new(vec![SearchClause::phrase("bounded lookup")]);
         automatic.must = vec![SearchClause::all("publication visible")];
@@ -1534,6 +1551,60 @@ mod tests {
         );
         automatic.must.push(SearchClause::phrase("not eligible"));
         assert_eq!(automatic.automatic_rerank_text(), None);
+    }
+
+    #[test]
+    fn structured_query_deduplicates_before_limits_and_matches_unicode_tokens() {
+        let query = SearchQuery {
+            version: SearchQueryVersion::V1,
+            any: vec![
+                SearchClause::all("  cafe\u{301}\u{a0}\u{4e16}\u{754c}  "),
+                SearchClause::all("cafe\u{301} \u{4e16}\u{754c}"),
+            ],
+            must: (0..SEARCH_MAX_CLAUSES)
+                .map(|_| SearchClause::all("same\tclause"))
+                .collect(),
+            must_not: Vec::new(),
+        }
+        .canonicalized()
+        .unwrap();
+        assert_eq!(
+            query.any,
+            vec![SearchClause::all("cafe\u{301} \u{4e16}\u{754c}")]
+        );
+        assert_eq!(query.must, vec![SearchClause::all("same clause")]);
+        assert_eq!(search_analyzed_token_count(query.any[0].value()), 2);
+
+        let exact_limit = SearchQuery::new(
+            (0..SEARCH_MAX_CLAUSES)
+                .map(|index| SearchClause::all(format!("term{index}")))
+                .collect(),
+        )
+        .canonicalized()
+        .expect("the exact clause limit is accepted");
+        assert_eq!(exact_limit.clause_count(), SEARCH_MAX_CLAUSES);
+
+        let literal = SearchQuery::new(vec![SearchClause::literal("  logs_2.db\t  suffix  ")])
+            .canonicalized()
+            .expect("literal whitespace is valid");
+        assert_eq!(
+            literal.any,
+            vec![SearchClause::literal("logs_2.db\t  suffix")]
+        );
+
+        let punctuation = SearchQuery::new(vec![SearchClause::all("---")]);
+        assert!(matches!(
+            punctuation.canonicalized(),
+            Err(SearchQueryError::NoSearchableTokens { .. })
+        ));
+        let too_many = (0..=SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(matches!(
+            SearchQuery::new(vec![SearchClause::all(too_many)]).canonicalized(),
+            Err(SearchQueryError::TooManyAnalyzedTokens { .. })
+        ));
     }
 
     #[test]

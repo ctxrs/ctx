@@ -91,7 +91,7 @@ func camelize(value any) any {
 		out := make(map[string]any, len(typed))
 		for key, nested := range typed {
 			camelKey := snakeToCamel(key)
-			if camelKey == "databasePath" || camelKey == "configPath" || camelKey == "itemType" || camelKey == "payloadType" || camelKey == "recordType" {
+			if omittedPublicKey(camelKey) {
 				continue
 			}
 			out[camelKey] = camelize(nested)
@@ -105,6 +105,16 @@ func camelize(value any) any {
 		return out
 	default:
 		return value
+	}
+}
+
+func omittedPublicKey(key string) bool {
+	switch key {
+	case "databasePath", "configPath", "itemType", "payloadType", "recordType",
+		"semanticWeight", "semanticFallbackCode", "semanticFallback":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -50,9 +50,10 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	fmt.Fprintf(stdout, "sync events=%d\n", syncResult.Import.Totals.ImportedEvents)
 
 	query := ctxagenthistory.NewSearchQuery(ctxagenthistory.SearchAll("local agent history"))
+	limit := 5
 	search, err := client.Search(ctx, ctxagenthistory.SearchOptions{
 		Query:   &query,
-		Limit:   5,
+		Limit:   &limit,
 		Refresh: "off",
 	})
 	if err != nil {
