@@ -21,6 +21,10 @@ public sealed record SearchOptions
     public int? Limit { get; init; }
     public string? Backend { get; init; }
     public string? Provider { get; init; }
+    public string? HistorySource { get; init; }
+    public string? ProviderKey { get; init; }
+    public string? SourceId { get; init; }
+    public string? SourceFormat { get; init; }
     public string? Workspace { get; init; }
     public string? Since { get; init; }
     public bool PrimaryOnly { get; init; }

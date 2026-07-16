@@ -78,12 +78,16 @@ public sealed class AgentHistoryClient
             args.Add("--query-json");
             args.Add(options.Query.ToJson());
         }
-        if (options.Limit is > 0)
+        if (options.Limit is not null)
         {
             AddOption(args, "--limit", options.Limit.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         AddOption(args, "--backend", options.Backend);
         AddOption(args, "--provider", options.Provider);
+        AddOption(args, "--history-source", options.HistorySource);
+        AddOption(args, "--provider-key", options.ProviderKey);
+        AddOption(args, "--source-id", options.SourceId);
+        AddOption(args, "--source-format", options.SourceFormat);
         AddOption(args, "--workspace", options.Workspace);
         AddOption(args, "--since", options.Since);
         if (options.PrimaryOnly)
@@ -253,6 +257,10 @@ public sealed class AgentHistoryClient
 
     private static void RequireSearchIntent(SearchOptions options)
     {
+        if (options.Limit is < 1 or > 200)
+        {
+            throw new CtxAgentHistoryValidationException("search limit must be an integer between 1 and 200");
+        }
         if (options.Query is not null)
         {
             options.Query.Validate();

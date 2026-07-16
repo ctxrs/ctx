@@ -12,7 +12,11 @@ internal static class Program
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("builds search flags", BuildsSearchFlags),
+            ("canonicalizes search queries", CanonicalizesSearchQueries),
+            ("enforces bounded search query limits", EnforcesSearchQueryLimits),
+            ("validates search result limits before transport", ValidatesSearchResultLimits),
             ("decodes schema-v2 search diagnostics", DecodesSearchDiagnostics),
+            ("rejects noncanonical schema-v2 responses", RejectsNoncanonicalSearchSchemas),
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show and locate commands", WrapsShowAndLocate),
             ("reports versioning metadata", ReportsVersioning),
@@ -115,6 +119,10 @@ internal static class Program
             Limit = 5,
             Backend = "hybrid",
             Provider = "codex",
+            HistorySource = "codex/default",
+            ProviderKey = "codex",
+            SourceId = "default",
+            SourceFormat = "codex_session_jsonl",
             Workspace = "ctx",
             Since = "30d",
             PrimaryOnly = true,
@@ -127,10 +135,111 @@ internal static class Program
             IncludeCurrentSession = true
         });
 
-        Equal("search --query-json {\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"retry\"},{\"semantic\":\"timeout backoff behavior\"}],\"must\":[{\"all\":\"ctx\"}]} --limit 5 --backend hybrid --provider codex --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --json", Join(transport.Calls[0]));
+        Equal("search --query-json {\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"retry\"},{\"semantic\":\"timeout backoff behavior\"}],\"must\":[{\"all\":\"ctx\"}]} --limit 5 --backend hybrid --provider codex --history-source codex/default --provider-key codex --source-id default --source-format codex_session_jsonl --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --json", Join(transport.Calls[0]));
         Equal("search", response.Operation);
         Equal("retry", response.Search.Query!.Any[0].Value);
         Equal("off", response.Search.Freshness!.Mode ?? "");
+    }
+
+    private static Task CanonicalizesSearchQueries()
+    {
+        var query = new SearchQueryV1
+        {
+            Any =
+            [
+                SearchClause.All("  cafe\u0301\u00A0\u4E16\u754C  "),
+                SearchClause.All("cafe\u0301 \u4E16\u754C"),
+                SearchClause.Phrase("\u2003retry\t path\u3000")
+            ],
+            MustNot = [SearchClause.Literal("\u00A0logs_2.db  \t backup\u3000")]
+        };
+
+        var canonical = query.Validate();
+        Equal(2, canonical.Any.Count);
+        Equal("cafe\u0301 \u4E16\u754C", canonical.Any[0].Value);
+        Equal("retry path", canonical.Any[1].Value);
+        Equal("logs_2.db  \t backup", canonical.MustNot[0].Value);
+
+        var serialized = JsonNode.Parse(query.ToJson())!.AsObject();
+        Equal("cafe\u0301 \u4E16\u754C", serialized["any"]![0]!["all"]!.GetValue<string>());
+        var duplicates = new SearchQueryV1
+        {
+            Any = Enumerable.Repeat(SearchClause.All(" duplicate "), 33).ToArray()
+        };
+        Equal(1, duplicates.Validate().Any.Count);
+        return Task.CompletedTask;
+    }
+
+    private static Task EnforcesSearchQueryLimits()
+    {
+        var exactClauses = Enumerable.Range(0, SearchQueryV1.MaxClauses)
+            .Select(index => SearchClause.All($"term{index}"))
+            .ToArray();
+        Equal(SearchQueryV1.MaxClauses, new SearchQueryV1 { Any = exactClauses }.Validate().Any.Count);
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1
+        {
+            Any = [.. exactClauses, SearchClause.All("overflow")]
+        }.Validate());
+
+        var exactTokens = string.Join(" ", new[] { "cafe\u0301ine\u200Dword" }.Concat(
+            Enumerable.Range(1, SearchQueryV1.MaxAnalyzedTokensPerClause - 1)
+                .Select(index => $"t{index}")));
+        _ = new SearchQueryV1 { Any = [SearchClause.All(exactTokens)] }.Validate();
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1
+        {
+            Any = [SearchClause.All($"{exactTokens} overflow")]
+        }.Validate());
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1
+        {
+            Any = [SearchClause.All("\u0301\u200D---")]
+        }.Validate());
+
+        _ = new SearchQueryV1 { Any = [SearchClause.All(new string('a', SearchQueryV1.MaxClauseBytes))] }.Validate();
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1
+        {
+            Any = [SearchClause.All(new string('a', SearchQueryV1.MaxClauseBytes + 1))]
+        }.Validate());
+        _ = new SearchQueryV1 { Any = [SearchClause.Literal(new string('a', SearchQueryV1.MinLiteralBytes))] }.Validate();
+        _ = new SearchQueryV1 { Any = [SearchClause.Literal(new string('a', SearchQueryV1.MaxLiteralBytes))] }.Validate();
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1
+        {
+            Any = [SearchClause.Literal(new string('a', SearchQueryV1.MinLiteralBytes - 1))]
+        }.Validate());
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1
+        {
+            Any = [SearchClause.Literal(new string('a', SearchQueryV1.MaxLiteralBytes + 1))]
+        }.Validate());
+
+        var fullSizeClauses = Enumerable.Range(0, 9)
+            .Select(index =>
+            {
+                var prefix = $"term{index}";
+                return SearchClause.All(prefix + new string('a', SearchQueryV1.MaxClauseBytes - prefix.Length));
+            })
+            .ToArray();
+        _ = new SearchQueryV1 { Any = fullSizeClauses[..8] }.Validate();
+        Throws<CtxAgentHistoryValidationException>(() => new SearchQueryV1 { Any = fullSizeClauses }.Validate());
+        return Task.CompletedTask;
+    }
+
+    private static async Task ValidatesSearchResultLimits()
+    {
+        var transport = new RecordingTransport(EmptySearchJson());
+        var client = new AgentHistoryClient(transport);
+        foreach (var limit in new[] { -1, 0, 201 })
+        {
+            await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
+            {
+                Query = SearchQuery(),
+                Limit = limit
+            }));
+        }
+        Equal(0, transport.Calls.Count);
+
+        await client.SearchAsync(new SearchOptions { Query = SearchQuery(), Limit = 1 });
+        await client.SearchAsync(new SearchOptions { Query = SearchQuery(), Limit = 200 });
+        True(Join(transport.Calls[0]).Contains("--limit 1"), "minimum search limit was not forwarded");
+        True(Join(transport.Calls[1]).Contains("--limit 200"), "maximum search limit was not forwarded");
     }
 
     private static async Task DecodesSearchDiagnostics()
@@ -143,6 +252,43 @@ internal static class Program
         Equal(16_384, response.Search.QueryExecution.Resolved.CandidateRows);
         Equal("lexical", response.Search.QueryExecution.Semantic.EffectiveBackend);
         True(response.Search.ToJsonObject().ContainsKey("query_execution"), "query_execution lost snake_case wire name");
+        var retrieval = response.Search.Retrieval?.AsObject()
+            ?? throw new InvalidOperationException("search retrieval diagnostics missing");
+        Equal("hybrid", retrieval["requestedMode"]!.GetValue<string>());
+        foreach (var key in new[]
+        {
+            "semantic_weight", "semanticWeight", "semantic_fallback_code",
+            "semanticFallbackCode", "semantic_fallback", "semanticFallback"
+        })
+        {
+            True(!retrieval.ContainsKey(key), $"obsolete retrieval field {key} was retained");
+        }
+    }
+
+    private static async Task RejectsNoncanonicalSearchSchemas()
+    {
+        var schemaOne = EmptySearchObject();
+        schemaOne["schema_version"] = 1;
+
+        var stringQuery = EmptySearchObject();
+        stringQuery["query"] = "agent history";
+
+        var camelSchema = EmptySearchObject();
+        camelSchema.Remove("schema_version");
+        camelSchema["schemaVersion"] = 2;
+
+        var camelExecution = EmptySearchObject();
+        camelExecution["queryExecution"] = Clone(camelExecution["query_execution"]);
+        camelExecution.Remove("query_execution");
+
+        foreach (var response in new[] { schemaOne, stringQuery, camelSchema, camelExecution })
+        {
+            var client = new AgentHistoryClient(new RecordingTransport(response.ToJsonString()));
+            await ThrowsAsync<CtxAgentHistoryProtocolException>(() => client.SearchAsync(new SearchOptions
+            {
+                Query = SearchQuery()
+            }));
+        }
     }
 
     private static async Task RejectsSearchWithoutIntent()
@@ -329,8 +475,10 @@ internal static class Program
     {
         const string limits = "{\"query_bytes\":8192,\"clauses\":32,\"analyzed_tokens_per_clause\":32,\"candidates_per_positive_seed\":1024,\"candidate_rows\":16384,\"retained_candidate_ids\":8192,\"residual_rows\":8192,\"verification_bytes\":16777216,\"verification_lookup_bytes\":16384,\"hydrated_rows\":256,\"hydration_input_bytes\":8388608,\"hydration_input_bytes_per_event\":65536,\"snippet_input_bytes\":8388608,\"returned_text_bytes\":524288,\"serialized_response_bytes\":2097152,\"results\":200,\"elapsed_ms\":1000}";
         const string consumed = "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"legacy_fallback_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
-        return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\",\"resolved\":" + limits + ",\"consumed\":" + consumed + ",\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"results\":[]}";
+        return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\",\"resolved\":" + limits + ",\"consumed\":" + consumed + ",\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"retrieval\":{\"requested_mode\":\"hybrid\",\"effective_mode\":\"lexical\",\"semantic_status\":\"unavailable\",\"semantic_weight\":0.25,\"semanticWeight\":0.5,\"semantic_fallback_code\":\"old\",\"semanticFallbackCode\":\"old\",\"semantic_fallback\":\"old\",\"semanticFallback\":\"old\"},\"results\":[]}";
     }
+
+    private static JsonObject EmptySearchObject() => JsonNode.Parse(EmptySearchJson())!.AsObject();
 
     private static string Join(IReadOnlyList<string> values) => string.Join(" ", values);
 
@@ -355,6 +503,19 @@ internal static class Program
         try
         {
             await action();
+        }
+        catch (T)
+        {
+            return;
+        }
+        throw new InvalidOperationException($"expected {typeof(T).Name}");
+    }
+
+    private static void Throws<T>(Action action) where T : Exception
+    {
+        try
+        {
+            action();
         }
         catch (T)
         {
