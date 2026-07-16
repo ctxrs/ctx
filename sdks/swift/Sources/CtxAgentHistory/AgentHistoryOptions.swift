@@ -33,10 +33,8 @@ public struct ImportOptions: Sendable {
 }
 
 public struct SearchOptions: Sendable {
-    public var terms: [String]
     public var limit: Int?
     public var backend: String?
-    public var semanticWeight: Double?
     public var provider: String?
     public var workspace: String?
     public var since: String?
@@ -50,10 +48,8 @@ public struct SearchOptions: Sendable {
     public var includeCurrentSession: Bool
 
     public init(
-        terms: [String] = [],
         limit: Int? = nil,
         backend: String? = nil,
-        semanticWeight: Double? = nil,
         provider: String? = nil,
         workspace: String? = nil,
         since: String? = nil,
@@ -66,10 +62,8 @@ public struct SearchOptions: Sendable {
         refresh: String? = nil,
         includeCurrentSession: Bool = false
     ) {
-        self.terms = terms
         self.limit = limit
         self.backend = backend
-        self.semanticWeight = semanticWeight
         self.provider = provider
         self.workspace = workspace
         self.since = since

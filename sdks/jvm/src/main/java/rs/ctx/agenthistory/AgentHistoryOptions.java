@@ -115,11 +115,9 @@ public final class AgentHistoryOptions {
     }
 
     public static final class Search {
-        private String query;
-        private final List<String> terms = new ArrayList<>();
+        private SearchQuery query;
         private Integer limit;
         private String backend;
-        private Double semanticWeight;
         private String provider;
         private String workspace;
         private String since;
@@ -132,12 +130,8 @@ public final class AgentHistoryOptions {
         private String refresh;
         private boolean includeCurrentSession;
 
-        public String query() {
+        public SearchQuery query() {
             return query;
-        }
-
-        public List<String> terms() {
-            return Collections.unmodifiableList(terms);
         }
 
         public Integer limit() {
@@ -148,9 +142,6 @@ public final class AgentHistoryOptions {
             return backend;
         }
 
-        public Double semanticWeight() {
-            return semanticWeight;
-        }
 
         public String provider() {
             return provider;
@@ -196,20 +187,8 @@ public final class AgentHistoryOptions {
             return includeCurrentSession;
         }
 
-        public Search query(String query) {
+        public Search query(SearchQuery query) {
             this.query = query;
-            return this;
-        }
-
-        public Search term(String term) {
-            this.terms.add(term);
-            return this;
-        }
-
-        public Search terms(Iterable<String> terms) {
-            for (String term : terms) {
-                this.terms.add(term);
-            }
             return this;
         }
 
@@ -223,10 +202,6 @@ public final class AgentHistoryOptions {
             return this;
         }
 
-        public Search semanticWeight(Double semanticWeight) {
-            this.semanticWeight = semanticWeight;
-            return this;
-        }
 
         public Search provider(String provider) {
             this.provider = provider;

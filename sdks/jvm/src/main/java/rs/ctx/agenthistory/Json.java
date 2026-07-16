@@ -18,6 +18,52 @@ final class Json {
         return object;
     }
 
+    static String stringify(Object value) {
+        StringBuilder out = new StringBuilder();
+        write(value, out);
+        return out.toString();
+    }
+
+    private static void write(Object value, StringBuilder out) {
+        if (value == null) { out.append("null"); return; }
+        if (value instanceof String) { writeString((String) value, out); return; }
+        if (value instanceof Number || value instanceof Boolean) { out.append(value); return; }
+        if (value instanceof Map<?, ?>) {
+            out.append('{'); boolean first = true;
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                if (!first) out.append(','); first = false;
+                writeString(String.valueOf(entry.getKey()), out); out.append(':'); write(entry.getValue(), out);
+            }
+            out.append('}'); return;
+        }
+        if (value instanceof Iterable<?>) {
+            out.append('['); boolean first = true;
+            for (Object item : (Iterable<?>) value) { if (!first) out.append(','); first = false; write(item, out); }
+            out.append(']'); return;
+        }
+        throw new IllegalArgumentException("unsupported JSON value: " + value.getClass().getName());
+    }
+
+    private static void writeString(String value, StringBuilder out) {
+        out.append('"');
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            switch (ch) {
+                case '"': out.append("\\\""); break;
+                case '\\': out.append("\\\\"); break;
+                case '\b': out.append("\\b"); break;
+                case '\f': out.append("\\f"); break;
+                case '\n': out.append("\\n"); break;
+                case '\r': out.append("\\r"); break;
+                case '\t': out.append("\\t"); break;
+                default:
+                    if (ch < 0x20) out.append(String.format("\\u%04x", Integer.valueOf(ch)));
+                    else out.append(ch);
+            }
+        }
+        out.append('"');
+    }
+
     private static final class Parser {
         private final String input;
         private int index;

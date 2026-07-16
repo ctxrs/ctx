@@ -20,7 +20,8 @@ internal static class AgentHistoryContract
     public static void EnsureSupportedSchema(JsonObject raw, string operation)
     {
         var schema = JsonHelpers.GetInt(raw, "schema_version") ?? JsonHelpers.GetInt(raw, "schemaVersion");
-        if (schema is not null && schema != CtxAgentHistoryVersions.SchemaVersion)
+        var expected = operation == "search" ? 2 : CtxAgentHistoryVersions.SchemaVersion;
+        if (schema is not null && schema != expected)
         {
             throw new CtxAgentHistoryProtocolException(
                 $"unsupported ctx schema version {schema}",
@@ -92,6 +93,39 @@ internal static class AgentHistoryContract
 
     public static JsonObject NormalizeSearch(JsonObject raw)
     {
+        var schema = JsonHelpers.GetInt(raw, "schema_version");
+        if (schema != 2)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx search returned an unsupported schema version",
+                new JsonObject { ["expectedSchemaVersion"] = 2, ["actualSchemaVersion"] = schema });
+        }
+        SearchQueryV1? query = null;
+        if (raw["query"] is JsonObject rawQuery)
+        {
+            try
+            {
+                query = SearchQueryV1.FromJson(rawQuery);
+            }
+            catch (CtxAgentHistoryValidationException error)
+            {
+                throw new CtxAgentHistoryProtocolException(
+                    "ctx search returned an invalid canonical query",
+                    new JsonObject { ["field"] = "query", ["validation"] = error.Message });
+            }
+        }
+        else if (raw["query"] is not null)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx search response contains a non-object canonical query",
+                new JsonObject { ["field"] = "query" });
+        }
+        if (raw["query_execution"] is not JsonObject queryExecution)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx search response is missing query execution diagnostics",
+                new JsonObject { ["field"] = "query_execution" });
+        }
         var search = (JsonObject)CamelizePublic(raw)!;
         var results = new JsonArray();
         if (raw["results"] is JsonArray rawResults)
@@ -102,7 +136,11 @@ internal static class AgentHistoryContract
             }
         }
 
-        SetIfAbsent(search, "query", raw["query"]);
+        search["schema_version"] = 2;
+        search["query"] = query?.ToJsonObject();
+        search["query_execution"] = JsonHelpers.Clone(queryExecution);
+        search.Remove("schemaVersion");
+        search.Remove("queryExecution");
         search["filters"] = CamelizePublic(raw["filters"] ?? new JsonObject());
         search["freshness"] = CamelizePublic(raw["freshness"] ?? new JsonObject());
         SetIfAbsent(search, "generatedAt", JsonHelpers.Clone(raw["generated_at"] ?? raw["generatedAt"]));

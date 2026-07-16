@@ -12,7 +12,7 @@ internal static class Program
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("builds search flags", BuildsSearchFlags),
-            ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
+            ("decodes schema-v2 search diagnostics", DecodesSearchDiagnostics),
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show and locate commands", WrapsShowAndLocate),
             ("reports versioning metadata", ReportsVersioning),
@@ -102,16 +102,18 @@ internal static class Program
 
     private static async Task BuildsSearchFlags()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"query":"retry","results":[],"freshness":{"mode":"off"}}""");
+        var transport = new RecordingTransport(EmptySearchJson());
         var client = new AgentHistoryClient(transport);
 
         var response = await client.SearchAsync(new SearchOptions
         {
-            Query = "retry",
-            Terms = ["timeout", "backoff"],
+            Query = new SearchQueryV1
+            {
+                Any = [SearchClause.All("retry"), SearchClause.Semantic("timeout backoff behavior")],
+                Must = [SearchClause.All("ctx")]
+            },
             Limit = 5,
             Backend = "hybrid",
-            SemanticWeight = 0.35,
             Provider = "codex",
             Workspace = "ctx",
             Since = "30d",
@@ -125,62 +127,27 @@ internal static class Program
             IncludeCurrentSession = true
         });
 
-        Equal("search retry --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --json", Join(transport.Calls[0]));
+        Equal("search --query-json {\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"retry\"},{\"semantic\":\"timeout backoff behavior\"}],\"must\":[{\"all\":\"ctx\"}]} --limit 5 --backend hybrid --provider codex --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --json", Join(transport.Calls[0]));
         Equal("search", response.Operation);
-        Equal("retry", response.Search.Query ?? "");
+        Equal("retry", response.Search.Query!.Any[0].Value);
         Equal("off", response.Search.Freshness!.Mode ?? "");
     }
 
-    private static async Task CamelizesSearchRetrievalJson()
+    private static async Task DecodesSearchDiagnostics()
     {
-        var transport = new RecordingTransport("""
-            {
-              "schema_version": 1,
-              "payloadType": "search_results",
-              "query": "agent history",
-              "retrieval": {
-                "requested_mode": "hybrid",
-                "effective_mode": "lexical",
-                "semantic_weight": 0.0,
-                "semantic_fallback_code": "semantic_retrieval_failed",
-                "semantic_fallback": "semantic_retrieval_failed",
-                "coverage": {"embedded_items":4,"indexed_now":1},
-                "diagnostics": {"query_embed_ms":2}
-              },
-              "results": [
-                {
-                  "result_type": "event",
-                  "recordType": "event",
-                  "itemType": "event",
-                  "result_scope": "event",
-                  "citations": [{"target_type":"event","label":"codex event"}]
-                }
-              ]
-            }
-            """);
+        var transport = new RecordingTransport(EmptySearchJson());
         var client = new AgentHistoryClient(transport);
-
-        var response = await client.SearchAsync(new SearchOptions { Query = "agent history" });
-
-        var retrieval = response.Search.Retrieval!.AsObject();
-        Equal("hybrid", retrieval["requestedMode"]!.GetValue<string>());
-        Equal("lexical", retrieval["effectiveMode"]!.GetValue<string>());
-        Equal(0.0, retrieval["semanticWeight"]!.GetValue<double>());
-        Equal("semantic_retrieval_failed", retrieval["semanticFallbackCode"]!.GetValue<string>());
-        Equal("semantic_retrieval_failed", retrieval["semanticFallback"]!.GetValue<string>());
-        Equal(4, retrieval["coverage"]!["embeddedItems"]!.GetValue<int>());
-        Equal(1, retrieval["coverage"]!["indexedNow"]!.GetValue<int>());
-        Equal(2, retrieval["diagnostics"]!["queryEmbedMs"]!.GetValue<int>());
-        True(!response.Search.ToJsonObject().ContainsKey("payloadType"), "search payload leaked payloadType");
-        True(!response.Search.Results[0].ToJsonObject().ContainsKey("recordType"), "search hit leaked recordType");
-        True(!response.Search.Results[0].ToJsonObject().ContainsKey("itemType"), "search hit leaked itemType");
-        Equal("event", response.Search.Results[0].ResultType ?? "");
-        Equal("event", response.Search.Results[0].Citations[0].TargetType ?? "");
+        var response = await client.SearchAsync(new SearchOptions { Query = SearchQuery() });
+        Equal(2, response.Search.SchemaVersion);
+        Equal("ctx-search-v1", response.Search.QueryExecution.QueryVersion);
+        Equal(16_384, response.Search.QueryExecution.Resolved.CandidateRows);
+        Equal("lexical", response.Search.QueryExecution.Semantic.EffectiveBackend);
+        True(response.Search.ToJsonObject().ContainsKey("query_execution"), "query_execution lost snake_case wire name");
     }
 
     private static async Task RejectsSearchWithoutIntent()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"results":[]}""");
+        var transport = new RecordingTransport(EmptySearchJson());
         var client = new AgentHistoryClient(transport);
 
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync());
@@ -191,7 +158,11 @@ internal static class Program
         }));
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
         {
-            Query = "   "
+            Query = new SearchQueryV1 { MustNot = [SearchClause.All("negative only")] }
+        }));
+        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
+        {
+            Query = new SearchQueryV1 { Must = [SearchClause.Semantic("invalid placement")] }
         }));
 
         Equal(0, transport.Calls.Count);
@@ -297,7 +268,7 @@ internal static class Program
                     }
                     break;
                 case "search":
-                    _ = (await ClientFor(node["search"]).SearchAsync(new SearchOptions { Query = "fixture search" })).Search.Results;
+                    _ = (await ClientFor(node["search"]).SearchAsync(new SearchOptions { Query = SearchQuery() })).Search.Results;
                     break;
                 case "showEvent":
                     _ = (await ClientFor(node["event"]).ShowEventAsync("event-1")).Event.Events;
@@ -347,6 +318,18 @@ internal static class Program
             }
         }
         throw new DirectoryNotFoundException("contracts/agent-history-v1/fixtures");
+    }
+
+    private static SearchQueryV1 SearchQuery() => new()
+    {
+        Any = [SearchClause.All("agent history")]
+    };
+
+    private static string EmptySearchJson()
+    {
+        const string limits = "{\"query_bytes\":8192,\"clauses\":32,\"analyzed_tokens_per_clause\":32,\"candidates_per_positive_seed\":1024,\"candidate_rows\":16384,\"retained_candidate_ids\":8192,\"residual_rows\":8192,\"verification_bytes\":16777216,\"verification_lookup_bytes\":16384,\"hydrated_rows\":256,\"hydration_input_bytes\":8388608,\"hydration_input_bytes_per_event\":65536,\"snippet_input_bytes\":8388608,\"returned_text_bytes\":524288,\"serialized_response_bytes\":2097152,\"results\":200,\"elapsed_ms\":1000}";
+        const string consumed = "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"legacy_fallback_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
+        return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\",\"resolved\":" + limits + ",\"consumed\":" + consumed + ",\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"results\":[]}";
     }
 
     private static string Join(IReadOnlyList<string> values) => string.Join(" ", values);

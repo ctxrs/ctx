@@ -12,7 +12,6 @@ public final class AgentHistoryClientTest {
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
         acceptsCanonicalSearchFixture();
-        camelizesSearchRetrievalJson();
         decodesAllCanonicalFixturesThroughTypedResponses();
         normalizesRawShowAndLocateResponses();
         buildsSearchCommand();
@@ -58,11 +57,12 @@ public final class AgentHistoryClientTest {
         String fixture = readFixture("search.results.json");
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport("local-cli", fixture));
 
-        SearchResponse response = client.search(AgentHistoryOptions.search().query("local agent history").refresh("off"));
+        SearchResponse response = client.search(AgentHistoryOptions.search().query(SearchQuery.all("local agent history")).refresh("off"));
 
         assertEquals("search", response.operation());
         assertEquals("/tmp/ctx-sdk-fixture", response.getBackend().getDataRoot());
-        assertEquals("local agent history", response.getSearch().getQuery());
+        assertEquals("local agent history", response.getSearch().getQuery().any().get(0).value());
+        assertEquals("ctx-search-v1", response.getSearch().getQueryExecution().queryVersion());
         assertEquals("codex", response.getSearch().getFilters().getProvider());
         assertEquals(Integer.valueOf(20), response.getSearch().getPagination().getLimit());
         assertEquals(Boolean.FALSE, response.getSearch().getTruncation().getTruncated());
@@ -73,38 +73,6 @@ public final class AgentHistoryClientTest {
         assertEquals("event", hit.getResultScope());
         assertEquals("event", hit.getCitations().get(0).getTargetType());
         assertEquals("codex event", hit.getCitations().get(0).getLabel());
-    }
-
-    private static void camelizesSearchRetrievalJson() {
-        AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
-                "local-cli",
-                "{"
-                        + "\"schema_version\":1,"
-                        + "\"query\":\"agent history\","
-                        + "\"retrieval\":{"
-                        + "\"requested_mode\":\"hybrid\","
-                        + "\"effective_mode\":\"lexical\","
-                        + "\"semantic_weight\":0.0,"
-                        + "\"semantic_fallback_code\":\"semantic_retrieval_failed\","
-                        + "\"semantic_fallback\":\"semantic_retrieval_failed\","
-                        + "\"coverage\":{\"embedded_items\":4,\"indexed_now\":1},"
-                        + "\"diagnostics\":{\"query_embed_ms\":2}"
-                        + "},"
-                        + "\"results\":[{\"result_scope\":\"event\"}]"
-                        + "}"));
-
-        SearchResponse response = client.search(AgentHistoryOptions.search().query("agent history"));
-        Map<String, Object> retrieval = AgentHistoryValue.object(response.getSearch().getRetrieval());
-        assertEquals("hybrid", retrieval.get("requestedMode"));
-        assertEquals("lexical", retrieval.get("effectiveMode"));
-        assertEquals(Double.valueOf(0.0), AgentHistoryValue.doubleValue(retrieval.get("semanticWeight")));
-        assertEquals("semantic_retrieval_failed", retrieval.get("semanticFallbackCode"));
-        assertEquals("semantic_retrieval_failed", retrieval.get("semanticFallback"));
-        Map<String, Object> coverage = AgentHistoryValue.object(retrieval.get("coverage"));
-        assertEquals(Integer.valueOf(4), AgentHistoryValue.integer(coverage.get("embeddedItems")));
-        assertEquals(Integer.valueOf(1), AgentHistoryValue.integer(coverage.get("indexedNow")));
-        Map<String, Object> diagnostics = AgentHistoryValue.object(retrieval.get("diagnostics"));
-        assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(diagnostics.get("queryEmbedMs")));
     }
 
     private static void normalizesRawShowAndLocateResponses() {
@@ -197,36 +165,37 @@ public final class AgentHistoryClientTest {
     private static void buildsSearchCommand() {
         FakeTransport transport = new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"query\":\"client\",\"results\":[]}");
+                emptySearchJson());
         AgentHistoryClient client = AgentHistoryClient.withTransport(transport);
 
         client.search(AgentHistoryOptions.search()
-                .query("agent history")
-                .term("ctx")
+                .query(SearchQuery.builder()
+                        .any(SearchClause.all("agent history"))
+                        .any(SearchClause.semantic("find related ctx work"))
+                        .must(SearchClause.all("ctx"))
+                        .build())
                 .limit(5)
                 .backend("hybrid")
-                .semanticWeight(Double.valueOf(0.35))
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
-        assertContainsInOrder(transport.lastOperation.args(), "search", "agent history", "--json");
+        assertContainsInOrder(transport.lastOperation.args(), "search", "--query-json");
+        assertContains(transport.lastOperation.args(), "\"semantic\":\"find related ctx work\"");
         assertContainsInOrder(transport.lastOperation.args(), "--limit", "5");
         assertContainsInOrder(transport.lastOperation.args(), "--backend", "hybrid");
-        assertContainsInOrder(transport.lastOperation.args(), "--semantic-weight", "0.35");
-        assertContainsInOrder(transport.lastOperation.args(), "--term", "ctx");
         assertContainsInOrder(transport.lastOperation.args(), "--refresh", "off");
     }
 
     private static void searchRequiresIntent() {
         FakeTransport transport = new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"query\":\"client\",\"results\":[]}");
+                emptySearchJson());
         AgentHistoryClient client = AgentHistoryClient.withTransport(transport);
 
         assertValidation(() -> client.search());
         assertValidation(() -> client.search(AgentHistoryOptions.search().refresh("off").limit(5)));
-        assertValidation(() -> client.search("   "));
-        assertValidation(() -> client.search(AgentHistoryOptions.search().term("   ")));
+        assertValidation(() -> client.search(AgentHistoryOptions.search().query(SearchQuery.builder().mustNot(SearchClause.all("only negative")).build())));
+        assertValidation(() -> client.search(AgentHistoryOptions.search().query(SearchQuery.builder().must(SearchClause.semantic("invalid placement")).build())));
         if (transport.lastOperation != null) {
             throw new AssertionError("invalid search invoked transport: " + transport.lastOperation.args());
         }
@@ -247,6 +216,27 @@ public final class AgentHistoryClientTest {
     private static String readFixture(String name) throws Exception {
         byte[] bytes = Files.readAllBytes(Paths.get("../../contracts/agent-history-v1/fixtures", name));
         return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static String emptySearchJson() {
+        return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},"
+                + "\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\","
+                + "\"resolved\":" + limitsJson() + ",\"consumed\":" + consumedJson() + ","
+                + "\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},"
+                + "\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"results\":[]}";
+    }
+
+    private static String limitsJson() {
+        return "{\"query_bytes\":8192,\"clauses\":32,\"analyzed_tokens_per_clause\":32,\"candidates_per_positive_seed\":1024,\"candidate_rows\":16384,\"retained_candidate_ids\":8192,\"residual_rows\":8192,\"verification_bytes\":16777216,\"verification_lookup_bytes\":16384,\"hydrated_rows\":256,\"hydration_input_bytes\":8388608,\"hydration_input_bytes_per_event\":65536,\"snippet_input_bytes\":8388608,\"returned_text_bytes\":524288,\"serialized_response_bytes\":2097152,\"results\":200,\"elapsed_ms\":1000}";
+    }
+
+    private static String consumedJson() {
+        return "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"legacy_fallback_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
+    }
+
+    private static void assertContains(List<String> values, String fragment) {
+        for (String value : values) if (value.contains(fragment)) return;
+        throw new AssertionError("expected fragment " + fragment + " in " + values);
     }
 
     private static void assertContainsInOrder(List<String> values, String first, String second) {

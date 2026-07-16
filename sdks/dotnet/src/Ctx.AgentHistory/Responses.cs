@@ -345,7 +345,15 @@ public sealed record SearchResult
     private SearchResult(JsonObject json)
     {
         _json = JsonHelpers.CloneObject(json);
-        Query = JsonHelpers.GetString(json, "query");
+        SchemaVersion = JsonHelpers.GetInt(json, "schema_version")
+            ?? throw SearchExecutionLimits.Missing("schema_version");
+        if (SchemaVersion != 2)
+        {
+            throw new CtxAgentHistoryProtocolException("unsupported search schema version", new JsonObject { ["schema_version"] = SchemaVersion });
+        }
+        Query = json["query"] is JsonObject query ? SearchQueryV1.FromJson(query) : null;
+        QueryExecution = new SearchQueryExecution(json["query_execution"] as JsonObject
+            ?? throw SearchExecutionLimits.Missing("query_execution"));
         Filters = JsonHelpers.CloneObject(json["filters"] as JsonObject);
         Freshness = Ctx.AgentHistory.Freshness.FromJson(json["freshness"] as JsonObject);
         GeneratedAt = JsonHelpers.GetString(json, "generatedAt");
@@ -355,7 +363,9 @@ public sealed record SearchResult
         Truncation = JsonHelpers.CloneObject(json["truncation"] as JsonObject);
     }
 
-    public string? Query { get; }
+    public int SchemaVersion { get; }
+    public SearchQueryV1? Query { get; }
+    public SearchQueryExecution QueryExecution { get; }
     public JsonObject Filters { get; }
     public Freshness? Freshness { get; }
     public string? GeneratedAt { get; }

@@ -78,17 +78,14 @@ public class AgentHistoryClient {
         return search(AgentHistoryOptions.search());
     }
 
-    public SearchResponse search(String query) {
-        return search(AgentHistoryOptions.search().query(query));
-    }
-
     public SearchResponse search(AgentHistoryOptions.Search options) {
         AgentHistoryOptions.Search safe = options == null ? AgentHistoryOptions.search() : options;
         requireSearchIntent(safe);
         List<String> args = new ArrayList<>();
         args.add("search");
-        if (safe.query() != null && !safe.query().isEmpty()) {
-            args.add(safe.query());
+        if (safe.query() != null) {
+            args.add("--query-json");
+            args.add(safe.query().toJson());
         }
         args.add("--json");
         if (safe.limit() != null) {
@@ -96,14 +93,6 @@ public class AgentHistoryClient {
             args.add(String.valueOf(safe.limit()));
         }
         add(args, "--backend", safe.backend());
-        if (safe.semanticWeight() != null) {
-            args.add("--semantic-weight");
-            args.add(String.valueOf(safe.semanticWeight()));
-        }
-        for (String term : safe.terms()) {
-            args.add("--term");
-            args.add(term);
-        }
         add(args, "--provider", safe.provider());
         add(args, "--workspace", safe.workspace());
         add(args, "--since", safe.since());
@@ -119,15 +108,14 @@ public class AgentHistoryClient {
     }
 
     private static void requireSearchIntent(AgentHistoryOptions.Search options) {
-        if (hasText(options.query()) || hasText(options.file())) {
+        if (options.query() != null) {
+            options.query().validate();
             return;
         }
-        for (String term : options.terms()) {
-            if (hasText(term)) {
-                return;
-            }
+        if (hasText(options.file())) {
+            return;
         }
-        throw new CtxAgentHistoryException.Validation("search requires a query, term, or file option");
+        throw new CtxAgentHistoryException.Validation("search requires a ctx-search-v1 query or file option");
     }
 
     public ShowEventResponse showEvent(String id, AgentHistoryOptions.ShowEvent options) {

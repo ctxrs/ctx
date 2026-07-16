@@ -73,20 +73,16 @@ public sealed class AgentHistoryClient
         options ??= new SearchOptions();
         RequireSearchIntent(options);
         var args = new List<string> { "search" };
-        if (!string.IsNullOrWhiteSpace(options.Query))
+        if (options.Query is not null)
         {
-            args.Add(options.Query);
-        }
-        foreach (var term in options.Terms ?? [])
-        {
-            AddOption(args, "--term", term);
+            args.Add("--query-json");
+            args.Add(options.Query.ToJson());
         }
         if (options.Limit is > 0)
         {
             AddOption(args, "--limit", options.Limit.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         AddOption(args, "--backend", options.Backend);
-        AddDoubleOption(args, "--semantic-weight", options.SemanticWeight);
         AddOption(args, "--provider", options.Provider);
         AddOption(args, "--workspace", options.Workspace);
         AddOption(args, "--since", options.Since);
@@ -257,14 +253,16 @@ public sealed class AgentHistoryClient
 
     private static void RequireSearchIntent(SearchOptions options)
     {
-        if (!string.IsNullOrWhiteSpace(options.Query)
-            || !string.IsNullOrWhiteSpace(options.File)
-            || (options.Terms?.Any(term => !string.IsNullOrWhiteSpace(term)) ?? false))
+        if (options.Query is not null)
+        {
+            options.Query.Validate();
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(options.File))
         {
             return;
         }
-
-        throw new CtxAgentHistoryValidationException("search requires a query, term, or file option");
+        throw new CtxAgentHistoryValidationException("search requires a ctx-search-v1 query or file option");
     }
 
     private static void RequireValue(string value, string name)
@@ -293,12 +291,4 @@ public sealed class AgentHistoryClient
         }
     }
 
-    private static void AddDoubleOption(List<string> args, string flag, double? value)
-    {
-        if (value is not null)
-        {
-            args.Add(flag);
-            args.Add(value.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        }
-    }
 }
