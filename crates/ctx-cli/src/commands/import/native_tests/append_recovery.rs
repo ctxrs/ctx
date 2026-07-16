@@ -181,7 +181,7 @@ fn mixed_codex_append_slice_reports_only_completed_bytes() {
 }
 
 #[test]
-fn rejected_codex_growth_keeps_later_growth_append_capable() {
+fn rejected_codex_growth_advances_certified_checkpoint() {
     let temp = tempdir();
     let root = temp.path().join("sessions");
     let file = root.join("session.jsonl");
@@ -229,18 +229,18 @@ fn rejected_codex_growth_keeps_later_growth_append_capable() {
     )
     .unwrap();
     assert_eq!(rejected_outcome.summary.failed, 1);
+    let rejected_checkpoint = store
+        .provider_file_checkpoint(ProviderFileCheckpointKey {
+            provider: initial_checkpoint.provider,
+            source_format: &initial_checkpoint.source_format,
+            source_root: &initial_checkpoint.source_root,
+            source_path: &initial_checkpoint.source_path,
+        })
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        store
-            .provider_file_checkpoint(ProviderFileCheckpointKey {
-                provider: initial_checkpoint.provider,
-                source_format: &initial_checkpoint.source_format,
-                source_root: &initial_checkpoint.source_root,
-                source_path: &initial_checkpoint.source_path,
-            })
-            .unwrap()
-            .unwrap()
-            .committed_byte_offset,
-        initial_checkpoint.committed_byte_offset
+        rejected_checkpoint.committed_byte_offset,
+        u64::try_from(initial.len() + rejected.len()).unwrap()
     );
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let post_rejection_state: (String, i64, i64, i64) = conn
@@ -298,7 +298,7 @@ fn rejected_codex_growth_keeps_later_growth_append_capable() {
         &selected.work,
     )
     .unwrap();
-    assert_eq!(accepted_outcome.summary.failed, 1);
+    assert_eq!(accepted_outcome.summary.failed, 0);
     assert_eq!(accepted_outcome.summary.imported_events, 1);
     assert_eq!(
         store
@@ -311,7 +311,7 @@ fn rejected_codex_growth_keeps_later_growth_append_capable() {
             .unwrap()
             .unwrap()
             .committed_byte_offset,
-        initial_checkpoint.committed_byte_offset
+        u64::try_from(initial.len() + rejected.len() + accepted.len()).unwrap()
     );
 }
 

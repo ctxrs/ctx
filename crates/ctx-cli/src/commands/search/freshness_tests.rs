@@ -573,6 +573,52 @@ mod freshness_tests {
     }
 
     #[test]
+    fn daemon_preserves_watcher_changes_during_paginated_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let changed = write_pi_source(&data_root.join("pi-first"), 1, "first");
+        let second = write_pi_source(&data_root.join("pi-second"), 1, "second");
+        let third = write_pi_source(&data_root.join("pi-third"), 1, "third");
+        let sources = vec![changed.clone(), second, third];
+        let baseline = refresh(&data_root, sources.clone(), ImportExecutionPolicy::Drain);
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+
+        let mut runtime = SearchRefreshRuntime::default();
+        let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+        let stale_generation = cached_inventory_generation(&runtime, &changed);
+        assert!(runtime.inventory_progress.is_some());
+
+        write_pi_source(&changed.path, 2, "changed-during-inventory");
+        runtime.force_source_change_for_test(&changed.path);
+        while runtime.inventory_progress.is_some() {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+        }
+        assert_eq!(
+            runtime.pending_dirty_paths,
+            BTreeSet::from([changed.path.clone()])
+        );
+
+        let mut refreshed = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+        assert!(runtime.pending_dirty_paths.is_empty());
+        assert_ne!(
+            cached_inventory_generation(&runtime, &changed),
+            stale_generation
+        );
+        for _ in 0..16 {
+            if refreshed.fresh_units_pending == 0 {
+                break;
+            }
+            refreshed = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+        }
+        assert_eq!(refreshed.fresh_units_pending, 0, "{refreshed:?}");
+        let store = Store::open(database_path(data_root)).unwrap();
+        assert!(!store
+            .search_event_hits("changed during inventory 1", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn daemon_elapsed_safety_sweep_runs_while_recovery_is_pending() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
