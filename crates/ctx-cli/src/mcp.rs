@@ -35,6 +35,7 @@ use super::{
 };
 use crate::commands::search::resolve_search_backend;
 use crate::search_query_input::parse_search_query_value;
+use crate::search_render::truncate_search_transport;
 use crate::semantic::{
     daemon_report, search_packet_file_filter_with_backend, search_packet_query_with_backend,
     semantic_worker_report_cached, semantic_worker_report_configured_json,
@@ -596,7 +597,7 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
         search_packet_file_filter_with_backend(&store, &options, backend, false)?
     };
     let refresh = SearchRefreshReport::skipped(RefreshArg::Off, "skipped");
-    let mut result = SearchDto::packet(&store, &packet, &refresh, &retrieval, None);
+    let mut result = SearchDto::packet(&store, &packet, &refresh, &retrieval, None)?;
     if let Some(object) = result.as_object_mut() {
         object.insert("schema_version".to_owned(), json!(2));
         object.insert("query".to_owned(), json!(query));
@@ -841,85 +842,6 @@ fn render_search_rpc_response(id: &Value, structured: &mut Value) -> Result<(Val
     Err(anyhow!(
         "bounded MCP search response byte accounting did not converge"
     ))
-}
-
-fn truncate_search_transport(structured: &mut Value, keep: usize) {
-    let Some(results) = structured.get_mut("results").and_then(Value::as_array_mut) else {
-        return;
-    };
-    let keep = keep.min(results.len());
-    let removed_results = results.len().saturating_sub(keep);
-    let removed_text_bytes = results[keep..]
-        .iter()
-        .map(search_result_text_bytes)
-        .fold(0_usize, usize::saturating_add);
-    results.truncate(keep);
-    if removed_results == 0 {
-        return;
-    }
-
-    if let Some(pagination) = structured
-        .get_mut("pagination")
-        .and_then(Value::as_object_mut)
-    {
-        pagination.insert("has_more".to_owned(), Value::Bool(true));
-    }
-    if let Some(truncation) = structured
-        .get_mut("truncation")
-        .and_then(Value::as_object_mut)
-    {
-        truncation.insert("truncated".to_owned(), Value::Bool(true));
-        truncation.insert("reason".to_owned(), json!("serialized_response_bytes"));
-        let omitted = truncation
-            .get("omitted_results")
-            .and_then(Value::as_u64)
-            .unwrap_or_default()
-            .saturating_add(removed_results as u64);
-        truncation.insert("omitted_results".to_owned(), json!(omitted));
-    }
-    let Some(execution) = structured
-        .get_mut("query_execution")
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    execution.insert("truncated".to_owned(), Value::Bool(true));
-    let reasons = execution
-        .entry("truncation_reasons".to_owned())
-        .or_insert_with(|| json!([]));
-    if let Some(reasons) = reasons.as_array_mut() {
-        let reason = json!("serialized_response_bytes");
-        if !reasons.contains(&reason) {
-            reasons.push(reason);
-        }
-    }
-    if let Some(consumed) = execution.get_mut("consumed").and_then(Value::as_object_mut) {
-        let returned = consumed
-            .get("returned_results")
-            .and_then(Value::as_u64)
-            .unwrap_or_default()
-            .saturating_sub(removed_results as u64);
-        consumed.insert("returned_results".to_owned(), json!(returned));
-        let returned_text_bytes = consumed
-            .get("returned_text_bytes")
-            .and_then(Value::as_u64)
-            .unwrap_or_default()
-            .saturating_sub(removed_text_bytes as u64);
-        consumed.insert("returned_text_bytes".to_owned(), json!(returned_text_bytes));
-    }
-}
-
-fn search_result_text_bytes(result: &Value) -> usize {
-    result
-        .get("title")
-        .and_then(Value::as_str)
-        .map_or(0, str::len)
-        .saturating_add(
-            result
-                .get("snippet")
-                .and_then(Value::as_str)
-                .map_or(0, str::len),
-        )
 }
 
 fn tool_error_result(err: anyhow::Error) -> Value {

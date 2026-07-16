@@ -1,3 +1,5 @@
+use anyhow::{anyhow, Result};
+use ctx_protocol::SEARCH_MAX_SERIALIZED_RESPONSE_BYTES;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -17,8 +19,8 @@ impl SearchDto {
         refresh: &SearchRefreshReport,
         retrieval: &SemanticRetrievalReport,
         suggested_next_query: Option<&str>,
-    ) -> Value {
-        compact_json(json!({
+    ) -> Result<Value> {
+        bounded_search_dto(compact_json(json!({
             "schema_version": 2,
             "payload_type": "search_results",
             "query": packet.query_spec,
@@ -69,8 +71,151 @@ impl SearchDto {
                 .collect::<Vec<_>>(),
             "pagination": packet.pagination,
             "truncation": packet.truncation,
-        }))
+        })))
     }
+}
+
+fn bounded_search_dto(mut structured: Value) -> Result<Value> {
+    let result_count = structured
+        .get("results")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if render_search_dto_bytes(&mut structured)? <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES {
+        return Ok(structured);
+    }
+
+    let mut smallest = 0_usize;
+    let mut largest = result_count;
+    let mut best = None;
+    while smallest <= largest {
+        let keep = smallest + (largest - smallest) / 2;
+        let mut candidate = structured.clone();
+        truncate_search_transport(&mut candidate, keep);
+        if render_search_dto_bytes(&mut candidate)? <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES {
+            best = Some(candidate);
+            smallest = keep.saturating_add(1);
+        } else {
+            if keep == 0 {
+                break;
+            }
+            largest = keep - 1;
+        }
+    }
+
+    best.ok_or_else(|| {
+        anyhow!(
+            "bounded search metadata exceeds the {SEARCH_MAX_SERIALIZED_RESPONSE_BYTES}-byte response cap"
+        )
+    })
+}
+
+fn render_search_dto_bytes(structured: &mut Value) -> Result<usize> {
+    for _ in 0..8 {
+        let serialized_bytes = serde_json::to_vec_pretty(structured)?
+            .len()
+            .saturating_add(1);
+        let Some(consumed) = structured
+            .get_mut("query_execution")
+            .and_then(Value::as_object_mut)
+            .and_then(|execution| execution.get_mut("consumed"))
+            .and_then(Value::as_object_mut)
+        else {
+            return Ok(serialized_bytes);
+        };
+        if consumed
+            .get("serialized_response_bytes")
+            .and_then(Value::as_u64)
+            == Some(serialized_bytes as u64)
+        {
+            return Ok(serialized_bytes);
+        }
+        consumed.insert(
+            "serialized_response_bytes".to_owned(),
+            json!(serialized_bytes),
+        );
+    }
+    Err(anyhow!(
+        "bounded search response byte accounting did not converge"
+    ))
+}
+
+pub(crate) fn truncate_search_transport(structured: &mut Value, keep: usize) {
+    let Some(results) = structured.get_mut("results").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let keep = keep.min(results.len());
+    let removed_results = results.len().saturating_sub(keep);
+    let removed_text_bytes = results[keep..]
+        .iter()
+        .map(search_result_text_bytes)
+        .fold(0_usize, usize::saturating_add);
+    results.truncate(keep);
+    if removed_results == 0 {
+        return;
+    }
+
+    if let Some(pagination) = structured
+        .get_mut("pagination")
+        .and_then(Value::as_object_mut)
+    {
+        pagination.insert("has_more".to_owned(), Value::Bool(true));
+    }
+    if let Some(truncation) = structured
+        .get_mut("truncation")
+        .and_then(Value::as_object_mut)
+    {
+        truncation.insert("truncated".to_owned(), Value::Bool(true));
+        truncation.insert("reason".to_owned(), json!("serialized_response_bytes"));
+        let omitted = truncation
+            .get("omitted_results")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            .saturating_add(removed_results as u64);
+        truncation.insert("omitted_results".to_owned(), json!(omitted));
+    }
+    let Some(execution) = structured
+        .get_mut("query_execution")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    execution.insert("truncated".to_owned(), Value::Bool(true));
+    let reasons = execution
+        .entry("truncation_reasons".to_owned())
+        .or_insert_with(|| json!([]));
+    if let Some(reasons) = reasons.as_array_mut() {
+        let reason = json!("serialized_response_bytes");
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(consumed) = execution.get_mut("consumed").and_then(Value::as_object_mut) {
+        let returned = consumed
+            .get("returned_results")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            .saturating_sub(removed_results as u64);
+        consumed.insert("returned_results".to_owned(), json!(returned));
+        let returned_text_bytes = consumed
+            .get("returned_text_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            .saturating_sub(removed_text_bytes as u64);
+        consumed.insert("returned_text_bytes".to_owned(), json!(returned_text_bytes));
+    }
+}
+
+fn search_result_text_bytes(result: &Value) -> usize {
+    result
+        .get("title")
+        .and_then(Value::as_str)
+        .map_or(0, str::len)
+        .saturating_add(
+            result
+                .get("snippet")
+                .and_then(Value::as_str)
+                .map_or(0, str::len),
+        )
 }
 
 pub(crate) fn search_result_type(
@@ -324,4 +469,45 @@ pub(crate) fn search_inspect_command(
                 .session_id
                 .map(|id| format!("ctx show session {id} --mode lite"))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_pretty_json_transport_is_bounded_and_accounted() {
+        let large_text = "x".repeat(900_000);
+        let results = (0..3)
+            .map(|index| json!({"title": format!("result {index}"), "snippet": large_text}))
+            .collect::<Vec<_>>();
+        let value = json!({
+            "query_execution": {
+                "truncated": false,
+                "truncation_reasons": [],
+                "consumed": {
+                    "returned_results": 3,
+                    "returned_text_bytes": 2_700_024,
+                    "serialized_response_bytes": 0,
+                }
+            },
+            "pagination": {"has_more": false},
+            "truncation": {"truncated": false, "omitted_results": 0},
+            "results": results,
+        });
+
+        let bounded = bounded_search_dto(value).unwrap();
+        let serialized_bytes = serde_json::to_vec_pretty(&bounded)
+            .unwrap()
+            .len()
+            .saturating_add(1);
+        assert!(serialized_bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES);
+        assert_eq!(bounded["results"].as_array().unwrap().len(), 2);
+        assert_eq!(bounded["pagination"]["has_more"], true);
+        assert_eq!(bounded["query_execution"]["truncated"], true);
+        assert_eq!(
+            bounded["query_execution"]["consumed"]["serialized_response_bytes"],
+            serialized_bytes
+        );
+    }
 }
