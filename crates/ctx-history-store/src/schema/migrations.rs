@@ -22,7 +22,10 @@ use crate::schema::scriptgram::migrate_to_v45;
 use crate::schema::views::{
     create_stable_sql_views, drop_stable_sql_views, stable_sql_views_exist,
 };
-use crate::search::projections::rebuild_search_projection;
+use crate::search::projections::{
+    mark_search_projection_rebuild_required,
+    trust_existing_search_projection_if_not_rebuild_pending,
+};
 use crate::{Result, StoreError};
 
 use self::v47_provider_session_repair::migrate_to_v47;
@@ -84,7 +87,7 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
         migrate_to_v43(conn)?;
     }
     if user_version < 44 {
-        migrate_to_v44(conn, false)?;
+        migrate_to_v44(conn)?;
     }
     if user_version < 45 {
         migrate_to_v45(conn)?;
@@ -418,7 +421,7 @@ fn migrate_to_v10(conn: &Connection) -> Result<()> {
 fn migrate_to_v11(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        rebuild_search_projection(conn)?;
+        mark_search_projection_rebuild_required(conn)?;
         conn.execute_batch("PRAGMA user_version = 11;")?;
         Ok(())
     })();
@@ -441,7 +444,7 @@ fn migrate_to_v12(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         invalidate_provider_import_indexes(conn)?;
-        rebuild_search_projection(conn)?;
+        mark_search_projection_rebuild_required(conn)?;
         conn.execute_batch("PRAGMA user_version = 12;")?;
         Ok(())
     })();
@@ -669,22 +672,20 @@ fn migrate_to_v43(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v44(conn: &Connection, rebuild_search_projection_now: bool) -> Result<()> {
+fn migrate_to_v44(conn: &Connection) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         if stable_sql_views_exist(conn)? {
             drop_stable_sql_views(conn)?;
         }
+        mark_search_projection_rebuild_required(conn)?;
         rebuild_v44_current_schema_tables(conn)?;
         drop_fts_table_if_exists(conn, "event_search")?;
         drop_fts_table_if_exists(conn, "artifact_search")?;
         create_fts_tables_if_supported(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
-        if rebuild_search_projection_now {
-            rebuild_search_projection(conn)?;
-        }
         conn.execute_batch("PRAGMA user_version = 44;")?;
         Ok(())
     })();
@@ -1157,12 +1158,32 @@ fn migrate_stable_views_to_v55(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_lightweight_event_index_to_v56(conn: &Connection) -> Result<()> {
+pub(super) fn migrate_lightweight_event_index_to_v56(conn: &Connection) -> Result<()> {
     // Fresh stores no longer create idx_events_seq. Keep an existing copy until
     // bounded idle maintenance can remove it without turning Store::open into
     // a corpus-sized foreground write.
-    conn.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version = 56; COMMIT;")?;
-    Ok(())
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        // A v55 projection is structurally compatible with v56. Absence of a
+        // durable rebuild marker is sufficient to trust it; older destructive
+        // migrations leave that marker behind and therefore cannot publish.
+        trust_existing_search_projection_if_not_rebuild_pending(conn)?;
+        conn.execute_batch("PRAGMA user_version = 56;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
 }
 fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
     if table_exists(conn, "catalog_sessions")? {

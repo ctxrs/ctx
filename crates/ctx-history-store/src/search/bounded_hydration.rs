@@ -33,6 +33,7 @@ impl Store {
         per_lookup_byte_limit: usize,
         timeout: Duration,
     ) -> Result<Vec<EventSearchPreview>> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if event_ids.is_empty()
             || row_limit == 0
             || total_byte_limit == 0
@@ -106,6 +107,7 @@ impl Store {
         include_cursor: bool,
         timeout: Duration,
     ) -> Result<Vec<EventSearchHit>> {
+        let _projection_snapshot = self.begin_readable_search_projection()?;
         if candidate_scores.is_empty()
             || row_limit == 0
             || total_byte_limit == 0

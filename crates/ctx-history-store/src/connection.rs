@@ -60,6 +60,7 @@ impl Store {
             busy_timeout: BUSY_TIMEOUT,
             event_search_bulk_depth: Default::default(),
             event_search_bulk_batches: Default::default(),
+            search_projection_recovery_deferred: Default::default(),
             store_identity,
             provider_file_publication: Default::default(),
             provider_file_write_scope: Default::default(),
@@ -95,6 +96,18 @@ impl Store {
         let conn = Connection::open(&path)?;
         restrict_private_file(&path)?;
         configure_connection(&conn, busy_timeout)?;
+        let fresh_empty_schema = conn.query_row(
+            r#"
+            SELECT NOT EXISTS (
+                SELECT 1
+                FROM sqlite_schema
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+            )
+            "#,
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
         let store = Self {
             path,
             object_dir,
@@ -102,6 +115,7 @@ impl Store {
             busy_timeout,
             event_search_bulk_depth: Default::default(),
             event_search_bulk_batches: Default::default(),
+            search_projection_recovery_deferred: Default::default(),
             store_identity,
             provider_file_publication: Default::default(),
             provider_file_write_scope: Default::default(),
@@ -113,11 +127,23 @@ impl Store {
             provider_file_reconciliation_candidates: Default::default(),
         };
         store.migrate()?;
-        store.recover_event_search_bulk_mode()?;
+        if fresh_empty_schema {
+            store.establish_empty_search_projection_ready()?;
+        }
+        if let Err(error) = store.recover_event_search_bulk_mode() {
+            if !error.is_retryable_search_projection_recovery() {
+                return Err(error);
+            }
+        }
         if migrated_legacy_layout {
             store.normalize_legacy_blob_paths()?;
         }
-        store.ensure_search_projection_initialized()?;
+        if let Err(error) = store.ensure_search_projection_initialized() {
+            if !error.is_retryable_search_projection_recovery() {
+                return Err(error);
+            }
+            store.search_projection_recovery_deferred.set(true);
+        }
         Ok(store)
     }
 

@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use crate::schema::ddl::CREATE_TABLES_SQL;
 use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
-use crate::Store;
+use crate::{EventSearchBulkMaintenanceOutcome, Store};
 
 fn tempdir() -> tempfile::TempDir {
     let root = std::env::var_os("TEST_TMPDIR")
@@ -39,7 +39,7 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
     let appended_event_id = new_id();
     let other_event_id = new_id();
     let file_touch_id = new_id();
-    let (other_event_search_rowid, other_event_scriptgram_rowid) = {
+    {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(CREATE_TABLES_SQL).unwrap();
         conn.execute_batch(FTS_TABLES_SQL).unwrap();
@@ -306,21 +306,7 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
         )
         .unwrap();
         conn.execute_batch("PRAGMA user_version = 46;").unwrap();
-        (
-            conn.query_row(
-                "SELECT rowid FROM event_search WHERE event_id = ?1",
-                [other_event_id.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-            conn.query_row(
-                "SELECT rowid FROM event_search_scriptgram WHERE event_id = ?1",
-                [other_event_id.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        )
-    };
+    }
 
     let store = Store::open(&path).unwrap();
     let sessions = store.list_sessions().unwrap();
@@ -351,6 +337,13 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
         Some(old_session_id)
     );
     assert_eq!(store.events_for_session(old_session_id).unwrap().len(), 2);
+    assert!(store.event_search_projection_needs_backfill().unwrap());
+    loop {
+        match store.refresh_search_index().unwrap() {
+            EventSearchBulkMaintenanceOutcome::Complete => break,
+            EventSearchBulkMaintenanceOutcome::Pending => {}
+        }
+    }
     for projection_table in [
         "event_search",
         "event_search_scriptgram",
@@ -408,29 +401,23 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
         store
             .conn
             .query_row(
-                "SELECT rowid, preview_text FROM event_search WHERE event_id = ?1",
+                "SELECT preview_text FROM event_search WHERE event_id = ?1",
                 [other_event_id.to_string()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        (
-            other_event_search_rowid,
-            "unrelated projection must remain untouched".to_owned(),
-        )
+        "unrelated projection must remain untouched"
     );
     assert_eq!(
         store
             .conn
             .query_row(
-                "SELECT rowid, token_text FROM event_search_scriptgram WHERE event_id = ?1",
+                "SELECT token_text FROM event_search_scriptgram WHERE event_id = ?1",
                 [other_event_id.to_string()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        (
-            other_event_scriptgram_rowid,
-            "unrelated projection must remain untouched".to_owned(),
-        )
+        "unrelated projection must remain untouched"
     );
     assert_eq!(
         store
