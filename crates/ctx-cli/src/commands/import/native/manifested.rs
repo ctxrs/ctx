@@ -1,12 +1,9 @@
-pub(crate) fn import_manifested_source(
+fn import_manifested_source(
     store: &mut Store,
     source: &SourceInfo,
-    record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
-    preinventoried_files: Option<&[SourceImportFile]>,
-    preinventory_generation: Option<u64>,
-    force_selection: bool,
-) -> Result<ProviderImportSummary> {
+    options: ManifestedImportOptions<'_>,
+) -> Result<ProviderImportBatchOutcome> {
     let mut import_file = |store: &mut Store, pending_source: &SourceInfo| {
         import_one_source_inner(
             store,
@@ -17,15 +14,31 @@ pub(crate) fn import_manifested_source(
             &SourcePreinventory::None,
         )
     };
-    import_manifested_source_with_importer(
-        store,
-        source,
-        record_id,
-        preinventoried_files,
-        preinventory_generation,
-        force_selection,
-        &mut import_file,
-    )
+    import_manifested_source_with_importer(store, source, options, &mut import_file)
+}
+
+#[derive(Clone, Copy)]
+struct ManifestedImportOptions<'a> {
+    preinventoried_files: Option<&'a [SourceImportFile]>,
+    preinventory_generation: Option<u64>,
+    force_selection: bool,
+    selection: Option<&'a SelectedImportWork>,
+}
+
+impl<'a> ManifestedImportOptions<'a> {
+    fn new(
+        preinventoried_files: Option<&'a [SourceImportFile]>,
+        preinventory_generation: Option<u64>,
+        force_selection: bool,
+        selection: Option<&'a SelectedImportWork>,
+    ) -> Self {
+        Self {
+            preinventoried_files,
+            preinventory_generation,
+            force_selection,
+            selection,
+        }
+    }
 }
 
 struct ManifestedImportOutcome {
@@ -44,48 +57,109 @@ enum ManifestedImportResult {
 fn import_manifested_source_with_importer(
     store: &mut Store,
     source: &SourceInfo,
-    record_id: Uuid,
-    preinventoried_files: Option<&[SourceImportFile]>,
-    _preinventory_generation: Option<u64>,
-    force_selection: bool,
+    options: ManifestedImportOptions<'_>,
     import_file: &mut dyn FnMut(&mut Store, &SourceInfo) -> Result<ProviderImportSummary>,
-) -> Result<ProviderImportSummary> {
+) -> Result<ProviderImportBatchOutcome> {
+    let ManifestedImportOptions {
+        preinventoried_files,
+        preinventory_generation,
+        force_selection,
+        selection,
+    } = options;
     let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
     let collected_files;
+    let mut outcome_generation = preinventory_generation;
     let files = match preinventoried_files {
         Some(files) => files,
         None => {
             collected_files = collect_source_import_files(source).with_context(|| {
                 format!("inventory import files from {}", source.path.display())
             })?;
-            persist_new_source_import_observation(store, source, &collected_files)?;
+            let persisted = persist_new_source_import_observation(store, source, &collected_files)?;
+            outcome_generation = Some(persisted.inventory_generation);
             &collected_files
         }
     };
-    if files.is_empty() {
+    if files.is_empty() && selection.is_none() {
         return Err(anyhow!(
             "no importable {} history files found under {}",
             source.provider.as_str(),
             source.path.display()
         ));
     }
-    let selected_files = if force_selection {
-        files.to_vec()
-    } else {
-        store.list_pending_source_import_files(source.provider, &source_root)?
+    let selected_files = match selection {
+        Some(SelectedImportWork::SourceFiles(work)) => {
+            work.iter().map(|work| work.file.clone()).collect()
+        }
+        Some(SelectedImportWork::Catalog(_)) => {
+            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                "catalog work selected for a manifested source",
+            )))
+        }
+        None if force_selection => files.to_vec(),
+        None => store.list_pending_source_import_files(source.provider, &source_root)?,
     };
     if selected_files.is_empty() {
-        return Ok(ProviderImportSummary::default());
+        return Ok(ProviderImportBatchOutcome::completed(
+            ProviderImportSummary::default(),
+            0,
+        ));
     }
+    let selected_work_by_path = match selection {
+        Some(SelectedImportWork::SourceFiles(work)) => work
+            .iter()
+            .map(|work| (work.file.source_path.as_str(), work))
+            .collect::<BTreeMap<_, _>>(),
+        Some(SelectedImportWork::Catalog(_)) | None => BTreeMap::new(),
+    };
 
     let mut summary = ProviderImportSummary::default();
+    let mut deferred_units = 0;
+    let mut durable_progress = false;
     let mut outcomes = Vec::with_capacity(selected_files.len());
     let mut system_error = None;
+    let append_only = provider_file_mutation_contract(source.provider, source.source_format)
+        == ProviderFileMutationContract::AppendOnlyNewlineDelimited;
     for pending_file in selected_files {
         let path = PathBuf::from(&pending_file.source_path);
         let mut pending_source = explicit_path_source(source.provider, path);
         pending_source.source_format = source.source_format;
-        let imported = import_file(store, &pending_source);
+        let uses_bounded_publication =
+            append_only && selected_work_by_path.contains_key(pending_file.source_path.as_str());
+        let imported = if append_only {
+            match selected_work_by_path.get(pending_file.source_path.as_str()) {
+                Some(work) => match import_manifested_append_source_file_work(
+                    store,
+                    source,
+                    &pending_source,
+                    work,
+                    preinventory_generation.ok_or_else(|| {
+                        anyhow::Error::new(CaptureError::SystemInvariant(
+                            "selected source-file work has no inventory generation",
+                        ))
+                    })?,
+                ) {
+                    Ok(AppendImportOutcome::Imported(summary)) => Some(Ok(summary)),
+                    Ok(AppendImportOutcome::Deferred {
+                        durable_progress: unit_progress,
+                    }) => {
+                        deferred_units += 1;
+                        durable_progress |= unit_progress;
+                        if unit_progress {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(error) => Some(Err(error)),
+                },
+                None => Some(import_file(store, &pending_source)),
+            }
+        } else {
+            Some(import_file(store, &pending_source))
+        };
+        let Some(imported) = imported else {
+            continue;
+        };
         match imported {
             Ok(file_summary) => {
                 let status = provider_summary_import_status(&file_summary);
@@ -99,6 +173,12 @@ fn import_manifested_source_with_importer(
                 });
             }
             Err(err) => {
+                if publication_recovery_required(&err) {
+                    if system_error.is_none() {
+                        system_error = Some(err);
+                    }
+                    continue;
+                }
                 if let Some(file_summary) = rejected_source_summary(&err) {
                     let status = provider_summary_import_status(&file_summary);
                     let error = (file_summary.failed > 0)
@@ -134,79 +214,159 @@ fn import_manifested_source_with_importer(
                 }
             }
         }
+        if uses_bounded_publication {
+            break;
+        }
     }
-    let persisted_outcomes = persist_reobserved_manifested_outcomes(store, source, &outcomes);
-    if let Some(error) = system_error {
-        return Err(error);
+    if deferred_units > 0 && durable_progress {
+        return Ok(ProviderImportBatchOutcome {
+            summary,
+            completed_units: 0,
+            completed_bytes: 0,
+            deferred_units,
+            durable_progress,
+            post_import_inventory_generation: None,
+            post_import_preinventory: None,
+        });
     }
-    let current_outcomes = persisted_outcomes?;
+    let outcome_generation = outcome_generation.ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "manifested import outcomes have no inventory generation",
+        ))
+    })?;
+    let persisted = match persist_reobserved_manifested_outcomes(
+        store,
+        source,
+        outcome_generation,
+        &outcomes,
+    ) {
+        Ok(persisted) => persisted,
+        Err(persist_error) => {
+            let mut partial_summary = ProviderImportSummary::default();
+            for outcome in &outcomes {
+                if let ManifestedImportResult::Imported(file_summary) = &outcome.result {
+                    partial_summary.merge_from(file_summary.clone());
+                }
+            }
+            return Err(provider_import_batch_error(
+                ProviderImportBatchOutcome {
+                    summary: partial_summary,
+                    completed_units: 0,
+                    completed_bytes: 0,
+                    deferred_units,
+                    durable_progress,
+                    post_import_inventory_generation: None,
+                    post_import_preinventory: None,
+                },
+                system_error.unwrap_or(persist_error),
+            ));
+        }
+    };
+    durable_progress |= persisted.durable_progress;
     let mut source_error = None;
+    let mut completed_paths = BTreeSet::new();
     for outcome in outcomes {
+        let source_path = outcome.observation.source_path.clone();
         match outcome.result {
-            ManifestedImportResult::Imported(file_summary) => summary.merge_from(file_summary),
+            ManifestedImportResult::Imported(file_summary) => {
+                if persisted.current_outcomes.contains(&source_path) {
+                    completed_paths.insert(source_path);
+                }
+                summary.merge_from(file_summary);
+            }
             ManifestedImportResult::SourceFailure(error)
-                if current_outcomes.contains(&outcome.observation.source_path) =>
+                if persisted
+                    .current_outcomes
+                    .contains(&outcome.observation.source_path) =>
             {
-                if source_error.is_none() {
+                if import_error_retryability(&error) == ImportRetryability::Terminal {
+                    completed_paths.insert(source_path.clone());
+                    summary.failed = summary.failed.saturating_add(1);
+                    summary.failures.push(ProviderImportFailure {
+                        line: 0,
+                        error: format!("{source_path}: {}", error_summary(&error)),
+                    });
+                } else if source_error.is_none() {
                     source_error = Some(error);
                 }
             }
             ManifestedImportResult::SourceFailure(_) | ManifestedImportResult::SystemFailure => {}
         }
     }
-    let _ = record_id;
-    if let Some(error) = source_error {
-        return Err(error);
+    let completed_bytes = completed_paths
+        .iter()
+        .filter_map(|source_path| selected_work_by_path.get(source_path.as_str()))
+        .fold(0_u64, |total, work| {
+            total.saturating_add(work.estimated_bytes)
+        });
+    let outcome = ProviderImportBatchOutcome {
+        summary,
+        completed_units: completed_paths.len(),
+        completed_bytes,
+        deferred_units,
+        durable_progress,
+        post_import_inventory_generation: Some(persisted.inventory_generation),
+        post_import_preinventory: None,
+    };
+    if let Some(error) = system_error {
+        return Err(provider_import_batch_error(outcome, error));
     }
-    Ok(summary)
+    if let Some(error) = source_error {
+        return Err(provider_import_batch_error(outcome, error));
+    }
+    Ok(outcome)
+}
+
+struct PersistedManifestedOutcomes {
+    current_outcomes: BTreeSet<String>,
+    inventory_generation: u64,
+    durable_progress: bool,
 }
 
 fn persist_reobserved_manifested_outcomes(
     store: &Store,
     source: &SourceInfo,
+    inventory_generation: u64,
     outcomes: &[ManifestedImportOutcome],
-) -> Result<BTreeSet<String>> {
-    let current_files = collect_source_import_files(source)
-        .with_context(|| format!("re-inventory import files from {}", source.path.display()))?;
-    let current_by_path = current_files
-        .iter()
-        .map(|file| (file.source_path.as_str(), file))
-        .collect::<BTreeMap<_, _>>();
-    let mut persisted_outcomes = Vec::new();
+) -> Result<PersistedManifestedOutcomes> {
+    let mut current_outcomes = BTreeSet::new();
+    let mut durable_progress = false;
     for outcome in outcomes {
-        let Some(current) = current_by_path.get(outcome.observation.source_path.as_str()) else {
+        let Some(current) =
+            observe_selected_source_import_file(source, &outcome.observation.source_path)?
+        else {
             continue;
         };
-        if !same_source_import_observation(&outcome.observation, current) {
+        if !same_source_import_observation(&outcome.observation, &current) {
+            store
+                .upsert_source_import_files(inventory_generation, std::slice::from_ref(&current))?;
+            durable_progress = true;
             continue;
         }
-        persisted_outcomes.push(SourceImportObservationOutcome {
-            file: current,
-            status: outcome.status,
-            error: outcome.error.as_deref(),
-        });
+        let changed = store.record_source_import_file_result(
+            current.provider,
+            SourceImportFileIndexUpdate {
+                source_root: &current.source_root,
+                source_path: &current.source_path,
+                file_size_bytes: current.file_size_bytes,
+                file_modified_at_ms: current.file_modified_at_ms,
+                import_revision: current.import_revision,
+                inventory_generation,
+                metadata: &current.metadata,
+                indexed_at_ms: utc_now().timestamp_millis(),
+            },
+            outcome.status,
+            outcome.error.as_deref(),
+        )?;
+        if changed == 1 {
+            current_outcomes.insert(current.source_path);
+        }
     }
-    persist_source_import_observation_with_outcomes(
-        store,
-        source,
-        &current_files,
-        &persisted_outcomes,
-    )?;
-    Ok(persisted_outcomes
-        .iter()
-        .map(|outcome| outcome.file.source_path.clone())
-        .collect())
-}
-
-fn same_source_import_observation(left: &SourceImportFile, right: &SourceImportFile) -> bool {
-    left.provider == right.provider
-        && left.source_format == right.source_format
-        && left.source_root == right.source_root
-        && left.source_path == right.source_path
-        && left.file_size_bytes == right.file_size_bytes
-        && left.file_modified_at_ms == right.file_modified_at_ms
-        && left.import_revision == right.import_revision
-        && left.metadata == right.metadata
+    Ok(PersistedManifestedOutcomes {
+        current_outcomes,
+        inventory_generation,
+        durable_progress,
+    })
 }
 
 fn import_error_status(error: &anyhow::Error) -> CatalogIndexedStatus {

@@ -1,6 +1,8 @@
 mod support;
 
 mod codex;
+mod codex_catalog_pacing;
+mod codex_observation;
 mod custom_history;
 mod hermes_batching;
 mod native_json;

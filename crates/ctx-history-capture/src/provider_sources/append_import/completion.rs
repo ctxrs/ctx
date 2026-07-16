@@ -1,3 +1,19 @@
+fn certify_uncheckpointed_replacement(
+    reader: &mut ProviderJsonlReader,
+    observed_size: u64,
+    is_replacement: bool,
+    decision: &mut ProviderAppendFileImportDecision,
+) {
+    let ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(result) = decision else {
+        return;
+    };
+    if is_replacement && result.summary.has_accepted_content() {
+        // Materialization is already committed. A hash failure stays encoded as
+        // a missing certificate so the coordinator retires rather than publishes it.
+        result.source_prefix_sha256 = reader.pinned_prefix_sha256(observed_size).ok();
+    }
+}
+
 fn unexpected_post_commit_checkpoint_failure(
     error: &CaptureError,
 ) -> ProviderJsonlReplacementReason {
@@ -310,19 +326,7 @@ pub fn provider_canonical_material_source_format(
     provider: CaptureProvider,
     inventory_source_format: &str,
 ) -> Option<&'static str> {
-    match (provider, inventory_source_format) {
-        (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl") => {
-            Some(CODEX_SESSION_SOURCE_FORMAT)
-        }
-        (CaptureProvider::Pi, "pi_session_jsonl") => Some("pi_session_jsonl"),
-        (CaptureProvider::Claude, "claude_projects_jsonl_tree") => {
-            Some(CLAUDE_PROJECTS_SOURCE_FORMAT)
-        }
-        (CaptureProvider::Tabnine, "tabnine_cli_chat_recording_jsonl") => {
-            Some(TABNINE_CLI_SOURCE_FORMAT)
-        }
-        _ => None,
-    }
+    canonical_provider_material_source_format(provider, inventory_source_format)
 }
 
 fn finish_import(
@@ -338,13 +342,21 @@ fn finish_import(
         Ok(checkpoint) => checkpoint,
         Err(reason) => {
             return ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
-                ProviderAppendFileImportWithoutCheckpoint { summary, reason },
+                ProviderAppendFileImportWithoutCheckpoint {
+                    summary,
+                    reason,
+                    source_prefix_sha256: None,
+                },
             );
         }
     };
     if let Some(reason) = certification_failure {
         return ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
-            ProviderAppendFileImportWithoutCheckpoint { summary, reason },
+            ProviderAppendFileImportWithoutCheckpoint {
+                summary,
+                reason,
+                source_prefix_sha256: None,
+            },
         );
     }
     checkpoint.resume_state = resume_state;

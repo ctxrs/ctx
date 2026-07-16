@@ -5,12 +5,14 @@ use ctx_history_core::{
     new_id, AgentType, Artifact, ArtifactKind, CaptureProvider, CaptureSource,
     CaptureSourceDescriptor, CaptureSourceKind, EntityTimestamps, Event, EventRole, EventType,
     Fidelity, Session, SessionStatus, SyncMetadata, SyncState, Visibility,
+    PROVIDER_MATERIAL_SOURCE_FORMATS,
 };
 use rusqlite::{ffi::ErrorCode, params};
 use uuid::Uuid;
 
 use crate::catalog::{
-    CatalogIndexedStatus, CatalogSession, CatalogSourceIndexUpdate, SourceImportFile,
+    expected_material_source_format, CatalogIndexedStatus, CatalogSession,
+    CatalogSourceIndexUpdate, ImportPendingReason, ImportWorkClass, SourceImportFile,
     SourceImportFileIndexUpdate,
 };
 use crate::connection::timestamp_ms;
@@ -186,6 +188,33 @@ fn current_source_generation(store: &Store, provider: CaptureProvider, source_ro
     current_inventory_generation(store, provider, source_root, "source_import_files")
 }
 
+fn insert_matching_checkpoint(store: &Store, file: &SourceImportFile) {
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO provider_file_checkpoints (
+                provider, source_format, source_root, source_path, import_revision,
+                checkpoint_version, stable_file_identity, committed_byte_offset,
+                committed_complete_line_count, head_sha256, boundary_sha256, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 'test-file', ?6, 0, ?7, ?8, ?9)
+            "#,
+            params![
+                file.provider.as_str(),
+                &file.source_format,
+                &file.source_root,
+                &file.source_path,
+                i64::from(file.import_revision),
+                file.file_size_bytes,
+                "a".repeat(64),
+                "b".repeat(64),
+                file.observed_at_ms,
+            ],
+        )
+        .unwrap();
+}
+
+include!("tests/pending_reasons.rs");
 include!("tests/catalog_imports.rs");
 include!("tests/source_imports.rs");
 include!("tests/queries.rs");

@@ -68,12 +68,12 @@ impl Store {
                 serde_json::to_string(&source.sync.metadata)?,
             ],
         )?;
+        self.track_provider_file_publication_capture_source(source.id)?;
         Ok(())
     }
 
     pub fn get_capture_source(&self, id: Uuid) -> Result<CaptureSource> {
-        let visible =
-            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
+        let visible = self.importer_capture_source_material_visible_predicate("capture_sources");
         self.conn
                 .query_row(
                     &format!("SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1 AND {visible}"),
@@ -110,8 +110,7 @@ impl Store {
         provider: CaptureProvider,
         external_session_id: &str,
     ) -> Result<Option<CaptureSource>> {
-        let visible =
-            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
+        let visible = self.importer_capture_source_material_visible_predicate("capture_sources");
         self.conn
                 .query_row(
                     &format!("SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE provider = ?1 AND external_session_id = ?2 AND {visible} ORDER BY started_at_ms DESC LIMIT 1"),

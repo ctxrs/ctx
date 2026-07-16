@@ -22,6 +22,7 @@ chrono.workspace = true
 clap.workspace = true
 clap_mangen.workspace = true
 jsonc-parser = { version = "0.33", features = ["serde", "serde_json"] }
+notify.workspace = true
 ring.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

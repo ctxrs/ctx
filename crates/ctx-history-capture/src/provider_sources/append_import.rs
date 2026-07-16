@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{canonical_provider_material_source_format, CaptureProvider};
 use ctx_history_store::Store;
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -32,8 +32,7 @@ use crate::{
     ProviderFileMutationContract, ProviderImportFailure, ProviderImportSummary,
     ProviderJsonlAppendCheckpoint, ProviderJsonlOpenDecision, ProviderJsonlOpenMode,
     ProviderJsonlReader, ProviderJsonlRecordRead, ProviderJsonlReplacementReason,
-    ProviderJsonlResumeState, Result, TabnineJsonlResumeState, CLAUDE_PROJECTS_SOURCE_FORMAT,
-    CODEX_SESSION_SOURCE_FORMAT, TABNINE_CLI_SOURCE_FORMAT,
+    ProviderJsonlResumeState, Result, TabnineJsonlResumeState, TABNINE_CLI_SOURCE_FORMAT,
 };
 
 use super::{ClaudeProjectsJsonlResumeState, CodexSessionJsonlResumeState};
@@ -76,6 +75,7 @@ pub struct ProviderAppendFileImportOptions {
     pub source_root: PathBuf,
     pub imported_at: DateTime<Utc>,
     pub history_record_id: Option<Uuid>,
+    pub observed_size: u64,
     pub mode: ProviderAppendFileImportMode,
 }
 
@@ -89,6 +89,7 @@ pub struct ProviderAppendFileImportResult {
 pub struct ProviderAppendFileImportWithoutCheckpoint {
     pub summary: ProviderImportSummary,
     pub reason: ProviderJsonlReplacementReason,
+    pub source_prefix_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +179,7 @@ fn import_append_capable_provider_file_with_post_materialization(
             ));
         }
     };
+    reader.limit_to_observed_size(options.observed_size)?;
     let context = ProviderAdapterContext {
         machine_id: options.machine_id,
         source_path: Some(options.source_path.clone()),
@@ -585,13 +587,21 @@ fn import_append_capable_provider_file_with_post_materialization(
         }
     };
 
-    if summary.requires_maintenance() {
-        return Ok(ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
+    if summary.has_checkpoint_blocking_maintenance() {
+        let mut decision = ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
             ProviderAppendFileImportWithoutCheckpoint {
                 summary,
                 reason: ProviderJsonlReplacementReason::CommittedMaintenanceIncomplete,
+                source_prefix_sha256: None,
             },
-        ));
+        );
+        certify_uncheckpointed_replacement(
+            &mut reader,
+            options.observed_size,
+            is_replacement,
+            &mut decision,
+        );
+        return Ok(decision);
     }
     post_materialization(&mut reader);
     let checkpoint_result = match semantic_boundary {
@@ -603,22 +613,38 @@ fn import_append_capable_provider_file_with_post_materialization(
     let checkpoint_decision = match checkpoint_result {
         Ok(decision) => decision,
         Err(error) => {
-            return Ok(ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
+            let mut decision = ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
                 ProviderAppendFileImportWithoutCheckpoint {
                     summary,
                     reason: unexpected_post_commit_checkpoint_failure(&error),
+                    source_prefix_sha256: None,
                 },
-            ));
+            );
+            certify_uncheckpointed_replacement(
+                &mut reader,
+                options.observed_size,
+                is_replacement,
+                &mut decision,
+            );
+            return Ok(decision);
         }
     };
-    Ok(finish_import(
+    let mut decision = finish_import(
         summary,
         checkpoint_decision,
         checkpoint_resume_state,
         certification_failure,
-    ))
+    );
+    certify_uncheckpointed_replacement(
+        &mut reader,
+        options.observed_size,
+        is_replacement,
+        &mut decision,
+    );
+    Ok(decision)
 }
 
 include!("append_import/completion.rs");
+
 #[cfg(test)]
 include!("append_import/tests.rs");

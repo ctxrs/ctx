@@ -370,7 +370,7 @@ pub enum ProviderJsonlRecordRead {
 #[derive(Debug)]
 pub struct ProviderJsonlReader {
     path: PathBuf,
-    reader: BufReader<File>,
+    reader: BufReader<crate::disk_io_pacing::PacedReader<File>>,
     stable_identity: Option<ProviderFileStableIdentity>,
     defer_unterminated_tail: bool,
     initial_offset: u64,
@@ -399,6 +399,75 @@ pub fn open_provider_jsonl(
     open_provider_jsonl_with_identity(path.as_ref(), mode, stable_file_identity)
 }
 
+pub fn provider_jsonl_checkpoint_matches_file(
+    path: impl AsRef<Path>,
+    checkpoint: &ProviderJsonlAppendCheckpoint,
+) -> Result<bool> {
+    let mut file = open_regular_provider_transcript_file(path.as_ref())?;
+    let metadata = file.metadata()?;
+    let stable_identity = stable_file_identity(&file, &metadata);
+    Ok(provider_jsonl_checkpoint_replacement_reason(
+        &mut file,
+        &metadata,
+        stable_identity.as_ref(),
+        checkpoint,
+        false,
+    )?
+    .is_none())
+}
+
+fn provider_jsonl_checkpoint_replacement_reason(
+    file: &mut File,
+    metadata: &std::fs::Metadata,
+    stable_identity: Option<&ProviderFileStableIdentity>,
+    checkpoint: &ProviderJsonlAppendCheckpoint,
+    require_growth: bool,
+) -> Result<Option<ProviderJsonlReplacementReason>> {
+    if checkpoint.version != CHECKPOINT_VERSION {
+        return Ok(Some(
+            ProviderJsonlReplacementReason::UnsupportedCheckpointVersion,
+        ));
+    }
+    let Some(actual_identity) = stable_identity else {
+        return Ok(Some(
+            ProviderJsonlReplacementReason::StableIdentityUnavailable,
+        ));
+    };
+    if actual_identity != &checkpoint.stable_identity {
+        return Ok(Some(ProviderJsonlReplacementReason::StableIdentityChanged));
+    }
+    if metadata.len() < checkpoint.committed_offset {
+        return Ok(Some(ProviderJsonlReplacementReason::FileShrank));
+    }
+    if require_growth && metadata.len() == checkpoint.committed_offset {
+        return Ok(Some(ProviderJsonlReplacementReason::EqualLengthObservation));
+    }
+    if checkpoint.committed_offset > 0 {
+        let Some(boundary_byte) = read_range_exact(file, checkpoint.committed_offset - 1, 1)?
+        else {
+            return Ok(Some(ProviderJsonlReplacementReason::FileShrank));
+        };
+        if boundary_byte != b"\n" {
+            return Ok(Some(
+                ProviderJsonlReplacementReason::BoundaryNotNewlineAligned,
+            ));
+        }
+    }
+    let Some(head_sha256) = hash_head_exact(file, checkpoint.committed_offset)? else {
+        return Ok(Some(ProviderJsonlReplacementReason::FileShrank));
+    };
+    if head_sha256 != checkpoint.head_sha256 {
+        return Ok(Some(ProviderJsonlReplacementReason::HeadHashMismatch));
+    }
+    let Some(boundary_sha256) = hash_boundary_exact(file, checkpoint.committed_offset)? else {
+        return Ok(Some(ProviderJsonlReplacementReason::FileShrank));
+    };
+    if boundary_sha256 != checkpoint.boundary_sha256 {
+        return Ok(Some(ProviderJsonlReplacementReason::BoundaryHashMismatch));
+    }
+    Ok(None)
+}
+
 fn open_provider_jsonl_with_identity(
     path: &Path,
     mode: ProviderJsonlOpenMode,
@@ -421,70 +490,18 @@ fn open_provider_jsonl_with_identity(
         ProviderJsonlOpenMode::WholeReplacement => (false, 0, 0),
         ProviderJsonlOpenMode::AppendCapableReplacement => (true, 0, 0),
         ProviderJsonlOpenMode::Append(checkpoint) => {
-            if checkpoint.version != CHECKPOINT_VERSION {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::UnsupportedCheckpointVersion,
-                ));
-            }
-            let Some(actual_identity) = stable_identity.as_ref() else {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::StableIdentityUnavailable,
-                ));
-            };
-            if actual_identity != &checkpoint.stable_identity {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::StableIdentityChanged,
-                ));
-            }
-            if metadata.len() < checkpoint.committed_offset {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::FileShrank,
-                ));
-            }
             // The coordinator owns exact unchanged-observation elision. Once
             // capture is invoked, equality is ambiguous: it can be an
             // unchanged file or an equal-length rewrite outside the bounded
             // sentinels, but it is never evidence of an append delta.
-            if metadata.len() == checkpoint.committed_offset {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::EqualLengthObservation,
-                ));
-            }
-            if checkpoint.committed_offset > 0 {
-                let Some(boundary_byte) =
-                    read_range_exact(&mut file, checkpoint.committed_offset - 1, 1)?
-                else {
-                    return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                        ProviderJsonlReplacementReason::FileShrank,
-                    ));
-                };
-                if boundary_byte != b"\n" {
-                    return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                        ProviderJsonlReplacementReason::BoundaryNotNewlineAligned,
-                    ));
-                }
-            }
-            let Some(head_sha256) = hash_head_exact(&mut file, checkpoint.committed_offset)? else {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::FileShrank,
-                ));
-            };
-            if head_sha256 != checkpoint.head_sha256 {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::HeadHashMismatch,
-                ));
-            }
-            let Some(boundary_sha256) =
-                hash_boundary_exact(&mut file, checkpoint.committed_offset)?
-            else {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::FileShrank,
-                ));
-            };
-            if boundary_sha256 != checkpoint.boundary_sha256 {
-                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::BoundaryHashMismatch,
-                ));
+            if let Some(reason) = provider_jsonl_checkpoint_replacement_reason(
+                &mut file,
+                &metadata,
+                stable_identity.as_ref(),
+                &checkpoint,
+                true,
+            )? {
+                return Ok(ProviderJsonlOpenDecision::ReplacementRequired(reason));
             }
             (
                 true,
@@ -498,7 +515,7 @@ fn open_provider_jsonl_with_identity(
 
     Ok(ProviderJsonlOpenDecision::Ready(ProviderJsonlReader {
         path: path.to_path_buf(),
-        reader: BufReader::new(file),
+        reader: BufReader::new(crate::disk_io_pacing::PacedReader::new(file)),
         stable_identity,
         defer_unterminated_tail,
         initial_offset: start_offset,
@@ -547,6 +564,28 @@ impl ProviderJsonlReader {
 
     pub fn has_deferred_partial(&self) -> bool {
         self.deferred_partial
+    }
+
+    pub(crate) fn pinned_prefix_sha256(&mut self, byte_count: u64) -> Result<String> {
+        let logical_position = self.current_offset;
+        self.reader.seek(SeekFrom::Start(0))?;
+        let hash = hash_reader_prefix_exact(&mut self.reader, byte_count);
+        let restore = self.reader.seek(SeekFrom::Start(logical_position));
+        restore?;
+        hash
+    }
+
+    pub fn limit_to_observed_size(&mut self, observed_size: u64) -> Result<()> {
+        if observed_size < self.initial_offset {
+            return Err(crate::CaptureError::SystemInvariant(
+                "provider JSONL observation ends before the admitted checkpoint",
+            ));
+        }
+        self.read_limit = Some(
+            self.read_limit
+                .map_or(observed_size, |current| current.min(observed_size)),
+        );
+        Ok(())
     }
 
     /// Reads the bounded first complete record from the pinned file handle, then
@@ -741,15 +780,16 @@ impl ProviderJsonlReader {
                 ProviderJsonlReplacementReason::StableIdentityUnavailable,
             ));
         };
-        let metadata = match self.reader.get_ref().metadata() {
+        let metadata = match self.reader.get_ref().get_ref().metadata() {
             Ok(metadata) => metadata,
             Err(_) => {
                 return Ok(Err(ProviderJsonlReplacementReason::CheckpointMetadataIo));
             }
         };
-        if let Err(reason) =
-            validate_stable_identity(&stable_identity, identity(self.reader.get_ref(), &metadata))
-        {
+        if let Err(reason) = validate_stable_identity(
+            &stable_identity,
+            identity(self.reader.get_ref().get_ref(), &metadata),
+        ) {
             return Ok(Err(reason));
         }
         match validate_path_identity(&self.path, &stable_identity, &identity) {
@@ -768,7 +808,7 @@ impl ProviderJsonlReader {
         let logical_position = self.current_offset;
         let validated_checkpoint = self.validated_checkpoint.clone();
         let hashes = {
-            let file = self.reader.get_mut();
+            let file = self.reader.get_mut().get_mut();
             checkpoint_hashes(file, committed_offset, validated_checkpoint.as_ref())
         };
         if self.reader.seek(SeekFrom::Start(logical_position)).is_err() {
@@ -780,15 +820,16 @@ impl ProviderJsonlReader {
             Ok(Err(reason)) => return Ok(Err(reason)),
         };
 
-        let metadata = match self.reader.get_ref().metadata() {
+        let metadata = match self.reader.get_ref().get_ref().metadata() {
             Ok(metadata) => metadata,
             Err(_) => {
                 return Ok(Err(ProviderJsonlReplacementReason::CheckpointMetadataIo));
             }
         };
-        if let Err(reason) =
-            validate_stable_identity(&stable_identity, identity(self.reader.get_ref(), &metadata))
-        {
+        if let Err(reason) = validate_stable_identity(
+            &stable_identity,
+            identity(self.reader.get_ref().get_ref(), &metadata),
+        ) {
             return Ok(Err(reason));
         }
         match validate_path_identity(&self.path, &stable_identity, &identity) {
@@ -819,6 +860,27 @@ impl ProviderJsonlReader {
     }
 }
 
+fn hash_reader_prefix_exact(reader: &mut impl Read, byte_count: u64) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let mut remaining = byte_count;
+    let mut buffer = [0_u8; 8192];
+    while remaining > 0 {
+        let to_read = buffer.len().min(remaining as usize);
+        let read = reader.read(&mut buffer[..to_read])?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("provider JSONL ended before byte offset {byte_count}"),
+            )
+            .into());
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 include!("incremental_jsonl/identity.rs");
+
 #[cfg(test)]
 include!("incremental_jsonl/tests.rs");

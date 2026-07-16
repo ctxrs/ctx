@@ -1,21 +1,19 @@
 use super::*;
+use crate::commands::import::scheduler::{SelectedImportSource, IMPORT_SLICE_MAX_UNITS};
+use crate::provider_args::NativeProviderArg;
 use crate::provider_sources::explicit_path_source;
+use ctx_history_capture::MAX_PROVIDER_JSONL_LINE_BYTES;
 use ctx_history_core::{
-    new_id, Event, EventRole, EventType, Fidelity, SyncMetadata, SyncState, Visibility,
+    new_id, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event, EventRole, EventType,
+    Fidelity, SyncMetadata, SyncState, Visibility,
 };
 use ctx_history_store::{SourceImportFile, SourceImportFileIndexUpdate};
 use serde_json::json;
-
-fn tempdir() -> tempfile::TempDir {
-    let temp_root = fs::canonicalize(std::env::temp_dir())
-        .expect("system temporary directory should be canonicalizable");
-    tempfile::Builder::new()
-        .prefix("ctx-native-import-")
-        .tempdir_in(temp_root)
-        .unwrap()
-}
+use std::io::Write;
+use std::sync::Arc;
 
 include!("native_tests/selection_and_append.rs");
+include!("native_tests/retirement.rs");
 include!("native_tests/append_recovery.rs");
 include!("native_tests/root_and_inventory.rs");
 include!("native_tests/manifest_and_sqlite.rs");

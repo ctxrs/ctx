@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use ctx_history_core::CaptureProvider;
 
 use super::super::{
-    provider_import_revision, provider_source_specs, DEFAULT_PROVIDER_IMPORT_REVISION,
-    PROVIDER_IMPORT_REVISIONS,
+    provider_import_revision, provider_source_for_persisted_format, provider_source_specs,
+    DEFAULT_PROVIDER_IMPORT_REVISION, PROVIDER_IMPORT_REVISIONS,
 };
 
 #[test]
@@ -61,4 +61,26 @@ fn semantic_output_changes_bump_only_the_affected_material_formats() {
         provider_import_revision(CaptureProvider::Pi, "pi_session_jsonl"),
         DEFAULT_PROVIDER_IMPORT_REVISION
     );
+}
+
+#[test]
+fn persisted_tree_format_does_not_depend_on_a_missing_path_still_being_a_directory() {
+    let source = provider_source_for_persisted_format(
+        CaptureProvider::Qoder,
+        std::path::PathBuf::from("/missing/qoder-root"),
+        "qoder_transcript_jsonl_tree",
+    )
+    .unwrap();
+
+    assert_eq!(source.source_format, "qoder_transcript_jsonl_tree");
+    assert_eq!(
+        source.import_revision,
+        provider_import_revision(CaptureProvider::Qoder, "qoder_transcript_jsonl_tree")
+    );
+    assert!(provider_source_for_persisted_format(
+        CaptureProvider::Qoder,
+        std::path::PathBuf::from("/missing/qoder-root"),
+        "codex_session_jsonl_tree",
+    )
+    .is_none());
 }

@@ -15,6 +15,44 @@ impl Store {
         self.allocate_import_inventory_generation(provider, source_root, "source_import_files")
     }
 
+    pub fn current_source_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Option<u64>> {
+        self.current_import_inventory_generation(provider, source_root, "source_import_files")
+    }
+
+    pub fn current_catalog_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Option<u64>> {
+        self.current_import_inventory_generation(provider, source_root, "catalog_sessions")
+    }
+
+    fn current_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_family: &str,
+    ) -> Result<Option<u64>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT current_generation
+                FROM import_inventory_generations
+                WHERE provider = ?1
+                  AND source_root = ?2
+                  AND inventory_family = ?3
+                "#,
+                params![provider.as_str(), source_root, inventory_family],
+                |row| nonnegative_i64_to_u64(row.get(0)?),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     pub fn catalog_inventory_generation_is_current(
         &self,
         provider: CaptureProvider,
@@ -53,6 +91,117 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    #[doc(hidden)]
+    pub fn catalog_inventory_generation_is_unpublished(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT current_generation = ?4 AND completed_generation = 0
+                FROM import_inventory_generations
+                WHERE provider = ?1
+                  AND source_root = ?2
+                  AND inventory_family = ?3
+                "#,
+                params![
+                    provider.as_str(),
+                    source_root,
+                    "catalog_sessions",
+                    capped_i64(inventory_generation),
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|unpublished| unpublished.unwrap_or(false))
+            .map_err(StoreError::from)
+    }
+
+    #[doc(hidden)]
+    pub fn delete_unpublished_catalog_sessions_batch(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+        limit: usize,
+    ) -> Result<Option<(usize, u64)>> {
+        self.delete_unpublished_catalog_sessions_batch_paced(
+            provider,
+            source_root,
+            inventory_generation,
+            limit,
+            |_| {},
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn delete_unpublished_catalog_sessions_batch_paced(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+        limit: usize,
+        pace: impl Fn(u64),
+    ) -> Result<Option<(usize, u64)>> {
+        with_immediate_transaction(&self.conn, || {
+            if !self.catalog_inventory_generation_is_unpublished(
+                provider,
+                source_root,
+                inventory_generation,
+            )? {
+                return Ok(None);
+            }
+            let (rows, bytes) = self.conn.query_row(
+                r#"
+                SELECT COUNT(*), COALESCE(SUM(
+                    length(source_path) + length(provider) + length(source_format)
+                    + length(source_root) + COALESCE(length(external_session_id), 0)
+                    + COALESCE(length(parent_external_session_id), 0)
+                    + length(agent_type) + COALESCE(length(role_hint), 0)
+                    + COALESCE(length(external_agent_id), 0) + COALESCE(length(cwd), 0)
+                    + length(metadata_json) + 256
+                ), 0)
+                FROM (
+                    SELECT *
+                    FROM catalog_sessions
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                    ORDER BY source_path
+                    LIMIT ?3
+                )
+                "#,
+                params![provider.as_str(), source_root, capped_i64(limit as u64),],
+                |row| {
+                    Ok((
+                        row.get::<_, usize>(0)?,
+                        nonnegative_i64_to_u64(row.get(1)?)?,
+                    ))
+                },
+            )?;
+            pace(bytes);
+            let deleted = self.conn.execute(
+                r#"
+                DELETE FROM catalog_sessions
+                WHERE rowid IN (
+                    SELECT rowid
+                    FROM catalog_sessions
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                    ORDER BY source_path
+                    LIMIT ?3
+                )
+                "#,
+                params![provider.as_str(), source_root, capped_i64(limit as u64),],
+            )?;
+            debug_assert_eq!(deleted, rows);
+            Ok(Some((deleted, bytes)))
+        })
+    }
+
+    #[doc(hidden)]
     pub fn catalog_inventory_generation_is_complete(
         &self,
         provider: CaptureProvider,
@@ -203,6 +352,218 @@ impl Store {
         Ok(changed)
     }
 
+    fn classify_catalog_pending_reason(
+        &self,
+        session: &CatalogSession,
+    ) -> Result<Option<ImportPendingReason>> {
+        let prior = self
+            .conn
+            .query_row(
+                r#"
+                SELECT provider, source_format, source_root, file_size_bytes,
+                       file_modified_at_ms, import_revision, is_stale,
+                       indexed_file_size_bytes, indexed_file_modified_at_ms,
+                       indexed_status, indexed_import_revision, pending_reason, metadata_json
+                FROM catalog_sessions
+                WHERE source_path = ?1
+                "#,
+                params![&session.source_path],
+                |row| {
+                    Ok(CatalogPendingState {
+                        provider: parse_text_enum(row.get(0)?)?,
+                        source_format: row.get(1)?,
+                        source_root: row.get(2)?,
+                        file_size_bytes: nonnegative_i64_to_u64(row.get(3)?)?,
+                        file_modified_at_ms: row.get(4)?,
+                        import_revision: nonnegative_i64_to_u32(row.get(5)?)?,
+                        is_stale: row.get(6)?,
+                        indexed_file_size_bytes: row
+                            .get::<_, Option<i64>>(7)?
+                            .map(nonnegative_i64_to_u64)
+                            .transpose()?,
+                        indexed_file_modified_at_ms: row.get(8)?,
+                        indexed_status: parse_text_enum(row.get(9)?)?,
+                        indexed_import_revision: row
+                            .get::<_, Option<i64>>(10)?
+                            .map(nonnegative_i64_to_u32)
+                            .transpose()?,
+                        pending_reason: row
+                            .get::<_, Option<String>>(11)?
+                            .map(parse_text_enum)
+                            .transpose()?,
+                        metadata_json: row.get(12)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(prior) = prior else {
+            return Ok(Some(ImportPendingReason::FreshNew));
+        };
+        if self.provider_file_publication_was_abandoned(
+            session.provider,
+            "catalog_sessions",
+            &prior.source_format,
+            &prior.source_root,
+            &session.source_path,
+        )? {
+            return Ok(Some(ImportPendingReason::AbandonedPublication));
+        }
+        let same_identity = prior.provider == session.provider
+            && prior.source_format == session.source_format
+            && prior.source_root == session.source_root;
+        let same_fingerprint = same_identity
+            && prior.file_size_bytes == session.file_size_bytes
+            && prior.file_modified_at_ms == session.file_modified_at_ms
+            && prior.import_revision == session.import_revision
+            && catalog_observation_metadata_matches(&prior.metadata_json, &session.metadata)
+            && !prior.is_stale;
+        if same_fingerprint && prior.pending_reason == Some(ImportPendingReason::ExplicitRescan) {
+            return Ok(prior.pending_reason);
+        }
+        if !same_fingerprint {
+            if let Some(reason) = prior
+                .pending_reason
+                .filter(|reason| reason.requires_replacement())
+            {
+                return Ok(Some(reason));
+            }
+            let parser_revision_only = same_identity
+                && prior.file_size_bytes == session.file_size_bytes
+                && prior.file_modified_at_ms == session.file_modified_at_ms
+                && catalog_observation_metadata_matches(&prior.metadata_json, &session.metadata)
+                && prior.import_revision != session.import_revision
+                && !prior.is_stale;
+            if parser_revision_only {
+                return Ok(Some(ImportPendingReason::ParserRevision));
+            }
+            let grew_in_place = same_identity
+                && prior.import_revision == session.import_revision
+                && !prior.is_stale
+                && session.file_size_bytes > prior.file_size_bytes;
+            if grew_in_place
+                && matches!(
+                    prior.pending_reason,
+                    Some(ImportPendingReason::FreshAppend | ImportPendingReason::RecoveryRetry)
+                )
+                && self.catalog_incremental_material_is_supported(&prior, session)?
+            {
+                return Ok(prior.pending_reason);
+            }
+            if self.catalog_observation_is_append(&prior, session)? {
+                return Ok(Some(ImportPendingReason::FreshAppend));
+            }
+            return Ok(Some(ImportPendingReason::FreshChanged));
+        }
+        match prior.indexed_status {
+            CatalogIndexedStatus::Failed => Ok(Some(ImportPendingReason::retry_after_failure(
+                prior.pending_reason,
+            ))),
+            CatalogIndexedStatus::Pending => Ok(Some(
+                prior.pending_reason.unwrap_or(ImportPendingReason::Legacy),
+            )),
+            CatalogIndexedStatus::Indexed | CatalogIndexedStatus::CompletedWithRejections => {
+                let indexed_matches = prior.indexed_file_size_bytes
+                    == Some(session.file_size_bytes)
+                    && prior.indexed_file_modified_at_ms == Some(session.file_modified_at_ms);
+                if prior.indexed_import_revision != Some(session.import_revision) {
+                    Ok(Some(ImportPendingReason::ParserRevision))
+                } else if !indexed_matches {
+                    Ok(Some(
+                        prior.pending_reason.unwrap_or(ImportPendingReason::Legacy),
+                    ))
+                } else if !self.catalog_session_material_exists(session)? {
+                    Ok(Some(ImportPendingReason::MissingMaterial))
+                } else {
+                    Ok(None)
+                }
+            }
+            CatalogIndexedStatus::Rejected => Ok(None),
+        }
+    }
+
+    fn catalog_observation_is_append(
+        &self,
+        prior: &CatalogPendingState,
+        session: &CatalogSession,
+    ) -> Result<bool> {
+        if prior.provider != session.provider
+            || prior.source_format != session.source_format
+            || prior.source_root != session.source_root
+            || prior.import_revision != session.import_revision
+            || prior.is_stale
+            || session.file_size_bytes <= prior.file_size_bytes
+            || !matches!(
+                prior.indexed_status,
+                CatalogIndexedStatus::Indexed | CatalogIndexedStatus::CompletedWithRejections
+            )
+            || prior.indexed_file_size_bytes != Some(prior.file_size_bytes)
+            || prior.indexed_file_modified_at_ms != Some(prior.file_modified_at_ms)
+            || prior.indexed_import_revision != Some(prior.import_revision)
+        {
+            return Ok(false);
+        }
+        Ok(self.provider_file_checkpoint_matches_prior_observation(
+            session.provider,
+            &session.source_format,
+            &session.source_root,
+            &session.source_path,
+            session.import_revision,
+            prior.file_size_bytes,
+        )? && self.catalog_session_material_exists(session)?)
+    }
+
+    fn catalog_incremental_material_is_supported(
+        &self,
+        prior: &CatalogPendingState,
+        session: &CatalogSession,
+    ) -> Result<bool> {
+        Ok(self.provider_file_checkpoint_matches_prior_observation(
+            session.provider,
+            &session.source_format,
+            &session.source_root,
+            &session.source_path,
+            session.import_revision,
+            prior.file_size_bytes,
+        )? && self.catalog_session_material_exists(session)?)
+    }
+
+    fn catalog_session_material_exists(&self, session: &CatalogSession) -> Result<bool> {
+        let Some(external_session_id) = session.external_session_id.as_deref() else {
+            return Ok(false);
+        };
+        let material_source_format =
+            expected_material_source_format(session.provider, &session.source_format);
+        let owner =
+            crate::provider_files::material_owner_predicate("source", "?1", "?3", "?5", "?4");
+        self.conn
+            .query_row(
+                &format!(
+                    r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM sessions AS material_session
+                    JOIN capture_sources AS source
+                      ON source.id = material_session.capture_source_id
+                    WHERE material_session.provider = ?1
+                      AND material_session.external_session_id = ?2
+                      AND ({owner})
+                      AND source.external_session_id = ?2
+                    LIMIT 1
+                )
+                "#
+                ),
+                params![
+                    session.provider.as_str(),
+                    external_session_id,
+                    material_source_format,
+                    &session.source_path,
+                    &session.source_root,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn upsert_catalog_sessions(
         &self,
         inventory_generation: u64,
@@ -215,16 +576,17 @@ impl Store {
                     source_path, provider, source_format, source_root,
                     external_session_id, parent_external_session_id, agent_type, role_hint,
                     external_agent_id, cwd, session_started_at_ms, file_size_bytes,
-                    file_modified_at_ms, import_revision, cataloged_at_ms, is_stale, metadata_json
+                    file_modified_at_ms, import_revision, cataloged_at_ms, is_stale,
+                    pending_reason, metadata_json
                 )
-                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16, ?17
                 WHERE EXISTS (
                     SELECT 1
                     FROM import_inventory_generations AS inventory
                     WHERE inventory.provider = ?2
                       AND inventory.source_root = ?4
                       AND inventory.inventory_family = 'catalog_sessions'
-                      AND inventory.current_generation = ?17
+                      AND inventory.current_generation = ?18
                 )
                 ON CONFLICT(source_path) DO UPDATE SET
                     provider = excluded.provider,
@@ -249,6 +611,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_at_ms
                         ELSE NULL
                     END,
@@ -259,6 +623,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_file_size_bytes
                         ELSE NULL
                     END,
@@ -269,6 +635,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_file_modified_at_ms
                         ELSE NULL
                     END,
@@ -279,6 +647,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_status
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -299,6 +669,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_error
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -319,6 +691,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_event_count
                         ELSE NULL
                     END,
@@ -329,6 +703,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_import_revision
                         ELSE NULL
                     END,
@@ -339,6 +715,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_at_ms
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -361,6 +739,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_file_size_bytes
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -383,6 +763,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_file_modified_at_ms
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -405,6 +787,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_file_sha256
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -427,6 +811,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_event_count
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -442,6 +828,7 @@ impl Store {
                         THEN catalog_sessions.last_imported_event_count
                         ELSE NULL
                     END,
+                    pending_reason = excluded.pending_reason,
                     metadata_json = excluded.metadata_json
                 WHERE EXISTS (
                     SELECT 1
@@ -449,7 +836,7 @@ impl Store {
                     WHERE inventory.provider = excluded.provider
                       AND inventory.source_root = excluded.source_root
                       AND inventory.inventory_family = 'catalog_sessions'
-                      AND inventory.current_generation = ?17
+                      AND inventory.current_generation = ?18
                 )
                   AND (
                        catalog_sessions.provider IS NOT excluded.provider
@@ -466,12 +853,14 @@ impl Store {
                     OR catalog_sessions.file_modified_at_ms != excluded.file_modified_at_ms
                     OR catalog_sessions.import_revision != excluded.import_revision
                     OR catalog_sessions.is_stale != 0
+                    OR catalog_sessions.pending_reason IS NOT excluded.pending_reason
                     OR catalog_sessions.metadata_json IS NOT excluded.metadata_json
                   )
                 "#,
             )?;
         let mut changed = 0;
         for session in sessions {
+            let pending_reason = self.classify_catalog_pending_reason(session)?;
             changed += stmt.execute(params![
                 session.source_path.as_str(),
                 session.provider.as_str(),
@@ -488,6 +877,7 @@ impl Store {
                 session.file_modified_at_ms,
                 i64::from(session.import_revision),
                 session.cataloged_at_ms,
+                pending_reason.map(ImportPendingReason::as_str),
                 serde_json::to_string(&session.metadata)?,
                 capped_i64(inventory_generation),
             ])?;
@@ -537,60 +927,5 @@ impl Store {
                 |row| row.get::<_, usize>(0),
             )
             .map_err(Into::into)
-    }
-
-    pub fn mark_catalog_source_missing_paths_stale(
-        &self,
-        provider: CaptureProvider,
-        source_root: &str,
-        current_paths: &[String],
-        cataloged_at_ms: i64,
-        inventory_generation: u64,
-    ) -> Result<usize> {
-        self.conn.execute(
-                "CREATE TEMP TABLE IF NOT EXISTS temp_catalog_current_paths(source_path TEXT PRIMARY KEY)",
-                [],
-            )?;
-        self.conn
-            .execute("DELETE FROM temp_catalog_current_paths", [])?;
-        {
-            let mut stmt = self.conn.prepare(
-                "INSERT OR IGNORE INTO temp_catalog_current_paths(source_path) VALUES (?1)",
-            )?;
-            for path in current_paths {
-                stmt.execute(params![path.as_str()])?;
-            }
-        }
-        let changed = self.conn.execute(
-            r#"
-                UPDATE catalog_sessions
-                SET is_stale = 1, cataloged_at_ms = ?3
-                WHERE provider = ?1
-                  AND source_root = ?2
-                  AND is_stale = 0
-                  AND EXISTS (
-                      SELECT 1
-                      FROM import_inventory_generations AS inventory
-                      WHERE inventory.provider = ?1
-                        AND inventory.source_root = ?2
-                        AND inventory.inventory_family = 'catalog_sessions'
-                        AND inventory.current_generation = ?4
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM temp_catalog_current_paths current
-                      WHERE current.source_path = catalog_sessions.source_path
-                  )
-                "#,
-            params![
-                provider.as_str(),
-                source_root,
-                cataloged_at_ms,
-                capped_i64(inventory_generation)
-            ],
-        )?;
-        self.conn
-            .execute("DELETE FROM temp_catalog_current_paths", [])?;
-        Ok(changed)
     }
 }

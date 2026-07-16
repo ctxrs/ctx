@@ -716,7 +716,7 @@ fn doctor_reports_missing_store_without_creating_it() {
 }
 
 #[test]
-fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
+fn codex_cli_resume_is_noop_for_healthy_sources_and_filters_subagents() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
 
@@ -805,9 +805,8 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["imported_edges"], 0);
-    assert!(second["totals"]["skipped"].as_u64().unwrap() > 0);
-    assert_eq!(second["sources"][0]["imported_sessions"], 0);
-    assert_eq!(second["sources"][0]["imported_events"], 0);
+    assert_eq!(second["totals"]["skipped"], 0);
+    assert!(second["sources"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -994,7 +993,8 @@ fn pi_cli_import_search_flow() {
     assert_eq!(second["resume_mode"], "idempotent_rescan");
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped"].as_u64().unwrap(), 7);
+    assert_eq!(second["totals"]["skipped"], 0);
+    assert!(second["sources"].as_array().unwrap().is_empty());
 
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(

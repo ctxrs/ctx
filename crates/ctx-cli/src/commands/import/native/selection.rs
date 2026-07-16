@@ -14,37 +14,8 @@ pub(crate) fn validate_source_import_supported(source: &SourceInfo) -> Result<()
     }
 }
 
-pub(crate) fn import_one_source(
-    store: &mut Store,
-    source: &SourceInfo,
-    progress: Option<CodexSessionImportProgressCallback>,
-    full_rescan: bool,
-    preinventory: &SourcePreinventory,
-) -> Result<ProviderImportSummary> {
-    let event_search_needs_backfill = store.event_search_projection_needs_backfill()?;
-    let refresh_search_after_import =
-        event_search_needs_backfill || !source_uses_incremental_event_search(source);
-    import_one_source_inner(
-        store,
-        source,
-        progress,
-        refresh_search_after_import,
-        full_rescan,
-        preinventory,
-    )
-}
-
-pub(crate) fn import_one_source_without_search_refresh(
-    store: &mut Store,
-    source: &SourceInfo,
-    progress: Option<CodexSessionImportProgressCallback>,
-    full_rescan: bool,
-    preinventory: &SourcePreinventory,
-) -> Result<ProviderImportSummary> {
-    import_one_source_inner(store, source, progress, false, full_rescan, preinventory)
-}
-
-pub(crate) fn import_one_source_for_search_refresh(
+#[cfg(test)]
+fn import_one_source_for_search_refresh(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
@@ -59,6 +30,90 @@ pub(crate) fn import_one_source_for_search_refresh(
         false,
         preinventory,
     )
+}
+
+pub(crate) fn import_selected_source(
+    store: &mut Store,
+    source: &SourceInfo,
+    progress: Option<CodexSessionImportProgressCallback>,
+    preinventory: &SourcePreinventory,
+    selection: &SelectedImportWork,
+) -> Result<SelectedSourceImportResult> {
+    let (outcome, remaining_error) = match import_one_source_inner_batched(
+        store,
+        source,
+        progress,
+        false,
+        preinventory,
+        Some(selection),
+    ) {
+        Ok(outcome) => (outcome, None),
+        Err(error) => match error.downcast::<ProviderImportBatchError>() {
+            Ok(error) => {
+                let (outcome, source) = error.into_parts();
+                (outcome, Some(source))
+            }
+            Err(error) => return Err(error),
+        },
+    };
+    let (selected_units, selected_bytes) = match selection {
+        SelectedImportWork::Catalog(work) => (
+            work.len(),
+            work.iter().fold(0_u64, |total, work| {
+                total.saturating_add(work.estimated_bytes)
+            }),
+        ),
+        SelectedImportWork::SourceFiles(work) => (
+            work.len(),
+            work.iter().fold(0_u64, |total, work| {
+                total.saturating_add(work.estimated_bytes)
+            }),
+        ),
+    };
+    let mut summary = outcome.summary;
+    if selected_work_is_explicit_rescan(selection) {
+        summary.skipped = summary.skipped.saturating_add(summary.imported);
+        summary.imported = 0;
+        summary.skipped_sessions = summary
+            .skipped_sessions
+            .saturating_add(summary.imported_sessions);
+        summary.imported_sessions = 0;
+        summary.skipped_events = summary
+            .skipped_events
+            .saturating_add(summary.imported_events);
+        summary.imported_events = 0;
+        summary.skipped_edges = summary.skipped_edges.saturating_add(summary.imported_edges);
+        summary.imported_edges = 0;
+    }
+    Ok(SelectedSourceImportResult {
+        outcome: SelectedSourceImportOutcome {
+            summary,
+            completed_units: outcome.completed_units,
+            completed_bytes: if outcome.completed_units == selected_units
+                && outcome.deferred_units == 0
+            {
+                selected_bytes
+            } else {
+                outcome.completed_bytes
+            },
+            deferred_units: outcome.deferred_units,
+            durable_progress: outcome.durable_progress,
+            post_import_inventory_generation: outcome.post_import_inventory_generation,
+            post_import_preinventory: outcome.post_import_preinventory,
+        },
+        remaining_error,
+    })
+}
+
+fn selected_work_is_explicit_rescan(selection: &SelectedImportWork) -> bool {
+    match selection {
+        SelectedImportWork::Catalog(work) => work
+            .iter()
+            .all(|unit| unit.reason == ImportPendingReason::ExplicitRescan),
+        SelectedImportWork::SourceFiles(work) => work
+            .iter()
+            .all(|unit| unit.reason == ImportPendingReason::ExplicitRescan),
+    }
 }
 
 pub(crate) fn import_one_source_inner(
@@ -100,6 +155,8 @@ fn import_one_source_inner_with_pre_lock_hook(
     let import_result = (|| {
         let mut revalidated = if full_rescan {
             RevalidatedSourcePreinventory::Import(preinventory.clone())
+        } else if preinventory_is_complete(store, source, preinventory)? {
+            RevalidatedSourcePreinventory::Complete
         } else {
             revalidate_source_preinventory(store, source, preinventory)?
         };
@@ -115,11 +172,12 @@ fn import_one_source_inner_with_pre_lock_hook(
                         progress.clone(),
                         full_rescan,
                         current,
+                        None,
                     ) {
                         Err(error) if is_inventory_superseded(&error) => {
                             revalidated = revalidate_source_preinventory(store, source, current)?;
                         }
-                        result => return result,
+                        result => return result.map(|outcome| outcome.summary),
                     }
                 }
             }
@@ -133,9 +191,14 @@ fn import_one_source_inner_with_pre_lock_hook(
     })();
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     let summary = match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete)) => {
+            Ok(summary)
+        }
+        (Ok(summary), Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending)) => {
+            Ok(summary)
+        }
         (_, Err(error)) => Err(error.into()),
-        (Err(error), Ok(())) => Err(error),
+        (Err(error), Ok(_)) => Err(error),
     }?;
     if refresh_search_after_import {
         store.refresh_search_index()?;

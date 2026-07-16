@@ -480,6 +480,12 @@ fn setup_backgrounds_discovered_codex_sessions_when_daemon_is_enabled_and_wait_i
     assert_eq!(ready["inventory"]["codex_catalog_sessions"], 1);
     assert_eq!(ready["catalog"]["cataloged_sessions"], 1);
     assert_eq!(ready["import"]["ran"], true);
+    assert_eq!(ready["import"]["totals"]["durable_progress"], true);
+    assert_eq!(ready["import"]["totals"]["fresh_units_pending_exact"], true);
+    assert_eq!(
+        ready["import"]["totals"]["recovery_units_pending_exact"],
+        true
+    );
     assert_eq!(ready["import"]["totals"]["failed_sources"], 0);
     assert_eq!(ready["import"]["totals"]["imported_sessions"], 1);
     assert!(
@@ -511,6 +517,60 @@ fn setup_backgrounds_discovered_codex_sessions_when_daemon_is_enabled_and_wait_i
     assert!(human_setup.contains("ctx local agent history search is ready"));
     assert!(human_setup.contains("from 1 source."));
     assert!(human_setup.contains("  ctx search \"test failure\""));
+}
+
+#[test]
+fn setup_json_reports_partial_when_foreground_import_leaves_incomplete_history() {
+    let temp = tempdir();
+    install_default_pi_fixture(&temp, "pi baseline setup content");
+
+    let baseline =
+        json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    assert_eq!(baseline["mode"], "ready", "{baseline:#}");
+
+    let source_root = temp.path().join(".pi/agent/sessions/--workspace--");
+    let incomplete_path = source_root.join("2026-06-24T12-00-00-000Z_pi-default-refresh.jsonl");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(incomplete_path)
+        .unwrap()
+        .write_all(br#"{"type":"message","id":"partial""#)
+        .unwrap();
+    write_pi_session_jsonl(
+        &source_root.join("2026-06-25T12-00-00-000Z_pi-complete-later.jsonl"),
+        "pi-complete-later",
+        "pi complete later setup content",
+    );
+
+    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    assert_eq!(setup["mode"], "partial", "{setup:#}");
+    assert_eq!(setup["import"]["ran"], true, "{setup:#}");
+    assert_eq!(setup["import"]["totals"]["durable_progress"], true);
+    assert_eq!(setup["import"]["totals"]["fresh_units_processed"], 1);
+    assert_eq!(setup["import"]["totals"]["fresh_units_pending"], 1);
+    assert_eq!(setup["import"]["totals"]["fresh_units_pending_exact"], true);
+    assert_eq!(setup["import"]["totals"]["recovery_units_pending"], 0);
+    assert_eq!(
+        setup["import"]["totals"]["recovery_units_pending_exact"],
+        true
+    );
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "pi complete later setup content",
+        "--provider",
+        "pi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "pi",
+        "pi complete later setup content",
+        1,
+        "message",
+    );
 }
 
 #[test]

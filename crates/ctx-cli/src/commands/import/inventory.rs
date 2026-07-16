@@ -1,5 +1,6 @@
 use std::{
     fs,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -7,14 +8,17 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    catalog_codex_session_tree, CatalogSummary, CodexSessionCatalogOptions, ProviderImportSupport,
-    ProviderImportUnitSpec, ProviderSourceStatus,
+    catalog_codex_session_tree, provider_source_for_persisted_format, CaptureError, CatalogSummary,
+    CodexSessionCatalogOptions, ProviderImportSupport, ProviderSourceStatus,
 };
-use ctx_history_core::CaptureProvider;
-use ctx_history_store::{SourceImportFile, Store};
+use ctx_history_core::{utc_now, CaptureProvider};
+use ctx_history_store::{
+    CatalogIndexedStatus, CatalogSourceIndexUpdate, ProviderFileInventoryFamily,
+    ProviderFilePublicationInventoryOwner, SourceImportFile, SourceImportFileIndexUpdate, Store,
+};
 
 use crate::commands::import::catalog::codex_catalog_root_identity;
-use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
+use crate::commands::import::catalog::{source_stats, system_time_ms};
 use crate::commands::import::manifest::{
     collect_source_import_files, persist_new_source_import_observation, persisted_import_identity,
     source_uses_import_file_manifest,
@@ -36,25 +40,39 @@ pub(crate) struct ImportInventory {
 
 pub(crate) fn inventory_import_sources(
     store: &Store,
-    sources: Vec<SourceInfo>,
+    mut sources: Vec<SourceInfo>,
     full_rescan: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
-    for (index, source) in sources.into_iter().enumerate() {
+    if let Some(owner) = store.effective_provider_file_publication_inventory_owner()? {
+        sources.retain(|source| !source_matches_publication_owner(source, &owner));
+        let plan = publication_owner_plan(owner)?;
+        inventory.totals.sources += 1;
+        inventory.totals.source_files += 1;
+        inventory.totals.source_bytes = plan.stats.bytes;
+        match &plan.preinventory {
+            SourcePreinventory::CodexSessionCatalog { .. } => {
+                inventory.totals.codex_catalog_sources += 1;
+            }
+            SourcePreinventory::SourceImportFiles { .. } => {
+                inventory.totals.source_import_files += 1;
+            }
+            SourcePreinventory::None | SourcePreinventory::SourceRoot { .. } => {}
+        }
+        inventory.sources.push(plan);
+    }
+    for source in sources {
         inventory.totals.sources += 1;
         let failure_source = source.clone();
         let (plan, cataloged) = match inventory_import_source(store, source, full_rescan) {
             Ok(inventoried) => inventoried,
             Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
                 inventory.failures.push(ImportSourceFailure {
-                    index,
                     source: failure_source,
                     stats: SourceStats::default(),
                     error: error_summary(&error),
-                    failure_scope: ImportFailureScope::Source,
                     failure_type: import_failure_type(&error),
                     rejected_summary: None,
-                    system_error: None,
                 });
                 continue;
             }
@@ -85,6 +103,49 @@ pub(crate) fn inventory_import_sources(
     Ok(inventory)
 }
 
+fn source_matches_publication_owner(
+    source: &SourceInfo,
+    owner: &ProviderFilePublicationInventoryOwner,
+) -> bool {
+    source.provider == owner.provider
+        && persisted_import_identity(&source.path, "source root")
+            .is_ok_and(|source_root| source_root == owner.source_root)
+}
+
+fn publication_owner_plan(
+    owner: ProviderFilePublicationInventoryOwner,
+) -> Result<PlannedImportSource> {
+    let source = provider_source_for_persisted_format(
+        owner.provider,
+        PathBuf::from(&owner.source_root),
+        &owner.source_format,
+    )
+    .ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "persisted publication owner has an unsupported source format",
+        ))
+    })?;
+    let preinventory = match owner.inventory_family {
+        ProviderFileInventoryFamily::Catalog => SourcePreinventory::CodexSessionCatalog {
+            summary: CatalogSummary::default(),
+            inventory_generation: owner.inventory_generation,
+        },
+        ProviderFileInventoryFamily::SourceImport => SourcePreinventory::SourceImportFiles {
+            files: Vec::new(),
+            inventory_generation: owner.inventory_generation,
+        },
+    };
+    Ok(PlannedImportSource {
+        source,
+        stats: SourceStats {
+            files: 1,
+            bytes: owner.file_size_bytes,
+            change_token: None,
+        },
+        preinventory,
+    })
+}
+
 pub(crate) fn inventory_available_sources(
     store: &Store,
     sources: &[SourceInfo],
@@ -104,12 +165,12 @@ pub(crate) fn inventory_available_sources(
 fn inventory_import_source(
     store: &Store,
     source: SourceInfo,
-    full_rescan: bool,
+    resume: bool,
 ) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
     if source.provider == CaptureProvider::Codex {
         codex_catalog_root_identity(&source.path)?;
     }
-    if !full_rescan && is_incremental_codex_session_tree(&source) {
+    if is_incremental_codex_session_tree(&source) {
         let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
         let mut cataloged = None;
         for _ in 0..3 {
@@ -152,6 +213,14 @@ fn inventory_import_source(
             bytes: summary.source_bytes,
             change_token: None,
         };
+        if resume {
+            schedule_pending_catalog_resume(
+                store,
+                CaptureProvider::Codex,
+                &source_root,
+                inventory_generation,
+            )?;
+        }
         let plan = PlannedImportSource {
             source,
             stats,
@@ -178,7 +247,22 @@ fn inventory_import_source(
     if source_uses_import_file_manifest(&source) {
         let files = collect_source_import_files(&source)
             .with_context(|| format!("inventory import files from {}", source.path.display()))?;
+        if files.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no importable {} history files found under {}",
+                source.provider.as_str(),
+                source.path.display()
+            ));
+        }
         let persisted = persist_new_source_import_observation(store, &source, &files)?;
+        if resume {
+            schedule_pending_source_resume(
+                store,
+                source.provider,
+                persisted_import_identity(&source.path, "source root")?,
+                persisted.inventory_generation,
+            )?;
+        }
         let stats = source_stats_from_import_files(&files);
         return Ok((
             PlannedImportSource {
@@ -193,39 +277,91 @@ fn inventory_import_source(
         ));
     }
 
-    let inventory_whole_source_rescan = full_rescan
-        && source.provider != CaptureProvider::Codex
-        && source.import_unit == ProviderImportUnitSpec::WholeSource;
-    if !full_rescan || inventory_whole_source_rescan {
-        let (stats, root_file) = observe_source_root(&source)?;
-        let persisted = persist_new_source_import_observation(
+    let (stats, root_file) = observe_source_root(&source)?;
+    let persisted =
+        persist_new_source_import_observation(store, &source, std::slice::from_ref(&root_file))?;
+    if resume {
+        schedule_pending_source_resume(
             store,
-            &source,
-            std::slice::from_ref(&root_file),
+            source.provider,
+            &root_file.source_root,
+            persisted.inventory_generation,
         )?;
-        return Ok((
-            PlannedImportSource {
-                source,
-                stats,
-                preinventory: SourcePreinventory::SourceRoot {
-                    file: root_file,
-                    inventory_generation: persisted.inventory_generation,
-                },
-            },
-            None,
-        ));
     }
-
-    let stats = source_import_stats(&source)
-        .with_context(|| format!("inventory import source {}", source.path.display()))?;
     Ok((
         PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::None,
+            preinventory: SourcePreinventory::SourceRoot {
+                file: root_file,
+                inventory_generation: persisted.inventory_generation,
+            },
         },
         None,
     ))
+}
+
+fn schedule_pending_catalog_resume(
+    store: &Store,
+    provider: CaptureProvider,
+    source_root: &str,
+    inventory_generation: u64,
+) -> Result<()> {
+    for session in store.list_pending_catalog_sessions(provider, source_root)? {
+        let state = store.catalog_source_index_state(
+            session.provider,
+            &session.source_root,
+            &session.source_path,
+        )?;
+        store.record_observed_catalog_source_import_result(
+            session.provider,
+            CatalogSourceIndexUpdate {
+                source_root: &session.source_root,
+                source_path: &session.source_path,
+                file_size_bytes: session.file_size_bytes,
+                file_modified_at_ms: session.file_modified_at_ms,
+                import_revision: session.import_revision,
+                inventory_generation,
+                file_sha256: state
+                    .as_ref()
+                    .and_then(|state| state.last_imported_file_sha256.as_deref()),
+                event_count: state
+                    .as_ref()
+                    .and_then(|state| state.last_imported_event_count),
+                indexed_at_ms: utc_now().timestamp_millis(),
+            },
+            &session.metadata,
+            CatalogIndexedStatus::Pending,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+fn schedule_pending_source_resume(
+    store: &Store,
+    provider: CaptureProvider,
+    source_root: &str,
+    inventory_generation: u64,
+) -> Result<()> {
+    for file in store.list_pending_source_import_files(provider, source_root)? {
+        store.record_source_import_file_result(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: &file.source_root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation,
+                metadata: &file.metadata,
+                indexed_at_ms: utc_now().timestamp_millis(),
+            },
+            CatalogIndexedStatus::Pending,
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 fn is_incremental_codex_session_tree(source: &SourceInfo) -> bool {

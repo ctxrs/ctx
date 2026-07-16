@@ -108,6 +108,440 @@ fn catalog_index_checkpoint_event_count_can_be_unknown() {
 }
 
 #[test]
+fn catalog_observation_token_refreshes_legacy_row_once() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let source_root = "/home/user/.codex/sessions";
+    let source_path = "/home/user/.codex/sessions/legacy-token.jsonl";
+    let legacy = catalog_session(source_path, source_path, observed_at_ms);
+    upsert_catalog_inventory(&store, std::slice::from_ref(&legacy));
+    store
+        .upsert_session(&imported_session(source_path))
+        .unwrap();
+    store
+        .mark_catalog_source_indexed(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root,
+                source_path,
+                file_size_bytes: legacy.file_size_bytes,
+                file_modified_at_ms: legacy.file_modified_at_ms,
+                import_revision: legacy.import_revision,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    source_root,
+                ),
+                file_sha256: None,
+                event_count: Some(1),
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+
+    let mut observed = legacy.clone();
+    observed.cataloged_at_ms += 2;
+    observed.metadata["file_observation_token_v1"] = serde_json::json!("token-a");
+    upsert_catalog_inventory(&store, std::slice::from_ref(&observed));
+    let pending = store
+        .list_catalog_import_work(
+            CaptureProvider::Codex,
+            source_root,
+            ImportWorkClass::Fresh,
+            10,
+        )
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].reason, ImportPendingReason::FreshChanged);
+
+    let generation = current_catalog_generation(&store, CaptureProvider::Codex, source_root);
+    let update = CatalogSourceIndexUpdate {
+        source_root,
+        source_path,
+        file_size_bytes: observed.file_size_bytes,
+        file_modified_at_ms: observed.file_modified_at_ms,
+        import_revision: observed.import_revision,
+        inventory_generation: generation,
+        file_sha256: None,
+        event_count: Some(1),
+        indexed_at_ms: observed_at_ms + 3,
+    };
+    assert_eq!(
+        store
+            .mark_catalog_source_indexed(CaptureProvider::Codex, update)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .list_catalog_import_work(
+                CaptureProvider::Codex,
+                source_root,
+                ImportWorkClass::Fresh,
+                10,
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .record_observed_catalog_source_import_result(
+                CaptureProvider::Codex,
+                update,
+                &observed.metadata,
+                CatalogIndexedStatus::Indexed,
+                None,
+            )
+            .unwrap(),
+        1
+    );
+    observed.cataloged_at_ms += 1;
+    upsert_catalog_inventory(&store, &[observed]);
+    assert!(store
+        .list_catalog_import_work(
+            CaptureProvider::Codex,
+            source_root,
+            ImportWorkClass::Fresh,
+            10
+        )
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn source_import_inventory_pacing_precharges_exact_bounded_write_chunks() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/home/user/.claude/projects";
+    let files = (0..65)
+        .map(|index| {
+            let source_path = format!("{source_root}/{index:03}.jsonl");
+            let mut file = source_import_file(
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                source_root,
+                &source_path,
+                1_000 + index,
+            );
+            file.metadata = serde_json::json!({"inventory_index": index});
+            file
+        })
+        .collect::<Vec<_>>();
+    let current_paths = files
+        .iter()
+        .map(|file| file.source_path.clone())
+        .collect::<Vec<_>>();
+    let generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, source_root)
+        .unwrap();
+    let row_bytes = files
+        .iter()
+        .map(|file| {
+            let metadata_json = serde_json::to_string(&file.metadata).unwrap();
+            [
+                file.provider.as_str(),
+                file.source_format.as_str(),
+                file.source_root.as_str(),
+                file.source_path.as_str(),
+                metadata_json.as_str(),
+            ]
+            .into_iter()
+            .fold(
+                super::SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES,
+                |bytes, value| bytes.saturating_add(value.len() as u64),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_upsert_charges = vec![
+        row_bytes[..64].iter().sum::<u64>(),
+        row_bytes[64..].iter().sum::<u64>(),
+    ];
+    let path_bytes = current_paths
+        .iter()
+        .map(|path| {
+            super::SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES.saturating_add(path.len() as u64)
+        })
+        .collect::<Vec<_>>();
+    let expected_path_charges = vec![
+        path_bytes[..64].iter().sum::<u64>(),
+        path_bytes[64..].iter().sum::<u64>(),
+    ];
+
+    let mut upsert_charges = Vec::new();
+    let mut rows_before_charge = Vec::new();
+    assert_eq!(
+        store
+            .upsert_source_import_files_with_pacing(generation, &files, |bytes| {
+                upsert_charges.push(bytes);
+                rows_before_charge.push(
+                    store
+                        .conn
+                        .query_row("SELECT COUNT(*) FROM source_import_files", [], |row| {
+                            row.get::<_, usize>(0)
+                        })
+                        .unwrap(),
+                );
+            })
+            .unwrap(),
+        files.len()
+    );
+    assert_eq!(upsert_charges, expected_upsert_charges);
+    assert_eq!(rows_before_charge, vec![0, 64]);
+
+    let mut path_charges = Vec::new();
+    let mut paths_before_charge = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &current_paths,
+                2_000,
+                generation,
+                |bytes| {
+                    path_charges.push(bytes);
+                    paths_before_charge.push(
+                        store
+                            .conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM temp_source_import_current_paths",
+                                [],
+                                |row| row.get::<_, usize>(0),
+                            )
+                            .unwrap(),
+                    );
+                },
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(path_charges, expected_path_charges);
+    assert_eq!(paths_before_charge, vec![0, 64]);
+
+    let mut repeated_upsert_charges = Vec::new();
+    assert_eq!(
+        store
+            .upsert_source_import_files_with_pacing(generation, &files, |bytes| {
+                repeated_upsert_charges.push(bytes);
+            })
+            .unwrap(),
+        0
+    );
+    assert_eq!(repeated_upsert_charges, expected_upsert_charges);
+
+    let mut repeated_path_charges = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &current_paths,
+                3_000,
+                generation,
+                |bytes| repeated_path_charges.push(bytes),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(repeated_path_charges, expected_path_charges);
+
+    let mut stale_observations = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &current_paths[..64],
+                4_000,
+                generation,
+                |bytes| {
+                    let temp_paths = store
+                        .conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM temp_source_import_current_paths",
+                            [],
+                            |row| row.get::<_, usize>(0),
+                        )
+                        .unwrap();
+                    let omitted_is_stale = store
+                        .conn
+                        .query_row(
+                            "SELECT is_stale FROM source_import_files WHERE source_path = ?1",
+                            params![&current_paths[64]],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap();
+                    stale_observations.push((bytes, temp_paths, omitted_is_stale));
+                },
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        stale_observations,
+        vec![
+            (path_bytes[..64].iter().sum::<u64>(), 0, false),
+            (row_bytes[64], 64, false),
+        ]
+    );
+
+    store
+        .conn
+        .execute("UPDATE source_import_files SET is_stale = 0", [])
+        .unwrap();
+    let mut stale_batch_charges = Vec::new();
+    let mut stale_rows_before_charge = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &[],
+                5_000,
+                generation,
+                |bytes| {
+                    stale_batch_charges.push(bytes);
+                    stale_rows_before_charge.push(
+                        store
+                            .conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM source_import_files WHERE is_stale != 0",
+                                [],
+                                |row| row.get::<_, usize>(0),
+                            )
+                            .unwrap(),
+                    );
+                },
+            )
+            .unwrap(),
+        files.len()
+    );
+    assert_eq!(stale_batch_charges, expected_upsert_charges);
+    assert_eq!(stale_rows_before_charge, vec![0, 64]);
+    assert!(store
+        .conn
+        .query_row(
+            "SELECT is_stale FROM source_import_files WHERE source_path = ?1",
+            params![&current_paths[64]],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+}
+
+#[test]
+fn direct_batched_stale_marking_rolls_back_all_rows_on_a_late_error() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/home/user/.claude/projects";
+    let files = (0..65)
+        .map(|index| {
+            let path = format!("{source_root}/{index:03}.jsonl");
+            source_import_file(
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                source_root,
+                &path,
+                1_000 + index,
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(source_generation, &files)
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            CREATE TRIGGER fail_late_source_stale
+            BEFORE UPDATE OF is_stale ON source_import_files
+            WHEN NEW.is_stale = 1
+             AND OLD.source_path = '/home/user/.claude/projects/064.jsonl'
+            BEGIN
+                SELECT RAISE(ABORT, 'late source stale failure');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    assert!(store
+        .mark_source_import_missing_paths_stale(
+            CaptureProvider::Claude,
+            source_root,
+            &[],
+            2_000,
+            source_generation,
+        )
+        .is_err());
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_import_files WHERE is_stale != 0",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    let catalog_root = "/home/user/.codex/sessions";
+    let sessions = (0..65)
+        .map(|index| {
+            let path = format!("{catalog_root}/{index:03}.jsonl");
+            catalog_session(&path, &format!("session-{index:03}"), 3_000 + index)
+        })
+        .collect::<Vec<_>>();
+    let catalog_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, catalog_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(catalog_generation, &sessions)
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            CREATE TRIGGER fail_late_catalog_stale
+            BEFORE UPDATE OF is_stale ON catalog_sessions
+            WHEN NEW.is_stale = 1
+             AND OLD.source_path = '/home/user/.codex/sessions/064.jsonl'
+            BEGIN
+                SELECT RAISE(ABORT, 'late catalog stale failure');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    assert!(store
+        .mark_catalog_source_missing_paths_stale(
+            CaptureProvider::Codex,
+            catalog_root,
+            &[],
+            4_000,
+            catalog_generation,
+        )
+        .is_err());
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale != 0",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -144,6 +578,11 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
             },
         )
         .unwrap();
+    let mut material_source = imported_source(new_id(), &file.source_root, "claude-session");
+    material_source.descriptor.provider = CaptureProvider::Claude;
+    material_source.descriptor.raw_source_path = Some(file.source_path.clone());
+    material_source.descriptor.source_format = Some(file.source_format.clone());
+    store.upsert_capture_source(&material_source).unwrap();
     let after_indexed: i64 = store
         .conn
         .query_row("SELECT total_changes()", [], |row| row.get(0))
@@ -160,6 +599,272 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
     assert_eq!(after_noop, after_indexed);
     assert!(store
         .list_pending_source_import_files(CaptureProvider::Claude, "/home/user/.claude/projects")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn manifested_inventory_formats_map_to_their_canonical_material_formats() {
+    for (index, mapping) in PROVIDER_MATERIAL_SOURCE_FORMATS.iter().enumerate() {
+        let provider = mapping.provider;
+        let inventory = mapping.inventory_source_format;
+        let material = mapping.material_source_format;
+        assert_eq!(
+            expected_material_source_format(provider, inventory),
+            material
+        );
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let root = format!("/fixture/material-format/{index}");
+        let path = format!("{root}/session.jsonl");
+        let observed_at_ms = timestamp_ms(fixed_time());
+        let mut file = source_import_file(provider, inventory, &root, &path, observed_at_ms);
+        file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        store
+            .mark_source_import_file_indexed(
+                provider,
+                SourceImportFileIndexUpdate {
+                    source_root: &root,
+                    source_path: &path,
+                    file_size_bytes: file.file_size_bytes,
+                    file_modified_at_ms: file.file_modified_at_ms,
+                    import_revision: file.import_revision,
+                    inventory_generation: current_source_generation(&store, provider, &root),
+                    metadata: &file.metadata,
+                    indexed_at_ms: observed_at_ms + 1,
+                },
+            )
+            .unwrap();
+        let mut source = imported_source(new_id(), &path, "material-format-session");
+        source.descriptor.provider = provider;
+        source.descriptor.raw_source_path = Some(path.clone());
+        source.descriptor.source_format = Some(material.into());
+        store.upsert_capture_source(&source).unwrap();
+        assert!(store.source_import_material_exists(&file).unwrap());
+
+        file.observed_at_ms += 1;
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        assert!(
+            store
+                .list_pending_source_import_files(provider, &root)
+                .unwrap()
+                .is_empty(),
+            "SQL material mapping disagreed for {}:{inventory}",
+            provider.as_str()
+        );
+    }
+    assert_eq!(
+        expected_material_source_format(CaptureProvider::Trae, "trae_state_vscdb"),
+        "trae_state_vscdb"
+    );
+}
+
+#[test]
+fn file_owned_source_import_material_does_not_match_a_sibling_capture_source() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.claude/projects";
+    let mut file = source_import_file(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        root,
+        "/home/user/.claude/projects/owned.jsonl",
+        observed_at_ms,
+    );
+    file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    let mut sibling = imported_source(new_id(), root, "sibling-session");
+    sibling.descriptor.provider = file.provider;
+    sibling.descriptor.raw_source_path = Some(format!("{root}/sibling.jsonl"));
+    sibling.descriptor.source_format = Some(file.source_format.clone());
+    store.upsert_capture_source(&sibling).unwrap();
+
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    let recovery = store
+        .list_source_import_file_work(file.provider, root, ImportWorkClass::Recovery, 10)
+        .unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(recovery[0].reason, ImportPendingReason::MissingMaterial);
+}
+
+#[test]
+fn file_owned_source_import_material_accepts_an_exact_self_rooted_capture_source() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.mistral-vibe/logs";
+    let mut file = source_import_file(
+        CaptureProvider::MistralVibe,
+        "mistral_vibe_session_jsonl_tree",
+        root,
+        "/home/user/.mistral-vibe/logs/session/messages.jsonl",
+        observed_at_ms,
+    );
+    file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    let mut source = imported_source(new_id(), &file.source_path, "mistral-session");
+    source.descriptor.provider = file.provider;
+    source.descriptor.raw_source_path = Some(file.source_path.clone());
+    source.descriptor.source_format = Some("mistral_vibe_session_jsonl".into());
+    store.upsert_capture_source(&source).unwrap();
+    let material: (String, String, Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT provider, source_format, source_root, raw_source_path FROM capture_sources WHERE id = ?1",
+            params![source.id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        material,
+        (
+            file.provider.as_str().to_owned(),
+            "mistral_vibe_session_jsonl".to_owned(),
+            Some(file.source_path.clone()),
+            Some(file.source_path.clone()),
+        )
+    );
+    assert!(store.source_import_material_exists(&file).unwrap());
+
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    assert!(store
+        .list_pending_source_import_files(file.provider, root)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn source_import_material_requires_expected_format_and_exact_root() {
+    for scenario in ["wrong_format", "wrong_root"] {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join(format!("{scenario}.sqlite"))).unwrap();
+        let observed_at_ms = timestamp_ms(fixed_time());
+        let root = "/fixture/pi";
+        let mut file = source_import_file(
+            CaptureProvider::Pi,
+            "pi_session_jsonl",
+            root,
+            "/fixture/pi/session.jsonl",
+            observed_at_ms,
+        );
+        file.metadata = serde_json::json!({"inventory_unit": "logical_import_unit"});
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        store
+            .mark_source_import_file_indexed(
+                file.provider,
+                SourceImportFileIndexUpdate {
+                    source_root: root,
+                    source_path: &file.source_path,
+                    file_size_bytes: file.file_size_bytes,
+                    file_modified_at_ms: file.file_modified_at_ms,
+                    import_revision: file.import_revision,
+                    inventory_generation: current_source_generation(&store, file.provider, root),
+                    metadata: &file.metadata,
+                    indexed_at_ms: observed_at_ms + 1,
+                },
+            )
+            .unwrap();
+        let mut source = imported_source(new_id(), root, "pi-session");
+        source.descriptor.provider = file.provider;
+        source.descriptor.raw_source_path = Some(file.source_path.clone());
+        source.descriptor.source_format = Some(file.source_format.clone());
+        if scenario == "wrong_format" {
+            source.descriptor.source_format = Some("pi_session_json".into());
+        } else {
+            source.descriptor.source_root = Some("/fixture/pi-other".into());
+        }
+        store.upsert_capture_source(&source).unwrap();
+
+        file.observed_at_ms += 1;
+        upsert_source_inventory(&store, std::slice::from_ref(&file));
+        let recovery = store
+            .list_source_import_file_work(file.provider, root, ImportWorkClass::Recovery, 10)
+            .unwrap();
+        assert_eq!(
+            recovery[0].reason,
+            ImportPendingReason::MissingMaterial,
+            "{scenario}"
+        );
+        let counts = store.source_import_file_counts().unwrap();
+        assert_eq!(counts.indexed, 0, "{scenario}");
+        assert_eq!(counts.pending, 1, "{scenario}");
+    }
+}
+
+#[test]
+fn source_root_import_material_accepts_a_capture_source_for_the_same_root() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.hermes";
+    let mut file = source_import_file(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        root,
+        "/home/user/.hermes/state.db",
+        observed_at_ms,
+    );
+    file.metadata = serde_json::json!({"inventory_unit": "source_root"});
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    let mut root_source = imported_source(new_id(), root, "root-session");
+    root_source.descriptor.provider = file.provider;
+    root_source.descriptor.raw_source_path = Some(format!("{root}/sibling.db"));
+    root_source.descriptor.source_format = Some(file.source_format.clone());
+    store.upsert_capture_source(&root_source).unwrap();
+
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    assert!(store
+        .list_pending_source_import_files(file.provider, root)
         .unwrap()
         .is_empty());
 }
@@ -205,6 +910,7 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
             },
         )
         .unwrap();
+    upsert_source_material(&store, &file);
     assert!(store
         .list_pending_source_import_files(CaptureProvider::Hermes, root)
         .unwrap()
@@ -263,6 +969,7 @@ fn logical_import_unit_change_token_marks_same_owner_stat_pending() {
             },
         )
         .unwrap();
+    upsert_source_material(&store, &file);
     assert!(store
         .list_pending_source_import_files(CaptureProvider::OpenCode, root)
         .unwrap()
@@ -371,6 +1078,7 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
             },
         )
         .unwrap();
+    upsert_source_material(&store, &files[0]);
     store
         .record_source_import_file_result(
             CaptureProvider::Claude,

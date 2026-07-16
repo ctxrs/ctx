@@ -83,7 +83,9 @@ impl Store {
               AND indexed_file_modified_at_ms = file_modified_at_ms
               AND indexed_import_revision = import_revision
               AND {visible}
-            "#
+              AND {}
+            "#,
+                source_import_material_exists_sql("source_import_files")
             ),
             [],
             |row| row.get::<_, i64>(0),

@@ -6,6 +6,7 @@ mod tests {
     };
 
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     use super::*;
@@ -28,6 +29,7 @@ mod tests {
             source_root: source_path.parent().unwrap().to_path_buf(),
             imported_at: "2026-07-14T12:00:00Z".parse().unwrap(),
             history_record_id: None,
+            observed_size: fs::metadata(source_path).unwrap().len(),
             mode,
         }
     }

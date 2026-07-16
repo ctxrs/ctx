@@ -85,6 +85,7 @@ fn archive_export_uses_one_visibility_snapshot_across_publication_commit() {
     assert!(store.list_events().unwrap().is_empty());
     assert!(store.list_files_touched().unwrap().is_empty());
 }
+
 #[test]
 fn ancillary_owner_material_is_hidden_then_removed_without_archive_or_cache_leaks() {
     let temp = tempdir().unwrap();
@@ -291,6 +292,7 @@ fn ancillary_owner_material_is_hidden_then_removed_without_archive_or_cache_leak
     }
     assert!(store.search_records("hidden", 10).unwrap().is_empty());
 }
+
 #[test]
 fn replacement_tracks_source_less_vcs_change_through_its_owned_workspace() {
     let temp = tempdir().unwrap();
@@ -360,6 +362,7 @@ fn replacement_tracks_source_less_vcs_change_through_its_owned_workspace() {
     assert!(row_exists(&store, "vcs_workspaces", workspace));
     assert_eq!(store.list_vcs_changes().unwrap()[0].id, retained);
 }
+
 #[test]
 fn cross_process_vcs_hijack_is_rejected_and_scoped_source_less_upsert_is_valid() {
     let temp = tempdir().unwrap();
@@ -503,6 +506,7 @@ fn omitted_session_releases_transcript_artifact_before_artifact_reconciliation()
         .unwrap();
     assert_eq!(session_state, (None, Some(100)));
 }
+
 #[test]
 fn pending_catalog_owner_is_hidden_from_ctx_sources_view() {
     let temp = tempdir().unwrap();
@@ -523,7 +527,7 @@ fn pending_catalog_owner_is_hidden_from_ctx_sources_view() {
         file_modified_at_ms: 100,
         import_revision: 1,
         cataloged_at_ms: 101,
-        metadata: json!({}),
+        metadata: json!({"file_observation_token_v1": "archive-catalog-token"}),
     };
     let generation = store
         .allocate_catalog_inventory_generation(catalog.provider, &catalog.source_root)
@@ -544,9 +548,10 @@ fn pending_catalog_owner_is_hidden_from_ctx_sources_view() {
     };
     let outcome = ProviderFileImportOutcome {
         provider: catalog.provider,
-        observation: ProviderFileInventoryObservation::Catalog {
+        observation: ProviderFileInventoryObservation::ObservedCatalog {
             source_format: &catalog.source_format,
             update,
+            metadata: &catalog.metadata,
         },
         status: CatalogIndexedStatus::Indexed,
         error: None,
@@ -619,6 +624,7 @@ fn pending_catalog_owner_is_hidden_from_ctx_sources_view() {
         )
         .unwrap());
 }
+
 #[test]
 fn pending_source_import_owner_is_hidden_from_pending_list_and_counts() {
     let temp = tempdir().unwrap();

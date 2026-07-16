@@ -480,7 +480,7 @@ sys.exit(23)
     );
 
     assert!(
-        stderr.contains("search refresh failed and no existing ctx index is available"),
+        stderr.contains("search refresh failed and no usable existing ctx index is available"),
         "{stderr}"
     );
     assert!(
@@ -513,17 +513,10 @@ fn search_refresh_auto_all_malformed_native_history_fails_instead_of_serving_emp
     ]));
 
     assert!(
-        stderr.contains("search refresh failed and no existing ctx index is available"),
+        stderr.contains("background search refresh has not produced a usable ctx index yet"),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("all search refresh sources failed; first failure: import codex source"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("codex session JSONL contained no real message content"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("retry with `--refresh wait`"), "{stderr}");
 }
 
 #[test]
@@ -857,7 +850,8 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
             search["freshness"]["totals"]["imported_sessions"]
                 .as_u64()
                 .unwrap()
-                >= 1
+                >= 1,
+            "{cli_provider} first refresh imported no sessions: {search:#}"
         );
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
 

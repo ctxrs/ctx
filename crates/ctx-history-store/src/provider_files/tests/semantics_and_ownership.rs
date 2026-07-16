@@ -79,6 +79,7 @@ fn equal_count_replacement_advances_semantic_replacement_revision() {
     assert_eq!(store.cached_event_embedding_document_count().unwrap(), None);
     assert_eq!(store.semantic_replacement_revision().unwrap(), 1);
 }
+
 #[test]
 fn semantic_cache_refresh_and_publication_marker_are_one_serialized_snapshot() {
     let temp = tempdir().unwrap();
@@ -145,6 +146,7 @@ fn semantic_cache_refresh_and_publication_marker_are_one_serialized_snapshot() {
         None
     );
 }
+
 #[test]
 fn replacement_owned_event_conflict_overwrites_and_cross_source_conflict_rejects() {
     let temp = tempdir().unwrap();
@@ -285,8 +287,9 @@ fn replacement_owned_event_conflict_overwrites_and_cross_source_conflict_rejects
     assert!(row_exists(&store, "events", owner_id));
     assert!(row_exists(&store, "events", sibling_id));
 }
+
 #[test]
-fn scoped_natural_key_and_unowned_record_writes_cannot_contaminate_publication() {
+fn scoped_natural_key_and_existing_record_writes_cannot_contaminate_publication() {
     let temp = tempdir().unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let file = source_file(20, 100);
@@ -377,20 +380,39 @@ fn scoped_natural_key_and_unowned_record_writes_cannot_contaminate_publication()
         ("sibling".to_owned(), sibling_source.to_string())
     );
 
-    let record = ctx_history_core::HistoryRecord::new(
-        "unowned write",
-        "must fail closed",
+    let mut record = ctx_history_core::HistoryRecord::new(
+        "new record shell",
+        "created by the exact active publication scope",
         Vec::new(),
         "note",
         None,
     );
+    record.id = Uuid::from_u128(45_005);
+    assert!(!store
+        .provider_file_publication_history_record_exists(&scope, record.id)
+        .unwrap());
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_record(&record))
+        .unwrap();
+    assert!(store
+        .provider_file_publication_history_record_exists(&scope, record.id)
+        .unwrap());
+    record.title = "existing record mutation must fail".to_owned();
     assert!(matches!(
         store
             .with_provider_file_publication_writes(&scope, |store| store.upsert_record(&record))
             .unwrap_err(),
         StoreError::ProviderFilePublicationOwnerMismatch { .. }
     ));
-    let busy = store.upsert_record(&record).unwrap_err();
+    let mut busy_record = ctx_history_core::HistoryRecord::new(
+        "foreground write",
+        "must fail while publication is active",
+        Vec::new(),
+        "note",
+        None,
+    );
+    busy_record.id = Uuid::from_u128(45_006);
+    let busy = store.upsert_record(&busy_record).unwrap_err();
     assert!(matches!(
         busy,
         StoreError::ProviderFileReplacementBusy { .. }
@@ -398,9 +420,164 @@ fn scoped_natural_key_and_unowned_record_writes_cannot_contaminate_publication()
     let rendered = busy.to_string();
     assert!(!rendered.contains(ROOT));
     assert!(!rendered.contains(PATH_A));
-    assert!(!row_exists(&store, "history_records", record.id));
+    assert!(!row_exists(&store, "history_records", busy_record.id));
     store.abandon_provider_file_publication(scope).unwrap();
 }
+
+#[test]
+fn child_owned_session_and_explicit_edge_allow_sibling_parent_references() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (scope, child_source, _, parent_session, _, _) =
+        begin_parent_child_ownership_publication(&store);
+    let child_session = Uuid::from_u128(80_010);
+    let mut child = session_fixture(child_session, child_source, "publication-child");
+    child.parent_session_id = Some(parent_session);
+    child.root_session_id = Some(parent_session);
+    child.agent_type = AgentType::Subagent;
+    child.is_primary = false;
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_session(&child))
+        .unwrap();
+
+    let edge_id = Uuid::from_u128(80_011);
+    let edge = session_edge_fixture(edge_id, child_session, parent_session, Some(child_source));
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_session_edge(&edge))
+        .unwrap();
+    let inherited_edge_id = Uuid::from_u128(80_012);
+    let inherited_edge =
+        session_edge_fixture(inherited_edge_id, child_session, parent_session, None);
+    store
+        .with_provider_file_publication_writes(&scope, |store| {
+            store.upsert_session_edge(&inherited_edge)
+        })
+        .unwrap();
+
+    let stored_session: (String, String, String) = store
+        .conn
+        .query_row(
+            "SELECT capture_source_id, parent_session_id, root_session_id FROM sessions WHERE id = ?1",
+            params![child_session.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_session,
+        (
+            child_source.to_string(),
+            parent_session.to_string(),
+            parent_session.to_string(),
+        )
+    );
+    let stored_edge_source: String = store
+        .conn
+        .query_row(
+            "SELECT source_id FROM session_edges WHERE id = ?1",
+            params![edge_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_edge_source, child_source.to_string());
+    let inherited_edge_source: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT source_id FROM session_edges WHERE id = ?1",
+            params![inherited_edge_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(inherited_edge_source, None);
+    store.abandon_provider_file_publication(scope).unwrap();
+}
+
+#[test]
+fn session_and_edge_owners_reject_sibling_overwrites_and_missing_sources() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (scope, child_source, sibling_source, parent_session, sibling_peer, sibling_edge) =
+        begin_parent_child_ownership_publication(&store);
+
+    let mut hijacked_parent = store.get_session(parent_session).unwrap();
+    hijacked_parent.capture_source_id = Some(child_source);
+    hijacked_parent.role_hint = Some("must not overwrite sibling owner".to_owned());
+    assert!(matches!(
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_session(&hijacked_parent)
+            })
+            .unwrap_err(),
+        StoreError::ProviderFilePublicationOwnerMismatch { .. }
+    ));
+    let stored_parent_source: String = store
+        .conn
+        .query_row(
+            "SELECT capture_source_id FROM sessions WHERE id = ?1",
+            params![parent_session.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_parent_source, sibling_source.to_string());
+
+    let hijacked_edge = session_edge_fixture(
+        sibling_edge,
+        parent_session,
+        sibling_peer,
+        Some(child_source),
+    );
+    assert!(matches!(
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_session_edge(&hijacked_edge)
+            })
+            .unwrap_err(),
+        StoreError::ProviderFilePublicationOwnerMismatch { .. }
+    ));
+    let stored_edge_source: String = store
+        .conn
+        .query_row(
+            "SELECT source_id FROM session_edges WHERE id = ?1",
+            params![sibling_edge.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_edge_source, sibling_source.to_string());
+
+    let missing_session_id = Uuid::from_u128(80_020);
+    let mut missing_session =
+        session_fixture(missing_session_id, child_source, "missing-session-owner");
+    missing_session.capture_source_id = None;
+    missing_session.parent_session_id = Some(parent_session);
+    missing_session.root_session_id = Some(parent_session);
+    assert!(matches!(
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_session(&missing_session)
+            })
+            .unwrap_err(),
+        StoreError::ProviderFilePublicationOwnerMismatch { .. }
+    ));
+    assert!(!row_exists(&store, "sessions", missing_session_id));
+
+    let missing_edge_id = Uuid::from_u128(80_021);
+    let missing_edge = session_edge_fixture(
+        missing_edge_id,
+        Uuid::from_u128(80_022),
+        Uuid::from_u128(80_023),
+        None,
+    );
+    assert!(matches!(
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_session_edge(&missing_edge)
+            })
+            .unwrap_err(),
+        StoreError::ProviderFilePublicationOwnerMismatch { .. }
+    ));
+    assert!(!row_exists(&store, "session_edges", missing_edge_id));
+    store.abandon_provider_file_publication(scope).unwrap();
+}
+
 #[test]
 fn legacy_root_effective_session_owner_is_hidden_and_seen_empty_session_survives() {
     let temp = tempdir().unwrap();
@@ -498,6 +675,158 @@ fn legacy_root_effective_session_owner_is_hidden_and_seen_empty_session_survives
     assert_eq!(session_deleted_at(&store, session), None);
     assert!(store.get_session(session).is_ok());
 }
+
+#[test]
+fn replacement_identity_reads_are_idempotent_and_scoped_to_the_active_file() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let store = Store::open(&path).unwrap();
+    let file_a = source_file(20, 100);
+    let mut file_b = source_file(20, 100);
+    file_b.source_path = PATH_B.to_owned();
+    let generation = store
+        .allocate_source_import_inventory_generation(file_a.provider, &file_a.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, &[file_a.clone(), file_b.clone()])
+        .unwrap();
+
+    let source_a = Uuid::from_u128(329_100);
+    let source_b = Uuid::from_u128(329_101);
+    let session_a = Uuid::from_u128(329_102);
+    let session_b = Uuid::from_u128(329_103);
+    let event_a = Uuid::from_u128(329_104);
+    let event_b = Uuid::from_u128(329_105);
+    insert_capture_source(&store, source_a, PATH_A, "shared-external-session");
+    insert_capture_source(&store, source_b, PATH_B, "shared-external-session");
+    let session_a_row = session_fixture(session_a, source_a, "shared-external-session");
+    let session_b_row = session_fixture(session_b, source_b, "shared-external-session");
+    store.upsert_session(&session_a_row).unwrap();
+    store.upsert_session(&session_b_row).unwrap();
+    let mut event_a_row = event_fixture(
+        event_a,
+        1,
+        source_a,
+        "owner-event-dedupe".to_owned(),
+        "owner event",
+    );
+    event_a_row.session_id = Some(session_a);
+    let mut event_b_row = event_fixture(
+        event_b,
+        2,
+        source_b,
+        "sibling-event-dedupe".to_owned(),
+        "sibling event",
+    );
+    event_b_row.session_id = Some(session_b);
+    store.upsert_event(&event_a_row).unwrap();
+    store.upsert_event(&event_b_row).unwrap();
+
+    let outcome_a = source_outcome(&file_a, generation, 110);
+    let scope = store
+        .begin_provider_file_publication(
+            file_a.provider,
+            outcome_a.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    prepare_all(&store, &scope, 1);
+
+    assert!(store.get_session(session_a).is_err());
+    assert!(store.get_session(session_b).is_ok());
+    assert!(store.get_event(event_a).is_err());
+    assert!(store.get_event(event_b).is_ok());
+    let active_owner =
+        material_source_matches_replacement_owner_predicate("active_source", "active_publication");
+    let sibling_matches_active_owner: bool = store
+        .conn
+        .query_row(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM capture_sources AS active_source \
+                 JOIN provider_file_publications AS active_publication ON ({active_owner}) \
+                 WHERE active_publication.replacement_id = ?1 AND active_source.id = ?2)"
+            ),
+            params![scope.scope_id.to_string(), source_b.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!sibling_matches_active_owner);
+    store
+        .with_provider_file_publication_writes(&scope, |store| {
+            assert_eq!(store.get_capture_source(source_a)?.id, source_a);
+            assert_eq!(store.get_session(session_a)?.id, session_a);
+            assert_eq!(store.get_session(session_b)?.id, session_b);
+            assert_eq!(store.get_event(event_a)?.id, event_a);
+            assert_eq!(store.get_event(event_b)?.id, event_b);
+            assert_eq!(
+                store
+                    .session_by_capture_source_and_external_session(
+                        source_a,
+                        CaptureProvider::Claude,
+                        "shared-external-session",
+                    )?
+                    .unwrap()
+                    .id,
+                session_a
+            );
+            assert_eq!(
+                store
+                    .session_by_capture_source_and_external_session(
+                        source_b,
+                        CaptureProvider::Claude,
+                        "shared-external-session",
+                    )?
+                    .unwrap()
+                    .id,
+                session_b
+            );
+            assert_eq!(store.event_id_by_dedupe_key("owner-event-dedupe")?, event_a);
+            assert_eq!(
+                store.event_id_by_dedupe_key("sibling-event-dedupe")?,
+                event_b
+            );
+            assert_eq!(store.events_for_session_limited(session_a, 10)?.len(), 1);
+            assert_eq!(store.events_for_session_limited(session_b, 10)?.len(), 1);
+
+            store.upsert_session(&session_a_row)?;
+            assert_eq!(store.upsert_event(&event_a_row)?, event_a);
+            Ok(())
+        })
+        .unwrap();
+
+    let owner_sessions: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE capture_source_id = ?1",
+            params![source_a.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let owner_events: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE capture_source_id = ?1",
+            params![source_a.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!((owner_sessions, owner_events), (1, 1));
+    assert_eq!(staged_seen_count(&store), 2);
+
+    reconcile_all(&store, &scope, 1);
+    store
+        .finalize_provider_file_publication(
+            scope,
+            outcome_a,
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+    assert!(store.get_session(session_a).is_ok());
+    assert!(store.get_session(session_b).is_ok());
+}
+
 #[test]
 fn replacement_removes_prior_file_material_but_preserves_shared_session() {
     let temp = tempdir().unwrap();
@@ -633,6 +962,7 @@ fn replacement_removes_prior_file_material_but_preserves_shared_session() {
     );
     assert_eq!(store.semantic_replacement_revision().unwrap(), 1);
 }
+
 #[test]
 fn replacement_preserves_sessions_with_each_kind_of_sibling_owned_material() {
     let temp = tempdir().unwrap();

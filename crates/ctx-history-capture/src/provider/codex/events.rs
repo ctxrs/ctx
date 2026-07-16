@@ -676,7 +676,8 @@ pub(crate) fn codex_tool_output_event(
         }),
     ))
 }
+
 include!("events/payload.rs");
 
 #[cfg(test)]
-mod resume_tests;
+include!("events/tests.rs");

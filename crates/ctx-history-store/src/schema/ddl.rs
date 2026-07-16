@@ -219,7 +219,8 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
     last_imported_file_modified_at_ms INTEGER,
     last_imported_file_sha256 TEXT,
     last_imported_event_count INTEGER,
-    metadata_json TEXT NOT NULL DEFAULT '{}'
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    pending_reason TEXT CHECK (pending_reason IS NULL OR pending_reason IN ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', 'recovery_replacement', 'parser_revision', 'missing_material', 'abandoned_publication', 'legacy', 'explicit_rescan'))
 );
 
 CREATE TABLE IF NOT EXISTS source_import_files (
@@ -241,7 +242,17 @@ CREATE TABLE IF NOT EXISTS source_import_files (
     indexed_error TEXT,
     indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
     metadata_json TEXT NOT NULL DEFAULT '{}',
+    pending_reason TEXT CHECK (pending_reason IS NULL OR pending_reason IN ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', 'recovery_replacement', 'parser_revision', 'missing_material', 'abandoned_publication', 'legacy', 'explicit_rescan')),
     PRIMARY KEY (provider, source_root, source_path)
+);
+
+CREATE TABLE IF NOT EXISTS import_pending_reason_repairs (
+    inventory_family TEXT PRIMARY KEY NOT NULL
+      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+    cursor_provider TEXT,
+    cursor_source_root TEXT,
+    cursor_source_path TEXT,
+    completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS provider_file_checkpoints (
@@ -279,6 +290,8 @@ CREATE TABLE IF NOT EXISTS provider_file_publications (
     import_revision INTEGER NOT NULL CHECK (import_revision > 0),
     metadata_json TEXT,
     mutation_started INTEGER NOT NULL DEFAULT 0 CHECK (mutation_started IN (0, 1)),
+    tracks_prior_material INTEGER NOT NULL DEFAULT 0 CHECK (tracks_prior_material IN (0, 1)),
+    staging_initialized INTEGER NOT NULL DEFAULT 0 CHECK (staging_initialized IN (0, 1)),
     preparation_complete INTEGER NOT NULL DEFAULT 0 CHECK (preparation_complete IN (0, 1)),
     preparation_cursor TEXT,
     cleanup_phase INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_phase BETWEEN 0 AND 14),
@@ -300,7 +313,37 @@ CREATE TABLE IF NOT EXISTS provider_file_publications (
     tombstoned_sessions INTEGER NOT NULL DEFAULT 0 CHECK (tombstoned_sessions >= 0),
     started_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    completion_payload_json TEXT CHECK (
+        completion_payload_json IS NULL OR
+        length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144
+    ),
+    inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0
+        CHECK (inventory_observation_invalidated IN (0, 1)),
+    retirement_started INTEGER NOT NULL DEFAULT 0 CHECK (retirement_started IN (0, 1)),
     PRIMARY KEY (provider, material_source_format, material_source_root, source_path)
+);
+
+CREATE TABLE IF NOT EXISTS provider_file_publication_seen (
+    replacement_id TEXT NOT NULL,
+    entity_kind TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (replacement_id, entity_kind, entity_id),
+    FOREIGN KEY (replacement_id) REFERENCES provider_file_publications(replacement_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS provider_file_publication_prior_sources (
+    replacement_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    PRIMARY KEY (replacement_id, source_id),
+    FOREIGN KEY (replacement_id) REFERENCES provider_file_publications(replacement_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS provider_file_publication_batch (
+    replacement_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (replacement_id, source_id, entity_id),
+    FOREIGN KEY (replacement_id) REFERENCES provider_file_publications(replacement_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS semantic_replacement_revision (

@@ -1,15 +1,17 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
 use ctx_history_core::{
-    CaptureProvider, CaptureSource, CaptureSourceDescriptor, Event, FileTouched, HistoryRecordLink,
-    Run, Session, SessionEdge, SessionHistoryArchive, Summary, VcsChange,
+    utc_now, CaptureProvider, CaptureSource, CaptureSourceDescriptor, Event, FileTouched,
+    HistoryRecordLink, Run, Session, SessionEdge, SessionHistoryArchive, Summary, VcsChange,
 };
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};

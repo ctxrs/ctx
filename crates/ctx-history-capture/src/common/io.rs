@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{self, BufRead, Read},
+    io::{self, BufRead, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -471,7 +471,12 @@ pub(crate) fn ensure_provider_path_parents_are_not_symlinks(path: &Path) -> Resu
 
 pub(crate) fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str) -> Result<String> {
     let file = File::open(path)?;
-    let mut reader = file.take((max_bytes as u64).saturating_add(1));
+    read_text_limited(file, max_bytes, label)
+}
+
+fn read_text_limited(reader: impl Read, max_bytes: usize, label: &str) -> Result<String> {
+    let reader = crate::disk_io_pacing::PacedReader::new(reader);
+    let mut reader = reader.take((max_bytes as u64).saturating_add(1));
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     if bytes.len() > max_bytes {
@@ -481,6 +486,38 @@ pub(crate) fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str)
     }
     String::from_utf8(bytes)
         .map_err(|err| CaptureError::InvalidPayload(format!("{label} is not valid UTF-8: {err}")))
+}
+
+pub fn provider_jsonl_range_has_complete_line(
+    path: &Path,
+    offset: u64,
+    observed_size: u64,
+) -> Result<bool> {
+    let mut file = open_regular_provider_transcript_file(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut remaining = observed_size.saturating_sub(offset);
+    let mut scanned = 0usize;
+    let scan_limit = MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(1);
+    let mut buffer = [0u8; 8 * 1024];
+    while remaining > 0 && scanned < scan_limit {
+        let budget = scan_limit.saturating_sub(scanned);
+        let limit = usize::try_from(remaining.min(buffer.len() as u64))
+            .unwrap_or(buffer.len())
+            .min(budget);
+        let read = file.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        if buffer[..read].contains(&b'\n') {
+            return Ok(true);
+        }
+        scanned = scanned.saturating_add(read);
+        remaining = remaining.saturating_sub(read as u64);
+    }
+    if remaining > 0 || scanned > MAX_PROVIDER_JSONL_LINE_BYTES {
+        return Err(provider_jsonl_line_too_large());
+    }
+    Ok(false)
 }
 
 pub(crate) fn read_provider_jsonl_line(
@@ -570,6 +607,9 @@ pub(crate) fn read_provider_jsonl_line_or_skip_oversized(
             reader.consume(bytes_to_consume);
             let (discarded, newline_terminated) = discard_provider_jsonl_line(reader)?;
             buffer.clear();
+            if !newline_terminated {
+                return Err(provider_jsonl_line_too_large());
+            }
             return Ok(ProviderJsonlLineRead::Oversized {
                 bytes: total
                     .saturating_add(bytes_to_consume)
@@ -585,17 +625,19 @@ pub(crate) fn read_provider_jsonl_line_or_skip_oversized(
 
 pub(crate) fn discard_provider_jsonl_line(reader: &mut impl BufRead) -> Result<(usize, bool)> {
     let mut discarded = 0usize;
-    loop {
+    while discarded < MAX_PROVIDER_JSONL_LINE_BYTES {
         let available = reader.fill_buf()?;
         if available.is_empty() {
             return Ok((discarded, false));
         }
-        let bytes_to_consume = available
+        let remaining = MAX_PROVIDER_JSONL_LINE_BYTES.saturating_sub(discarded);
+        let bounded = &available[..available.len().min(remaining)];
+        let bytes_to_consume = bounded
             .iter()
             .position(|byte| *byte == b'\n')
             .map(|index| index + 1)
-            .unwrap_or(available.len());
-        let found_newline = available
+            .unwrap_or(bounded.len());
+        let found_newline = bounded
             .get(bytes_to_consume.saturating_sub(1))
             .is_some_and(|byte| *byte == b'\n');
         reader.consume(bytes_to_consume);
@@ -604,6 +646,7 @@ pub(crate) fn discard_provider_jsonl_line(reader: &mut impl BufRead) -> Result<(
             return Ok((discarded, true));
         }
     }
+    Ok((discarded, false))
 }
 
 pub(crate) fn provider_jsonl_line_too_large() -> CaptureError {
@@ -620,6 +663,93 @@ pub(crate) fn read_json_file_limited(path: &Path, max_bytes: usize, label: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufReader;
+
+    use crate::{install_disk_io_pacer, DiskIoPacer};
+
+    struct ReservationObservedReader {
+        pacer: DiskIoPacer,
+        expected_reserved_bytes: u64,
+    }
+
+    impl Read for ReservationObservedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            assert_eq!(self.pacer.charged_bytes(), self.expected_reserved_bytes);
+            buffer.fill(b'x');
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn limited_text_reads_reserve_shared_budget_before_physical_reads() {
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+
+        for expected_reserved_bytes in [4, 8] {
+            let error = read_text_limited(
+                ReservationObservedReader {
+                    pacer: pacer.clone(),
+                    expected_reserved_bytes,
+                },
+                3,
+                "provider fixture",
+            )
+            .expect_err("the max-plus-one byte must preserve the size error");
+
+            assert!(matches!(error, CaptureError::InvalidPayload(_)));
+        }
+
+        assert_eq!(pacer.charged_bytes(), 8);
+    }
+
+    #[test]
+    fn oversized_line_discard_is_bounded_without_a_newline() {
+        let source = std::io::Read::take(
+            std::io::repeat(b'x'),
+            (MAX_PROVIDER_JSONL_LINE_BYTES as u64).saturating_mul(4),
+        );
+        let mut reader = BufReader::with_capacity(8 * 1024, source);
+
+        let (discarded, newline_terminated) = discard_provider_jsonl_line(&mut reader).unwrap();
+
+        assert_eq!(discarded, MAX_PROVIDER_JSONL_LINE_BYTES);
+        assert!(!newline_terminated);
+    }
+
+    #[test]
+    fn oversized_unterminated_line_stops_before_its_tail_can_be_reframed() {
+        let source = std::io::Read::take(
+            std::io::repeat(b'x'),
+            (MAX_PROVIDER_JSONL_LINE_BYTES as u64).saturating_mul(4),
+        );
+        let mut reader = BufReader::with_capacity(8 * 1024, source);
+        let mut buffer = Vec::new();
+
+        let error = read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut buffer)
+            .expect_err("unterminated oversized records must stop parsing");
+
+        assert!(matches!(error, CaptureError::InvalidPayload(_)));
+        assert!(buffer.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_range_probe_rejects_fifo_without_blocking() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fifo = temp.path().join("transcript.jsonl");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        let error = provider_jsonl_range_has_complete_line(&fifo, 0, 1)
+            .expect_err("provider FIFOs must be rejected");
+
+        assert!(matches!(
+            error,
+            CaptureError::InvalidProviderTranscriptPath { .. }
+        ));
+    }
 
     #[test]
     fn explicit_jsonl_file_does_not_require_an_extension() {

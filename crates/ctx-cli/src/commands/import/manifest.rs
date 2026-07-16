@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::commands::import::catalog::{source_change_token, system_time_ms, SourceChangeEntry};
 use ctx_history_capture::{
-    observe_sqlite_source_generation, ProviderImportDependency, ProviderImportUnitGrouping,
-    ProviderImportUnitOwner, ProviderImportUnitSpec,
+    observe_ordinary_file, observe_sqlite_source_generation, pace_current_disk_io,
+    ProviderImportDependency, ProviderImportUnitGrouping, ProviderImportUnitOwner,
+    ProviderImportUnitSpec,
 };
 
 pub(crate) struct PersistedSourceImportObservation {
@@ -73,6 +74,13 @@ fn persist_source_import_observation_with_outcomes_inner(
         )?;
         before_outcomes();
         for outcome in outcomes {
+            pace_current_disk_io(
+                256u64
+                    .saturating_add(outcome.file.source_format.len() as u64)
+                    .saturating_add(outcome.file.source_root.len() as u64)
+                    .saturating_add(outcome.file.source_path.len() as u64)
+                    .saturating_add(serde_json::to_vec(&outcome.file.metadata)?.len() as u64),
+            );
             let changed = store.record_source_import_file_result(
                 outcome.file.provider,
                 SourceImportFileIndexUpdate {
@@ -149,13 +157,18 @@ fn persist_source_import_files_in_batch(
         .iter()
         .map(|file| file.source_path.clone())
         .collect::<Vec<_>>();
-    store.upsert_source_import_files(inventory_generation, files)?;
-    store.mark_source_import_missing_paths_stale(
+    store.upsert_source_import_files_with_pacing(
+        inventory_generation,
+        files,
+        pace_current_disk_io,
+    )?;
+    store.mark_source_import_missing_paths_stale_with_pacing(
         source.provider,
         source_root,
         &current_paths,
         utc_now().timestamp_millis(),
         inventory_generation,
+        pace_current_disk_io,
     )?;
     Ok(())
 }
@@ -170,49 +183,111 @@ pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<Sou
     let observed_at_ms = utc_now().timestamp_millis();
     let mut files = Vec::with_capacity(units.len());
     for unit in units {
-        let owner_identity = persisted_import_identity(&unit.owner, "import unit owner")?;
-        let fingerprint_base = if source.path.is_dir() {
-            source.path.as_path()
-        } else {
-            source.path.parent().unwrap_or(source.path.as_path())
-        };
-        let fingerprint = import_unit_fingerprint(fingerprint_base, &unit)?;
-        let dependency_paths = fingerprint
-            .dependencies
-            .iter()
-            .filter(|path| *path != &unit.owner)
-            .map(|path| import_unit_path_label(fingerprint_base, path))
-            .collect::<Vec<_>>();
-        let absent_dependency_paths = fingerprint
-            .absent_dependencies
-            .iter()
-            .map(|path| import_unit_path_label(fingerprint_base, path))
-            .collect::<Vec<_>>();
-        files.push(SourceImportFile {
-            provider: source.provider,
-            source_format: source.source_format.to_owned(),
-            source_root: source_root.clone(),
-            source_path: owner_identity.to_owned(),
-            file_size_bytes: fingerprint.owner_len,
-            file_modified_at_ms: system_time_ms(fingerprint.owner_modified_at),
-            import_revision: source.import_revision,
+        files.push(observe_collected_source_import_unit(
+            source,
+            &source_root,
+            &unit,
             observed_at_ms,
-            metadata: json!({
-                "inventory_unit": "logical_import_unit",
-                "change_token_v1": hex_change_token(fingerprint.change_token),
-                "dependencies": dependency_paths,
-                "absent_dependencies": absent_dependency_paths,
-            }),
-        });
+        )?);
     }
     Ok(files)
 }
 
-pub(crate) fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
-    Ok(collect_source_import_units(source)?
-        .into_iter()
-        .map(|unit| unit.owner)
-        .collect())
+pub(crate) fn observe_selected_source_import_file(
+    source: &SourceInfo,
+    source_path: &str,
+) -> Result<Option<SourceImportFile>> {
+    let ProviderImportUnitSpec::PerFile {
+        owner,
+        dependencies,
+        ..
+    } = source.import_unit
+    else {
+        return Err(anyhow!(
+            "selected import file does not belong to a manifested source"
+        ));
+    };
+    let path = PathBuf::from(source_path);
+    let belongs_to_source = path == source.path || path.starts_with(&source.path);
+    if !belongs_to_source || !import_unit_owner_matches(owner, &source.path, &path) {
+        return Err(anyhow!(
+            "selected import unit is outside its manifested source: {}",
+            path.display()
+        ));
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(anyhow!(
+                "import unit owner is not a regular file: {}",
+                path.display()
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("stat import unit owner {}", path.display()))
+        }
+    }
+    let source_root = persisted_import_identity(&source.path, "source root")?;
+    let unit = collected_import_unit(path, dependencies)?;
+    observe_collected_source_import_unit(source, source_root, &unit, utc_now().timestamp_millis())
+        .map(Some)
+}
+
+pub(crate) fn same_source_import_observation(
+    left: &SourceImportFile,
+    right: &SourceImportFile,
+) -> bool {
+    left.provider == right.provider
+        && left.source_format == right.source_format
+        && left.source_root == right.source_root
+        && left.source_path == right.source_path
+        && left.file_size_bytes == right.file_size_bytes
+        && left.file_modified_at_ms == right.file_modified_at_ms
+        && left.import_revision == right.import_revision
+        && left.metadata == right.metadata
+}
+
+fn observe_collected_source_import_unit(
+    source: &SourceInfo,
+    source_root: &str,
+    unit: &CollectedImportUnit,
+    observed_at_ms: i64,
+) -> Result<SourceImportFile> {
+    let owner_identity = persisted_import_identity(&unit.owner, "import unit owner")?;
+    let fingerprint_base = if source.path.is_dir() {
+        source.path.as_path()
+    } else {
+        source.path.parent().unwrap_or(source.path.as_path())
+    };
+    let fingerprint = import_unit_fingerprint(fingerprint_base, unit)?;
+    let dependency_paths = fingerprint
+        .dependencies
+        .iter()
+        .filter(|path| *path != &unit.owner)
+        .map(|path| import_unit_path_label(fingerprint_base, path))
+        .collect::<Vec<_>>();
+    let absent_dependency_paths = fingerprint
+        .absent_dependencies
+        .iter()
+        .map(|path| import_unit_path_label(fingerprint_base, path))
+        .collect::<Vec<_>>();
+    Ok(SourceImportFile {
+        provider: source.provider,
+        source_format: source.source_format.to_owned(),
+        source_root: source_root.to_owned(),
+        source_path: owner_identity.to_owned(),
+        file_size_bytes: fingerprint.owner_len,
+        file_modified_at_ms: system_time_ms(fingerprint.owner_modified_at),
+        import_revision: source.import_revision,
+        observed_at_ms,
+        metadata: json!({
+            "inventory_unit": "logical_import_unit",
+            "change_token_v1": hex_change_token(fingerprint.change_token),
+            "dependencies": dependency_paths,
+            "absent_dependencies": absent_dependency_paths,
+        }),
+    })
 }
 
 struct CollectedImportUnit {
@@ -538,31 +613,23 @@ fn import_unit_fingerprint(
         }
         (generation.main().len(), generation.main().modified_at())
     } else {
-        let metadata = fs::symlink_metadata(&unit.owner)
-            .with_context(|| format!("stat import unit owner {}", unit.owner.display()))?;
-        if !metadata.file_type().is_file() {
-            return Err(anyhow!(
-                "import unit owner is not a regular file: {}",
-                unit.owner.display()
-            ));
-        }
-        entries.push(SourceChangeEntry::from_metadata(
+        let observation = observe_ordinary_file(&unit.owner)
+            .with_context(|| format!("observe import unit owner {}", unit.owner.display()))?;
+        entries.push(SourceChangeEntry::from_observation(
             base,
             &unit.owner,
-            &metadata,
+            &observation,
         ));
-        (metadata.len(), metadata.modified().unwrap_or(UNIX_EPOCH))
+        (observation.len(), observation.modified_at())
     };
     for path in unit.dependencies.iter().filter(|path| *path != &unit.owner) {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("stat import unit dependency {}", path.display()))?;
-        if !metadata.file_type().is_file() {
-            return Err(anyhow!(
-                "import unit dependency is not a regular file: {}",
-                path.display()
-            ));
-        }
-        entries.push(SourceChangeEntry::from_metadata(base, path, &metadata));
+        let observation = observe_ordinary_file(path)
+            .with_context(|| format!("observe import unit dependency {}", path.display()))?;
+        entries.push(SourceChangeEntry::from_observation(
+            base,
+            path,
+            &observation,
+        ));
     }
     let observed_absences = unit
         .absence_watches

@@ -8,6 +8,7 @@ struct DaemonIteration {
 struct DaemonRuntime {
     semantic_embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
     semantic_bootstrap_passes_since_refresh: usize,
+    history_refresh: crate::commands::search::SearchRefreshRuntime,
 }
 
 fn daemon_runtime_embedder_loaded(runtime: &DaemonRuntime) -> bool {
@@ -290,7 +291,8 @@ fn bind_daemon_query_listener(
                     break;
                 }
             }
-            if let Err(error) = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700)) {
+            if let Err(error) = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700))
+            {
                 let _ = fs::remove_dir(&runtime_dir);
                 failures.push(format!("secure {}: {error}", runtime_dir.display()));
                 continue;
@@ -298,7 +300,10 @@ fn bind_daemon_query_listener(
             let path = runtime_dir.join("q.sock");
             if path.as_os_str().as_bytes().len() > DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES {
                 let _ = fs::remove_dir(&runtime_dir);
-                failures.push(format!("fallback socket path is still too long: {}", path.display()));
+                failures.push(format!(
+                    "fallback socket path is still too long: {}",
+                    path.display()
+                ));
                 continue;
             }
             match UnixListener::bind(&path) {
@@ -371,11 +376,8 @@ fn start_daemon_query_service_with_request_timeout(
                         // macOS. A 384-float response exceeds the default
                         // socket buffer, so restore bounded blocking writes
                         // before serving the request.
-                        if configure_daemon_query_stream_unix(
-                            &stream,
-                            request_read_timeout,
-                        )
-                        .is_err()
+                        if configure_daemon_query_stream_unix(&stream, request_read_timeout)
+                            .is_err()
                         {
                             continue;
                         }
@@ -680,8 +682,7 @@ fn create_windows_daemon_query_pipe(
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
-        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-        PIPE_WAIT,
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
 
     if !windows_named_pipe_name_is_local(pipe_name) {
@@ -760,7 +761,9 @@ fn start_daemon_query_service(
     _data_root: &Path,
     _embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
 ) -> Result<DaemonQueryService> {
-    Err(anyhow!("daemon query service is not supported on this platform"))
+    Err(anyhow!(
+        "daemon query service is not supported on this platform"
+    ))
 }
 
 fn handle_daemon_query_stream<S: std::io::Write>(
@@ -827,7 +830,10 @@ fn handle_daemon_query_stream_inner<S: std::io::Write>(
     if op != "embed_query" {
         return Err(anyhow!("unknown daemon query operation `{op}`"));
     }
-    let model_key = request.get("model_key").and_then(Value::as_str).unwrap_or("");
+    let model_key = request
+        .get("model_key")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if model_key != semantic_model_key() {
         return Err(anyhow!("daemon query model key mismatch"));
     }
@@ -843,10 +849,12 @@ fn handle_daemon_query_stream_inner<S: std::io::Write>(
     {
         let mut guard = lock_shared_semantic_embedder(embedder)?;
         if guard.is_none() {
-        let cache_dir = semantic_worker_cache_dir(data_root);
-        if !semantic_model_cache_available(&cache_dir) {
-            return Err(anyhow!("semantic model cache is not available to daemon query service"));
-        }
+            let cache_dir = semantic_worker_cache_dir(data_root);
+            if !semantic_model_cache_available(&cache_dir) {
+                return Err(anyhow!(
+                    "semantic model cache is not available to daemon query service"
+                ));
+            }
             *guard = Some(new_semantic_embedder(&cache_dir)?);
         }
     }
@@ -897,7 +905,10 @@ impl Drop for DaemonTestJobHookGuard {
 #[cfg(all(test, ctx_sqlite_vec))]
 fn install_daemon_test_job_hooks(hooks: DaemonTestJobHooks) -> DaemonTestJobHookGuard {
     DAEMON_TEST_JOB_HOOKS.with(|slot| {
-        assert!(slot.borrow().is_none(), "daemon test job hook already installed");
+        assert!(
+            slot.borrow().is_none(),
+            "daemon test job hook already installed"
+        );
         *slot.borrow_mut() = Some(hooks);
     });
     DaemonTestJobHookGuard
@@ -1059,9 +1070,7 @@ fn run_daemon(args: DaemonRunArgs, data_root: PathBuf, config: &AppConfig) -> Re
         ));
     }
     let semantic_enabled = config.semantic_search_enabled() && semantic_query_service_supported();
-    if semantic_enabled {
-        lower_semantic_worker_priority();
-    }
+    lower_daemon_worker_priority();
     let report = match run_daemon_inner(
         args.clone(),
         &data_root,
@@ -1126,7 +1135,10 @@ fn run_daemon_inner(
 
     let mut runtime = DaemonRuntime::default();
     let query_service = if semantic_enabled {
-        Some(start_daemon_query_service(data_root, runtime.semantic_embedder.clone())?)
+        Some(start_daemon_query_service(
+            data_root,
+            runtime.semantic_embedder.clone(),
+        )?)
     } else {
         None
     };
@@ -1213,12 +1225,19 @@ fn run_daemon_once(
     if semantic_enabled && semantic_bootstrap_should_run_first(data_root, runtime)? {
         let history_refresh_job =
             daemon_history_refresh_skipped_job("semantic_bootstrap_in_progress");
-        write_daemon_job_status(&daemon_history_refresh_job_path(data_root), &history_refresh_job)?;
-        let semantic_job = run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
-            .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, format!("{error:#}")));
+        write_daemon_job_status(
+            &daemon_history_refresh_job_path(data_root),
+            &history_refresh_job,
+        )?;
+        let semantic_job =
+            run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
+                .unwrap_or_else(|error| {
+                    daemon_semantic_failed_job(data_root, format!("{error:#}"))
+                });
         let semantic_did_work = daemon_semantic_job_did_work(&semantic_job);
-        runtime.semantic_bootstrap_passes_since_refresh =
-            runtime.semantic_bootstrap_passes_since_refresh.saturating_add(1);
+        runtime.semantic_bootstrap_passes_since_refresh = runtime
+            .semantic_bootstrap_passes_since_refresh
+            .saturating_add(1);
         write_daemon_job_status_unless_deadline_skip(
             &daemon_semantic_job_path(data_root),
             &semantic_job,
@@ -1233,7 +1252,7 @@ fn run_daemon_once(
 
     let history_refresh_job =
         if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-            run_daemon_history_refresh_job(data_root)
+            run_daemon_history_refresh_job(data_root, runtime)
         } else {
             Ok(daemon_history_refresh_skipped_job("daemon_deadline"))
         };
@@ -1248,11 +1267,12 @@ fn run_daemon_once(
         &history_refresh_job,
     )?;
 
-    let semantic_job = if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-        run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
-    } else {
-        Ok(daemon_semantic_deadline_skipped_job(data_root))
-    };
+    let semantic_job =
+        if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
+            run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
+        } else {
+            Ok(daemon_semantic_deadline_skipped_job(data_root))
+        };
     let semantic_job = match semantic_job {
         Ok(value) => value,
         Err(error) => daemon_semantic_failed_job(data_root, format!("{error:#}")),
@@ -1342,12 +1362,12 @@ fn daemon_deadline_has_min_budget(deadline: Option<Instant>, min_secs: u64) -> b
     remaining >= StdDuration::from_secs(min_secs)
 }
 
-fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
+fn run_daemon_history_refresh_job(data_root: &Path, runtime: &mut DaemonRuntime) -> Result<Value> {
     #[cfg(all(test, ctx_sqlite_vec))]
     if let Some(value) = daemon_test_job("history_refresh") {
         return Ok(value);
     }
-
+    let _disk_io_pacing = runtime.history_refresh.install_daemon_disk_io_pacing();
     let last_run_at_ms = utc_now().timestamp_millis();
     let sources = search_refresh_sources(None);
     let plugin_sources = search_refresh_plugin_sources(
@@ -1356,7 +1376,7 @@ fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
         &crate::search_filters::SourceIdentityFilters::default(),
     )?;
     let source_count = sources.len().saturating_add(plugin_sources.len());
-    if source_count == 0 {
+    if source_count == 0 && !search_refresh_has_publication_work(data_root)? {
         return Ok(daemon_history_refresh_job_json(
             "skipped",
             0,
@@ -1367,12 +1387,14 @@ fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
         ));
     }
     let source_fingerprint = search_refresh_source_fingerprint(&sources);
-    let mut job = match refresh_sources_for_search(
+    let mut job = match refresh_sources_for_search_with_runtime(
         data_root,
         sources,
         plugin_sources,
         RefreshArg::Background,
         true,
+        crate::commands::import::ImportExecutionPolicy::Daemon,
+        &mut runtime.history_refresh,
     ) {
         Ok(totals) => daemon_history_refresh_job_json(
             "completed",
@@ -1382,14 +1404,17 @@ fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
             None,
             None,
         ),
-        Err(error) => daemon_history_refresh_job_json(
-            "failed",
-            source_count,
-            ImportTotals::default(),
-            last_run_at_ms,
-            None,
-            Some(error_summary(&error)),
-        ),
+        Err(error) => {
+            let totals = search_refresh_failure_totals(&error).unwrap_or_default();
+            daemon_history_refresh_job_json(
+                "failed",
+                source_count,
+                totals,
+                last_run_at_ms,
+                None,
+                Some(error_summary(&error)),
+            )
+        }
     };
     if let Some(map) = job.as_object_mut() {
         map.insert("source_fingerprint".to_owned(), json!(source_fingerprint));
@@ -1443,25 +1468,22 @@ fn daemon_history_refresh_job_did_work(value: &Value) -> bool {
     let Some(totals) = value.get("totals") else {
         return false;
     };
-    ["imported_sessions", "imported_events", "imported_edges"]
-        .into_iter()
-        .any(|key| totals.get(key).and_then(Value::as_u64).unwrap_or(0) > 0)
-}
-
-fn search_refresh_source_fingerprint(sources: &[crate::provider_sources::SourceInfo]) -> String {
-    let mut items = sources
-        .iter()
-        .map(|source| {
-            format!(
-                "{}|{}|{}",
-                source.provider.as_str(),
-                source.source_format,
-                source.path.display()
-            )
-        })
-        .collect::<Vec<_>>();
-    items.sort();
-    semantic_text_hash(&items.join("\n"))
+    if totals
+        .get("durable_progress")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    [
+        "imported_sessions",
+        "imported_events",
+        "imported_edges",
+        "fresh_units_processed",
+        "recovery_units_processed",
+    ]
+    .into_iter()
+    .any(|key| totals.get(key).and_then(Value::as_u64).unwrap_or(0) > 0)
 }
 
 fn run_daemon_semantic_job(
@@ -1676,10 +1698,7 @@ fn daemon_semantic_requested_seconds(args: &DaemonRunArgs) -> u64 {
     })
 }
 
-fn semantic_daemon_model_load_needed(
-    report: &SemanticWorkerReport,
-    runtime_loaded: bool,
-) -> bool {
+fn semantic_daemon_model_load_needed(report: &SemanticWorkerReport, runtime_loaded: bool) -> bool {
     report.searchable_items > 0 && !runtime_loaded
 }
 
@@ -1766,8 +1785,7 @@ fn daemon_semantic_model_load_deferred_job(
     );
     value["retryable"] = Value::Bool(true);
     value["available_memory_bytes"] = json!(deferred.available_memory_bytes);
-    value["required_available_memory_bytes"] =
-        json!(deferred.required_available_memory_bytes);
+    value["required_available_memory_bytes"] = json!(deferred.required_available_memory_bytes);
     compact_json(value)
 }
 
@@ -1814,9 +1832,9 @@ fn semantic_worker_report_for_daemon(data_root: &Path) -> SemanticWorkerReport {
     if db_path.exists() {
         match open_existing_store_read_only(&db_path, "ctx daemon status") {
             Ok(store) => {
-                return semantic_worker_report_cached(data_root, Some(&store)).unwrap_or_else(|error| {
-                    SemanticWorkerReport::unavailable(data_root, format!("{error:#}"))
-                });
+                return semantic_worker_report_cached(data_root, Some(&store)).unwrap_or_else(
+                    |error| SemanticWorkerReport::unavailable(data_root, format!("{error:#}")),
+                );
             }
             Err(error) => {
                 return SemanticWorkerReport::unavailable(data_root, format!("{error:#}"));
@@ -2312,4 +2330,40 @@ fn daemon_autostart_u64_env(name: &str, default: u64, max: u64) -> u64 {
         .filter(|value| *value > 0)
         .map(|value| value.min(max))
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    #[test]
+    fn deferred_history_work_does_not_count_as_daemon_productivity() {
+        let deferred = daemon_history_refresh_job_json(
+            "completed",
+            1,
+            ImportTotals {
+                fresh_units_pending: 1,
+                recovery_units_pending: 2,
+                ..ImportTotals::default()
+            },
+            1,
+            None,
+            None,
+        );
+        assert!(!daemon_history_refresh_job_did_work(&deferred));
+
+        let completed = daemon_history_refresh_job_json(
+            "completed",
+            1,
+            ImportTotals {
+                recovery_units_processed: 1,
+                recovery_units_pending: 1,
+                ..ImportTotals::default()
+            },
+            2,
+            None,
+            None,
+        );
+        assert!(daemon_history_refresh_job_did_work(&completed));
+    }
 }

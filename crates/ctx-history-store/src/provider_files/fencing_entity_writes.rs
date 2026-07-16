@@ -190,23 +190,19 @@ impl Store {
     ) -> Result<()> {
         let existing = self.stored_session_effective_source_id(session.id)?;
         let mut existing_sources = vec![existing];
-        if let Some((parent, root, transcript, record)) = self
+        if let Some((transcript, record)) = self
             .conn
             .query_row(
-                "SELECT parent_session_id, root_session_id, transcript_blob_id, history_record_id FROM sessions WHERE id = ?1",
+                "SELECT transcript_blob_id, history_record_id FROM sessions WHERE id = ?1",
                 params![session.id.to_string()],
-                four_optional_uuids_from_row,
+                two_optional_uuids_from_row,
             )
             .optional()?
         {
-            existing_sources.extend(self.session_reference_source_ids(
-                parent, root, transcript, record,
-            )?);
+            existing_sources.extend(self.session_owned_reference_source_ids(transcript, record)?);
         }
         let mut incoming_sources = vec![session.capture_source_id];
-        incoming_sources.extend(self.session_reference_source_ids(
-            session.parent_session_id,
-            session.root_session_id,
+        incoming_sources.extend(self.session_owned_reference_source_ids(
             session.transcript_blob_id,
             session.history_record_id,
         )?);
@@ -314,27 +310,7 @@ impl Store {
             edge.from_session_id,
             edge.to_session_id,
         )?;
-        let mut existing_sources = vec![existing];
-        if let Some((from, to)) = self
-            .conn
-            .query_row(
-                "SELECT from_session_id, to_session_id FROM session_edges WHERE id = ?1",
-                params![edge.id.to_string()],
-                two_uuids_from_row,
-            )
-            .optional()?
-        {
-            existing_sources.extend([
-                self.direct_entity_source_id("sessions", from)?,
-                self.direct_entity_source_id("sessions", to)?,
-            ]);
-        }
-        let incoming_sources = vec![
-            incoming,
-            self.direct_entity_source_id("sessions", edge.from_session_id)?,
-            self.direct_entity_source_id("sessions", edge.to_session_id)?,
-        ];
-        self.ensure_provider_file_source_ids_write_allowed(&existing_sources, &incoming_sources)
+        self.ensure_provider_file_source_ids_write_allowed(&[existing], &[incoming])
     }
 
     pub(crate) fn ensure_provider_file_direct_source_write_allowed(
@@ -383,7 +359,7 @@ impl Store {
                 existing_sources.push(self.direct_entity_source_id("sessions", session)?);
             }
             if let Some(record) = record {
-                existing_sources.push(self.direct_entity_source_id("history_records", record)?);
+                self.push_history_record_reference_source(&mut existing_sources, record)?;
             }
         }
         let mut incoming_sources = vec![summary.source_id];
@@ -391,7 +367,7 @@ impl Store {
             incoming_sources.push(self.direct_entity_source_id("sessions", session)?);
         }
         if let Some(record) = summary.history_record_id {
-            incoming_sources.push(self.direct_entity_source_id("history_records", record)?);
+            self.push_history_record_reference_source(&mut incoming_sources, record)?;
         }
         self.ensure_provider_file_source_ids_write_allowed(&existing_sources, &incoming_sources)
     }
@@ -418,16 +394,14 @@ impl Store {
             )
             .optional()?
         {
-            existing_sources.extend([
-                self.direct_entity_source_id("history_records", record)?,
-                self.link_target_source_id(&target_type, target)?,
-            ]);
+            self.push_history_record_reference_source(&mut existing_sources, record)?;
+            existing_sources.push(self.link_target_source_id(&target_type, target)?);
         }
-        let incoming_sources = vec![
+        let mut incoming_sources = vec![
             link.source_id,
-            self.direct_entity_source_id("history_records", link.history_record_id)?,
             self.link_target_source_id(link.target_type.as_str(), link.target_id)?,
         ];
+        self.push_history_record_reference_source(&mut incoming_sources, link.history_record_id)?;
         self.ensure_provider_file_source_ids_write_allowed(&existing_sources, &incoming_sources)
     }
 
@@ -463,6 +437,16 @@ impl Store {
         record_id: Uuid,
     ) -> Result<()> {
         if let Some(active) = self.provider_file_publication.borrow().as_ref() {
+            let exact_capability = active.lifecycle.load(Ordering::Acquire)
+                && self.provider_file_write_scope.get() == Some(active.scope_id);
+            let record_exists: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM history_records WHERE id = ?1)",
+                params![record_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if exact_capability && !record_exists {
+                return Ok(());
+            }
             return Err(active_owner_mismatch(active));
         }
         let marker = self
@@ -523,6 +507,57 @@ impl Store {
             )
             .optional()?;
         self.ensure_provider_file_marker_write_allowed(marker)
+    }
+
+    pub(crate) fn track_provider_file_publication_history_record(
+        &self,
+        record_id: Uuid,
+    ) -> Result<()> {
+        let active = self.provider_file_publication.borrow();
+        let Some(active) = active.as_ref() else {
+            return Ok(());
+        };
+        if !active.lifecycle.load(Ordering::Acquire)
+            || self.provider_file_write_scope.get() != Some(active.scope_id)
+            || !active.attached
+        {
+            return Err(active_owner_mismatch(active));
+        }
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {STAGING_SEEN_TABLE} (replacement_id, entity_kind, entity_id) VALUES (?1, 'history_record', ?2)"
+            ),
+            params![active.scope_id.to_string(), record_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn track_provider_file_publication_capture_source(
+        &self,
+        source_id: Uuid,
+    ) -> Result<()> {
+        let active = self.provider_file_publication.borrow();
+        let Some(active) = active.as_ref() else {
+            return Ok(());
+        };
+        if !active.lifecycle.load(Ordering::Acquire)
+            || self.provider_file_write_scope.get() != Some(active.scope_id)
+        {
+            return Err(active_owner_mismatch(active));
+        }
+        let replacement_id = active.scope_id.to_string();
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {STAGING_SEEN_TABLE} \
+                 (replacement_id, entity_kind, entity_id) VALUES (?1, ?2, ?3)"
+            ),
+            params![
+                &replacement_id,
+                CURRENT_CAPTURE_SOURCE_KIND,
+                source_id.to_string()
+            ],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn ensure_provider_file_session_assignment_write_allowed(
@@ -661,43 +696,5 @@ impl Store {
             entity_id,
             effective_source_predicate,
         )
-    }
-
-    fn direct_entity_source_id(&self, table: &'static str, id: Uuid) -> Result<Option<Uuid>> {
-        if table == "vcs_changes" {
-            return self
-                .conn
-                .query_row(
-                    r#"
-                    SELECT COALESCE(change.source_id, workspace.source_id)
-                    FROM vcs_changes AS change
-                    LEFT JOIN vcs_workspaces AS workspace ON workspace.id = change.vcs_workspace_id
-                    WHERE change.id = ?1
-                    "#,
-                    params![id.to_string()],
-                    optional_uuid_from_first_column,
-                )
-                .optional()
-                .map(Option::flatten)
-                .map_err(StoreError::from);
-        }
-        let source_column = match table {
-            "sessions" => "capture_source_id",
-            "artifacts"
-            | "history_records"
-            | "summaries"
-            | "history_record_links"
-            | "vcs_workspaces" => "source_id",
-            _ => unreachable!("unsupported referenced provider-owned table"),
-        };
-        self.conn
-            .query_row(
-                &format!("SELECT {source_column} FROM {table} WHERE id = ?1"),
-                params![id.to_string()],
-                optional_uuid_from_first_column,
-            )
-            .optional()
-            .map(|value| value.flatten())
-            .map_err(StoreError::from)
     }
 }

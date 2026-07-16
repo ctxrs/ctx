@@ -69,8 +69,11 @@ ctx daemon enable
   semantic is enabled. The daemon may acquire the local embedding model for
   semantic indexing. A looping daemon keeps the embedding model resident after
   cold start and performs recent-work freshness checks before settling into idle
-  loops; cloud sync remains disabled with `enabled: false` and
-  `network_allowed: false`.
+  loops. Native refresh charges measured source reads, logical write work, and
+  observed FTS maintenance WAL size to an internal 8 MiB/s I/O budget with a 1
+  MiB burst; SQLite and filesystem write amplification mean this is not a hard
+  physical-device bandwidth cap. Cloud sync remains disabled with
+  `enabled: false` and `network_allowed: false`.
 - `daemon disable` and `daemon enable` update `[daemon].enabled` in
   `config.toml`. The prerelease default is disabled, so daemon maintenance is an
   explicit opt-in; `daemon run --force` overrides a disabled config for explicit
@@ -266,6 +269,13 @@ or structurally incompatible input fails that source, while ctx-owned storage
 or index failures abort the command. A source with only rejected records is a
 failure; a source with valid content and rejections completes with an explicit
 `completed_with_rejections` outcome.
+
+Foreground import charges source reads, logical write work, and observed FTS
+maintenance WAL size to an internal bounded I/O budget (64 MiB/s with an 8 MiB
+burst). This has no command-line or configuration option: oversized units still
+make durable progress, while pacing occurs between bounded batches and slices.
+SQLite and filesystem write amplification mean the budget is not a hard
+physical-device bandwidth cap.
 
 When `[daemon].enabled` is true, `import` may opportunistically start a short
 one-pass ctx-owned maintenance profile after the foreground import finishes.

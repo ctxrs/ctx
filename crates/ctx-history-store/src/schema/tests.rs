@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::BTreeSet,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -6,13 +10,18 @@ use ctx_history_core::{
     Event, EventRole, EventType, Fidelity, Session, SessionHistoryArchive, SessionStatus,
     SyncMetadata, SyncState, Visibility,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{
+    hooks::{AuthAction, AuthContext, Authorization},
+    params, Connection,
+};
 use uuid::Uuid;
 
+use crate::provider_files::PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES;
 use crate::schema::ddl::{table_exists, table_has_column, CREATE_TABLES_SQL};
 use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::migrations::{
+    migrate_to_v50, migrate_to_v51, migrate_to_v52, migrate_to_v53,
     rebuild_capture_sources_provider_check, rebuild_catalog_sessions_provider_check,
 };
 use crate::{Store, SCHEMA_VERSION};
@@ -1146,6 +1155,42 @@ fn schema_v22_adds_forgecode_provider_checks() {
 }
 
 #[test]
+fn v54_migration_recreates_stable_views_with_inventory_publication_fencing() {
+    let temp = tempdir();
+    let path = temp.path().join("v54-stable-views.sqlite");
+    drop(Store::open(&path).unwrap());
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP VIEW ctx_sources;\
+             CREATE VIEW ctx_sources AS SELECT 1 AS stale;\
+             PRAGMA user_version = 53;",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let view_sql: String = store
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'ctx_sources'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(view_sql.contains("import_inventory_generations"));
+    assert!(!view_sql.contains("SELECT 1 AS stale"));
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_v23_adds_mistral_vibe_provider_checks() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
@@ -1444,4 +1489,5 @@ fn schema_v46_adds_mimocode_provider_checks() {
         "/tmp/mimocode/mimocode.db",
     );
 }
+
 include!("tests/import_contract.rs");

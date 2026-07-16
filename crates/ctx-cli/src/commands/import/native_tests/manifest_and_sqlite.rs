@@ -5,36 +5,152 @@ fn manifested_completion_requires_exact_post_import_observation() {
     fs::create_dir(&source_path).unwrap();
     fs::write(source_path.join("messages.jsonl"), b"{}\n").unwrap();
     fs::write(source_path.join("meta.json"), b"{}\n").unwrap();
+    let companion_modified = fs::metadata(source_path.join("meta.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
-        let mut meta = fs::OpenOptions::new()
-            .append(true)
-            .open(source_path.join("meta.json"))
+        let meta_path = source_path.join("meta.json");
+        fs::write(&meta_path, b"[]\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&meta_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(companion_modified))
             .unwrap();
-        use std::io::Write as _;
-        meta.write_all(b"changed\n").unwrap();
-        meta.sync_all().unwrap();
         Ok(successful_file_summary())
     };
 
     let summary = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .unwrap();
 
     assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.completed_units, 0);
+    assert_eq!(summary.deferred_units, 0);
+    assert!(summary.post_import_inventory_generation.is_some());
     let pending = store
         .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
         .unwrap();
     assert_eq!(pending.len(), 1, "changed companion must remain pending");
     assert_eq!(store.source_import_file_counts().unwrap().indexed, 0);
+}
+
+#[test]
+fn manifested_current_result_reports_exact_completion_and_post_import_generation() {
+    let temp = tempdir();
+    let source_path = temp.path().join("sessions");
+    fs::create_dir(&source_path).unwrap();
+    fs::write(source_path.join("messages.jsonl"), b"{}\n").unwrap();
+    let source = explicit_path_source(CaptureProvider::MistralVibe, source_path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let files = collect_source_import_files(&source).unwrap();
+    assert_eq!(files.len(), 1);
+    let pre_import = persist_new_source_import_observation(&store, &source, &files).unwrap();
+    let mut import_file =
+        |_store: &mut Store, _pending_source: &SourceInfo| Ok(successful_file_summary());
+
+    let outcome = import_manifested_source_with_importer(
+        &mut store,
+        &source,
+        ManifestedImportOptions::new(
+            Some(&files),
+            Some(pre_import.inventory_generation),
+            false,
+            None,
+        ),
+        &mut import_file,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.completed_units, 1);
+    assert_eq!(outcome.deferred_units, 0);
+    assert_eq!(
+        outcome.post_import_inventory_generation,
+        Some(pre_import.inventory_generation)
+    );
+    assert!(outcome.post_import_preinventory.is_none());
+    assert_eq!(outcome.imported_events, 1);
+}
+
+#[test]
+fn manifested_130_unit_drain_keeps_one_generation_across_three_slices() {
+    let temp = tempdir();
+    let source_path = temp.path().join("sessions");
+    fs::create_dir(&source_path).unwrap();
+    for index in 0..130 {
+        let session_path = source_path.join(format!("session-{index:03}"));
+        fs::create_dir(&session_path).unwrap();
+        fs::write(session_path.join("messages.jsonl"), b"{}\n").unwrap();
+    }
+    let source = explicit_path_source(CaptureProvider::MistralVibe, source_path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let files = collect_source_import_files(&source).unwrap();
+    assert_eq!(files.len(), 130);
+    let persisted = persist_new_source_import_observation(&store, &source, &files).unwrap();
+    let plan = ImportPlan::build(
+        &store,
+        vec![PlannedImportSource {
+            source: source.clone(),
+            stats: SourceStats::default(),
+            preinventory: SourcePreinventory::SourceImportFiles {
+                files: files.clone(),
+                inventory_generation: persisted.inventory_generation,
+            },
+        }],
+    )
+    .unwrap();
+    assert_eq!(plan.fresh_units, 130);
+    let mut completed = 0usize;
+    let mut slices = 0usize;
+    let mut import_file =
+        |_store: &mut Store, _pending_source: &SourceInfo| Ok(successful_file_summary());
+
+    loop {
+        let slice = plan
+            .select_slice(&store, ImportWorkClass::Fresh, IMPORT_SLICE_MAX_UNITS)
+            .unwrap();
+        if slice.is_empty() {
+            break;
+        }
+        slices += 1;
+        let selected = &slice.sources[0];
+        let outcome = import_manifested_source_with_importer(
+            &mut store,
+            &source,
+            ManifestedImportOptions::new(
+                Some(&files),
+                Some(persisted.inventory_generation),
+                false,
+                Some(&selected.work),
+            ),
+            &mut import_file,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.post_import_inventory_generation,
+            Some(persisted.inventory_generation)
+        );
+        completed += outcome.completed_units;
+    }
+
+    assert_eq!(slices, 3);
+    assert_eq!(completed, 130);
+    assert!(store
+        .list_source_import_file_work(
+            source.provider,
+            source.path.to_str().unwrap(),
+            ImportWorkClass::Fresh,
+            1,
+        )
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -101,7 +217,7 @@ fn whole_source_post_import_observation_failure_is_not_success() {
 #[test]
 fn whole_source_store_failure_takes_precedence_over_source_failure() {
     let observation_error = anyhow::Error::new(StoreError::BulkSearchImportBusy);
-    let selected = final_observation_system_error(Err(observation_error))
+    let selected = final_observation_system_error::<()>(Err(observation_error))
         .expect("a store failure during final observation must abort the whole run");
 
     assert_eq!(import_error_scope(&selected), ImportFailureScope::System);
@@ -126,10 +242,7 @@ fn manifested_system_error_survives_failed_post_observation() {
     let error = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .expect_err("the original system error must abort the manifested import");
@@ -162,10 +275,7 @@ fn manifested_source_error_keeps_its_typed_identity() {
     let error = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .expect_err("a source adapter failure must remain an error");
@@ -178,6 +288,83 @@ fn manifested_source_error_keeps_its_typed_identity() {
         ))) if code.code == rusqlite::ErrorCode::DatabaseBusy
     ));
     assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+}
+
+#[test]
+fn manifested_terminal_file_failure_preserves_sibling_success() {
+    let temp = tempdir();
+    let source_path = temp.path().join("sessions");
+    fs::create_dir(&source_path).unwrap();
+    fs::write(source_path.join("good.jsonl"), b"{}\n").unwrap();
+    fs::write(source_path.join("bad.jsonl"), b"{}\n").unwrap();
+    let source = explicit_path_source(CaptureProvider::Pi, source_path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let mut import_file = |_store: &mut Store, pending_source: &SourceInfo| {
+        if pending_source.path.ends_with("bad.jsonl") {
+            return Err(anyhow::Error::new(
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: pending_source.path.clone(),
+                    reason: "deterministic malformed fixture",
+                },
+            ));
+        }
+        Ok(successful_file_summary())
+    };
+
+    let outcome = import_manifested_source_with_importer(
+        &mut store,
+        &source,
+        ManifestedImportOptions::new(None, None, false, None),
+        &mut import_file,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.completed_units, 2);
+    assert_eq!(outcome.summary.imported_events, 1);
+    assert_eq!(outcome.summary.failed, 1);
+    assert_eq!(outcome.summary.failures.len(), 1);
+    assert!(outcome.summary.failures[0].error.contains("bad.jsonl"));
+}
+
+#[test]
+fn manifested_retryable_file_failure_preserves_original_error_after_sibling_success() {
+    let temp = tempdir();
+    let source_path = temp.path().join("sessions");
+    fs::create_dir(&source_path).unwrap();
+    fs::write(source_path.join("good.jsonl"), b"{}\n").unwrap();
+    fs::write(source_path.join("retry.jsonl"), b"{}\n").unwrap();
+    let source = explicit_path_source(CaptureProvider::Pi, source_path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let mut import_file = |_store: &mut Store, pending_source: &SourceInfo| {
+        if pending_source.path.ends_with("retry.jsonl") {
+            return Err(anyhow::Error::new(CaptureError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "retry this exact file",
+            ))));
+        }
+        Ok(successful_file_summary())
+    };
+
+    let error = import_manifested_source_with_importer(
+        &mut store,
+        &source,
+        ManifestedImportOptions::new(None, None, false, None),
+        &mut import_file,
+    )
+    .expect_err("a retryable manifested file failure must remain retryable");
+
+    let partial = error
+        .downcast::<ProviderImportBatchError>()
+        .expect("sibling success must be attached to the remaining retryable error");
+    let (outcome, error) = partial.into_parts();
+    assert_eq!(outcome.completed_units, 1);
+    assert_eq!(outcome.summary.imported_events, 1);
+    assert!(outcome.made_durable_progress());
+    assert!(matches!(
+        error.downcast_ref::<CaptureError>(),
+        Some(CaptureError::Io(source)) if source.kind() == std::io::ErrorKind::TimedOut
+    ));
+    assert!(error.to_string().contains("retry this exact file"));
 }
 
 #[test]
@@ -210,18 +397,18 @@ fn manifested_sqlite_change_during_import_remains_pending() {
         Ok(successful_file_summary())
     };
 
-    import_manifested_source_with_importer(
+    let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .unwrap();
 
     assert!(writer.is_some());
+    assert_eq!(outcome.completed_units, 0);
+    assert_eq!(outcome.deferred_units, 0);
+    assert!(outcome.post_import_inventory_generation.is_some());
     assert_eq!(
         store
             .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
@@ -259,17 +446,16 @@ fn optional_companion_directory_change_invalidates_the_absence_watch() {
         Ok(successful_file_summary())
     };
 
-    import_manifested_source_with_importer(
+    let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .unwrap();
 
+    assert_eq!(outcome.completed_units, 0);
+    assert!(outcome.post_import_inventory_generation.is_some());
     assert_eq!(
         store
             .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
@@ -296,17 +482,23 @@ fn removed_and_new_manifest_units_are_stale_and_pending() {
         Ok(successful_file_summary())
     };
 
-    import_manifested_source_with_importer(
+    let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .unwrap();
 
+    assert_eq!(outcome.completed_units, 0);
+    assert!(outcome.post_import_inventory_generation.is_some());
+    let pending = store
+        .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source_path, old_path.display().to_string());
+    let current_files = collect_source_import_files(&source).unwrap();
+    persist_new_source_import_observation(&store, &source, &current_files).unwrap();
     let pending = store
         .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
         .unwrap();
@@ -338,15 +530,22 @@ fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
     let summary = import_manifested_source_with_importer(
         &mut store,
         &source,
-        new_id(),
-        None,
-        None,
-        false,
+        ManifestedImportOptions::new(None, None, false, None),
         &mut import_file,
     )
     .unwrap();
 
-    assert_eq!(summary, ProviderImportSummary::default());
+    assert_eq!(summary.summary, ProviderImportSummary::default());
+    assert_eq!(summary.completed_units, 0);
+    assert_eq!(summary.deferred_units, 0);
+    assert!(summary.post_import_inventory_generation.is_some());
+    let counts = store.source_import_file_counts().unwrap();
+    assert_eq!(counts.stale, 0);
+    assert_eq!(counts.failed, 0);
+    assert_eq!(counts.rejected, 0);
+    let current_files = collect_source_import_files(&source).unwrap();
+    assert!(current_files.is_empty());
+    persist_new_source_import_observation(&store, &source, &current_files).unwrap();
     let counts = store.source_import_file_counts().unwrap();
     assert_eq!(counts.stale, 1);
     assert_eq!(counts.failed, 0);
@@ -500,6 +699,7 @@ fn provider_sqlite_lock_is_pending_until_the_lock_is_released() {
             .unwrap(),
         1
     );
+    persist_source_material(&store, &file);
     mark_source_import_file_result(
         &store,
         &file,
@@ -512,4 +712,77 @@ fn provider_sqlite_lock_is_pending_until_the_lock_is_released() {
         .list_pending_source_import_files(source.provider, &file.source_root)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn setup_drain_imports_later_complete_files_despite_an_incomplete_earlier_file() {
+    let temp = tempdir();
+    let source_root = temp.path().join("pi-fair-source");
+    let source = write_pi_source(&source_root, "partial-first");
+    let data_root = temp.path().join("data");
+    let args = crate::ImportArgs {
+        provider: Some(NativeProviderArg::Pi),
+        path: Some(source.path.clone()),
+        history_source: None,
+        history_source_manifest: Vec::new(),
+        reset_cursor: false,
+        format: None,
+        all: false,
+        resume: false,
+        no_daemon: true,
+        json: false,
+        progress: ProgressArg::None,
+    };
+    let run = |data_root: PathBuf| {
+        crate::commands::import::run_import_internal(
+            &args,
+            data_root,
+            &mut serde_json::Map::new(),
+            crate::commands::import::ImportRunOptions {
+                progress: ProgressArg::None,
+                json: false,
+                print_human: false,
+                allow_empty_sources: false,
+                include_history_source_plugins: false,
+                operation: "setup",
+            },
+        )
+        .unwrap()
+    };
+    let baseline = run(data_root.clone());
+    assert_eq!(baseline.totals.fresh_units_pending, 0, "{baseline:?}");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(source_root.join("session.jsonl"))
+        .unwrap()
+        .write_all(br#"{"type":"message","id":"partial""#)
+        .unwrap();
+    fs::write(
+        source_root.join("later.jsonl"),
+        format!(
+            "{}{}",
+            jsonl(json!({
+                "type": "session",
+                "id": "complete-later",
+                "timestamp": "2026-07-14T12:00:00Z"
+            })),
+            jsonl(json!({
+                "type": "message",
+                "id": "complete-later-message",
+                "timestamp": "2026-07-14T12:00:01Z",
+                "message": {"role": "user", "content": "complete later foreground content"}
+            }))
+        ),
+    )
+    .unwrap();
+
+    let report = run(data_root.clone());
+
+    assert_eq!(report.totals.fresh_units_processed, 1, "{report:?}");
+    assert_eq!(report.totals.fresh_units_pending, 1, "{report:?}");
+    let store = Store::open(ctx_history_core::database_path(data_root)).unwrap();
+    assert!(serde_json::to_string(&store.export_archive().unwrap())
+        .unwrap()
+        .contains("complete later foreground content"));
+    assert!(!store.has_pending_provider_file_publications().unwrap());
 }

@@ -15,6 +15,7 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::CaptureError;
+    use crate::{install_disk_io_pacer, DiskIoPacer};
 
     use super::{
         acquire_snapshot_copy_lock, create_private_snapshot_dir_in, create_private_snapshot_file,
@@ -150,6 +151,26 @@ mod tests {
                 copied_files: 3,
             }
         );
+    }
+
+    #[test]
+    fn snapshot_copy_accounts_source_and_destination_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("paced-snapshot.db");
+        let _writer = real_wal_writer(&db);
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        let snapshot_bytes = generation
+            .snapshot_files()
+            .into_iter()
+            .map(|file| file.snapshot_len())
+            .sum::<u64>();
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+
+        let connection = open_sqlite_readonly_source(&db).unwrap();
+        drop(connection);
+
+        assert!(pacer.charged_bytes() >= snapshot_bytes.saturating_mul(2));
     }
 
     #[test]
@@ -959,6 +980,7 @@ mod tests {
         writer
             .execute("UPDATE entries SET value = replace(value, 'a', 'b')", [])
             .unwrap();
+        writer.cache_flush().unwrap();
         let journal = sidecar(&source, "-journal");
         let journal_bytes = fs::read(&journal).unwrap();
         assert!(journal_bytes.starts_with(&super::super::sqlite_observation::JOURNAL_MAGIC));
