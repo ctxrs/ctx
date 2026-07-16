@@ -33,24 +33,15 @@ impl SemanticVectorStore {
         if !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(SemanticSidecarStats::default());
         }
-        let embedded_chunks = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM event_embedding_chunks WHERE model_key = ?1",
-                params![semantic_model_key()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        let embedded_items = self
-            .conn
-            .query_row(
-                "SELECT COUNT(DISTINCT event_id) FROM event_embedding_chunks WHERE model_key = ?1",
-                params![semantic_model_key()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
+        let (embedded_items, embedded_chunks) = self.conn.query_row(
+            r#"
+            SELECT COUNT(DISTINCT event_id), COUNT(*)
+            FROM event_embedding_chunks
+            WHERE model_key = ?1
+            "#,
+            params![semantic_model_key()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
         Ok(SemanticSidecarStats {
             embedded_items: embedded_items.max(0) as usize,
             embedded_chunks: embedded_chunks.max(0) as usize,
@@ -64,17 +55,53 @@ impl SemanticVectorStore {
         self.exact_stats()
     }
 
-    fn refresh_cached_stats(&self) -> Result<SemanticSidecarStats> {
-        let stats = self.exact_stats()?;
-        self.conn.execute(
+    fn initialize_cached_stats_if_absent(&mut self) -> Result<SemanticSidecarStats> {
+        if let Some(stats) = self.cached_stats()? {
+            return Ok(stats);
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let cached = tx
+            .query_row(
+                r#"
+                SELECT embedded_items, embedded_chunks
+                FROM semantic_index_stats
+                WHERE model_key = ?1
+                "#,
+                params![semantic_model_key()],
+                |row| {
+                    Ok(SemanticSidecarStats {
+                        embedded_items: row.get::<_, i64>(0)?.max(0) as usize,
+                        embedded_chunks: row.get::<_, i64>(1)?.max(0) as usize,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(stats) = cached {
+            tx.commit()?;
+            return Ok(stats);
+        }
+
+        let (embedded_items, embedded_chunks) = tx.query_row(
+            r#"
+            SELECT COUNT(DISTINCT event_id), COUNT(*)
+            FROM event_embedding_chunks
+            WHERE model_key = ?1
+            "#,
+            params![semantic_model_key()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let stats = SemanticSidecarStats {
+            embedded_items: embedded_items.max(0) as usize,
+            embedded_chunks: embedded_chunks.max(0) as usize,
+        };
+        tx.execute(
             r#"
             INSERT INTO semantic_index_stats
                 (model_key, embedded_items, embedded_chunks, updated_at_ms)
             VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(model_key) DO UPDATE SET
-                embedded_items = excluded.embedded_items,
-                embedded_chunks = excluded.embedded_chunks,
-                updated_at_ms = excluded.updated_at_ms
             "#,
             params![
                 semantic_model_key(),
@@ -83,7 +110,38 @@ impl SemanticVectorStore {
                 utc_now().timestamp_millis()
             ],
         )?;
+        tx.commit()?;
         Ok(stats)
+    }
+
+    fn update_cached_stats_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        deleted_items: usize,
+        deleted_chunks: usize,
+        inserted_items: usize,
+        inserted_chunks: usize,
+    ) -> Result<()> {
+        let updated = tx.execute(
+            r#"
+            UPDATE semantic_index_stats
+            SET embedded_items = MAX(embedded_items - ?2, 0) + ?3,
+                embedded_chunks = MAX(embedded_chunks - ?4, 0) + ?5,
+                updated_at_ms = ?6
+            WHERE model_key = ?1
+            "#,
+            params![
+                semantic_model_key(),
+                deleted_items as i64,
+                inserted_items as i64,
+                deleted_chunks as i64,
+                inserted_chunks as i64,
+                utc_now().timestamp_millis(),
+            ],
+        )?;
+        if updated != 1 {
+            return Err(anyhow!("semantic vector store cached stats are missing"));
+        }
+        Ok(())
     }
 
     fn maintenance_state_i64(&self, key: &str) -> Result<Option<i64>> {
@@ -115,6 +173,43 @@ impl SemanticVectorStore {
             params![key, value.to_string(), utc_now().timestamp_millis()],
         )?;
         Ok(())
+    }
+
+    fn set_maintenance_state_i64_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        key: &str,
+        value: i64,
+    ) -> Result<()> {
+        let key = Self::maintenance_state_key(key);
+        tx.execute(
+            r#"
+            INSERT INTO semantic_maintenance_state (key, value, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![key, value.to_string(), utc_now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    fn maintenance_state_i64_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        key: &str,
+    ) -> Result<Option<i64>> {
+        if !sqlite_table_exists(tx, "semantic_maintenance_state")? {
+            return Ok(None);
+        }
+        let key = Self::maintenance_state_key(key);
+        let value = tx
+            .query_row(
+                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|value| value.parse::<i64>().ok()))
     }
 
     fn delete_maintenance_state_keys(&self, keys: &[&str]) -> Result<()> {
@@ -322,11 +417,39 @@ impl SemanticVectorStore {
         if items.is_empty() {
             return Ok(());
         }
-        let maintain_sqlite_vec0 = self.sqlite_vec0_runtime_available()
-            && sqlite_table_exists(&self.conn, "event_embedding_vec0")?
-            && sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?;
-        let tx = self.conn.transaction()?;
+        self.initialize_cached_stats_if_absent()?;
+        let event_ids = items
+            .iter()
+            .map(|(doc, _)| doc.event_id)
+            .collect::<HashSet<_>>();
+        let sqlite_vec0_runtime_available = self.sqlite_vec0_runtime_available();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let sqlite_vec0_marked_ready =
+            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
+                == Some(SQLITE_VEC0_READY_STATE_VERSION);
+        let maintain_sqlite_vec0 = if sqlite_vec0_marked_ready
+            && sqlite_vec0_runtime_available
+            && sqlite_table_exists(&tx, "event_embedding_vec0")?
+            && sqlite_table_exists(&tx, "event_embedding_vec0_meta")?
         {
+            Self::sqlite_vec0_schema_compatible_on_connection(&tx)?
+        } else {
+            false
+        };
+        let mut deleted_items = 0_usize;
+        let mut deleted_chunks = 0_usize;
+        let mut inserted_events = HashSet::new();
+        let mut inserted_chunks = 0_usize;
+        {
+            if sqlite_vec0_marked_ready && !maintain_sqlite_vec0 {
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_READY_STATE_KEY,
+                    0,
+                )?;
+            }
             if maintain_sqlite_vec0 {
                 let mut delete_vec_stmt = tx.prepare(
                     r#"
@@ -341,22 +464,21 @@ impl SemanticVectorStore {
                 let mut delete_meta_stmt = tx.prepare(
                     "DELETE FROM event_embedding_vec0_meta WHERE model_key = ?1 AND event_id = ?2",
                 )?;
-                let mut deleted_events = std::collections::HashSet::new();
-                for (doc, _) in items {
-                    if deleted_events.insert(doc.event_id) {
-                        let event_id = doc.event_id.to_string();
-                        delete_vec_stmt.execute(params![semantic_model_key(), &event_id])?;
-                        delete_meta_stmt.execute(params![semantic_model_key(), &event_id])?;
-                    }
+                for event_id in &event_ids {
+                    let event_id = event_id.to_string();
+                    delete_vec_stmt.execute(params![semantic_model_key(), &event_id])?;
+                    delete_meta_stmt.execute(params![semantic_model_key(), &event_id])?;
                 }
             }
             let mut delete_stmt = tx.prepare(
                 "DELETE FROM event_embedding_chunks WHERE event_id = ?1 AND model_key = ?2",
             )?;
-            let mut deleted_events = std::collections::HashSet::new();
-            for (doc, _) in items {
-                if deleted_events.insert(doc.event_id) {
-                    delete_stmt.execute(params![doc.event_id.to_string(), semantic_model_key()])?;
+            for event_id in &event_ids {
+                let rows =
+                    delete_stmt.execute(params![event_id.to_string(), semantic_model_key()])?;
+                if rows > 0 {
+                    deleted_items = deleted_items.saturating_add(1);
+                    deleted_chunks = deleted_chunks.saturating_add(rows);
                 }
             }
             drop(delete_stmt);
@@ -395,7 +517,7 @@ impl SemanticVectorStore {
                 let history_record_id = doc.history_record_id.map(|id| id.to_string());
                 let session_id = doc.session_id.map(|id| id.to_string());
                 let blob = serialize_f32_blob(embedding);
-                stmt.execute(params![
+                let inserted = stmt.execute(params![
                     &event_id,
                     semantic_model_key(),
                     &history_record_id,
@@ -412,6 +534,10 @@ impl SemanticVectorStore {
                     &blob,
                     embedded_at_ms
                 ])?;
+                inserted_chunks = inserted_chunks.saturating_add(inserted);
+                if inserted > 0 {
+                    inserted_events.insert(doc.event_id);
+                }
                 let rowid = tx.last_insert_rowid();
                 if let (Some(meta_stmt), Some(vec_stmt)) =
                     (vec0_meta_stmt.as_mut(), vec0_stmt.as_mut())
@@ -431,9 +557,15 @@ impl SemanticVectorStore {
                     vec_stmt.execute(params![rowid, &blob])?;
                 }
             }
+            Self::update_cached_stats_in_transaction(
+                &tx,
+                deleted_items,
+                deleted_chunks,
+                inserted_events.len(),
+                inserted_chunks,
+            )?;
         }
         tx.commit()?;
-        self.refresh_cached_stats()?;
         Ok(())
     }
 
@@ -494,7 +626,6 @@ impl SemanticVectorStore {
         if let Some(next_cursor) = next_cursor {
             self.set_maintenance_state_i64("prune_event_seq_before", next_cursor)?;
         }
-        self.refresh_cached_stats()?;
         Ok(outcome)
     }
 
@@ -538,12 +669,33 @@ impl SemanticVectorStore {
         if event_ids.is_empty() || !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(0);
         }
-        let maintain_sqlite_vec0 = self.sqlite_vec0_runtime_available()
-            && sqlite_table_exists(&self.conn, "event_embedding_vec0")?
-            && sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?;
-        let tx = self.conn.transaction()?;
-        let mut deleted = 0_usize;
+        self.initialize_cached_stats_if_absent()?;
+        let sqlite_vec0_runtime_available = self.sqlite_vec0_runtime_available();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let sqlite_vec0_marked_ready =
+            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
+                == Some(SQLITE_VEC0_READY_STATE_VERSION);
+        let maintain_sqlite_vec0 = if sqlite_vec0_marked_ready
+            && sqlite_vec0_runtime_available
+            && sqlite_table_exists(&tx, "event_embedding_vec0")?
+            && sqlite_table_exists(&tx, "event_embedding_vec0_meta")?
         {
+            Self::sqlite_vec0_schema_compatible_on_connection(&tx)?
+        } else {
+            false
+        };
+        let mut deleted_items = 0_usize;
+        let mut deleted_chunks = 0_usize;
+        {
+            if sqlite_vec0_marked_ready && !maintain_sqlite_vec0 {
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_READY_STATE_KEY,
+                    0,
+                )?;
+            }
             if maintain_sqlite_vec0 {
                 let mut delete_vec_stmt = tx.prepare(
                     r#"
@@ -568,13 +720,17 @@ impl SemanticVectorStore {
                 "DELETE FROM event_embedding_chunks WHERE model_key = ?1 AND event_id = ?2",
             )?;
             for event_id in event_ids {
-                deleted = deleted.saturating_add(
-                    stmt.execute(params![semantic_model_key(), event_id.to_string()])?,
-                );
+                let rows = stmt.execute(params![semantic_model_key(), event_id.to_string()])?;
+                if rows > 0 {
+                    deleted_items = deleted_items.saturating_add(1);
+                    deleted_chunks = deleted_chunks.saturating_add(rows);
+                }
             }
+            drop(stmt);
+            Self::update_cached_stats_in_transaction(&tx, deleted_items, deleted_chunks, 0, 0)?;
         }
         tx.commit()?;
-        Ok(deleted)
+        Ok(deleted_chunks)
     }
 
 }

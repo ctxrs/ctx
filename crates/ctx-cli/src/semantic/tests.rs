@@ -1159,6 +1159,41 @@ mod tests {
     }
 
     #[test]
+    fn read_only_search_uses_blob_scan_while_vec0_is_not_ready() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let vector_path = temp.path().join("vectors.sqlite");
+        let event_id = Uuid::new_v4();
+        {
+            let mut store = SemanticVectorStore::open(&vector_path)?;
+            store.upsert_chunk_embeddings(&[(
+                test_chunk(event_id, 1, "interrupted"),
+                test_embedding(1.0, 0.0),
+            )])?;
+            store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+            store.conn.execute("DELETE FROM event_embedding_vec0", [])?;
+        }
+
+        let store = SemanticVectorStore::open_read_only(&vector_path)?.expect("vector store");
+        assert!(!store.sqlite_vec0_search_ready()?);
+        let search = store.search(&test_embedding(1.0, 0.0), 1)?;
+        assert_eq!(search.stats.backend, Some(SEMANTIC_VECTOR_BACKEND_RUST));
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.hits[0].event_id, event_id);
+        let vec_rows =
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM event_embedding_vec0", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        assert_eq!(vec_rows, 0, "read-only search must not repair vec0");
+        drop(store);
+
+        let store = SemanticVectorStore::open(&vector_path)?;
+        assert!(store.sqlite_vec0_ready()?);
+        Ok(())
+    }
+
+    #[test]
     fn sqlite_vec0_caps_large_k_without_falling_back() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
@@ -1262,6 +1297,172 @@ mod tests {
     }
 
     #[test]
+    fn cached_stats_track_multi_chunk_replacement_and_delete() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let multi_chunk_event = Uuid::new_v4();
+        let single_chunk_event = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[
+            (
+                test_chunk_at(multi_chunk_event, 2, "multi-v1", 0, 3),
+                test_embedding(1.0, 0.0),
+            ),
+            (
+                test_chunk_at(multi_chunk_event, 2, "multi-v1", 1, 3),
+                test_embedding(0.9, 0.1),
+            ),
+            (
+                test_chunk_at(multi_chunk_event, 2, "multi-v1", 2, 3),
+                test_embedding(0.8, 0.2),
+            ),
+            (
+                test_chunk(single_chunk_event, 1, "single"),
+                test_embedding(0.0, 1.0),
+            ),
+        ])?;
+
+        let stats = store.cached_stats()?.expect("cached stats");
+        assert_eq!(stats.embedded_items, 2);
+        assert_eq!(stats.embedded_chunks, 4);
+
+        store.conn.execute(
+            "DELETE FROM semantic_index_stats WHERE model_key = ?1",
+            [semantic_model_key()],
+        )?;
+        drop(store);
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let stats = store.cached_stats()?.expect("initialized cached stats");
+        assert_eq!(stats.embedded_items, 2);
+        assert_eq!(stats.embedded_chunks, 4);
+
+        store.upsert_chunk_embeddings(&[
+            (
+                test_chunk_at(multi_chunk_event, 3, "multi-v2", 0, 2),
+                test_embedding(1.0, 0.0),
+            ),
+            (
+                test_chunk_at(multi_chunk_event, 3, "multi-v2", 1, 2),
+                test_embedding(0.95, 0.05),
+            ),
+        ])?;
+        let stats = store.cached_stats()?.expect("cached stats");
+        assert_eq!(stats.embedded_items, 2);
+        assert_eq!(stats.embedded_chunks, 3);
+
+        assert_eq!(
+            store
+                .delete_embedding_chunks_for_event_ids(&[multi_chunk_event, multi_chunk_event,])?,
+            2
+        );
+        let stats = store.cached_stats()?.expect("cached stats");
+        assert_eq!(stats.embedded_items, 1);
+        assert_eq!(stats.embedded_chunks, 1);
+
+        assert_eq!(
+            store.delete_embedding_chunks_for_event_ids(&[single_chunk_event])?,
+            1
+        );
+        assert_eq!(
+            store.delete_embedding_chunks_for_event_ids(&[single_chunk_event])?,
+            0
+        );
+        let stats = store.cached_stats()?.expect("cached stats");
+        assert_eq!(stats.embedded_items, 0);
+        assert_eq!(stats.embedded_chunks, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn completed_sidecar_maintenance_is_not_repeated_on_second_open() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let vector_path = temp.path().join("vectors.sqlite");
+        {
+            let mut store = SemanticVectorStore::open(&vector_path)?;
+            store.upsert_chunk_embeddings(&[(
+                test_chunk(Uuid::new_v4(), 1, "ready"),
+                test_embedding(1.0, 0.0),
+            )])?;
+            for state_key in [SQLITE_VEC0_READY_STATE_KEY, PLAINTEXT_SANITIZED_STATE_KEY] {
+                let updated = store.conn.execute(
+                    "UPDATE semantic_maintenance_state SET updated_at_ms = 7 WHERE key = ?1",
+                    [SemanticVectorStore::maintenance_state_key(state_key)],
+                )?;
+                assert_eq!(updated, 1);
+            }
+            store.conn.execute(
+                r#"
+                UPDATE semantic_index_stats
+                SET embedded_items = 41, embedded_chunks = 43, updated_at_ms = 7
+                WHERE model_key = ?1
+                "#,
+                [semantic_model_key()],
+            )?;
+        }
+
+        let store = SemanticVectorStore::open(&vector_path)?;
+        for state_key in [SQLITE_VEC0_READY_STATE_KEY, PLAINTEXT_SANITIZED_STATE_KEY] {
+            let updated_at_ms = store.conn.query_row(
+                "SELECT updated_at_ms FROM semantic_maintenance_state WHERE key = ?1",
+                [SemanticVectorStore::maintenance_state_key(state_key)],
+                |row| row.get::<_, i64>(0),
+            )?;
+            assert_eq!(updated_at_ms, 7);
+        }
+        let stats = store.cached_stats()?.expect("cached stats");
+        assert_eq!(stats.embedded_items, 41);
+        assert_eq!(stats.embedded_chunks, 43);
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_plaintext_sanitation_recovers_before_marking_complete() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let vector_path = temp.path().join("vectors.sqlite");
+        {
+            let mut store = SemanticVectorStore::open(&vector_path)?;
+            let event_id = Uuid::new_v4();
+            store.upsert_chunk_embeddings(&[(
+                test_chunk(event_id, 1, "plaintext"),
+                test_embedding(1.0, 0.0),
+            )])?;
+            store.conn.execute(
+                "UPDATE event_embedding_chunks SET chunk_text = 'legacy plaintext' WHERE event_id = ?1",
+                [event_id.to_string()],
+            )?;
+            store.conn.execute(
+                r#"
+                INSERT INTO event_embeddings
+                    (event_id, model_key, event_seq, text_sha256, preview_text,
+                     dimensions, embedding_f32, embedded_at_ms)
+                VALUES (?1, ?2, 1, 'legacy', 'legacy preview', ?3, ?4, 1)
+                "#,
+                params![
+                    event_id.to_string(),
+                    semantic_model_key(),
+                    SEMANTIC_DIMENSIONS as i64,
+                    serialize_f32_blob(&test_embedding(1.0, 0.0)),
+                ],
+            )?;
+            store.set_maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY, 0)?;
+        }
+
+        let store = SemanticVectorStore::open(&vector_path)?;
+        assert_eq!(store.plaintext_value_count()?, 0);
+        assert_eq!(
+            store.maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY)?,
+            Some(PLAINTEXT_SANITIZED_STATE_VERSION)
+        );
+        let legacy_rows =
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM event_embeddings", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        assert_eq!(legacy_rows, 0);
+        Ok(())
+    }
+
+    #[test]
     fn prune_ineligible_events_is_bounded_and_advances_cursor() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let docs = write_searchable_store(temp.path(), SEMANTIC_PRUNE_EVENTS_PER_PASS + 1)?;
@@ -1281,6 +1482,10 @@ mod tests {
             vector_store.cached_or_exact_stats()?.embedded_items,
             SEMANTIC_PRUNE_EVENTS_PER_PASS + 1
         );
+        assert_eq!(
+            vector_store.cached_or_exact_stats()?.embedded_chunks,
+            SEMANTIC_PRUNE_EVENTS_PER_PASS + 1
+        );
 
         let first = vector_store.prune_ineligible_events(&store)?;
         assert_eq!(first.queued_stale_events, SEMANTIC_PRUNE_EVENTS_PER_PASS);
@@ -1289,10 +1494,12 @@ mod tests {
             1,
             "first pass should leave the oldest event for the next cursor page"
         );
+        assert_eq!(vector_store.cached_or_exact_stats()?.embedded_chunks, 1);
 
         let second = vector_store.prune_ineligible_events(&store)?;
         assert_eq!(second.queued_stale_events, 1);
         assert_eq!(vector_store.cached_or_exact_stats()?.embedded_items, 0);
+        assert_eq!(vector_store.cached_or_exact_stats()?.embedded_chunks, 0);
         assert_eq!(
             vector_store.dirty_event_count()?,
             SEMANTIC_PRUNE_EVENTS_PER_PASS + 1
@@ -1415,6 +1622,8 @@ mod tests {
 	        )?;
 
         assert!(!store.sqlite_vec0_ready()?);
+        store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+        assert!(!store.sqlite_vec0_search_ready()?);
         store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
 
@@ -1459,9 +1668,11 @@ mod tests {
         assert!(!store.sqlite_vec0_ready()?);
         assert!(
             store.sqlite_vec0_search_ready()?,
-            "search hot path should use cheap count readiness and leave deep integrity checks to maintenance"
+            "search hot path should trust the durable readiness marker"
         );
 
+        store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+        assert!(!store.sqlite_vec0_search_ready()?);
         store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
         Ok(())

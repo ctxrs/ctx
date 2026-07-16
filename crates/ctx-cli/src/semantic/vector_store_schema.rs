@@ -1,3 +1,8 @@
+const SQLITE_VEC0_READY_STATE_KEY: &str = "sqlite_vec0_ready_version";
+const SQLITE_VEC0_READY_STATE_VERSION: i64 = 1;
+const PLAINTEXT_SANITIZED_STATE_KEY: &str = "plaintext_sanitized_version";
+const PLAINTEXT_SANITIZED_STATE_VERSION: i64 = 1;
+
 impl SemanticVectorStore {
     fn open(path: &Path) -> Result<Self> {
         let _ = register_sqlite_vec_auto_extension();
@@ -78,7 +83,7 @@ impl SemanticVectorStore {
                 "semantic vector store schema version {user_version} is newer than this ctx supports"
             ));
         }
-        let mut compact_after_schema = false;
+        let mut canonical_schema_recreated = false;
         if sqlite_table_exists(&self.conn, "event_embedding_chunks")?
             && !sqlite_table_has_columns(
                 &self.conn,
@@ -102,8 +107,12 @@ impl SemanticVectorStore {
                 ],
             )?
         {
+            if sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
+                self.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+                self.set_maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY, 0)?;
+            }
             self.conn.execute("DROP TABLE event_embedding_chunks", [])?;
-            compact_after_schema = true;
+            canonical_schema_recreated = true;
         }
         self.conn.execute_batch(
             r#"
@@ -189,25 +198,15 @@ impl SemanticVectorStore {
                 [],
             )?;
         }
-        let foreign_vec0_rows = if sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
-            && sqlite_column_exists(&self.conn, "event_embedding_vec0_meta", "model_key")?
-        {
-            self.conn.query_row(
-                "SELECT COUNT(*) FROM event_embedding_vec0_meta WHERE model_key != ?1",
+        if canonical_schema_recreated {
+            self.conn.execute(
+                "DELETE FROM semantic_index_stats WHERE model_key = ?1",
                 [semantic_model_key()],
-                |row| row.get::<_, i64>(0),
-            )?
-        } else {
-            0
-        };
-        if foreign_vec0_rows > 0 {
-            self.drop_sqlite_vec0_schema()?;
+            )?;
+            self.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+            self.set_maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY, 0)?;
         }
-        let deleted_legacy_embeddings = self.conn.execute("DELETE FROM event_embeddings", [])?;
-        let scrubbed_chunk_text = self.conn.execute(
-            "UPDATE event_embedding_chunks SET chunk_text = '' WHERE chunk_text != ''",
-            [],
-        )?;
+        self.sanitize_legacy_plaintext_if_needed()?;
         self.conn.execute(
             r#"
             INSERT OR IGNORE INTO embedding_models
@@ -222,10 +221,37 @@ impl SemanticVectorStore {
                 utc_now().timestamp_millis()
             ],
         )?;
-        if compact_after_schema || deleted_legacy_embeddings > 0 || scrubbed_chunk_text > 0 {
+        self.initialize_cached_stats_if_absent()?;
+        self.ensure_sqlite_vec0_schema()?;
+        Ok(())
+    }
+
+    fn sanitize_legacy_plaintext_if_needed(&mut self) -> Result<()> {
+        let sanitation_state = self.maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY)?;
+        if sanitation_state == Some(PLAINTEXT_SANITIZED_STATE_VERSION) {
+            return Ok(());
+        }
+
+        let recovering_incomplete_sanitation = sanitation_state.is_some();
+        self.set_maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY, 0)?;
+        let tx = self.conn.transaction()?;
+        let deleted_legacy_embeddings = tx.execute("DELETE FROM event_embeddings", [])?;
+        let scrubbed_chunk_text = tx.execute(
+            "UPDATE event_embedding_chunks SET chunk_text = '' WHERE chunk_text != ''",
+            [],
+        )?;
+        tx.commit()?;
+
+        if recovering_incomplete_sanitation
+            || deleted_legacy_embeddings > 0
+            || scrubbed_chunk_text > 0
+        {
             self.compact_after_plaintext_scrub()?;
         }
-        self.ensure_sqlite_vec0_schema()?;
+        self.set_maintenance_state_i64(
+            PLAINTEXT_SANITIZED_STATE_KEY,
+            PLAINTEXT_SANITIZED_STATE_VERSION,
+        )?;
         Ok(())
     }
 
@@ -249,19 +275,16 @@ impl SemanticVectorStore {
     }
 
     fn ensure_sqlite_vec0_schema(&mut self) -> Result<()> {
-        if !self.sqlite_vec0_runtime_available() {
-            return Ok(());
-        }
-        if !self.sqlite_vec0_schema_compatible()? {
-            self.drop_sqlite_vec0_schema()?;
-        }
-        self.create_sqlite_vec0_schema()?;
         self.sync_sqlite_vec0_from_chunks_if_needed()
     }
 
     fn sqlite_vec0_schema_compatible(&self) -> Result<bool> {
-        let meta_exists = sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?;
-        let vec_exists = sqlite_table_exists(&self.conn, "event_embedding_vec0")?;
+        Self::sqlite_vec0_schema_compatible_on_connection(&self.conn)
+    }
+
+    fn sqlite_vec0_schema_compatible_on_connection(conn: &Connection) -> Result<bool> {
+        let meta_exists = sqlite_table_exists(conn, "event_embedding_vec0_meta")?;
+        let vec_exists = sqlite_table_exists(conn, "event_embedding_vec0")?;
         if !meta_exists && !vec_exists {
             return Ok(true);
         }
@@ -269,7 +292,7 @@ impl SemanticVectorStore {
             return Ok(false);
         }
         if !sqlite_table_has_columns(
-            &self.conn,
+            conn,
             "event_embedding_vec0_meta",
             &[
                 "rowid",
@@ -286,7 +309,7 @@ impl SemanticVectorStore {
         )? {
             return Ok(false);
         }
-        let Some(sql) = sqlite_table_sql(&self.conn, "event_embedding_vec0")? else {
+        let Some(sql) = sqlite_table_sql(conn, "event_embedding_vec0")? else {
             return Ok(false);
         };
         let sql = sql.to_ascii_lowercase();
@@ -324,6 +347,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
+    #[cfg(all(test, ctx_sqlite_vec))]
     fn sqlite_vec0_mismatch_count(&self) -> Result<usize> {
         if !self.sqlite_vec0_runtime_available()
             || !sqlite_table_exists(&self.conn, "event_embedding_vec0")?
@@ -415,6 +439,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
+    #[cfg(all(test, ctx_sqlite_vec))]
     fn sqlite_vec0_counts(&self) -> Result<Option<(usize, usize, usize)>> {
         if !self.sqlite_vec0_runtime_available()
             || !sqlite_table_exists(&self.conn, "event_embedding_vec0")?
@@ -455,6 +480,9 @@ impl SemanticVectorStore {
 
     #[cfg(all(test, ctx_sqlite_vec))]
     fn sqlite_vec0_ready(&self) -> Result<bool> {
+        if !self.sqlite_vec0_durably_ready()? {
+            return Ok(false);
+        }
         let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
             return Ok(false);
         };
@@ -465,20 +493,34 @@ impl SemanticVectorStore {
     }
 
     fn sqlite_vec0_search_ready(&self) -> Result<bool> {
-        let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
+        if !self.sqlite_vec0_durably_ready()? || !self.sqlite_vec0_runtime_available() {
             return Ok(false);
-        };
-        Ok(canonical_chunks > 0 && meta_rows == canonical_chunks && vec_rows == canonical_chunks)
+        }
+        if !sqlite_table_exists(&self.conn, "event_embedding_vec0")?
+            || !sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
+        {
+            return Ok(false);
+        }
+        self.sqlite_vec0_schema_compatible()
+    }
+
+    fn sqlite_vec0_durably_ready(&self) -> Result<bool> {
+        Ok(self.maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY)?
+            == Some(SQLITE_VEC0_READY_STATE_VERSION))
     }
 
     fn sync_sqlite_vec0_from_chunks_if_needed(&mut self) -> Result<()> {
-        let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
+        let schema_complete = sqlite_table_exists(&self.conn, "event_embedding_vec0")?
+            && sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
+            && self.sqlite_vec0_schema_compatible()?;
+        let marked_ready = self.sqlite_vec0_durably_ready()?;
+        if schema_complete && marked_ready {
             return Ok(());
-        };
-        if meta_rows == canonical_chunks
-            && vec_rows == canonical_chunks
-            && self.sqlite_vec0_mismatch_count()? == 0
-        {
+        }
+        if marked_ready {
+            self.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+        }
+        if !self.sqlite_vec0_runtime_available() {
             return Ok(());
         }
         self.rebuild_sqlite_vec0_from_chunks()
@@ -488,9 +530,12 @@ impl SemanticVectorStore {
         if !self.sqlite_vec0_runtime_available() {
             return Ok(());
         }
+        self.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
         self.drop_sqlite_vec0_schema()?;
         self.create_sqlite_vec0_schema()?;
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         {
             let mut rows = tx.prepare(
                 r#"
@@ -539,6 +584,11 @@ impl SemanticVectorStore {
                 vec_stmt.execute(params![rowid, embedding])?;
             }
         }
+        Self::set_maintenance_state_i64_in_transaction(
+            &tx,
+            SQLITE_VEC0_READY_STATE_KEY,
+            SQLITE_VEC0_READY_STATE_VERSION,
+        )?;
         tx.commit()?;
         Ok(())
     }
