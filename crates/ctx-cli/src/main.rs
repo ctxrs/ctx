@@ -23,6 +23,7 @@ mod progress;
 mod provider_args;
 mod provider_sources;
 mod search_filters;
+mod search_query_input;
 mod search_render;
 mod semantic;
 mod skill;
@@ -315,13 +316,78 @@ struct LocateEventArgs {
 
 #[derive(Debug, Args)]
 struct SearchArgs {
-    #[arg(help = "Natural-language query to search local agent history")]
+    #[arg(
+        help = "All words that must match; use repeated --term for alternatives",
+        conflicts_with_all = ["query_file", "query_json"]
+    )]
     query: Option<String>,
     #[arg(
         long,
-        help = "Add another search query or keyword; repeat to broaden with OR-style merged results"
+        help = "Add an all-words alternative; repeat for OR alternatives",
+        conflicts_with_all = ["query_file", "query_json"]
     )]
     term: Vec<String>,
+    #[arg(
+        long,
+        help = "Add an analyzed exact-phrase alternative; repeat for OR alternatives",
+        conflicts_with_all = ["query_file", "query_json"]
+    )]
+    phrase: Vec<String>,
+    #[arg(
+        long,
+        help = "Add a punctuation-preserving literal alternative; repeat for OR alternatives",
+        conflicts_with_all = ["query_file", "query_json"]
+    )]
+    literal: Vec<String>,
+    #[arg(
+        long,
+        help = "Add one semantic-recall alternative",
+        conflicts_with_all = ["query_file", "query_json"]
+    )]
+    semantic: Option<String>,
+    #[arg(
+        long,
+        help = "Require every word in this clause; repeat to require every clause",
+        conflicts_with_all = ["query_file", "query_json"]
+    )]
+    must: Vec<String>,
+    #[arg(
+        long,
+        help = "Exclude results matching every word in this clause; repeat to exclude any clause",
+        conflicts_with_all = ["query_file", "query_json"]
+    )]
+    exclude: Vec<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Load a ctx-search-v1 JSON query object",
+        conflicts_with_all = [
+            "query",
+            "term",
+            "phrase",
+            "literal",
+            "semantic",
+            "must",
+            "exclude",
+            "query_json"
+        ]
+    )]
+    query_file: Option<PathBuf>,
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = [
+            "query",
+            "term",
+            "phrase",
+            "literal",
+            "semantic",
+            "must",
+            "exclude",
+            "query_file"
+        ]
+    )]
+    query_json: Option<String>,
     #[arg(
         long,
         default_value_t = 20,
