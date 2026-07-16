@@ -341,6 +341,31 @@ mod freshness_tests {
     }
 
     #[test]
+    fn daemon_cached_refresh_watcher_invalidates_coalesced_parent_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("history.sqlite");
+        fs::write(&database, []).unwrap();
+        let watches = search_refresh_watch_specs(std::slice::from_ref(&database));
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
+
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &watches,
+            Ok(
+                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                    .add_path(temp.path().to_path_buf()),
+            ),
+        );
+
+        let changes = changes.into_inner().unwrap();
+        assert!(changes.full_rebuild);
+        assert!(changes.dirty_paths.is_empty());
+        assert!(healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn daemon_cached_refresh_watcher_invalidates_out_of_scope_events() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("history.sqlite");

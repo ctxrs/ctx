@@ -355,7 +355,7 @@ fn search_refresh_event_path_is_covered_by_watch(
     if watch.recursive {
         return event_path == watch.watch_path || event_path.starts_with(&watch.watch_path);
     }
-    event_path == watch.watch_path || event_path.parent() == Some(watch.watch_path.as_path())
+    event_path.parent() == Some(watch.watch_path.as_path())
 }
 
 fn search_refresh_event_is_non_mutating_access(kind: notify::EventKind) -> bool {
