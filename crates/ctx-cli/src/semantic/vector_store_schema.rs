@@ -31,6 +31,17 @@ const SQLITE_VEC0_META_TABLE: &str = "event_embedding_vec0_meta_v2";
 const SQLITE_VEC0_CANONICAL_INDEX: &str = "idx_event_embedding_vec0_v2_slot_canonical";
 const SQLITE_VEC0_EVENT_INDEX: &str = "idx_event_embedding_vec0_v2_slot_event";
 const SQLITE_VEC0_WORK_INDEX: &str = "idx_event_embedding_vec0_v2_slot_model_rowid";
+const CANONICAL_MODEL_DIMENSIONS_INDEX: &str = "idx_event_embedding_chunks_model_dimensions_rowid";
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqliteColumnShape {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    primary_key_position: i64,
+    hidden: i64,
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct SemanticSidecarWritePacing {
@@ -112,6 +123,17 @@ impl SemanticVectorStore {
         )? {
             return Err(anyhow!(
                 "semantic vector store event_embedding_chunks schema is incomplete"
+            ));
+        }
+        if !Self::sqlite_index_matches(
+            &self.conn,
+            "event_embedding_chunks",
+            CANONICAL_MODEL_DIMENSIONS_INDEX,
+            false,
+            &["model_key", "dimensions", "rowid"],
+        )? {
+            return Err(anyhow!(
+                "semantic vector store is missing its canonical model/dimensions index"
             ));
         }
         Ok(())
@@ -226,6 +248,17 @@ impl SemanticVectorStore {
         }
         if !canonical_table_existed {
             self.create_canonical_indexes()?;
+        } else if !Self::sqlite_index_matches(
+            &self.conn,
+            "event_embedding_chunks",
+            CANONICAL_MODEL_DIMENSIONS_INDEX,
+            false,
+            &["model_key", "dimensions", "rowid"],
+        )? {
+            return Err(SemanticVectorStoreTerminal::new(
+                "semantic canonical model/dimensions index is missing or incompatible",
+            )
+            .into());
         }
         if !summary_table_existed {
             self.conn.execute(
@@ -272,6 +305,8 @@ impl SemanticVectorStore {
                 ON event_embedding_chunks(model_key, session_id);
             CREATE INDEX idx_event_embedding_chunks_model_event
                 ON event_embedding_chunks(model_key, event_id);
+            CREATE INDEX idx_event_embedding_chunks_model_dimensions_rowid
+                ON event_embedding_chunks(model_key, dimensions, rowid);
             CREATE INDEX idx_semantic_dirty_events_model_priority
                 ON semantic_dirty_events(model_key, priority_seq, queued_at_ms);
             "#,
@@ -362,25 +397,27 @@ impl SemanticVectorStore {
         if !self.sqlite_vec0_runtime_available() {
             return Ok(false);
         }
-        let meta_existed = sqlite_table_exists(&self.conn, SQLITE_VEC0_META_TABLE)?;
-        let vec_existed = sqlite_table_exists(&self.conn, SQLITE_VEC0_TABLE)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let meta_existed = sqlite_table_exists(&tx, SQLITE_VEC0_META_TABLE)?;
+        let vec_existed = sqlite_table_exists(&tx, SQLITE_VEC0_TABLE)?;
         if meta_existed && vec_existed {
-            if !self.sqlite_vec0_schema_compatible()? {
+            if !Self::sqlite_vec0_schema_compatible_on_connection(&tx)? {
                 return Err(SemanticVectorStoreTerminal::new(
                     "semantic vec0 v2 schema is incompatible; maintenance cannot publish it",
                 )
                 .into());
             }
+            tx.commit()?;
             return Ok(true);
         }
-        let tx = self.conn.unchecked_transaction()?;
         if meta_existed || vec_existed {
-            tx.execute_batch(&format!(
-                r#"
-                DROP TABLE IF EXISTS {SQLITE_VEC0_TABLE};
-                DROP TABLE IF EXISTS {SQLITE_VEC0_META_TABLE};
-                "#,
-            ))?;
+            return Err(SemanticVectorStoreTerminal::new(
+                "semantic vec0 v2 schema is partial; maintenance will not drop or rebuild it",
+            )
+            .into());
         }
         tx.execute_batch(&format!(
             r#"
@@ -407,7 +444,8 @@ impl SemanticVectorStore {
             CREATE VIRTUAL TABLE {SQLITE_VEC0_TABLE}
             USING vec0(
                 embedding float[{SEMANTIC_DIMENSIONS}] distance_metric=cosine,
-                slot INTEGER PARTITION KEY
+                slot INTEGER PARTITION KEY,
+                model_key TEXT PARTITION KEY
             );
             "#,
         ))?;
@@ -426,71 +464,151 @@ impl SemanticVectorStore {
     }
 
     fn sqlite_vec0_schema_compatible_on_connection(conn: &Connection) -> Result<bool> {
-        if !sqlite_table_has_columns(
+        let meta_columns = Self::sqlite_table_column_shapes(conn, SQLITE_VEC0_META_TABLE)?;
+        let expected_meta_columns = vec![
+            Self::sqlite_column_shape("rowid", "INTEGER", false, 1, 0),
+            Self::sqlite_column_shape("slot", "INTEGER", true, 0, 0),
+            Self::sqlite_column_shape("canonical_rowid", "INTEGER", true, 0, 0),
+            Self::sqlite_column_shape("event_id", "TEXT", true, 0, 0),
+            Self::sqlite_column_shape("model_key", "TEXT", true, 0, 0),
+            Self::sqlite_column_shape("history_record_id", "TEXT", false, 0, 0),
+            Self::sqlite_column_shape("session_id", "TEXT", false, 0, 0),
+            Self::sqlite_column_shape("event_seq", "INTEGER", true, 0, 0),
+            Self::sqlite_column_shape("chunk_index", "INTEGER", true, 0, 0),
+            Self::sqlite_column_shape("source_text_sha256", "TEXT", true, 0, 0),
+            Self::sqlite_column_shape("start_char", "INTEGER", true, 0, 0),
+            Self::sqlite_column_shape("end_char", "INTEGER", true, 0, 0),
+        ];
+        if meta_columns != expected_meta_columns {
+            return Ok(false);
+        }
+        if !Self::sqlite_indexes_match_exactly(
             conn,
             SQLITE_VEC0_META_TABLE,
             &[
-                "rowid",
-                "slot",
-                "canonical_rowid",
-                "event_id",
-                "model_key",
-                "event_seq",
-                "chunk_index",
-                "source_text_sha256",
-                "start_char",
-                "end_char",
+                (
+                    SQLITE_VEC0_CANONICAL_INDEX,
+                    true,
+                    &["slot", "model_key", "canonical_rowid"],
+                ),
+                (
+                    SQLITE_VEC0_EVENT_INDEX,
+                    false,
+                    &["slot", "model_key", "event_id"],
+                ),
+                (
+                    SQLITE_VEC0_WORK_INDEX,
+                    false,
+                    &["slot", "model_key", "rowid"],
+                ),
             ],
         )? {
             return Ok(false);
         }
-        if Self::sqlite_primary_key_columns(conn, SQLITE_VEC0_META_TABLE)?
-            != vec!["rowid".to_owned()]
-            || !Self::sqlite_index_matches(
-                conn,
-                SQLITE_VEC0_META_TABLE,
-                SQLITE_VEC0_CANONICAL_INDEX,
-                true,
-                &["slot", "model_key", "canonical_rowid"],
-            )?
-            || !Self::sqlite_index_matches(
-                conn,
-                SQLITE_VEC0_META_TABLE,
-                SQLITE_VEC0_EVENT_INDEX,
-                false,
-                &["slot", "model_key", "event_id"],
-            )?
-            || !Self::sqlite_index_matches(
-                conn,
-                SQLITE_VEC0_META_TABLE,
-                SQLITE_VEC0_WORK_INDEX,
-                false,
-                &["slot", "model_key", "rowid"],
-            )?
-        {
+        let vec0_columns = Self::sqlite_table_column_shapes(conn, SQLITE_VEC0_TABLE)?;
+        let expected_vec0_columns = vec![
+            Self::sqlite_column_shape("rowid", "", false, 0, 0),
+            Self::sqlite_column_shape("embedding", "", false, 0, 0),
+            Self::sqlite_column_shape("slot", "", false, 0, 0),
+            Self::sqlite_column_shape("model_key", "", false, 0, 0),
+            Self::sqlite_column_shape("distance", "", false, 0, 1),
+            Self::sqlite_column_shape("k", "", false, 0, 1),
+        ];
+        if vec0_columns != expected_vec0_columns {
             return Ok(false);
         }
         let Some(sql) = sqlite_table_sql(conn, SQLITE_VEC0_TABLE)? else {
             return Ok(false);
         };
-        let sql = sql.to_ascii_lowercase();
-        Ok(sql.contains("using vec0")
-            && sql.contains(&format!("embedding float[{SEMANTIC_DIMENSIONS}]"))
-            && sql.contains("slot integer partition key"))
+        let expected_sql = format!(
+            r#"
+            CREATE VIRTUAL TABLE {SQLITE_VEC0_TABLE}
+            USING vec0(
+                embedding float[{SEMANTIC_DIMENSIONS}] distance_metric=cosine,
+                slot INTEGER PARTITION KEY,
+                model_key TEXT PARTITION KEY
+            )
+            "#
+        );
+        Ok(Self::normalized_schema_sql(&sql) == Self::normalized_schema_sql(&expected_sql))
     }
 
-    fn sqlite_primary_key_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    fn sqlite_column_shape(
+        name: &str,
+        declared_type: &str,
+        not_null: bool,
+        primary_key_position: i64,
+        hidden: i64,
+    ) -> SqliteColumnShape {
+        SqliteColumnShape {
+            name: name.to_owned(),
+            declared_type: declared_type.to_owned(),
+            not_null,
+            default_value: None,
+            primary_key_position,
+            hidden,
+        }
+    }
+
+    fn sqlite_table_column_shapes(
+        conn: &Connection,
+        table: &str,
+    ) -> Result<Vec<SqliteColumnShape>> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({table})"))?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+            Ok(SqliteColumnShape {
+                name: row.get(1)?,
+                declared_type: row.get(2)?,
+                not_null: row.get::<_, i64>(3)? == 1,
+                default_value: row.get(4)?,
+                primary_key_position: row.get(5)?,
+                hidden: row.get(6)?,
+            })
         })?;
-        let mut columns = rows
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|(position, _)| *position > 0)
-            .collect::<Vec<_>>();
-        columns.sort_by_key(|(position, _)| *position);
-        Ok(columns.into_iter().map(|(_, name)| name).collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn normalized_schema_sql(sql: &str) -> String {
+        sql.trim_end_matches(';')
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .map(|character| character.to_ascii_lowercase())
+            .collect()
+    }
+
+    fn sqlite_indexes_match_exactly(
+        conn: &Connection,
+        table: &str,
+        expected: &[(&str, bool, &[&str])],
+    ) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA index_list({table})"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? == 1,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? == 1,
+            ))
+        })?;
+        let indexes = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        if indexes.len() != expected.len()
+            || indexes.iter().any(|(name, unique, origin, partial)| {
+                *partial
+                    || origin != "c"
+                    || !expected.iter().any(|(expected_name, expected_unique, _)| {
+                        name == expected_name && unique == expected_unique
+                    })
+            })
+        {
+            return Ok(false);
+        }
+        for (name, unique, columns) in expected {
+            if !Self::sqlite_index_matches(conn, table, name, *unique, columns)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn sqlite_index_matches(
@@ -721,68 +839,134 @@ impl SemanticVectorStore {
         let validation_cursor = self
             .maintenance_state_i64(SQLITE_VEC0_VALIDATE_CURSOR_STATE_KEY)?
             .unwrap_or(0);
-        let stats_head = self.terminal_canonical_head(stats_cursor)?;
-        let projection_head = self.terminal_canonical_head(projection_cursor)?;
-        let validation_head = self.terminal_canonical_head(validation_cursor)?;
-        let legacy_head = self
-            .conn
-            .query_row(
-                r#"
-                SELECT rowid, length(preview_text) + length(embedding_f32)
-                FROM event_embeddings
-                ORDER BY rowid
-                LIMIT 1
-                "#,
-                [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-        let plaintext_head = self.terminal_plaintext_head(cursor)?;
+        let stats_page = self.terminal_canonical_page_fingerprint(stats_cursor)?;
+        let projection_page = self.terminal_canonical_page_fingerprint(projection_cursor)?;
+        let validation_page = self.terminal_canonical_page_fingerprint(validation_cursor)?;
+        let legacy_page = self.terminal_legacy_page_fingerprint()?;
+        let plaintext_page = self.terminal_plaintext_page_fingerprint(cursor)?;
         Ok(format!(
-            "schema={user_version}:{schema_cookie};model={:?};generation={canonical_generation};sanitize={sanitize_version}:{cursor_version}:{cursor};legacy={legacy_head:?};plaintext={plaintext_head:?};stats={stats_cursor}:{stats_head:?};projection={projection_cursor}:{projection_head:?};validation={validation_cursor}:{validation_head:?}",
+            "schema={user_version}:{schema_cookie};model={:?};generation={canonical_generation};sanitize={sanitize_version}:{cursor_version}:{cursor};legacy={legacy_page};plaintext={plaintext_page};stats={stats_cursor}:{stats_page};projection={projection_cursor}:{projection_page};validation={validation_cursor}:{validation_page}",
             model_tuple
         ))
     }
 
-    fn terminal_canonical_head(&self, cursor: i64) -> Result<Option<(i64, String, i64, i64)>> {
-        self.conn
-            .query_row(
-                r#"
-                SELECT rowid, model_key, dimensions, length(embedding_f32)
-                FROM event_embedding_chunks
-                WHERE rowid > ?1
-                ORDER BY rowid
-                LIMIT 1
-                "#,
-                [cursor],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(Into::into)
+    fn terminal_canonical_page_fingerprint(&self, cursor: i64) -> Result<String> {
+        let content_prefix_bytes = SEMANTIC_DIMENSIONS
+            .saturating_mul(std::mem::size_of::<f32>())
+            .saturating_add(1);
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT rowid, event_id, model_key, event_seq, chunk_index,
+                   source_text_sha256, chunk_text_sha256, dimensions,
+                   length(embedding_f32),
+                   hex(substr(CAST(embedding_f32 AS BLOB), 1, ?2))
+            FROM event_embedding_chunks
+            WHERE rowid > ?1
+            ORDER BY rowid
+            LIMIT ?3
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            params![
+                cursor,
+                content_prefix_bytes as i64,
+                SEMANTIC_SIDECAR_MAINTENANCE_ROWS as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            },
+        )?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Self::terminal_rows_fingerprint(&rows))
     }
 
-    fn terminal_plaintext_head(&self, cursor: i64) -> Result<Option<(i64, i64)>> {
-        self.conn
-            .query_row(
-                r#"
-                SELECT rowid, length(chunk_text)
-                FROM event_embedding_chunks
-                WHERE rowid > ?1
-                ORDER BY rowid
-                LIMIT 1
-                "#,
-                [cursor],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()
-            .map_err(Into::into)
+    fn terminal_legacy_page_fingerprint(&self) -> Result<String> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT rowid, event_id, model_key, text_sha256,
+                   length(preview_text),
+                   hex(substr(CAST(preview_text AS BLOB), 1, 4096)),
+                   dimensions, length(embedding_f32),
+                   hex(substr(CAST(embedding_f32 AS BLOB), 1, ?1))
+            FROM event_embeddings
+            ORDER BY rowid
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            params![
+                SEMANTIC_DIMENSIONS
+                    .saturating_mul(std::mem::size_of::<f32>())
+                    .saturating_add(1) as i64,
+                SEMANTIC_SIDECAR_MAINTENANCE_ROWS as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Self::terminal_rows_fingerprint(&rows))
+    }
+
+    fn terminal_plaintext_page_fingerprint(&self, cursor: i64) -> Result<String> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT rowid, event_id, model_key, source_text_sha256,
+                   chunk_text_sha256, length(chunk_text),
+                   hex(substr(CAST(chunk_text AS BLOB), 1, 4096))
+            FROM event_embedding_chunks
+            WHERE rowid > ?1
+            ORDER BY rowid
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            params![cursor, SEMANTIC_SIDECAR_MAINTENANCE_ROWS as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Self::terminal_rows_fingerprint(&rows))
+    }
+
+    fn terminal_rows_fingerprint(rows: &[impl fmt::Debug]) -> String {
+        let mut digest = Sha256::new();
+        for row in rows {
+            let encoded = format!("{row:?}");
+            digest.update((encoded.len() as u64).to_le_bytes());
+            digest.update(encoded.as_bytes());
+        }
+        format!("{:x}", digest.finalize())
     }
 
     fn active_terminal_maintenance_failure(&self) -> Result<Option<String>> {
@@ -956,23 +1140,31 @@ impl SemanticVectorStore {
 
     fn rebuild_stats_and_summary_slice(&mut self) -> Result<SemanticSidecarMaintenanceOutcome> {
         let page_units = self.maintenance_page_units()?;
-        let canonical_generation = self
-            .maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?
-            .unwrap_or(0);
-        if canonical_generation <= 0 {
-            self.set_maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY, 1)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::stats_and_summary_trusted_on_connection(&tx)? {
+            tx.commit()?;
             return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
         }
-        let active_slot = self
-            .maintenance_state_i64(SUMMARY_ACTIVE_SLOT_STATE_KEY)?
-            .filter(|slot| matches!(slot, 0 | 1));
+        let canonical_generation =
+            Self::maintenance_state_i64_in_transaction(&tx, CANONICAL_GENERATION_STATE_KEY)?
+                .unwrap_or(0);
+        if canonical_generation <= 0 {
+            Self::set_maintenance_state_i64_in_transaction(&tx, CANONICAL_GENERATION_STATE_KEY, 1)?;
+            tx.commit()?;
+            return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
+        }
+        let active_slot =
+            Self::maintenance_state_i64_in_transaction(&tx, SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+                .filter(|slot| matches!(slot, 0 | 1));
         let target_slot = active_slot.map_or(0, |slot| 1 - slot);
-        if self.maintenance_state_i64(STATS_BUILD_GENERATION_STATE_KEY)?
-            != Some(canonical_generation)
-        {
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let build_generation =
+            Self::maintenance_state_i64_in_transaction(&tx, STATS_BUILD_GENERATION_STATE_KEY)?;
+        let build_slot =
+            Self::maintenance_state_i64_in_transaction(&tx, STATS_BUILD_SLOT_STATE_KEY)?
+                .filter(|slot| matches!(slot, 0 | 1));
+        if build_generation != Some(canonical_generation) || build_slot != Some(target_slot) {
             for (key, value) in [
                 (STATS_BUILD_GENERATION_STATE_KEY, canonical_generation),
                 (STATS_BUILD_SLOT_STATE_KEY, target_slot),
@@ -986,10 +1178,9 @@ impl SemanticVectorStore {
             tx.commit()?;
             return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
         }
-        if self.maintenance_state_i64(STATS_BUILD_CLEARED_STATE_KEY)? != Some(1) {
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::maintenance_state_i64_in_transaction(&tx, STATS_BUILD_CLEARED_STATE_KEY)?
+            != Some(1)
+        {
             let event_ids = {
                 let mut stmt = tx.prepare(
                     r#"
@@ -1027,9 +1218,6 @@ impl SemanticVectorStore {
             ));
         }
 
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let cursor = Self::maintenance_state_i64_in_transaction(&tx, STATS_BUILD_CURSOR_STATE_KEY)?
             .unwrap_or(0);
         let rows = {
@@ -1208,19 +1396,40 @@ impl SemanticVectorStore {
         if !self.ensure_sqlite_vec0_schema_for_maintenance()? {
             return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
         }
-        let canonical_generation = self
-            .maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?
-            .unwrap_or(0);
-        let active_slot = self
-            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
-            .filter(|slot| matches!(slot, 0 | 1));
-        let target_slot = active_slot.map_or(0, |slot| 1 - slot);
-        if self.maintenance_state_i64(SQLITE_VEC0_BUILD_GENERATION_STATE_KEY)?
-            != Some(canonical_generation)
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let canonical_generation =
+            Self::maintenance_state_i64_in_transaction(&tx, CANONICAL_GENERATION_STATE_KEY)?
+                .unwrap_or(0);
+        if canonical_generation <= 0
+            || !Self::stats_and_summary_trusted_on_connection(&tx)?
+            || !Self::active_model_tuple_matches_on_connection(&tx)?
         {
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.commit()?;
+            return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
+        }
+        let active_slot =
+            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+                .filter(|slot| matches!(slot, 0 | 1));
+        if Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
+            == Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+            && Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_GENERATION_STATE_KEY)?
+                == Some(canonical_generation)
+            && active_slot.is_some()
+        {
+            tx.commit()?;
+            return Ok(SemanticSidecarMaintenanceOutcome::ready(0, 0));
+        }
+        let target_slot = active_slot.map_or(0, |slot| 1 - slot);
+        let build_generation = Self::maintenance_state_i64_in_transaction(
+            &tx,
+            SQLITE_VEC0_BUILD_GENERATION_STATE_KEY,
+        )?;
+        let build_slot =
+            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_BUILD_SLOT_STATE_KEY)?
+                .filter(|slot| matches!(slot, 0 | 1));
+        if build_generation != Some(canonical_generation) || build_slot != Some(target_slot) {
             for (key, value) in [
                 (SQLITE_VEC0_BUILD_GENERATION_STATE_KEY, canonical_generation),
                 (SQLITE_VEC0_BUILD_SLOT_STATE_KEY, target_slot),
@@ -1232,10 +1441,9 @@ impl SemanticVectorStore {
             tx.commit()?;
             return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
         }
-        if self.maintenance_state_i64(SQLITE_VEC0_BUILD_CLEARED_STATE_KEY)? != Some(1) {
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_BUILD_CLEARED_STATE_KEY)?
+            != Some(1)
+        {
             let rowids = {
                 let mut stmt = tx.prepare(&format!(
                     r#"
@@ -1273,9 +1481,6 @@ impl SemanticVectorStore {
             return Ok(SemanticSidecarMaintenanceOutcome::pending(rowids.len(), 0));
         }
 
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let cursor =
             Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_BUILD_CURSOR_STATE_KEY)?
                 .unwrap_or(0);
@@ -1362,7 +1567,7 @@ impl SemanticVectorStore {
             "#
         ))?;
         let mut vec_stmt = tx.prepare(&format!(
-            "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot) VALUES (?1, ?2, ?3)"
+            "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot, model_key) VALUES (?1, ?2, ?3, ?4)"
         ))?;
         for (
             rowid,
@@ -1419,7 +1624,12 @@ impl SemanticVectorStore {
                 end_char
             ])?;
             let projection_rowid = tx.last_insert_rowid();
-            vec_stmt.execute(params![projection_rowid, embedding, target_slot])?;
+            vec_stmt.execute(params![
+                projection_rowid,
+                embedding,
+                target_slot,
+                semantic_model_key()
+            ])?;
         }
         drop(meta_stmt);
         drop(vec_stmt);
@@ -1437,16 +1647,28 @@ impl SemanticVectorStore {
 
     fn validate_projection_slice(&mut self) -> Result<SemanticSidecarMaintenanceOutcome> {
         let page_units = self.maintenance_page_units()?;
-        let canonical_generation = self
-            .maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?
-            .unwrap_or(0);
-        let active_slot = self
-            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
-            .filter(|slot| matches!(slot, 0 | 1))
-            .ok_or_else(|| SemanticVectorStorePending::new("projection slot is missing"))?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let canonical_generation =
+            Self::maintenance_state_i64_in_transaction(&tx, CANONICAL_GENERATION_STATE_KEY)?
+                .unwrap_or(0);
+        let active_slot =
+            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+                .filter(|slot| matches!(slot, 0 | 1));
+        let projection_ready = canonical_generation > 0
+            && Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
+                == Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+            && Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_GENERATION_STATE_KEY)?
+                == Some(canonical_generation)
+            && active_slot.is_some()
+            && Self::stats_and_summary_trusted_on_connection(&tx)?
+            && Self::active_model_tuple_matches_on_connection(&tx)?
+            && Self::sqlite_vec0_schema_compatible_on_connection(&tx)?;
+        let Some(active_slot) = active_slot.filter(|_| projection_ready) else {
+            tx.commit()?;
+            return Ok(SemanticSidecarMaintenanceOutcome::pending(0, 0));
+        };
         if Self::maintenance_state_i64_in_transaction(
             &tx,
             SQLITE_VEC0_VALIDATE_GENERATION_STATE_KEY,
@@ -1577,7 +1799,7 @@ impl SemanticVectorStore {
                                    length(v.embedding),
                                    CASE WHEN length(v.embedding) = ?4
                                         THEN v.embedding ELSE NULL END,
-                                   v.slot
+                                   v.slot, v.model_key
                             FROM {SQLITE_VEC0_META_TABLE} AS m
                             JOIN {SQLITE_VEC0_TABLE} AS v ON v.rowid = m.rowid
                             WHERE m.slot = ?1 AND m.model_key = ?2 AND m.canonical_rowid = ?3
@@ -1597,6 +1819,7 @@ impl SemanticVectorStore {
                                 row.get::<_, i64>(8)?,
                                 row.get::<_, Option<Vec<u8>>>(9)?,
                                 row.get::<_, i64>(10)?,
+                                row.get::<_, String>(11)?,
                             ))
                         },
                     )
@@ -1614,6 +1837,7 @@ impl SemanticVectorStore {
                         projected_bytes,
                         projected_embedding,
                         projected_slot,
+                        projected_model_key,
                     )| {
                         projected_event_id == event_id
                             && projected_history_record_id == history_record_id
@@ -1626,6 +1850,7 @@ impl SemanticVectorStore {
                             && projected_bytes == expected_bytes
                             && projected_embedding.as_deref() == Some(embedding.as_slice())
                             && projected_slot == active_slot
+                            && projected_model_key == semantic_model_key()
                     },
                 );
                 if drift {
@@ -1706,9 +1931,9 @@ impl SemanticVectorStore {
             )? == 1;
             let vector_exists = tx.query_row(
                 &format!(
-                    "SELECT EXISTS(SELECT 1 FROM {SQLITE_VEC0_TABLE} WHERE rowid = ?1 AND slot = ?2)"
+                    "SELECT EXISTS(SELECT 1 FROM {SQLITE_VEC0_TABLE} WHERE rowid = ?1 AND slot = ?2 AND model_key = ?3)"
                 ),
-                params![rowid, active_slot],
+                params![rowid, active_slot, semantic_model_key()],
                 |row| row.get::<_, i64>(0),
             )? == 1;
             if !canonical_exists || !vector_exists {
