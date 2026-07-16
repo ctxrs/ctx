@@ -36,6 +36,7 @@ ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-search = { path = "../ctx-history-search" }
 ctx-history-store = { path = "../ctx-history-store" }
+ctx-protocol = { path = "../ctx-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 flate2 = "1"
