@@ -455,6 +455,7 @@ fn execute_search_refresh_plan_class_with_pre_lock_hook(
         let mut deferred_units = 0usize;
         let mut maintenance_progress = false;
         let mut source_durable_progress = false;
+        let mut stop_admission = false;
         for validation_failure in validation_failures {
             if !tolerate_source_errors {
                 system_error = Some(validation_failure.error);
@@ -536,6 +537,7 @@ fn execute_search_refresh_plan_class_with_pre_lock_hook(
             let mut outcome_rejected_without_content = false;
             let had_outcome = outcome.is_some();
             if let Some(outcome) = outcome {
+                stop_admission |= outcome.stop_admission;
                 let made_durable_progress = outcome.made_durable_progress();
                 execution_state.record_source_outcome(
                     selected.source_index,
@@ -657,10 +659,17 @@ fn execute_search_refresh_plan_class_with_pre_lock_hook(
             if outcome_deferred_units > 0 && store.has_pending_provider_file_publications()? {
                 break;
             }
+            if stop_admission {
+                break;
+            }
         }
-        store
-            .finish_event_search_bulk_mode(&bulk_guard)
-            .context("finish search refresh bulk mode")?;
+        match store.finish_event_search_bulk_mode(&bulk_guard) {
+            Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete) => {}
+            Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending) => {
+                stop_admission = true;
+            }
+            Err(error) => return Err(error).context("finish search refresh bulk mode"),
+        }
         match class {
             ImportWorkClass::Fresh => {
                 totals.fresh_units_processed =
@@ -678,10 +687,16 @@ fn execute_search_refresh_plan_class_with_pre_lock_hook(
             deferred_units,
             maintenance_progress || source_durable_progress,
         );
+        if stop_admission {
+            execution_result.stop_admission();
+        }
         totals.durable_progress |=
             completed_units > 0 || maintenance_progress || source_durable_progress;
         if let Some(error) = system_error {
             return Err(error);
+        }
+        if stop_admission {
+            break;
         }
         if deferred_units > 0 && store.has_pending_provider_file_publications()? {
             break;
