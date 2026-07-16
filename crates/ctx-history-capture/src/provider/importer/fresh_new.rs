@@ -29,10 +29,13 @@ use crate::{
 
 use super::import_normalized_provider_captures;
 
-pub(crate) const FRESH_NEW_BATCH_MAX_PATHS: usize = 1_024;
+/// Maximum transcript paths admitted to one atomic FreshNew group.
+pub const FRESH_NEW_BATCH_MAX_PATHS: usize = 1_024;
 pub(crate) const FRESH_NEW_BATCH_MAX_ACTUAL_UNITS: u64 = 4_096;
-pub(crate) const FRESH_NEW_BATCH_MAX_BYTES: u64 = 8 * 1_024 * 1_024;
-const PI_SESSION_SOURCE_FORMAT: &str = "pi_session_jsonl";
+/// Exclusive serialized payload byte ceiling for one FreshNew group.
+pub const FRESH_NEW_BATCH_MAX_BYTES: u64 = 8 * 1_024 * 1_024;
+/// Canonical Pi transcript source format supported by FreshNew batching.
+pub const PI_SESSION_SOURCE_FORMAT: &str = "pi_session_jsonl";
 const FRESH_NEW_WAL_CHECKPOINT_BYTES: u64 = 64 * 1_024 * 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,6 +681,7 @@ fn import_fresh_new_candidates(
                 outcome.summary.merge_from(rejection.summary);
             }
         } else {
+            defer_fresh_new_paths(store, &candidate_by_path, &rejected_paths)?;
             outcome.durable_only_paths.extend(rejected_paths);
         }
     }
@@ -782,6 +786,7 @@ fn import_fresh_new_candidates(
         },
     )?;
     let Some(summary) = committed else {
+        defer_fresh_new_paths(store, &candidate_by_path, &batch_paths)?;
         outcome.durable_only_paths.extend(batch_paths);
         return Ok(outcome);
     };

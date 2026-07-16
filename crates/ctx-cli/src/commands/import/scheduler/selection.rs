@@ -10,7 +10,33 @@ enum ImportCandidate {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshNewGroupKey {
+    CodexCatalog(usize),
+    PiSourceFiles(usize),
+}
+
 impl ImportCandidate {
+    fn fresh_new_group_key(&self) -> Option<FreshNewGroupKey> {
+        match self {
+            Self::Catalog { source_index, work }
+                if work.reason == ImportPendingReason::FreshNew
+                    && work.session.provider == ctx_history_core::CaptureProvider::Codex
+                    && work.session.source_format == CODEX_SESSION_SOURCE_FORMAT =>
+            {
+                Some(FreshNewGroupKey::CodexCatalog(*source_index))
+            }
+            Self::SourceFile { source_index, work }
+                if work.reason == ImportPendingReason::FreshNew
+                    && work.file.provider == ctx_history_core::CaptureProvider::Pi
+                    && work.file.source_format == PI_SESSION_SOURCE_FORMAT =>
+            {
+                Some(FreshNewGroupKey::PiSourceFiles(*source_index))
+            }
+            Self::Retirement(_) | Self::Catalog { .. } | Self::SourceFile { .. } => None,
+        }
+    }
+
     fn has_active_publication(&self) -> bool {
         match self {
             Self::Retirement(_) => true,
@@ -119,6 +145,12 @@ fn retain_current_generations(
     state: &mut ImportExecutionState,
 ) -> Result<()> {
     for selected in &mut slice.sources {
+        if selected.work.is_fresh_new_group() {
+            selected.attempts_persisted = true;
+            selected.stats.files = selected.work.unit_count();
+            selected.stats.bytes = selected_work_bytes(&selected.work);
+            continue;
+        }
         match (&selected.preinventory, &mut selected.work) {
             (
                 SourcePreinventory::CodexSessionCatalog {

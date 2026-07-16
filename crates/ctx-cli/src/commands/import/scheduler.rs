@@ -3,11 +3,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ctx_history_capture::{
+    CODEX_SESSION_SOURCE_FORMAT, FRESH_NEW_BATCH_MAX_BYTES, FRESH_NEW_BATCH_MAX_PATHS,
+    PI_SESSION_SOURCE_FORMAT,
+};
 use ctx_history_core::canonical_provider_material_source_format;
 use ctx_history_store::{
-    CatalogImportWork, CatalogIndexedStatus, EventSearchBulkGuard, ImportWorkClass,
-    ProviderFileInventoryFamily, ProviderFilePublicationRetirementWork, SourceImportFileWork,
-    Store,
+    CatalogImportWork, CatalogIndexedStatus, EventSearchBulkGuard, ImportPendingReason,
+    ImportWorkClass, ProviderFileInventoryFamily, ProviderFilePublicationRetirementWork,
+    SourceImportFileWork, Store,
 };
 
 use super::inventory::observe_source_root;

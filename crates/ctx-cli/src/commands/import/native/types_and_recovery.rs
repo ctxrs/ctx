@@ -77,6 +77,7 @@ pub(crate) struct SelectedSourceImportOutcome {
     pub(crate) completed_bytes: u64,
     pub(crate) deferred_units: usize,
     pub(crate) durable_progress: bool,
+    pub(crate) stop_admission: bool,
     #[allow(dead_code)]
     pub(crate) post_import_inventory_generation: Option<u64>,
     pub(crate) post_import_preinventory: Option<SourcePreinventory>,
@@ -103,6 +104,7 @@ pub(crate) struct ProviderImportBatchOutcome {
     pub(crate) completed_bytes: u64,
     pub(crate) deferred_units: usize,
     pub(crate) durable_progress: bool,
+    pub(crate) stop_admission: bool,
     pub(crate) post_import_inventory_generation: Option<u64>,
     pub(crate) post_import_preinventory: Option<SourcePreinventory>,
 }
@@ -115,6 +117,7 @@ impl ProviderImportBatchOutcome {
             completed_bytes: 0,
             deferred_units: 0,
             durable_progress: false,
+            stop_admission: false,
             post_import_inventory_generation: None,
             post_import_preinventory: None,
         }

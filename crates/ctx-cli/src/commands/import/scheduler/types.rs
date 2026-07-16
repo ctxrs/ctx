@@ -79,6 +79,7 @@ pub(crate) struct ImportExecutionResult {
     pub(crate) completed_units: usize,
     pub(crate) deferred_units: usize,
     durable_progress: bool,
+    admission_stopped: bool,
 }
 
 impl ImportExecutionResult {
@@ -96,7 +97,13 @@ impl ImportExecutionResult {
     }
 
     pub(crate) fn made_durable_progress(&self) -> bool {
-        self.durable_progress
+        // Outer drain loops use this signal for admission. A committed group can
+        // still require a quiet stop while WAL maintenance catches up.
+        self.durable_progress && !self.admission_stopped
+    }
+
+    pub(crate) fn stop_admission(&mut self) {
+        self.admission_stopped = true;
     }
 }
 
@@ -135,6 +142,28 @@ impl SelectedImportWork {
         match self {
             Self::Catalog(work) => work.len(),
             Self::SourceFiles(work) => work.len(),
+        }
+    }
+
+    pub(crate) fn is_fresh_new_group(&self) -> bool {
+        match self {
+            Self::Catalog(work) => {
+                !work.is_empty()
+                    && work.iter().all(|candidate| {
+                        candidate.reason == ImportPendingReason::FreshNew
+                            && candidate.session.provider
+                                == ctx_history_core::CaptureProvider::Codex
+                            && candidate.session.source_format == CODEX_SESSION_SOURCE_FORMAT
+                    })
+            }
+            Self::SourceFiles(work) => {
+                !work.is_empty()
+                    && work.iter().all(|candidate| {
+                        candidate.reason == ImportPendingReason::FreshNew
+                            && candidate.file.provider == ctx_history_core::CaptureProvider::Pi
+                            && candidate.file.source_format == PI_SESSION_SOURCE_FORMAT
+                    })
+            }
         }
     }
 }

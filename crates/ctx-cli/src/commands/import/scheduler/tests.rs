@@ -713,63 +713,88 @@ mod tests {
     }
 
     #[test]
-    fn attempted_fresh_window_does_not_hide_later_work_in_the_same_source() {
+    fn maintenance_pending_stops_drain_progress() {
+        let mut result = ImportExecutionResult::default();
+        result.add_slice(10, 10, 0, true);
+        result.stop_admission();
+        assert_eq!(result.completed_units, 10);
+        assert!(!result.made_durable_progress());
+    }
+
+    #[test]
+    fn only_fresh_new_work_uses_the_atomic_group_path() {
+        let mut candidate = catalog_work("session.jsonl", 1);
+        candidate.session.source_format = CODEX_SESSION_SOURCE_FORMAT.to_owned();
+        assert!(SelectedImportWork::Catalog(vec![candidate.clone()]).is_fresh_new_group());
+        for reason in [
+            ImportPendingReason::FreshChanged,
+            ImportPendingReason::FreshAppend,
+            ImportPendingReason::ParserRevision,
+            ImportPendingReason::RecoveryReplacement,
+        ] {
+            candidate.reason = reason;
+            assert!(!SelectedImportWork::Catalog(vec![candidate.clone()]).is_fresh_new_group());
+        }
+    }
+
+    #[test]
+    fn fresh_new_selection_is_one_efficient_group_in_every_mode() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let root = "/fixture/fresh-window";
-        let source = explicit_path_source(CaptureProvider::Pi, root.into());
-        let files = (0..65)
-            .map(|index| SourceImportFile {
-                provider: CaptureProvider::Pi,
-                source_format: source.source_format.to_owned(),
-                source_root: root.to_owned(),
-                source_path: format!("{root}/{index:03}.jsonl"),
-                file_size_bytes: 1,
-                file_modified_at_ms: 1,
-                import_revision: 1,
-                observed_at_ms: 1,
-                metadata: json!({}),
-            })
-            .collect::<Vec<_>>();
-        let generation = store
-            .allocate_source_import_inventory_generation(CaptureProvider::Pi, root)
-            .unwrap();
-        store
-            .upsert_source_import_files(generation, &files)
-            .unwrap();
-        let plan = ImportPlan::build(
-            &store,
-            vec![PlannedImportSource {
+        let mut sources = Vec::new();
+        for root in ["/fixture/fresh-window-a", "/fixture/fresh-window-b"] {
+            let source = explicit_path_source(CaptureProvider::Pi, root.into());
+            let files = (0..65)
+                .map(|index| SourceImportFile {
+                    provider: CaptureProvider::Pi,
+                    source_format: source.source_format.to_owned(),
+                    source_root: root.to_owned(),
+                    source_path: format!("{root}/{index:03}.jsonl"),
+                    file_size_bytes: 1,
+                    file_modified_at_ms: 1,
+                    import_revision: 1,
+                    observed_at_ms: 1,
+                    metadata: json!({}),
+                })
+                .collect::<Vec<_>>();
+            let generation = store
+                .allocate_source_import_inventory_generation(CaptureProvider::Pi, root)
+                .unwrap();
+            store
+                .upsert_source_import_files(generation, &files)
+                .unwrap();
+            sources.push(PlannedImportSource {
                 source,
                 stats: SourceStats::default(),
                 preinventory: SourcePreinventory::SourceImportFiles {
                     files,
                     inventory_generation: generation,
                 },
-            }],
-        )
-        .unwrap();
-        let mut state = ImportExecutionState::for_plan(&plan);
+            });
+        }
+        let plan = ImportPlan::build(&store, sources).unwrap();
 
-        let first = plan
-            .select_slice_with_state(
-                &store,
-                ImportWorkClass::Fresh,
-                IMPORT_SLICE_MAX_UNITS,
-                &state,
-                None,
-            )
-            .unwrap();
-        assert_eq!(first.units, IMPORT_SLICE_MAX_UNITS);
-        first.sources[0].persist_attempt_started(&store).unwrap();
-        state.record_source_attempt(&first.sources[0].work);
-        let second = plan
-            .select_slice_with_state(&store, ImportWorkClass::Fresh, 1, &state, None)
-            .unwrap();
-        assert_eq!(second.units, 1);
-        let SelectedImportWork::SourceFiles(work) = &second.sources[0].work else {
-            panic!("fresh manifest work must use source-file selection");
-        };
-        assert!(work[0].file.source_path.ends_with("/064.jsonl"));
+        for max_units in [1, IMPORT_SLICE_MAX_UNITS] {
+            let mut state = ImportExecutionState::for_plan(&plan);
+            for _ in 0..2 {
+                let slice = plan
+                    .select_slice_with_state(
+                        &store,
+                        ImportWorkClass::Fresh,
+                        max_units,
+                        &state,
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(slice.units, 65);
+                assert_eq!(slice.sources.len(), 1);
+                assert!(slice.sources[0].work.is_fresh_new_group());
+                state.record_source_attempt(&slice.sources[0].work);
+            }
+            let exhausted = plan
+                .select_slice_with_state(&store, ImportWorkClass::Fresh, max_units, &state, None)
+                .unwrap();
+            assert!(exhausted.is_empty());
+        }
     }
 }

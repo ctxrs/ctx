@@ -54,7 +54,8 @@ pub(crate) use cursors::{
 };
 pub use fresh_new::{
     import_codex_fresh_new_batch, import_pi_fresh_new_batch, FreshNewImportContext,
-    FreshNewImportOutcome,
+    FreshNewImportOutcome, FRESH_NEW_BATCH_MAX_BYTES, FRESH_NEW_BATCH_MAX_PATHS,
+    PI_SESSION_SOURCE_FORMAT,
 };
 pub(crate) use identity::{
     pi_existing_event_identity_by_entry_id, provider_event_exists, provider_event_import_identity,

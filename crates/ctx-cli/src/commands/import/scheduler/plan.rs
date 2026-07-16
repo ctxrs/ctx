@@ -85,17 +85,20 @@ impl ImportPlan {
         state: &ImportExecutionState,
         eligible_sources: Option<&BTreeSet<usize>>,
     ) -> Result<ImportSlice> {
-        let slice_limit = IMPORT_SLICE_MAX_UNITS.min(max_units);
-        if slice_limit == 0 {
+        let ordinary_slice_limit = IMPORT_SLICE_MAX_UNITS.min(max_units);
+        if ordinary_slice_limit == 0 {
+            return Ok(ImportSlice::empty());
+        }
+        if !store.event_search_bulk_admission_outcome()?.is_complete() {
             return Ok(ImportSlice::empty());
         }
 
         let mut candidates = Vec::new();
-        let fetch_limit = slice_limit;
+        let fetch_limit = ordinary_slice_limit;
         if class == ImportWorkClass::Recovery {
             for work in store.list_provider_file_publication_retirement_work(fetch_limit)? {
                 candidates.push(ImportCandidate::Retirement(work));
-                if candidates.len() >= slice_limit {
+                if candidates.len() >= ordinary_slice_limit {
                     break;
                 }
             }
@@ -118,14 +121,14 @@ impl ImportPlan {
                     candidates.extend(
                         work.into_iter()
                             .map(|work| ImportCandidate::Catalog { source_index, work })
-                            .take(slice_limit),
+                            .take(ordinary_slice_limit),
                     );
                 }
                 SelectedImportWork::SourceFiles(work) => {
                     candidates.extend(
                         work.into_iter()
                             .map(|work| ImportCandidate::SourceFile { source_index, work })
-                            .take(slice_limit),
+                            .take(ordinary_slice_limit),
                     );
                 }
             }
@@ -146,14 +149,66 @@ impl ImportPlan {
             candidates.retain(|candidate| !state.has_attempted(&candidate.identity()));
         }
 
+        let fresh_new_group = candidates
+            .first()
+            .and_then(ImportCandidate::fresh_new_group_key);
+        if let Some(group) = fresh_new_group {
+            let source_index = match group {
+                FreshNewGroupKey::CodexCatalog(source_index)
+                | FreshNewGroupKey::PiSourceFiles(source_index) => source_index,
+            };
+            let plan = &self.sources[source_index];
+            let preinventory = state
+                .observed_preinventories
+                .get(source_index)
+                .and_then(Option::as_ref)
+                .unwrap_or(&plan.preinventory);
+            let expanded =
+                list_source_work(store, plan, preinventory, class, FRESH_NEW_BATCH_MAX_PATHS)?;
+            candidates = match expanded {
+                Some(SelectedImportWork::Catalog(work)) => work
+                    .into_iter()
+                    .map(|work| ImportCandidate::Catalog { source_index, work })
+                    .filter(|candidate| candidate.fresh_new_group_key() == Some(group))
+                    .collect(),
+                Some(SelectedImportWork::SourceFiles(work)) => work
+                    .into_iter()
+                    .map(|work| ImportCandidate::SourceFile { source_index, work })
+                    .filter(|candidate| candidate.fresh_new_group_key() == Some(group))
+                    .collect(),
+                None => Vec::new(),
+            };
+            candidates.sort_by(|left, right| self.compare_candidates(left, right));
+            candidates.retain(|candidate| !state.has_attempted(&candidate.identity()));
+        } else {
+            // FreshNew work is admitted only when it leads an otherwise ordered
+            // slice. This keeps ordinary changed/recovery work ahead of it and
+            // prevents multiple atomic groups from entering one scheduler slice.
+            candidates.retain(|candidate| candidate.fresh_new_group_key().is_none());
+        }
+
         let mut slice = ImportSlice::empty();
+        let slice_limit = if fresh_new_group.is_some() {
+            FRESH_NEW_BATCH_MAX_PATHS
+        } else {
+            ordinary_slice_limit
+        };
         for candidate in candidates {
             if slice.units >= slice_limit {
                 break;
             }
             let bytes = candidate.estimated_bytes();
-            let exceeds_target =
-                slice.units > 0 && slice.bytes.saturating_add(bytes) > IMPORT_SLICE_TARGET_BYTES;
+            let byte_limit = if fresh_new_group.is_some() {
+                FRESH_NEW_BATCH_MAX_BYTES
+            } else {
+                IMPORT_SLICE_TARGET_BYTES
+            };
+            let exceeds_target = slice.units > 0
+                && if fresh_new_group.is_some() {
+                    slice.bytes.saturating_add(bytes) >= byte_limit
+                } else {
+                    slice.bytes.saturating_add(bytes) > byte_limit
+                };
             if exceeds_target {
                 break;
             }
