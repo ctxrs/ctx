@@ -9,7 +9,7 @@ Usage:
 
 Native release smoke for opt-in daemon + semantic search. The smoke creates an
 isolated ctx data root, imports a tiny custom-history fixture, enables daemon
-and semantic search in that root only, runs the daemon, verifies strict semantic
+and semantic search in that root only, runs the daemon, verifies explicit semantic
 search can find the fixture, and stops the daemon process it started. The
 default mode installs the packaged ONNX Runtime 1.27.0 sidecar under an isolated
 CTX_RUNTIME_DIR. --coreml instead exercises the production hash-pinned CoreML
@@ -575,24 +575,58 @@ PY
 }
 
 search_json_matches() {
-  python3 -I - "${search_json}" "${marker}" "${embedding_model}" "${coreml_mode}" <<'PY'
+  python3 -I - "${search_json}" "${marker}" "${embedding_model}" "${query}" "${coreml_mode}" <<'PY'
 import json
 import sys
 
-path, marker, expected_model, coreml_mode = sys.argv[1:]
+path, marker, expected_model, expected_query, coreml_mode = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as source:
         payload = json.load(source)
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit(1)
 
-retrieval = payload.get("retrieval") if isinstance(payload, dict) else None
-results = payload.get("results") if isinstance(payload, dict) else None
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+retrieval = payload.get("retrieval")
+query = payload.get("query")
+execution = payload.get("query_execution")
+results = payload.get("results")
+if payload.get("schema_version") != 2:
+    raise SystemExit(1)
+if query != {"version": "ctx-search-v1", "any": [{"semantic": expected_query}]}:
+    raise SystemExit(1)
 if not isinstance(retrieval, dict) or retrieval.get("embedding_model") != expected_model:
     raise SystemExit(1)
 if retrieval.get("requested_mode") != "semantic" or retrieval.get("effective_mode") != "semantic":
     raise SystemExit(1)
-if retrieval.get("semantic_fallback") is not None or retrieval.get("semantic_fallback_code") is not None:
+for obsolete in ("semantic_weight", "semantic_fallback", "semantic_fallback_code"):
+    if obsolete in retrieval:
+        raise SystemExit(1)
+if not isinstance(execution, dict) or execution.get("query_version") != "ctx-search-v1":
+    raise SystemExit(1)
+semantic = execution.get("semantic")
+if not isinstance(semantic, dict):
+    raise SystemExit(1)
+if semantic.get("attempted") is not True or semantic.get("required") is not True:
+    raise SystemExit(1)
+if semantic.get("readiness") != "ready" or semantic.get("effective_backend") != "semantic":
+    raise SystemExit(1)
+if semantic.get("completeness") not in {"complete", "partial"}:
+    raise SystemExit(1)
+resolved = execution.get("resolved")
+consumed = execution.get("consumed")
+if not isinstance(resolved, dict) or not isinstance(consumed, dict):
+    raise SystemExit(1)
+if execution.get("requested_result_limit") != 20 or execution.get("result_limit") != 20:
+    raise SystemExit(1)
+if execution.get("max_result_limit") != 200:
+    raise SystemExit(1)
+if consumed.get("returned_results", 201) > execution["result_limit"]:
+    raise SystemExit(1)
+if consumed.get("candidate_rows", 1) > resolved.get("candidate_rows", 0):
+    raise SystemExit(1)
+if consumed.get("serialized_response_bytes", 1) > resolved.get("serialized_response_bytes", 0):
     raise SystemExit(1)
 if coreml_mode == "1":
     worker = retrieval.get("worker")
@@ -615,7 +649,7 @@ if coreml_mode == "1":
     if runtime.get("acquisition_fallback") is not None:
         print("CoreML search status reported an acquisition fallback", file=sys.stderr)
         raise SystemExit(2)
-if not isinstance(results, list):
+if not isinstance(results, list) or len(results) > execution["result_limit"]:
     raise SystemExit(1)
 
 def strings(value):
@@ -656,7 +690,7 @@ while ((SECONDS < deadline)); do
   fi
 
   if [[ "${daemon_status_ready}" == "1" ]] && \
-    run_ctx search "${query}" --backend semantic --refresh off --json \
+    run_ctx search --semantic "${query}" --backend semantic --refresh off --json \
       > "${search_json}" 2> "${search_error}"; then
     last_output="$(cat "${search_json}")"
     last_search_error="$(cat "${search_error}")"
@@ -737,7 +771,7 @@ EOF
           mkdir -p -- "$(dirname -- "${proof_output}")"
           install -m 0644 "${runtime_proof}" "${proof_output}"
         fi
-        printf 'ctx semantic smoke ok: strict semantic search found %s with %s\n' \
+        printf 'ctx semantic smoke ok: explicit semantic search found %s with %s\n' \
           "${marker}" "${embedding_model}"
         exit 0
       else
