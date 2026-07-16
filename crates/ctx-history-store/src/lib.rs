@@ -71,6 +71,7 @@ pub struct Store {
     conn: Connection,
     busy_timeout: Duration,
     event_search_bulk_depth: Arc<AtomicUsize>,
+    event_search_bulk_batches: AtomicUsize,
     store_identity: store_identity::CanonicalStoreIdentity,
     provider_file_publication: RefCell<Option<provider_files::ActiveProviderFilePublication>>,
     provider_file_write_scope: Cell<Option<uuid::Uuid>>,

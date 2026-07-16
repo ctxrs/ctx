@@ -59,6 +59,7 @@ impl Store {
             conn,
             busy_timeout: BUSY_TIMEOUT,
             event_search_bulk_depth: Default::default(),
+            event_search_bulk_batches: Default::default(),
             store_identity,
             provider_file_publication: Default::default(),
             provider_file_write_scope: Default::default(),
@@ -100,6 +101,7 @@ impl Store {
             conn,
             busy_timeout,
             event_search_bulk_depth: Default::default(),
+            event_search_bulk_batches: Default::default(),
             store_identity,
             provider_file_publication: Default::default(),
             provider_file_write_scope: Default::default(),
@@ -178,6 +180,17 @@ impl Store {
             return Ok(false);
         }
         self.checkpoint_wal_truncate()?;
+        Ok(true)
+    }
+
+    pub fn checkpoint_wal_truncate_required_if_larger_than(&self, min_bytes: u64) -> Result<bool> {
+        let Some(wal_bytes) = self.wal_bytes()? else {
+            return Ok(false);
+        };
+        if wal_bytes < min_bytes {
+            return Ok(false);
+        }
+        self.checkpoint_wal_truncate_required()?;
         Ok(true)
     }
 

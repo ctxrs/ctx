@@ -1,8 +1,19 @@
-use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{EventSearchBulkMaintenanceOutcome, Store, StoreError};
+use crate::{
+    bulk_search::{
+        set_restore_post_commit_hook, FTS_BULK_CRISISMERGE, FTS_BULK_MAINTENANCE_BATCHES,
+    },
+    EventSearchBulkMaintenanceOutcome, Store, StoreError,
+};
+
+const BULK_SEARCH_WAL_HIGH_WATER_BYTES: u64 = 64 * 1024 * 1024;
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -88,7 +99,10 @@ fn bulk_search_mode_waits_for_paced_recovery_and_restores_saved_config() {
     assert_eq!(bulk_mode_marker(&store), Some(1));
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&store, table, "automerge", 4), 0);
-        assert_eq!(fts_config(&store, table, "crisismerge", 16), 1_000_000);
+        assert_eq!(
+            fts_config(&store, table, "crisismerge", 16),
+            FTS_BULK_CRISISMERGE
+        );
     }
     drop(store);
     drop(guard);
@@ -97,7 +111,10 @@ fn bulk_search_mode_waits_for_paced_recovery_and_restores_saved_config() {
     assert_eq!(bulk_mode_marker(&reopened), Some(1));
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&reopened, table, "automerge", 4), 0);
-        assert_eq!(fts_config(&reopened, table, "crisismerge", 16), 1_000_000);
+        assert_eq!(
+            fts_config(&reopened, table, "crisismerge", 16),
+            FTS_BULK_CRISISMERGE
+        );
     }
 
     let _pacing = crate::install_event_search_maintenance_pacer(|_| {});
@@ -144,7 +161,10 @@ fn overlapping_bulk_search_mode_is_rejected_until_guard_releases() {
     assert_eq!(bulk_mode_marker(&second), Some(1));
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&second, table, "automerge", 4), 0);
-        assert_eq!(fts_config(&second, table, "crisismerge", 16), 1_000_000);
+        assert_eq!(
+            fts_config(&second, table, "crisismerge", 16),
+            FTS_BULK_CRISISMERGE
+        );
     }
 
     first.finish_event_search_bulk_mode(&guard).unwrap();
@@ -467,4 +487,308 @@ fn interrupted_bounded_merge_resumes_after_paced_reopen() {
             .unwrap(),
         20
     );
+}
+
+fn insert_committed_bulk_search_event(store: &Store, prefix: &str, index: usize) {
+    store.begin_immediate_batch().unwrap();
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO event_search
+            (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
+            VALUES (?1, NULL, NULL, 'user', ?2, 'message')
+            "#,
+            params![
+                format!("{prefix}-event-{index}"),
+                format!("{prefix} needle {index}")
+            ],
+        )
+        .unwrap();
+    store.commit_batch().unwrap();
+}
+
+fn wal_bytes(db_path: &std::path::Path) -> u64 {
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    std::fs::metadata(wal_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+#[test]
+fn subthreshold_changed_slice_coalesces_its_intermediate_checkpoints() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    insert_bulk_search_events(&store, "coalesced", 20, 8);
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO search_projection_stats (key, value, updated_at_ms)
+            VALUES ('event_search_bulk_mode_v1:test_remaining_merge_passes', 3, 0)
+            "#,
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.finish_event_search_bulk_mode(&guard).unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    let pending_wal_bytes = wal_bytes(&db_path);
+    assert!(pending_wal_bytes > 0);
+    assert!(pending_wal_bytes < BULK_SEARCH_WAL_HIGH_WATER_BYTES);
+    assert_eq!(bulk_mode_marker(&store), Some(1));
+
+    for _ in 0..32 {
+        if store
+            .finish_event_search_bulk_mode(&guard)
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
+    assert_eq!(bulk_mode_marker(&store), None);
+    assert_eq!(wal_bytes(&db_path), 0);
+}
+
+#[test]
+fn bulk_search_periodic_maintenance_starts_at_256_committed_groups() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    let outer = store.begin_event_search_bulk_mode().unwrap();
+
+    for index in 0..FTS_BULK_MAINTENANCE_BATCHES {
+        insert_committed_bulk_search_event(&store, "cadence", index);
+        assert_eq!(
+            store.maintain_event_search_bulk_mode().unwrap(),
+            EventSearchBulkMaintenanceOutcome::Complete
+        );
+        if index + 1 == FTS_BULK_MAINTENANCE_BATCHES - 1 {
+            assert_eq!(
+                event_search_segment_count(&store),
+                (index + 1) as i64,
+                "maintenance ran before the 256-group cadence"
+            );
+        }
+    }
+
+    assert!(
+        event_search_segment_count(&store) < FTS_BULK_MAINTENANCE_BATCHES as i64,
+        "the first bounded cadence slice did not reduce segment debt"
+    );
+    assert_eq!(bulk_mode_marker(&store), Some(1));
+
+    for _ in 0..32 {
+        if store
+            .finish_event_search_bulk_mode(&outer)
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
+    assert_eq!(bulk_mode_marker(&store), None);
+}
+
+#[test]
+fn bulk_search_crisis_threshold_bounds_uncounted_connection_segments() {
+    const UNCOUNTED_GROUPS: usize = 2_100;
+    const _: () = assert!(FTS_BULK_CRISISMERGE > FTS_BULK_MAINTENANCE_BATCHES as i64);
+    const _: () = assert!(FTS_BULK_CRISISMERGE * 3 < 2_000);
+
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let owner = Store::open(&db_path).unwrap();
+    let outer = owner.begin_event_search_bulk_mode().unwrap();
+    let other = Store::open(&db_path).unwrap();
+
+    for index in 0..UNCOUNTED_GROUPS {
+        other
+            .conn
+            .execute(
+                r#"
+                INSERT INTO event_search
+                (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
+                VALUES (?1, NULL, NULL, 'user', ?2, 'message')
+                "#,
+                params![
+                    format!("uncounted-event-{index}"),
+                    format!("uncounted concurrent needle {index}")
+                ],
+            )
+            .unwrap();
+    }
+
+    assert_eq!(bulk_mode_marker(&other), Some(1));
+    assert!(
+        event_search_segment_count(&other) < FTS_BULK_CRISISMERGE,
+        "the database-global crisis threshold did not bound uncounted writers"
+    );
+    assert_eq!(
+        other
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'uncounted AND concurrent AND needle'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        UNCOUNTED_GROUPS as i64
+    );
+
+    for _ in 0..32 {
+        if owner
+            .finish_event_search_bulk_mode(&outer)
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
+    assert_eq!(bulk_mode_marker(&owner), None);
+}
+
+#[test]
+fn pinned_high_water_suspends_admission_without_further_wal_growth() {
+    const GROUP_BYTES: i64 = 1024 * 1024;
+    const MAX_GROUPS: usize = 128;
+
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    store
+        .conn
+        .execute("CREATE TABLE admission_probe(value BLOB NOT NULL)", [])
+        .unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM admission_probe", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+
+    let mut blocked_wal_bytes = None;
+    let mut largest_group_growth = 0;
+    for _ in 0..MAX_GROUPS {
+        assert_eq!(
+            store.event_search_bulk_admission_outcome().unwrap(),
+            EventSearchBulkMaintenanceOutcome::Complete
+        );
+        let before = wal_bytes(&db_path);
+        store.begin_immediate_batch().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO admission_probe VALUES (zeroblob(?1))",
+                [GROUP_BYTES],
+            )
+            .unwrap();
+        store.commit_batch().unwrap();
+        let after = wal_bytes(&db_path);
+        largest_group_growth = largest_group_growth.max(after.saturating_sub(before));
+
+        match store
+            .checkpoint_wal_truncate_required_if_larger_than(BULK_SEARCH_WAL_HIGH_WATER_BYTES)
+        {
+            Ok(false) => {}
+            Ok(true) => panic!("pinned checkpoint unexpectedly truncated the WAL"),
+            Err(StoreError::WalCheckpointBusy { .. }) => {
+                blocked_wal_bytes = Some(after);
+                break;
+            }
+            Err(error) => panic!("unexpected checkpoint error: {error}"),
+        }
+    }
+
+    let blocked_wal_bytes = blocked_wal_bytes.expect("fixture did not reach the WAL high-water");
+    assert!(blocked_wal_bytes >= BULK_SEARCH_WAL_HIGH_WATER_BYTES);
+    assert!(
+        blocked_wal_bytes < BULK_SEARCH_WAL_HIGH_WATER_BYTES.saturating_add(largest_group_growth),
+        "WAL overshoot exceeded the one already-admitted bounded group"
+    );
+    for _ in 0..8 {
+        assert_eq!(
+            store.event_search_bulk_admission_outcome().unwrap(),
+            EventSearchBulkMaintenanceOutcome::Pending
+        );
+        assert_eq!(wal_bytes(&db_path), blocked_wal_bytes);
+    }
+
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    assert!(store
+        .checkpoint_wal_truncate_required_if_larger_than(BULK_SEARCH_WAL_HIGH_WATER_BYTES)
+        .unwrap());
+    assert_eq!(
+        store.event_search_bulk_admission_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Complete
+    );
+    assert!(store
+        .finish_event_search_bulk_mode(&guard)
+        .unwrap()
+        .is_complete());
+}
+
+#[test]
+fn marker_cleared_checkpoint_failure_is_required_again_on_retry() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    insert_bulk_search_events(&store, "final-handoff", 20, 8);
+
+    let pinned_reader = Arc::new(Mutex::new(None));
+    let hook_reader = Arc::clone(&pinned_reader);
+    let hook_db_path = db_path.clone();
+    set_restore_post_commit_hook(
+        db_path.clone(),
+        Box::new(move || {
+            let reader = Connection::open(&hook_db_path).unwrap();
+            reader.execute_batch("BEGIN").unwrap();
+            assert_eq!(
+                reader
+                    .query_row(
+                        "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'event_search_bulk_mode_v1'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0,
+                "hook ran before marker removal committed"
+            );
+            *hook_reader.lock().unwrap() = Some(reader);
+        }),
+    );
+
+    assert!(matches!(
+        store.finish_event_search_bulk_mode(&guard).unwrap_err(),
+        StoreError::WalCheckpointBusy { .. }
+    ));
+    assert_eq!(bulk_mode_marker(&store), None);
+    assert!(wal_bytes(&db_path) > 0);
+
+    assert!(matches!(
+        store.finish_event_search_bulk_mode(&guard).unwrap_err(),
+        StoreError::WalCheckpointBusy { .. }
+    ));
+
+    let reader = pinned_reader.lock().unwrap().take().unwrap();
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    assert!(store
+        .finish_event_search_bulk_mode(&guard)
+        .unwrap()
+        .is_complete());
+    assert_eq!(wal_bytes(&db_path), 0);
 }
