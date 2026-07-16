@@ -17,6 +17,7 @@ sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
+ctx-protocol = { path = "../ctx-protocol" }
 fs2 = "0.4.3"
 libc.workspace = true
 

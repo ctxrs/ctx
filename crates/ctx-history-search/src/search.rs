@@ -462,7 +462,7 @@ fn merge_explicit_semantic_candidates(
     let file_scope = file_filter_scope(store, &options.filters)?;
     let mut semantic_results = Vec::new();
     for (rank, hit) in hits.into_iter().enumerate() {
-        if !consume_hydration_input(&mut packet.query_execution, hit.preview.len()) {
+        if !consume_hydration_input(&mut packet.query_execution, hit.input_bytes()) {
             continue;
         }
         let verification_bytes = hit.preview.len();
@@ -1011,7 +1011,7 @@ fn search_packet_query_lexical(
         resolved.hydration_input_bytes_per_event,
     )?;
     ensure_structured_deadline(started, &diagnostics)?;
-    hits.retain(|hit| consume_hydration_input(&mut diagnostics, hit.preview.len()));
+    hits.retain(|hit| consume_hydration_input(&mut diagnostics, hit.input_bytes()));
     let display_query = render_structured_query(&query);
     let snippet_query = query
         .any
@@ -1084,7 +1084,9 @@ fn search_packet_query_lexical(
             .title
             .len()
             .saturating_add(record.body.len())
-            .saturating_add(record.tags.iter().map(String::len).sum::<usize>());
+            .saturating_add(record.tags.iter().map(String::len).sum::<usize>())
+            .saturating_add(record.kind.len())
+            .saturating_add(record.workspace.as_deref().map_or(0, str::len));
         if !consume_hydration_input(&mut diagnostics, record_input_bytes) {
             continue;
         }
@@ -1192,7 +1194,7 @@ fn search_packet_query_lexical(
             resolved.hydration_input_bytes_per_event,
         )?
     };
-    full_hits.retain(|hit| consume_hydration_input(&mut diagnostics, hit.preview.len()));
+    full_hits.retain(|hit| consume_hydration_input(&mut diagnostics, hit.input_bytes()));
     let full_hits = full_hits
         .into_iter()
         .map(|hit| (hit.event_id, hit))
