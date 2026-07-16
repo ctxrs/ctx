@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     fs::File,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom, Write},
     ops::Deref,
     path::{Path, PathBuf},
 };
@@ -19,7 +19,7 @@ use crate::provider::sqlite_observation::{
     SQLITE_GENERATION_MAX_ATTEMPTS, SQLITE_SNAPSHOT_MAX_BYTES,
 };
 
-use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
+use crate::{pace_current_disk_io, CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 pub(crate) fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
     let exists: i64 = conn.query_row(
@@ -546,14 +546,35 @@ fn copy_sqlite_snapshot_file(
     let mut destination_file = create_private_snapshot_file(destination)?;
     run_snapshot_copy_test_hook(source.path());
     source_file.seek(SeekFrom::Start(0))?;
-    let copied = io::copy(
-        &mut source_file.by_ref().take(byte_count),
-        &mut destination_file,
-    )?;
-    if copied != byte_count {
-        return Ok(false);
+    let mut remaining = byte_count;
+    let mut buffer = vec![0_u8; 256 * 1024];
+    while remaining > 0 {
+        let limit = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        pace_current_disk_io(limit as u64);
+        let read = source_file.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        write_all_paced(&mut destination_file, &buffer[..read])?;
+        remaining = remaining.saturating_sub(read as u64);
     }
     Ok(true)
+}
+
+fn write_all_paced(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        pace_current_disk_io((bytes.len() - offset) as u64);
+        let written = file.write(&bytes[offset..])?;
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "SQLite snapshot destination stopped accepting bytes",
+            ));
+        }
+        offset += written;
+    }
+    Ok(())
 }
 
 fn create_private_snapshot_dir_in(parent: &Path) -> io::Result<PrivateSnapshotDir> {

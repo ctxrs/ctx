@@ -1,29 +1,3 @@
-fn insert_matching_checkpoint(store: &Store, file: &SourceImportFile) {
-    store
-        .conn
-        .execute(
-            r#"
-            INSERT INTO provider_file_checkpoints (
-                provider, source_format, source_root, source_path, import_revision,
-                checkpoint_version, stable_file_identity, committed_byte_offset,
-                committed_complete_line_count, head_sha256, boundary_sha256, updated_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 'test-file', ?6, 0, ?7, ?8, ?9)
-            "#,
-            params![
-                file.provider.as_str(),
-                &file.source_format,
-                &file.source_root,
-                &file.source_path,
-                i64::from(file.import_revision),
-                file.file_size_bytes,
-                "a".repeat(64),
-                "b".repeat(64),
-                file.observed_at_ms,
-            ],
-        )
-        .unwrap();
-}
-
 #[test]
 fn fresh_schema_stages_both_pending_reason_repairs() {
     let temp = tempdir();
@@ -482,6 +456,163 @@ fn explicit_source_rescan_survives_same_fingerprint_reobservation() {
 }
 
 #[test]
+fn explicit_source_rescan_repairs_failures_and_reopens_healthy_mixed_rows() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("catalog.sqlite")).unwrap();
+    let root = "/fixture/explicit-mixed-source";
+    let files = [
+        ("failed.jsonl", "failed"),
+        ("indexed.jsonl", "indexed"),
+        ("mixed.jsonl", "completed_with_rejections"),
+        ("rejected.jsonl", "rejected"),
+    ]
+    .map(|(name, _)| {
+        source_import_file(
+            CaptureProvider::Pi,
+            "pi_session_jsonl",
+            root,
+            &format!("{root}/{name}"),
+            1000,
+        )
+    });
+    upsert_source_inventory(&store, &files);
+    for ((_, status), file) in [
+        ("failed.jsonl", "failed"),
+        ("indexed.jsonl", "indexed"),
+        ("mixed.jsonl", "completed_with_rejections"),
+        ("rejected.jsonl", "rejected"),
+    ]
+    .into_iter()
+    .zip(&files)
+    {
+        store
+            .conn
+            .execute(
+                "UPDATE source_import_files SET indexed_status = ?2, pending_reason = NULL \
+                 WHERE source_path = ?1",
+                params![&file.source_path, status],
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        store
+            .schedule_source_import_explicit_rescan(
+                CaptureProvider::Pi,
+                root,
+                current_source_generation(&store, CaptureProvider::Pi, root),
+            )
+            .unwrap(),
+        2
+    );
+    let states = store
+        .conn
+        .prepare(
+            "SELECT indexed_status, pending_reason FROM source_import_files \
+             WHERE source_root = ?1 ORDER BY source_path",
+        )
+        .unwrap()
+        .query_map([root], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            ("failed".into(), Some("legacy".into())),
+            ("indexed".into(), Some("explicit_rescan".into())),
+            ("completed_with_rejections".into(), None),
+            ("rejected".into(), None),
+        ]
+    );
+    let work = store
+        .list_source_import_file_work(CaptureProvider::Pi, root, ImportWorkClass::Recovery, 10)
+        .unwrap();
+    assert_eq!(work.len(), 2);
+    assert!(work
+        .iter()
+        .any(|work| work.reason == ImportPendingReason::Legacy));
+    assert!(work
+        .iter()
+        .any(|work| work.reason == ImportPendingReason::ExplicitRescan));
+}
+
+#[test]
+fn explicit_catalog_rescan_repairs_failures_and_reopens_healthy_mixed_rows() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("catalog.sqlite")).unwrap();
+    let root = "/fixture/explicit-mixed-catalog";
+    let sessions = [
+        ("failed.jsonl", "failed"),
+        ("indexed.jsonl", "indexed"),
+        ("mixed.jsonl", "completed_with_rejections"),
+        ("rejected.jsonl", "rejected"),
+    ]
+    .map(|(name, _)| catalog_session_for_root(root, &format!("{root}/{name}"), name, 1000));
+    upsert_catalog_inventory(&store, &sessions);
+    for ((_, status), session) in [
+        ("failed.jsonl", "failed"),
+        ("indexed.jsonl", "indexed"),
+        ("mixed.jsonl", "completed_with_rejections"),
+        ("rejected.jsonl", "rejected"),
+    ]
+    .into_iter()
+    .zip(&sessions)
+    {
+        store
+            .conn
+            .execute(
+                "UPDATE catalog_sessions SET indexed_status = ?2, pending_reason = NULL \
+                 WHERE source_path = ?1",
+                params![&session.source_path, status],
+            )
+            .unwrap();
+    }
+    let generation = current_catalog_generation(&store, CaptureProvider::Codex, root);
+
+    assert_eq!(
+        store
+            .schedule_catalog_source_explicit_rescan(CaptureProvider::Codex, root, generation,)
+            .unwrap(),
+        2
+    );
+    let states = store
+        .conn
+        .prepare(
+            "SELECT indexed_status, pending_reason FROM catalog_sessions \
+             WHERE source_root = ?1 ORDER BY source_path",
+        )
+        .unwrap()
+        .query_map([root], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            ("failed".into(), Some("legacy".into())),
+            ("indexed".into(), Some("explicit_rescan".into())),
+            ("completed_with_rejections".into(), None),
+            ("rejected".into(), None),
+        ]
+    );
+    let work = store
+        .list_catalog_import_work(CaptureProvider::Codex, root, ImportWorkClass::Recovery, 10)
+        .unwrap();
+    assert_eq!(work.len(), 2);
+    assert!(work
+        .iter()
+        .any(|work| work.reason == ImportPendingReason::Legacy));
+    assert!(work
+        .iter()
+        .any(|work| work.reason == ImportPendingReason::ExplicitRescan));
+}
+
+#[test]
 fn source_import_append_failure_retries_incrementally() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("catalog.sqlite")).unwrap();
@@ -525,6 +656,16 @@ fn source_import_append_failure_retries_incrementally() {
         .unwrap();
     assert_eq!(fresh[0].reason, ImportPendingReason::FreshAppend);
 
+    file.file_size_bytes = 72;
+    file.file_modified_at_ms += 1;
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    let repeated_growth = store
+        .list_source_import_file_work(file.provider, root, ImportWorkClass::Fresh, 10)
+        .unwrap();
+    assert_eq!(repeated_growth[0].reason, ImportPendingReason::FreshAppend);
+    assert!(!repeated_growth[0].reason.requires_replacement());
+
     store
         .record_source_import_file_result(
             file.provider,
@@ -564,6 +705,68 @@ fn source_import_append_failure_retries_incrementally() {
         .unwrap();
     assert_eq!(after_growth[0].reason, ImportPendingReason::RecoveryRetry);
     assert!(!after_growth[0].reason.requires_replacement());
+}
+
+#[test]
+fn source_import_pending_growth_ignores_only_owner_change_token() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("catalog.sqlite")).unwrap();
+    let root = "/fixture/append-token";
+    let mut file = source_import_file(
+        CaptureProvider::Pi,
+        "pi_session_jsonl",
+        root,
+        "/fixture/append-token/session.jsonl",
+        1000,
+    );
+    file.metadata = serde_json::json!({
+        "dependencies": [{"path": "companion.json", "exists": true}],
+        "change_token_v1": "first",
+    });
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            file.provider,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(&store, file.provider, root),
+                metadata: &file.metadata,
+                indexed_at_ms: 1001,
+            },
+        )
+        .unwrap();
+    upsert_source_material(&store, &file);
+    insert_matching_checkpoint(&store, &file);
+
+    file.file_size_bytes += 10;
+    file.file_modified_at_ms += 1;
+    file.observed_at_ms += 1;
+    file.metadata["change_token_v1"] = serde_json::json!("second");
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    let fresh = store
+        .list_source_import_file_work(file.provider, root, ImportWorkClass::Fresh, 10)
+        .unwrap();
+    assert_eq!(fresh[0].reason, ImportPendingReason::FreshAppend);
+
+    file.file_size_bytes += 10;
+    file.file_modified_at_ms += 1;
+    file.observed_at_ms += 1;
+    file.metadata["dependencies"] =
+        serde_json::json!([{"path": "companion.json", "exists": false}]);
+    file.metadata["change_token_v1"] = serde_json::json!("third");
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    let changed_dependency = store
+        .list_source_import_file_work(file.provider, root, ImportWorkClass::Fresh, 10)
+        .unwrap();
+    assert_eq!(
+        changed_dependency[0].reason,
+        ImportPendingReason::FreshChanged
+    );
+    assert!(changed_dependency[0].reason.requires_replacement());
 }
 
 #[test]

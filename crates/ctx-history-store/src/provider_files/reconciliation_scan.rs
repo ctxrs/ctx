@@ -8,6 +8,19 @@ impl Store {
         limit: usize,
     ) -> Result<ReconciliationBatch> {
         let replacement_id = scope.scope_id.to_string();
+        if phase == CLEANUP_PHASE_AUDIT_LOG
+            && matches!(
+                source_cursor,
+                Some(PRIOR_HISTORY_RECORD_CURSOR | PRIOR_CAPTURE_SOURCE_CURSOR)
+            )
+        {
+            return self.reconcile_prior_seen_batch(
+                &replacement_id,
+                source_cursor.ok_or(StoreError::InvalidProviderFilePublicationScope)?,
+                entity_cursor,
+                limit,
+            );
+        }
         let scan = self.reconciliation_batch_rows(
             &replacement_id,
             phase,
@@ -16,13 +29,14 @@ impl Store {
             limit,
         )?;
         if scan.owned_entity_ids.is_empty() {
-            return Ok(ReconciliationBatch {
+            let batch = ReconciliationBatch {
                 visited: scan.visited,
                 phase_complete: scan.phase_complete,
                 source_cursor: scan.source_cursor,
                 entity_cursor: scan.entity_cursor,
                 removed: ProviderFileReconciliationCounts::default(),
-            });
+            };
+            return self.begin_prior_seen_cleanup_if_needed(phase, &replacement_id, batch);
         }
         self.conn.execute(
             &format!("DELETE FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1"),
@@ -121,13 +135,169 @@ impl Store {
             },
             _ => unreachable!(),
         };
-        Ok(ReconciliationBatch {
+        let batch = ReconciliationBatch {
             visited: scan.visited,
             phase_complete: scan.phase_complete,
             source_cursor: scan.source_cursor,
             entity_cursor: scan.entity_cursor,
             removed,
+        };
+        self.begin_prior_seen_cleanup_if_needed(phase, &replacement_id, batch)
+    }
+
+    fn begin_prior_seen_cleanup_if_needed(
+        &self,
+        phase: i64,
+        replacement_id: &str,
+        mut batch: ReconciliationBatch,
+    ) -> Result<ReconciliationBatch> {
+        if phase != CLEANUP_PHASE_AUDIT_LOG || !batch.phase_complete {
+            return Ok(batch);
+        }
+        let next_cursor = if self
+            .provider_file_publication_seen_kind_exists(replacement_id, PRIOR_HISTORY_RECORD_KIND)?
+        {
+            Some(PRIOR_HISTORY_RECORD_CURSOR)
+        } else if self
+            .provider_file_publication_seen_kind_exists(replacement_id, PRIOR_CAPTURE_SOURCE_KIND)?
+        {
+            Some(PRIOR_CAPTURE_SOURCE_CURSOR)
+        } else {
+            None
+        };
+        if let Some(next_cursor) = next_cursor {
+            batch.phase_complete = false;
+            batch.source_cursor = Some(next_cursor.to_owned());
+            batch.entity_cursor = None;
+        }
+        Ok(batch)
+    }
+
+    fn reconcile_prior_seen_batch(
+        &self,
+        replacement_id: &str,
+        prior_cursor: &str,
+        entity_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ReconciliationBatch> {
+        let prior_kind = match prior_cursor {
+            PRIOR_HISTORY_RECORD_CURSOR => PRIOR_HISTORY_RECORD_KIND,
+            PRIOR_CAPTURE_SOURCE_CURSOR => PRIOR_CAPTURE_SOURCE_KIND,
+            _ => return Err(StoreError::InvalidProviderFilePublicationScope),
+        };
+        let sqlite_limit = i64::try_from(limit.checked_add(1).ok_or(
+            StoreError::ProviderFileReconciliationLimitOutOfRange {
+                value: limit,
+                max: PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+            },
+        )?)
+        .map_err(|_| StoreError::ProviderFileReconciliationLimitOutOfRange {
+            value: limit,
+            max: PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT entity_id FROM {STAGING_SEEN_TABLE} \
+             WHERE replacement_id = ?1 AND entity_kind = ?2 \
+               AND (?3 IS NULL OR entity_id > ?3) \
+             ORDER BY entity_id LIMIT ?4"
+        ))?;
+        let rows = stmt.query_map(
+            params![replacement_id, prior_kind, entity_cursor, sqlite_limit],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let complete = ids.len() <= limit;
+        if !complete {
+            ids.pop();
+        }
+        if ids.is_empty() {
+            let next_cursor = if prior_cursor == PRIOR_HISTORY_RECORD_CURSOR
+                && self.provider_file_publication_seen_kind_exists(
+                    replacement_id,
+                    PRIOR_CAPTURE_SOURCE_KIND,
+                )? {
+                Some(PRIOR_CAPTURE_SOURCE_CURSOR.to_owned())
+            } else {
+                None
+            };
+            return Ok(ReconciliationBatch {
+                visited: 0,
+                phase_complete: next_cursor.is_none(),
+                source_cursor: next_cursor,
+                entity_cursor: None,
+                removed: ProviderFileReconciliationCounts::default(),
+            });
+        }
+
+        self.conn.execute(
+            &format!("DELETE FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1"),
+            params![replacement_id],
+        )?;
+        {
+            let mut insert = self.conn.prepare_cached(&format!(
+                "INSERT INTO {STAGING_BATCH_TABLE} \
+                 (replacement_id, source_id, entity_id) VALUES (?1, ?2, ?3)"
+            ))?;
+            for id in &ids {
+                insert.execute(params![replacement_id, prior_cursor, id])?;
+            }
+        }
+        let removed = if prior_kind == PRIOR_HISTORY_RECORD_KIND {
+            ProviderFileReconciliationCounts {
+                history_records: self.delete_unseen_history_record_batch(replacement_id)?,
+                ..ProviderFileReconciliationCounts::default()
+            }
+        } else {
+            self.delete_unseen_capture_source_batch(replacement_id)?;
+            ProviderFileReconciliationCounts::default()
+        };
+        self.conn.execute(
+            &format!(
+                "DELETE FROM {STAGING_SEEN_TABLE} WHERE replacement_id = ?1 \
+                 AND entity_kind = ?2 AND entity_id IN ( \
+                     SELECT entity_id FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1 \
+                 )"
+            ),
+            params![replacement_id, prior_kind],
+        )?;
+
+        let last_id = ids.last().cloned();
+        let next_cursor = if complete
+            && prior_cursor == PRIOR_HISTORY_RECORD_CURSOR
+            && self.provider_file_publication_seen_kind_exists(
+                replacement_id,
+                PRIOR_CAPTURE_SOURCE_KIND,
+            )? {
+            Some(PRIOR_CAPTURE_SOURCE_CURSOR.to_owned())
+        } else if complete {
+            None
+        } else {
+            Some(prior_cursor.to_owned())
+        };
+        Ok(ReconciliationBatch {
+            visited: ids.len(),
+            phase_complete: complete && next_cursor.is_none(),
+            source_cursor: next_cursor,
+            entity_cursor: (!complete).then_some(last_id).flatten(),
+            removed,
         })
+    }
+
+    fn provider_file_publication_seen_kind_exists(
+        &self,
+        replacement_id: &str,
+        entity_kind: &str,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM {STAGING_SEEN_TABLE} \
+                     WHERE replacement_id = ?1 AND entity_kind = ?2)"
+                ),
+                params![replacement_id, entity_kind],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
     }
 
     fn reconciliation_batch_rows(

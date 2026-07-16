@@ -101,29 +101,13 @@ fn mixed_codex_append_slice_reports_only_completed_bytes() {
     let temp = tempdir();
     let root = temp.path().join("sessions");
     write_valid_codex_session(&root, "a-complete");
-    write_valid_codex_session(&root, "b-deferred");
     let completed_file = root.join("a-complete.jsonl");
     let deferred_file = root.join("b-deferred.jsonl");
-    let source = explicit_path_source(CaptureProvider::Codex, root);
+    let source = explicit_path_source(CaptureProvider::Codex, root.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-    let inventory = inventory_import_sources(&store, vec![source.clone()], false).unwrap();
-    let plan = ImportPlan::build(&store, inventory.sources).unwrap();
-    let slice = plan
-        .select_slice(&store, ImportWorkClass::Fresh, plan.fresh_units)
-        .unwrap();
-    let selected = &slice.sources[0];
-    let source_plan = &plan.sources[selected.source_index];
-    let initial = import_selected_source(
-        &mut store,
-        &source_plan.source,
-        None,
-        &selected.preinventory,
-        &selected.work,
-    )
-    .unwrap();
-    assert_eq!(initial.completed_units, 2);
-    assert_eq!(initial.deferred_units, 0);
+    run_single_fresh_unit(&mut store, source.clone());
+    write_valid_codex_session(&root, "b-deferred");
+    run_single_fresh_unit(&mut store, source.clone());
 
     fs::OpenOptions::new()
         .append(true)
@@ -182,6 +166,18 @@ fn mixed_codex_append_slice_reports_only_completed_bytes() {
     assert_eq!(outcome.completed_units, 1);
     assert_eq!(outcome.deferred_units, 1);
     assert_eq!(outcome.completed_bytes, expected_completed_bytes);
+    assert_eq!(
+        store
+            .list_catalog_import_work(
+                CaptureProvider::Codex,
+                root.to_str().unwrap(),
+                ImportWorkClass::Fresh,
+                10,
+            )
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -378,11 +374,15 @@ fn deferred_source_file_reports_zero_completion_and_post_import_generation() {
     assert_eq!(outcome.completed_units, 0);
     assert_eq!(outcome.completed_bytes, 0);
     assert_eq!(outcome.deferred_units, 1);
-    assert!(outcome.post_import_inventory_generation > Some(pre_import_generation));
+    assert!(!outcome.durable_progress);
+    assert_eq!(
+        outcome.post_import_inventory_generation,
+        Some(pre_import_generation)
+    );
 }
 
 #[test]
-fn append_source_failure_after_mutation_preserves_error_and_allows_other_work() {
+fn append_source_failure_after_mutation_fences_other_work_until_recovered() {
     let temp = tempdir();
     let root = temp.path().join("sessions");
     let file = root.join("session.jsonl");
@@ -485,32 +485,39 @@ fn append_source_failure_after_mutation_preserves_error_and_allows_other_work() 
     )
     .unwrap();
     let unrelated = explicit_path_source(CaptureProvider::Pi, pi_root);
-    let (unrelated_summary, _) = run_single_fresh_unit(&mut store, unrelated);
-    assert!(unrelated_summary.imported_events > 0);
-
-    fs::remove_file(&file).unwrap();
-    let source_root = root.to_str().unwrap();
-    let tombstone_generation = store
-        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+    let inventory = inventory_import_sources(&store, vec![unrelated.clone()], false).unwrap();
+    let plan = ImportPlan::build(&store, inventory.sources).unwrap();
+    let slice = plan
+        .select_slice(&store, ImportWorkClass::Fresh, plan.fresh_units)
         .unwrap();
-    store
-        .mark_catalog_source_missing_paths_stale(
-            CaptureProvider::Codex,
-            source_root,
-            &[],
-            utc_now().timestamp_millis(),
-            tombstone_generation,
+    assert_eq!(slice.sources.len(), 1);
+    assert_eq!(slice.sources[0].source_index, 0);
+    assert_eq!(plan.sources[0].source.path, source.path);
+
+    let mut recovered = None;
+    for _ in 0..32 {
+        let result = import_selected_source(
+            &mut store,
+            &source_plan.source,
+            None,
+            &selected.preinventory,
+            &selected.work,
         )
         .unwrap();
-    let work = store
-        .list_provider_file_publication_retirement_work(1)
-        .unwrap();
-    assert_eq!(work.len(), 1);
-    let recovery = recover_provider_file_publication_retirement(&store, &work[0], true).unwrap();
-    assert!(recovery.completed);
-    assert!(recovery.made_durable_progress);
-    assert!(recovery.maintenance_warnings.is_empty());
+        assert!(result.remaining_error.is_none());
+        if result.outcome.completed_units == 1 {
+            recovered = Some(result.outcome);
+            break;
+        }
+        assert_eq!(result.outcome.deferred_units, 1);
+    }
+    recovered.expect("the interrupted publication must resume");
     assert!(!store.has_pending_provider_file_publications().unwrap());
+    assert!(serde_json::to_string(&store.export_archive().unwrap())
+        .unwrap()
+        .contains("durable before injected failure"));
+    let (unrelated_summary, _) = run_single_fresh_unit(&mut store, unrelated);
+    assert!(unrelated_summary.imported_events > 0);
 }
 
 #[test]

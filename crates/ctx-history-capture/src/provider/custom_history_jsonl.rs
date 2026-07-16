@@ -64,7 +64,7 @@ pub(crate) fn normalize_custom_history_jsonl_v1(
 ) -> Result<CustomHistoryJsonlV1NormalizationResult> {
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     normalize_custom_history_jsonl_v1_reader(reader, context)
 }
 

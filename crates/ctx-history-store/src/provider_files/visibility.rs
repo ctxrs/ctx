@@ -104,7 +104,16 @@ pub(crate) fn history_record_material_visible_predicate(record_alias: &str) -> S
     let event_visible = event_material_visible_predicate("record_event");
     format!(
         r#"
-        ({direct}) AND (
+        ({direct})
+        AND NOT EXISTS (
+            SELECT 1
+            FROM provider_file_publications AS record_publication
+            JOIN {STAGING_SEEN_TABLE} AS record_seen
+              ON record_seen.replacement_id = record_publication.replacement_id
+             AND record_seen.entity_kind IN ('history_record', '{PRIOR_HISTORY_RECORD_KIND}')
+             AND record_seen.entity_id = {record_alias}.id
+        )
+        AND (
             NOT EXISTS (SELECT 1 FROM sessions WHERE history_record_id = {record_alias}.id)
             AND NOT EXISTS (SELECT 1 FROM runs WHERE history_record_id = {record_alias}.id)
             AND NOT EXISTS (SELECT 1 FROM events WHERE history_record_id = {record_alias}.id)
@@ -123,6 +132,39 @@ pub(crate) fn history_record_material_visible_predicate(record_alias: &str) -> S
         )
         "#
     )
+}
+
+impl Store {
+    pub(crate) fn importer_history_record_material_visible_predicate(
+        &self,
+        record_alias: &str,
+    ) -> String {
+        let public = history_record_material_visible_predicate(record_alias);
+        let active_scope_id = self
+            .provider_file_publication
+            .borrow()
+            .as_ref()
+            .filter(|active| {
+                active.attached
+                    && active.lifecycle.load(Ordering::Acquire)
+                    && self.provider_file_write_scope.get() == Some(active.scope_id)
+            })
+            .map(|active| active.scope_id);
+        let Some(active_scope_id) = active_scope_id else {
+            return public;
+        };
+        format!(
+            r#"
+            (({public}) OR EXISTS (
+                SELECT 1
+                FROM provider_file_publication_seen AS active_record_seen
+                WHERE active_record_seen.replacement_id = '{active_scope_id}'
+                  AND active_record_seen.entity_kind = 'history_record'
+                  AND active_record_seen.entity_id = {record_alias}.id
+            ))
+            "#,
+        )
+    }
 }
 
 pub(crate) fn summary_material_visible_predicate(summary_alias: &str) -> String {
@@ -355,46 +397,94 @@ pub(crate) fn effective_provider_file_publication_predicate(publication_alias: &
     format!("{publication_alias}.mutation_started = 1 OR ({current})")
 }
 
-fn provider_file_retirement_observation_current_predicate(publication_alias: &str) -> String {
+fn global_provider_file_publication_id_sql() -> String {
+    let effective = effective_provider_file_publication_predicate("global_publication");
+    format!(
+        "SELECT global_publication.replacement_id \
+         FROM provider_file_publications AS global_publication \
+         WHERE {effective} \
+         ORDER BY global_publication.started_at_ms, global_publication.replacement_id \
+         LIMIT 1"
+    )
+}
+
+pub(crate) fn catalog_candidate_is_global_publication(catalog_alias: &str) -> String {
+    let global_id = global_provider_file_publication_id_sql();
     format!(
         r#"
-        (
-            {publication_alias}.inventory_family = '{CATALOG_INVENTORY_FAMILY}'
-            AND EXISTS (
-                SELECT 1 FROM catalog_sessions AS retirement_catalog
-                WHERE retirement_catalog.provider = {publication_alias}.provider
-                  AND retirement_catalog.source_format = {publication_alias}.inventory_source_format
-                  AND retirement_catalog.source_root = {publication_alias}.inventory_source_root
-                  AND retirement_catalog.source_path = {publication_alias}.source_path
-                  AND retirement_catalog.is_stale = 0
-            )
-        )
-        OR (
-            {publication_alias}.inventory_family = '{SOURCE_IMPORT_INVENTORY_FAMILY}'
-            AND EXISTS (
-                SELECT 1 FROM source_import_files AS retirement_file
-                WHERE retirement_file.provider = {publication_alias}.provider
-                  AND retirement_file.source_format = {publication_alias}.inventory_source_format
-                  AND retirement_file.source_root = {publication_alias}.inventory_source_root
-                  AND retirement_file.source_path = {publication_alias}.source_path
-                  AND retirement_file.is_stale = 0
-            )
+        EXISTS (
+            SELECT 1 FROM provider_file_publications AS candidate_publication
+            WHERE candidate_publication.replacement_id = ({global_id})
+              AND candidate_publication.inventory_observation_invalidated = 0
+              AND candidate_publication.inventory_family = '{CATALOG_INVENTORY_FAMILY}'
+              AND candidate_publication.provider = {catalog_alias}.provider
+              AND candidate_publication.inventory_source_format = {catalog_alias}.source_format
+              AND candidate_publication.inventory_source_root = {catalog_alias}.source_root
+              AND candidate_publication.source_path = {catalog_alias}.source_path
+              AND candidate_publication.file_size_bytes = {catalog_alias}.file_size_bytes
+              AND candidate_publication.file_modified_at_ms = {catalog_alias}.file_modified_at_ms
+              AND candidate_publication.import_revision = {catalog_alias}.import_revision
+              AND (candidate_publication.metadata_json IS NULL
+                   OR candidate_publication.metadata_json IS {catalog_alias}.metadata_json)
         )
         "#
     )
 }
 
-pub(crate) fn replacement_observation_current_predicate(replacement_alias: &str) -> String {
+pub(crate) fn source_file_candidate_is_global_publication(source_alias: &str) -> String {
+    let global_id = global_provider_file_publication_id_sql();
     format!(
         r#"
         EXISTS (
-            SELECT 1 FROM import_inventory_generations AS replacement_inventory
-            WHERE replacement_inventory.provider = {replacement_alias}.provider
-              AND replacement_inventory.source_root = {replacement_alias}.inventory_source_root
-              AND replacement_inventory.inventory_family = {replacement_alias}.inventory_family
-              AND replacement_inventory.current_generation = {replacement_alias}.inventory_generation
+            SELECT 1 FROM provider_file_publications AS candidate_publication
+            WHERE candidate_publication.replacement_id = ({global_id})
+              AND candidate_publication.inventory_observation_invalidated = 0
+              AND candidate_publication.inventory_family = '{SOURCE_IMPORT_INVENTORY_FAMILY}'
+              AND candidate_publication.provider = {source_alias}.provider
+              AND candidate_publication.inventory_source_format = {source_alias}.source_format
+              AND candidate_publication.inventory_source_root = {source_alias}.source_root
+              AND candidate_publication.source_path = {source_alias}.source_path
+              AND candidate_publication.file_size_bytes = {source_alias}.file_size_bytes
+              AND candidate_publication.file_modified_at_ms = {source_alias}.file_modified_at_ms
+              AND candidate_publication.import_revision = {source_alias}.import_revision
+              AND candidate_publication.metadata_json IS {source_alias}.metadata_json
         )
-        AND (
+        "#
+    )
+}
+
+fn provider_file_retirement_observation_current_predicate(publication_alias: &str) -> String {
+    provider_file_observation_current_predicate(publication_alias, false)
+}
+
+pub(crate) fn replacement_observation_current_predicate(replacement_alias: &str) -> String {
+    provider_file_observation_current_predicate(replacement_alias, true)
+}
+
+fn provider_file_observation_current_predicate(
+    replacement_alias: &str,
+    require_generation_match: bool,
+) -> String {
+    let generation_current = if require_generation_match {
+        format!(
+            r#"
+            EXISTS (
+                SELECT 1 FROM import_inventory_generations AS replacement_inventory
+                WHERE replacement_inventory.provider = {replacement_alias}.provider
+                  AND replacement_inventory.source_root = {replacement_alias}.inventory_source_root
+                  AND replacement_inventory.inventory_family = {replacement_alias}.inventory_family
+                  AND replacement_inventory.current_generation = {replacement_alias}.inventory_generation
+            )
+            AND
+            "#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"
+        {replacement_alias}.inventory_observation_invalidated = 0
+        AND {generation_current} (
             (
                 {replacement_alias}.inventory_family = '{CATALOG_INVENTORY_FAMILY}'
                 AND EXISTS (
@@ -407,6 +497,8 @@ pub(crate) fn replacement_observation_current_predicate(replacement_alias: &str)
                       AND replacement_catalog.file_size_bytes = {replacement_alias}.file_size_bytes
                       AND replacement_catalog.file_modified_at_ms = {replacement_alias}.file_modified_at_ms
                       AND replacement_catalog.import_revision = {replacement_alias}.import_revision
+                      AND ({replacement_alias}.metadata_json IS NULL
+                           OR replacement_catalog.metadata_json IS {replacement_alias}.metadata_json)
                 )
             )
             OR (

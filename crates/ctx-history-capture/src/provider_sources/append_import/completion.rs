@@ -1,3 +1,19 @@
+fn certify_uncheckpointed_replacement(
+    reader: &mut ProviderJsonlReader,
+    observed_size: u64,
+    is_replacement: bool,
+    decision: &mut ProviderAppendFileImportDecision,
+) {
+    let ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(result) = decision else {
+        return;
+    };
+    if is_replacement && result.summary.has_accepted_content() {
+        // Materialization is already committed. A hash failure stays encoded as
+        // a missing certificate so the coordinator retires rather than publishes it.
+        result.source_prefix_sha256 = reader.pinned_prefix_sha256(observed_size).ok();
+    }
+}
+
 fn unexpected_post_commit_checkpoint_failure(
     error: &CaptureError,
 ) -> ProviderJsonlReplacementReason {
@@ -326,13 +342,21 @@ fn finish_import(
         Ok(checkpoint) => checkpoint,
         Err(reason) => {
             return ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
-                ProviderAppendFileImportWithoutCheckpoint { summary, reason },
+                ProviderAppendFileImportWithoutCheckpoint {
+                    summary,
+                    reason,
+                    source_prefix_sha256: None,
+                },
             );
         }
     };
     if let Some(reason) = certification_failure {
         return ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
-            ProviderAppendFileImportWithoutCheckpoint { summary, reason },
+            ProviderAppendFileImportWithoutCheckpoint {
+                summary,
+                reason,
+                source_prefix_sha256: None,
+            },
         );
     }
     checkpoint.resume_state = resume_state;

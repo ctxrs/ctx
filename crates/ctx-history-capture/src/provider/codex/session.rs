@@ -6,7 +6,7 @@ use std::{
 };
 
 use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
-use ctx_history_store::Store;
+use ctx_history_store::{EventSearchBulkMaintenanceOutcome, Store};
 use serde_json::Value;
 
 use crate::CodexSessionJsonlAdapter;
@@ -502,7 +502,14 @@ pub fn import_codex_session_jsonl_tail(
         import_codex_session_jsonl_tail_bounded(path, start_offset, total_bytes, store, &options);
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(EventSearchBulkMaintenanceOutcome::Complete)) => Ok(summary),
+        (Ok(mut summary), Ok(EventSearchBulkMaintenanceOutcome::Pending)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
+                "event search maintenance remains queued",
+            );
+            Ok(summary)
+        }
         (Ok(mut summary), Err(error)) => {
             summary.push_maintenance_warning(
                 crate::ProviderImportMaintenanceKind::EventSearchFinalization,
@@ -553,7 +560,7 @@ fn import_codex_session_jsonl_tail_bounded(
     let mut transaction = None;
     let import = (|| -> Result<ProviderImportSummary> {
         let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
         let mut line = Vec::new();
         let mut line_number = 0usize;
         let mut position = 0u64;
@@ -860,7 +867,14 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
     );
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
+        (Ok(summary), Ok(EventSearchBulkMaintenanceOutcome::Complete)) => Ok(summary),
+        (Ok(mut summary), Ok(EventSearchBulkMaintenanceOutcome::Pending)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
+                "event search maintenance remains queued",
+            );
+            Ok(summary)
+        }
         (Ok(mut summary), Err(error)) => {
             summary.push_maintenance_warning(
                 crate::ProviderImportMaintenanceKind::EventSearchFinalization,
@@ -997,11 +1011,15 @@ pub(crate) fn normalize_codex_session_paths_parallel(
     }
 
     let chunk_size = paths.len().div_ceil(parallelism).max(1);
+    let disk_io_pacer = crate::disk_io_pacing::current_disk_io_pacer();
     let mut batches = thread::scope(|scope| {
         let mut handles = Vec::new();
         for (chunk_index, chunk) in paths.chunks(chunk_size).enumerate() {
             let chunk = chunk.to_vec();
+            let disk_io_pacer = disk_io_pacer.clone();
             handles.push(scope.spawn(move || {
+                let _disk_io_pacing =
+                    disk_io_pacer.map(crate::disk_io_pacing::install_disk_io_pacer);
                 let mut normalized = Vec::with_capacity(chunk.len());
                 let base_index = chunk_index * chunk_size;
                 for (offset, path) in chunk.iter().enumerate() {

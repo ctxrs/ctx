@@ -60,6 +60,16 @@ Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including
 manifested per-file imports, but its final compaction remains bounded.
 
+Import execution also applies an internal cross-platform token-bucket disk
+pacer; it is policy, not a product flag. Exhaustive foreground setup/import and
+wait refresh use 64 MiB/s with an 8 MiB burst, bounded interactive refresh uses
+32 MiB/s with a 4 MiB burst, and daemon refresh uses 8 MiB/s with a 1 MiB burst.
+The daemon retains its bucket across refresh passes, and idle credit never
+exceeds one burst. Sleeps are issued in at most 25 ms quanta. A first unit may
+exceed the 8 MiB transaction/slice target, but it is committed and then charged
+by its actual durable or observed byte count, preserving progress and retry
+fairness instead of rejecting the unit.
+
 ## Import Unit Observation
 
 Inventory tracks the logical unit an adapter reads, not merely the file passed
@@ -99,6 +109,11 @@ super-journal still exists. A child journal whose super-journal has been deleted
 is non-hot post-commit residue under SQLite's recovery rules; relative native
 super-journal names are resolved beside the child journal. Observation retries
 a bounded number of times and never modifies provider-owned files.
+WAL checksum validation charges each header/page read to the active pacer.
+Snapshot copying uses bounded chunks and charges both source reads and temporary
+destination writes, so a large stable generation progresses without an
+unaccounted copy burst. Normal streamed imports likewise pause only between
+bounded durable transaction batches and scheduler slices, not per byte.
 
 Providers whose adapters normalize a whole document or root may remain
 whole-source replacement units. Native one-shot discovery still scans the

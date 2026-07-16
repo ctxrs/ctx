@@ -1,101 +1,3 @@
-#[test]
-fn changed_observation_adoption_resets_prior_staging_progress() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("work.sqlite");
-    let original = source_file(20, 100);
-    let source = Uuid::from_u128(64_200);
-    let replacement_event = Uuid::from_u128(64_201);
-    let prior_event = Uuid::from_u128(64_202);
-
-    {
-        let store = Store::open(&path).unwrap();
-        let generation = store
-            .allocate_source_import_inventory_generation(original.provider, &original.source_root)
-            .unwrap();
-        store
-            .upsert_source_import_files(generation, std::slice::from_ref(&original))
-            .unwrap();
-        insert_capture_source(&store, source, PATH_A, "changed-staging-adoption");
-        insert_raw_event(&store, prior_event, 1, source, "prior generation");
-        let scope = store
-            .begin_provider_file_publication(
-                original.provider,
-                source_outcome(&original, generation, 110).observation,
-                MATERIAL_FORMAT,
-                ProviderFilePublicationKind::Replacement,
-                105,
-            )
-            .unwrap();
-        prepare_all(&store, &scope, 1);
-        let mut event = event_fixture(
-            replacement_event,
-            2,
-            source,
-            "changed-staging-adoption".to_owned(),
-            "old attempt",
-        );
-        event.dedupe_key = None;
-        store
-            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&event))
-            .unwrap();
-        let completion = ProviderFilePublicationCompletion {
-            version: 1,
-            payload: json!({"attempt": "old-observation"}),
-        };
-        store
-            .stage_provider_file_publication_completion(&scope, &completion)
-            .unwrap();
-        store
-            .reconcile_provider_file_publication_slice(&scope, 1)
-            .unwrap();
-        assert_eq!(staged_seen_count(&store), 1);
-        drop(scope);
-    }
-
-    let store = Store::open(&path).unwrap();
-    let changed = source_file(30, 120);
-    let generation = store
-        .allocate_source_import_inventory_generation(changed.provider, &changed.source_root)
-        .unwrap();
-    store
-        .upsert_source_import_files(generation, std::slice::from_ref(&changed))
-        .unwrap();
-    let adopted = store
-        .begin_provider_file_publication(
-            changed.provider,
-            source_outcome(&changed, generation, 130).observation,
-            MATERIAL_FORMAT,
-            ProviderFilePublicationKind::Replacement,
-            125,
-        )
-        .unwrap();
-    assert_eq!(staged_seen_count(&store), 0);
-    assert_eq!(
-        store
-            .load_provider_file_publication_completion(&adopted)
-            .unwrap(),
-        None
-    );
-    let reset_progress: (i64, Option<String>, Option<String>) = store
-        .conn
-        .query_row(
-            "SELECT cleanup_phase, cleanup_source_cursor, cleanup_entity_cursor \
-             FROM provider_file_publications",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(reset_progress, (0, None, None));
-    assert_eq!(
-        store.provider_file_publication_phase(&adopted).unwrap(),
-        ProviderFilePublicationPhase::Preparing
-    );
-    assert!(matches!(
-        store.abort_provider_file_publication(adopted).unwrap(),
-        std::ops::ControlFlow::Break(None)
-    ));
-}
-
 fn create_mutated_retirement_marker(store: &Store, family: RetirementInventoryFamily) {
     let (source_id, old_event_id, replacement_event_id) = match family {
         RetirementInventoryFamily::Catalog => (
@@ -420,6 +322,16 @@ fn retirement_attempt_timestamps_rotate_fairly_and_survive_reopen() {
             Uuid::from_u128(65_301),
             100,
         );
+        // Simulate a legacy database created before publication work was
+        // globally serialized. An ineffective marker would not have blocked
+        // the second owner, then both could later become durable recovery work.
+        store
+            .conn
+            .execute(
+                "UPDATE provider_file_publications SET mutation_started = 0 WHERE source_path = ?1",
+                [PATH_A],
+            )
+            .unwrap();
         create_source_import_retirement_work(
             &store,
             PATH_B,
@@ -427,6 +339,13 @@ fn retirement_attempt_timestamps_rotate_fairly_and_survive_reopen() {
             Uuid::from_u128(65_311),
             200,
         );
+        store
+            .conn
+            .execute(
+                "UPDATE provider_file_publications SET mutation_started = 1 WHERE source_path = ?1",
+                [PATH_A],
+            )
+            .unwrap();
 
         let initial = store
             .list_provider_file_publication_retirement_work(10)
@@ -473,7 +392,7 @@ fn retirement_attempt_timestamps_rotate_fairly_and_survive_reopen() {
 }
 
 #[test]
-fn matching_family_and_format_current_observation_blocks_retirement() {
+fn newer_generation_of_same_observation_adopts_existing_publication() {
     for family in [
         RetirementInventoryFamily::Catalog,
         RetirementInventoryFamily::SourceImport,
@@ -502,10 +421,6 @@ fn matching_family_and_format_current_observation_blocks_retirement() {
             "{family:?}",
         );
         assert!(store
-            .list_provider_file_publication_retirement_work(10)
-            .unwrap()
-            .is_empty());
-        assert!(store
             .begin_provider_file_publication_retirement(
                 CaptureProvider::Claude,
                 MATERIAL_FORMAT,
@@ -515,8 +430,58 @@ fn matching_family_and_format_current_observation_blocks_retirement() {
             )
             .unwrap()
             .is_none());
-        assert!(store.has_pending_provider_file_publications().unwrap());
-        assert_eq!(table_row_count(&store, "provider_file_publications"), 1);
+        match family {
+            RetirementInventoryFamily::Catalog => {
+                let catalog = catalog_file(20, 100);
+                let observation = catalog_observation(&catalog, generation, 160);
+                let scope = store
+                    .begin_provider_file_publication(
+                        catalog.provider,
+                        observation,
+                        MATERIAL_FORMAT,
+                        ProviderFilePublicationKind::Replacement,
+                        155,
+                    )
+                    .unwrap();
+                let outcome = ProviderFileImportOutcome {
+                    provider: catalog.provider,
+                    observation,
+                    status: CatalogIndexedStatus::Indexed,
+                    error: None,
+                };
+                reconcile_all(&store, &scope, 1);
+                store
+                    .finalize_provider_file_publication(
+                        scope,
+                        outcome,
+                        ProviderFilePublicationCommit::Replacement(None),
+                    )
+                    .unwrap();
+            }
+            RetirementInventoryFamily::SourceImport => {
+                let file = source_file(20, 100);
+                let outcome = source_outcome(&file, generation, 160);
+                let scope = store
+                    .begin_provider_file_publication(
+                        file.provider,
+                        outcome.observation,
+                        MATERIAL_FORMAT,
+                        ProviderFilePublicationKind::Replacement,
+                        155,
+                    )
+                    .unwrap();
+                reconcile_all(&store, &scope, 1);
+                store
+                    .finalize_provider_file_publication(
+                        scope,
+                        outcome,
+                        ProviderFilePublicationCommit::Replacement(None),
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(!store.has_pending_provider_file_publications().unwrap());
+        assert_eq!(table_row_count(&store, "provider_file_publications"), 0);
     }
 }
 
@@ -595,204 +560,125 @@ fn tombstoned_observation_retires_visibility_fence_and_can_be_adopted() {
 }
 
 #[test]
-fn retirement_without_prior_material_skips_preparation() {
-    const SOURCE_COUNT: u128 = 130;
-
+fn explicit_observation_invalidation_survives_an_identical_inventory_revival() {
     let temp = tempdir().unwrap();
-    let path = temp.path().join("work.sqlite");
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let file = source_file(10, 100);
-    {
-        let store = Store::open(&path).unwrap();
-        let generation = store
-            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
-            .unwrap();
-        store
-            .upsert_source_import_files(generation, std::slice::from_ref(&file))
-            .unwrap();
-        for index in 0..SOURCE_COUNT {
-            insert_capture_source(
-                &store,
-                Uuid::from_u128(66_000 + index),
-                PATH_A,
-                &format!("retirement-preparation-{index}"),
-            );
-        }
-        let scope = store
-            .begin_provider_file_publication(
-                file.provider,
-                source_outcome(&file, generation, 110).observation,
-                MATERIAL_FORMAT,
-                ProviderFilePublicationKind::Incremental,
-                105,
-            )
-            .unwrap();
-        let mut event = event_fixture(
-            Uuid::from_u128(66_500),
-            1,
-            Uuid::from_u128(66_000),
-            "retirement-preparation-0".to_owned(),
-            "mutation before disappearance",
-        );
-        event.dedupe_key = None;
-        store
-            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&event))
-            .unwrap();
-        assert!(matches!(
-            store.abort_provider_file_publication(scope).unwrap(),
-            std::ops::ControlFlow::Break(None)
-        ));
-        store
-            .mark_source_import_missing_paths_stale(
-                file.provider,
-                &file.source_root,
-                &[],
-                120,
-                generation,
-            )
-            .unwrap();
-    }
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let outcome = source_outcome(&file, generation, 110);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    let source = capture_source_fixture(Uuid::from_u128(66), PATH_A, "invalidated-owner");
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_capture_source(&source))
+        .unwrap();
 
-    let mut staged = 0;
-    let mut completed_on_cycle = None;
-    for cycle in 0..4 {
-        let store = Store::open(&path).unwrap();
-        let scope = store
-            .begin_provider_file_publication_retirement(
-                file.provider,
-                MATERIAL_FORMAT,
-                &file.source_root,
-                &file.source_path,
-                130 + cycle,
-            )
-            .unwrap()
-            .unwrap();
-        let progress = store
-            .prepare_provider_file_publication_slice(&scope, 64)
-            .unwrap();
-        staged += progress.source_ids_staged;
-        if progress.complete {
-            completed_on_cycle = Some(cycle);
-            reconcile_all(&store, &scope, 256);
-            store.retire_provider_file_publication(scope).unwrap();
-            break;
-        }
-        assert!(store
-            .abandon_provider_file_publication(scope)
-            .unwrap()
-            .is_none());
-    }
+    let owner = store
+        .effective_provider_file_publication_inventory_owner()
+        .unwrap()
+        .unwrap();
+    store
+        .mark_source_import_missing_paths_stale(
+            file.provider,
+            &file.source_root,
+            &[],
+            115,
+            generation,
+        )
+        .unwrap();
+    assert!(store
+        .invalidate_effective_provider_file_publication_observation(&owner, 120)
+        .unwrap());
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
 
-    assert_eq!(staged, 0);
-    assert_eq!(completed_on_cycle, Some(0));
-    let store = Store::open(&path).unwrap();
-    assert!(!store.has_pending_provider_file_publications().unwrap());
+    assert_eq!(
+        store
+            .provider_file_publication_retirement_work_count()
+            .unwrap(),
+        1
+    );
+    assert!(!store
+        .provider_file_publication_matches_candidate(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            &file.source_root,
+        )
+        .unwrap());
+    store.abandon_provider_file_publication(scope).unwrap();
+    assert!(store
+        .begin_provider_file_publication_retirement(
+            file.provider,
+            MATERIAL_FORMAT,
+            &file.source_root,
+            &file.source_path,
+            125,
+        )
+        .unwrap()
+        .is_some());
 }
 
 #[test]
-fn retirement_reconciliation_preserves_seen_candidates_across_reopen_cycles() {
-    const EVENT_COUNT: u128 = 130;
-
+fn explicit_observation_invalidation_discards_an_unmutated_publication() {
     let temp = tempdir().unwrap();
-    let path = temp.path().join("work.sqlite");
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let file = source_file(10, 100);
-    let source = Uuid::from_u128(67_000);
-    {
-        let store = Store::open(&path).unwrap();
-        let generation = store
-            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
-            .unwrap();
-        store
-            .upsert_source_import_files(generation, std::slice::from_ref(&file))
-            .unwrap();
-        insert_capture_source(&store, source, PATH_A, "retirement-retained");
-        for index in 0..EVENT_COUNT {
-            insert_raw_event(
-                &store,
-                Uuid::from_u128(67_100 + index),
-                index as i64,
-                source,
-                &format!("retained event {index}"),
-            );
-        }
-        let scope = store
-            .begin_provider_file_publication(
-                file.provider,
-                source_outcome(&file, generation, 110).observation,
-                MATERIAL_FORMAT,
-                ProviderFilePublicationKind::Replacement,
-                105,
-            )
-            .unwrap();
-        prepare_all(&store, &scope, 64);
-        for index in 0..EVENT_COUNT {
-            store
-                .track_provider_file_publication_event(Uuid::from_u128(67_100 + index))
-                .unwrap();
-        }
-        let mut mutation = event_fixture(
-            Uuid::from_u128(67_500),
-            500,
-            source,
-            "retirement-retained".to_owned(),
-            "retained mutation",
-        );
-        mutation.dedupe_key = None;
-        store
-            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&mutation))
-            .unwrap();
-        assert!(matches!(
-            store.abort_provider_file_publication(scope).unwrap(),
-            std::ops::ControlFlow::Break(None)
-        ));
-        store
-            .mark_source_import_missing_paths_stale(
-                file.provider,
-                &file.source_root,
-                &[],
-                120,
-                generation,
-            )
-            .unwrap();
-    }
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let outcome = source_outcome(&file, generation, 110);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    store.abandon_provider_file_publication(scope).unwrap();
 
-    let mut completed = false;
-    let mut cycles = 0;
-    for cycle in 0..32 {
-        let store = Store::open(&path).unwrap();
-        let scope = store
-            .begin_provider_file_publication_retirement(
-                file.provider,
-                MATERIAL_FORMAT,
-                &file.source_root,
-                &file.source_path,
-                130 + cycle,
-            )
-            .unwrap()
-            .unwrap();
-        assert!(
-            store
-                .prepare_provider_file_publication_slice(&scope, 64)
-                .unwrap()
-                .complete
-        );
-        let progress = store
-            .reconcile_provider_file_publication_slice(&scope, 64)
-            .unwrap();
-        cycles += 1;
-        if progress.complete {
-            store.retire_provider_file_publication(scope).unwrap();
-            completed = true;
-            break;
-        }
-        assert!(store
-            .abandon_provider_file_publication(scope)
-            .unwrap()
-            .is_none());
-    }
+    let owner = store
+        .effective_provider_file_publication_inventory_owner()
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .invalidate_effective_provider_file_publication_observation(&owner, 120)
+        .unwrap());
+    assert_eq!(table_row_count(&store, "provider_file_publications"), 0);
 
-    assert!(completed, "bounded retirement did not converge");
-    assert!(cycles >= 3);
-    let store = Store::open(&path).unwrap();
-    assert_eq!(table_row_count(&store, "events"), EVENT_COUNT as i64 + 1);
-    assert!(!store.has_pending_provider_file_publications().unwrap());
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let restarted = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            125,
+        )
+        .unwrap();
+    assert!(!restarted.tracks_prior_material());
+    assert!(matches!(
+        store.abort_provider_file_publication(restarted).unwrap(),
+        std::ops::ControlFlow::Continue(None)
+    ));
 }

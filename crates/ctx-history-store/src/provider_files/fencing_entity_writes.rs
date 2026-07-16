@@ -437,6 +437,16 @@ impl Store {
         record_id: Uuid,
     ) -> Result<()> {
         if let Some(active) = self.provider_file_publication.borrow().as_ref() {
+            let exact_capability = active.lifecycle.load(Ordering::Acquire)
+                && self.provider_file_write_scope.get() == Some(active.scope_id);
+            let record_exists: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM history_records WHERE id = ?1)",
+                params![record_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if exact_capability && !record_exists {
+                return Ok(());
+            }
             return Err(active_owner_mismatch(active));
         }
         let marker = self
@@ -497,6 +507,57 @@ impl Store {
             )
             .optional()?;
         self.ensure_provider_file_marker_write_allowed(marker)
+    }
+
+    pub(crate) fn track_provider_file_publication_history_record(
+        &self,
+        record_id: Uuid,
+    ) -> Result<()> {
+        let active = self.provider_file_publication.borrow();
+        let Some(active) = active.as_ref() else {
+            return Ok(());
+        };
+        if !active.lifecycle.load(Ordering::Acquire)
+            || self.provider_file_write_scope.get() != Some(active.scope_id)
+            || !active.attached
+        {
+            return Err(active_owner_mismatch(active));
+        }
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {STAGING_SEEN_TABLE} (replacement_id, entity_kind, entity_id) VALUES (?1, 'history_record', ?2)"
+            ),
+            params![active.scope_id.to_string(), record_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn track_provider_file_publication_capture_source(
+        &self,
+        source_id: Uuid,
+    ) -> Result<()> {
+        let active = self.provider_file_publication.borrow();
+        let Some(active) = active.as_ref() else {
+            return Ok(());
+        };
+        if !active.lifecycle.load(Ordering::Acquire)
+            || self.provider_file_write_scope.get() != Some(active.scope_id)
+        {
+            return Err(active_owner_mismatch(active));
+        }
+        let replacement_id = active.scope_id.to_string();
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {STAGING_SEEN_TABLE} \
+                 (replacement_id, entity_kind, entity_id) VALUES (?1, ?2, ?3)"
+            ),
+            params![
+                &replacement_id,
+                CURRENT_CAPTURE_SOURCE_KIND,
+                source_id.to_string()
+            ],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn ensure_provider_file_session_assignment_write_allowed(
@@ -635,43 +696,5 @@ impl Store {
             entity_id,
             effective_source_predicate,
         )
-    }
-
-    fn direct_entity_source_id(&self, table: &'static str, id: Uuid) -> Result<Option<Uuid>> {
-        if table == "vcs_changes" {
-            return self
-                .conn
-                .query_row(
-                    r#"
-                    SELECT COALESCE(change.source_id, workspace.source_id)
-                    FROM vcs_changes AS change
-                    LEFT JOIN vcs_workspaces AS workspace ON workspace.id = change.vcs_workspace_id
-                    WHERE change.id = ?1
-                    "#,
-                    params![id.to_string()],
-                    optional_uuid_from_first_column,
-                )
-                .optional()
-                .map(Option::flatten)
-                .map_err(StoreError::from);
-        }
-        let source_column = match table {
-            "sessions" => "capture_source_id",
-            "artifacts"
-            | "history_records"
-            | "summaries"
-            | "history_record_links"
-            | "vcs_workspaces" => "source_id",
-            _ => unreachable!("unsupported referenced provider-owned table"),
-        };
-        self.conn
-            .query_row(
-                &format!("SELECT {source_column} FROM {table} WHERE id = ?1"),
-                params![id.to_string()],
-                optional_uuid_from_first_column,
-            )
-            .optional()
-            .map(|value| value.flatten())
-            .map_err(StoreError::from)
     }
 }

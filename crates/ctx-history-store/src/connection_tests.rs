@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{Store, StoreError};
+use crate::{EventSearchBulkMaintenanceOutcome, Store, StoreError};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -151,7 +151,10 @@ fn nested_bulk_search_mode_finishes_only_at_outer_scope() {
     let nested = first.begin_event_search_bulk_mode().unwrap();
     let second = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
 
-    first.finish_event_search_bulk_mode(&nested).unwrap();
+    assert_eq!(
+        first.finish_event_search_bulk_mode(&nested).unwrap(),
+        EventSearchBulkMaintenanceOutcome::Complete
+    );
     assert_eq!(bulk_mode_marker(&first), Some(1));
     let error = first.finish_event_search_bulk_mode(&outer).unwrap_err();
     assert!(matches!(error, StoreError::InvalidBulkSearchGuard));

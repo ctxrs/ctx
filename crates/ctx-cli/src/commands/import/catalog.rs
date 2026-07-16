@@ -1,5 +1,8 @@
 use super::*;
-use ctx_history_capture::{observe_sqlite_source_generation, SqliteObservedFile};
+use ctx_history_capture::{
+    observe_ordinary_file, observe_sqlite_source_generation, OrdinaryFileObservation,
+    SqliteObservedFile,
+};
 use sha2::{Digest, Sha256};
 
 pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
@@ -19,9 +22,32 @@ fn catalog_batch_outcome(
         completed_units,
         completed_bytes,
         deferred_units,
+        durable_progress: false,
         post_import_inventory_generation: None,
         post_import_preinventory: None,
     }
+}
+
+fn catalog_batch_error_with_progress(
+    summary: &ProviderImportSummary,
+    completed_units: usize,
+    completed_bytes: u64,
+    deferred_units: usize,
+    durable_progress: bool,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    super::native::provider_import_batch_error(
+        super::native::ProviderImportBatchOutcome {
+            summary: summary.clone(),
+            completed_units,
+            completed_bytes,
+            deferred_units,
+            durable_progress,
+            post_import_inventory_generation: None,
+            post_import_preinventory: None,
+        },
+        error,
+    )
 }
 
 fn catalog_batch_error(
@@ -41,13 +67,14 @@ fn catalog_batch_error(
 pub(crate) fn import_incremental_codex_session_tree(
     store: &mut Store,
     source: &SourceInfo,
-    record_id: Uuid,
+    record: &HistoryRecord,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory_catalog: Option<&CatalogSummary>,
     preinventory_generation: Option<u64>,
     force_selection: bool,
     selection: Option<&SelectedImportWork>,
 ) -> Result<super::native::ProviderImportBatchOutcome> {
+    let record_id = record.id;
     let source_root = codex_catalog_root_identity(&source.path)?.to_owned();
     let inventory_generation = match preinventory_generation {
         Some(generation) => generation,
@@ -59,6 +86,7 @@ pub(crate) fn import_incremental_codex_session_tree(
     let mut completed_units = 0;
     let mut completed_bytes = 0_u64;
     let mut deferred_units = 0;
+    let mut durable_progress = false;
     if let Some(catalog) = preinventory_catalog {
         summary.failed += catalog.failed_sessions;
         summary.failures.extend(catalog.failures.clone());
@@ -81,18 +109,20 @@ pub(crate) fn import_incremental_codex_session_tree(
         for unit in work {
             let outcome = match super::native::import_append_capable_catalog_work(
                 store,
+                source,
                 unit,
                 inventory_generation,
-                record_id,
+                record,
             ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if super::native::publication_recovery_required(&error) {
-                        return Err(catalog_batch_error(
+                        return Err(catalog_batch_error_with_progress(
                             &summary,
                             completed_units,
                             completed_bytes,
                             deferred_units,
+                            durable_progress,
                             error,
                         ));
                     }
@@ -102,7 +132,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                     } else {
                         catalog_import_error_status(&error)
                     };
-                    if let Err(persist_error) = store.record_catalog_source_import_result(
+                    if let Err(persist_error) = store.record_observed_catalog_source_import_result(
                         unit.session.provider,
                         CatalogSourceIndexUpdate {
                             source_root: &unit.session.source_root,
@@ -115,14 +145,16 @@ pub(crate) fn import_incremental_codex_session_tree(
                             event_count: None,
                             indexed_at_ms: utc_now().timestamp_millis(),
                         },
+                        &unit.session.metadata,
                         status,
                         Some(&error_summary(&error)),
                     ) {
-                        return Err(catalog_batch_error(
+                        return Err(catalog_batch_error_with_progress(
                             &summary,
                             completed_units,
                             completed_bytes,
                             deferred_units,
+                            durable_progress,
                             persist_error.into(),
                         ));
                     }
@@ -136,11 +168,12 @@ pub(crate) fn import_incremental_codex_session_tree(
                         summary.merge_from(rejected_summary);
                         continue;
                     }
-                    return Err(catalog_batch_error(
+                    return Err(catalog_batch_error_with_progress(
                         &summary,
                         completed_units,
                         completed_bytes,
                         deferred_units,
+                        durable_progress,
                         error,
                     ));
                 }
@@ -151,7 +184,13 @@ pub(crate) fn import_incremental_codex_session_tree(
                     completed_units += 1;
                     completed_bytes = completed_bytes.saturating_add(unit.estimated_bytes);
                 }
-                super::native::AppendImportOutcome::Deferred => deferred_units += 1,
+                super::native::AppendImportOutcome::Deferred {
+                    durable_progress: unit_progress,
+                } => {
+                    deferred_units += 1;
+                    durable_progress |= unit_progress;
+                    break;
+                }
             }
         }
         return Ok(super::native::ProviderImportBatchOutcome {
@@ -159,6 +198,7 @@ pub(crate) fn import_incremental_codex_session_tree(
             completed_units,
             completed_bytes,
             deferred_units,
+            durable_progress,
             post_import_inventory_generation: None,
             post_import_preinventory: None,
         });
@@ -498,7 +538,7 @@ pub(crate) fn mark_catalog_session_result(
     } else {
         None
     };
-    let changed = store.record_catalog_source_import_result(
+    let changed = store.record_observed_catalog_source_import_result(
         session.provider,
         CatalogSourceIndexUpdate {
             source_root: &session.source_root,
@@ -511,6 +551,7 @@ pub(crate) fn mark_catalog_session_result(
             event_count,
             indexed_at_ms,
         },
+        &session.metadata,
         status,
         error,
     )?;
@@ -561,7 +602,7 @@ pub(crate) fn mark_catalog_sessions_error(
 ) -> Result<()> {
     let indexed_at_ms = utc_now().timestamp_millis();
     for session in sessions {
-        let changed = store.record_catalog_source_import_result(
+        let changed = store.record_observed_catalog_source_import_result(
             session.provider,
             CatalogSourceIndexUpdate {
                 source_root: &session.source_root,
@@ -574,6 +615,7 @@ pub(crate) fn mark_catalog_sessions_error(
                 event_count: None,
                 indexed_at_ms,
             },
+            &session.metadata,
             status,
             Some(error),
         )?;
@@ -616,13 +658,14 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
             stats.change_token = Some(source_change_token(change_entries));
             return Ok(stats);
         }
-        add_source_stat(
+        let observation = observe_ordinary_file(path)
+            .with_context(|| format!("observe import source {}", path.display()))?;
+        add_source_observation(
             &mut stats,
             &mut change_entries,
             path.parent().unwrap_or(path),
             path,
-            &metadata,
-            true,
+            &observation,
             true,
         );
         stats.change_token = Some(source_change_token(change_entries));
@@ -655,6 +698,11 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
                         })
                     }
                 };
+                if is_sqlite_sidecar_path(&entry_path) {
+                    stats.files += 1;
+                    stats.bytes = stats.bytes.saturating_add(metadata.len());
+                    continue;
+                }
                 if is_sqlite_main_path(&entry_path) {
                     stats.files += 1;
                     stats.bytes = stats.bytes.saturating_add(metadata.len());
@@ -674,15 +722,16 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
                     }
                     continue;
                 }
-                let include_in_token = !is_sqlite_sidecar_path(&entry_path);
-                add_source_stat(
+                let observation = observe_ordinary_file(&entry_path).with_context(|| {
+                    format!("observe import source file {}", entry_path.display())
+                })?;
+                add_source_observation(
                     &mut stats,
                     &mut change_entries,
                     path,
                     &entry_path,
-                    &metadata,
+                    &observation,
                     true,
-                    include_in_token,
                 );
             }
         }
@@ -712,6 +761,24 @@ impl SourceChangeEntry {
             modified_secs: modified.as_secs(),
             modified_nanos: modified.subsec_nanos(),
             sentinel: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_observation(
+        base: &Path,
+        path: &Path,
+        observation: &OrdinaryFileObservation,
+    ) -> Self {
+        let modified = observation
+            .modified_at()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            path: path.strip_prefix(base).unwrap_or(path).to_path_buf(),
+            len: observation.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+            sentinel: observation.token().to_vec(),
         }
     }
 
@@ -749,23 +816,20 @@ fn is_sqlite_sidecar_path(path: &Path) -> bool {
     })
 }
 
-fn add_source_stat(
+fn add_source_observation(
     stats: &mut SourceStats,
     change_entries: &mut Vec<SourceChangeEntry>,
     base: &Path,
     path: &Path,
-    metadata: &fs::Metadata,
-    include_in_totals: bool,
+    observation: &OrdinaryFileObservation,
     include_in_token: bool,
 ) {
-    if include_in_totals {
-        stats.files += 1;
-        stats.bytes = stats.bytes.saturating_add(metadata.len());
-    }
+    stats.files += 1;
+    stats.bytes = stats.bytes.saturating_add(observation.len());
     if !include_in_token {
         return;
     }
-    change_entries.push(SourceChangeEntry::from_metadata(base, path, metadata));
+    change_entries.push(SourceChangeEntry::from_observation(base, path, observation));
 }
 
 pub(crate) fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 32] {
@@ -862,231 +926,4 @@ pub(crate) fn import_record_for_history_source_plugin(
     record
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider_sources::explicit_path_source;
-    use ctx_history_capture::provider_source_specs;
-    use ctx_history_core::AgentType;
-
-    #[test]
-    fn every_importable_provider_uses_incremental_event_search() {
-        for spec in provider_source_specs() {
-            let source = explicit_path_source(
-                spec.provider,
-                PathBuf::from(format!("{}-history", spec.provider.as_str())),
-            );
-
-            assert_eq!(source.import_support, spec.import_support);
-            assert!(
-                source_uses_incremental_event_search(&source),
-                "{} import must maintain event search incrementally",
-                spec.provider
-            );
-        }
-    }
-
-    #[test]
-    fn unsupported_source_does_not_claim_incremental_event_search() {
-        let source = explicit_path_source(CaptureProvider::Shell, PathBuf::from("shell-history"));
-
-        assert!(!source.import_support.is_importable());
-        assert!(!source_uses_incremental_event_search(&source));
-    }
-
-    #[test]
-    fn codex_result_rejects_a_generation_superseded_after_normalization() {
-        let temp = tempfile::tempdir().unwrap();
-        let db_path = temp.path().join("work.sqlite");
-        let source_path = temp.path().join("session.jsonl");
-        fs::write(&source_path, b"{}\n").unwrap();
-        let source_root = temp.path().join("sessions").display().to_string();
-        let source_path = source_path.display().to_string();
-        let session = CatalogSession {
-            provider: CaptureProvider::Codex,
-            source_format: "codex_session_jsonl".to_owned(),
-            source_root: source_root.clone(),
-            source_path,
-            external_session_id: Some("superseded-result".to_owned()),
-            parent_external_session_id: None,
-            agent_type: AgentType::Primary,
-            role_hint: None,
-            external_agent_id: None,
-            cwd: None,
-            session_started_at_ms: Some(1),
-            file_size_bytes: 3,
-            file_modified_at_ms: 1,
-            import_revision: 1,
-            cataloged_at_ms: 1,
-            metadata: serde_json::json!({}),
-        };
-        let store = Store::open(db_path).unwrap();
-        let superseded = store
-            .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
-            .unwrap();
-        store
-            .upsert_catalog_sessions(superseded, std::slice::from_ref(&session))
-            .unwrap();
-        store
-            .complete_catalog_inventory_generation(CaptureProvider::Codex, &source_root, superseded)
-            .unwrap();
-        store
-            .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
-            .unwrap();
-
-        let error = mark_catalog_session_result(
-            &store,
-            &session,
-            Some(1),
-            2,
-            CatalogIndexedStatus::Indexed,
-            None,
-            superseded,
-        )
-        .unwrap_err();
-
-        assert!(error.chain().any(|cause| matches!(
-            cause.downcast_ref::<CaptureError>(),
-            Some(CaptureError::InventorySuperseded)
-        )));
-    }
-
-    #[test]
-    fn sqlite_source_stats_observe_durable_sidecars_but_ignore_shm() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("state.db");
-        fs::write(&db, b"main").unwrap();
-        let initial = source_stats(&db).unwrap().change_token.unwrap();
-
-        fs::write(sqlite_sidecar(&db, "-shm"), b"volatile coordination state").unwrap();
-        assert_eq!(source_stats(&db).unwrap().change_token.unwrap(), initial);
-
-        fs::write(sqlite_sidecar(&db, "-wal"), b"committed wal frame").unwrap();
-        assert_ne!(source_stats(&db).unwrap().change_token.unwrap(), initial);
-
-        let root = temp.path().join("project");
-        fs::create_dir(&root).unwrap();
-        let nested_db = root.join("session.db");
-        fs::write(&nested_db, b"main").unwrap();
-        let root_initial = source_stats(&root).unwrap().change_token.unwrap();
-        fs::write(sqlite_sidecar(&nested_db, "-shm"), b"volatile").unwrap();
-        assert_eq!(
-            source_stats(&root).unwrap().change_token.unwrap(),
-            root_initial
-        );
-        fs::write(sqlite_sidecar(&nested_db, "-journal"), b"committed journal").unwrap();
-        assert_ne!(
-            source_stats(&root).unwrap().change_token.unwrap(),
-            root_initial
-        );
-    }
-
-    #[test]
-    fn sqlite_source_stats_detect_same_stat_wal_generation_and_disappearance() {
-        use std::fs::FileTimes;
-
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("state.db");
-        let first_fixture = real_wal_generation(temp.path(), "first", "omega");
-        let second_fixture = real_wal_generation(temp.path(), "second", "sigma");
-        assert_eq!(first_fixture.0, second_fixture.0);
-        assert_eq!(first_fixture.1.len(), second_fixture.1.len());
-        fs::write(&db, first_fixture.0).unwrap();
-        let wal = sqlite_sidecar(&db, "-wal");
-        fs::write(&wal, first_fixture.1).unwrap();
-        let original_metadata = fs::metadata(&wal).unwrap();
-        let original_modified = original_metadata.modified().unwrap();
-        let first = source_stats(&db).unwrap().change_token.unwrap();
-
-        fs::write(&wal, second_fixture.1).unwrap();
-        fs::File::options()
-            .write(true)
-            .open(&wal)
-            .unwrap()
-            .set_times(FileTimes::new().set_modified(original_modified))
-            .unwrap();
-        let replacement_metadata = fs::metadata(&wal).unwrap();
-        assert_eq!(replacement_metadata.len(), original_metadata.len());
-        assert_eq!(replacement_metadata.modified().unwrap(), original_modified);
-        let replaced = source_stats(&db).unwrap().change_token.unwrap();
-        assert_ne!(replaced, first);
-
-        fs::remove_file(&wal).unwrap();
-        let disappeared = source_stats(&db).unwrap().change_token.unwrap();
-        assert_ne!(disappeared, replaced);
-    }
-
-    #[test]
-    fn ordinary_source_change_tokens_keep_the_stat_only_encoding() {
-        let path = PathBuf::from("session.jsonl");
-        let entry = SourceChangeEntry {
-            path: path.clone(),
-            len: 42,
-            modified_secs: 123,
-            modified_nanos: 456,
-            sentinel: Vec::new(),
-        };
-        let mut expected = Sha256::new();
-        let path = path.as_os_str().as_encoded_bytes();
-        expected.update((path.len() as u64).to_le_bytes());
-        expected.update(path);
-        expected.update(42_u64.to_le_bytes());
-        expected.update(123_u64.to_le_bytes());
-        expected.update(456_u32.to_le_bytes());
-        let expected: [u8; 32] = expected.finalize().into();
-
-        assert_eq!(source_change_token(vec![entry]), expected);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn source_change_tokens_distinguish_lossy_non_utf8_path_labels() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-
-        let path_a = PathBuf::from(OsString::from_vec(b"session-\x80.jsonl".to_vec()));
-        let path_b = PathBuf::from(OsString::from_vec(b"session-\x81.jsonl".to_vec()));
-        assert_eq!(path_a.display().to_string(), path_b.display().to_string());
-
-        let entry = |path| SourceChangeEntry {
-            path,
-            len: 42,
-            modified_secs: 123,
-            modified_nanos: 456,
-            sentinel: Vec::new(),
-        };
-        assert_ne!(
-            source_change_token(vec![entry(path_a)]),
-            source_change_token(vec![entry(path_b)])
-        );
-    }
-
-    fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
-        let mut sidecar = path.as_os_str().to_owned();
-        sidecar.push(suffix);
-        PathBuf::from(sidecar)
-    }
-
-    fn real_wal_generation(root: &Path, name: &str, value: &str) -> (Vec<u8>, Vec<u8>) {
-        let path = root.join(format!("{name}.db"));
-        let writer = rusqlite::Connection::open(&path).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA page_size = 512;
-                 VACUUM;
-                 CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT);
-                 INSERT INTO entries VALUES (1, 'alpha');
-                 PRAGMA journal_mode = WAL;
-                 PRAGMA wal_autocheckpoint = 0;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .unwrap();
-        writer
-            .execute("UPDATE entries SET value = ?1 WHERE id = 1", [value])
-            .unwrap();
-        (
-            fs::read(&path).unwrap(),
-            fs::read(sqlite_sidecar(&path, "-wal")).unwrap(),
-        )
-    }
-}
+include!("catalog_tests.rs");

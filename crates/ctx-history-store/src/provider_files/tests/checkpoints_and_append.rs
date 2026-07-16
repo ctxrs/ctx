@@ -56,7 +56,7 @@ fn checkpoint_round_trip_preserves_exact_boundary_data_and_version() {
 }
 
 #[test]
-fn stale_generation_is_typed_and_never_advances_checkpoint() {
+fn exact_observation_survives_newer_scan_generation_and_advances_checkpoint() {
     let temp = tempdir().unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let file = source_file(10, 100);
@@ -74,21 +74,12 @@ fn stale_generation_is_typed_and_never_advances_checkpoint() {
         .unwrap();
     let checkpoint = checkpoint(10, 3, "unix:2049:881", 110);
 
-    let error = store
+    store
         .upsert_provider_file_checkpoint(source_outcome(&file, stale_generation, 110), &checkpoint)
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        StoreError::ImportInventorySuperseded {
-            inventory_family: SOURCE_IMPORT_INVENTORY_FAMILY,
-            expected_generation,
-            ..
-        } if expected_generation == stale_generation
-    ));
+        .unwrap();
     assert_eq!(
         store.provider_file_checkpoint(checkpoint.key()).unwrap(),
-        None
+        Some(checkpoint)
     );
     let status: String = store
         .conn
@@ -98,7 +89,7 @@ fn stale_generation_is_typed_and_never_advances_checkpoint() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(status, "pending");
+    assert_eq!(status, "indexed");
 }
 
 #[test]
@@ -290,7 +281,7 @@ fn catalog_observation_can_finalize_a_provider_file_checkpoint() {
         file_modified_at_ms: 20,
         import_revision: 3,
         cataloged_at_ms: 21,
-        metadata: json!({}),
+        metadata: json!({"file_observation_token_v1": "checkpoint-catalog-token"}),
     };
     let generation = store
         .allocate_catalog_inventory_generation(catalog.provider, &catalog.source_root)
@@ -315,7 +306,7 @@ fn catalog_observation_can_finalize_a_provider_file_checkpoint() {
     };
     let outcome = ProviderFileImportOutcome {
         provider: catalog.provider,
-        observation: ProviderFileInventoryObservation::Catalog {
+        observation: ProviderFileInventoryObservation::ObservedCatalog {
             source_format: &catalog.source_format,
             update: CatalogSourceIndexUpdate {
                 source_root: &catalog.source_root,
@@ -328,6 +319,7 @@ fn catalog_observation_can_finalize_a_provider_file_checkpoint() {
                 event_count: Some(2),
                 indexed_at_ms: 30,
             },
+            metadata: &catalog.metadata,
         },
         status: CatalogIndexedStatus::Indexed,
         error: None,
@@ -344,6 +336,61 @@ fn catalog_observation_can_finalize_a_provider_file_checkpoint() {
             .unwrap(),
         checkpoint
     );
+}
+
+#[test]
+fn catalog_publication_requires_an_observation_token() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let mut catalog = catalog_file(12, 20);
+    catalog.metadata = json!({});
+    let generation = store
+        .allocate_catalog_inventory_generation(catalog.provider, &catalog.source_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(generation, std::slice::from_ref(&catalog))
+        .unwrap();
+    let update = CatalogSourceIndexUpdate {
+        source_root: &catalog.source_root,
+        source_path: &catalog.source_path,
+        file_size_bytes: catalog.file_size_bytes,
+        file_modified_at_ms: catalog.file_modified_at_ms,
+        import_revision: catalog.import_revision,
+        inventory_generation: generation,
+        file_sha256: None,
+        event_count: None,
+        indexed_at_ms: 30,
+    };
+
+    assert!(matches!(
+        store
+            .record_observed_catalog_source_import_result(
+                catalog.provider,
+                update,
+                &catalog.metadata,
+                CatalogIndexedStatus::Indexed,
+                None,
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFileCheckpoint("catalog observation token is required")
+    ));
+
+    assert!(matches!(
+        store
+            .begin_provider_file_publication(
+                catalog.provider,
+                ProviderFileInventoryObservation::ObservedCatalog {
+                    source_format: &catalog.source_format,
+                    update,
+                    metadata: &catalog.metadata,
+                },
+                &catalog.source_format,
+                ProviderFilePublicationKind::Replacement,
+                30,
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFileCheckpoint("catalog observation token is required")
+    ));
 }
 
 #[test]
@@ -366,7 +413,7 @@ fn catalog_append_completion_preserves_rejections_and_accumulates_event_count() 
         file_modified_at_ms: 100,
         import_revision: 3,
         cataloged_at_ms: 101,
-        metadata: json!({}),
+        metadata: json!({"file_observation_token_v1": "append-catalog-token"}),
     };
     let first_generation = store
         .allocate_catalog_inventory_generation(catalog.provider, &catalog.source_root)
@@ -387,9 +434,10 @@ fn catalog_append_completion_preserves_rejections_and_accumulates_event_count() 
     };
     let first_outcome = ProviderFileImportOutcome {
         provider: catalog.provider,
-        observation: ProviderFileInventoryObservation::Catalog {
+        observation: ProviderFileInventoryObservation::ObservedCatalog {
             source_format: &catalog.source_format,
             update: first_update,
+            metadata: &catalog.metadata,
         },
         status: CatalogIndexedStatus::CompletedWithRejections,
         error: Some("one malformed event"),
@@ -451,9 +499,10 @@ fn catalog_append_completion_preserves_rejections_and_accumulates_event_count() 
         .upsert_provider_file_checkpoint(
             ProviderFileImportOutcome {
                 provider: catalog.provider,
-                observation: ProviderFileInventoryObservation::Catalog {
+                observation: ProviderFileInventoryObservation::ObservedCatalog {
                     source_format: &catalog.source_format,
                     update: second_update,
+                    metadata: &catalog.metadata,
                 },
                 status: CatalogIndexedStatus::Indexed,
                 error: None,
@@ -692,6 +741,479 @@ fn initial_import_uses_zero_seen_staging_rows() {
         ProviderFileReconciliationCounts::default()
     );
     assert_eq!(store.semantic_replacement_revision().unwrap(), 0);
+}
+
+#[test]
+fn provider_publications_are_globally_capped_and_exactly_resumable() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let files = (0..129)
+        .map(|index| {
+            let mut file = source_file(10, 100);
+            file.source_path = format!("{ROOT}/{index:03}.jsonl");
+            file
+        })
+        .collect::<Vec<_>>();
+    let generation;
+    {
+        let store = Store::open(&path).unwrap();
+        generation = store
+            .allocate_source_import_inventory_generation(files[0].provider, ROOT)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, &files)
+            .unwrap();
+        let outcome = source_outcome(&files[0], generation, 110);
+        let scope = store
+            .begin_provider_file_publication(
+                files[0].provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        drop(scope);
+    }
+
+    for file in &files[1..] {
+        let observer = Store::open(&path).unwrap();
+        let outcome = source_outcome(file, generation, 110);
+        assert!(matches!(
+            observer
+                .begin_provider_file_publication(
+                    file.provider,
+                    outcome.observation,
+                    MATERIAL_FORMAT,
+                    ProviderFilePublicationKind::Replacement,
+                    106,
+                )
+                .unwrap_err(),
+            StoreError::ProviderFileReplacementBusy { .. }
+        ));
+        let marker_count: usize = observer
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_file_publications",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker_count, 1);
+    }
+
+    let reopened = Store::open(&path).unwrap();
+    let outcome = source_outcome(&files[0], generation, 110);
+    let adopted = reopened
+        .begin_provider_file_publication(
+            files[0].provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            107,
+        )
+        .unwrap();
+    assert!(matches!(
+        reopened.abort_provider_file_publication(adopted).unwrap(),
+        std::ops::ControlFlow::Continue(None)
+    ));
+    assert!(!reopened.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
+fn first_rejected_replacement_finalizes_without_a_checkpoint() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let outcome = ProviderFileImportOutcome {
+        provider: file.provider,
+        observation: ProviderFileInventoryObservation::SourceImport {
+            source_format: &file.source_format,
+            update: SourceImportFileIndexUpdate {
+                source_root: &file.source_root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: generation,
+                metadata: &file.metadata,
+                indexed_at_ms: 110,
+            },
+        },
+        status: CatalogIndexedStatus::Rejected,
+        error: Some("all source content was rejected"),
+    };
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+
+    store
+        .finalize_provider_file_publication(
+            scope,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+
+    let state: (String, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT indexed_status, indexed_error FROM source_import_files WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3",
+            params![file.provider.as_str(), &file.source_root, &file.source_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state.0, "rejected");
+    assert_eq!(state.1.as_deref(), outcome.error);
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+    assert!(store
+        .provider_file_checkpoint(ProviderFileCheckpointKey {
+            provider: file.provider,
+            source_format: &file.source_format,
+            source_root: &file.source_root,
+            source_path: &file.source_path,
+        })
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn rejected_replacement_cannot_discard_prior_material() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let prior_source = Uuid::from_u128(901);
+    insert_capture_source(&store, prior_source, PATH_A, "prior-material");
+    insert_raw_event(
+        &store,
+        Uuid::from_u128(903),
+        1,
+        prior_source,
+        "prior material",
+    );
+    let mut outcome = source_outcome(&file, generation, 110);
+    outcome.status = CatalogIndexedStatus::Rejected;
+    outcome.error = Some("replacement rejected");
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    assert!(scope.tracks_prior_material());
+    prepare_all(&store, &scope, 8);
+
+    assert!(matches!(
+        store
+            .finalize_provider_file_publication(
+                scope,
+                outcome,
+                ProviderFilePublicationCommit::Replacement(None),
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFileCheckpoint(_)
+    ));
+}
+
+#[test]
+fn rejected_replacement_cannot_publish_staged_material() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let mut outcome = source_outcome(&file, generation, 110);
+    outcome.status = CatalogIndexedStatus::Rejected;
+    outcome.error = Some("replacement rejected");
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    let mut record = ctx_history_core::HistoryRecord::new(
+        "staged record",
+        "must not escape a rejected publication",
+        Vec::new(),
+        "note",
+        None,
+    );
+    record.id = Uuid::from_u128(902);
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_record(&record))
+        .unwrap();
+
+    assert!(matches!(
+        store
+            .finalize_provider_file_publication(
+                scope,
+                outcome,
+                ProviderFilePublicationCommit::Replacement(None),
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFileCheckpoint(_)
+    ));
+}
+
+#[test]
+fn rejected_replacement_cannot_publish_partial_capture_source() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let store = Store::open(&path).unwrap();
+    let file = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let mut outcome = source_outcome(&file, generation, 110);
+    outcome.status = CatalogIndexedStatus::Rejected;
+    outcome.error = Some("source was written before the import was rejected");
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    let source_id = Uuid::from_u128(905);
+    let source = capture_source_fixture(source_id, PATH_A, "rejected-partial-source");
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_capture_source(&source))
+        .unwrap();
+    let observer = Store::open(&path).unwrap();
+    assert!(matches!(
+        observer.get_capture_source(source_id),
+        Err(StoreError::NotFound(id)) if id == source_id
+    ));
+
+    assert!(matches!(
+        store
+            .finalize_provider_file_publication(
+                scope,
+                outcome,
+                ProviderFilePublicationCommit::Replacement(None),
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFileCheckpoint(_)
+    ));
+    assert!(store.has_pending_provider_file_publications().unwrap());
+    assert!(matches!(
+        observer.get_capture_source(source_id),
+        Err(StoreError::NotFound(id)) if id == source_id
+    ));
+
+    store
+        .mark_source_import_missing_paths_stale(
+            file.provider,
+            &file.source_root,
+            &[],
+            120,
+            generation,
+        )
+        .unwrap();
+    let retirement = store
+        .begin_provider_file_publication_retirement(
+            file.provider,
+            MATERIAL_FORMAT,
+            &file.source_root,
+            &file.source_path,
+            125,
+        )
+        .unwrap()
+        .unwrap();
+    reconcile_all(&store, &retirement, 1);
+    store.retire_provider_file_publication(retirement).unwrap();
+    assert!(!row_exists(&store, "capture_sources", source_id));
+    assert!(!store.has_provider_data(file.provider).unwrap());
+}
+
+#[test]
+fn completed_rejected_replacement_adopts_after_discarding_orphan_source() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(10, 100);
+    let generation;
+    {
+        let store = Store::open(&path).unwrap();
+        generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                source_outcome(&file, generation, 110).observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        let source_id = Uuid::from_u128(906);
+        let source = capture_source_fixture(source_id, PATH_A, "rejected-orphan-source");
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_capture_source(&source)
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .discard_provider_file_publication_orphan_capture_sources(&scope)
+                .unwrap(),
+            1
+        );
+        assert!(!row_exists(&store, "capture_sources", source_id));
+        store
+            .stage_provider_file_publication_completion(
+                &scope,
+                &ProviderFilePublicationCompletion {
+                    version: 1,
+                    payload: json!({"rejected": true}),
+                },
+            )
+            .unwrap();
+        store.abandon_provider_file_publication(scope).unwrap();
+    }
+
+    let reopened = Store::open(&path).unwrap();
+    let mut outcome = source_outcome(&file, generation, 120);
+    outcome.status = CatalogIndexedStatus::Rejected;
+    outcome.error = Some("all source content was rejected");
+    let scope = reopened
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            115,
+        )
+        .unwrap();
+    assert!(!scope.tracks_prior_material());
+    reopened
+        .finalize_provider_file_publication(
+            scope,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+    assert!(!reopened.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
+fn first_import_record_writes_stay_hidden_across_reopen() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let record_ids = [
+        Uuid::from_u128(910),
+        Uuid::from_u128(911),
+        Uuid::from_u128(912),
+    ];
+    {
+        let store = Store::open(&path).unwrap();
+        let file = source_file(10, 100);
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let outcome = source_outcome(&file, generation, 110);
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        let records = record_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut record = ctx_history_core::HistoryRecord::new(
+                    format!("private staged record {index}"),
+                    format!("unpublished-token-{index}"),
+                    Vec::new(),
+                    "note",
+                    None,
+                );
+                record.id = *id;
+                record
+            })
+            .collect::<Vec<_>>();
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.insert_record(&records[0])?;
+                store.upsert_record(&records[1])?;
+                store.upsert_records(&records[2..])?;
+                for record in &records {
+                    assert_eq!(store.get_record(record.id)?.id, record.id);
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let observer = Store::open(&path).unwrap();
+        for id in record_ids {
+            assert!(matches!(
+                observer.get_record(id),
+                Err(StoreError::NotFound(_))
+            ));
+        }
+        assert!(observer.list_records(10).unwrap().is_empty());
+        assert!(observer
+            .search_records("unpublished-token", 10)
+            .unwrap()
+            .is_empty());
+        drop(scope);
+    }
+
+    let reopened = Store::open(&path).unwrap();
+    for id in record_ids {
+        assert!(matches!(
+            reopened.get_record(id),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+    assert!(reopened.list_records(10).unwrap().is_empty());
+    assert!(reopened
+        .search_records("unpublished-token", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

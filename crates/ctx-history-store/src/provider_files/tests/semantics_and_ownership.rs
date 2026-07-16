@@ -289,7 +289,7 @@ fn replacement_owned_event_conflict_overwrites_and_cross_source_conflict_rejects
 }
 
 #[test]
-fn scoped_natural_key_and_unowned_record_writes_cannot_contaminate_publication() {
+fn scoped_natural_key_and_existing_record_writes_cannot_contaminate_publication() {
     let temp = tempdir().unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let file = source_file(20, 100);
@@ -380,20 +380,39 @@ fn scoped_natural_key_and_unowned_record_writes_cannot_contaminate_publication()
         ("sibling".to_owned(), sibling_source.to_string())
     );
 
-    let record = ctx_history_core::HistoryRecord::new(
-        "unowned write",
-        "must fail closed",
+    let mut record = ctx_history_core::HistoryRecord::new(
+        "new record shell",
+        "created by the exact active publication scope",
         Vec::new(),
         "note",
         None,
     );
+    record.id = Uuid::from_u128(45_005);
+    assert!(!store
+        .provider_file_publication_history_record_exists(&scope, record.id)
+        .unwrap());
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_record(&record))
+        .unwrap();
+    assert!(store
+        .provider_file_publication_history_record_exists(&scope, record.id)
+        .unwrap());
+    record.title = "existing record mutation must fail".to_owned();
     assert!(matches!(
         store
             .with_provider_file_publication_writes(&scope, |store| store.upsert_record(&record))
             .unwrap_err(),
         StoreError::ProviderFilePublicationOwnerMismatch { .. }
     ));
-    let busy = store.upsert_record(&record).unwrap_err();
+    let mut busy_record = ctx_history_core::HistoryRecord::new(
+        "foreground write",
+        "must fail while publication is active",
+        Vec::new(),
+        "note",
+        None,
+    );
+    busy_record.id = Uuid::from_u128(45_006);
+    let busy = store.upsert_record(&busy_record).unwrap_err();
     assert!(matches!(
         busy,
         StoreError::ProviderFileReplacementBusy { .. }
@@ -401,7 +420,7 @@ fn scoped_natural_key_and_unowned_record_writes_cannot_contaminate_publication()
     let rendered = busy.to_string();
     assert!(!rendered.contains(ROOT));
     assert!(!rendered.contains(PATH_A));
-    assert!(!row_exists(&store, "history_records", record.id));
+    assert!(!row_exists(&store, "history_records", busy_record.id));
     store.abandon_provider_file_publication(scope).unwrap();
 }
 
@@ -703,16 +722,6 @@ fn replacement_identity_reads_are_idempotent_and_scoped_to_the_active_file() {
     store.upsert_event(&event_a_row).unwrap();
     store.upsert_event(&event_b_row).unwrap();
 
-    let sibling_store = Store::open(&path).unwrap();
-    let sibling_scope = sibling_store
-        .begin_provider_file_publication(
-            file_b.provider,
-            source_outcome(&file_b, generation, 110).observation,
-            MATERIAL_FORMAT,
-            ProviderFilePublicationKind::Replacement,
-            105,
-        )
-        .unwrap();
     let outcome_a = source_outcome(&file_a, generation, 110);
     let scope = store
         .begin_provider_file_publication(
@@ -720,15 +729,15 @@ fn replacement_identity_reads_are_idempotent_and_scoped_to_the_active_file() {
             outcome_a.observation,
             MATERIAL_FORMAT,
             ProviderFilePublicationKind::Replacement,
-            106,
+            105,
         )
         .unwrap();
     prepare_all(&store, &scope, 1);
 
     assert!(store.get_session(session_a).is_err());
-    assert!(store.get_session(session_b).is_err());
+    assert!(store.get_session(session_b).is_ok());
     assert!(store.get_event(event_a).is_err());
-    assert!(store.get_event(event_b).is_err());
+    assert!(store.get_event(event_b).is_ok());
     let active_owner =
         material_source_matches_replacement_owner_predicate("active_source", "active_publication");
     let sibling_matches_active_owner: bool = store
@@ -748,9 +757,9 @@ fn replacement_identity_reads_are_idempotent_and_scoped_to_the_active_file() {
         .with_provider_file_publication_writes(&scope, |store| {
             assert_eq!(store.get_capture_source(source_a)?.id, source_a);
             assert_eq!(store.get_session(session_a)?.id, session_a);
-            assert!(store.get_session(session_b).is_err());
+            assert_eq!(store.get_session(session_b)?.id, session_b);
             assert_eq!(store.get_event(event_a)?.id, event_a);
-            assert!(store.get_event(event_b).is_err());
+            assert_eq!(store.get_event(event_b)?.id, event_b);
             assert_eq!(
                 store
                     .session_by_capture_source_and_external_session(
@@ -762,19 +771,24 @@ fn replacement_identity_reads_are_idempotent_and_scoped_to_the_active_file() {
                     .id,
                 session_a
             );
-            assert!(store
-                .session_by_capture_source_and_external_session(
-                    source_b,
-                    CaptureProvider::Claude,
-                    "shared-external-session",
-                )?
-                .is_none());
+            assert_eq!(
+                store
+                    .session_by_capture_source_and_external_session(
+                        source_b,
+                        CaptureProvider::Claude,
+                        "shared-external-session",
+                    )?
+                    .unwrap()
+                    .id,
+                session_b
+            );
             assert_eq!(store.event_id_by_dedupe_key("owner-event-dedupe")?, event_a);
-            assert!(store
-                .event_id_by_dedupe_key("sibling-event-dedupe")
-                .is_err());
+            assert_eq!(
+                store.event_id_by_dedupe_key("sibling-event-dedupe")?,
+                event_b
+            );
             assert_eq!(store.events_for_session_limited(session_a, 10)?.len(), 1);
-            assert!(store.events_for_session_limited(session_b, 10)?.is_empty());
+            assert_eq!(store.events_for_session_limited(session_b, 10)?.len(), 1);
 
             store.upsert_session(&session_a_row)?;
             assert_eq!(store.upsert_event(&event_a_row)?, event_a);
@@ -810,13 +824,6 @@ fn replacement_identity_reads_are_idempotent_and_scoped_to_the_active_file() {
         )
         .unwrap();
     assert!(store.get_session(session_a).is_ok());
-    assert!(store.get_session(session_b).is_err());
-    assert!(matches!(
-        sibling_store
-            .abort_provider_file_publication(sibling_scope)
-            .unwrap(),
-        std::ops::ControlFlow::Continue(None)
-    ));
     assert!(store.get_session(session_b).is_ok());
 }
 

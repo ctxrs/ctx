@@ -317,6 +317,9 @@ CREATE TABLE IF NOT EXISTS provider_file_publications (
         completion_payload_json IS NULL OR
         length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144
     ),
+    inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0
+        CHECK (inventory_observation_invalidated IN (0, 1)),
+    retirement_started INTEGER NOT NULL DEFAULT 0 CHECK (retirement_started IN (0, 1)),
     PRIMARY KEY (provider, material_source_format, material_source_root, source_path)
 );
 

@@ -75,7 +75,7 @@ pub(crate) fn normalize_kimi_wire_jsonl_file(
 ) -> Result<ProviderNormalizationResult> {
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut result = ProviderNormalizationResult::default();
     let mut rows = Vec::new();
     let mut line = Vec::new();
@@ -539,7 +539,7 @@ pub(crate) fn read_kimi_session_index(path: &Path) -> BTreeMap<String, KimiSessi
     let Ok(file) = File::open(path) else {
         return BTreeMap::new();
     };
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut line = Vec::new();
     let mut entries = BTreeMap::new();
     loop {

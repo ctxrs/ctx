@@ -34,6 +34,9 @@ const ALL_FTS_TABLES: [&str; 5] = [
 const BULK_MODE_MARKER_KEY: &str = "event_search_bulk_mode_v1";
 const BULK_MODE_AUTOMERGE_KEY_PREFIX: &str = "event_search_bulk_mode_v1:automerge:";
 const BULK_MODE_CRISISMERGE_KEY_PREFIX: &str = "event_search_bulk_mode_v1:crisismerge:";
+#[cfg(test)]
+const BULK_MODE_TEST_REMAINING_MERGE_PASSES_KEY: &str =
+    "event_search_bulk_mode_v1:test_remaining_merge_passes";
 const FTS_AUTOMERGE_DEFAULT: i64 = 4;
 const FTS_CRISISMERGE_DEFAULT: i64 = 16;
 const FTS_BULK_CRISISMERGE: i64 = 1_000_000;
@@ -42,6 +45,9 @@ const FTS_BULK_CRISISMERGE: i64 = 1_000_000;
 // Keep each step deliberately small so checkpoints remain safe on large real
 // indexes, not only on compact synthetic fixtures.
 const FTS_MERGE_PAGE_BUDGET: i64 = 16;
+// Preserve the common changed-pass plus quiescence-pass completion path while
+// putting a hard ceiling on large or resumed merge backlogs.
+const EVENT_SEARCH_MERGE_PASSES_PER_CALL: usize = 2;
 const BULK_LOCK_SUFFIX: &str = ".event-search-bulk.lock.sqlite";
 
 /// Owns the cross-process lock for one event-search bulk operation.
@@ -53,6 +59,23 @@ pub struct EventSearchBulkGuard {
     store_path: PathBuf,
     depth: Arc<AtomicUsize>,
     depth_counted: bool,
+}
+
+/// Result of one bounded event-search maintenance slice.
+///
+/// `Pending` is durable: the bulk-mode marker remains present and a later
+/// maintenance call can resume without restarting the merge. It can also mean
+/// that an in-progress provider publication currently fences FTS maintenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSearchBulkMaintenanceOutcome {
+    Complete,
+    Pending,
+}
+
+impl EventSearchBulkMaintenanceOutcome {
+    pub fn is_complete(self) -> bool {
+        self == Self::Complete
+    }
 }
 
 impl Drop for EventSearchBulkGuard {
@@ -92,10 +115,14 @@ impl Store {
             }
         };
         guard.depth_counted = true;
+        if bulk_mode_pending(self)? && self.has_pending_provider_file_publications()? {
+            return Ok(guard);
+        }
         self.begin_immediate_batch()?;
         let result = (|| {
             ensure_search_projection_stats_table(self)?;
-            if !bulk_mode_pending(self)? {
+            let pending = bulk_mode_pending(self)?;
+            if !pending {
                 for table in EVENT_SEARCH_FTS_TABLES {
                     if !table_exists(&self.conn, table)? {
                         continue;
@@ -113,7 +140,11 @@ impl Store {
                 }
                 save_bulk_mode_config(self, BULK_MODE_MARKER_KEY, 1)?;
             }
-            suppress_event_search_merges(self)
+            if pending && self.has_pending_provider_file_publications()? {
+                Ok(())
+            } else {
+                suppress_event_search_merges(self)
+            }
         })();
         if let Err(err) = result {
             let _ = self.rollback_batch();
@@ -126,31 +157,66 @@ impl Store {
         Ok(guard)
     }
 
-    /// Compact pending bulk segments in bounded steps, then restore saved settings.
+    /// Advance pending bulk compaction by one bounded slice.
     ///
     /// Bulk finalization deliberately uses positive FTS5 merge commands. Starting
     /// a full merge with a negative command would assign every pre-existing
     /// segment to the same level and rewrite the entire shared event index. That
     /// is appropriate for an explicit optimize, but not for finishing one
     /// provider import in an already-populated multi-source index.
-    pub fn finish_event_search_bulk_mode(&self, guard: &EventSearchBulkGuard) -> Result<()> {
+    pub fn finish_event_search_bulk_mode(
+        &self,
+        guard: &EventSearchBulkGuard,
+    ) -> Result<EventSearchBulkMaintenanceOutcome> {
         if guard.store_path != self.path {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if guard.lock_conn.is_none() {
-            return Ok(());
+            // The outer guard owns the durable marker and final merge. The
+            // nested caller has no independent maintenance debt to surface.
+            return Ok(EventSearchBulkMaintenanceOutcome::Complete);
         }
         if guard.depth_counted && guard.depth.load(Ordering::SeqCst) != 1 {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if !bulk_mode_pending(self)? {
-            return Ok(());
+            return Ok(EventSearchBulkMaintenanceOutcome::Complete);
         }
-        loop {
+        // A bounded provider publication can intentionally span scheduler
+        // passes. Keep merge suppression durable until that publication is
+        // resumed and finalized; FTS maintenance is fenced while its material
+        // is not yet visible.
+        if self.has_pending_provider_file_publications()? {
+            return Ok(EventSearchBulkMaintenanceOutcome::Pending);
+        }
+        for _ in 0..EVENT_SEARCH_MERGE_PASSES_PER_CALL {
             if self.finish_event_search_bulk_mode_step()? {
-                return Ok(());
+                return Ok(EventSearchBulkMaintenanceOutcome::Complete);
             }
         }
+        self.event_search_bulk_maintenance_outcome()
+    }
+
+    pub fn event_search_bulk_maintenance_outcome(
+        &self,
+    ) -> Result<EventSearchBulkMaintenanceOutcome> {
+        Ok(if bulk_mode_pending(self)? {
+            EventSearchBulkMaintenanceOutcome::Pending
+        } else {
+            EventSearchBulkMaintenanceOutcome::Complete
+        })
+    }
+
+    pub fn advance_event_search_bulk_maintenance(
+        &self,
+    ) -> Result<EventSearchBulkMaintenanceOutcome> {
+        let guard = self
+            .acquire_event_search_bulk_lock(self.busy_timeout)?
+            .ok_or(StoreError::BulkSearchImportBusy)?;
+        if !bulk_mode_pending(self)? {
+            return Ok(EventSearchBulkMaintenanceOutcome::Complete);
+        }
+        self.finish_event_search_bulk_mode(&guard)
     }
 
     pub(crate) fn recover_event_search_bulk_mode(&self) -> Result<()> {
@@ -160,7 +226,7 @@ impl Store {
         self.begin_immediate_batch()?;
         let result = (|| {
             let pending = bulk_mode_pending(self)?;
-            if pending {
+            if pending && !self.has_pending_provider_file_publications()? {
                 suppress_event_search_merges(self)?;
             }
             Ok(pending)
@@ -179,8 +245,9 @@ impl Store {
         if !pending {
             return Ok(());
         }
-        // A live importer owns this lock. A stale marker has no owner, so the
-        // next writable open adopts and completes its bounded recovery.
+        // A live importer owns this lock. A stale marker has no owner, so each
+        // writable open that acquires the lock advances one bounded recovery
+        // slice. The durable marker keeps later opens restartable.
         if let Some(guard) = self.acquire_event_search_bulk_lock(Duration::ZERO)? {
             self.finish_event_search_bulk_mode(&guard)?;
         }
@@ -193,8 +260,14 @@ impl Store {
         let guard = self
             .acquire_event_search_bulk_lock(self.busy_timeout)?
             .ok_or(StoreError::BulkSearchImportBusy)?;
+        if self.has_pending_provider_file_publications()? {
+            return Ok(());
+        }
         if bulk_mode_pending(self)? {
             self.finish_event_search_bulk_mode(&guard)?;
+            if bulk_mode_pending(self)? {
+                return Ok(());
+            }
         }
         for table in ALL_FTS_TABLES {
             self.merge_fts_table_bounded(table, true)?;
@@ -346,6 +419,19 @@ fn merge_event_search_tables_in_transaction(store: &Store) -> Result<bool> {
             changed |= merge_fts_table_in_transaction(store, table, FTS_MERGE_PAGE_BUDGET)?;
         }
     }
+    #[cfg(test)]
+    if let Some(remaining) = bulk_mode_config(store, BULK_MODE_TEST_REMAINING_MERGE_PASSES_KEY)? {
+        if remaining > 0 {
+            // Keep fault-injected work durable so reopen tests exercise the
+            // same marker/config state machine as interrupted FTS work.
+            save_bulk_mode_config(
+                store,
+                BULK_MODE_TEST_REMAINING_MERGE_PASSES_KEY,
+                remaining - 1,
+            )?;
+            changed = true;
+        }
+    }
     Ok(changed)
 }
 
@@ -460,4 +546,233 @@ fn clear_bulk_mode_state(store: &Store) -> Result<()> {
         params![BULK_MODE_MARKER_KEY, "event_search_bulk_mode_v1:%"],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LARGE_MERGE_EVENT_COUNT: usize = 512;
+    const LARGE_MERGE_PAYLOAD_WORDS: usize = 256;
+    const FORCED_MERGE_PASSES: i64 = 5;
+    const MAX_CONVERGENCE_CALLS: usize = 256;
+
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("ctx-history-store-bulk-search-")
+            .tempdir()
+            .unwrap()
+    }
+
+    fn insert_search_events(
+        store: &Store,
+        token: &str,
+        batch: &str,
+        count: usize,
+        payload_words: usize,
+    ) {
+        let payload = "payload ".repeat(payload_words);
+        for index in 0..count {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO event_search
+                    (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
+                    VALUES (?1, NULL, NULL, 'user', ?2, 'message')
+                    "#,
+                    params![
+                        format!("{token}-{batch}-event-{index}"),
+                        format!("{token} {index} {payload}")
+                    ],
+                )
+                .unwrap();
+        }
+    }
+
+    fn seed_large_merge_work(store: &Store, token: &str) {
+        insert_search_events(
+            store,
+            token,
+            "pending",
+            LARGE_MERGE_EVENT_COUNT,
+            LARGE_MERGE_PAYLOAD_WORDS,
+        );
+        save_bulk_mode_config(
+            store,
+            BULK_MODE_TEST_REMAINING_MERGE_PASSES_KEY,
+            FORCED_MERGE_PASSES,
+        )
+        .unwrap();
+    }
+
+    fn remaining_forced_merge_passes(store: &Store) -> Option<i64> {
+        bulk_mode_config(store, BULK_MODE_TEST_REMAINING_MERGE_PASSES_KEY).unwrap()
+    }
+
+    fn marker(store: &Store) -> Option<i64> {
+        bulk_mode_config(store, BULK_MODE_MARKER_KEY).unwrap()
+    }
+
+    fn search_count(store: &Store, token: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_search MATCH ?1",
+                params![token],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn assert_merge_suppressed(store: &Store) {
+        for table in EVENT_SEARCH_FTS_TABLES {
+            assert_eq!(fts_config_value(store, table, "automerge", 4).unwrap(), 0);
+            assert_eq!(
+                fts_config_value(store, table, "crisismerge", 16).unwrap(),
+                FTS_BULK_CRISISMERGE
+            );
+        }
+    }
+
+    fn assert_merge_config_restored(store: &Store) {
+        for table in EVENT_SEARCH_FTS_TABLES {
+            assert_eq!(
+                fts_config_value(store, table, "automerge", 4).unwrap(),
+                FTS_AUTOMERGE_DEFAULT
+            );
+            assert_eq!(
+                fts_config_value(store, table, "crisismerge", 16).unwrap(),
+                FTS_CRISISMERGE_DEFAULT
+            );
+        }
+    }
+
+    #[test]
+    fn finish_call_is_bounded_and_repeated_calls_converge() {
+        let temp = tempdir();
+        let db_path = temp.path().join("work.sqlite");
+        let store = Store::open(&db_path).unwrap();
+        let guard = store.begin_event_search_bulk_mode().unwrap();
+        seed_large_merge_work(&store, "boundedfinish");
+
+        assert_eq!(
+            store.finish_event_search_bulk_mode(&guard).unwrap(),
+            EventSearchBulkMaintenanceOutcome::Pending
+        );
+        assert_eq!(
+            store.event_search_bulk_maintenance_outcome().unwrap(),
+            EventSearchBulkMaintenanceOutcome::Pending
+        );
+
+        assert_eq!(
+            marker(&store),
+            Some(1),
+            "one call must leave a large merge restartable"
+        );
+        assert_eq!(
+            remaining_forced_merge_passes(&store),
+            Some(FORCED_MERGE_PASSES - EVENT_SEARCH_MERGE_PASSES_PER_CALL as i64),
+            "one call exceeded its merge-pass bound"
+        );
+        assert_merge_suppressed(&store);
+        assert_eq!(
+            search_count(&store, "boundedfinish"),
+            LARGE_MERGE_EVENT_COUNT as i64
+        );
+
+        let mut calls = 1;
+        while marker(&store).is_some() && calls < MAX_CONVERGENCE_CALLS {
+            store.finish_event_search_bulk_mode(&guard).unwrap();
+            calls += 1;
+        }
+
+        assert!(
+            calls < MAX_CONVERGENCE_CALLS,
+            "bounded finalization did not converge"
+        );
+        assert!(calls > 1, "fixture did not exceed one bounded call");
+        assert_eq!(marker(&store), None);
+        assert_eq!(
+            store.event_search_bulk_maintenance_outcome().unwrap(),
+            EventSearchBulkMaintenanceOutcome::Complete
+        );
+        assert_merge_config_restored(&store);
+        assert_eq!(
+            search_count(&store, "boundedfinish"),
+            LARGE_MERGE_EVENT_COUNT as i64
+        );
+    }
+
+    #[test]
+    fn interrupted_merge_recovery_is_bounded_per_open_and_converges() {
+        let temp = tempdir();
+        let db_path = temp.path().join("work.sqlite");
+        {
+            let store = Store::open(&db_path).unwrap();
+            let _guard = store.begin_event_search_bulk_mode().unwrap();
+            seed_large_merge_work(&store, "boundedreopen");
+            assert_eq!(marker(&store), Some(1));
+        }
+
+        let first_reopen = Store::open(&db_path).unwrap();
+        assert_eq!(
+            marker(&first_reopen),
+            Some(1),
+            "one open must not drain an interrupted large merge"
+        );
+        assert_eq!(
+            remaining_forced_merge_passes(&first_reopen),
+            Some(FORCED_MERGE_PASSES - EVENT_SEARCH_MERGE_PASSES_PER_CALL as i64),
+            "one recovery open exceeded its merge-pass bound"
+        );
+        assert_merge_suppressed(&first_reopen);
+        assert_eq!(
+            search_count(&first_reopen, "boundedreopen"),
+            LARGE_MERGE_EVENT_COUNT as i64
+        );
+        drop(first_reopen);
+
+        let mut reopens = 1;
+        loop {
+            let reopened = Store::open(&db_path).unwrap();
+            reopens += 1;
+            assert_eq!(
+                search_count(&reopened, "boundedreopen"),
+                LARGE_MERGE_EVENT_COUNT as i64
+            );
+            if marker(&reopened).is_none() {
+                assert_merge_config_restored(&reopened);
+                break;
+            }
+            assert_merge_suppressed(&reopened);
+            assert!(
+                reopens < MAX_CONVERGENCE_CALLS,
+                "bounded reopen recovery did not converge"
+            );
+        }
+
+        assert!(reopens > 1, "fixture did not exceed one recovery open");
+    }
+
+    #[test]
+    fn maintenance_api_reports_and_advances_durable_debt() {
+        let temp = tempdir();
+        let db_path = temp.path().join("work.sqlite");
+        let store = Store::open(&db_path).unwrap();
+        let guard = store.begin_event_search_bulk_mode().unwrap();
+        seed_large_merge_work(&store, "maintenanceapi");
+        assert_eq!(
+            store.finish_event_search_bulk_mode(&guard).unwrap(),
+            EventSearchBulkMaintenanceOutcome::Pending
+        );
+        drop(guard);
+
+        let before = remaining_forced_merge_passes(&store).unwrap();
+        let outcome = store.advance_event_search_bulk_maintenance().unwrap();
+        let after = remaining_forced_merge_passes(&store).unwrap_or_default();
+
+        assert!(after < before);
+        assert_eq!(outcome, EventSearchBulkMaintenanceOutcome::Pending);
+    }
 }

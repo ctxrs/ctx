@@ -181,7 +181,7 @@ fn has_junie_session_events(root: &Path, max_entries: usize) -> BoundedProbe {
         Ok(file) => file,
         Err(_) => return BoundedProbe::IoError,
     };
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut line = Vec::new();
     let mut visited = 0usize;
     loop {

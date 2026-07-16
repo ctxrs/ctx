@@ -8,6 +8,7 @@ struct DaemonIteration {
 struct DaemonRuntime {
     semantic_embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
     semantic_bootstrap_passes_since_refresh: usize,
+    history_refresh: crate::commands::search::SearchRefreshRuntime,
 }
 
 fn daemon_runtime_embedder_loaded(runtime: &DaemonRuntime) -> bool {
@@ -1253,7 +1254,7 @@ fn run_daemon_once(
 
     let history_refresh_job =
         if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-            run_daemon_history_refresh_job(data_root)
+            run_daemon_history_refresh_job(data_root, runtime)
         } else {
             Ok(daemon_history_refresh_skipped_job("daemon_deadline"))
         };
@@ -1363,12 +1364,12 @@ fn daemon_deadline_has_min_budget(deadline: Option<Instant>, min_secs: u64) -> b
     remaining >= StdDuration::from_secs(min_secs)
 }
 
-fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
+fn run_daemon_history_refresh_job(data_root: &Path, runtime: &mut DaemonRuntime) -> Result<Value> {
     #[cfg(all(test, ctx_sqlite_vec))]
     if let Some(value) = daemon_test_job("history_refresh") {
         return Ok(value);
     }
-
+    let _disk_io_pacing = runtime.history_refresh.install_daemon_disk_io_pacing();
     let last_run_at_ms = utc_now().timestamp_millis();
     let sources = search_refresh_sources(None);
     let plugin_sources = search_refresh_plugin_sources(
@@ -1377,7 +1378,7 @@ fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
         &crate::search_filters::SourceIdentityFilters::default(),
     )?;
     let source_count = sources.len().saturating_add(plugin_sources.len());
-    if source_count == 0 && !search_refresh_has_retirement_work(data_root)? {
+    if source_count == 0 && !search_refresh_has_publication_work(data_root)? {
         return Ok(daemon_history_refresh_job_json(
             "skipped",
             0,
@@ -1388,13 +1389,14 @@ fn run_daemon_history_refresh_job(data_root: &Path) -> Result<Value> {
         ));
     }
     let source_fingerprint = search_refresh_source_fingerprint(&sources);
-    let mut job = match refresh_sources_for_search(
+    let mut job = match refresh_sources_for_search_with_runtime(
         data_root,
         sources,
         plugin_sources,
         RefreshArg::Background,
         true,
         crate::commands::import::ImportExecutionPolicy::Daemon,
+        &mut runtime.history_refresh,
     ) {
         Ok(totals) => daemon_history_refresh_job_json(
             "completed",
@@ -1484,22 +1486,6 @@ fn daemon_history_refresh_job_did_work(value: &Value) -> bool {
     ]
     .into_iter()
     .any(|key| totals.get(key).and_then(Value::as_u64).unwrap_or(0) > 0)
-}
-
-fn search_refresh_source_fingerprint(sources: &[crate::provider_sources::SourceInfo]) -> String {
-    let mut items = sources
-        .iter()
-        .map(|source| {
-            format!(
-                "{}|{}|{}",
-                source.provider.as_str(),
-                source.source_format,
-                source.path.display()
-            )
-        })
-        .collect::<Vec<_>>();
-    items.sort();
-    semantic_text_hash(&items.join("\n"))
 }
 
 fn run_daemon_semantic_job(

@@ -1,10 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
+    fs::File,
     io::BufReader,
     path::{Path, PathBuf},
     thread,
-    time::UNIX_EPOCH,
 };
 
 use ctx_history_core::{AgentType, CaptureProvider};
@@ -16,8 +15,11 @@ use crate::common::io::{
 };
 use crate::common::time::{parse_rfc3339_utc, system_time_ms};
 use crate::{
-    provider_sources::provider_import_revision, CaptureError, CatalogSummary,
-    CodexSessionCatalogOptions, ProviderImportFailure, Result, CODEX_SESSION_SOURCE_FORMAT,
+    provider_sources::{
+        open_observed_ordinary_file, provider_import_revision, OrdinaryFileObservation,
+    },
+    CaptureError, CatalogSummary, CodexSessionCatalogOptions, ProviderImportFailure, Result,
+    CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::session::{apply_codex_session_import_bounds, contains_bytes};
@@ -63,8 +65,8 @@ pub fn catalog_codex_session_tree(
     let mut paths_to_parse = Vec::new();
     let mut has_metadata_failures = false;
     for path in paths {
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
+        let observation = match crate::observe_ordinary_file(&path) {
+            Ok(observation) => observation,
             Err(err) => {
                 summary.failed_sessions += 1;
                 has_metadata_failures = true;
@@ -76,12 +78,12 @@ pub fn catalog_codex_session_tree(
             }
         };
         summary.source_files += 1;
-        summary.source_bytes = summary.source_bytes.saturating_add(metadata.len());
+        summary.source_bytes = summary.source_bytes.saturating_add(observation.len());
         let source_path = codex_catalog_session_identity(&path)?.to_owned();
         current_paths.push(source_path.clone());
         if let Some(session) = cached_catalog_session_if_unchanged(
             existing.get(&source_path),
-            &metadata,
+            &observation,
             cataloged_at_ms,
             import_revision,
         ) {
@@ -228,17 +230,23 @@ pub fn catalog_codex_session_files(
 
 pub(crate) fn cached_catalog_session_if_unchanged(
     session: Option<&CatalogSession>,
-    metadata: &fs::Metadata,
+    observation: &OrdinaryFileObservation,
     cataloged_at_ms: i64,
     import_revision: u32,
 ) -> Option<CatalogSession> {
     let session = session?;
-    let modified_at_ms = system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH));
+    let modified_at_ms = system_time_ms(observation.modified_at());
+    let observation_token = observation.token_hex();
     if session.provider == CaptureProvider::Codex
         && session.source_format == CODEX_SESSION_SOURCE_FORMAT
         && session.import_revision == import_revision
-        && session.file_size_bytes == metadata.len()
+        && session.file_size_bytes == observation.len()
         && session.file_modified_at_ms == modified_at_ms
+        && session
+            .metadata
+            .get("file_observation_token_v1")
+            .and_then(Value::as_str)
+            == Some(observation_token.as_str())
     {
         let mut session = session.clone();
         session.cataloged_at_ms = cataloged_at_ms;
@@ -268,12 +276,16 @@ pub(crate) fn catalog_codex_session_paths(
         )]
     } else {
         let chunk_size = paths.len().div_ceil(parallelism).max(1);
+        let disk_io_pacer = crate::disk_io_pacing::current_disk_io_pacer();
         thread::scope(|scope| -> Result<Vec<CatalogWorkerBatch>> {
             let mut handles = Vec::new();
             for chunk in paths.chunks(chunk_size) {
                 let chunk = chunk.to_vec();
                 let source_root = source_root.to_owned();
+                let disk_io_pacer = disk_io_pacer.clone();
                 handles.push(scope.spawn(move || {
+                    let _disk_io_pacing =
+                        disk_io_pacer.map(crate::disk_io_pacing::install_disk_io_pacer);
                     catalog_codex_session_chunk(chunk, source_root, cataloged_at_ms)
                 }));
             }
@@ -307,8 +319,8 @@ pub(crate) fn catalog_codex_session_chunk(
         ..CatalogWorkerBatch::default()
     };
     for path in paths {
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
+        let (file, observation) = match open_observed_ordinary_file(&path) {
+            Ok(observed) => observed,
             Err(err) => {
                 batch.summary.failed_sessions += 1;
                 batch.summary.sample_failure(ProviderImportFailure {
@@ -319,8 +331,14 @@ pub(crate) fn catalog_codex_session_chunk(
             }
         };
         batch.summary.source_files += 1;
-        batch.summary.source_bytes = batch.summary.source_bytes.saturating_add(metadata.len());
-        match catalog_codex_session_file(&path, source_root.as_str(), &metadata, cataloged_at_ms) {
+        batch.summary.source_bytes = batch.summary.source_bytes.saturating_add(observation.len());
+        match catalog_codex_session_file(
+            &path,
+            file,
+            source_root.as_str(),
+            &observation,
+            cataloged_at_ms,
+        ) {
             Ok(session) => {
                 batch.summary.parsed_sessions += 1;
                 batch.sessions.push(session);
@@ -351,12 +369,13 @@ pub(crate) fn catalog_parallelism(
 }
 pub(crate) fn catalog_codex_session_file(
     path: &Path,
+    file: File,
     source_root: &str,
-    metadata: &fs::Metadata,
+    observation: &OrdinaryFileObservation,
     cataloged_at_ms: i64,
 ) -> Result<CatalogSession> {
     let source_path = codex_catalog_session_identity(path)?;
-    let session_meta = read_codex_session_meta(path)?;
+    let session_meta = read_codex_session_meta_from_file(file)?;
     let payload = session_meta.as_ref().and_then(|value| value.get("payload"));
     let source = payload
         .and_then(|payload| payload.get("source"))
@@ -412,8 +431,8 @@ pub(crate) fn catalog_codex_session_file(
             .filter(|cwd| !cwd.trim().is_empty())
             .map(str::to_owned),
         session_started_at_ms,
-        file_size_bytes: metadata.len(),
-        file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+        file_size_bytes: observation.len(),
+        file_modified_at_ms: system_time_ms(observation.modified_at()),
         import_revision: provider_import_revision(
             CaptureProvider::Codex,
             CODEX_SESSION_SOURCE_FORMAT,
@@ -426,6 +445,7 @@ pub(crate) fn catalog_codex_session_file(
             "source_kind": codex_source_kind(&source),
             "source": source,
             "catalog_scope": "session_meta",
+            "file_observation_token_v1": observation.token_hex(),
         }),
     })
 }
@@ -452,9 +472,9 @@ fn validate_codex_catalog_session_paths(paths: &[PathBuf]) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn read_codex_session_meta(path: &Path) -> Result<Option<Value>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+
+fn read_codex_session_meta_from_file(file: File) -> Result<Option<Value>> {
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut line = Vec::new();
     for _ in 0..32 {
         match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {

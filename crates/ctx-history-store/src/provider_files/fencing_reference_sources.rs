@@ -1,4 +1,42 @@
 impl Store {
+    fn direct_entity_source_id(&self, table: &'static str, id: Uuid) -> Result<Option<Uuid>> {
+        if table == "vcs_changes" {
+            return self
+                .conn
+                .query_row(
+                    r#"
+                    SELECT COALESCE(change.source_id, workspace.source_id)
+                    FROM vcs_changes AS change
+                    LEFT JOIN vcs_workspaces AS workspace ON workspace.id = change.vcs_workspace_id
+                    WHERE change.id = ?1
+                    "#,
+                    params![id.to_string()],
+                    optional_uuid_from_first_column,
+                )
+                .optional()
+                .map(Option::flatten)
+                .map_err(StoreError::from);
+        }
+        let source_column = match table {
+            "sessions" => "capture_source_id",
+            "artifacts"
+            | "history_records"
+            | "summaries"
+            | "history_record_links"
+            | "vcs_workspaces" => "source_id",
+            _ => unreachable!("unsupported referenced provider-owned table"),
+        };
+        self.conn
+            .query_row(
+                &format!("SELECT {source_column} FROM {table} WHERE id = ?1"),
+                params![id.to_string()],
+                optional_uuid_from_first_column,
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(StoreError::from)
+    }
+
     fn session_owned_reference_source_ids(
         &self,
         transcript: Option<Uuid>,

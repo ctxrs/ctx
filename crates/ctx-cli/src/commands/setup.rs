@@ -30,6 +30,13 @@ pub(crate) fn run_setup(
     quiet: bool,
     config: &config::AppConfig,
 ) -> Result<()> {
+    let daemon_backgrounding_enabled = config.daemon.enabled && !args.no_daemon;
+    let setup_policy = if daemon_backgrounding_enabled && !args.wait && !args.catalog_only {
+        crate::commands::import::ImportExecutionPolicy::Daemon
+    } else {
+        crate::commands::import::ImportExecutionPolicy::Drain
+    };
+    let _disk_io_pacing = ctx_history_capture::install_disk_io_pacer(setup_policy.disk_io_pacer());
     fs::create_dir_all(&data_root)?;
     let db_path = database_path(data_root.clone());
     let store = Store::open(&db_path)?;
@@ -45,7 +52,6 @@ pub(crate) fn run_setup(
     let sources = discovered_sources();
     let progress_arg = setup_progress_arg(args.progress, quiet);
     let progress = ProgressReporter::new(progress_arg, args.json, "setup", 0);
-    let daemon_backgrounding_enabled = config.daemon.enabled && !args.no_daemon;
     let foreground_import = !args.catalog_only && (args.wait || !daemon_backgrounding_enabled);
     let mut inventory_only = None;
     let import_report = if args.catalog_only || !foreground_import {
