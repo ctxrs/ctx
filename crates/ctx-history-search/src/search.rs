@@ -169,8 +169,26 @@ pub fn search_packet_envelope(
     }
     packet.query = envelope.query.canonical_text();
     packet.query_spec = Some(envelope.query.clone());
+    let analyzed_tokens = envelope
+        .query
+        .clauses()
+        .map(|clause| search_analyzed_token_count(clause.value()))
+        .collect::<Vec<_>>();
+    packet.query_execution.consumed.query_bytes = envelope
+        .query
+        .clauses()
+        .map(|clause| clause.value().len())
+        .sum();
+    packet.query_execution.consumed.clauses = envelope.query.clause_count();
+    packet.query_execution.consumed.analyzed_tokens = analyzed_tokens.iter().sum();
+    packet
+        .query_execution
+        .consumed
+        .largest_analyzed_tokens_per_clause =
+        analyzed_tokens.into_iter().max().unwrap_or_default();
     packet.query_execution.requested_result_limit = options.limit;
     packet.query_execution.result_limit = packet.query_execution.resolved.results;
+    packet.query_execution.max_result_limit = ctx_protocol::SEARCH_MAX_RESULTS;
     packet.query_execution.semantic.attempted =
         semantic_required || automatic_rerank_requested;
     packet.query_execution.semantic.required = semantic_required;
@@ -178,8 +196,9 @@ pub fn search_packet_envelope(
     packet.query_execution.semantic.backend = semantic.and_then(|input| input.backend.clone());
     packet.query_execution.semantic.positive_text_rule_version =
         SEARCH_POSITIVE_TEXT_RULE_VERSION.to_owned();
-    packet.query_execution.semantic.coverage.requested_candidates =
-        semantic.map_or(0, |input| input.candidates.len());
+    let supplied_candidates = semantic.map_or(0, |input| input.candidates.len());
+    packet.query_execution.semantic.requested_candidates = supplied_candidates;
+    packet.query_execution.semantic.candidates_supplied = supplied_candidates;
     packet.query_execution.semantic.coverage.indexed_documents =
         semantic.and_then(|input| input.indexed_documents);
     packet.query_execution.semantic.coverage.searchable_documents =
@@ -226,9 +245,16 @@ pub fn search_packet_envelope(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        packet.query_execution.semantic.coverage.eligible_candidates = semantic_ids.len();
-        packet.query_execution.semantic.coverage.truncated =
-            input.candidates.len() > semantic_ids.len();
+        packet.query_execution.semantic.eligible_candidates = semantic_ids.len();
+        packet.query_execution.semantic.candidates_consumed = semantic_ids.len();
+        packet
+            .query_execution
+            .consumed
+            .largest_positive_seed_candidates = packet
+            .query_execution
+            .consumed
+            .largest_positive_seed_candidates
+            .max(semantic_ids.len());
         packet.query_execution.consumed.candidate_rows = packet
             .query_execution
             .consumed
@@ -255,7 +281,7 @@ pub fn search_packet_envelope(
     }
     packet.query_execution.semantic.effective_backend = match (
         has_lexical_positive,
-        packet.query_execution.semantic.coverage.used_candidates > 0,
+        packet.query_execution.semantic.candidates_used > 0,
     ) {
         (true, true) => SearchEffectiveBackend::Hybrid,
         (false, true) => SearchEffectiveBackend::Semantic,
@@ -265,7 +291,8 @@ pub fn search_packet_envelope(
     packet.query_execution.semantic.completeness = if !packet.query_execution.semantic.attempted {
         ctx_protocol::SearchSemanticCompleteness::NotAttempted
     } else if readiness == SearchSemanticReadiness::Ready {
-        if packet.query_execution.semantic.coverage.truncated
+        if packet.query_execution.semantic.candidates_supplied
+            > packet.query_execution.semantic.candidates_consumed
             || semantic.is_none_or(|input| !input.coverage_complete)
         {
             ctx_protocol::SearchSemanticCompleteness::Partial
@@ -303,6 +330,47 @@ pub fn search_packet_envelope(
         }
         _ => None,
     };
+    if packet.query_execution.semantic.attempted
+        && packet.query_execution.semantic.skip_reason.is_some()
+    {
+        packet.query_execution.semantic.completeness =
+            ctx_protocol::SearchSemanticCompleteness::Skipped;
+    }
+    if packet.query_execution.semantic.attempted {
+        if packet.query_execution.semantic.candidates_supplied
+            > packet.query_execution.semantic.candidates_consumed
+        {
+            packet
+                .query_execution
+                .semantic
+                .incompleteness_reasons
+                .push("semantic_candidate_budget_exhausted".to_owned());
+            push_truncation_reason(
+                &mut packet.query_execution,
+                "semantic_candidate_budget_exhausted",
+            );
+        }
+        if readiness == SearchSemanticReadiness::Ready
+            && semantic.is_some_and(|input| !input.coverage_complete)
+        {
+            packet
+                .query_execution
+                .semantic
+                .incompleteness_reasons
+                .push("semantic_coverage_incomplete".to_owned());
+            push_truncation_reason(
+                &mut packet.query_execution,
+                "semantic_coverage_incomplete",
+            );
+        }
+        if let Some(reason) = packet.query_execution.semantic.skip_reason {
+            packet
+                .query_execution
+                .semantic
+                .incompleteness_reasons
+                .push(format!("semantic_{}", semantic_skip_reason_key(reason)));
+        }
+    }
     finalize_structured_packet(&mut packet)?;
     Ok(packet)
 }
@@ -343,7 +411,7 @@ fn rerank_automatic_semantic_candidates(
     });
     packet.results = ranked.into_iter().map(|(result, _)| result).collect();
     normalize_search_result_ranks(&mut packet.results);
-    packet.query_execution.semantic.coverage.used_candidates = used;
+    packet.query_execution.semantic.candidates_used = used;
 }
 
 fn merge_explicit_semantic_candidates(
@@ -358,15 +426,39 @@ fn merge_explicit_semantic_candidates(
     // canonical-row fallback for missing legacy lookup entries. Both reads
     // must apply provider-publication visibility fences and the supplied byte
     // limits; it must never trigger a projection rebuild.
-    let hits = store.semantic_event_hits_by_ids_bounded_visible(
-        semantic_ids,
-        resolved.residual_rows,
-        resolved.verification_bytes,
-        resolved.verification_lookup_bytes,
-        resolved.hydrated_rows,
-        resolved.hydration_input_bytes,
-        resolved.hydration_input_bytes_per_event,
-    )?;
+    let remaining_residual_rows = resolved
+        .residual_rows
+        .saturating_sub(packet.query_execution.consumed.residual_rows);
+    let remaining_verification_bytes = resolved
+        .verification_bytes
+        .saturating_sub(packet.query_execution.consumed.verification_bytes);
+    let remaining_hydrated_rows = resolved
+        .hydrated_rows
+        .saturating_sub(packet.query_execution.consumed.hydrated_rows);
+    let remaining_input_bytes = resolved.hydration_input_bytes.saturating_sub(
+        packet
+            .query_execution
+            .consumed
+            .hydration_input_bytes
+            .saturating_add(packet.query_execution.consumed.snippet_input_bytes),
+    );
+    let hits = if remaining_residual_rows == 0
+        || remaining_verification_bytes == 0
+        || remaining_hydrated_rows == 0
+        || remaining_input_bytes == 0
+    {
+        Vec::new()
+    } else {
+        store.semantic_event_hits_by_ids_bounded_visible(
+            semantic_ids,
+            remaining_residual_rows,
+            remaining_verification_bytes,
+            resolved.verification_lookup_bytes,
+            remaining_hydrated_rows,
+            remaining_input_bytes,
+            resolved.hydration_input_bytes_per_event,
+        )?
+    };
     let file_scope = file_filter_scope(store, &options.filters)?;
     let mut semantic_results = Vec::new();
     for (rank, hit) in hits.into_iter().enumerate() {
@@ -427,6 +519,9 @@ fn merge_explicit_semantic_candidates(
                 .saturating_add(1);
             continue;
         }
+        if !consume_snippet_input(&mut packet.query_execution, hit.preview.len()) {
+            continue;
+        }
         let mut result = event_search_result(
             &hit,
             &query.canonical_positive_text(),
@@ -463,7 +558,7 @@ fn merge_explicit_semantic_candidates(
     }
     normalize_search_result_ranks(&mut combined);
     packet.results = combined;
-    packet.query_execution.semantic.coverage.used_candidates = used;
+    packet.query_execution.semantic.candidates_used = used;
     Ok(())
 }
 
@@ -556,7 +651,17 @@ fn search_packet_query_lexical(
                 .clauses()
                 .map(|clause| search_analyzed_token_count(clause.value()))
                 .sum();
+            packet
+                .query_execution
+                .consumed
+                .largest_analyzed_tokens_per_clause = query
+                .clauses()
+                .map(|clause| search_analyzed_token_count(clause.value()))
+                .max()
+                .unwrap_or_default();
             packet.query_execution.resolved = resolved;
+            packet.query_execution.requested_result_limit = options.limit;
+            packet.query_execution.result_limit = packet.query_execution.resolved.results;
             return Ok(packet);
         }
     }
@@ -620,9 +725,16 @@ fn search_packet_query_lexical(
                 .clauses()
                 .map(|clause| search_analyzed_token_count(clause.value()))
                 .sum(),
+            largest_analyzed_tokens_per_clause: query
+                .clauses()
+                .map(|clause| search_analyzed_token_count(clause.value()))
+                .max()
+                .unwrap_or_default(),
             ..ctx_protocol::SearchExecutionConsumption::default()
         },
         per_branch_candidate_rows: per_clause_budget,
+        requested_result_limit: options.limit,
+        result_limit: resolved.results,
         ..SearchExecutionDiagnostics::default()
     };
     let mut candidates = BTreeMap::<Uuid, StructuredCandidate>::new();
@@ -654,6 +766,13 @@ fn search_packet_query_lexical(
         if batch.timed_out {
             return Err(structured_timeout_error(started, &diagnostics));
         }
+        let event_candidate_count = batch.candidates.len();
+        diagnostics
+            .consumed
+            .largest_positive_seed_candidates = diagnostics
+            .consumed
+            .largest_positive_seed_candidates
+            .max(event_candidate_count);
         let mut clause_candidates = batch.candidates;
         clause_candidates.sort_by(|left, right| {
             left.rank
@@ -717,6 +836,12 @@ fn search_packet_query_lexical(
         if batch.timed_out {
             return Err(structured_timeout_error(started, &diagnostics));
         }
+        diagnostics
+            .consumed
+            .largest_positive_seed_candidates = diagnostics
+            .consumed
+            .largest_positive_seed_candidates
+            .max(event_candidate_count.saturating_add(batch.candidates.len()));
         let mut clause_candidates = batch.candidates;
         clause_candidates.sort_by(|left, right| {
             left.rank
@@ -955,6 +1080,14 @@ fn search_packet_query_lexical(
             continue;
         };
         let record = document.into_history_record();
+        let record_input_bytes = record
+            .title
+            .len()
+            .saturating_add(record.body.len())
+            .saturating_add(record.tags.iter().map(String::len).sum::<usize>());
+        if !consume_hydration_input(&mut diagnostics, record_input_bytes) {
+            continue;
+        }
         let matches_query = record_matches_structured_query(&record, &query);
         ensure_structured_deadline(started, &diagnostics)?;
         if !matches_query {
@@ -971,26 +1104,32 @@ fn search_packet_query_lexical(
                 diagnostics.filter_verification_dropped.saturating_add(1);
             continue;
         };
+        if !consume_snippet_input(&mut diagnostics, record_input_bytes) {
+            continue;
+        }
         candidate.score = reciprocal_rank_score as f32 + (candidate.score * 0.000_001);
         let mut result = candidate_search_result(&candidate, &snippet_query, &options);
         result.timestamp = Some(candidate.record.updated_at);
         ensure_structured_deadline(started, &diagnostics)?;
         record_results.push(result);
     }
-    diagnostics.consumed.hydrated_rows = diagnostics
-        .consumed
-        .hydrated_rows
-        .saturating_add(record_results.len())
-        .min(diagnostics.resolved.hydrated_rows);
-
     let target_results = options.limit.saturating_add(1);
     let mut results = Vec::<SearchPacketResult>::new();
     let mut result_index = BTreeMap::<Uuid, usize>::new();
-    for result in verified_hits
-        .iter()
-        .map(|hit| event_search_result(hit, &snippet_query, options.snippet_chars))
-        .chain(record_results)
-    {
+    for hit in &verified_hits {
+        if !consume_snippet_input(&mut diagnostics, hit.preview.len()) {
+            continue;
+        }
+        let result = event_search_result(hit, &snippet_query, options.snippet_chars);
+        let result_key = search_result_merge_key(&result, options.result_mode);
+        if let Some(index) = result_index.get(&result_key).copied() {
+            merge_search_result(&mut results[index], result);
+        } else {
+            result_index.insert(result_key, results.len());
+            results.push(result);
+        }
+    }
+    for result in record_results {
         let result_key = search_result_merge_key(&result, options.result_mode);
         if let Some(index) = result_index.get(&result_key).copied() {
             merge_search_result(&mut results[index], result);
@@ -1037,7 +1176,12 @@ fn search_packet_query_lexical(
         .saturating_sub(diagnostics.consumed.hydrated_rows);
     let remaining_hydration_bytes = resolved
         .hydration_input_bytes
-        .saturating_sub(diagnostics.consumed.hydration_input_bytes);
+        .saturating_sub(
+            diagnostics
+                .consumed
+                .hydration_input_bytes
+                .saturating_add(diagnostics.consumed.snippet_input_bytes),
+        );
     let mut full_hits = if remaining_hydration_rows == 0 || remaining_hydration_bytes == 0 {
         Vec::new()
     } else {
@@ -1110,6 +1254,19 @@ fn push_truncation_reason(diagnostics: &mut SearchExecutionDiagnostics, reason: 
     }
 }
 
+fn semantic_skip_reason_key(reason: ctx_protocol::SearchSemanticSkipReason) -> &'static str {
+    match reason {
+        ctx_protocol::SearchSemanticSkipReason::Disabled => "disabled",
+        ctx_protocol::SearchSemanticSkipReason::Unavailable => "unavailable",
+        ctx_protocol::SearchSemanticSkipReason::NotReady => "not_ready",
+        ctx_protocol::SearchSemanticSkipReason::Unsupported => "unsupported",
+        ctx_protocol::SearchSemanticSkipReason::NoLexicalCandidates => "no_lexical_candidates",
+        ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible => {
+            "query_shape_not_eligible"
+        }
+    }
+}
+
 fn consume_hydration_input(
     diagnostics: &mut SearchExecutionDiagnostics,
     event_bytes: usize,
@@ -1118,6 +1275,7 @@ fn consume_hydration_input(
         || diagnostics
             .consumed
             .hydration_input_bytes
+            .saturating_add(diagnostics.consumed.snippet_input_bytes)
             .saturating_add(event_bytes)
             > diagnostics.resolved.hydration_input_bytes
         || diagnostics.consumed.hydrated_rows >= diagnostics.resolved.hydrated_rows
@@ -1135,6 +1293,28 @@ fn consume_hydration_input(
         .consumed
         .largest_hydration_input_bytes
         .max(event_bytes);
+    true
+}
+
+fn consume_snippet_input(
+    diagnostics: &mut SearchExecutionDiagnostics,
+    event_bytes: usize,
+) -> bool {
+    if event_bytes > diagnostics.resolved.hydration_input_bytes_per_event
+        || diagnostics
+            .consumed
+            .hydration_input_bytes
+            .saturating_add(diagnostics.consumed.snippet_input_bytes)
+            .saturating_add(event_bytes)
+            > diagnostics.resolved.snippet_input_bytes
+    {
+        push_truncation_reason(diagnostics, "hydration_snippet_input_bytes_budget");
+        return false;
+    }
+    diagnostics.consumed.snippet_input_bytes = diagnostics
+        .consumed
+        .snippet_input_bytes
+        .saturating_add(event_bytes);
     true
 }
 

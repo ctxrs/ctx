@@ -624,6 +624,9 @@ pub struct SearchExecutionLimits {
     pub hydrated_rows: usize,
     pub hydration_input_bytes: usize,
     pub hydration_input_bytes_per_event: usize,
+    /// Maximum bytes analyzed for snippets. This is the same shared pool as
+    /// `hydration_input_bytes`, not an additional allowance.
+    pub snippet_input_bytes: usize,
     pub returned_text_bytes: usize,
     pub serialized_response_bytes: usize,
     pub results: usize,
@@ -647,6 +650,7 @@ impl SearchExecutionLimits {
             hydrated_rows: SEARCH_MAX_HYDRATED_ROWS,
             hydration_input_bytes: SEARCH_MAX_HYDRATION_INPUT_BYTES,
             hydration_input_bytes_per_event: SEARCH_MAX_HYDRATION_INPUT_BYTES_PER_EVENT,
+            snippet_input_bytes: SEARCH_MAX_HYDRATION_INPUT_BYTES,
             returned_text_bytes: SEARCH_MAX_RETURNED_TEXT_BYTES,
             serialized_response_bytes: SEARCH_MAX_SERIALIZED_RESPONSE_BYTES,
             results: SEARCH_MAX_RESULTS,
@@ -661,6 +665,10 @@ impl SearchExecutionLimits {
     ) -> Self {
         let hard = Self::hard_maxima();
         let requested = requested.unwrap_or(&hard);
+        let shared_hydration_input_bytes = requested
+            .hydration_input_bytes
+            .min(requested.snippet_input_bytes)
+            .clamp(1, hard.hydration_input_bytes);
         Self {
             query_bytes: requested.query_bytes.clamp(1, hard.query_bytes),
             clauses: requested.clauses.clamp(1, hard.clauses),
@@ -682,12 +690,11 @@ impl SearchExecutionLimits {
                 .verification_lookup_bytes
                 .clamp(1, hard.verification_lookup_bytes),
             hydrated_rows: requested.hydrated_rows.clamp(1, hard.hydrated_rows),
-            hydration_input_bytes: requested
-                .hydration_input_bytes
-                .clamp(1, hard.hydration_input_bytes),
+            hydration_input_bytes: shared_hydration_input_bytes,
             hydration_input_bytes_per_event: requested
                 .hydration_input_bytes_per_event
                 .clamp(1, hard.hydration_input_bytes_per_event),
+            snippet_input_bytes: shared_hydration_input_bytes,
             returned_text_bytes: requested
                 .returned_text_bytes
                 .clamp(1, hard.returned_text_bytes),
@@ -715,6 +722,8 @@ pub struct SearchExecutionConsumption {
     pub query_bytes: usize,
     pub clauses: usize,
     pub analyzed_tokens: usize,
+    pub largest_analyzed_tokens_per_clause: usize,
+    pub largest_positive_seed_candidates: usize,
     pub candidate_rows: usize,
     pub retained_candidate_ids: usize,
     pub residual_rows: usize,
@@ -724,6 +733,7 @@ pub struct SearchExecutionConsumption {
     pub largest_verification_lookup_bytes: usize,
     pub hydration_input_bytes: usize,
     pub largest_hydration_input_bytes: usize,
+    pub snippet_input_bytes: usize,
     pub returned_results: usize,
     pub returned_text_bytes: usize,
     pub serialized_response_bytes: usize,
@@ -758,10 +768,6 @@ pub struct SearchSemanticCoverage {
     pub indexed_documents: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub searchable_documents: Option<u64>,
-    pub requested_candidates: usize,
-    pub eligible_candidates: usize,
-    pub used_candidates: usize,
-    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,8 +789,15 @@ pub struct SearchSemanticDiagnostics {
     pub effective_backend: SearchEffectiveBackend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    pub requested_candidates: usize,
+    pub eligible_candidates: usize,
+    pub candidates_supplied: usize,
+    pub candidates_consumed: usize,
+    pub candidates_used: usize,
     pub coverage: SearchSemanticCoverage,
     pub completeness: SearchSemanticCompleteness,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incompleteness_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<SearchSemanticSkipReason>,
     pub positive_text_rule_version: String,
@@ -803,6 +816,7 @@ pub struct SearchExecutionDiagnostics {
     pub per_branch_candidate_rows: usize,
     pub requested_result_limit: usize,
     pub result_limit: usize,
+    pub max_result_limit: usize,
     pub clauses_executed: usize,
     pub verification_dropped: usize,
     pub filter_verification_dropped: usize,
@@ -828,6 +842,7 @@ impl Default for SearchExecutionDiagnostics {
             per_branch_candidate_rows: 0,
             requested_result_limit: 0,
             result_limit: 0,
+            max_result_limit: SEARCH_MAX_RESULTS,
             clauses_executed: 0,
             verification_dropped: 0,
             filter_verification_dropped: 0,
