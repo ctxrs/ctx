@@ -1190,7 +1190,7 @@ pub(crate) fn run_search(
             &refresh,
             &retrieval,
             suggested_next_query,
-        ))?;
+        )?)?;
     } else {
         if refresh.status == "failed" && args.refresh == RefreshArg::Background {
             if let Some(error) = &refresh.error {
