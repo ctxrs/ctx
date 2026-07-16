@@ -985,13 +985,7 @@ pub(crate) fn run_search(
     analytics_properties: &mut AnalyticsProperties,
     config: &config::AppConfig,
 ) -> Result<()> {
-    if !search_has_intent(SearchIntentInput {
-        query: args.query.as_deref(),
-        terms: &args.term,
-        file: args.file.as_deref(),
-    }) {
-        return Err(missing_search_intent_error());
-    }
+    let query_spec = search_query_from_args(&args)?;
 
     let db_path = database_path(data_root.clone());
     let had_existing_store = db_path.exists();
@@ -1088,21 +1082,20 @@ pub(crate) fn run_search(
         indexed_history_item_count(&store)? > 0,
     );
     let source_identity = SourceIdentityFilterArgs::from(&args);
-    let query = args.query.unwrap_or_default();
-    let query_term_count = query
-        .split_whitespace()
-        .filter(|term| !term.trim().is_empty())
-        .count()
-        .saturating_add(
-            args.term
-                .iter()
-                .filter(|term| !term.trim().is_empty())
-                .count(),
-        );
+    let query_text = query_spec
+        .as_ref()
+        .map(ctx_protocol::SearchQuery::canonical_text)
+        .unwrap_or_default();
+    let query_term_count = query_spec.as_ref().map_or(0, |query| {
+        query
+            .clauses()
+            .map(|clause| clause.value().split_whitespace().count())
+            .sum()
+    });
     analytics::insert_text_length_bucket(
         analytics_properties,
         "query_length_bucket",
-        query.chars().count(),
+        query_text.chars().count(),
     );
     analytics::insert_count_bucket(
         analytics_properties,
@@ -1134,20 +1127,24 @@ pub(crate) fn run_search(
         },
         ..ctx_history_search::PacketOptions::default()
     };
-    let uses_composed_terms = args.term.iter().any(|term| !term.trim().is_empty());
+    let uses_composed_terms = query_spec
+        .as_ref()
+        .is_some_and(|query| query.single_all_text().is_none());
     let query_started = Instant::now();
-    let (packet, retrieval) = search_packet_with_backend(
-        &store,
-        &data_root,
-        &query,
-        &args.term,
-        &options,
-        requested_backend,
-        semantic_enabled,
-        args.semantic_weight,
-        args.refresh,
-        !args.json,
-    )?;
+    let (packet, retrieval) = if let Some(query) = query_spec.as_ref() {
+        search_packet_query_with_backend(
+            &store,
+            &data_root,
+            query,
+            &options,
+            requested_backend,
+            semantic_enabled,
+            args.refresh,
+            !args.json,
+        )?
+    } else {
+        search_packet_file_filter_with_backend(&store, &options, requested_backend, !args.json)?
+    };
     analytics::insert_duration(
         analytics_properties,
         "query_duration",
@@ -1182,7 +1179,10 @@ pub(crate) fn run_search(
     analytics::insert_bool(analytics_properties, "zero_result", result_count == 0);
     let render_started = Instant::now();
     if args.json {
-        let suggested_next_query = (!uses_composed_terms).then_some(query.as_str());
+        let suggested_next_query = query_spec
+            .as_ref()
+            .and_then(ctx_protocol::SearchQuery::single_all_text)
+            .filter(|_| !uses_composed_terms);
         print_json(SearchDto::packet(
             &store,
             &packet,
@@ -1202,7 +1202,7 @@ pub(crate) fn run_search(
             if let Some(file) = args
                 .file
                 .as_deref()
-                .filter(|_| query.trim().is_empty() && !uses_composed_terms)
+                .filter(|_| query_spec.is_none())
             {
                 println!("no indexed events touched {}", file.display());
                 let indexed_items = indexed_history_item_count(&store)?;
@@ -1217,7 +1217,7 @@ pub(crate) fn run_search(
             } else {
                 println!(
                     "no results for {}",
-                    search_no_results_target(&query, &args.term)
+                    search_no_results_target(&query_text, &[])
                 );
                 let indexed_items = indexed_history_item_count(&store)?;
                 if indexed_items == 0 {
@@ -1227,7 +1227,10 @@ pub(crate) fn run_search(
                 }
             }
         }
-        let suggested_next_query = (!uses_composed_terms).then_some(query.as_str());
+        let suggested_next_query = query_spec
+            .as_ref()
+            .and_then(ctx_protocol::SearchQuery::single_all_text)
+            .filter(|_| !uses_composed_terms);
         for (index, result) in packet.results.iter().enumerate() {
             if args.verbose {
                 print_search_result_verbose(result, suggested_next_query);

@@ -55,10 +55,7 @@ use provider_args::{
     NativeProviderArg, ProviderArg,
 };
 use provider_sources::{discovered_plugin_sources_json, discovered_sources, sources_json};
-use search_filters::{
-    search_filters, search_has_intent, SearchFilterInput, SearchIntentInput,
-    SourceIdentityFilterArgs,
-};
+use search_filters::{search_filters, SearchFilterInput, SourceIdentityFilterArgs};
 use search_render::SearchDto;
 use transcript::{event_window, event_window_json, session_transcript_json, TranscriptMode};
 
@@ -470,13 +467,6 @@ struct SearchArgs {
         long_help = "Search backend override. By default ctx uses lexical search unless local semantic search is enabled in config, then hybrid. hybrid combines SQLite FTS/BM25 and semantic vector evidence; lexical uses only the SQLite FTS/BM25 path; semantic requires local semantic search to be enabled and ready."
     )]
     backend: Option<SearchBackendArg>,
-    #[arg(
-        long = "semantic-weight",
-        default_value_t = 0.35,
-        value_parser = parse_semantic_weight,
-        help = "Hybrid ranking weight for semantic evidence, from 0.0 to 1.0"
-    )]
-    semantic_weight: f32,
     #[arg(
         long,
         value_enum,
@@ -1017,16 +1007,6 @@ fn env_truthy(key: &str) -> bool {
             "" | "0" | "false" | "no" | "off"
         )
     })
-}
-
-fn parse_semantic_weight(value: &str) -> std::result::Result<f32, String> {
-    let weight = value
-        .parse::<f32>()
-        .map_err(|err| format!("invalid semantic weight: {err}"))?;
-    if !(0.0..=1.0).contains(&weight) || !weight.is_finite() {
-        return Err("semantic weight must be between 0.0 and 1.0".to_owned());
-    }
-    Ok(weight)
 }
 
 fn parse_semantic_worker_batch(value: &str) -> std::result::Result<usize, String> {

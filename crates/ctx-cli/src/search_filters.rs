@@ -87,35 +87,6 @@ impl From<&SearchArgs> for SourceIdentityFilterArgs {
     }
 }
 
-pub(crate) struct SearchIntentInput<'a> {
-    pub(crate) query: Option<&'a str>,
-    pub(crate) terms: &'a [String],
-    pub(crate) file: Option<&'a Path>,
-}
-
-pub(crate) fn search_has_intent(input: SearchIntentInput<'_>) -> bool {
-    input.query.is_some_and(has_search_token)
-        || input.terms.iter().any(|term| has_search_token(term))
-        || input
-            .file
-            .and_then(|path| path.to_str())
-            .is_some_and(|file| !file.trim().is_empty())
-}
-
-pub(crate) fn has_search_token(value: &str) -> bool {
-    value.split_whitespace().any(|term| {
-        term.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-            .chars()
-            .any(char::is_alphanumeric)
-    })
-}
-
-pub(crate) fn missing_search_intent_error() -> anyhow::Error {
-    anyhow!(
-        "search needs a query, --term, or --file\n\nTry:\n  ctx search \"failed migration\"\n  ctx search --term \"failed migration\" --term rollback\n  ctx search --file crates/foo/src/lib.rs"
-    )
-}
-
 pub(crate) fn search_no_results_target(query: &str, terms: &[String]) -> String {
     if !query.trim().is_empty() {
         return shell_quote_arg(query);
