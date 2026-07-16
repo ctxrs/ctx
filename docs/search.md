@@ -193,7 +193,7 @@ rather than adding a second one.
 The v1 hard maxima are:
 
 - 64 KiB structured query JSON; 32 clauses; 1,024 UTF-8 bytes per clause; 8,192
-  clause bytes total; and 32 analyzed tokens per `all` or `phrase` clause;
+  clause bytes total; and 32 analyzed tokens per clause;
 - literals from 3 through 256 bytes;
 - 1,024 candidates per positive seed, 16,384 candidate rows examined, and
   8,192 unique candidate IDs retained;
