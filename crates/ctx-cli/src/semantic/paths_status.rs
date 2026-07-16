@@ -784,6 +784,12 @@ fn daemon_history_refresh_job_report(
         "budget_reasons": status_value
             .as_ref()
             .and_then(|value| value.get("budget_reasons").cloned()),
+        "watcher": status_value
+            .as_ref()
+            .and_then(|value| value.get("watcher").cloned()),
+        "inventory": status_value
+            .as_ref()
+            .and_then(|value| value.get("inventory").cloned()),
         "last_error": status_value
             .as_ref()
             .and_then(|value| json_string(value, "last_error")),

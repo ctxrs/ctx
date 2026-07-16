@@ -1134,6 +1134,10 @@ fn run_daemon_inner(
     write_daemon_lifecycle_status(data_root, &args, "running", started_at_ms, None, None)?;
 
     let mut runtime = DaemonRuntime::default();
+    let prior_history_refresh = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
+    runtime
+        .history_refresh
+        .restore_daemon_status(prior_history_refresh.as_ref());
     let query_service = if semantic_enabled {
         Some(start_daemon_query_service(
             data_root,
@@ -1223,8 +1227,12 @@ fn run_daemon_once(
     semantic_enabled: bool,
 ) -> Result<DaemonIteration> {
     if semantic_enabled && semantic_bootstrap_should_run_first(data_root, runtime)? {
-        let history_refresh_job =
+        let mut history_refresh_job =
             daemon_history_refresh_skipped_job("semantic_bootstrap_in_progress");
+        add_daemon_history_refresh_runtime_status(
+            &mut history_refresh_job,
+            &runtime.history_refresh,
+        );
         write_daemon_job_status(
             &daemon_history_refresh_job_path(data_root),
             &history_refresh_job,
@@ -1256,10 +1264,11 @@ fn run_daemon_once(
         } else {
             Ok(daemon_history_refresh_skipped_job("daemon_deadline"))
         };
-    let history_refresh_job = match history_refresh_job {
+    let mut history_refresh_job = match history_refresh_job {
         Ok(value) => value,
         Err(error) => daemon_history_refresh_failed_job(format!("{error:#}")),
     };
+    add_daemon_history_refresh_runtime_status(&mut history_refresh_job, &runtime.history_refresh);
     let history_refresh_did_work = daemon_history_refresh_job_did_work(&history_refresh_job);
     runtime.semantic_bootstrap_passes_since_refresh = 0;
     write_daemon_job_status_unless_deadline_skip(
@@ -1462,6 +1471,22 @@ fn daemon_history_refresh_job_json(
         "last_run_at_ms": last_run_at_ms,
         "last_error": last_error,
     }))
+}
+
+fn add_daemon_history_refresh_runtime_status(
+    job: &mut Value,
+    runtime: &crate::commands::search::SearchRefreshRuntime,
+) {
+    let runtime_status = runtime.daemon_status_json();
+    let Some(job) = job.as_object_mut() else {
+        return;
+    };
+    if let Some(watcher) = runtime_status.get("watcher") {
+        job.insert("watcher".to_owned(), watcher.clone());
+    }
+    if let Some(inventory) = runtime_status.get("inventory") {
+        job.insert("inventory".to_owned(), inventory.clone());
+    }
 }
 
 fn daemon_history_refresh_job_did_work(value: &Value) -> bool {
