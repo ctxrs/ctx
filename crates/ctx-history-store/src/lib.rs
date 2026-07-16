@@ -52,6 +52,19 @@ pub use raw_sql::{
     RAW_SQL_MAX_RESULT_CELLS, RAW_SQL_MAX_RESULT_PREVIEW_BYTES, RAW_SQL_MAX_ROWS_CAP,
     RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
+pub use records::{
+    RecordSearchCandidate, RecordSearchCandidateBatch, RecordSearchDocument,
+    MAX_RECORD_CANDIDATES_PER_CLAUSE,
+};
+pub use search::bounded_candidates::{
+    EventCandidateAgentScope, EventCandidateExcludedSession, EventCandidateFileScope,
+    EventCandidateScope, EventSearchCandidate, EventSearchCandidateBatch,
+    MAX_EVENT_CANDIDATES_PER_CLAUSE,
+};
+pub use search::bounded_files::{
+    FileSearchCandidateBatch, FileSearchCandidateScope, MAX_FILE_SEARCH_CANDIDATES,
+};
+pub use search::bounded_hydration::EventSearchPreview;
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
 
 use std::{

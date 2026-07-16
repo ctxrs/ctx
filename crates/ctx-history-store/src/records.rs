@@ -1,5 +1,10 @@
+use std::time::{Duration, Instant};
+
 use ctx_history_core::{EntityTimestamps, HistoryRecord, HistoryRecordLink};
-use rusqlite::{params, params_from_iter, types::Value, OptionalExtension};
+use ctx_protocol::{
+    search_analyzed_token_count, SearchClause, SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE,
+};
+use rusqlite::{params, params_from_iter, types::Value, ErrorCode, OptionalExtension};
 use uuid::Uuid;
 
 use crate::connection::{
@@ -8,7 +13,8 @@ use crate::connection::{
 };
 use crate::schema::ddl::table_exists;
 use crate::search::analyzer::{
-    lexical_query_terms, scriptgram_match_clauses, scriptgram_match_query,
+    branch_needs_scriptgram, candidate_branch_match_query, lexical_query_terms,
+    scriptgram_match_clauses, scriptgram_match_query,
 };
 use crate::search::projections::{
     event_scriptgram_table_ready, fts_match_clauses, fts_match_query,
@@ -17,7 +23,243 @@ use crate::search::projections::{
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
+pub const MAX_RECORD_CANDIDATES_PER_CLAUSE: usize = 1_024;
+const RECORD_SEARCH_TITLE_MAX_CHARS: usize = 512;
+const RECORD_SEARCH_BODY_MAX_CHARS: usize = 2_048;
+const RECORD_SEARCH_TAG_TEXT_MAX_CHARS: usize = 1_024;
+const RECORD_SEARCH_KIND_MAX_CHARS: usize = 128;
+const RECORD_SEARCH_WORKSPACE_MAX_CHARS: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordSearchCandidate {
+    pub record_id: Uuid,
+    pub rank: f64,
+    pub updated_at_ms: i64,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordSearchCandidateBatch {
+    pub candidates: Vec<RecordSearchCandidate>,
+    pub examined: usize,
+    pub truncated: bool,
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordSearchDocument {
+    pub record_id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub tag_text: String,
+    pub kind: String,
+    pub workspace: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl RecordSearchDocument {
+    pub fn into_history_record(self) -> HistoryRecord {
+        HistoryRecord {
+            id: self.record_id,
+            title: self.title,
+            body: self.body,
+            tags: if self.tag_text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![self.tag_text]
+            },
+            kind: self.kind,
+            workspace: self.workspace,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
 impl Store {
+    pub fn get_record_search_document(
+        &self,
+        record_id: Uuid,
+    ) -> Result<Option<RecordSearchDocument>> {
+        if !table_exists(&self.conn, "ctx_history_search")? {
+            return Ok(None);
+        }
+        let visible = crate::provider_files::history_record_material_visible_predicate("records");
+        self.conn
+            .query_row(
+                &format!(
+                    r#"
+                    SELECT search.record_id,
+                           substr(search.title, 1, ?2),
+                           substr(search.primary_user_text, 1, ?3),
+                           substr(search.tag_text, 1, ?4),
+                           substr(records.kind, 1, ?5),
+                           substr(records.workspace, 1, ?6),
+                           records.created_at_ms,
+                           records.updated_at_ms
+                    FROM ctx_history_search AS search
+                    JOIN history_records AS records ON records.id = search.record_id
+                    WHERE search.record_id = ?1 AND {visible}
+                    ORDER BY search.rowid
+                    LIMIT 1
+                    "#,
+                ),
+                params![
+                    record_id.to_string(),
+                    RECORD_SEARCH_TITLE_MAX_CHARS as i64,
+                    RECORD_SEARCH_BODY_MAX_CHARS as i64,
+                    RECORD_SEARCH_TAG_TEXT_MAX_CHARS as i64,
+                    RECORD_SEARCH_KIND_MAX_CHARS as i64,
+                    RECORD_SEARCH_WORKSPACE_MAX_CHARS as i64,
+                ],
+                |row| {
+                    Ok(RecordSearchDocument {
+                        record_id: parse_uuid(row.get::<_, String>(0)?)?,
+                        title: row.get(1)?,
+                        body: row.get(2)?,
+                        tag_text: row.get(3)?,
+                        kind: row.get(4)?,
+                        workspace: row.get(5)?,
+                        created_at: ms_to_time(row.get(6)?)?,
+                        updated_at: ms_to_time(row.get(7)?)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn search_record_candidates_for_clause(
+        &self,
+        clause: &SearchClause,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<RecordSearchCandidateBatch> {
+        self.search_record_candidates_for_branch(clause, &[], &[], limit, timeout)
+    }
+
+    pub fn search_record_candidates_for_branch(
+        &self,
+        seed: &SearchClause,
+        required: &[SearchClause],
+        excluded: &[SearchClause],
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<RecordSearchCandidateBatch> {
+        if !table_exists(&self.conn, "ctx_history_search")? {
+            return Ok(RecordSearchCandidateBatch {
+                candidates: Vec::new(),
+                examined: 0,
+                truncated: false,
+                timed_out: false,
+            });
+        }
+        if std::iter::once(seed)
+            .chain(required)
+            .chain(excluded)
+            .any(|clause| {
+                search_analyzed_token_count(clause.value()) > SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE
+            })
+        {
+            return Ok(RecordSearchCandidateBatch {
+                candidates: Vec::new(),
+                examined: 0,
+                truncated: true,
+                timed_out: false,
+            });
+        }
+        let use_scriptgram =
+            record_scriptgram_table_ready(&self.conn)? && branch_needs_scriptgram(seed, required);
+        let table = if use_scriptgram {
+            "ctx_history_search_scriptgram"
+        } else {
+            "ctx_history_search"
+        };
+        let Some(match_query) =
+            candidate_branch_match_query(seed, required, excluded, use_scriptgram)
+        else {
+            return Ok(RecordSearchCandidateBatch {
+                candidates: Vec::new(),
+                examined: 0,
+                truncated: false,
+                timed_out: false,
+            });
+        };
+        let candidate_limit = limit.clamp(1, MAX_RECORD_CANDIDATES_PER_CLAUSE);
+        let visible = crate::provider_files::history_record_material_visible_predicate("record");
+        let sql = format!(
+            r#"
+            SELECT candidate.record_id, candidate.rank
+            FROM {table} AS candidate
+            WHERE {table} MATCH ?1
+              AND EXISTS (
+                  SELECT 1 FROM history_records AS record
+                  WHERE record.id = candidate.record_id AND {visible}
+              )
+            ORDER BY candidate.rank
+            LIMIT ?2
+            "#,
+        );
+        let started = Instant::now();
+        let progress_started = started;
+        self.conn
+            .progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
+        let mut candidates = Vec::with_capacity(candidate_limit);
+        let mut examined = 0usize;
+        let query_result = (|| -> Result<()> {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut rows = stmt.query(params![
+                match_query,
+                candidate_limit.saturating_add(1) as i64
+            ])?;
+            while let Some(row) = rows.next()? {
+                examined = examined.saturating_add(1);
+                if candidates.len() < candidate_limit {
+                    candidates.push(RecordSearchCandidate {
+                        record_id: parse_uuid(row.get::<_, String>(0)?)?,
+                        rank: row.get(1)?,
+                        updated_at_ms: 0,
+                        created_at_ms: 0,
+                    });
+                }
+            }
+            let mut timestamps = self.conn.prepare(
+                "SELECT updated_at_ms, created_at_ms FROM history_records WHERE id = ?1",
+            )?;
+            for candidate in &mut candidates {
+                if let Some((updated_at_ms, created_at_ms)) = timestamps
+                    .query_row(params![candidate.record_id.to_string()], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()?
+                {
+                    candidate.updated_at_ms = updated_at_ms;
+                    candidate.created_at_ms = created_at_ms;
+                }
+            }
+            Ok(())
+        })();
+        self.conn.progress_handler(0, None::<fn() -> bool>);
+        let mut timed_out = false;
+        match query_result {
+            Ok(()) => {}
+            Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+                if error.code == ErrorCode::OperationInterrupted
+                    && started.elapsed() >= timeout =>
+            {
+                timed_out = true;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(RecordSearchCandidateBatch {
+            truncated: examined > candidate_limit || timed_out,
+            candidates,
+            examined,
+            timed_out,
+        })
+    }
+
     pub fn upsert_history_record_link(&self, link: &HistoryRecordLink) -> Result<Uuid> {
         self.with_provider_file_publication_write(|| self.upsert_history_record_link_inner(link))
     }

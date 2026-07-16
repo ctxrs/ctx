@@ -1,3 +1,5 @@
+use ctx_protocol::{search_analyzed_tokens, SearchClause};
+
 pub(crate) fn scriptgram_index_text(text: &str) -> String {
     if !contains_grammed_script(text) {
         return String::new();
@@ -46,6 +48,88 @@ pub(crate) fn lexical_query_terms(query: &str) -> Vec<&str> {
         terms.push(term);
     }
     terms
+}
+
+pub(crate) fn candidate_branch_match_query(
+    seed: &SearchClause,
+    required: &[SearchClause],
+    excluded: &[SearchClause],
+    use_scriptgram: bool,
+) -> Option<String> {
+    let positive = std::iter::once(seed)
+        .chain(required)
+        .map(|clause| candidate_positive_clause(clause, use_scriptgram))
+        .collect::<Option<Vec<_>>>()?;
+    let mut query = positive
+        .into_iter()
+        .map(|clause| format!("({clause})"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    for clause in excluded.iter().filter_map(safe_negative_clause_match_query) {
+        query.push_str(" NOT (");
+        query.push_str(&clause);
+        query.push(')');
+    }
+    Some(query)
+}
+
+pub(crate) fn branch_needs_scriptgram(seed: &SearchClause, required: &[SearchClause]) -> bool {
+    std::iter::once(seed)
+        .chain(required)
+        .any(|clause| clause_scriptgram_match_query(clause).is_some())
+}
+
+fn candidate_positive_clause(clause: &SearchClause, use_scriptgram: bool) -> Option<String> {
+    if use_scriptgram {
+        clause_scriptgram_match_query(clause).or_else(|| clause_match_query(clause))
+    } else {
+        clause_match_query(clause)
+    }
+}
+
+fn clause_match_query(clause: &SearchClause) -> Option<String> {
+    match clause {
+        SearchClause::All(value) => {
+            let terms = search_analyzed_tokens(value);
+            (!terms.is_empty()).then(|| {
+                terms
+                    .into_iter()
+                    .filter_map(|term| query_term_clause(&term))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            })
+        }
+        SearchClause::Phrase(value) | SearchClause::Literal(value) => {
+            (!search_analyzed_tokens(value).is_empty()).then(|| quoted_fts_term(value.trim()))
+        }
+        SearchClause::Semantic(_) => None,
+    }
+}
+
+fn clause_scriptgram_match_query(clause: &SearchClause) -> Option<String> {
+    let value = clause.value();
+    if matches!(clause, SearchClause::Semantic(_)) || !contains_grammed_script(value) {
+        return None;
+    }
+    let clauses = scriptgram_match_clauses(value)
+        .into_iter()
+        .map(|(_, clause)| clause)
+        .collect::<Vec<_>>();
+    (!clauses.is_empty()).then(|| clauses.join(" AND "))
+}
+
+fn safe_negative_clause_match_query(clause: &SearchClause) -> Option<String> {
+    let value = match clause {
+        SearchClause::All(value) | SearchClause::Phrase(value) => value,
+        SearchClause::Literal(_) | SearchClause::Semantic(_) => return None,
+    };
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace())
+    {
+        return None;
+    }
+    clause_match_query(clause)
 }
 
 fn query_term_clause(term: &str) -> Option<String> {
