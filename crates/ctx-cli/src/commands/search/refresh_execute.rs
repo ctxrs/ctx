@@ -668,6 +668,7 @@ fn execute_search_refresh_plan_class_with_pre_lock_hook(
             Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending) => {
                 stop_admission = true;
             }
+            Err(ctx_history_store::StoreError::WalCheckpointBusy { .. }) if stop_admission => {}
             Err(error) => return Err(error).context("finish search refresh bulk mode"),
         }
         match class {
