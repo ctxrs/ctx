@@ -472,6 +472,13 @@ pub(crate) fn search_packet_query_with_backend(
             "the semantic backend requires one explicit --semantic clause"
         ));
     }
+    if requested_backend == SearchBackendArg::Semantic
+        && query.any.iter().any(ctx_protocol::SearchClause::is_lexical)
+    {
+        return Err(anyhow!(
+            "the semantic backend requires semantic as its sole positive any clause"
+        ));
+    }
 
     let worker = semantic_worker_report_cached(data_root, Some(store))?;
     let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
@@ -673,7 +680,12 @@ fn semantic_query_unavailable(
     emit_warnings: bool,
 ) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
     if request_mode == readiness::SemanticRetrievalRequestMode::ExplicitSemantic {
-        return Err(anyhow!("explicit semantic unavailable [{code}]: {message}"));
+        return Err(anyhow::Error::new(
+            ctx_history_search::SearchError::SemanticNotReady { readiness },
+        )
+        .context(format!(
+            "explicit semantic unavailable [{code}]: {message}"
+        )));
     }
     retrieval.effective_mode = SearchBackendArg::Lexical;
     retrieval.embedding_model = None;

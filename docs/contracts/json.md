@@ -558,9 +558,10 @@ MCP search does not refresh or import provider history. It supports the same
 bounded lexical, semantic, and hybrid query contract as CLI search, and
 excludes the active Codex session tree by
 default when `CODEX_THREAD_ID` is set; pass `include_current_session: true` to
-opt back in. The complete MCP search tool result, including rendered text and
-structured content, is capped at 2 MiB and reports transport trimming through
-the same `query_execution.truncation_reasons` diagnostics.
+opt back in. The complete newline-framed JSON-RPC search response, including
+the request id, rendered text, and structured content, is capped at 2 MiB and
+reports transport trimming through the same
+`query_execution.truncation_reasons` diagnostics.
 
 The MCP `sql` tool uses the same `sql_result` JSON contract as `ctx sql
 --json`, always read-only.
