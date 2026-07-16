@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use crate::schema::ddl::{
     ensure_columns, table_exists, table_has_column, CAPTURE_SOURCE_IDENTITY_COLUMNS,
     CATALOG_SESSION_IMPORT_STATE_COLUMNS, CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
+    SOURCE_IMPORT_FILE_STATE_COLUMNS,
 };
 use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
 use crate::schema::indexes::INDEXES_SQL;
@@ -77,6 +78,12 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     }
     if user_version < 46 {
         migrate_to_v46(conn)?;
+    }
+    if user_version < 47 {
+        migrate_to_v47(conn)?;
+    }
+    if user_version < 48 {
+        migrate_to_v48(conn)?;
     }
     Ok(())
 }
@@ -702,6 +709,91 @@ fn migrate_to_v46(conn: &Connection) -> Result<()> {
     }
 }
 
+fn migrate_to_v47(conn: &Connection) -> Result<()> {
+    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        if stable_sql_views_exist(conn)? {
+            drop_stable_sql_views(conn)?;
+        }
+        rebuild_catalog_sessions_provider_check(conn)?;
+        rebuild_source_import_files_provider_check(conn)?;
+        conn.execute_batch(
+            r#"
+            UPDATE catalog_sessions
+            SET indexed_import_revision = import_revision
+            WHERE indexed_status = 'indexed'
+              AND indexed_import_revision IS NULL;
+
+            UPDATE source_import_files
+            SET indexed_import_revision = import_revision
+            WHERE indexed_status = 'indexed'
+              AND indexed_import_revision IS NULL;
+            "#,
+        )?;
+        conn.execute_batch(INDEXES_SQL)?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch("PRAGMA user_version = 47;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_to_v48(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        conn.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO import_inventory_generations
+                (provider, source_root, inventory_family, current_generation)
+            SELECT DISTINCT provider, source_root, 'catalog_sessions', 1
+            FROM catalog_sessions;
+
+            INSERT OR IGNORE INTO import_inventory_generations
+                (provider, source_root, inventory_family, current_generation)
+            SELECT DISTINCT provider, source_root, 'source_import_files', 1
+            FROM source_import_files;
+
+            PRAGMA user_version = 48;
+            "#,
+        )?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
 fn backfill_capture_source_identity_columns(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "capture_sources")? {
         return Ok(());
@@ -924,14 +1016,16 @@ pub(crate) fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Resu
             session_started_at_ms INTEGER,
             file_size_bytes INTEGER NOT NULL,
             file_modified_at_ms INTEGER NOT NULL,
+            import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),
             cataloged_at_ms INTEGER NOT NULL,
             is_stale INTEGER NOT NULL DEFAULT 0,
             indexed_at_ms INTEGER,
             indexed_file_size_bytes INTEGER,
             indexed_file_modified_at_ms INTEGER,
-            indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
+            indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed')),
             indexed_error TEXT,
             indexed_event_count INTEGER,
+            indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
             last_imported_at_ms INTEGER,
             last_imported_file_size_bytes INTEGER,
             last_imported_file_modified_at_ms INTEGER,
@@ -940,8 +1034,8 @@ pub(crate) fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Resu
             metadata_json TEXT NOT NULL DEFAULT '{}'
         );
         INSERT INTO catalog_sessions_new
-        (source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, cataloged_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, indexed_event_count, last_imported_at_ms, last_imported_file_size_bytes, last_imported_file_modified_at_ms, last_imported_file_sha256, last_imported_event_count, metadata_json)
-        SELECT source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, cataloged_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, indexed_event_count, last_imported_at_ms, last_imported_file_size_bytes, last_imported_file_modified_at_ms, last_imported_file_sha256, last_imported_event_count, metadata_json
+        (source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, import_revision, cataloged_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, indexed_event_count, indexed_import_revision, last_imported_at_ms, last_imported_file_size_bytes, last_imported_file_modified_at_ms, last_imported_file_sha256, last_imported_event_count, metadata_json)
+        SELECT source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, import_revision, cataloged_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, indexed_event_count, indexed_import_revision, last_imported_at_ms, last_imported_file_size_bytes, last_imported_file_modified_at_ms, last_imported_file_sha256, last_imported_event_count, metadata_json
         FROM catalog_sessions;
         DROP TABLE catalog_sessions;
         ALTER TABLE catalog_sessions_new RENAME TO catalog_sessions;
@@ -963,6 +1057,11 @@ fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
     if recreate_views {
         drop_stable_sql_views(conn)?;
     }
+    ensure_columns(
+        conn,
+        "source_import_files",
+        SOURCE_IMPORT_FILE_STATE_COLUMNS,
+    )?;
     conn.execute_batch(
         r#"
         DROP TABLE IF EXISTS source_import_files_new;
@@ -975,19 +1074,21 @@ fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
             source_path TEXT NOT NULL,
             file_size_bytes INTEGER NOT NULL,
             file_modified_at_ms INTEGER NOT NULL,
+            import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),
             observed_at_ms INTEGER NOT NULL,
             is_stale INTEGER NOT NULL DEFAULT 0,
             indexed_at_ms INTEGER,
             indexed_file_size_bytes INTEGER,
             indexed_file_modified_at_ms INTEGER,
-            indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
+            indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed')),
             indexed_error TEXT,
+            indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
             metadata_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY (provider, source_root, source_path)
         );
         INSERT INTO source_import_files_new
-        (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, metadata_json)
-        SELECT provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, metadata_json
+        (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, import_revision, observed_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, indexed_import_revision, metadata_json)
+        SELECT provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, import_revision, observed_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, indexed_import_revision, metadata_json
         FROM source_import_files;
         DROP TABLE source_import_files;
         ALTER TABLE source_import_files_new RENAME TO source_import_files;

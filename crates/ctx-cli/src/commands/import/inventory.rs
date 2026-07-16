@@ -13,7 +13,7 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::{SourceImportFile, Store};
 
-use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
+use crate::commands::import::catalog::{source_stats, system_time_ms};
 use crate::commands::import::manifest::{
     collect_source_import_files, persist_source_import_files, source_uses_import_file_manifest,
 };
@@ -35,13 +35,12 @@ pub(crate) struct ImportInventory {
 pub(crate) fn inventory_import_sources(
     store: &Store,
     sources: Vec<SourceInfo>,
-    full_rescan: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
     for (index, source) in sources.into_iter().enumerate() {
         inventory.totals.sources += 1;
         let failure_source = source.clone();
-        let (plan, cataloged) = match inventory_import_source(store, source, full_rescan) {
+        let (plan, cataloged) = match inventory_import_source(store, source) {
             Ok(inventoried) => inventoried,
             Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
                 inventory.failures.push(ImportSourceFailure {
@@ -64,13 +63,13 @@ pub(crate) fn inventory_import_sources(
             .source_bytes
             .saturating_add(plan.stats.bytes);
         match &plan.preinventory {
-            SourcePreinventory::SourceImportFiles(files) => {
+            SourcePreinventory::SourceImportFiles { files, .. } => {
                 inventory.totals.source_import_files += files.len();
             }
-            SourcePreinventory::SourceRoot(_) => {
+            SourcePreinventory::SourceRoot { .. } => {
                 inventory.totals.source_import_files += 1;
             }
-            SourcePreinventory::None | SourcePreinventory::CodexSessionCatalog(_) => {}
+            SourcePreinventory::None | SourcePreinventory::CodexSessionCatalog { .. } => {}
         }
         if let Some((summary, source_json)) = cataloged {
             inventory.catalog.add(&summary);
@@ -96,20 +95,23 @@ pub(crate) fn inventory_available_sources(
         })
         .cloned()
         .collect::<Vec<_>>();
-    inventory_import_sources(store, available, false)
+    inventory_import_sources(store, available)
 }
 
 fn inventory_import_source(
     store: &Store,
     source: SourceInfo,
-    full_rescan: bool,
 ) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
-    if !full_rescan && is_incremental_codex_session_tree(&source) {
+    if is_incremental_codex_session_tree(&source) {
+        let source_root = source.path.display().to_string();
+        let inventory_generation =
+            store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?;
         let summary = catalog_codex_session_tree(
             &source.path,
             store,
             CodexSessionCatalogOptions {
                 source_root: Some(source.path.clone()),
+                observation_generation: Some(inventory_generation),
                 ..CodexSessionCatalogOptions::default()
             },
         )
@@ -122,7 +124,10 @@ fn inventory_import_source(
         let plan = PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::CodexSessionCatalog(summary.clone()),
+            preinventory: SourcePreinventory::CodexSessionCatalog {
+                summary: summary.clone(),
+                inventory_generation,
+            },
         };
         let source_json = json!({
             "provider": plan.source.provider.as_str(),
@@ -139,43 +144,47 @@ fn inventory_import_source(
         return Ok((plan, Some((summary, source_json))));
     }
 
-    if !full_rescan && source_uses_import_file_manifest(&source) {
+    if source_uses_import_file_manifest(&source) {
+        let source_root = source.path.display().to_string();
+        let inventory_generation =
+            store.allocate_source_import_inventory_generation(source.provider, &source_root)?;
         let files = collect_source_import_files(&source)
             .with_context(|| format!("inventory import files from {}", source.path.display()))?;
-        persist_source_import_files(store, &source, &files)?;
+        persist_source_import_files(store, &source, inventory_generation, &files)?;
         let stats = source_stats_from_import_files(&files);
         return Ok((
             PlannedImportSource {
                 source,
                 stats,
-                preinventory: SourcePreinventory::SourceImportFiles(files),
+                preinventory: SourcePreinventory::SourceImportFiles {
+                    files,
+                    inventory_generation,
+                },
             },
             None,
         ));
     }
 
-    if !full_rescan {
-        let stats = source_stats(&source.path)
-            .with_context(|| format!("inventory import source {}", source.path.display()))?;
-        let root_file = source_root_import_file(&source, stats)?;
-        persist_source_import_files(store, &source, std::slice::from_ref(&root_file))?;
-        return Ok((
-            PlannedImportSource {
-                source,
-                stats,
-                preinventory: SourcePreinventory::SourceRoot(root_file),
-            },
-            None,
-        ));
-    }
-
-    let stats = source_import_stats(&source)
+    let source_root = source.path.display().to_string();
+    let inventory_generation =
+        store.allocate_source_import_inventory_generation(source.provider, &source_root)?;
+    let stats = source_stats(&source.path)
         .with_context(|| format!("inventory import source {}", source.path.display()))?;
+    let root_file = source_root_import_file(&source, stats)?;
+    persist_source_import_files(
+        store,
+        &source,
+        inventory_generation,
+        std::slice::from_ref(&root_file),
+    )?;
     Ok((
         PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::None,
+            preinventory: SourcePreinventory::SourceRoot {
+                file: root_file,
+                inventory_generation,
+            },
         },
         None,
     ))
@@ -205,6 +214,7 @@ fn source_root_import_file(source: &SourceInfo, stats: SourceStats) -> Result<So
         source_path: source.path.display().to_string(),
         file_size_bytes: stats.bytes,
         file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+        import_revision: source.import_revision,
         observed_at_ms: system_time_ms(SystemTime::now()),
         metadata: json!({
             "inventory_unit": "source_root",

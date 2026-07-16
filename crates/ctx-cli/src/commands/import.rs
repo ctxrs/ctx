@@ -15,15 +15,14 @@ use ctx_history_capture::{
     catalog_codex_session_tree, import_antigravity_cli_history, import_astrbot_sqlite,
     import_auggie_history, import_claude_projects_jsonl_tree, import_cline_task_json_history,
     import_codebuddy_history, import_codex_history_jsonl, import_codex_session_jsonl,
-    import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
-    import_continue_cli_sessions, import_copilot_cli_session_events, import_crush_sqlite,
-    import_cursor_native_history, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
-    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
-    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
-    import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history, import_mux_history,
-    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_codex_session_jsonl_tail, import_codex_session_paths, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
+    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
+    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_kiro_sqlite, import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history,
+    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qoder_history,
     import_qwen_code_history, import_roo_task_json_history, import_rovodev_history,
     import_shelley_sqlite, import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
@@ -49,8 +48,8 @@ use ctx_history_core::{
     database_path, utc_now, CaptureProvider, CtxHistoryJsonlRecord, HistoryRecord,
 };
 use ctx_history_store::{
-    CatalogSession, CatalogSourceIndexUpdate, SourceImportFile, SourceImportFileIndexUpdate, Store,
-    StoreError,
+    CatalogIndexedStatus, CatalogSession, CatalogSourceIndexUpdate, SourceImportFile,
+    SourceImportFileIndexUpdate, Store, StoreError,
 };
 
 use crate::analytics::AnalyticsProperties;
@@ -102,249 +101,14 @@ use report::{
     print_source_failed, print_source_imported, source_failure_json, source_import_json,
 };
 pub(crate) use report::{
-    error_summary, import_error_scope, import_totals_json, one_line_error, source_error_reason,
+    error_summary, import_error_retryability, import_error_scope, import_totals_json,
+    one_line_error, source_error_reason,
 };
-pub(crate) use report::{ImportFailureScope, ImportFailureType};
+pub(crate) use report::{ImportFailureScope, ImportFailureType, ImportRetryability};
 pub(crate) use requests::import_history_source_plugin;
 use requests::{history_source_plugin_import_requests, import_requests, validate_import_args};
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ImportTotals {
-    pub(crate) source_files: usize,
-    pub(crate) source_bytes: u64,
-    pub(crate) imported_sources: usize,
-    pub(crate) sources_completed_with_rejections: usize,
-    pub(crate) failed_sources: usize,
-    pub(crate) imported_sessions: usize,
-    pub(crate) imported_events: usize,
-    pub(crate) imported_edges: usize,
-    pub(crate) skipped_sessions: usize,
-    pub(crate) skipped_events: usize,
-    pub(crate) skipped_edges: usize,
-    pub(crate) skipped: usize,
-    pub(crate) failed: usize,
-}
-
-#[derive(Debug)]
-pub(crate) struct ImportReport {
-    pub(crate) resume: bool,
-    pub(crate) totals: ImportTotals,
-    pub(crate) inventory: InventoryTotals,
-    pub(crate) catalog: CatalogTotals,
-    pub(crate) catalog_sources: Vec<Value>,
-    pub(crate) sources: Vec<Value>,
-}
-
-impl ImportReport {
-    pub(crate) fn empty(resume: bool) -> Self {
-        Self {
-            resume,
-            totals: ImportTotals::default(),
-            inventory: InventoryTotals::default(),
-            catalog: CatalogTotals::default(),
-            catalog_sources: Vec::new(),
-            sources: Vec::new(),
-        }
-    }
-
-    pub(crate) fn resume_mode(&self) -> &'static str {
-        resume_mode_name(self.resume)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ImportRunOptions {
-    pub(crate) progress: ProgressArg,
-    pub(crate) json: bool,
-    pub(crate) print_human: bool,
-    pub(crate) allow_empty_sources: bool,
-    pub(crate) include_history_source_plugins: bool,
-    pub(crate) operation: &'static str,
-}
-
-pub(crate) fn resume_mode_name(resume: bool) -> &'static str {
-    if resume {
-        "idempotent_rescan"
-    } else {
-        "normal_scan"
-    }
-}
-
-impl ImportTotals {
-    pub(crate) fn add(&mut self, summary: &ProviderImportSummary, stats: &SourceStats) {
-        self.source_files += stats.files;
-        self.source_bytes = self.source_bytes.saturating_add(stats.bytes);
-        self.imported_sources += 1;
-        self.sources_completed_with_rejections += usize::from(summary.failed > 0);
-        self.imported_sessions += summary.imported_sessions;
-        self.imported_events += summary.imported_events;
-        self.imported_edges += summary.imported_edges;
-        self.skipped_sessions += summary.skipped_sessions;
-        self.skipped_events += summary.skipped_events;
-        self.skipped_edges += summary.skipped_edges;
-        self.skipped += summary.skipped;
-        self.failed += summary.failed;
-    }
-
-    pub(crate) fn add_source_failure(&mut self, stats: &SourceStats) {
-        self.source_files += stats.files;
-        self.source_bytes = self.source_bytes.saturating_add(stats.bytes);
-        self.failed_sources += 1;
-    }
-
-    pub(crate) fn add_rejected_source(
-        &mut self,
-        summary: &ProviderImportSummary,
-        stats: &SourceStats,
-    ) {
-        self.add_source_failure(stats);
-        self.skipped_sessions = self
-            .skipped_sessions
-            .saturating_add(summary.skipped_sessions);
-        self.skipped_events = self.skipped_events.saturating_add(summary.skipped_events);
-        self.skipped_edges = self.skipped_edges.saturating_add(summary.skipped_edges);
-        self.skipped = self.skipped.saturating_add(summary.skipped);
-        self.failed = self.failed.saturating_add(summary.failed);
-    }
-}
-
-pub(crate) fn provider_summary_has_imported_content(summary: &ProviderImportSummary) -> bool {
-    summary.has_accepted_content()
-}
-
-pub(crate) fn history_record_exists(store: &Store, record_id: Uuid) -> Result<bool> {
-    match store.get_record(record_id) {
-        Ok(_) => Ok(true),
-        Err(StoreError::NotFound(_)) => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(crate) fn cleanup_rejected_history_record(
-    store: &Store,
-    record_id: Uuid,
-    existed_before_import: bool,
-) -> Result<()> {
-    let deleted = store.delete_orphan_record(record_id)?;
-    if !deleted && !existed_before_import && history_record_exists(store, record_id)? {
-        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
-            "rejected import left content attached to its history record",
-        )));
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-pub(crate) struct RejectedSourceError {
-    message: String,
-    summary: ProviderImportSummary,
-}
-
-impl std::fmt::Display for RejectedSourceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for RejectedSourceError {}
-
-pub(crate) fn rejected_source_error(
-    message: String,
-    summary: &ProviderImportSummary,
-) -> anyhow::Error {
-    anyhow::Error::new(RejectedSourceError {
-        message,
-        summary: summary.clone(),
-    })
-}
-
-pub(crate) fn rejected_source_summary(error: &anyhow::Error) -> Option<ProviderImportSummary> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<RejectedSourceError>())
-        .map(|error| error.summary.clone())
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CatalogTotals {
-    pub(crate) sources: usize,
-    pub(crate) source_files: usize,
-    pub(crate) source_bytes: u64,
-    pub(crate) cataloged_sessions: usize,
-    pub(crate) cached_sessions: usize,
-    pub(crate) parsed_sessions: usize,
-    pub(crate) skipped_sessions: usize,
-    pub(crate) failed_sessions: usize,
-}
-
-impl CatalogTotals {
-    pub(crate) fn add(&mut self, summary: &CatalogSummary) {
-        self.sources += 1;
-        self.source_files += summary.source_files;
-        self.source_bytes = self.source_bytes.saturating_add(summary.source_bytes);
-        self.cataloged_sessions += summary.cataloged_sessions;
-        self.cached_sessions += summary.cached_sessions;
-        self.parsed_sessions += summary.parsed_sessions;
-        self.skipped_sessions += summary.skipped_sessions;
-        self.failed_sessions += summary.failed_sessions;
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct InventoryTotals {
-    pub(crate) sources: usize,
-    pub(crate) source_files: usize,
-    pub(crate) source_bytes: u64,
-    pub(crate) codex_catalog_sources: usize,
-    pub(crate) codex_catalog_sessions: usize,
-    pub(crate) source_import_files: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) enum SourcePreinventory {
-    #[default]
-    None,
-    CodexSessionCatalog(CatalogSummary),
-    SourceImportFiles(Vec<SourceImportFile>),
-    SourceRoot(SourceImportFile),
-}
-
-impl SourcePreinventory {
-    pub(crate) fn codex_session_catalog(&self) -> Option<&CatalogSummary> {
-        match self {
-            Self::CodexSessionCatalog(summary) => Some(summary),
-            Self::None | Self::SourceImportFiles(_) | Self::SourceRoot(_) => None,
-        }
-    }
-
-    pub(crate) fn source_import_files(&self) -> Option<&[SourceImportFile]> {
-        match self {
-            Self::SourceImportFiles(files) => Some(files),
-            Self::None | Self::CodexSessionCatalog(_) | Self::SourceRoot(_) => None,
-        }
-    }
-
-    pub(crate) fn source_root_file(&self) -> Option<&SourceImportFile> {
-        match self {
-            Self::SourceRoot(file) => Some(file),
-            Self::None | Self::CodexSessionCatalog(_) | Self::SourceImportFiles(_) => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct SourceStats {
-    pub(crate) files: usize,
-    pub(crate) bytes: u64,
-    pub(crate) change_token: Option<[u8; 32]>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PlannedImportSource {
-    pub(crate) source: SourceInfo,
-    pub(crate) stats: SourceStats,
-    pub(crate) preinventory: SourcePreinventory,
-}
+include!("import/state.rs");
 
 pub(crate) fn run_import(
     args: ImportArgs,
@@ -495,8 +259,8 @@ pub(crate) fn run_import_internal(
     let inventory_progress =
         ProgressReporter::new(options.progress, options.json, options.operation, 0);
     inventory_progress.message("inventorying", "Preparing local history...");
-    let inventory = inventory_import_sources(&store, requests, args.resume)
-        .context("inventory local history sources")?;
+    let inventory =
+        inventory_import_sources(&store, requests).context("inventory local history sources")?;
     let planned_sources = inventory.sources;
     let inventory_failures = inventory.failures;
     let planned_total_bytes = inventory.totals.source_bytes;

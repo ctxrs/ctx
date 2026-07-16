@@ -18,11 +18,36 @@ fails that source while independent sources continue. Ctx-owned store, index,
 worker, lock, and operational-I/O failures abort the run.
 
 A source with rejections and accepted content completes with
-`completed_with_rejections`. A source with rejections but no accepted event,
-file-touch, or edge content fails. Session/source metadata alone does not make
-an import successful. Source and provider cursor checkpoints advance only when
-the source run has zero rejections, so corrected records remain eligible for a
-later idempotent scan.
+`completed_with_rejections`. A deterministically all-rejected source is recorded
+as terminal for its exact observed fingerprint and import revision. Neither
+outcome is selected again until the source changes or that provider/source-format
+revision is bumped. Session/source metadata alone does not make an import
+successful. Source failures discovered before ctx can record a stable
+observation are discovered again. Once an exact observation exists,
+deterministic source-scoped adapter errors are terminal for that fingerprint
+and revision. Transient provider SQLite locks, transient or permission-denied
+I/O, and ctx-owned or system-scoped failures remain retryable.
+
+Observation completion is separate from native resume checkpoints. A completed
+observation with rejections may preserve an earlier safe checkpoint, but it must
+not advance that checkpoint past a rejected record. A later changed observation
+can therefore replay from the safe point while stable event IDs keep the import
+idempotent.
+Forced `--resume` imports still inventory and persist the final observation;
+forcing selection does not bypass fingerprint or parser-revision accounting.
+
+Every native provider/source-format parser has a positive import revision in the
+shared provider registry. Inventory completion requires both the current source
+fingerprint and current import revision. Bump only the affected registry entry
+when parser or normalization semantics require reprocessing; unrelated providers
+remain complete.
+
+Inventory allocates a durable monotonic generation per provider, source root,
+and catalog family before discovery. Upserts, missing-path finalization, and
+completion apply only while that generation is current, so a late older scan
+cannot replace or complete a newer observation. The generation is a concurrency
+fence, not per-row seen state: unchanged catalog and source rows are not rewritten
+just because another inventory completed.
 
 Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including

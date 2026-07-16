@@ -42,6 +42,7 @@ Manifest example:
       "provider_key": "example-agent",
       "source_id": "default",
       "source_format": "example-agent-sqlite-v1",
+      "import_revision": 1,
       "enabled": true,
       "refresh": "auto",
       "command": ["example-agent-to-ctx", "export"],
@@ -53,6 +54,9 @@ Manifest example:
 
 `name`, `id`, `provider_key`, and `source_id` must be stable lowercase ASCII
 identifiers. `command` is an argv array; ctx does not run it through a shell.
+`import_revision` is an optional positive integer and defaults to `1`. Bump it
+when the source parser changes in a way that invalidates the previous cursor;
+the new revision receives a distinct cursor stream.
 
 `enabled: true` means `ctx import --all` may run that source. `refresh: auto`
 means `ctx search` may run it during the normal pre-search refresh. Explicit
@@ -115,6 +119,7 @@ ctx sets these variables before invoking a plugin command:
 - `CTX_HISTORY_SOURCE_ID`
 - `CTX_HISTORY_PROVIDER_KEY`
 - `CTX_HISTORY_SOURCE_FORMAT`
+- `CTX_HISTORY_IMPORT_REVISION`
 - `CTX_HISTORY_CURSOR_STREAM`
 - `CTX_HISTORY_MACHINE_ID`
 - `CTX_HISTORY_FULL_RESCAN`, `1` or `0`
@@ -145,6 +150,7 @@ JSON string. ctx stores it under a stable custom stream derived from:
 - `provider_key`
 - `source_id`
 - `source_format`
+- `import_revision`, when greater than the backward-compatible default of `1`
 
 The local machine id is stored separately with the cursor so multiple machines
 can import the same custom source without overwriting each other's progress.

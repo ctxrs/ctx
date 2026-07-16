@@ -1,166 +1,9 @@
-use rusqlite::{params, Connection, OptionalExtension};
-
-use crate::Result;
-
-pub(crate) struct ColumnSpec {
-    pub(crate) name: &'static str,
-    pub(crate) definition: &'static str,
-}
-
-pub(crate) const HISTORY_RECORD_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "summary",
-        definition: "summary TEXT",
-    },
-    ColumnSpec {
-        name: "status",
-        definition: "status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'active', 'completed', 'abandoned', 'archived'))",
-    },
-    ColumnSpec {
-        name: "primary_vcs_workspace_id",
-        definition: "primary_vcs_workspace_id TEXT REFERENCES vcs_workspaces(id)",
-    },
-    ColumnSpec {
-        name: "started_at_ms",
-        definition: "started_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "last_activity_at_ms",
-        definition: "last_activity_at_ms INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "completed_at_ms",
-        definition: "completed_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "confidence",
-        definition: "confidence TEXT NOT NULL DEFAULT 'unknown' CHECK (confidence IN ('explicit', 'high', 'medium', 'low', 'unknown'))",
-    },
-    ColumnSpec {
-        name: "created_at_ms",
-        definition: "created_at_ms INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "updated_at_ms",
-        definition: "updated_at_ms INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "source_id",
-        definition: "source_id TEXT REFERENCES capture_sources(id)",
-    },
-    ColumnSpec {
-        name: "visibility",
-        definition: "visibility TEXT NOT NULL DEFAULT 'local_only' CHECK (visibility IN ('local_only', 'reportable', 'sync_metadata', 'sync_full'))",
-    },
-    ColumnSpec {
-        name: "fidelity",
-        definition: "fidelity TEXT NOT NULL DEFAULT 'partial' CHECK (fidelity IN ('full', 'partial', 'imported', 'inferred', 'summary_only'))",
-    },
-    ColumnSpec {
-        name: "sync_state",
-        definition: "sync_state TEXT NOT NULL DEFAULT 'local_only' CHECK (sync_state IN ('local_only', 'pending', 'synced', 'failed'))",
-    },
-    ColumnSpec {
-        name: "sync_version",
-        definition: "sync_version INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "deleted_at_ms",
-        definition: "deleted_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "metadata_json",
-        definition: "metadata_json TEXT NOT NULL DEFAULT '{}'",
-    },
-];
-
-pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "import_revision",
-        definition: "import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0)",
-    },
-    ColumnSpec {
-        name: "indexed_at_ms",
-        definition: "indexed_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_file_size_bytes",
-        definition: "indexed_file_size_bytes INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_file_modified_at_ms",
-        definition: "indexed_file_modified_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_status",
-        definition: "indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed'))",
-    },
-    ColumnSpec {
-        name: "indexed_error",
-        definition: "indexed_error TEXT",
-    },
-    ColumnSpec {
-        name: "indexed_event_count",
-        definition: "indexed_event_count INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_import_revision",
-        definition: "indexed_import_revision INTEGER CHECK (indexed_import_revision > 0)",
-    },
-    ColumnSpec {
-        name: "last_imported_at_ms",
-        definition: "last_imported_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "last_imported_file_size_bytes",
-        definition: "last_imported_file_size_bytes INTEGER",
-    },
-    ColumnSpec {
-        name: "last_imported_file_modified_at_ms",
-        definition: "last_imported_file_modified_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "last_imported_file_sha256",
-        definition: "last_imported_file_sha256 TEXT",
-    },
-    ColumnSpec {
-        name: "last_imported_event_count",
-        definition: "last_imported_event_count INTEGER",
-    },
-];
-
-pub(crate) const SOURCE_IMPORT_FILE_STATE_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "import_revision",
-        definition: "import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0)",
-    },
-    ColumnSpec {
-        name: "indexed_import_revision",
-        definition: "indexed_import_revision INTEGER CHECK (indexed_import_revision > 0)",
-    },
-];
-
-pub(crate) const CAPTURE_SOURCE_IDENTITY_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "source_format",
-        definition: "source_format TEXT",
-    },
-    ColumnSpec {
-        name: "source_root",
-        definition: "source_root TEXT",
-    },
-    ColumnSpec {
-        name: "source_identity",
-        definition: "source_identity TEXT",
-    },
-];
-
-pub(crate) const CREATE_TABLES_SQL: &str = r#"
+-- Exact CREATE_TABLES_SQL fixture from schema v45 (dc7491d6^).
 CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown', 'mimocode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
     machine_id TEXT NOT NULL,
     process_id INTEGER,
@@ -179,18 +22,10 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE TABLE IF NOT EXISTS import_inventory_generations (
-    provider TEXT NOT NULL,
-    source_root TEXT NOT NULL,
-    inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
-    current_generation INTEGER NOT NULL CHECK (current_generation > 0),
-    PRIMARY KEY (provider, source_root, inventory_family)
-);
-
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown', 'mimocode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
@@ -203,16 +38,14 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
     session_started_at_ms INTEGER,
     file_size_bytes INTEGER NOT NULL,
     file_modified_at_ms INTEGER NOT NULL,
-    import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),
     cataloged_at_ms INTEGER NOT NULL,
     is_stale INTEGER NOT NULL DEFAULT 0,
     indexed_at_ms INTEGER,
     indexed_file_size_bytes INTEGER,
     indexed_file_modified_at_ms INTEGER,
-    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed')),
+    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
     indexed_error TEXT,
     indexed_event_count INTEGER,
-    indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
     last_imported_at_ms INTEGER,
     last_imported_file_size_bytes INTEGER,
     last_imported_file_modified_at_ms INTEGER,
@@ -223,22 +56,20 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
 
 CREATE TABLE IF NOT EXISTS source_import_files (
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown', 'mimocode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
     source_path TEXT NOT NULL,
     file_size_bytes INTEGER NOT NULL,
     file_modified_at_ms INTEGER NOT NULL,
-    import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),
     observed_at_ms INTEGER NOT NULL,
     is_stale INTEGER NOT NULL DEFAULT 0,
     indexed_at_ms INTEGER,
     indexed_file_size_bytes INTEGER,
     indexed_file_modified_at_ms INTEGER,
-    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed')),
+    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
     indexed_error TEXT,
-    indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
     metadata_json TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (provider, source_root, source_path)
 );
@@ -602,37 +433,3 @@ CREATE TABLE IF NOT EXISTS audit_log (
     source_id TEXT REFERENCES capture_sources(id),
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
-"#;
-
-pub(crate) fn ensure_columns(conn: &Connection, table: &str, columns: &[ColumnSpec]) -> Result<()> {
-    for column in columns {
-        if !table_has_column(conn, table, column.name)? {
-            let sql = format!("ALTER TABLE {table} ADD COLUMN {}", column.definition);
-            conn.execute(&sql, [])?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let sql = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for row in rows {
-        if row? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}

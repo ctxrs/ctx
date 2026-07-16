@@ -6,6 +6,7 @@ use crate::commands::import::catalog::system_time_ms;
 pub(crate) fn persist_source_import_files(
     store: &Store,
     source: &SourceInfo,
+    inventory_generation: u64,
     files: &[SourceImportFile],
 ) -> Result<()> {
     let source_root = source.path.display().to_string();
@@ -16,12 +17,13 @@ pub(crate) fn persist_source_import_files(
     let observed_at_ms = utc_now().timestamp_millis();
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
-        store.upsert_source_import_files(files)?;
+        store.upsert_source_import_files(inventory_generation, files)?;
         store.mark_source_import_missing_paths_stale(
             source.provider,
             &source_root,
             &current_paths,
             observed_at_ms,
+            inventory_generation,
         )?;
         Ok(())
     })();
@@ -67,6 +69,7 @@ pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<Sou
             source_path: path.display().to_string(),
             file_size_bytes: metadata.len(),
             file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+            import_revision: source.import_revision,
             observed_at_ms,
             metadata: json!({}),
         });

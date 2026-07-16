@@ -27,6 +27,12 @@ pub(crate) fn import_one_source(
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     let event_search_needs_backfill = store.event_search_projection_needs_backfill()?;
+    if !full_rescan && root_source_observation_is_complete(store, source, preinventory)? {
+        if event_search_needs_backfill {
+            store.refresh_search_index()?;
+        }
+        return Ok(ProviderImportSummary::default());
+    }
     let refresh_search_after_import =
         event_search_needs_backfill || !source_uses_incremental_event_search(source);
     import_one_source_inner(
@@ -55,19 +61,25 @@ pub(crate) fn import_one_source_for_search_refresh(
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    if !source_uses_import_file_manifest(source)
-        && preinventory.source_root_file().is_some()
-        && store
-            .list_pending_source_import_files(source.provider, &source.path.display().to_string())?
-            .is_empty()
-    {
-        store.upsert_record(&import_record_for_source(source))?;
+    if root_source_observation_is_complete(store, source, preinventory)? {
         if store.event_search_projection_needs_backfill()? {
             store.refresh_search_index()?;
         }
         return Ok(ProviderImportSummary::default());
     }
     import_one_source_without_search_refresh(store, source, progress, false, preinventory)
+}
+
+fn root_source_observation_is_complete(
+    store: &Store,
+    source: &SourceInfo,
+    preinventory: &SourcePreinventory,
+) -> Result<bool> {
+    Ok(!source_uses_import_file_manifest(source)
+        && preinventory.source_root_file().is_some()
+        && store
+            .list_pending_source_import_files(source.provider, &source.path.display().to_string())?
+            .is_empty())
 }
 
 pub(crate) fn import_one_source_inner(
@@ -104,39 +116,31 @@ fn import_one_source_inner_batched(
     let record_id = record.id;
     let record_existed = history_record_exists(store, record_id)?;
     store.upsert_record(&record)?;
-    let summary = if !full_rescan && source_uses_import_file_manifest(source) {
+    let summary = if source_uses_import_file_manifest(source)
+        && (source.path.is_dir() || preinventory.source_import_files().is_some())
+    {
         import_manifested_source(
             store,
             source,
             record_id,
             progress,
             preinventory.source_import_files(),
+            preinventory.inventory_generation(),
+            full_rescan,
         )
     } else {
         match source.provider {
             CaptureProvider::Codex => {
                 if source.path.is_dir() {
-                    if full_rescan {
-                        import_codex_session_tree(
-                            &source.path,
-                            store,
-                            CodexSessionImportOptions {
-                                source_path: Some(source.path.clone()),
-                                history_record_id: Some(record_id),
-                                progress: progress.clone(),
-                                ..CodexSessionImportOptions::default()
-                            },
-                        )
-                        .map_err(anyhow::Error::from)
-                    } else {
-                        import_incremental_codex_session_tree(
-                            store,
-                            source,
-                            record_id,
-                            progress.clone(),
-                            preinventory.codex_session_catalog(),
-                        )
-                    }
+                    import_incremental_codex_session_tree(
+                        store,
+                        source,
+                        record_id,
+                        progress.clone(),
+                        preinventory.codex_session_catalog(),
+                        preinventory.inventory_generation(),
+                        full_rescan,
+                    )
                 } else if source
                     .path
                     .file_name()
@@ -574,7 +578,7 @@ fn import_one_source_inner_batched(
         }
     };
     let summary = match summary {
-        Ok(summary) => {
+        Ok(mut summary) => {
             // A manifested-source retry can contain only rejected files even though earlier
             // files under the same stable history record are already indexed. Preserve that
             // as a completed source with rejections; an orphan record is still cleaned up and
@@ -587,26 +591,41 @@ fn import_one_source_inner_batched(
             } else {
                 false
             };
+            if retained_existing_content {
+                summary.mark_retained_existing_content();
+            }
             if summary.failed > 0
                 && !provider_summary_has_imported_content(&summary)
                 && !retained_existing_content
             {
-                mark_source_root_inventory_failed(
+                mark_source_root_inventory_result(
                     store,
-                    source,
                     preinventory,
+                    CatalogIndexedStatus::Rejected,
                     &format!("provider import reported {} failure(s)", summary.failed),
                 )?;
                 cleanup_rejected_history_record(store, record_id, record_existed)?;
                 return Err(provider_import_summary_failure(source, &summary));
             }
-            mark_source_root_inventory_indexed(store, preinventory)?;
+            let status = provider_summary_import_status(&summary);
+            let error = (summary.failed > 0).then(|| source_import_file_failure(&summary));
+            mark_source_root_inventory_result(
+                store,
+                preinventory,
+                status,
+                error.as_deref().unwrap_or(""),
+            )?;
+            if !record_existed && summary == ProviderImportSummary::default() {
+                store.delete_orphan_record(record_id)?;
+            }
             summary
         }
         Err(err) => {
-            mark_source_root_inventory_failed(store, source, preinventory, &err.to_string())?;
+            let failure_scope = import_error_scope(&err);
+            let status = import_error_status(&err);
+            mark_source_root_inventory_result(store, preinventory, status, &err.to_string())?;
             let deleted = store.delete_orphan_record(record_id)?;
-            if import_error_scope(&err) == ImportFailureScope::Source
+            if failure_scope == ImportFailureScope::Source
                 && !deleted
                 && !record_existed
                 && history_record_exists(store, record_id)?
@@ -621,66 +640,45 @@ fn import_one_source_inner_batched(
     Ok(summary)
 }
 
-fn mark_source_root_inventory_indexed(
+fn mark_source_root_inventory_result(
     store: &Store,
     preinventory: &SourcePreinventory,
-) -> Result<()> {
-    let Some(file) = preinventory.source_root_file() else {
-        return Ok(());
-    };
-    mark_source_import_file_indexed(store, file.provider, &file.source_root, file)
-}
-
-fn mark_source_root_inventory_failed(
-    store: &Store,
-    source: &SourceInfo,
-    preinventory: &SourcePreinventory,
+    status: CatalogIndexedStatus,
     error: &str,
 ) -> Result<()> {
-    let Some(file) = preinventory.source_root_file() else {
+    let Some((file, inventory_generation)) = preinventory.source_root_observation() else {
         return Ok(());
     };
-    mark_source_import_file_failed(
+    mark_source_import_file_result(
         store,
-        source.provider,
-        &file.source_root,
-        &file.source_path,
-        error,
+        file,
+        inventory_generation,
+        status,
+        (!error.is_empty()).then_some(error),
     )
 }
 
-fn mark_source_import_file_failed(
+fn mark_source_import_file_result(
     store: &Store,
-    provider: CaptureProvider,
-    source_root: &str,
-    source_path: &str,
-    error: &str,
-) -> Result<()> {
-    store.mark_source_import_file_failed(
-        provider,
-        source_root,
-        source_path,
-        error,
-        utc_now().timestamp_millis(),
-    )?;
-    Ok(())
-}
-
-fn mark_source_import_file_indexed(
-    store: &Store,
-    provider: CaptureProvider,
-    source_root: &str,
     file: &SourceImportFile,
+    inventory_generation: u64,
+    status: CatalogIndexedStatus,
+    error: Option<&str>,
 ) -> Result<()> {
-    store.mark_source_import_file_indexed(
-        provider,
+    store.record_source_import_file_result(
+        file.provider,
         SourceImportFileIndexUpdate {
-            source_root,
+            source_root: &file.source_root,
             source_path: &file.source_path,
             file_size_bytes: file.file_size_bytes,
             file_modified_at_ms: file.file_modified_at_ms,
+            import_revision: file.import_revision,
+            inventory_generation,
+            metadata: &file.metadata,
             indexed_at_ms: utc_now().timestamp_millis(),
         },
+        status,
+        error,
     )?;
     Ok(())
 }
@@ -711,8 +709,14 @@ pub(crate) fn import_manifested_source(
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventoried_files: Option<&[SourceImportFile]>,
+    preinventory_generation: Option<u64>,
+    force_selection: bool,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
+    let inventory_generation = match preinventory_generation {
+        Some(generation) => generation,
+        None => store.allocate_source_import_inventory_generation(source.provider, &source_root)?,
+    };
     let collected_files;
     let files = match preinventoried_files {
         Some(files) => files,
@@ -720,7 +724,7 @@ pub(crate) fn import_manifested_source(
             collected_files = collect_source_import_files(source).with_context(|| {
                 format!("inventory import files from {}", source.path.display())
             })?;
-            persist_source_import_files(store, source, &collected_files)?;
+            persist_source_import_files(store, source, inventory_generation, &collected_files)?;
             &collected_files
         }
     };
@@ -731,13 +735,17 @@ pub(crate) fn import_manifested_source(
             source.path.display()
         ));
     }
-    let pending = store.list_pending_source_import_files(source.provider, &source_root)?;
-    if pending.is_empty() {
+    let selected_files = if force_selection {
+        files.to_vec()
+    } else {
+        store.list_pending_source_import_files(source.provider, &source_root)?
+    };
+    if selected_files.is_empty() {
         return Ok(ProviderImportSummary::default());
     }
 
     let mut summary = ProviderImportSummary::default();
-    for pending_file in pending {
+    for pending_file in selected_files {
         let path = PathBuf::from(&pending_file.source_path);
         let mut pending_source = explicit_path_source(source.provider, path);
         pending_source.source_format = source.source_format;
@@ -751,33 +759,28 @@ pub(crate) fn import_manifested_source(
         );
         match imported {
             Ok(file_summary) => {
-                if file_summary.failed > 0 {
-                    mark_source_import_file_failed(
-                        store,
-                        source.provider,
-                        &source_root,
-                        &pending_file.source_path,
-                        &source_import_file_failure(&file_summary),
-                    )?;
-                } else {
-                    mark_source_import_file_indexed(
-                        store,
-                        source.provider,
-                        &source_root,
-                        &pending_file,
-                    )?;
-                }
+                let status = provider_summary_import_status(&file_summary);
+                let error =
+                    (file_summary.failed > 0).then(|| source_import_file_failure(&file_summary));
+                mark_source_import_file_result(
+                    store,
+                    &pending_file,
+                    inventory_generation,
+                    status,
+                    error.as_deref(),
+                )?;
                 summary.merge_from(file_summary);
             }
             Err(err) => {
                 let failure_scope = import_error_scope(&err);
                 let error = error_summary(&err);
-                mark_source_import_file_failed(
+                let status = import_error_status(&err);
+                mark_source_import_file_result(
                     store,
-                    source.provider,
-                    &source_root,
-                    &pending_file.source_path,
-                    &error,
+                    &pending_file,
+                    inventory_generation,
+                    status,
+                    Some(&error),
                 )?;
                 if failure_scope == ImportFailureScope::System {
                     return Err(err);
@@ -791,6 +794,13 @@ pub(crate) fn import_manifested_source(
     }
     let _ = record_id;
     Ok(summary)
+}
+
+fn import_error_status(error: &anyhow::Error) -> CatalogIndexedStatus {
+    match import_error_retryability(error) {
+        ImportRetryability::Retryable => CatalogIndexedStatus::Failed,
+        ImportRetryability::Terminal => CatalogIndexedStatus::Rejected,
+    }
 }
 
 fn source_import_file_failure(summary: &ProviderImportSummary) -> String {

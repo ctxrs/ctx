@@ -42,7 +42,9 @@ nonzero. Mixed success and source failures remain successful.
 sources. It includes `sources`, `units`, `source_files`, `source_bytes`,
 `source_import_files`, `indexed_source_import_files`,
 `pending_source_import_files`, `failed_source_import_files`,
-`stale_source_import_files`, and Codex compatibility counters. The legacy
+`completed_with_rejections_source_import_files`,
+`terminal_rejected_source_import_files`, `stale_source_import_files`, aggregate
+completed/rejected unit counts, and Codex compatibility counters. The legacy
 `catalog` and `catalog_sources` blocks are retained for Codex session catalog
 consumers.
 
@@ -70,16 +72,22 @@ Reads local storage state and returns:
 - `inventory_units`;
 - `pending_inventory_units`;
 - `failed_inventory_units`;
+- `completed_with_rejections_inventory_units`;
+- `terminal_rejected_inventory_units`;
 - `stale_inventory_units`;
 - `cataloged_sessions`;
 - `indexed_catalog_sessions`;
 - `pending_catalog_sessions`;
 - `failed_catalog_sessions`;
+- `completed_with_rejections_catalog_sessions`;
+- `terminal_rejected_catalog_sessions`;
 - `stale_catalog_sessions`;
 - `source_import_files`;
 - `indexed_source_import_files`;
 - `pending_source_import_files`;
 - `failed_source_import_files`;
+- `completed_with_rejections_source_import_files`;
+- `terminal_rejected_source_import_files`;
 - `stale_source_import_files`;
 - `semantic`;
 - `daemon`;

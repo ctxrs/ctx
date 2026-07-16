@@ -31,8 +31,12 @@ fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["source_import_files"], 2, "{status:#}");
     assert_eq!(status["indexed_source_import_files"], 1, "{status:#}");
-    assert_eq!(status["failed_source_import_files"], 1, "{status:#}");
-    assert_eq!(status["pending_source_import_files"], 1, "{status:#}");
+    assert_eq!(status["failed_source_import_files"], 0, "{status:#}");
+    assert_eq!(status["pending_source_import_files"], 0, "{status:#}");
+    assert_eq!(
+        status["terminal_rejected_source_import_files"], 1,
+        "{status:#}"
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -138,6 +142,315 @@ fn codex_mixed_session_replay_remains_completed_with_rejections() {
 }
 
 #[test]
+fn unchanged_codex_catalog_mixed_observation_is_not_selected_again() {
+    let temp = tempdir();
+    let sessions = temp.path().join("codex-sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = sessions.join("mixed.jsonl");
+    let meta = r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"catalog-mixed","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","source":"cli"}}"#;
+    let user = r#"{"timestamp":"2026-07-13T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"catalog mixed searchable oracle"}]}}"#;
+    let rejected = r#"{"timestamp":"2026-07-13T12:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":["#;
+    fs::write(&session, format!("{meta}\n{user}\n{rejected}\n")).unwrap();
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(first["outcome"], "completed_with_rejections", "{first:#}");
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["pending_catalog_sessions"], 0, "{status:#}");
+    assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
+    assert_eq!(
+        status["completed_with_rejections_catalog_sessions"], 1,
+        "{status:#}"
+    );
+
+    let unchanged = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["rejected_records"], 0, "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["imported_events"], 0, "{unchanged:#}");
+
+    let assistant = r#"{"timestamp":"2026-07-13T12:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"catalog mixed corrected oracle"}]}}"#;
+    fs::write(&session, format!("{meta}\n{user}\n{assistant}\n")).unwrap();
+    let corrected = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(corrected["outcome"], "success", "{corrected:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "catalog mixed corrected oracle",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "catalog mixed corrected oracle",
+        1,
+        "message",
+    );
+}
+
+#[test]
+fn codex_append_after_mixed_tail_preserves_the_earlier_safe_checkpoint() {
+    let temp = tempdir();
+    let sessions = temp.path().join("codex-sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = sessions.join("mixed-append.jsonl");
+    let meta = r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"mixed-append","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","source":"cli"}}"#;
+    let user = r#"{"timestamp":"2026-07-13T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"mixed append checkpoint oracle"}]}}"#;
+    let initial = format!("{meta}\n{user}\n");
+    fs::write(&session, &initial).unwrap();
+    let args = [
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ];
+    let first = json_output(ctx(&temp).args(args));
+    assert_eq!(first["outcome"], "success", "{first:#}");
+
+    let rejected = r#"{"timestamp":"2026-07-13T12:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":["#;
+    let mixed = format!("{initial}{rejected}\n");
+    fs::write(&session, &mixed).unwrap();
+    let first_mixed = json_output(ctx(&temp).args(args));
+    assert_eq!(
+        first_mixed["outcome"], "completed_with_rejections",
+        "{first_mixed:#}"
+    );
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let checkpoint_after_rejection: (i64, i64) = conn
+        .query_row(
+            "SELECT last_imported_file_size_bytes, indexed_file_size_bytes FROM catalog_sessions WHERE source_path = ?1",
+            [session.to_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(checkpoint_after_rejection.0, initial.len() as i64);
+    assert_eq!(checkpoint_after_rejection.1, mixed.len() as i64);
+    drop(conn);
+
+    let accepted = r#"{"timestamp":"2026-07-13T12:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"mixed append accepted after rejection"}]}}"#;
+    let appended = format!("{mixed}{accepted}\n");
+    fs::write(&session, &appended).unwrap();
+    let appended_result = json_output(ctx(&temp).args(args));
+    assert_eq!(
+        appended_result["outcome"], "completed_with_rejections",
+        "{appended_result:#}"
+    );
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let checkpoint_after_append: (i64, i64) = conn
+        .query_row(
+            "SELECT last_imported_file_size_bytes, indexed_file_size_bytes FROM catalog_sessions WHERE source_path = ?1",
+            [session.to_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(checkpoint_after_append.0, initial.len() as i64);
+    assert_eq!(checkpoint_after_append.1, appended.len() as i64);
+    drop(conn);
+
+    let unchanged = json_output(ctx(&temp).args(args));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["imported_events"], 0, "{unchanged:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "mixed append accepted after rejection",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "mixed append accepted after rejection",
+        1,
+        "message",
+    );
+}
+
+#[test]
+fn legacy_pr75_generic_catalog_failure_gets_one_tolerant_recovery_attempt() {
+    let temp = tempdir();
+    let sessions = temp.path().join("codex-sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = sessions.join("legacy-failed.jsonl");
+    fs::write(
+        &session,
+        concat!(
+            r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"legacy-pr75","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","source":"cli"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-13T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"legacy pr75 recovery oracle"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let args = [
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ];
+    json_output(ctx(&temp).args(args));
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    conn.execute(
+        "UPDATE catalog_sessions SET indexed_status = 'failed', indexed_error = 'full import failed for one or more sessions', indexed_import_revision = NULL WHERE source_path = ?1",
+        [session.to_str().unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let recovered = json_output(ctx(&temp).args(args).arg("--resume"));
+    assert_eq!(recovered["outcome"], "success", "{recovered:#}");
+    assert_eq!(recovered["totals"]["rejected_records"], 0, "{recovered:#}");
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
+    assert_eq!(status["pending_catalog_sessions"], 0, "{status:#}");
+    let unchanged = json_output(ctx(&temp).args(args));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["imported_events"], 0, "{unchanged:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "legacy pr75 recovery oracle",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "legacy pr75 recovery oracle",
+        1,
+        "message",
+    );
+}
+
+#[test]
+fn terminal_codex_catalog_rejection_converges_then_retries_after_correction() {
+    let temp = tempdir();
+    let sessions = temp.path().join("codex-sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = sessions.join("rejected.jsonl");
+    let meta = r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"catalog-rejected","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","source":"cli"}}"#;
+    let invalid = r#"{"timestamp":"not-rfc3339","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"catalog rejected corrected later"}]}}"#;
+    fs::write(&session, format!("{meta}\n{invalid}\n")).unwrap();
+
+    ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            sessions.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure();
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(
+        status["terminal_rejected_catalog_sessions"], 1,
+        "{status:#}"
+    );
+    assert_eq!(status["pending_catalog_sessions"], 0, "{status:#}");
+
+    let unchanged = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["rejected_records"], 0, "{unchanged:#}");
+
+    let corrected = invalid.replace("not-rfc3339", "2026-07-13T12:00:01.000Z");
+    fs::write(&session, format!("{meta}\n{corrected}\n")).unwrap();
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+        "--resume",
+    ]));
+    assert_eq!(imported["outcome"], "success", "{imported:#}");
+    let completed = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(completed["outcome"], "success", "{completed:#}");
+    assert_eq!(completed["totals"]["imported_events"], 0, "{completed:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "catalog rejected corrected later",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "catalog rejected corrected later",
+        1,
+        "message",
+    );
+}
+
+#[test]
 fn corrected_manifested_file_retries_rejected_row_idempotently() {
     let temp = tempdir();
     let project = temp.path().join("claude-project");
@@ -161,8 +474,12 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
     assert_eq!(first["totals"]["imported_events"], 1, "{first:#}");
     assert_eq!(first["totals"]["rejected_records"], 1, "{first:#}");
     let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["failed_source_import_files"], 1, "{status:#}");
-    assert_eq!(status["pending_source_import_files"], 1, "{status:#}");
+    assert_eq!(status["failed_source_import_files"], 0, "{status:#}");
+    assert_eq!(status["pending_source_import_files"], 0, "{status:#}");
+    assert_eq!(
+        status["completed_with_rejections_source_import_files"], 1,
+        "{status:#}"
+    );
 
     let valid_assistant = r#"{"sessionId":"manifest-retry","timestamp":"2026-07-13T12:00:01Z","cwd":"/repo","version":"test","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"manifest retry corrected row"}]},"uuid":"manifest-retry-2"}"#;
     fs::write(&session, format!("{valid_user}\n{valid_assistant}\n")).unwrap();
@@ -194,6 +511,129 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
         &search,
         "claude",
         "manifest retry corrected row",
+        1,
+        "message",
+    );
+}
+
+#[test]
+fn manifested_retry_retaining_existing_content_reports_completed_with_rejections() {
+    let temp = tempdir();
+    let project = temp.path().join("claude-retained-project");
+    fs::create_dir_all(&project).unwrap();
+    let session = project.join("retained.jsonl");
+    let valid = r#"{"sessionId":"retained","timestamp":"2026-07-13T12:00:00Z","cwd":"/repo","version":"test","type":"user","message":{"role":"user","content":[{"type":"text","text":"retained manifested content oracle"}]},"uuid":"retained-1"}"#;
+    fs::write(&session, format!("{valid}\n")).unwrap();
+    let args = [
+        "import",
+        "--provider",
+        "claude",
+        "--path",
+        project.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ];
+
+    let first = json_output(ctx(&temp).args(args));
+    assert_eq!(first["outcome"], "success", "{first:#}");
+    assert_eq!(first["totals"]["imported_events"], 1, "{first:#}");
+
+    fs::write(&session, "{\"type\":\n").unwrap();
+    let retained = json_output(ctx(&temp).args(args));
+    assert_eq!(
+        retained["outcome"], "completed_with_rejections",
+        "{retained:#}"
+    );
+    assert_eq!(
+        retained["sources"][0]["status"], "completed_with_rejections",
+        "{retained:#}"
+    );
+    assert_eq!(retained["sources"][0]["failure_scope"], "record");
+    assert_eq!(retained["totals"]["failed_sources"], 0);
+    assert_eq!(retained["totals"]["sources_completed_with_rejections"], 1);
+    assert_eq!(retained["totals"]["rejected_records"], 1);
+    assert_eq!(retained["totals"]["imported_sessions"], 0);
+    assert_eq!(retained["totals"]["imported_events"], 0);
+    assert_eq!(retained["totals"]["imported_edges"], 0);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "retained manifested content oracle",
+        "--provider",
+        "claude",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "claude",
+        "retained manifested content oracle",
+        1,
+        "message",
+    );
+
+    let unchanged = json_output(ctx(&temp).args(args));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["rejected_records"], 0, "{unchanged:#}");
+}
+
+#[test]
+fn unchanged_root_source_completed_with_rejections_is_not_retried() {
+    let temp = tempdir();
+    let root = PathBuf::from(write_native_openclaw_fixture(
+        &temp,
+        "openclaw root convergence oracle",
+    ));
+    let transcript = root.join("agents/personal-agent/sessions/openclaw-cli-native.jsonl");
+    let mut source = fs::read_to_string(&transcript).unwrap();
+    source.push_str("{\"type\":\n");
+    fs::write(&transcript, source).unwrap();
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "openclaw",
+        "--path",
+        root.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(first["outcome"], "completed_with_rejections", "{first:#}");
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["pending_source_import_files"], 0, "{status:#}");
+    assert_eq!(
+        status["completed_with_rejections_source_import_files"], 1,
+        "{status:#}"
+    );
+
+    let unchanged = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "openclaw",
+        "--path",
+        root.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["rejected_records"], 0, "{unchanged:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "openclaw root convergence oracle",
+        "--provider",
+        "openclaw",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "openclaw",
+        "openclaw root convergence oracle",
         1,
         "message",
     );
@@ -241,6 +681,51 @@ fn all_invalid_source_reports_failure_json_and_exits_nonzero() {
         1,
         "{report:#}"
     );
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(
+        status["terminal_rejected_source_import_files"], 1,
+        "{status:#}"
+    );
+    assert_eq!(status["pending_source_import_files"], 0, "{status:#}");
+
+    let unchanged = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "antigravity",
+        "--path",
+        brain.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["rejected_records"], 0, "{unchanged:#}");
+
+    let valid = PathBuf::from(provider_history_fixture("antigravity/v1/brain"))
+        .join("agy-success/.system_generated/logs/transcript_full.jsonl");
+    fs::copy(valid, bad_logs.join("transcript_full.jsonl")).unwrap();
+    let corrected = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "antigravity",
+        "--path",
+        brain.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(corrected["outcome"], "success", "{corrected:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "write_to_file",
+        "--provider",
+        "antigravity",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "antigravity", "write_to_file", 1, "tool_call");
 }
 
 #[test]

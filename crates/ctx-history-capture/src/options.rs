@@ -190,6 +190,7 @@ pub struct CodexSessionImportProgress {
 #[derive(Debug, Clone)]
 pub struct CodexSessionCatalogOptions {
     pub source_root: Option<PathBuf>,
+    pub observation_generation: Option<u64>,
     pub cataloged_at: DateTime<Utc>,
     pub max_session_files: Option<usize>,
     pub max_total_bytes: Option<u64>,
@@ -200,6 +201,7 @@ impl Default for CodexSessionCatalogOptions {
     fn default() -> Self {
         Self {
             source_root: None,
+            observation_generation: None,
             cataloged_at: utc_now(),
             max_session_files: None,
             max_total_bytes: None,

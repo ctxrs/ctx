@@ -20,8 +20,75 @@ fn history_source_plugins_are_listed_without_running() {
         .unwrap();
     assert_eq!(plugin_source["kind"], "history_source_plugin");
     assert_eq!(plugin_source["provider_key"], "dorkos");
+    assert_eq!(plugin_source["import_revision"], 1);
     assert_eq!(plugin_source["enabled"], false);
     assert!(!plugin.run_marker.exists());
+}
+
+#[test]
+fn history_source_plugin_revision_bump_uses_a_fresh_cursor_stream() {
+    let temp = tempdir();
+    let cursor_log = temp.path().join("cursor-log.txt");
+    let plugin = write_history_source_plugin(&temp, "hermes", false, Some(&cursor_log));
+    let manifest_path = plugin.manifest_dir.join("ctx-history-plugin.json");
+
+    json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "import",
+                "--history-source",
+                "hermes/default",
+                "--json",
+                "--progress",
+                "none",
+            ]),
+    );
+
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["history_sources"][0]["import_revision"] = json!(2);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "import",
+                "--history-source",
+                "hermes/default",
+                "--json",
+                "--progress",
+                "none",
+            ]),
+    );
+    assert!(
+        !cursor_log.exists(),
+        "revision bump unexpectedly received the previous cursor: {}",
+        fs::read_to_string(&cursor_log).unwrap_or_default()
+    );
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let cursor_streams: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(cursor_streams, 2);
+
+    let sources = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args(["sources", "--json"]),
+    );
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["history_source"] == "hermes/default")
+        .unwrap();
+    assert_eq!(source["import_revision"], 2);
 }
 
 #[test]
