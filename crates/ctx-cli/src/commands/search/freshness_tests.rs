@@ -505,7 +505,7 @@ mod freshness_tests {
             .unwrap()
             .passes_since_reinventory = 17;
 
-        write_pi_source(&dirty.path, 2, "dirty-changed");
+        write_pi_source(&dirty.path, 2, "dirtychanged");
         runtime.force_source_change_for_test(&dirty.path);
         let mut refreshed = refresh_with_runtime(
             &data_root,
@@ -530,7 +530,6 @@ mod freshness_tests {
                 .passes_since_reinventory,
             18
         );
-        let mut fresh_units_processed = refreshed.fresh_units_processed;
         for _ in 0..16 {
             if refreshed.fresh_units_pending == 0 {
                 break;
@@ -540,11 +539,13 @@ mod freshness_tests {
                 &mut runtime,
                 vec![dirty.clone(), unchanged.clone()],
             );
-            fresh_units_processed =
-                fresh_units_processed.saturating_add(refreshed.fresh_units_processed);
         }
-        assert_eq!(fresh_units_processed, 2, "{refreshed:?}");
         assert_eq!(refreshed.fresh_units_pending, 0, "{refreshed:?}");
+        let store = Store::open(database_path(data_root.clone())).unwrap();
+        assert!(!store
+            .search_event_hits("dirtychanged 1", 10)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             cached_inventory_generation(&runtime, &unchanged),
             unchanged_generation
