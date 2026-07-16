@@ -193,6 +193,11 @@ fn refresh_sources_for_search_inner(
         .as_deref_mut()
         .and_then(|runtime| runtime.watcher_changes(&sources));
     let work = if let Some(runtime) = runtime.as_deref_mut() {
+        if let Some(changes) = watcher_changes.as_ref() {
+            runtime
+                .pending_dirty_paths
+                .extend(changes.dirty_paths.iter().cloned());
+        }
         let publication_owner = store.effective_provider_file_publication_inventory_owner()?;
         let publication_pending = publication_owner.is_some();
         let periodic_reinventory = runtime.inventory_progress.is_none()
@@ -211,11 +216,7 @@ fn refresh_sources_for_search_inner(
         {
             runtime.request_inventory(SearchInventoryReason::SourcesChanged);
         }
-        if runtime.cached_work.is_none()
-            && watcher_changes
-                .as_ref()
-                .is_some_and(|changes| !changes.dirty_paths.is_empty())
-        {
+        if runtime.cached_work.is_none() && !runtime.pending_dirty_paths.is_empty() {
             runtime.request_inventory(SearchInventoryReason::SourcesChanged);
         }
         let force_rebuild = runtime.durable_sources_changed(&source_fingerprint)
@@ -229,9 +230,9 @@ fn refresh_sources_for_search_inner(
         let inventory_sources = sources
             .iter()
             .filter(|source| {
-                publication_owner.as_ref().is_none_or(|owner| {
-                    !source_matches_publication_owner(source, owner)
-                })
+                publication_owner
+                    .as_ref()
+                    .is_none_or(|owner| !source_matches_publication_owner(source, owner))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -291,21 +292,21 @@ fn refresh_sources_for_search_inner(
                     work.passes_since_reinventory = 0;
                 }
             }
-        } else if let Some(changes) = watcher_changes {
-            if !changes.dirty_paths.is_empty() {
-                let refresh_result = refresh_dirty_search_sources(
-                    &store,
-                    &sources,
-                    &changes.dirty_paths,
-                    runtime
-                        .cached_work
-                        .as_mut()
-                        .expect("daemon refresh cache must be populated"),
-                );
-                if let Err(error) = refresh_result {
-                    runtime.invalidate();
-                    return Err(error);
-                }
+        } else if !runtime.pending_dirty_paths.is_empty() {
+            let pending_dirty_paths = std::mem::take(&mut runtime.pending_dirty_paths);
+            let refresh_result = refresh_dirty_search_sources(
+                &store,
+                &sources,
+                &pending_dirty_paths,
+                runtime
+                    .cached_work
+                    .as_mut()
+                    .expect("daemon refresh cache must be populated"),
+            );
+            if let Err(error) = refresh_result {
+                runtime.pending_dirty_paths.extend(pending_dirty_paths);
+                runtime.invalidate();
+                return Err(error);
             }
         }
         if let Some(work) = runtime.cached_work.as_mut() {

@@ -420,7 +420,6 @@ fn import_append_capable_work(
                 .as_ref()
                 .map(|checkpoint| store_checkpoint_from_capture(&unit, checkpoint, indexed_at_ms))
                 .transpose()?;
-            let retain_safe_checkpoint = summary.failed > 0;
             if effective_replacement {
                 let completion = encode_staged_append_completion(
                     summary,
@@ -437,12 +436,8 @@ fn import_append_capable_work(
                 });
             }
             let commit = if effective_replacement {
-                ProviderFilePublicationCommit::Replacement(if retain_safe_checkpoint {
-                    None
-                } else {
-                    stored_checkpoint.as_ref()
-                })
-            } else if retain_checkpoint || retain_safe_checkpoint {
+                ProviderFilePublicationCommit::Replacement(stored_checkpoint.as_ref())
+            } else if retain_checkpoint {
                 ProviderFilePublicationCommit::RetainCheckpoint
             } else {
                 ProviderFilePublicationCommit::Append(stored_checkpoint.as_ref().ok_or_else(
