@@ -22,7 +22,15 @@ BackendKind = Literal["local", "hosted"]
 SearchBackendMode = Literal["hybrid", "semantic", "lexical"]
 SearchSemanticReadiness = Literal["ready", "not_ready", "unsupported", "unavailable"]
 SearchEffectiveBackend = Literal["none", "lexical", "semantic", "hybrid"]
-SearchCompleteness = Literal["complete", "partial"]
+SearchSemanticCompleteness = Literal["not_attempted", "complete", "partial", "skipped"]
+SearchSemanticSkipReason = Literal[
+    "disabled",
+    "unavailable",
+    "not_ready",
+    "unsupported",
+    "no_lexical_candidates",
+    "query_shape_not_eligible",
+]
 
 
 class SearchAllClause(TypedDict):
@@ -182,10 +190,7 @@ class RetrievalCoverage(TypedDict, total=False):
 class SearchRetrieval(TypedDict, total=False):
     requestedMode: Optional[SearchBackendMode]
     effectiveMode: Optional[SearchBackendMode]
-    semanticWeight: Optional[float]
     semanticStatus: Optional[str]
-    semanticFallbackCode: Optional[str]
-    semanticFallback: Optional[str]
     embeddingModel: Optional[str]
     coverage: RetrievalCoverage
     worker: JsonObject
@@ -234,7 +239,7 @@ class SearchExecutionConsumption(TypedDict):
     elapsed_ms: int
 
 
-class SearchSemanticCoverage(TypedDict):
+class SearchSemanticCoverage(TypedDict, total=False):
     indexed_documents: int
     searchable_documents: int
 
@@ -244,32 +249,42 @@ class _SearchSemanticExecutionRequired(TypedDict):
     required: bool
     readiness: SearchSemanticReadiness
     effective_backend: SearchEffectiveBackend
+    requested_candidates: int
+    eligible_candidates: int
     candidates_supplied: int
     candidates_consumed: int
     candidates_used: int
+    coverage: SearchSemanticCoverage
+    completeness: SearchSemanticCompleteness
     positive_text_rule_version: str
 
 
 class SearchSemanticExecution(_SearchSemanticExecutionRequired, total=False):
-    backend: Optional[str]
-    requested_candidates: int
-    eligible_candidates: int
-    coverage: SearchSemanticCoverage
-    completeness: SearchCompleteness
+    backend: str
     incompleteness_reasons: list[str]
-    skip_reason: Optional[str]
+    skip_reason: SearchSemanticSkipReason
 
 
-class SearchQueryExecution(TypedDict):
+class _SearchQueryExecutionRequired(TypedDict):
     query_version: Literal["ctx-search-v1"]
     candidate_strategy: str
     resolved: SearchExecutionLimits
     consumed: SearchExecutionConsumption
     semantic: SearchSemanticExecution
+    rrf_k: int
+    per_branch_candidate_rows: int
     requested_result_limit: int
     result_limit: int
     max_result_limit: int
+    clauses_executed: int
+    verification_dropped: int
+    filter_verification_dropped: int
+    candidate_budget_exhausted: bool
+    timed_out: bool
     truncated: bool
+
+
+class SearchQueryExecution(_SearchQueryExecutionRequired, total=False):
     truncation_reasons: list[str]
 
 

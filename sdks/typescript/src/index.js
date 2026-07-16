@@ -8,11 +8,14 @@ const SEARCH_MAX_CLAUSES = 32;
 const SEARCH_MAX_CLAUSE_BYTES = 1_024;
 const SEARCH_MAX_TOTAL_CLAUSE_BYTES = 8_192;
 const SEARCH_MAX_QUERY_JSON_BYTES = 64 * 1_024;
+const SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE = 32;
 const SEARCH_MIN_LITERAL_BYTES = 3;
 const SEARCH_MAX_LITERAL_BYTES = 256;
+const SEARCH_MAX_RESULTS = 200;
 const SEARCH_QUERY_FIELDS = new Set(["version", "any", "must", "must_not"]);
 const SEARCH_LEXICAL_MATCHERS = new Set(["all", "phrase", "literal"]);
 const SEARCH_ANY_MATCHERS = new Set([...SEARCH_LEXICAL_MATCHERS, "semantic"]);
+const SEARCH_ALPHANUMERIC = /^[\p{Alphabetic}\p{Number}]$/u;
 
 export class CtxError extends Error {
   constructor(message, options = {}) {
@@ -411,7 +414,10 @@ function camelizeKeys(value) {
       camelKey === "configPath" ||
       camelKey === "itemType" ||
       camelKey === "payloadType" ||
-      camelKey === "recordType"
+      camelKey === "recordType" ||
+      camelKey === "semanticWeight" ||
+      camelKey === "semanticFallbackCode" ||
+      camelKey === "semanticFallback"
     ) {
       continue;
     }
@@ -436,8 +442,12 @@ function appendImportArgs(args, options) {
 }
 
 function appendSearchArgs(args, options) {
-  appendOptional(args, "--limit", options.limit);
+  appendOptionalNumber(args, "--limit", options.limit);
   appendOptional(args, "--provider", options.provider);
+  appendOptional(args, "--history-source", options.historySource);
+  appendOptional(args, "--provider-key", options.providerKey);
+  appendOptional(args, "--source-id", options.sourceId);
+  appendOptional(args, "--source-format", options.sourceFormat);
   appendOptional(args, "--workspace", options.workspace);
   appendOptional(args, "--since", options.since);
   appendFlag(args, "--primary-only", options.primaryOnly);
@@ -452,6 +462,7 @@ function appendSearchArgs(args, options) {
 }
 
 function validateSearchIntent(options) {
+  validateSearchLimit(options.limit);
   if (options.query !== undefined) {
     validateSearchQuery(options.query);
     return;
@@ -526,10 +537,7 @@ export function validateSearchQuery(query) {
   }
 
   const canonical = { version: CTX_SEARCH_V1_VERSION };
-  let totalClauses = 0;
-  let totalClauseBytes = 0;
-  let semanticClauses = 0;
-  let positiveClauses = 0;
+  const canonicalPlacements = {};
   for (const placement of ["any", "must", "must_not"]) {
     const rawClauses = query[placement] ?? [];
     if (!Array.isArray(rawClauses)) {
@@ -537,6 +545,7 @@ export function validateSearchQuery(query) {
     }
     const allowed = placement === "any" ? SEARCH_ANY_MATCHERS : SEARCH_LEXICAL_MATCHERS;
     const clauses = [];
+    const seen = new Set();
     for (const rawClause of rawClauses) {
       if (!isObject(rawClause)) {
         invalidSearchQuery("search clause must be an object", { placement });
@@ -550,61 +559,136 @@ export function validateSearchQuery(query) {
       }
       const matcher = matchers[0];
       const value = rawClause[matcher];
-      if (!hasSearchText(value)) {
-        invalidSearchQuery("search clause value must be a non-empty string", {
+      if (typeof value !== "string") {
+        invalidSearchQuery("search clause value must be a string", {
           placement,
           matcher,
         });
       }
-      const valueBytes = Buffer.byteLength(value, "utf8");
-      if (valueBytes > SEARCH_MAX_CLAUSE_BYTES) {
-        invalidSearchQuery("search clause exceeds the 1024-byte limit", {
-          matcher,
-          actualBytes: valueBytes,
-        });
+      const canonicalValue =
+        matcher === "literal" ? value.trim() : (value.match(/\S+/gu) ?? []).join(" ");
+      const identity = JSON.stringify([matcher, canonicalValue]);
+      if (seen.has(identity)) {
+        continue;
       }
-      if (
-        matcher === "literal" &&
-        (valueBytes < SEARCH_MIN_LITERAL_BYTES || valueBytes > SEARCH_MAX_LITERAL_BYTES)
-      ) {
-        invalidSearchQuery("literal search clause must be between 3 and 256 bytes", {
-          actualBytes: valueBytes,
-        });
-      }
-      if (matcher === "semantic") {
-        semanticClauses += 1;
-      }
-      clauses.push({ [matcher]: value });
-      totalClauses += 1;
-      totalClauseBytes += valueBytes;
-      if (totalClauses > SEARCH_MAX_CLAUSES) {
-        invalidSearchQuery("search query exceeds the 32-clause limit", {
-          actualClauses: totalClauses,
-          maximumClauses: SEARCH_MAX_CLAUSES,
-        });
-      }
-      if (totalClauseBytes > SEARCH_MAX_TOTAL_CLAUSE_BYTES) {
-        invalidSearchQuery("search query exceeds the 8192-byte clause limit", {
-          actualBytes: totalClauseBytes,
-          maximumBytes: SEARCH_MAX_TOTAL_CLAUSE_BYTES,
-        });
-      }
-      if (semanticClauses > 1) {
-        invalidSearchQuery("search query allows at most one semantic clause in any", {});
-      }
+      seen.add(identity);
+      clauses.push({ [matcher]: canonicalValue });
     }
-    if (Object.hasOwn(query, placement) || clauses.length > 0) {
+    if (clauses.length > 0) {
       canonical[placement] = clauses;
-    }
-    if (placement === "any" || placement === "must") {
-      positiveClauses += clauses.length;
+      canonicalPlacements[placement] = clauses;
     }
   }
 
+  const positiveClauses =
+    (canonicalPlacements.any?.length ?? 0) + (canonicalPlacements.must?.length ?? 0);
   if (positiveClauses === 0) {
     invalidSearchQuery("search query needs a positive any or must clause", {});
   }
+
+  const allClauses = [
+    ...(canonicalPlacements.any ?? []),
+    ...(canonicalPlacements.must ?? []),
+    ...(canonicalPlacements.must_not ?? []),
+  ];
+  if (allClauses.length > SEARCH_MAX_CLAUSES) {
+    invalidSearchQuery("search query exceeds the 32-clause limit", {
+      actualClauses: allClauses.length,
+      maximumClauses: SEARCH_MAX_CLAUSES,
+    });
+  }
+
+  const semanticClauses = (canonicalPlacements.any ?? []).filter((clause) =>
+    Object.hasOwn(clause, "semantic"),
+  ).length;
+  if (semanticClauses > 1) {
+    invalidSearchQuery("search query allows at most one semantic clause in any", {});
+  }
+
+  let totalClauseBytes = 0;
+  for (const clause of allClauses) {
+    const [matcher] = Object.keys(clause);
+    const value = clause[matcher];
+    const valueBytes = Buffer.byteLength(value, "utf8");
+    if (valueBytes === 0) {
+      invalidSearchQuery("search clause cannot be empty", { matcher });
+    }
+    if (valueBytes > SEARCH_MAX_CLAUSE_BYTES) {
+      invalidSearchQuery("search clause exceeds the 1024-byte limit", {
+        matcher,
+        actualBytes: valueBytes,
+      });
+    }
+    if (
+      matcher === "literal" &&
+      (valueBytes < SEARCH_MIN_LITERAL_BYTES || valueBytes > SEARCH_MAX_LITERAL_BYTES)
+    ) {
+      invalidSearchQuery("literal search clause must be between 3 and 256 bytes", {
+        actualBytes: valueBytes,
+      });
+    }
+    const analyzedTokens = searchAnalyzedTokenCount(value);
+    if (analyzedTokens === 0) {
+      invalidSearchQuery("search clause has no searchable tokens", { matcher });
+    }
+    if (analyzedTokens > SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE) {
+      invalidSearchQuery("search clause exceeds the 32 analyzed-token limit", {
+        matcher,
+        actualTokens: analyzedTokens,
+        maximumTokens: SEARCH_MAX_ANALYZED_TOKENS_PER_CLAUSE,
+      });
+    }
+    totalClauseBytes += valueBytes;
+  }
+  if (totalClauseBytes > SEARCH_MAX_TOTAL_CLAUSE_BYTES) {
+    invalidSearchQuery("search query exceeds the 8192-byte clause limit", {
+      actualBytes: totalClauseBytes,
+      maximumBytes: SEARCH_MAX_TOTAL_CLAUSE_BYTES,
+    });
+  }
   return canonical;
+}
+
+function validateSearchLimit(limit) {
+  if (limit === undefined) {
+    return;
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > SEARCH_MAX_RESULTS) {
+    throw new CtxValidationError("search limit must be an integer between 1 and 200", {
+      details: { limit, minimum: 1, maximum: SEARCH_MAX_RESULTS },
+    });
+  }
+}
+
+function searchAnalyzedTokenCount(value) {
+  let count = 0;
+  let inToken = false;
+  for (const char of value) {
+    const continuesToken =
+      SEARCH_ALPHANUMERIC.test(char) || (inToken && isSearchContinuationMark(char));
+    if (continuesToken) {
+      if (!inToken) {
+        count += 1;
+      }
+      inToken = true;
+    } else {
+      inToken = false;
+    }
+  }
+  return count;
+}
+
+function isSearchContinuationMark(char) {
+  const codepoint = char.codePointAt(0);
+  return (
+    (codepoint >= 0x0300 && codepoint <= 0x036f) ||
+    (codepoint >= 0x1ab0 && codepoint <= 0x1aff) ||
+    (codepoint >= 0x1dc0 && codepoint <= 0x1dff) ||
+    (codepoint >= 0x20d0 && codepoint <= 0x20ff) ||
+    (codepoint >= 0xfe20 && codepoint <= 0xfe2f) ||
+    codepoint === 0x200c ||
+    codepoint === 0x200d
+  );
 }
 
 function normalizeSearchResponse(raw) {

@@ -105,6 +105,13 @@ def search_execution() -> dict[str, object]:
         "requested_result_limit": 5,
         "result_limit": 5,
         "max_result_limit": 200,
+        "rrf_k": 60,
+        "per_branch_candidate_rows": 1024,
+        "clauses_executed": 7,
+        "verification_dropped": 0,
+        "filter_verification_dropped": 0,
+        "candidate_budget_exhausted": False,
+        "timed_out": False,
         "truncated": True,
         "truncation_reasons": ["semantic_coverage_incomplete"],
     }
@@ -154,7 +161,11 @@ class LocalCliAdapterTests(unittest.TestCase):
             self.assertEqual(
                 client.search(
                     SEARCH_QUERY,
-                    provider="codex",
+                    provider="custom",
+                    history_source="dorkos/default",
+                    provider_key="dorkos",
+                    source_id="default",
+                    source_format="dorkos-history-v1",
                     workspace="repo",
                     since="30d",
                     event_type="message",
@@ -195,20 +206,92 @@ class LocalCliAdapterTests(unittest.TestCase):
                         call()
                     self.assertEqual(raised.exception.code, "invalid_request")
 
+            with self.assertRaises(TypeError):
+                client.search(SEARCH_QUERY, semantic_weight=0.5)  # type: ignore[call-arg]
+
     def test_search_serializes_ctx_search_v1_and_optional_backend(self) -> None:
         adapter = RecordingSearchAdapter()
         client = AgentHistoryClient(adapter)
 
         client.search(SEARCH_QUERY)
-        client.search(SEARCH_QUERY, backend="hybrid", refresh="off")
+        client.search(
+            SEARCH_QUERY,
+            provider="custom",
+            history_source="dorkos/default",
+            provider_key="dorkos",
+            source_id="default",
+            source_format="dorkos-history-v1",
+            backend="hybrid",
+            refresh="off",
+        )
 
         self.assertEqual(adapter.calls[0][:2], ["search", "--query-json"])
         self.assertEqual(json.loads(adapter.calls[0][2]), SEARCH_QUERY)
         self.assertNotIn("--backend", adapter.calls[0])
         self.assertEqual(
             adapter.calls[1][3:],
-            ["--backend", "hybrid", "--refresh", "off", "--json"],
+            [
+                "--provider",
+                "custom",
+                "--history-source",
+                "dorkos/default",
+                "--provider-key",
+                "dorkos",
+                "--source-id",
+                "default",
+                "--source-format",
+                "dorkos-history-v1",
+                "--backend",
+                "hybrid",
+                "--refresh",
+                "off",
+                "--json",
+            ],
         )
+
+    def test_search_query_canonicalizes_before_enforcing_bounds(self) -> None:
+        query = {
+            "version": "ctx-search-v1",
+            "any": [
+                {"all": "  disk\t io  pressure "},
+                {"all": "disk io pressure"},
+                {"literal": "  logs_2.db  raw  "},
+            ],
+            "must": [],
+            "must_not": [{"phrase": " postgres\n vacuum "}],
+        }
+
+        self.assertEqual(
+            json.loads(serialize_search_query(typing.cast(SearchQueryV1, query))),
+            {
+                "version": "ctx-search-v1",
+                "any": [{"all": "disk io pressure"}, {"literal": "logs_2.db  raw"}],
+                "must_not": [{"phrase": "postgres vacuum"}],
+            },
+        )
+        deduped = {
+            "version": "ctx-search-v1",
+            "any": [{"all": "  cafe\u0301\u00a0\u4e16\u754c  "}] * 33,
+        }
+        self.assertEqual(
+            json.loads(serialize_search_query(typing.cast(SearchQueryV1, deduped)))["any"],
+            [{"all": "cafe\u0301 \u4e16\u754c"}],
+        )
+
+    def test_search_limit_is_an_integer_from_one_to_two_hundred(self) -> None:
+        adapter = RecordingSearchAdapter()
+        client = AgentHistoryClient(adapter)
+
+        for limit in (0, 201, 1.5, True):
+            with self.subTest(limit=limit):
+                with self.assertRaises(CtxAgentHistoryValidationError):
+                    client.search(SEARCH_QUERY, limit=typing.cast(typing.Any, limit))
+        self.assertEqual(adapter.calls, [])
+
+        client.search(SEARCH_QUERY, limit=1)
+        client.search(SEARCH_QUERY, limit=200)
+        self.assertIn("1", adapter.calls[0])
+        self.assertIn("200", adapter.calls[1])
 
     def test_search_query_validation_rejects_ambiguous_or_unbounded_shapes(self) -> None:
         invalid = [
@@ -219,8 +302,13 @@ class LocalCliAdapterTests(unittest.TestCase):
             {"version": "ctx-search-v1", "any": [{"literal": "x"}]},
             {"version": "ctx-search-v1", "any": [{"all": "x"}], "unknown": True},
             {"version": "ctx-search-v1", "any": [{"all": "x"}], "mustNot": []},
-            {"version": "ctx-search-v1", "any": [{"all": "x"}] * 33},
+            {
+                "version": "ctx-search-v1",
+                "any": [{"all": f"term-{index}"} for index in range(33)],
+            },
             {"version": "ctx-search-v1", "any": [{"all": "x" * 1025}]},
+            {"version": "ctx-search-v1", "any": [{"all": "!!!"}]},
+            {"version": "ctx-search-v1", "any": [{"all": " ".join(["x"] * 33)}]},
         ]
         for query in invalid:
             with self.subTest(query=query):
@@ -267,9 +355,9 @@ class LocalCliAdapterTests(unittest.TestCase):
         retrieval = result["search"]["retrieval"]
         self.assertEqual(retrieval["requestedMode"], "hybrid")
         self.assertEqual(retrieval["effectiveMode"], "lexical")
-        self.assertEqual(retrieval["semanticWeight"], 0.0)
-        self.assertEqual(retrieval["semanticFallbackCode"], "semantic_retrieval_failed")
-        self.assertEqual(retrieval["semanticFallback"], "semantic_retrieval_failed")
+        self.assertNotIn("semanticWeight", retrieval)
+        self.assertNotIn("semanticFallbackCode", retrieval)
+        self.assertNotIn("semanticFallback", retrieval)
         self.assertEqual(retrieval["coverage"]["embeddedItems"], 4)
         self.assertEqual(retrieval["coverage"]["indexedNow"], 1)
         self.assertEqual(retrieval["diagnostics"]["queryEmbedMs"], 2)
@@ -601,11 +689,77 @@ def _fake_ctx_script(
                     "query": query,
                     "query_execution": {
                         "query_version": "ctx-search-v1",
-                        "resolved": {},
-                        "consumed": {},
-                        "semantic": {},
-                        "truncated": False,
-                        "truncation_reasons": [],
+                        "candidate_strategy": "bounded_fts",
+                        "resolved": {
+                            "query_bytes": 8192,
+                            "clauses": 32,
+                            "analyzed_tokens_per_clause": 32,
+                            "candidates_per_positive_seed": 1024,
+                            "candidate_rows": 16384,
+                            "retained_candidate_ids": 8192,
+                            "residual_rows": 8192,
+                            "verification_bytes": 16777216,
+                            "verification_lookup_bytes": 16384,
+                            "hydrated_rows": 256,
+                            "hydration_input_bytes": 8388608,
+                            "hydration_input_bytes_per_event": 65536,
+                            "snippet_input_bytes": 8388608,
+                            "returned_text_bytes": 524288,
+                            "serialized_response_bytes": 2097152,
+                            "results": 3,
+                            "elapsed_ms": 1000,
+                        },
+                        "consumed": {
+                            "query_bytes": 96,
+                            "clauses": 7,
+                            "analyzed_tokens": 18,
+                            "largest_analyzed_tokens_per_clause": 6,
+                            "largest_positive_seed_candidates": 20,
+                            "candidate_rows": 48,
+                            "retained_candidate_ids": 31,
+                            "residual_rows": 12,
+                            "verification_bytes": 4096,
+                            "largest_verification_lookup_bytes": 512,
+                            "hydrated_rows": 3,
+                            "legacy_fallback_rows": 0,
+                            "hydration_input_bytes": 2048,
+                            "largest_hydration_input_bytes": 800,
+                            "snippet_input_bytes": 1200,
+                            "returned_results": 1,
+                            "returned_text_bytes": 128,
+                            "serialized_response_bytes": 2048,
+                            "elapsed_ms": 12,
+                        },
+                        "semantic": {
+                            "attempted": True,
+                            "required": True,
+                            "readiness": "ready",
+                            "effective_backend": "hybrid",
+                            "requested_candidates": 20,
+                            "eligible_candidates": 18,
+                            "candidates_supplied": 20,
+                            "candidates_consumed": 18,
+                            "candidates_used": 4,
+                            "coverage": {
+                                "indexed_documents": 990,
+                                "searchable_documents": 1000,
+                            },
+                            "completeness": "partial",
+                            "incompleteness_reasons": ["semantic_coverage_incomplete"],
+                            "positive_text_rule_version": "ctx-search-positive-text-v1",
+                        },
+                        "rrf_k": 60,
+                        "per_branch_candidate_rows": 1024,
+                        "requested_result_limit": 3,
+                        "result_limit": 3,
+                        "max_result_limit": 200,
+                        "clauses_executed": 7,
+                        "verification_dropped": 0,
+                        "filter_verification_dropped": 0,
+                        "candidate_budget_exhausted": False,
+                        "timed_out": False,
+                        "truncated": True,
+                        "truncation_reasons": ["semantic_coverage_incomplete"],
                     },
                     "payload_type": "search_results",
                     "results": [
@@ -615,6 +769,11 @@ def _fake_ctx_script(
                             "citations": [{"target_type": "event", "label": "codex event"}],
                         }
                     ],
+                    "truncation": {
+                        "truncated": True,
+                        "reason": "semantic_coverage_incomplete",
+                        "omitted_results": 1,
+                    },
                     "freshness": {"mode": "off", "status": "skipped"},
                 }
             )

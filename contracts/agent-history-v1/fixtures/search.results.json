@@ -7,6 +7,7 @@
     "dataRoot": "/tmp/ctx-sdk-fixture"
   },
   "search": {
+    "schema_version": 2,
     "query": {
       "version": "ctx-search-v1",
       "any": [
@@ -92,7 +93,9 @@
       "limit": 20
     },
     "truncation": {
-      "truncated": false
+      "truncated": true,
+      "reason": "semantic_coverage_incomplete",
+      "omittedResults": 1
     },
     "query_execution": {
       "query_version": "ctx-search-v1",
@@ -110,6 +113,7 @@
         "hydrated_rows": 256,
         "hydration_input_bytes": 8388608,
         "hydration_input_bytes_per_event": 65536,
+        "snippet_input_bytes": 8388608,
         "returned_text_bytes": 524288,
         "serialized_response_bytes": 2097152,
         "results": 20,
@@ -119,6 +123,8 @@
         "query_bytes": 73,
         "clauses": 3,
         "analyzed_tokens": 12,
+        "largest_analyzed_tokens_per_clause": 7,
+        "largest_positive_seed_candidates": 2,
         "candidate_rows": 2,
         "retained_candidate_ids": 1,
         "residual_rows": 1,
@@ -128,6 +134,7 @@
         "largest_verification_lookup_bytes": 128,
         "hydration_input_bytes": 512,
         "largest_hydration_input_bytes": 512,
+        "snippet_input_bytes": 512,
         "returned_results": 1,
         "returned_text_bytes": 33,
         "serialized_response_bytes": 4096,
@@ -139,23 +146,31 @@
         "readiness": "ready",
         "effective_backend": "hybrid",
         "backend": "daemon",
+        "requested_candidates": 2,
+        "eligible_candidates": 2,
+        "candidates_supplied": 2,
+        "candidates_consumed": 2,
+        "candidates_used": 1,
         "coverage": {
-          "candidates_supplied": 2,
-          "candidates_consumed": 2,
-          "candidates_used": 1,
-          "truncated": false
+          "indexed_documents": 1190,
+          "searchable_documents": 1200
         },
-        "completeness": "complete",
+        "completeness": "partial",
+        "incompleteness_reasons": ["semantic_coverage_incomplete"],
         "positive_text_rule_version": "ctx-search-positive-text-v1"
       },
       "rrf_k": 60,
       "per_branch_candidate_rows": 1024,
+      "requested_result_limit": 20,
+      "result_limit": 20,
+      "max_result_limit": 200,
       "clauses_executed": 3,
       "verification_dropped": 0,
       "filter_verification_dropped": 0,
       "candidate_budget_exhausted": false,
       "timed_out": false,
-      "truncated": false
+      "truncated": true,
+      "truncation_reasons": ["semantic_coverage_incomplete"]
     }
   }
 }

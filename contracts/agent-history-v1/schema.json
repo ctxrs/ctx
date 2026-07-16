@@ -178,7 +178,8 @@
         "candidates_per_positive_seed", "candidate_rows", "retained_candidate_ids",
         "residual_rows", "verification_bytes", "verification_lookup_bytes",
         "hydrated_rows", "hydration_input_bytes", "hydration_input_bytes_per_event",
-        "returned_text_bytes", "serialized_response_bytes", "results", "elapsed_ms"
+        "snippet_input_bytes", "returned_text_bytes", "serialized_response_bytes",
+        "results", "elapsed_ms"
       ],
       "properties": {
         "query_bytes": { "type": "integer", "minimum": 1, "maximum": 8192 },
@@ -193,6 +194,7 @@
         "hydrated_rows": { "type": "integer", "minimum": 1, "maximum": 256 },
         "hydration_input_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
         "hydration_input_bytes_per_event": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "snippet_input_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
         "returned_text_bytes": { "type": "integer", "minimum": 1, "maximum": 524288 },
         "serialized_response_bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 },
         "results": { "type": "integer", "minimum": 1, "maximum": 200 },
@@ -203,16 +205,19 @@
     "searchExecutionConsumption": {
       "type": "object",
       "required": [
-        "query_bytes", "clauses", "analyzed_tokens", "candidate_rows",
-        "retained_candidate_ids", "residual_rows", "hydrated_rows",
+        "query_bytes", "clauses", "analyzed_tokens", "largest_analyzed_tokens_per_clause",
+        "largest_positive_seed_candidates", "candidate_rows", "retained_candidate_ids",
+        "residual_rows", "hydrated_rows",
         "legacy_fallback_rows", "verification_bytes", "largest_verification_lookup_bytes",
-        "hydration_input_bytes", "largest_hydration_input_bytes", "returned_results",
-        "returned_text_bytes", "serialized_response_bytes", "elapsed_ms"
+        "hydration_input_bytes", "largest_hydration_input_bytes", "snippet_input_bytes",
+        "returned_results", "returned_text_bytes", "serialized_response_bytes", "elapsed_ms"
       ],
       "properties": {
         "query_bytes": { "type": "integer", "minimum": 0 },
         "clauses": { "type": "integer", "minimum": 0 },
         "analyzed_tokens": { "type": "integer", "minimum": 0 },
+        "largest_analyzed_tokens_per_clause": { "type": "integer", "minimum": 0 },
+        "largest_positive_seed_candidates": { "type": "integer", "minimum": 0 },
         "candidate_rows": { "type": "integer", "minimum": 0 },
         "retained_candidate_ids": { "type": "integer", "minimum": 0 },
         "residual_rows": { "type": "integer", "minimum": 0 },
@@ -222,6 +227,7 @@
         "largest_verification_lookup_bytes": { "type": "integer", "minimum": 0 },
         "hydration_input_bytes": { "type": "integer", "minimum": 0 },
         "largest_hydration_input_bytes": { "type": "integer", "minimum": 0 },
+        "snippet_input_bytes": { "type": "integer", "minimum": 0 },
         "returned_results": { "type": "integer", "minimum": 0 },
         "returned_text_bytes": { "type": "integer", "minimum": 0 },
         "serialized_response_bytes": { "type": "integer", "minimum": 0 },
@@ -231,20 +237,18 @@
     },
     "searchSemanticCoverage": {
       "type": "object",
-      "required": ["candidates_supplied", "candidates_consumed", "candidates_used", "truncated"],
       "properties": {
-        "candidates_supplied": { "type": "integer", "minimum": 0 },
-        "candidates_consumed": { "type": "integer", "minimum": 0 },
-        "candidates_used": { "type": "integer", "minimum": 0 },
-        "truncated": { "type": "boolean" }
+        "indexed_documents": { "type": "integer", "minimum": 0 },
+        "searchable_documents": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },
     "searchSemanticDiagnostics": {
       "type": "object",
       "required": [
-        "attempted", "required", "readiness", "effective_backend", "coverage",
-        "completeness", "positive_text_rule_version"
+        "attempted", "required", "readiness", "effective_backend", "requested_candidates",
+        "eligible_candidates", "candidates_supplied", "candidates_consumed", "candidates_used",
+        "coverage", "completeness", "positive_text_rule_version"
       ],
       "properties": {
         "attempted": { "type": "boolean" },
@@ -252,10 +256,19 @@
         "readiness": { "enum": ["ready", "not_ready", "unsupported", "unavailable"] },
         "effective_backend": { "enum": ["none", "lexical", "semantic", "hybrid"] },
         "backend": { "type": "string" },
+        "requested_candidates": { "type": "integer", "minimum": 0 },
+        "eligible_candidates": { "type": "integer", "minimum": 0 },
+        "candidates_supplied": { "type": "integer", "minimum": 0 },
+        "candidates_consumed": { "type": "integer", "minimum": 0 },
+        "candidates_used": { "type": "integer", "minimum": 0 },
         "coverage": { "$ref": "#/$defs/searchSemanticCoverage" },
         "completeness": { "enum": ["not_attempted", "complete", "partial", "skipped"] },
+        "incompleteness_reasons": { "type": "array", "items": { "type": "string" } },
         "skip_reason": {
-          "enum": ["disabled", "unavailable", "not_ready", "unsupported", "no_lexical_candidates"]
+          "enum": [
+            "disabled", "unavailable", "not_ready", "unsupported",
+            "no_lexical_candidates", "query_shape_not_eligible"
+          ]
         },
         "positive_text_rule_version": { "const": "ctx-search-positive-text-v1" }
       },
@@ -265,7 +278,8 @@
       "type": "object",
       "required": [
         "query_version", "candidate_strategy", "resolved", "consumed", "semantic",
-        "rrf_k", "per_branch_candidate_rows", "clauses_executed", "verification_dropped",
+        "rrf_k", "per_branch_candidate_rows", "requested_result_limit", "result_limit",
+        "max_result_limit", "clauses_executed", "verification_dropped",
         "filter_verification_dropped", "candidate_budget_exhausted", "timed_out", "truncated"
       ],
       "properties": {
@@ -276,6 +290,9 @@
         "semantic": { "$ref": "#/$defs/searchSemanticDiagnostics" },
         "rrf_k": { "type": "integer", "minimum": 1 },
         "per_branch_candidate_rows": { "type": "integer", "minimum": 0 },
+        "requested_result_limit": { "type": "integer", "minimum": 0 },
+        "result_limit": { "type": "integer", "minimum": 0 },
+        "max_result_limit": { "type": "integer", "minimum": 0 },
         "clauses_executed": { "type": "integer", "minimum": 0 },
         "verification_dropped": { "type": "integer", "minimum": 0 },
         "filter_verification_dropped": { "type": "integer", "minimum": 0 },
@@ -288,8 +305,9 @@
     },
     "searchResult": {
       "type": "object",
-      "required": ["query", "results", "query_execution"],
+      "required": ["schema_version", "query", "results", "query_execution"],
       "properties": {
+        "schema_version": { "const": 2 },
         "query": {
           "oneOf": [
             { "$ref": "#/$defs/searchQueryV1" },
