@@ -167,7 +167,10 @@ pub use provider::codex::{
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, custom_history_jsonl_v1_cursor_stream_with_revision,
 };
-pub use provider::importer::import_normalized_provider_captures;
+pub use provider::importer::{
+    import_codex_fresh_new_batch, import_normalized_provider_captures, import_pi_fresh_new_batch,
+    FreshNewImportContext, FreshNewImportOutcome,
+};
 
 mod spool;
 pub use spool::{

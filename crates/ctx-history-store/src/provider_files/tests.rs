@@ -210,6 +210,7 @@ fn catalog_legacy_cursor(store: &Store, source_path: &str) -> CatalogLegacyCurso
 }
 
 include!("tests/checkpoints_and_append.rs");
+include!("tests/fresh_new.rs");
 include!("tests/lifecycle_and_adoption.rs");
 include!("tests/retirement_observations.rs");
 include!("tests/retirement_reconciliation.rs");

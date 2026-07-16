@@ -1,13 +1,33 @@
-use std::collections::HashSet;
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{utc_now, CaptureProvider, HistoryRecord};
 use ctx_history_store::{
-    CatalogImportWork, EventSearchBulkMaintenanceOutcome, ImportPendingReason,
+    CatalogImportWork, CatalogIndexedStatus, CatalogSourceIndexUpdate,
+    EventSearchBulkMaintenanceOutcome, ImportPendingReason, ProviderFileCheckpoint,
+    ProviderFileImportOutcome, ProviderFileInventoryObservation, SourceImportFileIndexUpdate,
     SourceImportFileWork, Store, StoreError,
 };
 use uuid::Uuid;
 
-use crate::{ProviderImportSummary, CODEX_SESSION_SOURCE_FORMAT};
+use crate::provider::adapter::PiSessionJsonlAdapter;
+use crate::provider::codex::events::{
+    codex_session_header, codex_session_line_capture, codex_session_line_timestamp,
+    CodexSessionLineContext, CodexToolCallContexts,
+};
+use crate::provider::codex::session::should_parse_codex_session_line;
+use crate::{
+    provider_jsonl_checkpoint_matches_file, CaptureError, CodexSessionJsonlAdapter,
+    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderCaptureAdapter,
+    ProviderImportSummary, ProviderJsonlAppendCheckpoint, ProviderJsonlReader,
+    ProviderJsonlRecordRead, ProviderJsonlReplacementReason, ProviderJsonlResumeState,
+    ProviderNormalizationResult, Result, CODEX_SESSION_SOURCE_FORMAT,
+};
+
+use super::import_normalized_provider_captures;
 
 pub(crate) const FRESH_NEW_BATCH_MAX_PATHS: usize = 1_024;
 pub(crate) const FRESH_NEW_BATCH_MAX_ACTUAL_UNITS: u64 = 4_096;
@@ -27,7 +47,6 @@ pub(crate) struct FreshNewCandidateEvidence {
     pub(crate) machine_id: String,
     pub(crate) history_record_id: Option<Uuid>,
     pub(crate) inventory_generation: u64,
-    pub(crate) ownership_token: String,
     pub(crate) observation: FreshNewObservation,
 }
 
@@ -86,6 +105,60 @@ impl FreshNewBatchCandidate {
         }
     }
 
+    fn import_revision(&self) -> u32 {
+        match &self.work {
+            FreshNewCandidateWork::Codex(work) => work.session.import_revision,
+            FreshNewCandidateWork::Pi(work) => work.file.import_revision,
+        }
+    }
+
+    fn import_outcome<'a>(
+        &'a self,
+        status: CatalogIndexedStatus,
+        error: Option<&'a str>,
+        event_count: Option<u64>,
+        indexed_at_ms: i64,
+    ) -> ProviderFileImportOutcome<'a> {
+        let observation = match &self.work {
+            FreshNewCandidateWork::Codex(work) => {
+                ProviderFileInventoryObservation::ObservedCatalog {
+                    source_format: &work.session.source_format,
+                    update: CatalogSourceIndexUpdate {
+                        source_root: &work.session.source_root,
+                        source_path: &work.session.source_path,
+                        file_size_bytes: work.session.file_size_bytes,
+                        file_modified_at_ms: work.session.file_modified_at_ms,
+                        import_revision: work.session.import_revision,
+                        inventory_generation: self.evidence.inventory_generation,
+                        file_sha256: None,
+                        event_count,
+                        indexed_at_ms,
+                    },
+                    metadata: &work.session.metadata,
+                }
+            }
+            FreshNewCandidateWork::Pi(work) => ProviderFileInventoryObservation::SourceImport {
+                source_format: &work.file.source_format,
+                update: SourceImportFileIndexUpdate {
+                    source_root: &work.file.source_root,
+                    source_path: &work.file.source_path,
+                    file_size_bytes: work.file.file_size_bytes,
+                    file_modified_at_ms: work.file.file_modified_at_ms,
+                    import_revision: work.file.import_revision,
+                    inventory_generation: self.evidence.inventory_generation,
+                    metadata: &work.file.metadata,
+                    indexed_at_ms,
+                },
+            },
+        };
+        ProviderFileImportOutcome {
+            provider: self.provider(),
+            observation,
+            status,
+            error,
+        }
+    }
+
     fn same_group_scope(&self, other: &Self) -> bool {
         self.kind == other.kind
             && self.provider() == other.provider()
@@ -94,7 +167,6 @@ impl FreshNewBatchCandidate {
             && self.evidence.machine_id == other.evidence.machine_id
             && self.evidence.history_record_id == other.evidence.history_record_id
             && self.evidence.inventory_generation == other.evidence.inventory_generation
-            && self.evidence.ownership_token == other.evidence.ownership_token
     }
 }
 
@@ -104,16 +176,13 @@ pub(crate) enum FreshNewDurableOnlyReason {
     PriorOrActivePublication,
     UnsupportedConcreteSource,
     MissingCurrentGeneration,
-    MissingCurrentOwnership,
     MissingCurrentObservation,
     MissingVisibleIdentity,
     ObservationChanged,
     DuplicateSourcePath,
     EstimatedPathOverLimit,
     ActualBatchOverLimit,
-    EligibilityConflict,
     TransientPreparation(String),
-    AtomicCommitConflict(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,9 +283,6 @@ fn validate_candidate_common(
     if evidence.inventory_generation == 0 {
         return Err(fail(FreshNewDurableOnlyReason::MissingCurrentGeneration));
     }
-    if evidence.ownership_token.trim().is_empty() {
-        return Err(fail(FreshNewDurableOnlyReason::MissingCurrentOwnership));
-    }
     if evidence.observation.token.trim().is_empty() || expected_observation_token.is_none() {
         return Err(fail(FreshNewDurableOnlyReason::MissingCurrentObservation));
     }
@@ -275,7 +341,10 @@ pub(crate) fn plan_fresh_new_batch(
             plan.remainder.push(candidate);
             continue;
         }
-        if plan.group.first().is_some_and(|first| !first.same_group_scope(&candidate))
+        if plan
+            .group
+            .first()
+            .is_some_and(|first| !first.same_group_scope(&candidate))
             || plan.group.len() == FRESH_NEW_BATCH_MAX_PATHS
             || plan
                 .estimated_bytes
@@ -298,8 +367,6 @@ pub(crate) fn plan_fresh_new_batch(
 pub(crate) struct FreshNewPreparedFile<T> {
     pub(crate) candidate: FreshNewBatchCandidate,
     pub(crate) payload: T,
-    pub(crate) actual_units: u64,
-    pub(crate) actual_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -309,21 +376,23 @@ pub(crate) enum FreshNewFilePreparation<T> {
         actual_units: u64,
         actual_bytes: u64,
     },
-    Rejected(ProviderImportSummary),
+    Rejected {
+        summary: ProviderImportSummary,
+        payload: T,
+    },
     DurableOnly(FreshNewDurableOnlyReason),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FreshNewRejected {
+pub(crate) struct FreshNewRejected<T> {
     pub(crate) source_path: String,
     pub(crate) summary: ProviderImportSummary,
+    pub(crate) payload: T,
 }
 
 #[derive(Debug)]
 pub(crate) struct FreshNewPreparedBatch<T> {
     pub(crate) files: Vec<FreshNewPreparedFile<T>>,
-    pub(crate) actual_units: u64,
-    pub(crate) actual_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -331,7 +400,7 @@ pub(crate) struct FreshNewPreparation<T> {
     pub(crate) prepared: Option<FreshNewPreparedBatch<T>>,
     pub(crate) remainder: Vec<FreshNewBatchCandidate>,
     pub(crate) durable_only: Vec<FreshNewDurableOnly>,
-    pub(crate) rejected: Vec<FreshNewRejected>,
+    pub(crate) rejected: Vec<FreshNewRejected<T>>,
 }
 
 pub(crate) fn prepare_fresh_new_batch<T>(
@@ -371,24 +440,20 @@ pub(crate) fn prepare_fresh_new_batch<T>(
                         source_path: candidate.source_path().to_owned(),
                         reason: FreshNewDurableOnlyReason::ActualBatchOverLimit,
                     }));
-                    actual_units = 0;
-                    actual_bytes = 0;
                     break;
                 } else {
                     actual_units = next_units;
                     actual_bytes = next_bytes;
-                    files.push(FreshNewPreparedFile {
-                        candidate,
-                        payload,
-                        actual_units: file_units,
-                        actual_bytes: file_bytes,
-                    });
+                    files.push(FreshNewPreparedFile { candidate, payload });
                 }
             }
-            FreshNewFilePreparation::Rejected(summary) => rejected.push(FreshNewRejected {
-                source_path: candidate.source_path().to_owned(),
-                summary,
-            }),
+            FreshNewFilePreparation::Rejected { summary, payload } => {
+                rejected.push(FreshNewRejected {
+                    source_path: candidate.source_path().to_owned(),
+                    summary,
+                    payload,
+                })
+            }
             FreshNewFilePreparation::DurableOnly(reason) => {
                 durable_only.extend(files.drain(..).map(|file: FreshNewPreparedFile<T>| {
                     FreshNewDurableOnly {
@@ -404,120 +469,658 @@ pub(crate) fn prepare_fresh_new_batch<T>(
                     source_path: candidate.source_path().to_owned(),
                     reason: reason.clone(),
                 }));
-                actual_units = 0;
-                actual_bytes = 0;
                 break;
             }
         }
     }
 
     FreshNewPreparation {
-        prepared: (!files.is_empty()).then_some(FreshNewPreparedBatch {
-            files,
-            actual_units,
-            actual_bytes,
-        }),
+        prepared: (!files.is_empty()).then_some(FreshNewPreparedBatch { files }),
         remainder: plan.remainder,
         durable_only,
         rejected,
     }
 }
 
-pub(crate) struct FreshNewAtomicCommitRequest<'a, T> {
-    pub(crate) batch: &'a FreshNewPreparedBatch<T>,
-    pub(crate) max_paths: usize,
-    pub(crate) max_actual_units: u64,
-    pub(crate) max_bytes_exclusive: u64,
+#[derive(Debug, Clone)]
+/// Shared identity needed to materialize one bounded FreshNew group.
+pub struct FreshNewImportContext {
+    /// Stable local machine identity used by normalized provider sources.
+    pub machine_id: String,
+    /// Source record created in the same transaction as imported material.
+    pub history_record: HistoryRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FreshNewAtomicCommitDisposition {
-    Committed,
-    DurableOnly(FreshNewDurableOnlyReason),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FreshNewAdmission {
+enum FreshNewAdmission {
     Continue,
     StopPending,
     StopAfterMaintenanceError(String),
 }
 
-#[derive(Debug)]
-pub(crate) struct FreshNewBatchExecution {
-    pub(crate) committed_paths: Vec<String>,
-    pub(crate) remainder: Vec<FreshNewBatchCandidate>,
-    pub(crate) durable_only: Vec<FreshNewDurableOnly>,
-    pub(crate) rejected: Vec<FreshNewRejected>,
-    pub(crate) admission: FreshNewAdmission,
+#[derive(Debug, Clone, Default)]
+/// Result of attempting one bounded FreshNew group.
+pub struct FreshNewImportOutcome {
+    /// Import and deterministic-rejection counters for completed paths.
+    pub summary: ProviderImportSummary,
+    /// Paths whose content, status, and append checkpoint committed atomically.
+    pub committed_paths: Vec<String>,
+    /// Paths terminally rejected after deterministic parsing and revalidation.
+    pub rejected_paths: Vec<String>,
+    /// Paths durably redirected to the replacement state machine.
+    pub durable_only_paths: Vec<String>,
+    /// Valid FreshNew paths left for a later scheduler slice.
+    pub remainder_paths: Vec<String>,
+    /// Whether WAL/search maintenance requires admission to stop without spinning.
+    pub maintenance_pending: bool,
+    /// Post-commit maintenance failure, if one occurred.
+    pub maintenance_error: Option<String>,
 }
 
-/// The callback is the store-owned atomic boundary. Before writing, it must
-/// revalidate current generation, ownership, and observations and prove no
-/// prior material, source/material attribution, visible identity, active or
-/// abandoned publication, or cross-source identity collision. It must meter
-/// actual units/bytes, then commit content, projections, inventory status,
-/// indexed revision, observations, and the canonical provider-file append
-/// checkpoint in one transaction. On conflict or error it must roll back and
-/// durably mark every requested path as durable-only before returning
-/// `DurableOnly`.
-pub(crate) fn commit_prepared_fresh_new_batch<T>(
+#[derive(Debug, Clone)]
+struct PreparedFreshNewPayload {
+    normalization: ProviderNormalizationResult,
+    checkpoint: ProviderFileCheckpoint,
+    visible_external_session_ids: Vec<(CaptureProvider, String)>,
+    persist_cursors: bool,
+}
+
+/// Attempts one bounded atomic group of previously unseen Codex transcripts.
+pub fn import_codex_fresh_new_batch(
     store: &mut Store,
-    preparation: FreshNewPreparation<T>,
-    commit: impl FnOnce(
-        &mut Store,
-        FreshNewAtomicCommitRequest<'_, T>,
-    ) -> FreshNewAtomicCommitDisposition,
-) -> FreshNewBatchExecution {
+    work: Vec<CatalogImportWork>,
+    inventory_generation: u64,
+    context: FreshNewImportContext,
+) -> Result<FreshNewImportOutcome> {
+    let candidates = work
+        .into_iter()
+        .map(|work| {
+            let token = work
+                .session
+                .metadata
+                .get("file_observation_token_v1")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let evidence = FreshNewCandidateEvidence {
+                machine_id: context.machine_id.clone(),
+                history_record_id: Some(context.history_record.id),
+                inventory_generation,
+                observation: FreshNewObservation {
+                    file_size_bytes: work.session.file_size_bytes,
+                    file_modified_at_ms: work.session.file_modified_at_ms,
+                    token,
+                },
+            };
+            let fallback = FreshNewBatchCandidate {
+                kind: FreshNewCandidateKind::CodexCatalog,
+                work: FreshNewCandidateWork::Codex(work.clone()),
+                evidence: evidence.clone(),
+            };
+            (
+                fallback,
+                construct_codex_fresh_new_candidate(work, evidence),
+            )
+        })
+        .collect::<Vec<_>>();
+    import_fresh_new_candidates(store, candidates, context)
+}
+
+/// Attempts one bounded atomic group of previously unseen Pi transcripts.
+pub fn import_pi_fresh_new_batch(
+    store: &mut Store,
+    work: Vec<SourceImportFileWork>,
+    inventory_generation: u64,
+    context: FreshNewImportContext,
+) -> Result<FreshNewImportOutcome> {
+    let candidates = work
+        .into_iter()
+        .map(|work| {
+            let token = work
+                .file
+                .metadata
+                .get("change_token_v1")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let evidence = FreshNewCandidateEvidence {
+                machine_id: context.machine_id.clone(),
+                history_record_id: Some(context.history_record.id),
+                inventory_generation,
+                observation: FreshNewObservation {
+                    file_size_bytes: work.file.file_size_bytes,
+                    file_modified_at_ms: work.file.file_modified_at_ms,
+                    token,
+                },
+            };
+            let fallback = FreshNewBatchCandidate {
+                kind: FreshNewCandidateKind::PiOrdinaryFile,
+                work: FreshNewCandidateWork::Pi(work.clone()),
+                evidence: evidence.clone(),
+            };
+            (fallback, construct_pi_fresh_new_candidate(work, evidence))
+        })
+        .collect::<Vec<_>>();
+    import_fresh_new_candidates(store, candidates, context)
+}
+
+fn import_fresh_new_candidates(
+    store: &mut Store,
+    candidates: Vec<(FreshNewBatchCandidate, FreshNewCandidateResult)>,
+    context: FreshNewImportContext,
+) -> Result<FreshNewImportOutcome> {
+    let mut candidate_by_path = BTreeMap::new();
+    for (candidate, _) in &candidates {
+        candidate_by_path.insert(candidate.source_path().to_owned(), candidate.clone());
+    }
+    let plan = plan_fresh_new_batch(candidates.into_iter().map(|(_, result)| result));
+    let preparation = prepare_fresh_new_batch(plan, prepare_fresh_new_candidate);
     let FreshNewPreparation {
         prepared,
         remainder,
-        mut durable_only,
+        durable_only,
         rejected,
     } = preparation;
-    let Some(batch) = prepared else {
-        return FreshNewBatchExecution {
-            committed_paths: Vec::new(),
-            remainder,
-            durable_only,
-            rejected,
-            admission: FreshNewAdmission::Continue,
-        };
+
+    let mut outcome = FreshNewImportOutcome {
+        remainder_paths: remainder
+            .iter()
+            .map(|candidate| candidate.source_path().to_owned())
+            .collect(),
+        durable_only_paths: durable_only
+            .iter()
+            .map(|route| route.source_path.clone())
+            .collect(),
+        ..FreshNewImportOutcome::default()
     };
-    let paths = batch
+    defer_fresh_new_paths(store, &candidate_by_path, &outcome.durable_only_paths)?;
+
+    if !rejected.is_empty() {
+        let rejected_paths = rejected
+            .iter()
+            .map(|rejection| rejection.source_path.clone())
+            .collect::<Vec<_>>();
+        let rejected_candidates = candidates_for_paths(&candidate_by_path, &rejected_paths)?;
+        let errors = rejected
+            .iter()
+            .map(|rejection| summary_failure(&rejection.summary))
+            .collect::<Vec<_>>();
+        let rejected_outcomes = rejected_candidates
+            .iter()
+            .zip(&errors)
+            .map(|(candidate, error)| {
+                candidate.import_outcome(
+                    CatalogIndexedStatus::Rejected,
+                    error.as_deref(),
+                    None,
+                    utc_now().timestamp_millis(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let rejection_stability_paths = rejected
+            .iter()
+            .map(|rejection| {
+                let candidate = candidate_by_path.get(&rejection.source_path).ok_or(
+                    CaptureError::SystemInvariant("FreshNew rejection lost its source candidate"),
+                )?;
+                Ok((
+                    PathBuf::from(&rejection.source_path),
+                    candidate.evidence.observation.clone(),
+                    rejection.payload.checkpoint.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if store.reject_fresh_new_atomic_batch::<CaptureError>(&rejected_outcomes, || {
+            fresh_new_sources_are_stable(&rejection_stability_paths)
+        })? {
+            outcome.rejected_paths = rejected_paths;
+            for rejection in rejected {
+                outcome.summary.merge_from(rejection.summary);
+            }
+        } else {
+            outcome.durable_only_paths.extend(rejected_paths);
+        }
+    }
+
+    let Some(batch) = prepared else {
+        return Ok(outcome);
+    };
+    let batch_paths = batch
         .files
         .iter()
         .map(|file| file.candidate.source_path().to_owned())
         .collect::<Vec<_>>();
-    let disposition = commit(
-        store,
-        FreshNewAtomicCommitRequest {
-            batch: &batch,
-            max_paths: FRESH_NEW_BATCH_MAX_PATHS,
-            max_actual_units: FRESH_NEW_BATCH_MAX_ACTUAL_UNITS,
-            max_bytes_exclusive: FRESH_NEW_BATCH_MAX_BYTES,
+    let statuses = batch
+        .files
+        .iter()
+        .map(|file| normalization_status(&file.payload.normalization))
+        .collect::<Vec<_>>();
+    let errors = batch
+        .files
+        .iter()
+        .map(|file| summary_failure(&file.payload.normalization.summary))
+        .collect::<Vec<_>>();
+    let event_counts = batch
+        .files
+        .iter()
+        .map(|file| {
+            u64::try_from(
+                file.payload
+                    .normalization
+                    .captures
+                    .iter()
+                    .filter(|(_, capture)| capture.event.is_some())
+                    .count(),
+            )
+            .unwrap_or(u64::MAX)
+        })
+        .collect::<Vec<_>>();
+    let indexed_at_ms = utc_now().timestamp_millis();
+    let store_outcomes = batch
+        .files
+        .iter()
+        .zip(&statuses)
+        .zip(&errors)
+        .zip(&event_counts)
+        .map(|(((file, status), error), event_count)| {
+            file.candidate.import_outcome(
+                *status,
+                error.as_deref(),
+                Some(*event_count),
+                indexed_at_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    let checkpoints = batch
+        .files
+        .iter()
+        .map(|file| file.payload.checkpoint.clone())
+        .collect::<Vec<_>>();
+    let visible_ids = batch
+        .files
+        .iter()
+        .flat_map(|file| file.payload.visible_external_session_ids.clone())
+        .collect::<Vec<_>>();
+    let payloads = batch
+        .files
+        .iter()
+        .map(|file| file.payload.clone())
+        .collect::<Vec<_>>();
+    let stability_paths = batch
+        .files
+        .iter()
+        .map(|file| {
+            (
+                PathBuf::from(file.candidate.source_path()),
+                file.candidate.evidence.observation.clone(),
+                file.payload.checkpoint.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let history_record = context.history_record;
+    let committed = store.commit_fresh_new_atomic_batch::<ProviderImportSummary, CaptureError>(
+        &store_outcomes,
+        &checkpoints,
+        &visible_ids,
+        || fresh_new_sources_are_stable(&stability_paths),
+        |store| {
+            store.upsert_record(&history_record)?;
+            let mut summary = ProviderImportSummary::default();
+            for payload in payloads {
+                summary.merge_from(import_normalized_provider_captures(
+                    store,
+                    payload.normalization,
+                    NormalizedProviderImportOptions {
+                        history_record_id: Some(history_record.id),
+                        persist_cursors: payload.persist_cursors,
+                        wrap_transaction: false,
+                        fast_event_inserts: true,
+                    },
+                )?);
+            }
+            Ok(summary)
         },
-    );
-    let (committed_paths, admission) = match disposition {
-        FreshNewAtomicCommitDisposition::Committed => {
-            let admission = maintain_fresh_new_group_admission(store);
-            (paths, admission)
+    )?;
+    let Some(summary) = committed else {
+        outcome.durable_only_paths.extend(batch_paths);
+        return Ok(outcome);
+    };
+    outcome.summary.merge_from(summary);
+    outcome.committed_paths = batch_paths;
+    match maintain_fresh_new_group_admission(store) {
+        FreshNewAdmission::Continue => {}
+        FreshNewAdmission::StopPending => outcome.maintenance_pending = true,
+        FreshNewAdmission::StopAfterMaintenanceError(error) => {
+            outcome.maintenance_error = Some(error)
         }
-        FreshNewAtomicCommitDisposition::DurableOnly(reason) => {
-            durable_only.extend(paths.into_iter().map(|source_path| FreshNewDurableOnly {
-                source_path,
-                reason: reason.clone(),
-            }));
-            (Vec::new(), FreshNewAdmission::Continue)
+    }
+    Ok(outcome)
+}
+
+fn prepare_fresh_new_candidate(
+    candidate: &FreshNewBatchCandidate,
+) -> FreshNewFilePreparation<PreparedFreshNewPayload> {
+    match prepare_fresh_new_candidate_inner(candidate) {
+        Ok(payload)
+            if normalization_status(&payload.normalization) == CatalogIndexedStatus::Rejected =>
+        {
+            FreshNewFilePreparation::Rejected {
+                summary: payload.normalization.summary.clone(),
+                payload,
+            }
+        }
+        Ok(payload) => match normalization_actual_bytes(&payload.normalization) {
+            Ok(actual_bytes) => FreshNewFilePreparation::Prepared {
+                actual_units: u64::try_from(
+                    payload.normalization.captures.len()
+                        + payload.normalization.files_touched.len(),
+                )
+                .unwrap_or(u64::MAX)
+                .max(1),
+                actual_bytes,
+                payload,
+            },
+            Err(error) => FreshNewFilePreparation::DurableOnly(
+                FreshNewDurableOnlyReason::TransientPreparation(error.to_string()),
+            ),
+        },
+        Err(FreshNewPreparationError::DurableOnly(reason)) => {
+            FreshNewFilePreparation::DurableOnly(reason)
+        }
+        Err(FreshNewPreparationError::Capture(error)) => FreshNewFilePreparation::DurableOnly(
+            FreshNewDurableOnlyReason::TransientPreparation(error.to_string()),
+        ),
+    }
+}
+
+fn normalization_actual_bytes(normalization: &ProviderNormalizationResult) -> Result<u64> {
+    normalization
+        .captures
+        .iter()
+        .map(|(_, capture)| serde_json::to_vec(capture))
+        .chain(
+            normalization
+                .files_touched
+                .iter()
+                .map(|(_, file)| serde_json::to_vec(file)),
+        )
+        .try_fold(0_u64, |total, encoded| {
+            let bytes = u64::try_from(encoded?.len()).unwrap_or(u64::MAX);
+            Ok(total.saturating_add(bytes))
+        })
+}
+
+enum FreshNewPreparationError {
+    DurableOnly(FreshNewDurableOnlyReason),
+    Capture(CaptureError),
+}
+
+impl From<CaptureError> for FreshNewPreparationError {
+    fn from(error: CaptureError) -> Self {
+        Self::Capture(error)
+    }
+}
+
+fn prepare_fresh_new_candidate_inner(
+    candidate: &FreshNewBatchCandidate,
+) -> std::result::Result<PreparedFreshNewPayload, FreshNewPreparationError> {
+    let path = Path::new(candidate.source_path());
+    let context = ProviderAdapterContext {
+        machine_id: candidate.evidence.machine_id.clone(),
+        source_path: Some(path.to_path_buf()),
+        source_root: (candidate.kind == FreshNewCandidateKind::CodexCatalog)
+            .then(|| PathBuf::from(candidate.source_root())),
+        imported_at: utc_now(),
+    };
+    let (normalization, checkpoint, persist_cursors) = match candidate.kind {
+        FreshNewCandidateKind::CodexCatalog => {
+            let normalization = CodexSessionJsonlAdapter.normalize_path(path, &context)?;
+            let checkpoint = codex_fresh_new_checkpoint(path, &context)?;
+            (normalization, checkpoint, false)
+        }
+        FreshNewCandidateKind::PiOrdinaryFile => {
+            let normalization = PiSessionJsonlAdapter.normalize_path(path, &context)?;
+            let checkpoint = ordinary_fresh_new_checkpoint(path)?;
+            (normalization, checkpoint, true)
         }
     };
-    FreshNewBatchExecution {
-        committed_paths,
-        remainder,
-        durable_only,
-        rejected,
-        admission,
+    let checkpoint = checkpoint.map_err(|reason| {
+        FreshNewPreparationError::DurableOnly(FreshNewDurableOnlyReason::TransientPreparation(
+            format!("checkpoint certification required durable replacement: {reason:?}"),
+        ))
+    })?;
+    let visible_external_session_ids = normalization
+        .captures
+        .iter()
+        .map(|(_, capture)| {
+            (
+                capture.provider,
+                capture.session.provider_session_id.clone(),
+            )
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let FreshNewCandidateWork::Codex(work) = &candidate.work {
+        let expected = work
+            .session
+            .external_session_id
+            .as_deref()
+            .unwrap_or_default();
+        if !visible_external_session_ids
+            .iter()
+            .any(|(provider, identity)| *provider == CaptureProvider::Codex && identity == expected)
+        {
+            return Err(FreshNewPreparationError::DurableOnly(
+                FreshNewDurableOnlyReason::MissingVisibleIdentity,
+            ));
+        }
     }
+    Ok(PreparedFreshNewPayload {
+        normalization,
+        checkpoint: store_checkpoint_from_capture(candidate, &checkpoint)?,
+        visible_external_session_ids,
+        persist_cursors,
+    })
+}
+
+fn ordinary_fresh_new_checkpoint(
+    path: &Path,
+) -> Result<std::result::Result<ProviderJsonlAppendCheckpoint, ProviderJsonlReplacementReason>> {
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    let mut line = Vec::new();
+    loop {
+        if matches!(
+            reader.read_record(&mut line)?,
+            ProviderJsonlRecordRead::Eof | ProviderJsonlRecordRead::DeferredPartial { .. }
+        ) {
+            break;
+        }
+    }
+    reader.safe_checkpoint()
+}
+
+fn codex_fresh_new_checkpoint(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<std::result::Result<ProviderJsonlAppendCheckpoint, ProviderJsonlReplacementReason>> {
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    let mut header = None;
+    let mut call_contexts = CodexToolCallContexts::default();
+    let mut line = Vec::new();
+    loop {
+        let line_number = match reader.read_record(&mut line)? {
+            ProviderJsonlRecordRead::Eof | ProviderJsonlRecordRead::DeferredPartial { .. } => break,
+            ProviderJsonlRecordRead::Oversized { .. } => continue,
+            ProviderJsonlRecordRead::Record { line_number, .. } => {
+                usize::try_from(line_number).unwrap_or(usize::MAX)
+            }
+        };
+        if line.iter().all(u8::is_ascii_whitespace) || !should_parse_codex_session_line(&line) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("session_meta") {
+            if let Ok(parsed) = codex_session_header(value) {
+                call_contexts.clear();
+                header = Some(parsed);
+            }
+            continue;
+        }
+        let Some(header) = header.as_ref() else {
+            continue;
+        };
+        let Ok(occurred_at) = codex_session_line_timestamp(&value, header.timestamp) else {
+            continue;
+        };
+        let raw_source_path = context
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string());
+        codex_session_line_capture(
+            header,
+            &value,
+            &mut call_contexts,
+            CodexSessionLineContext {
+                line_number,
+                occurred_at,
+                raw_source_path: raw_source_path.as_deref(),
+                source_root: context.source_root_display().as_deref(),
+                source_format: CODEX_SESSION_SOURCE_FORMAT,
+            },
+        );
+    }
+    reader.safe_checkpoint().map(|checkpoint| {
+        checkpoint.map(|mut checkpoint| {
+            checkpoint.resume_state = Some(ProviderJsonlResumeState::CodexSession(
+                call_contexts.resume_state(),
+            ));
+            checkpoint
+        })
+    })
+}
+
+fn store_checkpoint_from_capture(
+    candidate: &FreshNewBatchCandidate,
+    checkpoint: &ProviderJsonlAppendCheckpoint,
+) -> Result<ProviderFileCheckpoint> {
+    let resume_state = checkpoint
+        .resume_state
+        .as_ref()
+        .map(ProviderJsonlResumeState::encode_persisted_json)
+        .transpose()?
+        .map(String::into_bytes);
+    Ok(ProviderFileCheckpoint {
+        provider: candidate.provider(),
+        source_format: candidate.source_format().to_owned(),
+        source_root: candidate.source_root().to_owned(),
+        source_path: candidate.source_path().to_owned(),
+        import_revision: candidate.import_revision(),
+        checkpoint_version: checkpoint.version,
+        stable_file_identity: checkpoint.stable_identity.to_storage_key(),
+        committed_byte_offset: checkpoint.committed_offset,
+        committed_complete_line_count: checkpoint.complete_line_count,
+        head_sha256: checkpoint.head_sha256.clone(),
+        boundary_sha256: checkpoint.boundary_sha256.clone(),
+        resume_state,
+        updated_at_ms: utc_now().timestamp_millis(),
+    })
+}
+
+fn fresh_new_sources_are_stable(
+    sources: &[(PathBuf, FreshNewObservation, ProviderFileCheckpoint)],
+) -> Result<bool> {
+    for (path, observation, checkpoint) in sources {
+        let metadata = fs::metadata(path)?;
+        let modified_at_ms = metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?
+            .as_millis();
+        if metadata.len() != observation.file_size_bytes
+            || i64::try_from(modified_at_ms).unwrap_or(i64::MAX) != observation.file_modified_at_ms
+        {
+            return Ok(false);
+        }
+        let capture_checkpoint = ProviderJsonlAppendCheckpoint {
+            version: checkpoint.checkpoint_version,
+            stable_identity: crate::ProviderFileStableIdentity::from_storage_key(
+                &checkpoint.stable_file_identity,
+            )
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload("fresh-new stable identity is invalid".to_owned())
+            })?,
+            committed_offset: checkpoint.committed_byte_offset,
+            complete_line_count: checkpoint.committed_complete_line_count,
+            head_sha256: checkpoint.head_sha256.clone(),
+            boundary_sha256: checkpoint.boundary_sha256.clone(),
+            resume_state: None,
+        };
+        if !provider_jsonl_checkpoint_matches_file(path, &capture_checkpoint)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn normalization_status(normalization: &ProviderNormalizationResult) -> CatalogIndexedStatus {
+    if normalization.summary.failed == 0 {
+        CatalogIndexedStatus::Indexed
+    } else if !normalization.captures.is_empty() || !normalization.files_touched.is_empty() {
+        CatalogIndexedStatus::CompletedWithRejections
+    } else {
+        CatalogIndexedStatus::Rejected
+    }
+}
+
+fn summary_failure(summary: &ProviderImportSummary) -> Option<String> {
+    summary.failures.first().map(|failure| {
+        if failure.line == 0 {
+            failure.error.clone()
+        } else {
+            format!("line {}: {}", failure.line, failure.error)
+        }
+    })
+}
+
+fn candidates_for_paths<'a>(
+    candidates: &'a BTreeMap<String, FreshNewBatchCandidate>,
+    paths: &[String],
+) -> Result<Vec<&'a FreshNewBatchCandidate>> {
+    paths
+        .iter()
+        .map(|path| {
+            candidates.get(path).ok_or(CaptureError::SystemInvariant(
+                "FreshNew preparation lost its source candidate",
+            ))
+        })
+        .collect()
+}
+
+fn defer_fresh_new_paths(
+    store: &mut Store,
+    candidates: &BTreeMap<String, FreshNewBatchCandidate>,
+    paths: &[String],
+) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let candidates = candidates_for_paths(candidates, paths)?;
+    let outcomes = candidates
+        .iter()
+        .map(|candidate| {
+            candidate.import_outcome(
+                CatalogIndexedStatus::Failed,
+                Some("FreshNew eligibility requires durable replacement"),
+                None,
+                utc_now().timestamp_millis(),
+            )
+        })
+        .collect::<Vec<_>>();
+    store.defer_fresh_new_atomic_batch(&outcomes)?;
+    Ok(())
 }
 
 fn maintain_fresh_new_group_admission(store: &Store) -> FreshNewAdmission {
@@ -547,7 +1150,6 @@ mod tests {
             machine_id: "machine".to_owned(),
             history_record_id: None,
             inventory_generation: 7,
-            ownership_token: "owner-7".to_owned(),
             observation: FreshNewObservation {
                 file_size_bytes: 10,
                 file_modified_at_ms: 20,
@@ -556,7 +1158,11 @@ mod tests {
         }
     }
 
-    fn codex(path: &str, reason: ImportPendingReason, estimated_bytes: u64) -> FreshNewCandidateResult {
+    fn codex(
+        path: &str,
+        reason: ImportPendingReason,
+        estimated_bytes: u64,
+    ) -> FreshNewCandidateResult {
         construct_codex_fresh_new_candidate(
             CatalogImportWork {
                 session: CatalogSession {
@@ -656,16 +1262,15 @@ mod tests {
 
     #[test]
     fn deterministic_rejection_is_not_requeued() {
-        let plan = plan_fresh_new_batch([codex(
-            "malformed.jsonl",
-            ImportPendingReason::FreshNew,
-            10,
-        )]);
+        let plan =
+            plan_fresh_new_batch([codex("malformed.jsonl", ImportPendingReason::FreshNew, 10)]);
         let mut summary = ProviderImportSummary::default();
         summary.failed = 1;
-        let prepared: FreshNewPreparation<()> = prepare_fresh_new_batch(plan, |_| {
-            FreshNewFilePreparation::Rejected(summary.clone())
-        });
+        let prepared: FreshNewPreparation<()> =
+            prepare_fresh_new_batch(plan, |_| FreshNewFilePreparation::Rejected {
+                summary: summary.clone(),
+                payload: (),
+            });
         assert!(prepared.prepared.is_none());
         assert!(prepared.durable_only.is_empty());
         assert_eq!(prepared.rejected.len(), 1);
@@ -678,8 +1283,8 @@ mod tests {
             codex("a.jsonl", ImportPendingReason::FreshNew, 10),
             codex("b.jsonl", ImportPendingReason::FreshNew, 10),
         ]);
-        let prepared = prepare_fresh_new_batch(plan, |candidate| {
-            FreshNewFilePreparation::Prepared {
+        let prepared =
+            prepare_fresh_new_batch(plan, |candidate| FreshNewFilePreparation::Prepared {
                 payload: (),
                 actual_units: if candidate.source_path() == "a.jsonl" {
                     FRESH_NEW_BATCH_MAX_ACTUAL_UNITS
@@ -687,8 +1292,7 @@ mod tests {
                     1
                 },
                 actual_bytes: 10,
-            }
-        });
+            });
         assert!(prepared.prepared.is_none());
         assert_eq!(prepared.durable_only.len(), 2);
         assert!(prepared
@@ -706,9 +1310,7 @@ mod tests {
         ]);
         let prepared = prepare_fresh_new_batch(plan, |candidate| {
             if candidate.source_path() == "b.jsonl" {
-                FreshNewFilePreparation::DurableOnly(
-                    FreshNewDurableOnlyReason::ObservationChanged,
-                )
+                FreshNewFilePreparation::DurableOnly(FreshNewDurableOnlyReason::ObservationChanged)
             } else {
                 FreshNewFilePreparation::Prepared {
                     payload: (),
@@ -723,36 +1325,5 @@ mod tests {
             .durable_only
             .iter()
             .all(|route| route.reason == FreshNewDurableOnlyReason::ObservationChanged));
-    }
-
-    #[test]
-    fn commit_callback_receives_runtime_limits_and_returns_admission() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut store = Store::open(temp.path().join("history.sqlite")).unwrap();
-        let plan = plan_fresh_new_batch([codex(
-            "a.jsonl",
-            ImportPendingReason::FreshNew,
-            10,
-        )]);
-        let prepared = prepare_fresh_new_batch(plan, |_| FreshNewFilePreparation::Prepared {
-            payload: "normalized",
-            actual_units: 2,
-            actual_bytes: 20,
-        });
-
-        let execution = commit_prepared_fresh_new_batch(&mut store, prepared, |_, request| {
-            assert_eq!(request.batch.files.len(), 1);
-            assert_eq!(request.batch.files[0].payload, "normalized");
-            assert_eq!(request.max_paths, FRESH_NEW_BATCH_MAX_PATHS);
-            assert_eq!(
-                request.max_actual_units,
-                FRESH_NEW_BATCH_MAX_ACTUAL_UNITS
-            );
-            assert_eq!(request.max_bytes_exclusive, FRESH_NEW_BATCH_MAX_BYTES);
-            FreshNewAtomicCommitDisposition::Committed
-        });
-
-        assert_eq!(execution.committed_paths, ["a.jsonl"]);
-        assert_eq!(execution.admission, FreshNewAdmission::Continue);
     }
 }
