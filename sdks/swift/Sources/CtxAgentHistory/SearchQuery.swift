@@ -1,6 +1,7 @@
 import Foundation
 
 public let CTX_SEARCH_V1_VERSION = "ctx-search-v1"
+public let CTX_SEARCH_MAX_RESULTS = 200
 
 public enum SearchClause: Codable, Equatable, Sendable {
     case all(String)
@@ -42,6 +43,7 @@ public struct SearchQueryV1: Codable, Equatable, Sendable {
     public static let maxClauseBytes = 1_024
     public static let maxTotalClauseBytes = 8_192
     public static let maxJSONBytes = 64 * 1_024
+    public static let maxAnalyzedTokensPerClause = 32
     public static let minLiteralBytes = 3
     public static let maxLiteralBytes = 256
 
@@ -57,12 +59,25 @@ public struct SearchQueryV1: Codable, Equatable, Sendable {
         mustNot: [SearchClause] = []
     ) throws {
         self.version = version; self.any = any; self.must = must; self.mustNot = mustNot
-        try validate()
+        self = try canonicalized()
     }
 
     public static func all(_ value: String) throws -> SearchQueryV1 { try SearchQueryV1(any: [.all(value)]) }
 
     public func validate() throws {
+        _ = try canonicalized()
+    }
+
+    private func canonicalized() throws -> SearchQueryV1 {
+        var canonical = self
+        canonical.any = canonicalizeSearchClauses(any)
+        canonical.must = canonicalizeSearchClauses(must)
+        canonical.mustNot = canonicalizeSearchClauses(mustNot)
+        try canonical.validateCanonical()
+        return canonical
+    }
+
+    private func validateCanonical() throws {
         guard version == CTX_SEARCH_V1_VERSION else { throw invalid("search query version must be ctx-search-v1") }
         guard !any.isEmpty || !must.isEmpty else { throw invalid("search query needs a positive any or must clause") }
         let placements = [("any", any), ("must", must), ("must_not", mustNot)]
@@ -72,11 +87,16 @@ public struct SearchQueryV1: Codable, Equatable, Sendable {
                 if placement != "any", clause.matcher == "semantic" { throw invalid("semantic clauses are allowed only in any") }
                 if clause.matcher == "semantic" { semanticCount += 1 }
                 guard semanticCount <= 1 else { throw invalid("search query allows at most one semantic clause in any") }
-                guard !clause.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw invalid("search clause value must be a non-empty string") }
                 let bytes = clause.value.lengthOfBytes(using: .utf8)
+                guard bytes > 0 else { throw invalid("search clause cannot be empty") }
                 guard bytes <= Self.maxClauseBytes else { throw invalid("search clause exceeds the 1024-byte limit") }
                 if clause.matcher == "literal", !(Self.minLiteralBytes ... Self.maxLiteralBytes).contains(bytes) {
                     throw invalid("literal search clause must be between 3 and 256 bytes")
+                }
+                let analyzedTokens = searchAnalyzedTokenCount(clause.value)
+                guard analyzedTokens > 0 else { throw invalid("search clause has no searchable tokens") }
+                guard analyzedTokens <= Self.maxAnalyzedTokensPerClause else {
+                    throw invalid("search clause exceeds the 32 analyzed-token limit")
                 }
                 count += 1; totalBytes += bytes
             }
@@ -86,7 +106,6 @@ public struct SearchQueryV1: Codable, Equatable, Sendable {
     }
 
     public func jsonString() throws -> String {
-        try validate()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(self)
@@ -97,23 +116,30 @@ public struct SearchQueryV1: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey { case version, any, must; case mustNot = "must_not" }
 
     public func encode(to encoder: Encoder) throws {
-        try validate()
+        let canonical = try canonicalized()
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(version, forKey: .version)
-        if !any.isEmpty { try container.encode(any, forKey: .any) }
-        if !must.isEmpty { try container.encode(must, forKey: .must) }
-        if !mustNot.isEmpty { try container.encode(mustNot, forKey: .mustNot) }
+        try container.encode(canonical.version, forKey: .version)
+        if !canonical.any.isEmpty { try container.encode(canonical.any, forKey: .any) }
+        if !canonical.must.isEmpty { try container.encode(canonical.must, forKey: .must) }
+        if !canonical.mustNot.isEmpty { try container.encode(canonical.mustNot, forKey: .mustNot) }
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: SearchCodingKey.self)
         let allowed = Set(["version", "any", "must", "must_not"])
         guard let unknown = container.allKeys.first(where: { !allowed.contains($0.stringValue) }) else {
-            version = try container.decode(String.self, forKey: SearchCodingKey("version"))
-            any = try container.decodeIfPresent([SearchClause].self, forKey: SearchCodingKey("any")) ?? []
-            must = try container.decodeIfPresent([SearchClause].self, forKey: SearchCodingKey("must")) ?? []
-            mustNot = try container.decodeIfPresent([SearchClause].self, forKey: SearchCodingKey("must_not")) ?? []
-            try validate()
+            do {
+                self = try SearchQueryV1(
+                    version: container.decode(String.self, forKey: SearchCodingKey("version")),
+                    any: container.decodeIfPresent([SearchClause].self, forKey: SearchCodingKey("any")) ?? [],
+                    must: container.decodeIfPresent([SearchClause].self, forKey: SearchCodingKey("must")) ?? [],
+                    mustNot: container.decodeIfPresent([SearchClause].self, forKey: SearchCodingKey("must_not")) ?? []
+                )
+            } catch {
+                throw DecodingError.dataCorrupted(
+                    .init(codingPath: decoder.codingPath, debugDescription: "invalid ctx-search-v1 query: \(error)")
+                )
+            }
             return
         }
         throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unknown search query field \(unknown.stringValue)"))
@@ -129,6 +155,83 @@ private struct SearchCodingKey: CodingKey {
 
 private func invalid(_ message: String) -> CtxAgentHistorySDKError {
     CtxAgentHistorySDKError(code: .invalidRequest, message: message)
+}
+
+private func canonicalizeSearchClauses(_ clauses: [SearchClause]) -> [SearchClause] {
+    var canonical: [SearchClause] = []
+    for clause in clauses {
+        let value = canonicalSearchValue(clause.value, preserveInteriorWhitespace: clause.matcher == "literal")
+        let normalized: SearchClause
+        switch clause {
+        case .all: normalized = .all(value)
+        case .phrase: normalized = .phrase(value)
+        case .literal: normalized = .literal(value)
+        case .semantic: normalized = .semantic(value)
+        }
+        if !canonical.contains(normalized) {
+            canonical.append(normalized)
+        }
+    }
+    return canonical
+}
+
+private func canonicalSearchValue(_ value: String, preserveInteriorWhitespace: Bool) -> String {
+    let scalars = value.unicodeScalars
+    guard let first = scalars.firstIndex(where: { !isSearchWhitespace($0.value) }),
+          let last = scalars.lastIndex(where: { !isSearchWhitespace($0.value) })
+    else {
+        return ""
+    }
+    let trimmed = String(scalars[first ... last])
+    guard !preserveInteriorWhitespace else {
+        return trimmed
+    }
+    return trimmed.unicodeScalars
+        .split(whereSeparator: { isSearchWhitespace($0.value) })
+        .map(String.init)
+        .joined(separator: " ")
+}
+
+private func searchAnalyzedTokenCount(_ value: String) -> Int {
+    var count = 0
+    var inToken = false
+    for scalar in value.unicodeScalars {
+        let continuesToken = CharacterSet.alphanumerics.contains(scalar)
+            || (inToken && isSearchContinuationMark(scalar.value))
+        if continuesToken {
+            if !inToken {
+                count += 1
+            }
+            inToken = true
+        } else {
+            inToken = false
+        }
+    }
+    return count
+}
+
+private func isSearchWhitespace(_ scalar: UInt32) -> Bool {
+    (0x0009 ... 0x000D).contains(scalar)
+        || scalar == 0x0020
+        || scalar == 0x0085
+        || scalar == 0x00A0
+        || scalar == 0x1680
+        || (0x2000 ... 0x200A).contains(scalar)
+        || scalar == 0x2028
+        || scalar == 0x2029
+        || scalar == 0x202F
+        || scalar == 0x205F
+        || scalar == 0x3000
+}
+
+private func isSearchContinuationMark(_ scalar: UInt32) -> Bool {
+    (0x0300 ... 0x036F).contains(scalar)
+        || (0x1AB0 ... 0x1AFF).contains(scalar)
+        || (0x1DC0 ... 0x1DFF).contains(scalar)
+        || (0x20D0 ... 0x20FF).contains(scalar)
+        || (0xFE20 ... 0xFE2F).contains(scalar)
+        || scalar == 0x200C
+        || scalar == 0x200D
 }
 
 public struct SearchExecutionLimits: Codable, Equatable, Sendable {

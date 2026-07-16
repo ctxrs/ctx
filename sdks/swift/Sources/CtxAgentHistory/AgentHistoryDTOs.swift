@@ -169,13 +169,19 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
         guard schemaVersion == 2 else {
             throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "unsupported search schema version")
         }
+        guard container.contains(.query) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.query,
+                .init(codingPath: decoder.codingPath, debugDescription: "schema-v2 search result requires query")
+            )
+        }
         query = try container.decodeIfPresent(SearchQueryV1.self, forKey: .query)
         queryExecution = try container.decode(SearchQueryExecution.self, forKey: .queryExecution)
         filters = try container.decodeIfPresent(JSONValue.self, forKey: .filters)
         freshness = try container.decodeIfPresent(AgentHistoryFreshness.self, forKey: .freshness)
         generatedAt = try container.decodeIfPresent(String.self, forKey: .generatedAt)
         retrieval = try container.decodeIfPresent(JSONValue.self, forKey: .retrieval)
-        results = try container.decodeIfPresent([AgentHistorySearchHit].self, forKey: .results) ?? []
+        results = try container.decode([AgentHistorySearchHit].self, forKey: .results)
         pagination = try container.decodeIfPresent(AgentHistoryPagination.self, forKey: .pagination)
         truncation = try container.decodeIfPresent(AgentHistoryTruncation.self, forKey: .truncation)
     }
@@ -276,7 +282,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         snippet = try container.decodeIfPresent(String.self, forKey: .snippet)
         rank = try container.decodeIfPresent(Double.self, forKey: .rank)
         resultType = try container.decodeIfPresent(String.self, forKey: .resultType)
-        resultScope = try container.decodeIfPresent(String.self, forKey: .resultScope) ?? "unknown"
+        resultScope = try container.decode(String.self, forKey: .resultScope)
         provider = try container.decodeIfPresent(String.self, forKey: .provider)
         timestamp = try container.decodeIfPresent(String.self, forKey: .timestamp)
         cwd = try container.decodeIfPresent(String.self, forKey: .cwd)

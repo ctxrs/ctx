@@ -80,6 +80,10 @@ public struct AgentHistoryClient: Sendable {
         }
         appendOption(&arguments, "--backend", options.backend)
         appendOption(&arguments, "--provider", options.provider)
+        appendOption(&arguments, "--history-source", options.historySource)
+        appendOption(&arguments, "--provider-key", options.providerKey)
+        appendOption(&arguments, "--source-id", options.sourceId)
+        appendOption(&arguments, "--source-format", options.sourceFormat)
         appendOption(&arguments, "--workspace", options.workspace)
         appendOption(&arguments, "--since", options.since)
         if options.primaryOnly {
@@ -293,6 +297,12 @@ private func appendOption(_ arguments: inout [String], _ name: String, _ value: 
 }
 
 private func requireSearchIntent(query: SearchQueryV1?, options: SearchOptions) throws {
+    if let limit = options.limit, !(1 ... CTX_SEARCH_MAX_RESULTS).contains(limit) {
+        throw CtxAgentHistorySDKError(
+            code: .invalidRequest,
+            message: "search limit must be an integer between 1 and 200"
+        )
+    }
     if let query {
         try query.validate()
         return
@@ -422,11 +432,17 @@ private func normalizeSearch(_ raw: JSONValue) throws -> JSONValue {
     guard object["schema_version"]?.intValue == 2 else {
         throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search returned an unsupported schema version")
     }
-    guard object["query"] == nil || object["query"] == .null || object["query"]?.objectValue != nil else {
+    guard object.keys.contains("query") else {
+        throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search response is missing canonical query")
+    }
+    guard object["query"] == .null || object["query"]?.objectValue != nil else {
         throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search response contains a non-object canonical query")
     }
     guard object["query_execution"]?.objectValue != nil else {
         throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search response is missing query execution diagnostics")
+    }
+    guard let results = object["results"]?.arrayValue else {
+        throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx search response is missing results")
     }
     var search = raw.camelizedPublicJSON().objectValue ?? [:]
     search.removeValue(forKey: "schemaVersion")
@@ -437,7 +453,7 @@ private func normalizeSearch(_ raw: JSONValue) throws -> JSONValue {
     search["filters"] = (object["filters"] ?? .object([:])).camelizedPublicJSON()
     search["freshness"] = (object["freshness"] ?? .object([:])).camelizedPublicJSON()
     search["generatedAt"] = object["generated_at"] ?? object["generatedAt"] ?? search["generatedAt"] ?? .null
-    search["results"] = .array((object["results"]?.arrayValue ?? []).map { normalizeSearchHit($0) })
+    search["results"] = .array(results.map { normalizeSearchHit($0) })
     search["pagination"] = (object["pagination"] ?? .object([:])).camelizedPublicJSON()
     search["truncation"] = (object["truncation"] ?? .object([:])).camelizedPublicJSON()
     return .object(search).droppingNulls()

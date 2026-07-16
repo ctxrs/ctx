@@ -58,10 +58,18 @@ The public client mirrors the `agent-history-v1` operations:
 Swift reserves `init` for initializers, so the agent-history-v1 `init` operation is
 exposed as `initialize()`. Returned envelopes still use `operation: "init"`.
 
-Search validation enforces the canonical matcher placements and byte limits
-before invoking `ctx search --query-json`. Schema-v2 results include typed
-resolved and consumed budgets, semantic readiness and coverage, and truncation
-diagnostics in `SearchQueryExecution`.
+Search validation collapses canonical Unicode whitespace for non-literal
+clauses, trims literal edges, and deduplicates within each placement before
+enforcing the 32-clause, byte, and 1-to-32 analyzed-token bounds. Explicit
+`SearchOptions.limit` values must be in `1...200`; `nil` uses the CLI default.
+
+Custom history imports can be filtered with `SearchOptions.historySource`,
+`providerKey`, `sourceId`, and `sourceFormat`, which map to the corresponding
+`ctx search` flags. Schema-v2 results require the canonical query, execution
+diagnostics, results, and exact integer fields. They include typed resolved and
+consumed budgets, semantic readiness and coverage, and truncation diagnostics
+in `SearchQueryExecution`; obsolete semantic weight/fallback retrieval fields
+are omitted from the normalized SDK payload.
 
 ## Local CLI Adapter
 
