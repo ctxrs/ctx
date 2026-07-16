@@ -4,7 +4,7 @@ impl SemanticVectorStore {
     }
 
     fn cached_stats(&self) -> Result<Option<SemanticSidecarStats>> {
-        if !sqlite_table_exists(&self.conn, "semantic_index_stats")? {
+        if !self.stats_and_summary_trusted()? {
             return Ok(None);
         }
         let stats = self
@@ -29,128 +29,78 @@ impl SemanticVectorStore {
         Ok(stats)
     }
 
-    fn exact_stats(&self) -> Result<SemanticSidecarStats> {
-        if !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
-            return Ok(SemanticSidecarStats::default());
+    fn stats_and_summary_trusted(&self) -> Result<bool> {
+        Self::stats_and_summary_trusted_on_connection(&self.conn)
+    }
+
+    fn stats_and_summary_trusted_on_connection(conn: &Connection) -> Result<bool> {
+        if !sqlite_table_exists(conn, "semantic_index_stats")?
+            || !sqlite_table_exists(conn, "semantic_event_summary")?
+            || !sqlite_table_exists(conn, "semantic_maintenance_state")?
+            || !Self::active_model_tuple_matches_on_connection(conn)?
+        {
+            return Ok(false);
         }
-        let (embedded_items, embedded_chunks) = self.conn.query_row(
-            r#"
-            SELECT COUNT(DISTINCT event_id), COUNT(*)
-            FROM event_embedding_chunks
-            WHERE model_key = ?1
-            "#,
-            params![semantic_model_key()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        let canonical_generation =
+            Self::maintenance_state_i64_on_connection(conn, CANONICAL_GENERATION_STATE_KEY)?;
+        let summary_generation =
+            Self::maintenance_state_i64_on_connection(conn, SUMMARY_GENERATION_STATE_KEY)?;
+        let summary_slot =
+            Self::maintenance_state_i64_on_connection(conn, SUMMARY_ACTIVE_SLOT_STATE_KEY)?;
+        let sanitized = Self::global_maintenance_state_i64_on_connection(
+            conn,
+            PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY,
         )?;
-        Ok(SemanticSidecarStats {
-            embedded_items: embedded_items.max(0) as usize,
-            embedded_chunks: embedded_chunks.max(0) as usize,
-        })
-    }
-
-    fn cached_or_exact_stats(&self) -> Result<SemanticSidecarStats> {
-        if let Some(stats) = self.cached_stats()? {
-            return Ok(stats);
-        }
-        self.exact_stats()
-    }
-
-    fn initialize_cached_stats_if_absent(&mut self) -> Result<SemanticSidecarStats> {
-        if let Some(stats) = self.cached_stats()? {
-            return Ok(stats);
-        }
-
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let cached = tx
+        let stats = conn
             .query_row(
                 r#"
-                SELECT embedded_items, embedded_chunks
+                SELECT embedded_items, embedded_chunks, trust_version, generation
                 FROM semantic_index_stats
                 WHERE model_key = ?1
                 "#,
-                params![semantic_model_key()],
+                [semantic_model_key()],
                 |row| {
-                    Ok(SemanticSidecarStats {
-                        embedded_items: row.get::<_, i64>(0)?.max(0) as usize,
-                        embedded_chunks: row.get::<_, i64>(1)?.max(0) as usize,
-                    })
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
                 },
             )
             .optional()?;
-        if let Some(stats) = cached {
-            tx.commit()?;
-            return Ok(stats);
-        }
-
-        let (embedded_items, embedded_chunks) = tx.query_row(
-            r#"
-            SELECT COUNT(DISTINCT event_id), COUNT(*)
-            FROM event_embedding_chunks
-            WHERE model_key = ?1
-            "#,
-            params![semantic_model_key()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        let stats = SemanticSidecarStats {
-            embedded_items: embedded_items.max(0) as usize,
-            embedded_chunks: embedded_chunks.max(0) as usize,
-        };
-        tx.execute(
-            r#"
-            INSERT INTO semantic_index_stats
-                (model_key, embedded_items, embedded_chunks, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4)
-            "#,
-            params![
-                semantic_model_key(),
-                stats.embedded_items as i64,
-                stats.embedded_chunks as i64,
-                utc_now().timestamp_millis()
-            ],
-        )?;
-        tx.commit()?;
-        Ok(stats)
+        Ok(
+            matches!(canonical_generation, Some(generation) if generation > 0)
+                && summary_generation == canonical_generation
+                && matches!(summary_slot, Some(0 | 1))
+                && sanitized == Some(PLAINTEXT_SANITIZED_STATE_VERSION)
+                && stats.is_some_and(|(items, chunks, trust, generation)| {
+                    items >= 0
+                        && chunks >= 0
+                        && trust == SEMANTIC_SIDECAR_TRUST_VERSION
+                        && Some(generation) == canonical_generation
+                }),
+        )
     }
 
-    fn update_cached_stats_in_transaction(
-        tx: &rusqlite::Transaction<'_>,
-        deleted_items: usize,
-        deleted_chunks: usize,
-        inserted_items: usize,
-        inserted_chunks: usize,
-    ) -> Result<()> {
-        let updated = tx.execute(
-            r#"
-            UPDATE semantic_index_stats
-            SET embedded_items = MAX(embedded_items - ?2, 0) + ?3,
-                embedded_chunks = MAX(embedded_chunks - ?4, 0) + ?5,
-                updated_at_ms = ?6
-            WHERE model_key = ?1
-            "#,
-            params![
-                semantic_model_key(),
-                deleted_items as i64,
-                inserted_items as i64,
-                deleted_chunks as i64,
-                inserted_chunks as i64,
-                utc_now().timestamp_millis(),
-            ],
-        )?;
-        if updated != 1 {
-            return Err(anyhow!("semantic vector store cached stats are missing"));
-        }
-        Ok(())
+    fn sidecar_trust_state(&self) -> Result<SemanticSidecarTrustState> {
+        Ok(if self.stats_and_summary_trusted()? {
+            SemanticSidecarTrustState::Ready
+        } else {
+            SemanticSidecarTrustState::Pending
+        })
     }
 
     fn maintenance_state_i64(&self, key: &str) -> Result<Option<i64>> {
-        if !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
+        Self::maintenance_state_i64_on_connection(&self.conn, key)
+    }
+
+    fn maintenance_state_i64_on_connection(conn: &Connection, key: &str) -> Result<Option<i64>> {
+        if !sqlite_table_exists(conn, "semantic_maintenance_state")? {
             return Ok(None);
         }
         let key = Self::maintenance_state_key(key);
-        let value = self
-            .conn
+        let value = conn
             .query_row(
                 "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
                 params![key],
@@ -171,6 +121,36 @@ impl SemanticVectorStore {
                 updated_at_ms = excluded.updated_at_ms
             "#,
             params![key, value.to_string(), utc_now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    fn maintenance_state_string(&self, key: &str) -> Result<Option<String>> {
+        if !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
+            return Ok(None);
+        }
+        let key = Self::maintenance_state_key(key);
+        self.conn
+            .query_row(
+                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn set_maintenance_state_string(&self, key: &str, value: &str) -> Result<()> {
+        let key = Self::maintenance_state_key(key);
+        self.conn.execute(
+            r#"
+            INSERT INTO semantic_maintenance_state (key, value, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![key, value, utc_now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -198,18 +178,90 @@ impl SemanticVectorStore {
         tx: &rusqlite::Transaction<'_>,
         key: &str,
     ) -> Result<Option<i64>> {
-        if !sqlite_table_exists(tx, "semantic_maintenance_state")? {
+        Self::maintenance_state_i64_on_connection(tx, key)
+    }
+
+    fn increment_maintenance_state_i64_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        key: &str,
+        delta: i64,
+    ) -> Result<()> {
+        let value = Self::maintenance_state_i64_in_transaction(tx, key)?
+            .unwrap_or(0)
+            .checked_add(delta)
+            .ok_or_else(|| anyhow!("semantic maintenance counter overflow"))?;
+        Self::set_maintenance_state_i64_in_transaction(tx, key, value)
+    }
+
+    fn global_maintenance_state_i64(&self, key: &str) -> Result<Option<i64>> {
+        Self::global_maintenance_state_i64_on_connection(&self.conn, key)
+    }
+
+    fn global_maintenance_state_i64_on_connection(
+        conn: &Connection,
+        key: &str,
+    ) -> Result<Option<i64>> {
+        if !sqlite_table_exists(conn, "semantic_maintenance_state")? {
             return Ok(None);
         }
-        let key = Self::maintenance_state_key(key);
-        let value = tx
+        let value = conn
             .query_row(
                 "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
-                params![key],
+                [key],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
         Ok(value.and_then(|value| value.parse::<i64>().ok()))
+    }
+
+    fn global_maintenance_state_string(&self, key: &str) -> Result<Option<String>> {
+        if !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
+            return Ok(None);
+        }
+        self.conn
+            .query_row(
+                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn set_global_maintenance_state_i64_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        key: &str,
+        value: i64,
+    ) -> Result<()> {
+        tx.execute(
+            r#"
+            INSERT INTO semantic_maintenance_state (key, value, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![key, value.to_string(), utc_now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    fn set_global_maintenance_state_string_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        tx.execute(
+            r#"
+            INSERT INTO semantic_maintenance_state (key, value, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![key, value, utc_now().timestamp_millis()],
+        )?;
+        Ok(())
     }
 
     fn delete_maintenance_state_keys(&self, keys: &[&str]) -> Result<()> {
@@ -218,8 +270,10 @@ impl SemanticVectorStore {
         }
         for key in keys {
             let key = Self::maintenance_state_key(key);
-            self.conn
-                .execute("DELETE FROM semantic_maintenance_state WHERE key = ?1", [key])?;
+            self.conn.execute(
+                "DELETE FROM semantic_maintenance_state WHERE key = ?1",
+                [key],
+            )?;
         }
         Ok(())
     }
@@ -249,20 +303,25 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn dirty_event_count(&self) -> Result<usize> {
+    fn bounded_dirty_event_count(&self) -> Result<usize> {
         if !sqlite_table_exists(&self.conn, "semantic_dirty_events")? {
             return Ok(0);
         }
-        let count = self
+        let limit = SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT.saturating_add(1);
+        let mut stmt = self
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM semantic_dirty_events WHERE model_key = ?1",
-                params![semantic_model_key()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        Ok(count.max(0) as usize)
+            .prepare("SELECT model_key FROM semantic_dirty_events ORDER BY rowid LIMIT ?1")?;
+        let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let matching = rows
+            .iter()
+            .filter(|model_key| model_key.as_str() == semantic_model_key())
+            .count();
+        Ok(if rows.len() == limit {
+            matching.max(1)
+        } else {
+            matching
+        })
     }
 
     fn enqueue_dirty_documents(
@@ -307,22 +366,60 @@ impl SemanticVectorStore {
         if limit == 0 || !sqlite_table_exists(&self.conn, "semantic_dirty_events")? {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare(
+        let bounded_limit = limit.min(SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT);
+        let mut present_stmt = self.conn.prepare(
             r#"
-            SELECT event_id
+            SELECT event_id, priority_seq, queued_at_ms
             FROM semantic_dirty_events
-            WHERE model_key = ?1
-            ORDER BY priority_seq IS NULL, priority_seq DESC, queued_at_ms ASC
+            WHERE model_key = ?1 AND priority_seq IS NOT NULL
+            ORDER BY priority_seq DESC, queued_at_ms DESC
             LIMIT ?2
             "#,
         )?;
-        let mut rows = stmt.query(params![semantic_model_key(), limit as i64])?;
-        let mut event_ids = Vec::new();
-        while let Some(row) = rows.next()? {
-            let event_id_text = row.get::<_, String>(0)?;
-            let event_id = Uuid::parse_str(&event_id_text)
-                .context("invalid dirty event id in semantic vector store")?;
-            event_ids.push(event_id);
+        let present =
+            present_stmt.query_map(params![semantic_model_key(), bounded_limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+        let mut present = present.collect::<rusqlite::Result<Vec<_>>>()?;
+        present.sort_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let mut event_ids = present
+            .into_iter()
+            .map(|(event_id, _, _)| {
+                Uuid::parse_str(&event_id)
+                    .context("invalid dirty event id in semantic vector store")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let remaining = bounded_limit.saturating_sub(event_ids.len());
+        if remaining > 0 {
+            let mut absent_stmt = self.conn.prepare(
+                r#"
+                SELECT event_id
+                FROM semantic_dirty_events
+                WHERE model_key = ?1 AND priority_seq IS NULL
+                ORDER BY queued_at_ms ASC
+                LIMIT ?2
+                "#,
+            )?;
+            let absent = absent_stmt
+                .query_map(params![semantic_model_key(), remaining as i64], |row| {
+                    row.get::<_, String>(0)
+                })?;
+            for event_id in absent {
+                event_ids.push(
+                    Uuid::parse_str(&event_id?)
+                        .context("invalid dirty event id in semantic vector store")?,
+                );
+            }
         }
         Ok(event_ids)
     }
@@ -348,52 +445,48 @@ impl SemanticVectorStore {
     }
 
     fn plaintext_value_count(&self) -> Result<usize> {
-        let mut count = 0_usize;
-        if sqlite_column_exists(&self.conn, "event_embeddings", "preview_text")? {
-            let rows = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM event_embeddings WHERE preview_text != ''",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .unwrap_or(0);
-            count = count.saturating_add(rows.max(0) as usize);
-        }
-        if sqlite_column_exists(&self.conn, "event_embedding_chunks", "chunk_text")? {
-            let rows = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM event_embedding_chunks WHERE chunk_text != ''",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .unwrap_or(0);
-            count = count.saturating_add(rows.max(0) as usize);
-        }
-        Ok(count)
+        Ok(
+            (self.global_maintenance_state_i64(PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY)?
+                != Some(PLAINTEXT_SANITIZED_STATE_VERSION)) as usize,
+        )
     }
 
     fn existing_hashes_for_event_ids(&self, event_ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {
-        if event_ids.is_empty() || !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
+        if event_ids.is_empty() {
             return Ok(HashMap::new());
         }
+        if event_ids.len() > SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT {
+            return Err(SemanticVectorStorePending::new(
+                "semantic hash lookup exceeds the bounded event-id limit",
+            )
+            .into());
+        }
+        if !self.stats_and_summary_trusted()? {
+            return Err(SemanticVectorStorePending::new(
+                "semantic summary is not trusted for hash lookup",
+            )
+            .into());
+        }
+        let slot = self
+            .maintenance_state_i64(SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+            .filter(|slot| matches!(slot, 0 | 1))
+            .ok_or_else(|| SemanticVectorStorePending::new("semantic summary slot is missing"))?;
         let placeholders = (0..event_ids.len())
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
             r#"
-            SELECT event_id, source_text_sha256
-            FROM event_embedding_chunks
-            WHERE model_key = ?
+            SELECT event_id, source_text_sha256, single_source_hash
+            FROM semantic_event_summary
+            WHERE slot = ? AND model_key = ?
               AND event_id IN ({placeholders})
-            GROUP BY event_id, source_text_sha256
             "#
         );
-        let mut query_params = vec![SqlValue::from(semantic_model_key().to_owned())];
+        let mut query_params = vec![
+            SqlValue::from(slot),
+            SqlValue::from(semantic_model_key().to_owned()),
+        ];
         query_params.extend(
             event_ids
                 .iter()
@@ -403,6 +496,9 @@ impl SemanticVectorStore {
         let mut rows = stmt.query(params_from_iter(query_params))?;
         let mut hashes = HashMap::new();
         while let Some(row) = rows.next()? {
+            if row.get::<_, i64>(2)? != 1 {
+                continue;
+            }
             let event_id = Uuid::parse_str(&row.get::<_, String>(0)?)
                 .context("invalid event id in semantic vector store")?;
             hashes.insert(event_id, row.get(1)?);
@@ -417,57 +513,84 @@ impl SemanticVectorStore {
         if items.is_empty() {
             return Ok(());
         }
-        self.initialize_cached_stats_if_absent()?;
+        let nominal_bytes = items.iter().fold(0_u64, |total, (_, embedding)| {
+            total.saturating_add(
+                (embedding.len() as u64)
+                    .saturating_mul(std::mem::size_of::<f32>() as u64)
+                    .saturating_mul(2),
+            )
+        });
+        ctx_history_capture::pace_current_disk_io(nominal_bytes);
+        let supplemental_bytes = self.upsert_chunk_embeddings_precharged(items, nominal_bytes)?;
+        ctx_history_capture::pace_current_disk_io(supplemental_bytes);
+        Ok(())
+    }
+
+    fn upsert_chunk_embeddings_precharged(
+        &mut self,
+        items: &[(SemanticChunkDocument, Vec<f32>)],
+        nominal_bytes: u64,
+    ) -> Result<u64> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        if !self.active_model_tuple_matches()? {
+            return Err(SemanticVectorStoreTerminal::new("active model tuple mismatch").into());
+        }
+        let pacing = self.begin_write_pacing(nominal_bytes);
         let event_ids = items
             .iter()
             .map(|(doc, _)| doc.event_id)
             .collect::<HashSet<_>>();
-        let sqlite_vec0_runtime_available = self.sqlite_vec0_runtime_available();
+        let stats_trusted = self.stats_and_summary_trusted()?;
+        let canonical_generation = self
+            .maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?
+            .unwrap_or(0);
+        let next_generation = canonical_generation
+            .checked_add(1)
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| anyhow!("semantic canonical generation overflow"))?;
+        let projection_slot = self
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .filter(|slot| matches!(slot, 0 | 1));
+        let projection_trusted = self.sqlite_vec0_search_ready()?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let sqlite_vec0_marked_ready =
-            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
-                == Some(SQLITE_VEC0_READY_STATE_VERSION);
-        let maintain_sqlite_vec0 = if sqlite_vec0_marked_ready
-            && sqlite_vec0_runtime_available
-            && sqlite_table_exists(&tx, "event_embedding_vec0")?
-            && sqlite_table_exists(&tx, "event_embedding_vec0_meta")?
-        {
-            Self::sqlite_vec0_schema_compatible_on_connection(&tx)?
-        } else {
-            false
-        };
         let mut deleted_items = 0_usize;
         let mut deleted_chunks = 0_usize;
+        let mut deleted_projection_vectors = 0_usize;
+        let mut deleted_projection_meta = 0_usize;
         let mut inserted_events = HashSet::new();
         let mut inserted_chunks = 0_usize;
         {
-            if sqlite_vec0_marked_ready && !maintain_sqlite_vec0 {
-                Self::set_maintenance_state_i64_in_transaction(
-                    &tx,
-                    SQLITE_VEC0_READY_STATE_KEY,
-                    0,
-                )?;
-            }
-            if maintain_sqlite_vec0 {
-                let mut delete_vec_stmt = tx.prepare(
+            if let Some(slot) = projection_slot.filter(|_| projection_trusted) {
+                let mut select_stmt = tx.prepare(&format!(
                     r#"
-                    DELETE FROM event_embedding_vec0
-                    WHERE rowid IN (
-                        SELECT rowid
-                        FROM event_embedding_vec0_meta
-                        WHERE model_key = ?1 AND event_id = ?2
-                    )
-                    "#,
-                )?;
-                let mut delete_meta_stmt = tx.prepare(
-                    "DELETE FROM event_embedding_vec0_meta WHERE model_key = ?1 AND event_id = ?2",
-                )?;
+                    SELECT rowid FROM {SQLITE_VEC0_META_TABLE}
+                    WHERE slot = ?1 AND model_key = ?2 AND event_id = ?3
+                    "#
+                ))?;
+                let mut delete_vec_stmt =
+                    tx.prepare(&format!("DELETE FROM {SQLITE_VEC0_TABLE} WHERE rowid = ?1"))?;
+                let mut delete_meta_stmt = tx.prepare(&format!(
+                    "DELETE FROM {SQLITE_VEC0_META_TABLE} WHERE rowid = ?1"
+                ))?;
                 for event_id in &event_ids {
                     let event_id = event_id.to_string();
-                    delete_vec_stmt.execute(params![semantic_model_key(), &event_id])?;
-                    delete_meta_stmt.execute(params![semantic_model_key(), &event_id])?;
+                    let rowids = {
+                        let rows = select_stmt
+                            .query_map(params![slot, semantic_model_key(), &event_id], |row| {
+                                row.get::<_, i64>(0)
+                            })?;
+                        rows.collect::<rusqlite::Result<Vec<_>>>()?
+                    };
+                    for rowid in rowids {
+                        deleted_projection_vectors = deleted_projection_vectors
+                            .saturating_add(delete_vec_stmt.execute([rowid])?);
+                        deleted_projection_meta = deleted_projection_meta
+                            .saturating_add(delete_meta_stmt.execute([rowid])?);
+                    }
                 }
             }
             let mut delete_stmt = tx.prepare(
@@ -483,6 +606,22 @@ impl SemanticVectorStore {
             }
             drop(delete_stmt);
 
+            if let Some(summary_slot) =
+                Self::maintenance_state_i64_in_transaction(&tx, SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+                    .filter(|slot| stats_trusted && matches!(slot, 0 | 1))
+            {
+                let mut stmt = tx.prepare(
+                    "DELETE FROM semantic_event_summary WHERE slot = ?1 AND model_key = ?2 AND event_id = ?3",
+                )?;
+                for event_id in &event_ids {
+                    stmt.execute(params![
+                        summary_slot,
+                        semantic_model_key(),
+                        event_id.to_string()
+                    ])?;
+                }
+            }
+
             let mut stmt = tx.prepare(
                 r#"
                 INSERT INTO event_embedding_chunks
@@ -492,22 +631,23 @@ impl SemanticVectorStore {
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 "#,
             )?;
-            let mut vec0_meta_stmt = if maintain_sqlite_vec0 {
-                Some(tx.prepare(
+            let mut vec0_meta_stmt = if projection_trusted {
+                Some(tx.prepare(&format!(
                     r#"
-	                    INSERT INTO event_embedding_vec0_meta
-	                        (rowid, event_id, model_key, history_record_id, session_id, event_seq,
-	                         chunk_index, source_text_sha256, start_char, end_char)
-	                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-	                    "#,
-                )?)
+                        INSERT INTO {SQLITE_VEC0_META_TABLE}
+                            (slot, canonical_rowid, event_id, model_key, history_record_id,
+                             session_id, event_seq, chunk_index, source_text_sha256,
+                             start_char, end_char)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        "#
+                ))?)
             } else {
                 None
             };
-            let mut vec0_stmt = if maintain_sqlite_vec0 {
-                Some(tx.prepare(
-                    "INSERT INTO event_embedding_vec0(rowid, embedding) VALUES (?1, ?2)",
-                )?)
+            let mut vec0_stmt = if projection_trusted {
+                Some(tx.prepare(&format!(
+                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot) VALUES (?1, ?2, ?3)"
+                ))?)
             } else {
                 None
             };
@@ -538,12 +678,16 @@ impl SemanticVectorStore {
                 if inserted > 0 {
                     inserted_events.insert(doc.event_id);
                 }
-                let rowid = tx.last_insert_rowid();
+                let canonical_rowid = tx.last_insert_rowid();
                 if let (Some(meta_stmt), Some(vec_stmt)) =
                     (vec0_meta_stmt.as_mut(), vec0_stmt.as_mut())
                 {
+                    let slot = projection_slot.ok_or_else(|| {
+                        anyhow!("trusted semantic projection is missing its active slot")
+                    })?;
                     meta_stmt.execute(params![
-                        rowid,
+                        slot,
+                        canonical_rowid,
                         &event_id,
                         semantic_model_key(),
                         &history_record_id,
@@ -554,41 +698,221 @@ impl SemanticVectorStore {
                         doc.start_char as i64,
                         doc.end_char as i64,
                     ])?;
-                    vec_stmt.execute(params![rowid, &blob])?;
+                    let projection_rowid = tx.last_insert_rowid();
+                    vec_stmt.execute(params![projection_rowid, &blob, slot])?;
                 }
             }
-            Self::update_cached_stats_in_transaction(
+            drop(stmt);
+            drop(vec0_meta_stmt);
+            drop(vec0_stmt);
+
+            let summary_slot =
+                Self::maintenance_state_i64_in_transaction(&tx, SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+                    .filter(|slot| stats_trusted && matches!(slot, 0 | 1));
+            if let Some(slot) = summary_slot {
+                let mut summary_stmt = tx.prepare(
+                    r#"
+                    INSERT INTO semantic_event_summary
+                        (slot, model_key, event_id, event_seq, source_text_sha256,
+                         single_source_hash, chunk_count)
+                    VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+                    "#,
+                )?;
+                for event_id in &inserted_events {
+                    let doc = items
+                        .iter()
+                        .find(|(doc, _)| doc.event_id == *event_id)
+                        .map(|(doc, _)| doc)
+                        .ok_or_else(|| anyhow!("inserted semantic event has no document"))?;
+                    let chunk_count = items
+                        .iter()
+                        .filter(|(candidate, _)| candidate.event_id == *event_id)
+                        .count();
+                    summary_stmt.execute(params![
+                        slot,
+                        semantic_model_key(),
+                        event_id.to_string(),
+                        doc.seq as i64,
+                        doc.source_text_hash,
+                        chunk_count as i64
+                    ])?;
+                }
+            }
+
+            let cached = tx
+                .query_row(
+                    r#"
+                    SELECT embedded_items, embedded_chunks
+                    FROM semantic_index_stats
+                    WHERE model_key = ?1 AND trust_version = ?2 AND generation = ?3
+                    "#,
+                    params![
+                        semantic_model_key(),
+                        SEMANTIC_SIDECAR_TRUST_VERSION,
+                        canonical_generation
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let counts_valid = stats_trusted
+                && (!projection_trusted
+                    || (deleted_projection_vectors == deleted_chunks
+                        && deleted_projection_meta == deleted_chunks))
+                && cached.is_some_and(|(items, chunks)| {
+                    items >= deleted_items as i64 && chunks >= deleted_chunks as i64
+                });
+            if counts_valid {
+                let (items_before, chunks_before) = cached.unwrap_or_default();
+                tx.execute(
+                    r#"
+                    UPDATE semantic_index_stats
+                    SET embedded_items = ?2,
+                        embedded_chunks = ?3,
+                        updated_at_ms = ?4,
+                        generation = ?5
+                    WHERE model_key = ?1
+                    "#,
+                    params![
+                        semantic_model_key(),
+                        items_before - deleted_items as i64 + inserted_events.len() as i64,
+                        chunks_before - deleted_chunks as i64 + inserted_chunks as i64,
+                        utc_now().timestamp_millis(),
+                        next_generation
+                    ],
+                )?;
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SUMMARY_GENERATION_STATE_KEY,
+                    next_generation,
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE semantic_index_stats SET trust_version = 0 WHERE model_key = ?1",
+                    [semantic_model_key()],
+                )?;
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SUMMARY_GENERATION_STATE_KEY,
+                    0,
+                )?;
+            }
+            if projection_trusted && counts_valid {
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_GENERATION_STATE_KEY,
+                    next_generation,
+                )?;
+            } else {
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_READY_STATE_KEY,
+                    0,
+                )?;
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_GENERATION_STATE_KEY,
+                    0,
+                )?;
+            }
+            Self::set_maintenance_state_i64_in_transaction(
                 &tx,
-                deleted_items,
-                deleted_chunks,
-                inserted_events.len(),
-                inserted_chunks,
+                CANONICAL_GENERATION_STATE_KEY,
+                next_generation,
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(self.finish_write_pacing(pacing))
     }
 
     fn prune_ineligible_events(&mut self, store: &Store) -> Result<SemanticPruneOutcome> {
+        ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+        self.prune_ineligible_events_precharged(store)
+    }
+
+    fn prune_ineligible_events_precharged(
+        &mut self,
+        store: &Store,
+    ) -> Result<SemanticPruneOutcome> {
+        let sql_deadline =
+            Instant::now() + StdDuration::from_millis(SEMANTIC_SIDECAR_MAINTENANCE_MAX_MILLIS);
+        self.conn.progress_handler(
+            SEMANTIC_SQL_PROGRESS_OPS,
+            Some(move || Instant::now() >= sql_deadline),
+        );
+        let page_units = match self.maintenance_page_units() {
+            Ok(units) => units,
+            Err(error) => {
+                self.conn.progress_handler(0, None::<fn() -> bool>);
+                return Err(error);
+            }
+        };
+        let result = self.prune_ineligible_events_precharged_inner(store, page_units);
+        self.conn.progress_handler(0, None::<fn() -> bool>);
+        match result {
+            Err(error) if Self::sqlite_operation_interrupted(&error) => {
+                if page_units == 1 {
+                    Err(SemanticVectorStoreTerminal::new(
+                        "semantic prune made no progress at the one-row floor",
+                    )
+                    .into())
+                } else {
+                    self.set_maintenance_state_i64(
+                        MAINTENANCE_PAGE_UNITS_STATE_KEY,
+                        (page_units / 2).max(1) as i64,
+                    )?;
+                    Ok(SemanticPruneOutcome::default())
+                }
+            }
+            Ok(outcome) => {
+                self.grow_maintenance_page_units_after_success(page_units)?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prune_ineligible_events_precharged_inner(
+        &mut self,
+        store: &Store,
+        page_units: usize,
+    ) -> Result<SemanticPruneOutcome> {
         if !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(SemanticPruneOutcome::default());
         }
-        let mut sidecar_events =
-            self.prune_candidate_events(self.maintenance_state_i64("prune_event_seq_before")?)?;
-        if sidecar_events.is_empty()
-            && self
-                .maintenance_state_i64("prune_event_seq_before")?
-                .is_some()
-        {
-            sidecar_events = self.prune_candidate_events(None)?;
+        let cursor = self
+            .maintenance_state_i64("prune_event_seq_before")?
+            .zip(self.maintenance_state_string("prune_event_id_before")?);
+        let mut sidecar_events = self.prune_candidate_events(cursor.as_ref(), page_units)?;
+        if sidecar_events.is_empty() && cursor.is_some() {
+            sidecar_events = self.prune_candidate_events(None, page_units)?;
         }
-
-        let next_cursor = sidecar_events.last().map(|(_, _, _, event_seq)| *event_seq);
+        let mut admitted_chunks = 0_usize;
+        let mut admitted_events = Vec::new();
+        for event in sidecar_events {
+            let declared_chunks = event.4;
+            if declared_chunks > page_units {
+                return Err(SemanticVectorStoreTerminal::new(format!(
+                    "semantic prune event {} declares {declared_chunks} chunks above the slice limit",
+                    event.0
+                ))
+                .into());
+            }
+            if !admitted_events.is_empty()
+                && admitted_chunks.saturating_add(declared_chunks) > page_units
+            {
+                break;
+            }
+            admitted_chunks = admitted_chunks.saturating_add(declared_chunks);
+            admitted_events.push(event);
+        }
+        let next_cursor = admitted_events
+            .last()
+            .map(|(event_id, _, _, event_seq, _)| (*event_seq, event_id.to_string()));
         let mut outcome = SemanticPruneOutcome::default();
-        for chunk in sidecar_events.chunks(SEMANTIC_PRUNE_EVENT_BATCH) {
-            let event_ids = chunk
+        if !admitted_events.is_empty() {
+            let event_ids = admitted_events
                 .iter()
-                .map(|(event_id, _, _, _)| *event_id)
+                .map(|(event_id, _, _, _, _)| *event_id)
                 .collect::<Vec<_>>();
             let eligible_event_ids = store.semantic_eligible_event_ids(&event_ids)?;
             let current_docs = store.event_embedding_documents_by_ids(&event_ids)?;
@@ -598,7 +922,7 @@ impl SemanticVectorStore {
                 .collect::<HashMap<_, _>>();
             let mut delete_event_ids = Vec::new();
             let mut stale_docs = Vec::new();
-            for (event_id, stored_hash, single_hash, _) in chunk {
+            for (event_id, stored_hash, single_hash, _, _) in &admitted_events {
                 let Some(doc) = current_by_id.get(event_id) else {
                     delete_event_ids.push(*event_id);
                     continue;
@@ -614,123 +938,333 @@ impl SemanticVectorStore {
                     stale_docs.push(doc.clone());
                 }
             }
-            outcome.deleted_chunks = outcome
-                .deleted_chunks
-                .saturating_add(self.delete_embedding_chunks_for_event_ids(&delete_event_ids)?);
+            let (deleted_chunks, supplemental_bytes) =
+                self.delete_embedding_chunks_for_event_ids_precharged(&delete_event_ids)?;
+            if deleted_chunks > admitted_chunks {
+                return Err(SemanticVectorStoreTerminal::new(
+                    "semantic prune deleted more canonical rows than the admitted summary slice",
+                )
+                .into());
+            }
+            outcome.deleted_chunks = deleted_chunks;
+            outcome.supplemental_bytes = supplemental_bytes;
             if !stale_docs.is_empty() {
                 outcome.queued_stale_events = outcome
                     .queued_stale_events
                     .saturating_add(self.enqueue_dirty_documents(&stale_docs, "stale_hash")?);
             }
         }
-        if let Some(next_cursor) = next_cursor {
-            self.set_maintenance_state_i64("prune_event_seq_before", next_cursor)?;
+        if let Some((event_seq, event_id)) = next_cursor {
+            self.set_maintenance_state_i64("prune_event_seq_before", event_seq)?;
+            self.set_maintenance_state_string("prune_event_id_before", &event_id)?;
         }
         Ok(outcome)
     }
 
     fn prune_candidate_events(
         &self,
-        before_event_seq: Option<i64>,
-    ) -> Result<Vec<(Uuid, String, bool, i64)>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT event_id,
-                   MIN(source_text_sha256),
-                   COUNT(DISTINCT source_text_sha256),
-                   MAX(event_seq)
-            FROM event_embedding_chunks
-            WHERE model_key = ?1
-              AND (?2 IS NULL OR event_seq < ?2)
-            GROUP BY event_id
-            ORDER BY MAX(event_seq) DESC
-            LIMIT ?3
-            "#,
-        )?;
-        let mut rows = stmt.query(params![
-            semantic_model_key(),
-            before_event_seq,
-            SEMANTIC_PRUNE_EVENTS_PER_PASS as i64
-        ])?;
-        let mut sidecar_events = Vec::<(Uuid, String, bool, i64)>::new();
+        cursor: Option<&(i64, String)>,
+        page_units: usize,
+    ) -> Result<Vec<(Uuid, String, bool, i64, usize)>> {
+        let Some(slot) = self
+            .maintenance_state_i64(SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+            .filter(|slot| matches!(slot, 0 | 1))
+        else {
+            return Ok(Vec::new());
+        };
+        let (sql, query_params): (&str, Vec<SqlValue>) = match cursor {
+            Some((event_seq, event_id)) => (
+                r#"
+                SELECT event_id, source_text_sha256, single_source_hash, event_seq, chunk_count
+                FROM semantic_event_summary
+                WHERE slot = ?1 AND model_key = ?2
+                  AND (event_seq, event_id) < (?3, ?4)
+                ORDER BY event_seq DESC, event_id DESC
+                LIMIT ?5
+                "#,
+                vec![
+                    SqlValue::from(slot),
+                    SqlValue::from(semantic_model_key().to_owned()),
+                    SqlValue::from(*event_seq),
+                    SqlValue::from(event_id.clone()),
+                    SqlValue::from(page_units as i64),
+                ],
+            ),
+            None => (
+                r#"
+                SELECT event_id, source_text_sha256, single_source_hash, event_seq, chunk_count
+                FROM semantic_event_summary
+                WHERE slot = ?1 AND model_key = ?2
+                ORDER BY event_seq DESC, event_id DESC
+                LIMIT ?3
+                "#,
+                vec![
+                    SqlValue::from(slot),
+                    SqlValue::from(semantic_model_key().to_owned()),
+                    SqlValue::from(page_units as i64),
+                ],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query(params_from_iter(query_params))?;
+        let mut sidecar_events = Vec::new();
         while let Some(row) = rows.next()? {
             let event_id_text = row.get::<_, String>(0)?;
             if let Ok(event_id) = Uuid::parse_str(&event_id_text) {
                 let source_text_hash = row.get::<_, String>(1)?;
-                let hash_versions = row.get::<_, i64>(2)?.max(0);
+                let single_hash = row.get::<_, i64>(2)? == 1;
                 let event_seq = row.get::<_, i64>(3)?.max(0);
-                sidecar_events.push((event_id, source_text_hash, hash_versions == 1, event_seq));
+                let chunk_count = row.get::<_, i64>(4)?.max(0) as usize;
+                sidecar_events.push((
+                    event_id,
+                    source_text_hash,
+                    single_hash,
+                    event_seq,
+                    chunk_count,
+                ));
             }
         }
         Ok(sidecar_events)
     }
 
     fn delete_embedding_chunks_for_event_ids(&mut self, event_ids: &[Uuid]) -> Result<usize> {
+        ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+        let (deleted_chunks, supplemental_bytes) =
+            self.delete_embedding_chunks_for_event_ids_precharged(event_ids)?;
+        ctx_history_capture::pace_current_disk_io(supplemental_bytes);
+        Ok(deleted_chunks)
+    }
+
+    fn delete_embedding_chunks_for_event_ids_precharged(
+        &mut self,
+        event_ids: &[Uuid],
+    ) -> Result<(usize, u64)> {
         if event_ids.is_empty() || !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
-            return Ok(0);
+            return Ok((0, 0));
         }
-        self.initialize_cached_stats_if_absent()?;
-        let sqlite_vec0_runtime_available = self.sqlite_vec0_runtime_available();
+        let page_units = self.maintenance_page_units()?;
+        if event_ids.len() > page_units {
+            return Err(SemanticVectorStoreTerminal::new(
+                "semantic delete request exceeds the sidecar row slice",
+            )
+            .into());
+        }
+        let pacing = self.begin_write_pacing(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+        let stats_trusted = self.stats_and_summary_trusted()?;
+        let canonical_generation = self
+            .maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?
+            .unwrap_or(0);
+        let projection_slot = self
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .filter(|slot| matches!(slot, 0 | 1));
+        let projection_trusted = self.sqlite_vec0_search_ready()?;
+        let placeholders = (0..event_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            r#"
+            SELECT rowid, event_id, length(embedding_f32)
+            FROM event_embedding_chunks
+            WHERE model_key = ? AND event_id IN ({placeholders})
+            ORDER BY rowid
+            LIMIT ?
+            "#
+        );
+        let mut query_params = vec![SqlValue::from(semantic_model_key().to_owned())];
+        query_params.extend(
+            event_ids
+                .iter()
+                .map(|event_id| SqlValue::from(event_id.to_string())),
+        );
+        query_params.push(SqlValue::from(page_units.saturating_add(1) as i64));
+        let canonical_rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(query_params), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if canonical_rows.len() > page_units {
+            return Err(SemanticVectorStoreTerminal::new(
+                "semantic delete event exceeds the sidecar row slice",
+            )
+            .into());
+        }
+        let logical_bytes = canonical_rows
+            .iter()
+            .map(|(_, _, bytes)| *bytes)
+            .sum::<u64>();
+        if logical_bytes > SEMANTIC_SIDECAR_MAINTENANCE_MAX_BYTES as u64 {
+            return Err(SemanticVectorStoreTerminal::new(
+                "semantic delete vectors exceed the sidecar byte slice",
+            )
+            .into());
+        }
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let sqlite_vec0_marked_ready =
-            Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
-                == Some(SQLITE_VEC0_READY_STATE_VERSION);
-        let maintain_sqlite_vec0 = if sqlite_vec0_marked_ready
-            && sqlite_vec0_runtime_available
-            && sqlite_table_exists(&tx, "event_embedding_vec0")?
-            && sqlite_table_exists(&tx, "event_embedding_vec0_meta")?
-        {
-            Self::sqlite_vec0_schema_compatible_on_connection(&tx)?
-        } else {
-            false
-        };
-        let mut deleted_items = 0_usize;
+        let mut deleted_event_ids = HashSet::new();
         let mut deleted_chunks = 0_usize;
+        let mut deleted_projection_vectors = 0_usize;
+        let mut deleted_projection_meta = 0_usize;
         {
-            if sqlite_vec0_marked_ready && !maintain_sqlite_vec0 {
+            if let Some(slot) = projection_slot.filter(|_| projection_trusted) {
+                let mut select_stmt = tx.prepare(&format!(
+                    r#"
+                    SELECT rowid FROM {SQLITE_VEC0_META_TABLE}
+                    WHERE slot = ?1 AND model_key = ?2 AND canonical_rowid = ?3
+                    "#
+                ))?;
+                let mut delete_vec_stmt =
+                    tx.prepare(&format!("DELETE FROM {SQLITE_VEC0_TABLE} WHERE rowid = ?1"))?;
+                let mut delete_meta_stmt = tx.prepare(&format!(
+                    "DELETE FROM {SQLITE_VEC0_META_TABLE} WHERE rowid = ?1"
+                ))?;
+                for (canonical_rowid, _, _) in &canonical_rows {
+                    let projection_rowid = select_stmt
+                        .query_row(
+                            params![slot, semantic_model_key(), canonical_rowid],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()?;
+                    if let Some(rowid) = projection_rowid {
+                        deleted_projection_vectors = deleted_projection_vectors
+                            .saturating_add(delete_vec_stmt.execute([rowid])?);
+                        deleted_projection_meta = deleted_projection_meta
+                            .saturating_add(delete_meta_stmt.execute([rowid])?);
+                    }
+                }
+            }
+            let mut stmt = tx.prepare(
+                "DELETE FROM event_embedding_chunks WHERE rowid = ?1 AND model_key = ?2",
+            )?;
+            for (rowid, event_id, _) in &canonical_rows {
+                let rows = stmt.execute(params![rowid, semantic_model_key()])?;
+                if rows == 1 {
+                    deleted_event_ids.insert(event_id.clone());
+                    deleted_chunks = deleted_chunks.saturating_add(1);
+                }
+            }
+            drop(stmt);
+            let deleted_items = deleted_event_ids.len();
+            if deleted_chunks > canonical_rows.len()
+                || deleted_projection_vectors > canonical_rows.len()
+                || deleted_projection_meta > canonical_rows.len()
+            {
+                return Err(SemanticVectorStoreTerminal::new(
+                    "semantic delete exceeded its admitted canonical row slice",
+                )
+                .into());
+            }
+            if deleted_chunks == 0
+                && deleted_projection_vectors == 0
+                && deleted_projection_meta == 0
+            {
+                tx.commit()?;
+                return Ok((0, self.finish_write_pacing(pacing)));
+            }
+            let summary_slot =
+                Self::maintenance_state_i64_in_transaction(&tx, SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+                    .filter(|slot| stats_trusted && matches!(slot, 0 | 1));
+            if let Some(slot) = summary_slot {
+                let mut stmt = tx.prepare(
+                    "DELETE FROM semantic_event_summary WHERE slot = ?1 AND model_key = ?2 AND event_id = ?3",
+                )?;
+                for event_id in event_ids {
+                    stmt.execute(params![slot, semantic_model_key(), event_id.to_string()])?;
+                }
+            }
+            let next_generation = canonical_generation
+                .checked_add(1)
+                .filter(|generation| *generation > 0)
+                .ok_or_else(|| anyhow!("semantic canonical generation overflow"))?;
+            let cached = tx
+                .query_row(
+                    r#"
+                    SELECT embedded_items, embedded_chunks
+                    FROM semantic_index_stats
+                    WHERE model_key = ?1 AND trust_version = ?2 AND generation = ?3
+                    "#,
+                    params![
+                        semantic_model_key(),
+                        SEMANTIC_SIDECAR_TRUST_VERSION,
+                        canonical_generation
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let counts_valid = stats_trusted
+                && (!projection_trusted
+                    || (deleted_projection_vectors == deleted_chunks
+                        && deleted_projection_meta == deleted_chunks))
+                && cached.is_some_and(|(items, chunks)| {
+                    items >= deleted_items as i64 && chunks >= deleted_chunks as i64
+                });
+            if counts_valid {
+                let (items_before, chunks_before) = cached.unwrap_or_default();
+                tx.execute(
+                    r#"
+                    UPDATE semantic_index_stats
+                    SET embedded_items = ?2,
+                        embedded_chunks = ?3,
+                        updated_at_ms = ?4,
+                        generation = ?5
+                    WHERE model_key = ?1
+                    "#,
+                    params![
+                        semantic_model_key(),
+                        items_before - deleted_items as i64,
+                        chunks_before - deleted_chunks as i64,
+                        utc_now().timestamp_millis(),
+                        next_generation
+                    ],
+                )?;
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SUMMARY_GENERATION_STATE_KEY,
+                    next_generation,
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE semantic_index_stats SET trust_version = 0 WHERE model_key = ?1",
+                    [semantic_model_key()],
+                )?;
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SUMMARY_GENERATION_STATE_KEY,
+                    0,
+                )?;
+            }
+            if projection_trusted && counts_valid {
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_GENERATION_STATE_KEY,
+                    next_generation,
+                )?;
+            } else {
                 Self::set_maintenance_state_i64_in_transaction(
                     &tx,
                     SQLITE_VEC0_READY_STATE_KEY,
                     0,
                 )?;
-            }
-            if maintain_sqlite_vec0 {
-                let mut delete_vec_stmt = tx.prepare(
-                    r#"
-                    DELETE FROM event_embedding_vec0
-                    WHERE rowid IN (
-                        SELECT rowid
-                        FROM event_embedding_vec0_meta
-                        WHERE model_key = ?1 AND event_id = ?2
-                    )
-                    "#,
+                Self::set_maintenance_state_i64_in_transaction(
+                    &tx,
+                    SQLITE_VEC0_GENERATION_STATE_KEY,
+                    0,
                 )?;
-                let mut delete_meta_stmt = tx.prepare(
-                    "DELETE FROM event_embedding_vec0_meta WHERE model_key = ?1 AND event_id = ?2",
-                )?;
-                for event_id in event_ids {
-                    let event_id = event_id.to_string();
-                    delete_vec_stmt.execute(params![semantic_model_key(), &event_id])?;
-                    delete_meta_stmt.execute(params![semantic_model_key(), &event_id])?;
-                }
             }
-            let mut stmt = tx.prepare(
-                "DELETE FROM event_embedding_chunks WHERE model_key = ?1 AND event_id = ?2",
+            Self::set_maintenance_state_i64_in_transaction(
+                &tx,
+                CANONICAL_GENERATION_STATE_KEY,
+                next_generation,
             )?;
-            for event_id in event_ids {
-                let rows = stmt.execute(params![semantic_model_key(), event_id.to_string()])?;
-                if rows > 0 {
-                    deleted_items = deleted_items.saturating_add(1);
-                    deleted_chunks = deleted_chunks.saturating_add(rows);
-                }
-            }
-            drop(stmt);
-            Self::update_cached_stats_in_transaction(&tx, deleted_items, deleted_chunks, 0, 0)?;
         }
         tx.commit()?;
-        Ok(deleted_chunks)
+        Ok((deleted_chunks, self.finish_write_pacing(pacing)))
     }
-
 }

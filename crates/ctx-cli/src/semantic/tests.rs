@@ -310,6 +310,8 @@ mod tests {
                 "searchable_items": 10,
                 "embedded_items": 2,
                 "embedded_chunks": 4,
+                "sidecar_trust_version": SEMANTIC_SIDECAR_TRUST_VERSION,
+                "sidecar_generation": 7,
                 "dirty_items": 1,
                 "embed_policy": {
                     "source": "fixture",
@@ -324,6 +326,28 @@ mod tests {
         assert_eq!(report["embed_policy"]["source"], "fixture");
         assert_eq!(report["embed_policy"]["threads"], 7);
         assert_eq!(report["coverage"]["embedded_chunks"], 4);
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_worker_report_does_not_treat_untrusted_status_counts_as_zero() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_semantic_worker_status(
+            temp.path(),
+            &json!({
+                "schema_version": 1,
+                "status": "ready",
+                "model_key": semantic_model_key(),
+                "searchable_items": 10,
+                "embedded_items": 10,
+                "embedded_chunks": 20,
+            }),
+        )?;
+
+        let report = semantic_worker_report_best_effort(temp.path()).to_json();
+        assert_eq!(report["status"], "unknown");
+        assert_eq!(report["coverage"]["sidecar_stats_known"], false);
+        assert_eq!(report["coverage"]["coverage_ratio"], Value::Null);
         Ok(())
     }
 
@@ -460,10 +484,7 @@ mod tests {
         assert_eq!(value["worker_status"], "model_load_deferred");
         assert_eq!(value["retryable"], true);
         assert_eq!(value["available_memory_bytes"], 1_610_612_736_u64);
-        assert_eq!(
-            value["required_available_memory_bytes"],
-            2_147_483_648_u64
-        );
+        assert_eq!(value["required_available_memory_bytes"], 2_147_483_648_u64);
         Ok(())
     }
 
@@ -482,7 +503,10 @@ mod tests {
             }),
         )?;
 
-        let daemon = daemon_report(temp.path(), &semantic_worker_report_best_effort(temp.path()));
+        let daemon = daemon_report(
+            temp.path(),
+            &semantic_worker_report_best_effort(temp.path()),
+        );
         let semantic = &daemon["jobs"]["semantic_index"];
         assert_eq!(semantic["status"], "unknown");
         assert_eq!(semantic["reason"], "searchable_items_unknown");
@@ -519,7 +543,7 @@ mod tests {
             test_chunk(user.id, user.seq, &source_hash),
             test_embedding(1.0, 0.0),
         )])?;
-        assert_eq!(vector_store.dirty_event_count()?, 0);
+        assert_eq!(vector_store.bounded_dirty_event_count()?, 0);
         drop(vector_store);
 
         let mut updated_assistant = assistant.clone();
@@ -527,7 +551,10 @@ mod tests {
         updated_assistant.occurred_at = utc_now();
         store.upsert_event(&updated_assistant)?;
 
-        assert_eq!(queue_recent_semantic_work(data_root, &store, "test_recent")?, 1);
+        assert_eq!(
+            queue_recent_semantic_work(data_root, &store, "test_recent")?,
+            1
+        );
         let vector_store = SemanticVectorStore::open(&vector_path)?;
         assert_eq!(vector_store.queued_dirty_event_ids(10)?, vec![user.id]);
         Ok(())
@@ -850,9 +877,9 @@ mod tests {
         drop(vector_store);
 
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
-        let lexical_query = ctx_protocol::SearchQuery::new(vec![
-            ctx_protocol::SearchClause::all("semantic daemon scheduling fixture"),
-        ])
+        let lexical_query = ctx_protocol::SearchQuery::new(vec![ctx_protocol::SearchClause::all(
+            "semantic daemon scheduling fixture",
+        )])
         .canonicalized()?;
         let (packet, retrieval) = search_packet_query_with_backend(
             &store,
@@ -880,10 +907,11 @@ mod tests {
         );
         assert_eq!(packet.query, "semantic daemon scheduling fixture");
 
-        let semantic_query = ctx_protocol::SearchQuery::new(vec![
-            ctx_protocol::SearchClause::semantic("semantic daemon scheduling fixture"),
-        ])
-        .canonicalized()?;
+        let semantic_query =
+            ctx_protocol::SearchQuery::new(vec![ctx_protocol::SearchClause::semantic(
+                "semantic daemon scheduling fixture",
+            )])
+            .canonicalized()?;
         let err = search_packet_query_with_backend(
             &store,
             temp.path(),
@@ -917,7 +945,10 @@ mod tests {
             ..SemanticCacheEnv::default()
         };
 
-        assert_eq!(semantic_worker_cache_dir_from_env(&data_root, &env), explicit);
+        assert_eq!(
+            semantic_worker_cache_dir_from_env(&data_root, &env),
+            explicit
+        );
         Ok(())
     }
 
@@ -936,8 +967,20 @@ mod tests {
         );
         let mut runtime = DaemonRuntime::default();
 
-        let first = run_daemon_once(&test_daemon_run_args(), temp.path(), &mut runtime, None, true)?;
-        let second = run_daemon_once(&test_daemon_run_args(), temp.path(), &mut runtime, None, true)?;
+        let first = run_daemon_once(
+            &test_daemon_run_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+        )?;
+        let second = run_daemon_once(
+            &test_daemon_run_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+        )?;
 
         assert!(first.did_work);
         assert!(second.did_work);
@@ -1014,7 +1057,13 @@ mod tests {
         );
 
         let mut runtime = DaemonRuntime::default();
-        let iteration = run_daemon_once(&test_daemon_run_args(), temp.path(), &mut runtime, None, true)?;
+        let iteration = run_daemon_once(
+            &test_daemon_run_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+        )?;
 
         assert!(iteration.did_work);
         assert!(!iteration.failed);
@@ -1057,7 +1106,13 @@ mod tests {
         );
 
         let mut runtime = DaemonRuntime::default();
-        let iteration = run_daemon_once(&test_daemon_run_args(), temp.path(), &mut runtime, None, true)?;
+        let iteration = run_daemon_once(
+            &test_daemon_run_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+        )?;
 
         assert!(iteration.did_work);
         assert!(!iteration.failed);
@@ -1095,7 +1150,10 @@ mod tests {
         assert_eq!(*calls.borrow(), vec!["history_refresh"]);
         let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
         assert_eq!(daemon["jobs"]["semantic_index"]["status"], "disabled");
-        assert_eq!(daemon["jobs"]["semantic_index"]["reason"], "semantic_disabled");
+        assert_eq!(
+            daemon["jobs"]["semantic_index"]["reason"],
+            "semantic_disabled"
+        );
         assert!(!semantic_vector_path(temp.path()).exists());
         Ok(())
     }
@@ -1105,11 +1163,20 @@ mod tests {
         let temp = tempfile::tempdir()?;
         write_semantic_enabled_config(temp.path())?;
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let _hooks =
-            install_test_daemon_jobs(calls.clone(), Some(daemon_history_completed_test_job()), None);
+        let _hooks = install_test_daemon_jobs(
+            calls.clone(),
+            Some(daemon_history_completed_test_job()),
+            None,
+        );
 
         let mut runtime = DaemonRuntime::default();
-        let iteration = run_daemon_once(&test_daemon_run_args(), temp.path(), &mut runtime, None, true)?;
+        let iteration = run_daemon_once(
+            &test_daemon_run_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+        )?;
 
         assert!(!iteration.failed);
         assert_eq!(calls.borrow().first(), Some(&"history_refresh"));
@@ -1119,8 +1186,62 @@ mod tests {
             daemon["jobs"]["history_refresh"]["reason"],
             "semantic_bootstrap_in_progress"
         );
-        assert_eq!(daemon["jobs"]["semantic_index"]["last_run_status"], "skipped");
-        assert_eq!(daemon["jobs"]["semantic_index"]["last_run_reason"], "store_missing");
+        assert_eq!(
+            daemon["jobs"]["semantic_index"]["last_run_status"],
+            "skipped"
+        );
+        assert_eq!(
+            daemon["jobs"]["semantic_index"]["last_run_reason"],
+            "store_missing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_sidecar_maintenance_degrades_semantic_without_stopping_daemon() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_semantic_enabled_config(temp.path())?;
+        let _store = Store::open(database_path(temp.path().to_path_buf()))?;
+        {
+            let vector_path = semantic_vector_path(temp.path());
+            let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+            vector_store.conn.execute(
+                "UPDATE embedding_models SET dimensions = dimensions + 1 WHERE model_key = ?1",
+                [semantic_model_key()],
+            )?;
+            let error = vector_store
+                .run_maintenance_slice()
+                .expect_err("model mismatch");
+            let message =
+                semantic_terminal_maintenance_message(&error).expect("terminal maintenance");
+            vector_store.record_terminal_maintenance_failure(&message)?;
+        }
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _hooks = install_test_daemon_jobs(
+            calls.clone(),
+            Some(daemon_history_completed_test_job()),
+            None,
+        );
+
+        let mut runtime = DaemonRuntime::default();
+        let iteration = run_daemon_once(
+            &test_daemon_run_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+        )?;
+
+        assert!(!iteration.failed);
+        assert_eq!(calls.borrow().first(), Some(&"history_refresh"));
+        let semantic_job = read_daemon_job_status(&daemon_semantic_job_path(temp.path()))
+            .expect("semantic job status");
+        assert_eq!(semantic_job["status"], "degraded");
+        assert_eq!(semantic_job["reason"], "sidecar_maintenance_terminal");
+        assert_eq!(semantic_job["retryable"], false);
+        let report = semantic_worker_report_for_daemon(temp.path());
+        assert_eq!(report.status, "degraded");
+        assert!(report.last_error.is_some());
         Ok(())
     }
 
@@ -1137,6 +1258,7 @@ mod tests {
             ),
             (test_chunk(far_event, 1, "far"), test_embedding(0.0, 1.0)),
         ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
 
         assert!(store.sqlite_vec0_ready()?);
 
@@ -1169,8 +1291,8 @@ mod tests {
                 test_chunk(event_id, 1, "interrupted"),
                 test_embedding(1.0, 0.0),
             )])?;
+            store.sync_sqlite_vec0_from_chunks_if_needed()?;
             store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
-            store.conn.execute("DELETE FROM event_embedding_vec0", [])?;
         }
 
         let store = SemanticVectorStore::open_read_only(&vector_path)?.expect("vector store");
@@ -1179,17 +1301,74 @@ mod tests {
         assert_eq!(search.stats.backend, Some(SEMANTIC_VECTOR_BACKEND_RUST));
         assert_eq!(search.hits.len(), 1);
         assert_eq!(search.hits[0].event_id, event_id);
-        let vec_rows =
-            store
-                .conn
-                .query_row("SELECT COUNT(*) FROM event_embedding_vec0", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-        assert_eq!(vec_rows, 0, "read-only search must not repair vec0");
+        assert_eq!(
+            store.maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY)?,
+            Some(0),
+            "read-only search must not repair vec0"
+        );
         drop(store);
 
-        let store = SemanticVectorStore::open(&vector_path)?;
+        let mut store = SemanticVectorStore::open(&vector_path)?;
+        assert!(!store.sqlite_vec0_search_ready()?);
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
+        Ok(())
+    }
+
+    #[test]
+    fn blob_search_is_model_dimension_and_deadline_bounded() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let active_event = Uuid::new_v4();
+        let foreign_event = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[(
+            test_chunk(active_event, 1, "active"),
+            test_embedding(0.0, 1.0),
+        )])?;
+        store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+        store.conn.execute(
+            r#"
+            INSERT INTO event_embedding_chunks
+                (event_id, model_key, event_seq, chunk_index, chunk_count,
+                 source_text_sha256, chunk_text_sha256, start_char, end_char,
+                 dimensions, embedding_f32, embedded_at_ms)
+            VALUES (?1, 'foreign:model', 2, 0, 1, 'foreign', 'foreign', 0, 1, ?2, ?3, 1)
+            "#,
+            params![
+                foreign_event.to_string(),
+                SEMANTIC_DIMENSIONS as i64,
+                serialize_f32_blob(&test_embedding(1.0, 0.0))
+            ],
+        )?;
+
+        let search = store.search(&test_embedding(1.0, 0.0), 2)?;
+        assert_eq!(
+            search
+                .hits
+                .iter()
+                .map(|hit| hit.event_id)
+                .collect::<Vec<_>>(),
+            vec![active_event]
+        );
+        let deadline_error = store
+            .search_until(&test_embedding(1.0, 0.0), 1, Instant::now())
+            .expect_err("elapsed retrieval deadline must fail closed");
+        assert!(deadline_error
+            .chain()
+            .any(|cause| cause.downcast_ref::<SemanticVectorStorePending>().is_some()));
+        let too_many_ids =
+            vec![active_event; query_service_contract::SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS + 1];
+        let cap_error = store
+            .search_event_ids_until(
+                &test_embedding(1.0, 0.0),
+                &too_many_ids,
+                1,
+                Instant::now() + StdDuration::from_secs(1),
+            )
+            .expect_err("oversized candidate set must fail closed");
+        assert!(cap_error
+            .chain()
+            .any(|cause| cause.downcast_ref::<SemanticVectorStorePending>().is_some()));
         Ok(())
     }
 
@@ -1206,6 +1385,7 @@ mod tests {
             ),
             (test_chunk(far_event, 1, "far"), test_embedding(0.0, 1.0)),
         ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
 
         let search = store.search(&test_embedding(1.0, 0.0), SEMANTIC_SQLITE_VEC0_MAX_K + 1)?;
 
@@ -1225,9 +1405,9 @@ mod tests {
         let chunk_limit = semantic_rust_full_scan_chunk_limit();
         store.conn.execute(
             r#"
-            INSERT INTO semantic_index_stats
-                (model_key, embedded_items, embedded_chunks, updated_at_ms)
-            VALUES (?1, 1, ?2, 1)
+            UPDATE semantic_index_stats
+            SET embedded_items = 1, embedded_chunks = ?2
+            WHERE model_key = ?1
             "#,
             params![semantic_model_key(), (chunk_limit + 1) as i64],
         )?;
@@ -1331,7 +1511,9 @@ mod tests {
         )?;
         drop(store);
         let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
-        let stats = store.cached_stats()?.expect("initialized cached stats");
+        assert_eq!(store.cached_stats()?, None);
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+        let stats = store.cached_stats()?.expect("rebuilt cached stats");
         assert_eq!(stats.embedded_items, 2);
         assert_eq!(stats.embedded_chunks, 4);
 
@@ -1354,6 +1536,7 @@ mod tests {
                 .delete_embedding_chunks_for_event_ids(&[multi_chunk_event, multi_chunk_event,])?,
             2
         );
+        assert!(store.sqlite_vec0_ready()?);
         let stats = store.cached_stats()?.expect("cached stats");
         assert_eq!(stats.embedded_items, 1);
         assert_eq!(stats.embedded_chunks, 1);
@@ -1362,6 +1545,7 @@ mod tests {
             store.delete_embedding_chunks_for_event_ids(&[single_chunk_event])?,
             1
         );
+        assert!(store.sqlite_vec0_ready()?);
         assert_eq!(
             store.delete_embedding_chunks_for_event_ids(&[single_chunk_event])?,
             0
@@ -1373,7 +1557,67 @@ mod tests {
     }
 
     #[test]
-    fn completed_sidecar_maintenance_is_not_repeated_on_second_open() -> Result<()> {
+    fn cached_stats_underflow_invalidates_trust() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let event_id = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[(
+            test_chunk(event_id, 1, "underflow"),
+            test_embedding(1.0, 0.0),
+        )])?;
+        store.conn.execute(
+            "UPDATE semantic_index_stats SET embedded_items = 0, embedded_chunks = 0 WHERE model_key = ?1",
+            [semantic_model_key()],
+        )?;
+
+        assert_eq!(store.delete_embedding_chunks_for_event_ids(&[event_id])?, 1);
+        assert_eq!(store.cached_stats()?, None);
+        let (items, chunks, trust) = store.conn.query_row(
+            "SELECT embedded_items, embedded_chunks, trust_version FROM semantic_index_stats WHERE model_key = ?1",
+            [semantic_model_key()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        assert_eq!((items, chunks, trust), (0, 0, 0));
+        assert_eq!(
+            store.sidecar_trust_state()?,
+            SemanticSidecarTrustState::Pending
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_model_tuple_mismatch_is_terminal_until_fingerprint_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        store.conn.execute(
+            "UPDATE embedding_models SET dimensions = dimensions + 1 WHERE model_key = ?1",
+            [semantic_model_key()],
+        )?;
+
+        let error = store.run_maintenance_slice().expect_err("model mismatch");
+        let message = semantic_terminal_maintenance_message(&error).expect("typed terminal error");
+        store.record_terminal_maintenance_failure(&message)?;
+        assert_eq!(
+            store.active_terminal_maintenance_failure()?,
+            Some(message.clone())
+        );
+
+        store.conn.execute(
+            "UPDATE embedding_models SET dimensions = ?2 WHERE model_key = ?1",
+            params![semantic_model_key(), SEMANTIC_DIMENSIONS as i64],
+        )?;
+        assert_eq!(store.active_terminal_maintenance_failure()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn reopening_vector_store_does_not_read_corpus_tables() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let vector_path = temp.path().join("vectors.sqlite");
         {
@@ -1382,83 +1626,168 @@ mod tests {
                 test_chunk(Uuid::new_v4(), 1, "ready"),
                 test_embedding(1.0, 0.0),
             )])?;
-            for state_key in [SQLITE_VEC0_READY_STATE_KEY, PLAINTEXT_SANITIZED_STATE_KEY] {
-                let updated = store.conn.execute(
-                    "UPDATE semantic_maintenance_state SET updated_at_ms = 7 WHERE key = ?1",
-                    [SemanticVectorStore::maintenance_state_key(state_key)],
-                )?;
-                assert_eq!(updated, 1);
-            }
-            store.conn.execute(
-                r#"
-                UPDATE semantic_index_stats
-                SET embedded_items = 41, embedded_chunks = 43, updated_at_ms = 7
-                WHERE model_key = ?1
-                "#,
-                [semantic_model_key()],
-            )?;
         }
 
-        let store = SemanticVectorStore::open(&vector_path)?;
-        for state_key in [SQLITE_VEC0_READY_STATE_KEY, PLAINTEXT_SANITIZED_STATE_KEY] {
-            let updated_at_ms = store.conn.query_row(
-                "SELECT updated_at_ms FROM semantic_maintenance_state WHERE key = ?1",
-                [SemanticVectorStore::maintenance_state_key(state_key)],
-                |row| row.get::<_, i64>(0),
-            )?;
-            assert_eq!(updated_at_ms, 7);
-        }
-        let stats = store.cached_stats()?.expect("cached stats");
-        assert_eq!(stats.embedded_items, 41);
-        assert_eq!(stats.embedded_chunks, 43);
+        let conn = Connection::open(&vector_path)?;
+        let mut store = SemanticVectorStore {
+            conn,
+            path: vector_path,
+        };
+        let denied_reads = Arc::new(Mutex::new(Vec::new()));
+        let callback_denied_reads = Arc::clone(&denied_reads);
+        store
+            .conn
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if let rusqlite::hooks::AuthAction::Read { table_name, .. } = context.action {
+                    if matches!(
+                        table_name,
+                        "event_embeddings"
+                            | "event_embedding_chunks"
+                            | "semantic_index_stats"
+                            | "semantic_event_summary"
+                            | "event_embedding_vec0_v2"
+                            | "event_embedding_vec0_meta_v2"
+                    ) {
+                        callback_denied_reads
+                            .lock()
+                            .expect("denied-read lock")
+                            .push(table_name.to_owned());
+                        return rusqlite::hooks::Authorization::Deny;
+                    }
+                }
+                rusqlite::hooks::Authorization::Allow
+            }));
+
+        store.ensure_schema()?;
+        assert!(
+            denied_reads.lock().expect("denied-read lock").is_empty(),
+            "reopen attempted a corpus read"
+        );
         Ok(())
     }
 
     #[test]
-    fn incomplete_plaintext_sanitation_recovers_before_marking_complete() -> Result<()> {
+    fn plaintext_sanitation_cursor_resumes_after_reopen() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let vector_path = temp.path().join("vectors.sqlite");
         {
             let mut store = SemanticVectorStore::open(&vector_path)?;
-            let event_id = Uuid::new_v4();
-            store.upsert_chunk_embeddings(&[(
-                test_chunk(event_id, 1, "plaintext"),
-                test_embedding(1.0, 0.0),
-            )])?;
+            let chunks = (0..=SEMANTIC_SIDECAR_MAINTENANCE_ROWS)
+                .map(|index| {
+                    (
+                        test_chunk(Uuid::new_v4(), index as u64 + 1, "plaintext"),
+                        test_embedding(1.0, 0.0),
+                    )
+                })
+                .collect::<Vec<_>>();
+            store.upsert_chunk_embeddings(&chunks)?;
             store.conn.execute(
-                "UPDATE event_embedding_chunks SET chunk_text = 'legacy plaintext' WHERE event_id = ?1",
-                [event_id.to_string()],
+                "UPDATE event_embedding_chunks SET chunk_text = 'legacy plaintext'",
+                [],
             )?;
-            store.conn.execute(
-                r#"
-                INSERT INTO event_embeddings
-                    (event_id, model_key, event_seq, text_sha256, preview_text,
-                     dimensions, embedding_f32, embedded_at_ms)
-                VALUES (?1, ?2, 1, 'legacy', 'legacy preview', ?3, ?4, 1)
-                "#,
-                params![
-                    event_id.to_string(),
-                    semantic_model_key(),
-                    SEMANTIC_DIMENSIONS as i64,
-                    serialize_f32_blob(&test_embedding(1.0, 0.0)),
-                ],
+            let tx = store.conn.transaction()?;
+            SemanticVectorStore::set_global_maintenance_state_i64_in_transaction(
+                &tx,
+                PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY,
+                0,
             )?;
-            store.set_maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY, 0)?;
+            SemanticVectorStore::set_global_maintenance_state_i64_in_transaction(
+                &tx,
+                PLAINTEXT_SANITIZE_CURSOR_VERSION_GLOBAL_STATE_KEY,
+                0,
+            )?;
+            tx.commit()?;
+            assert_eq!(store.run_maintenance_slice()?.rows_processed, 0);
+            let first = store.run_maintenance_slice()?;
+            assert_eq!(first.rows_processed, SEMANTIC_SIDECAR_MAINTENANCE_ROWS);
+            let trailing_plaintext = store.conn.query_row(
+                "SELECT chunk_text != '' FROM event_embedding_chunks ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            assert!(trailing_plaintext);
         }
 
-        let store = SemanticVectorStore::open(&vector_path)?;
-        assert_eq!(store.plaintext_value_count()?, 0);
+        let mut store = SemanticVectorStore::open(&vector_path)?;
+        let resumed = store.run_maintenance_slice()?;
+        assert_eq!(resumed.rows_processed, 1);
+        let trailing_plaintext = store.conn.query_row(
+            "SELECT chunk_text != '' FROM event_embedding_chunks ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        assert!(!trailing_plaintext);
+        let published = store.run_maintenance_slice()?;
+        assert!(!published.is_ready());
         assert_eq!(
-            store.maintenance_state_i64(PLAINTEXT_SANITIZED_STATE_KEY)?,
+            store.global_maintenance_state_i64(PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY)?,
             Some(PLAINTEXT_SANITIZED_STATE_VERSION)
         );
-        let legacy_rows =
-            store
-                .conn
-                .query_row("SELECT COUNT(*) FROM event_embeddings", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-        assert_eq!(legacy_rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_maintenance_restores_adaptive_page_units_toward_default() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        store.set_maintenance_state_i64(MAINTENANCE_PAGE_UNITS_STATE_KEY, 1)?;
+
+        store.run_maintenance_slice()?;
+
+        assert_eq!(
+            store.maintenance_state_i64(MAINTENANCE_PAGE_UNITS_STATE_KEY)?,
+            Some(2)
+        );
+        store.grow_maintenance_page_units_after_success(40)?;
+        assert_eq!(
+            store.maintenance_state_i64(MAINTENANCE_PAGE_UNITS_STATE_KEY)?,
+            Some(SEMANTIC_SIDECAR_MAINTENANCE_ROWS as i64)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_legacy_plaintext_is_terminal_without_mutation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let event_id = Uuid::new_v4();
+        store.conn.execute(
+            r#"
+            INSERT INTO event_embeddings
+                (event_id, model_key, event_seq, text_sha256, preview_text,
+                 dimensions, embedding_f32, embedded_at_ms)
+            VALUES (?1, ?2, 1, 'legacy', zeroblob(?3), ?4, ?5, 1)
+            "#,
+            params![
+                event_id.to_string(),
+                semantic_model_key(),
+                SEMANTIC_SIDECAR_MAINTENANCE_MAX_BYTES as i64 + 1,
+                SEMANTIC_DIMENSIONS as i64,
+                serialize_f32_blob(&test_embedding(1.0, 0.0)),
+            ],
+        )?;
+        let tx = store.conn.transaction()?;
+        SemanticVectorStore::set_global_maintenance_state_i64_in_transaction(
+            &tx,
+            PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY,
+            0,
+        )?;
+        tx.commit()?;
+
+        let error = store
+            .run_maintenance_slice()
+            .expect_err("oversized row must fail closed");
+        assert!(semantic_terminal_maintenance_message(&error).is_some());
+        let remaining = store.conn.query_row(
+            "SELECT length(preview_text) FROM event_embeddings WHERE event_id = ?1",
+            [event_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(remaining, SEMANTIC_SIDECAR_MAINTENANCE_MAX_BYTES as i64 + 1);
+        assert_eq!(
+            store.global_maintenance_state_i64(PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY)?,
+            Some(0)
+        );
         Ok(())
     }
 
@@ -1479,31 +1808,250 @@ mod tests {
             .collect::<Vec<_>>();
         vector_store.upsert_chunk_embeddings(&chunks)?;
         assert_eq!(
-            vector_store.cached_or_exact_stats()?.embedded_items,
+            vector_store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_items,
             SEMANTIC_PRUNE_EVENTS_PER_PASS + 1
         );
         assert_eq!(
-            vector_store.cached_or_exact_stats()?.embedded_chunks,
+            vector_store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_chunks,
             SEMANTIC_PRUNE_EVENTS_PER_PASS + 1
+        );
+
+        let slot = vector_store
+            .maintenance_state_i64(SUMMARY_ACTIVE_SLOT_STATE_KEY)?
+            .expect("summary slot");
+        let first_plan = {
+            let mut stmt = vector_store.conn.prepare(
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT event_id, source_text_sha256, single_source_hash, event_seq, chunk_count
+                FROM semantic_event_summary
+                WHERE slot = ?1 AND model_key = ?2
+                ORDER BY event_seq DESC, event_id DESC
+                LIMIT ?3
+                "#,
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    slot,
+                    semantic_model_key(),
+                    SEMANTIC_PRUNE_EVENTS_PER_PASS as i64
+                ],
+                |row| row.get::<_, String>(3),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n")
+        };
+        assert!(
+            first_plan.contains("idx_semantic_event_summary_prune"),
+            "{first_plan}"
+        );
+        assert!(!first_plan.contains("USE TEMP B-TREE"), "{first_plan}");
+        let continuation_plan = {
+            let mut stmt = vector_store.conn.prepare(
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT event_id, source_text_sha256, single_source_hash, event_seq, chunk_count
+                FROM semantic_event_summary
+                WHERE slot = ?1 AND model_key = ?2
+                  AND (event_seq, event_id) < (?3, ?4)
+                ORDER BY event_seq DESC, event_id DESC
+                LIMIT ?5
+                "#,
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    slot,
+                    semantic_model_key(),
+                    i64::MAX,
+                    Uuid::nil().to_string(),
+                    SEMANTIC_PRUNE_EVENTS_PER_PASS as i64
+                ],
+                |row| row.get::<_, String>(3),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n")
+        };
+        assert!(
+            continuation_plan.contains("idx_semantic_event_summary_prune"),
+            "{continuation_plan}"
+        );
+        assert!(
+            continuation_plan.contains("event_seq<?"),
+            "{continuation_plan}"
+        );
+        assert!(
+            !continuation_plan.contains("USE TEMP B-TREE"),
+            "{continuation_plan}"
         );
 
         let first = vector_store.prune_ineligible_events(&store)?;
         assert_eq!(first.queued_stale_events, SEMANTIC_PRUNE_EVENTS_PER_PASS);
         assert_eq!(
-            vector_store.cached_or_exact_stats()?.embedded_items,
+            vector_store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_items,
             1,
             "first pass should leave the oldest event for the next cursor page"
         );
-        assert_eq!(vector_store.cached_or_exact_stats()?.embedded_chunks, 1);
+        assert_eq!(
+            vector_store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_chunks,
+            1
+        );
 
         let second = vector_store.prune_ineligible_events(&store)?;
         assert_eq!(second.queued_stale_events, 1);
-        assert_eq!(vector_store.cached_or_exact_stats()?.embedded_items, 0);
-        assert_eq!(vector_store.cached_or_exact_stats()?.embedded_chunks, 0);
         assert_eq!(
-            vector_store.dirty_event_count()?,
+            vector_store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_items,
+            0
+        );
+        assert_eq!(
+            vector_store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_chunks,
+            0
+        );
+        assert_eq!(
+            vector_store.bounded_dirty_event_count()?,
             SEMANTIC_PRUNE_EVENTS_PER_PASS + 1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prune_rejects_an_event_larger_than_one_row_slice() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let docs = write_searchable_store(temp.path(), 1)?;
+        let history = Store::open(database_path(temp.path().to_path_buf()))?;
+        let event_id = docs[0].event_id;
+        let mut store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
+        let chunks = (0..=SEMANTIC_SIDECAR_MAINTENANCE_ROWS)
+            .map(|chunk_index| {
+                (
+                    test_chunk_at(
+                        event_id,
+                        docs[0].seq,
+                        "oversized-prune",
+                        chunk_index,
+                        SEMANTIC_SIDECAR_MAINTENANCE_ROWS + 1,
+                    ),
+                    test_embedding(1.0, 0.0),
+                )
+            })
+            .collect::<Vec<_>>();
+        store.upsert_chunk_embeddings(&chunks)?;
+
+        let error = store
+            .prune_ineligible_events(&history)
+            .expect_err("oversized summary event must fail closed");
+
+        assert!(semantic_terminal_maintenance_message(&error).is_some());
+        assert_eq!(
+            store
+                .cached_stats()?
+                .expect("trusted stats")
+                .embedded_chunks,
+            SEMANTIC_SIDECAR_MAINTENANCE_ROWS + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_and_dirty_pages_use_bounded_composite_indexes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        assert!(store.ensure_sqlite_vec0_schema_for_maintenance()?);
+
+        for (sql, query_params, expected_index) in [
+            (
+                format!(
+                    r#"
+                    EXPLAIN QUERY PLAN
+                    SELECT rowid FROM {SQLITE_VEC0_META_TABLE}
+                    WHERE slot = ?1 AND model_key = ?2
+                    ORDER BY rowid
+                    LIMIT ?3
+                    "#
+                ),
+                vec![
+                    SqlValue::from(0_i64),
+                    SqlValue::from(semantic_model_key().to_owned()),
+                    SqlValue::from(SEMANTIC_SIDECAR_MAINTENANCE_ROWS as i64),
+                ],
+                SQLITE_VEC0_WORK_INDEX,
+            ),
+            (
+                format!(
+                    r#"
+                    EXPLAIN QUERY PLAN
+                    SELECT rowid, canonical_rowid FROM {SQLITE_VEC0_META_TABLE}
+                    WHERE slot = ?1 AND model_key = ?2 AND rowid > ?3
+                    ORDER BY rowid
+                    LIMIT ?4
+                    "#
+                ),
+                vec![
+                    SqlValue::from(0_i64),
+                    SqlValue::from(semantic_model_key().to_owned()),
+                    SqlValue::from(1_i64),
+                    SqlValue::from(SEMANTIC_SIDECAR_MAINTENANCE_ROWS as i64),
+                ],
+                SQLITE_VEC0_WORK_INDEX,
+            ),
+        ] {
+            let mut stmt = store.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(query_params), |row| {
+                row.get::<_, String>(3)
+            })?;
+            let plan = rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+            assert!(plan.contains(expected_index), "{plan}");
+            assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+        }
+
+        for sql in [
+            r#"
+            EXPLAIN QUERY PLAN
+            SELECT event_id, priority_seq, queued_at_ms
+            FROM semantic_dirty_events
+            WHERE model_key = ?1 AND priority_seq IS NOT NULL
+            ORDER BY priority_seq DESC, queued_at_ms DESC
+            LIMIT ?2
+            "#,
+            r#"
+            EXPLAIN QUERY PLAN
+            SELECT event_id
+            FROM semantic_dirty_events
+            WHERE model_key = ?1 AND priority_seq IS NULL
+            ORDER BY queued_at_ms ASC
+            LIMIT ?2
+            "#,
+        ] {
+            let mut stmt = store.conn.prepare(sql)?;
+            let rows = stmt.query_map(
+                params![
+                    semantic_model_key(),
+                    SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT as i64
+                ],
+                |row| row.get::<_, String>(3),
+            )?;
+            let plan = rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+            assert!(
+                plan.contains("idx_semantic_dirty_events_model_priority"),
+                "{plan}"
+            );
+            assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+        }
         Ok(())
     }
 
@@ -1531,6 +2079,7 @@ mod tests {
                 test_embedding(0.98, 0.199),
             ),
         ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
 
         let query = test_embedding(1.0, 0.0);
         let sqlite_hits = store.search(&query, 2)?;
@@ -1559,7 +2108,80 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_vec0_rebuilds_incompatible_derived_schema() -> Result<()> {
+    fn sqlite_vec0_partition_excludes_changed_inactive_vectors_from_top_k() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let close_event = Uuid::new_v4();
+        let far_event = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[
+            (
+                test_chunk(close_event, 2, "active-close"),
+                test_embedding(0.9, 0.1),
+            ),
+            (
+                test_chunk(far_event, 1, "active-far"),
+                test_embedding(0.0, 1.0),
+            ),
+        ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+        let active_slot = store
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .expect("active slot");
+        let inactive_slot = 1 - active_slot;
+        let tx = store.conn.transaction()?;
+        for index in 0..8_i64 {
+            let inactive_event = Uuid::new_v4().to_string();
+            tx.execute(
+                &format!(
+                    r#"
+                    INSERT INTO {SQLITE_VEC0_META_TABLE}
+                        (slot, canonical_rowid, event_id, model_key, event_seq, chunk_index,
+                         source_text_sha256, start_char, end_char)
+                    VALUES (?1, ?2, ?3, ?4, ?5, 0, 'inactive', 0, 1)
+                    "#
+                ),
+                params![
+                    inactive_slot,
+                    10_000 + index,
+                    inactive_event,
+                    semantic_model_key(),
+                    10_000 + index
+                ],
+            )?;
+            let projection_rowid = tx.last_insert_rowid();
+            tx.execute(
+                &format!(
+                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot) VALUES (?1, ?2, ?3)"
+                ),
+                params![
+                    projection_rowid,
+                    serialize_f32_blob(&test_embedding(1.0, 0.0)),
+                    inactive_slot
+                ],
+            )?;
+        }
+        tx.commit()?;
+
+        let query = test_embedding(1.0, 0.0);
+        let projected = store.search(&query, 2)?;
+        let canonical = store.search_event_ids(&query, &[close_event, far_event], 2)?;
+        assert_eq!(
+            projected
+                .hits
+                .iter()
+                .map(|hit| hit.event_id)
+                .collect::<Vec<_>>(),
+            canonical
+                .hits
+                .iter()
+                .map(|hit| hit.event_id)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_preserves_legacy_projection_tables() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let vector_path = temp.path().join("vectors.sqlite");
         {
@@ -1579,20 +2201,20 @@ mod tests {
         }
 
         let mut store = SemanticVectorStore::open(&vector_path)?;
+        assert!(sqlite_table_exists(&store.conn, "event_embedding_vec0")?);
+        assert!(sqlite_table_exists(
+            &store.conn,
+            "event_embedding_vec0_meta"
+        )?);
         let close_event = Uuid::new_v4();
         store.upsert_chunk_embeddings(&[(
             test_chunk(close_event, 1, "close"),
             test_embedding(1.0, 0.0),
         )])?;
-
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
-        let vec0_sql = sqlite_table_sql(&store.conn, "event_embedding_vec0")?.unwrap_or_default();
-        assert!(vec0_sql.to_ascii_lowercase().contains("using vec0"));
-        assert!(sqlite_table_has_columns(
-            &store.conn,
-            "event_embedding_vec0_meta",
-            &["model_key", "source_text_sha256", "start_char", "end_char"]
-        )?);
+        assert!(sqlite_table_exists(&store.conn, SQLITE_VEC0_TABLE)?);
+        assert!(sqlite_table_exists(&store.conn, SQLITE_VEC0_META_TABLE)?);
         Ok(())
     }
 
@@ -1609,6 +2231,7 @@ mod tests {
             ),
             (test_chunk(far_event, 1, "far"), test_embedding(0.0, 1.0)),
         ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
 
         let canonical_rowid = store.conn.query_row(
@@ -1617,22 +2240,34 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         store.conn.execute(
-	            "UPDATE event_embedding_vec0_meta SET rowid = rowid + 1000 WHERE event_id = ?1 AND model_key = ?2",
-	            params![close_event.to_string(), semantic_model_key()],
-	        )?;
+            &format!(
+                "UPDATE {SQLITE_VEC0_META_TABLE} SET rowid = rowid + 1000 WHERE event_id = ?1 AND model_key = ?2"
+            ),
+            params![close_event.to_string(), semantic_model_key()],
+        )?;
 
-        assert!(!store.sqlite_vec0_ready()?);
-        store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+        assert!(store.sqlite_vec0_search_ready()?);
+        for _ in 0..3 {
+            store.run_maintenance_slice()?;
+            if !store.sqlite_vec0_search_ready()? {
+                break;
+            }
+        }
         assert!(!store.sqlite_vec0_search_ready()?);
         store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
 
-        let repaired_rowid = store.conn.query_row(
-            "SELECT rowid FROM event_embedding_vec0_meta WHERE event_id = ?1 AND model_key = ?2",
-            params![close_event.to_string(), semantic_model_key()],
+        let active_slot = store
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .expect("active slot");
+        let repaired_canonical_rowid = store.conn.query_row(
+            &format!(
+                "SELECT canonical_rowid FROM {SQLITE_VEC0_META_TABLE} WHERE slot = ?1 AND event_id = ?2 AND model_key = ?3"
+            ),
+            params![active_slot, close_event.to_string(), semantic_model_key()],
             |row| row.get::<_, i64>(0),
         )?;
-        assert_eq!(repaired_rowid, canonical_rowid);
+        assert_eq!(repaired_canonical_rowid, canonical_rowid);
         Ok(())
     }
 
@@ -1649,29 +2284,42 @@ mod tests {
             ),
             (test_chunk(far_event, 1, "far"), test_embedding(0.0, 1.0)),
         ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
 
+        let active_slot = store
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .expect("active slot");
         let close_rowid = store.conn.query_row(
-            "SELECT rowid FROM event_embedding_chunks WHERE event_id = ?1 AND model_key = ?2",
-            params![close_event.to_string(), semantic_model_key()],
+            &format!(
+                "SELECT rowid FROM {SQLITE_VEC0_META_TABLE} WHERE slot = ?1 AND event_id = ?2 AND model_key = ?3"
+            ),
+            params![active_slot, close_event.to_string(), semantic_model_key()],
             |row| row.get::<_, i64>(0),
         )?;
         store.conn.execute(
-            "DELETE FROM event_embedding_vec0 WHERE rowid = ?1",
+            &format!("DELETE FROM {SQLITE_VEC0_TABLE} WHERE rowid = ?1"),
             params![close_rowid],
         )?;
         store.conn.execute(
-            "INSERT INTO event_embedding_vec0(rowid, embedding) VALUES (?1, ?2)",
-            params![close_rowid, serialize_f32_blob(&test_embedding(0.0, 1.0))],
+            &format!("INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot) VALUES (?1, ?2, ?3)"),
+            params![
+                close_rowid,
+                serialize_f32_blob(&test_embedding(0.0, 1.0)),
+                active_slot
+            ],
         )?;
 
-        assert!(!store.sqlite_vec0_ready()?);
         assert!(
             store.sqlite_vec0_search_ready()?,
             "search hot path should trust the durable readiness marker"
         );
-
-        store.set_maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY, 0)?;
+        for _ in 0..3 {
+            store.run_maintenance_slice()?;
+            if !store.sqlite_vec0_search_ready()? {
+                break;
+            }
+        }
         assert!(!store.sqlite_vec0_search_ready()?);
         store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);
@@ -1718,7 +2366,10 @@ mod tests {
         };
         write_daemon_lifecycle_status(temp.path(), &args, "running", 123, None, None)?;
 
-        let daemon = daemon_report(temp.path(), &semantic_worker_report_best_effort(temp.path()));
+        let daemon = daemon_report(
+            temp.path(),
+            &semantic_worker_report_best_effort(temp.path()),
+        );
 
         assert_eq!(daemon["status"], "stale_lock");
         assert_eq!(daemon["running"], false);
@@ -1726,7 +2377,6 @@ mod tests {
         assert_eq!(daemon["reason"], "daemon_status_stale");
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -1783,8 +2433,8 @@ mod model_retry_tests {
         assert_eq!(status.next_retry_at_ms, final_next_retry_at_ms);
         assert!(status.retryable);
         assert!(!status.terminal);
-        let readiness = readiness::SemanticReadinessDiagnostics::evaluate(
-            readiness::SemanticReadinessInputs {
+        let readiness =
+            readiness::SemanticReadinessDiagnostics::evaluate(readiness::SemanticReadinessInputs {
                 enabled: true,
                 supported: true,
                 model_available: false,
@@ -1798,18 +2448,14 @@ mod model_retry_tests {
                     queued_items: 0,
                 },
                 model_retry: status.clone(),
-            },
-        );
+            });
         assert_eq!(
             readiness.state,
             readiness::SemanticReadinessState::RetryDeferred
         );
         assert!(matches!(
             readiness.primary_blocker(),
-            Some(readiness::SemanticReadinessBlocker::ModelRetryDeferred {
-                attempt: 8,
-                ..
-            })
+            Some(readiness::SemanticReadinessBlocker::ModelRetryDeferred { attempt: 8, .. })
         ));
         let status_json = serde_json::to_value(&status)?;
         assert!(status_json.get("max_attempts").is_none());
@@ -1838,8 +2484,8 @@ mod model_retry_tests {
         assert!(!status.retryable);
         assert!(status.terminal);
         assert_eq!(status.next_retry_at_ms, None);
-        let readiness = readiness::SemanticReadinessDiagnostics::evaluate(
-            readiness::SemanticReadinessInputs {
+        let readiness =
+            readiness::SemanticReadinessDiagnostics::evaluate(readiness::SemanticReadinessInputs {
                 enabled: true,
                 supported: true,
                 model_available: false,
@@ -1853,15 +2499,11 @@ mod model_retry_tests {
                     queued_items: 0,
                 },
                 model_retry: status,
-            },
-        );
+            });
         assert_eq!(readiness.state, readiness::SemanticReadinessState::Failed);
         assert!(matches!(
             readiness.primary_blocker(),
-            Some(readiness::SemanticReadinessBlocker::ModelFailureTerminal {
-                attempt: 1,
-                ..
-            })
+            Some(readiness::SemanticReadinessBlocker::ModelFailureTerminal { attempt: 1, .. })
         ));
         Ok(())
     }
@@ -1909,12 +2551,13 @@ mod unsupported_platform_tests {
         let temp = tempfile::tempdir()?;
         fs::create_dir_all(temp.path())?;
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
-        insert_test_event(&store, "semantic unsupported platform lexical fallback fixture")?;
-        let lexical_query = ctx_protocol::SearchQuery::new(vec![
-            ctx_protocol::SearchClause::all(
-                "semantic unsupported platform lexical fallback fixture",
-            ),
-        ])
+        insert_test_event(
+            &store,
+            "semantic unsupported platform lexical fallback fixture",
+        )?;
+        let lexical_query = ctx_protocol::SearchQuery::new(vec![ctx_protocol::SearchClause::all(
+            "semantic unsupported platform lexical fallback fixture",
+        )])
         .canonicalized()?;
 
         let (packet, retrieval) = search_packet_query_with_backend(
@@ -1948,12 +2591,11 @@ mod unsupported_platform_tests {
             "semantic unsupported platform lexical fallback fixture"
         );
 
-        let semantic_query = ctx_protocol::SearchQuery::new(vec![
-            ctx_protocol::SearchClause::semantic(
+        let semantic_query =
+            ctx_protocol::SearchQuery::new(vec![ctx_protocol::SearchClause::semantic(
                 "semantic unsupported platform lexical fallback fixture",
-            ),
-        ])
-        .canonicalized()?;
+            )])
+            .canonicalized()?;
         let error = search_packet_query_with_backend(
             &store,
             temp.path(),
@@ -2128,6 +2770,82 @@ mod query_service_transport_tests {
         assert_eq!(snapshot.active_foreground_queries, 0);
         assert!(!snapshot.document_batch_active);
         Ok(())
+    }
+
+    #[test]
+    fn foreground_waiter_wins_before_next_background_batch_without_sleep() -> Result<()> {
+        let priority = query_priority::SemanticQueryPriorityGate::default();
+        let active_batch = priority.begin_document_batch(None)?;
+        let foreground_priority = priority.clone();
+        let (foreground_acquired_tx, foreground_acquired_rx) = std::sync::mpsc::channel();
+        let (release_foreground_tx, release_foreground_rx) = std::sync::mpsc::channel();
+        let foreground = std::thread::spawn(move || {
+            let permit = foreground_priority
+                .begin_test_foreground_query(None)
+                .expect("foreground permit");
+            foreground_acquired_tx
+                .send(())
+                .expect("signal foreground permit");
+            release_foreground_rx
+                .recv()
+                .expect("release foreground permit");
+            drop(permit);
+        });
+        while priority.snapshot().waiting_foreground_queries == 0 {
+            std::thread::yield_now();
+        }
+
+        let background_priority = priority.clone();
+        let (background_acquired_tx, background_acquired_rx) = std::sync::mpsc::channel();
+        let background = std::thread::spawn(move || {
+            let permit = background_priority
+                .begin_document_batch(None)
+                .expect("background permit");
+            background_acquired_tx
+                .send(())
+                .expect("signal background permit");
+            drop(permit);
+        });
+        drop(active_batch);
+
+        foreground_acquired_rx.recv()?;
+        assert!(matches!(
+            background_acquired_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release_foreground_tx.send(())?;
+        background_acquired_rx.recv()?;
+        foreground.join().expect("foreground thread");
+        background.join().expect("background thread");
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_query_retryability_is_explicit_and_fail_closed() {
+        let pending = anyhow::Error::new(SemanticVectorStorePending::new("pending"));
+        let terminal = anyhow::Error::new(SemanticVectorStoreTerminal::new("terminal"));
+        let busy = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ));
+        let interrupted = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+            None,
+        ));
+        let corrupt = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        ));
+
+        assert!(semantic_query_error_retryable(&pending));
+        assert!(semantic_query_error_retryable(&busy));
+        assert!(semantic_query_error_retryable(&interrupted));
+        assert!(!semantic_query_error_retryable(&terminal));
+        assert!(!semantic_query_error_retryable(&corrupt));
+        assert!(!semantic_query_error_retryable(&anyhow!("unknown")));
+        assert!(!semantic_deterministic_sidecar_error(&busy));
+        assert!(!semantic_deterministic_sidecar_error(&interrupted));
+        assert!(semantic_deterministic_sidecar_error(&corrupt));
     }
 
     #[test]
@@ -2333,8 +3051,8 @@ mod query_service_transport_tests {
     fn daemon_query_request_reader_rejects_oversized_request() {
         let mut cursor = std::io::Cursor::new(b"abcdef".to_vec());
 
-        let error = read_daemon_query_request(&mut cursor, 3)
-            .expect_err("oversized request should fail");
+        let error =
+            read_daemon_query_request(&mut cursor, 3).expect_err("oversized request should fail");
 
         assert!(format!("{error:#}").contains("daemon query request is too large"));
     }
@@ -2436,7 +3154,6 @@ mod query_service_transport_tests {
 mod fastembed_policy_tests {
     use super::*;
 
-
     #[test]
     fn cpu_model_load_defers_before_cache_or_runtime_access() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2448,12 +3165,7 @@ mod fastembed_policy_tests {
                 available_parallelism: 8,
             },
         );
-        let error = match acquire_cpu_backend(
-            temp.path(),
-            policy,
-            BackendPreference::Cpu,
-            false,
-        ) {
+        let error = match acquire_cpu_backend(temp.path(), policy, BackendPreference::Cpu, false) {
             Ok(_) => panic!("low-memory acquisition should defer"),
             Err(error) => error,
         };
@@ -2489,7 +3201,10 @@ mod fastembed_policy_tests {
             ..SemanticCacheEnv::default()
         };
 
-        assert_eq!(semantic_worker_cache_dir_from_env(&data_root, &env), explicit);
+        assert_eq!(
+            semantic_worker_cache_dir_from_env(&data_root, &env),
+            explicit
+        );
         Ok(())
     }
 }

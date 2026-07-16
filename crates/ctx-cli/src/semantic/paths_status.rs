@@ -50,9 +50,7 @@ fn semantic_model_retry_store(data_root: &Path) -> model_retry::SemanticModelRet
     )
 }
 
-fn semantic_model_retry_status(
-    data_root: &Path,
-) -> Result<model_retry::SemanticModelRetryStatus> {
+fn semantic_model_retry_status(data_root: &Path) -> Result<model_retry::SemanticModelRetryStatus> {
     semantic_model_retry_store(data_root)
         .status(semantic_model_key(), utc_now().timestamp_millis())
         .map_err(|error| anyhow!(error))
@@ -182,7 +180,9 @@ impl PidFileLock {
         // cannot see the guard file. A live or incomplete legacy owner wins;
         // stale legacy metadata is reclaimable for supported upgrade handoff.
         if path.exists()
-            && !previous.as_ref().is_some_and(pid_lock_uses_advisory_protocol)
+            && !previous
+                .as_ref()
+                .is_some_and(pid_lock_uses_advisory_protocol)
             && !legacy_pid_lock_value_is_stale(path, previous.as_ref())
         {
             let _ = fs2::FileExt::unlock(&guard);
@@ -233,7 +233,9 @@ fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
         secure_private_file_permissions(path)?;
         let previous = (!created).then(|| read_pid_lock_json(path)).flatten();
         if !created
-            && !previous.as_ref().is_some_and(pid_lock_uses_advisory_protocol)
+            && !previous
+                .as_ref()
+                .is_some_and(pid_lock_uses_advisory_protocol)
             && !legacy_pid_lock_value_is_stale(path, previous.as_ref())
         {
             return Ok(false);
@@ -440,9 +442,7 @@ fn process_state(pid: u32) -> ProcessState {
 #[cfg(windows)]
 fn process_state(pid: u32) -> ProcessState {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     if pid == 0 {
         return ProcessState::NotRunning;
@@ -560,46 +560,48 @@ fn semantic_status_file_searchable_items(status_value: Option<&Value>) -> Option
     status_value.and_then(|value| json_usize(value, "searchable_items"))
 }
 
-fn semantic_status_file_stats(status_value: Option<&Value>) -> SemanticSidecarStats {
-    if !semantic_status_file_model_matches(status_value) {
-        return SemanticSidecarStats::default();
+fn semantic_status_file_stats(status_value: Option<&Value>) -> Option<SemanticSidecarStats> {
+    if !semantic_status_file_model_matches(status_value)
+        || status_value.and_then(|value| json_i64(value, "sidecar_trust_version"))
+            != Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+        || !status_value
+            .and_then(|value| json_i64(value, "sidecar_generation"))
+            .is_some_and(|generation| generation > 0)
+    {
+        return None;
     }
-    SemanticSidecarStats {
+    Some(SemanticSidecarStats {
         embedded_items: status_value
             .and_then(|value| json_usize(value, "embedded_items"))
             .unwrap_or(0),
         embedded_chunks: status_value
             .and_then(|value| json_usize(value, "embedded_chunks"))
             .unwrap_or(0),
-    }
+    })
 }
 
 pub(crate) fn semantic_worker_report(
     data_root: &Path,
     store: Option<&Store>,
 ) -> Result<SemanticWorkerReport> {
-    semantic_worker_report_with_count_mode(data_root, store, SemanticReportCountMode::ExactOnCacheMiss)
+    semantic_worker_report_trusted(data_root, store)
 }
 
 pub(crate) fn semantic_worker_report_cached(
     data_root: &Path,
     store: Option<&Store>,
 ) -> Result<SemanticWorkerReport> {
-    semantic_worker_report_with_count_mode(data_root, store, SemanticReportCountMode::CachedOrStatusFile)
+    semantic_worker_report_trusted(data_root, store)
 }
 
-fn semantic_worker_report_with_count_mode(
+fn semantic_worker_report_trusted(
     data_root: &Path,
     store: Option<&Store>,
-    count_mode: SemanticReportCountMode,
 ) -> Result<SemanticWorkerReport> {
     let status_value = read_semantic_worker_status(data_root);
     let status_file_model_matches = semantic_status_file_model_matches(status_value.as_ref());
     let current_status_value = status_value.as_ref().filter(|_| status_file_model_matches);
     let (searchable_items, searchable_items_known) = match store {
-        Some(store) if count_mode == SemanticReportCountMode::ExactOnCacheMiss => {
-            (store.event_embedding_document_count_cached_or_exact()?, true)
-        }
         Some(store) => match store
             .cached_event_embedding_document_count()?
             .or_else(|| semantic_status_file_searchable_items(status_value.as_ref()))
@@ -615,38 +617,24 @@ fn semantic_worker_report_with_count_mode(
     let vector_path = semantic_vector_path(data_root);
     let model_cache_available =
         semantic_model_cache_available(&semantic_worker_cache_dir(data_root));
-    let sidecar_state_result = (|| -> Result<(SemanticSidecarStats, usize)> {
-        if let Some(vector_store) = SemanticVectorStore::open_read_only(&vector_path)? {
-            let dirty_items = vector_store.dirty_event_count()?;
-            let mut stats = match count_mode {
-                SemanticReportCountMode::ExactOnCacheMiss => vector_store.cached_or_exact_stats()?,
-                SemanticReportCountMode::CachedOrStatusFile => vector_store
-                    .cached_stats()?
-                    .unwrap_or_else(|| semantic_status_file_stats(current_status_value)),
-            };
-            if count_mode == SemanticReportCountMode::ExactOnCacheMiss
-                && semantic_status_needs_exact_sidecar_stats(searchable_items, dirty_items, stats)
-            {
-                stats = vector_store.exact_stats()?;
+    let sidecar_state_result =
+        (|| -> Result<(Option<SemanticSidecarStats>, usize, Option<String>)> {
+            if let Some(vector_store) = SemanticVectorStore::open_read_only(&vector_path)? {
+                let dirty_items = vector_store.bounded_dirty_event_count()?;
+                let terminal_failure = vector_store.active_terminal_maintenance_failure()?;
+                Ok((vector_store.cached_stats()?, dirty_items, terminal_failure))
+            } else if store.is_some() {
+                Ok((None, 0, None))
+            } else {
+                Ok((semantic_status_file_stats(current_status_value), 0, None))
             }
-            Ok((stats, dirty_items))
-        } else if store.is_some() {
-            Ok((SemanticSidecarStats::default(), 0))
-        } else {
-            Ok((semantic_status_file_stats(current_status_value), 0))
-        }
-    })();
-    let (sidecar_stats, dirty_items, sidecar_error) = match sidecar_state_result {
-        Ok((stats, dirty_items)) => (stats, dirty_items, None),
-        Err(error) => (
-            SemanticSidecarStats {
-                embedded_items: 0,
-                embedded_chunks: 0,
-            },
-            0,
-            Some(format!("{error:#}")),
-        ),
+        })();
+    let (sidecar_stats, dirty_items, terminal_failure, sidecar_error) = match sidecar_state_result {
+        Ok((stats, dirty_items, terminal_failure)) => (stats, dirty_items, terminal_failure, None),
+        Err(error) => (None, 0, None, Some(format!("{error:#}"))),
     };
+    let sidecar_stats_known = sidecar_stats.is_some();
+    let sidecar_stats = sidecar_stats.unwrap_or_default();
     let embedded_items = sidecar_stats.embedded_items;
     let embedded_chunks = sidecar_stats.embedded_chunks;
     let status_path = semantic_worker_status_path(data_root);
@@ -668,18 +656,25 @@ fn semantic_worker_report_with_count_mode(
         .saturating_sub(embedded_items)
         .max(dirty_items);
     let mut status = status_file_status.unwrap_or_else(|| {
-            if !searchable_items_known || store.is_none() {
-                "unknown".to_owned()
-            } else if searchable_items == 0 {
-                "empty".to_owned()
-            } else if queued_items_estimate == 0 {
-                "ready".to_owned()
-            } else {
-                "pending".to_owned()
-            }
-        });
+        if !searchable_items_known || !sidecar_stats_known || store.is_none() {
+            "unknown".to_owned()
+        } else if searchable_items == 0 {
+            "empty".to_owned()
+        } else if queued_items_estimate == 0 {
+            "ready".to_owned()
+        } else {
+            "pending".to_owned()
+        }
+    });
+    if terminal_failure.is_some() {
+        status = "degraded".to_owned();
+    } else if !sidecar_stats_known && status == "ready" {
+        status = "unknown".to_owned();
+    }
     if store.is_some() {
-        let live_status = if !searchable_items_known {
+        let live_status = if terminal_failure.is_some() {
+            "degraded".to_owned()
+        } else if !searchable_items_known || !sidecar_stats_known {
             "unknown".to_owned()
         } else if searchable_items == 0 {
             "empty".to_owned()
@@ -718,13 +713,14 @@ fn semantic_worker_report_with_count_mode(
         finished_at_ms: current_status_value.and_then(|value| json_i64(value, "finished_at_ms")),
         indexed_chunks: current_status_value.and_then(|value| json_usize(value, "indexed_chunks")),
         model_init_ms: current_status_value.and_then(|value| json_usize(value, "model_init_ms")),
-        last_error: sidecar_error.or_else(|| {
-            current_status_value.and_then(|value| json_string(value, "last_error"))
-        }),
+        last_error: terminal_failure
+            .or(sidecar_error)
+            .or_else(|| current_status_value.and_then(|value| json_string(value, "last_error"))),
         searchable_items,
         searchable_items_known,
         embedded_items,
         embedded_chunks,
+        sidecar_stats_known,
         dirty_items,
         queued_items_estimate,
         model_cache_available,
