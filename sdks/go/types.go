@@ -75,6 +75,48 @@ const (
 	FreshnessStatusFailed          FreshnessStatus = "failed"
 )
 
+// SearchSemanticReadiness reports whether semantic retrieval can run.
+type SearchSemanticReadiness string
+
+const (
+	SearchSemanticReady       SearchSemanticReadiness = "ready"
+	SearchSemanticNotReady    SearchSemanticReadiness = "not_ready"
+	SearchSemanticUnsupported SearchSemanticReadiness = "unsupported"
+	SearchSemanticUnavailable SearchSemanticReadiness = "unavailable"
+)
+
+// SearchEffectiveBackend reports the backend that actually contributed results.
+type SearchEffectiveBackend string
+
+const (
+	SearchEffectiveNone     SearchEffectiveBackend = "none"
+	SearchEffectiveLexical  SearchEffectiveBackend = "lexical"
+	SearchEffectiveSemantic SearchEffectiveBackend = "semantic"
+	SearchEffectiveHybrid   SearchEffectiveBackend = "hybrid"
+)
+
+// SearchSemanticCompleteness reports semantic retrieval coverage.
+type SearchSemanticCompleteness string
+
+const (
+	SearchSemanticNotAttempted SearchSemanticCompleteness = "not_attempted"
+	SearchSemanticComplete     SearchSemanticCompleteness = "complete"
+	SearchSemanticPartial      SearchSemanticCompleteness = "partial"
+	SearchSemanticSkipped      SearchSemanticCompleteness = "skipped"
+)
+
+// SearchSemanticSkipReason explains why semantic retrieval did not run.
+type SearchSemanticSkipReason string
+
+const (
+	SearchSemanticSkipDisabled     SearchSemanticSkipReason = "disabled"
+	SearchSemanticSkipUnavailable  SearchSemanticSkipReason = "unavailable"
+	SearchSemanticSkipNotReady     SearchSemanticSkipReason = "not_ready"
+	SearchSemanticSkipUnsupported  SearchSemanticSkipReason = "unsupported"
+	SearchSemanticSkipNoCandidates SearchSemanticSkipReason = "no_lexical_candidates"
+	SearchSemanticSkipIneligible   SearchSemanticSkipReason = "query_shape_not_eligible"
+)
+
 // ResultScope classifies the granularity of a search hit.
 type ResultScope string
 
@@ -203,14 +245,106 @@ type SearchResponse struct {
 
 // SearchResult contains agent history search results.
 type SearchResult struct {
-	Query       string            `json:"query,omitempty"`
-	Filters     Object            `json:"filters,omitempty"`
-	Freshness   *Freshness        `json:"freshness,omitempty"`
-	GeneratedAt string            `json:"generatedAt,omitempty"`
-	Retrieval   any               `json:"retrieval,omitempty"`
-	Results     []SearchHit       `json:"results"`
-	Pagination  *SearchPagination `json:"pagination,omitempty"`
-	Truncation  *SearchTruncation `json:"truncation,omitempty"`
+	SchemaVersion  int                  `json:"schema_version"`
+	Query          *SearchQuery         `json:"query"`
+	QueryExecution SearchQueryExecution `json:"query_execution"`
+	Filters        Object               `json:"filters,omitempty"`
+	Freshness      *Freshness           `json:"freshness,omitempty"`
+	GeneratedAt    string               `json:"generatedAt,omitempty"`
+	Retrieval      any                  `json:"retrieval,omitempty"`
+	Results        []SearchHit          `json:"results"`
+	Pagination     *SearchPagination    `json:"pagination,omitempty"`
+	Truncation     *SearchTruncation    `json:"truncation,omitempty"`
+}
+
+// SearchExecutionLimits reports the resolved hard work envelope for a search.
+type SearchExecutionLimits struct {
+	QueryBytes                  int   `json:"query_bytes"`
+	Clauses                     int   `json:"clauses"`
+	AnalyzedTokensPerClause     int   `json:"analyzed_tokens_per_clause"`
+	CandidatesPerPositiveSeed   int   `json:"candidates_per_positive_seed"`
+	CandidateRows               int   `json:"candidate_rows"`
+	RetainedCandidateIDs        int   `json:"retained_candidate_ids"`
+	ResidualRows                int   `json:"residual_rows"`
+	VerificationBytes           int   `json:"verification_bytes"`
+	VerificationLookupBytes     int   `json:"verification_lookup_bytes"`
+	HydratedRows                int   `json:"hydrated_rows"`
+	HydrationInputBytes         int   `json:"hydration_input_bytes"`
+	HydrationInputBytesPerEvent int   `json:"hydration_input_bytes_per_event"`
+	SnippetInputBytes           int   `json:"snippet_input_bytes"`
+	ReturnedTextBytes           int   `json:"returned_text_bytes"`
+	SerializedResponseBytes     int   `json:"serialized_response_bytes"`
+	Results                     int   `json:"results"`
+	ElapsedMS                   int64 `json:"elapsed_ms"`
+}
+
+// SearchExecutionConsumption reports work actually consumed by a search.
+type SearchExecutionConsumption struct {
+	QueryBytes                     int   `json:"query_bytes"`
+	Clauses                        int   `json:"clauses"`
+	AnalyzedTokens                 int   `json:"analyzed_tokens"`
+	LargestAnalyzedTokensPerClause int   `json:"largest_analyzed_tokens_per_clause"`
+	LargestPositiveSeedCandidates  int   `json:"largest_positive_seed_candidates"`
+	CandidateRows                  int   `json:"candidate_rows"`
+	RetainedCandidateIDs           int   `json:"retained_candidate_ids"`
+	ResidualRows                   int   `json:"residual_rows"`
+	HydratedRows                   int   `json:"hydrated_rows"`
+	LegacyFallbackRows             int   `json:"legacy_fallback_rows"`
+	VerificationBytes              int   `json:"verification_bytes"`
+	LargestVerificationLookupBytes int   `json:"largest_verification_lookup_bytes"`
+	HydrationInputBytes            int   `json:"hydration_input_bytes"`
+	LargestHydrationInputBytes     int   `json:"largest_hydration_input_bytes"`
+	SnippetInputBytes              int   `json:"snippet_input_bytes"`
+	ReturnedResults                int   `json:"returned_results"`
+	ReturnedTextBytes              int   `json:"returned_text_bytes"`
+	SerializedResponseBytes        int   `json:"serialized_response_bytes"`
+	ElapsedMS                      int64 `json:"elapsed_ms"`
+}
+
+// SearchSemanticCoverage reports semantic index coverage relevant to a query.
+type SearchSemanticCoverage struct {
+	IndexedDocuments    *uint64 `json:"indexed_documents,omitempty"`
+	SearchableDocuments *uint64 `json:"searchable_documents,omitempty"`
+}
+
+// SearchSemanticExecution reports semantic readiness, use, and completeness.
+type SearchSemanticExecution struct {
+	Attempted               bool                       `json:"attempted"`
+	Required                bool                       `json:"required"`
+	Readiness               SearchSemanticReadiness    `json:"readiness"`
+	EffectiveBackend        SearchEffectiveBackend     `json:"effective_backend"`
+	Backend                 *string                    `json:"backend,omitempty"`
+	RequestedCandidates     int                        `json:"requested_candidates"`
+	EligibleCandidates      int                        `json:"eligible_candidates"`
+	CandidatesSupplied      int                        `json:"candidates_supplied"`
+	CandidatesConsumed      int                        `json:"candidates_consumed"`
+	CandidatesUsed          int                        `json:"candidates_used"`
+	Coverage                SearchSemanticCoverage     `json:"coverage"`
+	Completeness            SearchSemanticCompleteness `json:"completeness"`
+	IncompletenessReasons   []string                   `json:"incompleteness_reasons,omitempty"`
+	SkipReason              *SearchSemanticSkipReason  `json:"skip_reason,omitempty"`
+	PositiveTextRuleVersion string                     `json:"positive_text_rule_version"`
+}
+
+// SearchQueryExecution is the typed, snake_case schema-v2 execution diagnostic block.
+type SearchQueryExecution struct {
+	QueryVersion              string                     `json:"query_version"`
+	CandidateStrategy         string                     `json:"candidate_strategy"`
+	Resolved                  SearchExecutionLimits      `json:"resolved"`
+	Consumed                  SearchExecutionConsumption `json:"consumed"`
+	Semantic                  SearchSemanticExecution    `json:"semantic"`
+	RRFK                      uint32                     `json:"rrf_k"`
+	PerBranchCandidateRows    int                        `json:"per_branch_candidate_rows"`
+	RequestedResultLimit      int                        `json:"requested_result_limit"`
+	ResultLimit               int                        `json:"result_limit"`
+	MaxResultLimit            int                        `json:"max_result_limit"`
+	ClausesExecuted           int                        `json:"clauses_executed"`
+	VerificationDropped       int                        `json:"verification_dropped"`
+	FilterVerificationDropped int                        `json:"filter_verification_dropped"`
+	CandidateBudgetExhausted  bool                       `json:"candidate_budget_exhausted"`
+	TimedOut                  bool                       `json:"timed_out"`
+	Truncated                 bool                       `json:"truncated"`
+	TruncationReasons         []string                   `json:"truncation_reasons,omitempty"`
 }
 
 // SearchPagination describes paging metadata for search results.
@@ -324,17 +458,17 @@ type SessionRecord struct {
 
 // Event is the agent-history-v1 event shape.
 type Event struct {
-	CtxEventID     string     `json:"ctxEventId,omitempty"`
-	CtxSessionID   string     `json:"ctxSessionId,omitempty"`
-	Sequence       int        `json:"sequence,omitempty"`
-	EventType      string     `json:"eventType,omitempty"`
-	Role           string     `json:"role,omitempty"`
-	OccurredAt     string     `json:"occurredAt,omitempty"`
-	Source         string     `json:"source,omitempty"`
-	Cursor         string     `json:"cursor,omitempty"`
-	Text           string     `json:"text,omitempty"`
-	Preview        string     `json:"preview,omitempty"`
-	Citations      []Citation `json:"citations,omitempty"`
+	CtxEventID   string     `json:"ctxEventId,omitempty"`
+	CtxSessionID string     `json:"ctxSessionId,omitempty"`
+	Sequence     int        `json:"sequence,omitempty"`
+	EventType    string     `json:"eventType,omitempty"`
+	Role         string     `json:"role,omitempty"`
+	OccurredAt   string     `json:"occurredAt,omitempty"`
+	Source       string     `json:"source,omitempty"`
+	Cursor       string     `json:"cursor,omitempty"`
+	Text         string     `json:"text,omitempty"`
+	Preview      string     `json:"preview,omitempty"`
+	Citations    []Citation `json:"citations,omitempty"`
 }
 
 // LocateEventResponse is returned by Client.LocateEvent.

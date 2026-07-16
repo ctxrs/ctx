@@ -14,13 +14,19 @@ use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
     AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, EventResult, Freshness,
-    ImportResult, LocationResult, ProviderSource, SearchHit, SearchResult, SearchRetrieval,
-    SearchRetrievalCoverage, SessionResult, SourceLocation, Totals, CONTRACT_VERSION,
-    SCHEMA_VERSION,
+    ImportResult, LocationResult, ProviderSource, SearchClause, SearchEffectiveBackend,
+    SearchExecutionConsumption, SearchExecutionDiagnostics, SearchExecutionLimits, SearchHit,
+    SearchQuery, SearchQueryError, SearchQueryVersion, SearchResult, SearchRetrieval,
+    SearchRetrievalCoverage, SearchSemanticCompleteness, SearchSemanticCoverage,
+    SearchSemanticDiagnostics, SearchSemanticReadiness, SearchSemanticSkipReason, SessionResult,
+    SourceLocation, Totals, CONTRACT_VERSION, SCHEMA_VERSION, SEARCH_QUERY_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use thiserror::Error;
+
+/// The nested `ctx search --json` response schema supported by this SDK.
+pub const SEARCH_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Error)]
 #[error("{body:?}")]
@@ -85,11 +91,9 @@ pub struct ImportOptions {
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
-    pub query: Option<String>,
-    pub terms: Vec<String>,
+    pub query: Option<SearchQuery>,
     pub limit: usize,
     pub backend: Option<String>,
-    pub semantic_weight: Option<f64>,
     pub provider: Option<String>,
     pub workspace: Option<String>,
     pub since: Option<String>,
@@ -104,10 +108,8 @@ impl Default for SearchOptions {
     fn default() -> Self {
         Self {
             query: None,
-            terms: Vec::new(),
             limit: 20,
             backend: None,
-            semantic_weight: None,
             provider: None,
             workspace: None,
             since: None,
@@ -122,11 +124,7 @@ impl Default for SearchOptions {
 
 impl SearchOptions {
     fn has_intent(&self) -> bool {
-        self.query
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|query| !query.is_empty())
-            || self.terms.iter().any(|term| !term.trim().is_empty())
+        self.query.is_some()
             || self
                 .file
                 .as_ref()
@@ -238,24 +236,18 @@ impl AgentHistoryClient {
         if !options.has_intent() {
             return Err(AgentHistoryError::new(
                 AgentHistoryErrorCode::InvalidRequest,
-                "search requires a query, term, or file option",
+                "search requires a ctx-search-v1 query or file option",
                 false,
             ));
         }
         let mut owned = Vec::<String>::new();
         owned.push("search".to_owned());
         if let Some(query) = options.query {
-            owned.push(query);
-        }
-        for term in options.terms {
-            owned.push("--term".to_owned());
-            owned.push(term);
+            owned.push("--query-json".to_owned());
+            owned.push(serialize_search_query(&query)?);
         }
         owned.extend(["--limit".to_owned(), options.limit.to_string()]);
         push_opt(&mut owned, "--backend", options.backend);
-        if let Some(semantic_weight) = options.semantic_weight {
-            owned.extend(["--semantic-weight".to_owned(), semantic_weight.to_string()]);
-        }
         push_opt(&mut owned, "--provider", options.provider);
         push_opt(&mut owned, "--workspace", options.workspace);
         push_opt(&mut owned, "--since", options.since);
@@ -428,6 +420,42 @@ fn push_opt(args: &mut Vec<String>, name: &str, value: Option<String>) {
     }
 }
 
+/// Validate, canonicalize, and serialize one `ctx-search-v1` query for `--query-json`.
+pub fn serialize_search_query(query: &SearchQuery) -> Result<String, AgentHistoryError> {
+    let canonical = query.clone().canonicalized().map_err(|error| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::InvalidRequest,
+            "invalid ctx-search-v1 query",
+            false,
+        )
+        .with_cause(error.to_string())
+    })?;
+    let bytes = serde_json::to_vec(&canonical).map_err(|error| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::InvalidRequest,
+            "failed to encode ctx-search-v1 query",
+            false,
+        )
+        .with_cause(error.to_string())
+    })?;
+    SearchQuery::from_json_slice(&bytes).map_err(|error| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::InvalidRequest,
+            "invalid serialized ctx-search-v1 query",
+            false,
+        )
+        .with_cause(error.to_string())
+    })?;
+    String::from_utf8(bytes).map_err(|error| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::InvalidRequest,
+            "ctx-search-v1 query was not UTF-8",
+            false,
+        )
+        .with_cause(error.to_string())
+    })
+}
+
 fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, AgentHistoryError> {
     let mut command = Command::new(&config.ctx_binary);
     command
@@ -584,8 +612,77 @@ fn normalize_import(raw: &Value) -> Result<ImportResult, AgentHistoryError> {
 }
 
 fn normalize_search(raw: &Value) -> Result<SearchResult, AgentHistoryError> {
-    let value = camel_alias_object(raw, &[("generated_at", "generatedAt")]);
-    decode_payload(camelize_object_keys(&value), "search")
+    let schema_version = raw.get("schema_version").and_then(Value::as_u64);
+    if schema_version != Some(u64::from(SEARCH_SCHEMA_VERSION)) {
+        return Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            format!(
+                "ctx search returned unsupported schema version {:?}; expected {SEARCH_SCHEMA_VERSION}",
+                schema_version
+            ),
+            false,
+        ));
+    }
+
+    let query = match raw.get("query") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value::<SearchQuery>(value.clone())
+                .map_err(|error| {
+                    AgentHistoryError::new(
+                        AgentHistoryErrorCode::DecodeError,
+                        "ctx search returned an invalid canonical query",
+                        false,
+                    )
+                    .with_cause(error.to_string())
+                })?
+                .canonicalized()
+                .map_err(|error| {
+                    AgentHistoryError::new(
+                        AgentHistoryErrorCode::DecodeError,
+                        "ctx search returned an invalid canonical query",
+                        false,
+                    )
+                    .with_cause(error.to_string())
+                })?,
+        ),
+    };
+    let query_execution = raw
+        .get("query_execution")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::DecodeError,
+                "ctx search response is missing query_execution diagnostics",
+                false,
+            )
+        })
+        .and_then(|value| {
+            serde_json::from_value::<SearchExecutionDiagnostics>(value.clone()).map_err(|error| {
+                AgentHistoryError::new(
+                    AgentHistoryErrorCode::DecodeError,
+                    "ctx search returned invalid query_execution diagnostics",
+                    false,
+                )
+                .with_cause(error.to_string())
+            })
+        })?;
+
+    let mut public_raw = raw.clone();
+    if let Some(object) = public_raw.as_object_mut() {
+        object.remove("schema_version");
+        object.remove("query");
+        object.remove("query_execution");
+    }
+    let value = camel_alias_object(&public_raw, &[("generated_at", "generatedAt")]);
+    let mut result: SearchResult = decode_payload(camelize_object_keys(&value), "search")?;
+    result.query = query;
+    result.query_execution = query_execution;
+    result.extra.insert(
+        "schema_version".to_owned(),
+        Value::from(SEARCH_SCHEMA_VERSION),
+    );
+    Ok(result)
 }
 
 fn normalize_event(raw: &Value) -> Result<EventResult, AgentHistoryError> {
@@ -634,6 +731,19 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    fn all_query(value: &str) -> SearchQuery {
+        SearchQuery::new(vec![SearchClause::all(value)])
+    }
+
+    fn schema_v2_search(query: Option<SearchQuery>, results: Value) -> Value {
+        json!({
+            "schema_version": SEARCH_SCHEMA_VERSION,
+            "query": query,
+            "query_execution": SearchExecutionDiagnostics::default(),
+            "results": results,
+        })
+    }
+
     #[test]
     fn reads_shared_search_fixture() {
         let value: AgentHistoryEnvelope = serde_json::from_str(include_str!(
@@ -643,7 +753,15 @@ mod tests {
         assert_eq!(value.contract_version, CONTRACT_VERSION);
         assert_eq!(value.operation, AgentHistoryOperation::Search);
         let search = value.search.unwrap();
-        assert_eq!(search.query.as_deref(), Some("local agent history"));
+        assert_eq!(
+            search.query.as_ref().and_then(SearchQuery::single_all_text),
+            None,
+            "the shared fixture intentionally combines lexical and semantic alternatives"
+        );
+        assert_eq!(
+            search.query.as_ref().unwrap().any[0],
+            SearchClause::all("local agent history")
+        );
         assert_eq!(search.results.len(), 1);
         assert_eq!(
             search.results[0].ctx_event_id.as_deref(),
@@ -694,40 +812,46 @@ mod tests {
     #[test]
     fn builds_search_cli_arguments_without_running_for_public_options() {
         let options = SearchOptions {
-            query: Some("agent history".to_owned()),
-            terms: vec!["ctx".to_owned()],
+            query: Some(SearchQuery::new(vec![
+                SearchClause::all("agent history"),
+                SearchClause::semantic("ctx"),
+            ])),
             limit: 3,
             backend: Some("hybrid".to_owned()),
-            semantic_weight: Some(0.35),
             provider: Some("codex".to_owned()),
             refresh: SearchRefresh::Off,
             events: true,
             ..SearchOptions::default()
         };
         assert_eq!(options.refresh.as_arg(), "off");
-        assert_eq!(options.terms, vec!["ctx"]);
         assert_eq!(options.backend.as_deref(), Some("hybrid"));
-        assert_eq!(options.semantic_weight, Some(0.35));
         assert!(SearchOptions::default().backend.is_none());
-        assert!(SearchOptions::default().semantic_weight.is_none());
+        assert_eq!(
+            serialize_search_query(options.query.as_ref().unwrap()).unwrap(),
+            r#"{"version":"ctx-search-v1","any":[{"all":"agent history"},{"semantic":"ctx"}]}"#
+        );
     }
 
     #[test]
     fn search_options_map_retrieval_controls_to_cli_flags() {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("ctx-fake");
+        let response = schema_v2_search(Some(all_query("agent history")), json!([])).to_string();
         fs::write(
             &script,
-            r#"#!/bin/sh
+            format!(
+                r#"#!/bin/sh
 set -eu
 printf '%s\n' "$@" > "$CTX_DATA_ROOT/argv.txt"
 if [ "$1" = "search" ]; then
-  printf '%s\n' '{"query":"agent history","results":[]}'
+  printf '%s\n' '{}'
   exit 0
 fi
 echo "unexpected command: $*" >&2
 exit 2
 "#,
+                response
+            ),
         )
         .unwrap();
         #[cfg(unix)]
@@ -741,10 +865,9 @@ exit 2
 
         client
             .search(SearchOptions {
-                query: Some("agent history".to_owned()),
+                query: Some(all_query("agent history")),
                 limit: 7,
                 backend: Some("hybrid".to_owned()),
-                semantic_weight: Some(0.625),
                 refresh: SearchRefresh::Off,
                 ..SearchOptions::default()
             })
@@ -756,13 +879,12 @@ exit 2
             argv,
             vec![
                 "search",
-                "agent history",
+                "--query-json",
+                r#"{"version":"ctx-search-v1","any":[{"all":"agent history"}]}"#,
                 "--limit",
                 "7",
                 "--backend",
                 "hybrid",
-                "--semantic-weight",
-                "0.625",
                 "--refresh",
                 "off",
                 "--json",
@@ -776,7 +898,9 @@ exit 2
             AgentHistoryOperation::Search,
             BackendInfo::local(None),
             json!({
-                "query": "semantic defaults",
+                "schema_version": SEARCH_SCHEMA_VERSION,
+                "query": all_query("semantic defaults"),
+                "query_execution": SearchExecutionDiagnostics::default(),
                 "generated_at": "2026-07-05T00:00:00Z",
                 "retrieval": {
                     "requested_mode": "hybrid",
@@ -798,6 +922,11 @@ exit 2
         .unwrap();
 
         let search = envelope.search.unwrap();
+        assert_eq!(
+            search.extra.get("schema_version"),
+            Some(&json!(SEARCH_SCHEMA_VERSION))
+        );
+        assert_eq!(search.query_execution.query_version, SEARCH_QUERY_VERSION);
         let retrieval = search.retrieval.unwrap();
         assert_eq!(retrieval.requested_mode.as_deref(), Some("hybrid"));
         assert_eq!(retrieval.effective_mode.as_deref(), Some("lexical"));
@@ -827,7 +956,7 @@ exit 2
     }
 
     #[test]
-    fn search_requires_query_term_or_file_before_cli() {
+    fn search_requires_query_or_file_before_cli() {
         let client = AgentHistoryClient::local(LocalBackendConfig {
             ctx_binary: PathBuf::from("/definitely/missing/ctx"),
             data_root: None,
@@ -840,14 +969,62 @@ exit 2
                 refresh: SearchRefresh::Off,
                 ..SearchOptions::default()
             },
-            SearchOptions {
-                query: Some("   ".to_owned()),
-                terms: vec!["".to_owned(), "   ".to_owned()],
-                ..SearchOptions::default()
-            },
         ] {
             let err = client.search(options).unwrap_err();
             assert_eq!(err.body.code, AgentHistoryErrorCode::InvalidRequest);
+        }
+
+        let err = client
+            .search(SearchOptions {
+                query: Some(all_query("   ")),
+                ..SearchOptions::default()
+            })
+            .unwrap_err();
+        assert_eq!(err.body.code, AgentHistoryErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn structured_query_validation_is_closed_and_canonical() {
+        let query = SearchQuery::from_json_slice(
+            br#"{"version":"ctx-search-v1","any":[{"all":"  disk   pressure "},{"all":"disk pressure"}],"must_not":[{"literal":" logs_2.db "}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serialize_search_query(&query).unwrap(),
+            r#"{"version":"ctx-search-v1","any":[{"all":"disk pressure"}],"must_not":[{"literal":"logs_2.db"}]}"#
+        );
+        for raw in [
+            br#"{"version":"ctx-search-v1","unknown":true,"any":[{"all":"ctx"}]}"#.as_slice(),
+            br#"{"version":"ctx-search-v1","any":[{"all":"ctx","phrase":"ctx"}]}"#.as_slice(),
+            br#"{"version":"ctx-search-v1","must":[{"semantic":"ctx"}]}"#.as_slice(),
+        ] {
+            assert!(SearchQuery::from_json_slice(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn query_execution_wire_keys_remain_snake_case() {
+        let value = serde_json::to_value(SearchExecutionDiagnostics::default()).unwrap();
+        let object = value.as_object().unwrap();
+        assert!(object.contains_key("query_version"));
+        assert!(object.contains_key("candidate_strategy"));
+        assert!(!object.contains_key("queryVersion"));
+        let semantic = object.get("semantic").and_then(Value::as_object).unwrap();
+        assert!(semantic.contains_key("effective_backend"));
+        assert!(semantic.contains_key("positive_text_rule_version"));
+        assert!(!semantic.contains_key("effectiveBackend"));
+    }
+
+    #[test]
+    fn search_rejects_legacy_or_incomplete_response_shape() {
+        let backend = BackendInfo::local(None);
+        for raw in [
+            json!({"schema_version": 1, "query": "ctx", "results": []}),
+            json!({"schema_version": 2, "query": "ctx", "query_execution": {}, "results": []}),
+            json!({"schema_version": 2, "query": all_query("ctx"), "results": []}),
+        ] {
+            let error = normalize(AgentHistoryOperation::Search, backend.clone(), raw).unwrap_err();
+            assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
         }
     }
 
@@ -855,21 +1032,31 @@ exit 2
     fn local_client_can_dogfood_fake_ctx_without_private_history() {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("ctx-fake");
+        let response = schema_v2_search(
+            Some(all_query("rust sdk")),
+            json!([{
+                "ctx_event_id": "event-1",
+                "ctx_session_id": "session-1",
+                "result_scope": "event",
+                "snippet": "typed ergonomics",
+            }]),
+        )
+        .to_string();
         fs::write(
             &script,
-            r#"#!/bin/sh
+            format!(r#"#!/bin/sh
 set -eu
 if [ "$1" = "status" ]; then
-  printf '%s\n' '{"initialized":true,"local_only":true,"data_root":"'"$CTX_DATA_ROOT"'","indexed_items":2}'
+  printf '%s\n' '{{"initialized":true,"local_only":true,"data_root":"'"$CTX_DATA_ROOT"'","indexed_items":2}}'
   exit 0
 fi
 if [ "$1" = "search" ]; then
-  printf '%s\n' '{"query":"rust sdk","generated_at":"2026-07-01T12:00:00Z","results":[{"ctx_event_id":"event-1","ctx_session_id":"session-1","result_scope":"event","snippet":"typed ergonomics"}]}'
+  printf '%s\n' '{}'
   exit 0
 fi
 echo "unexpected command: $*" >&2
 exit 2
-"#,
+"#, response),
         )
         .unwrap();
         #[cfg(unix)]
@@ -894,7 +1081,7 @@ exit 2
 
         let search = client
             .search(SearchOptions {
-                query: Some("rust sdk".to_owned()),
+                query: Some(all_query("rust sdk")),
                 refresh: SearchRefresh::Off,
                 limit: 1,
                 ..SearchOptions::default()

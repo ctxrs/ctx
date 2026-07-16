@@ -8,12 +8,15 @@ contract is being shaped in-repo.
 ## Use
 
 ```rust
-use ctx_sdk::{LocalBackendConfig, AgentHistoryClient, SearchOptions, SearchRefresh};
+use ctx_sdk::{
+    AgentHistoryClient, LocalBackendConfig, SearchClause, SearchOptions, SearchQuery,
+    SearchRefresh,
+};
 
 let client = AgentHistoryClient::local(LocalBackendConfig::default());
 let status = client.status()?;
 let results = client.search(SearchOptions {
-    query: Some("release notes".to_owned()),
+    query: Some(SearchQuery::new(vec![SearchClause::all("release notes")])),
     refresh: SearchRefresh::Off,
     ..SearchOptions::default()
 })?;
@@ -34,3 +37,15 @@ let results = client.search(SearchOptions {
 
 The SDK returns `AgentHistoryEnvelope` values from `ctx-protocol` with stable
 `agent-history-v1` fields. CLI JSON remains an adapter detail.
+
+## Structured Search
+
+Search accepts only `ctx-search-v1` structured queries or a file-only search.
+The Rust SDK re-exports `SearchQuery`, the externally tagged `SearchClause`
+enum, and the typed `SearchExecutionDiagnostics` tree directly from
+`ctx-protocol`; it does not maintain a second DTO.
+
+Queries are canonicalized and validated before the local adapter invokes
+`ctx search --query-json <json> --json`. Search responses must use nested
+schema version 2 and include `query_execution`; those machine fields retain
+their exact `snake_case` wire names.

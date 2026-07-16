@@ -46,7 +46,34 @@ Version constants:
 
 - `APIVersion`
 - `SchemaVersion`
+- `SearchQueryVersion`
+- `SearchSchemaVersion`
 - `SDKVersion`
+
+## Search
+
+Search accepts only the structured `ctx-search-v1` query contract (or a
+file-only search). `any` clauses are alternatives, `must` clauses are global
+requirements, and `must_not` clauses are global exclusions. Semantic clauses
+are allowed once under `any` only.
+
+```go
+query := ctxagenthistory.NewSearchQuery(
+	ctxagenthistory.SearchAll("disk io pressure"),
+	ctxagenthistory.SearchSemantic("storage contention during indexing"),
+)
+query.Must = []ctxagenthistory.SearchClause{ctxagenthistory.SearchAll("codex")}
+
+response, err := client.Search(context.Background(), ctxagenthistory.SearchOptions{
+	Query:   &query,
+	Backend: "hybrid",
+	Limit:   20,
+})
+```
+
+The SDK validates and canonicalizes queries before invoking `ctx`, passes them
+with `--query-json`, requires nested search schema version 2, and exposes the
+bounded `query_execution` diagnostics with their exact `snake_case` JSON keys.
 
 ## Local CLI
 
@@ -58,7 +85,7 @@ client := ctxagenthistory.NewLocalClient(
 ```
 
 The adapter runs JSON-producing CLI commands such as `ctx status --json`,
-`ctx search <query>|--term <term>|--file <path> --json`, and
+`ctx search --query-json <json> --json`, and
 `ctx show event --format json`, then normalizes CLI JSON into
 `agent-history-v1` wrappers with `contractVersion` and `schemaVersion`.
 
