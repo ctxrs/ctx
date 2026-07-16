@@ -358,15 +358,7 @@ fn assert_search_projection_fenced<T>(result: crate::Result<T>) {
     }
 }
 
-#[test]
-fn ready_projection_initialization_does_not_read_corpus_tables() {
-    let temp = tempdir();
-    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    store.insert_record(&stable_tie_record(1)).unwrap();
-    store
-        .upsert_event(&local_preview_event(1, "ready projection event"))
-        .unwrap();
-
+fn deny_search_corpus_reads(store: &Store) -> Arc<Mutex<Vec<String>>> {
     let denied_reads = Arc::new(Mutex::new(Vec::new()));
     let callback_denied_reads = Arc::clone(&denied_reads);
     store.conn.authorizer(Some(move |context: AuthContext<'_>| {
@@ -392,6 +384,19 @@ fn ready_projection_initialization_does_not_read_corpus_tables() {
         }
         Authorization::Allow
     }));
+    denied_reads
+}
+
+#[test]
+fn ready_projection_initialization_does_not_read_corpus_tables() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    store.insert_record(&stable_tie_record(1)).unwrap();
+    store
+        .upsert_event(&local_preview_event(1, "ready projection event"))
+        .unwrap();
+
+    let denied_reads = deny_search_corpus_reads(&store);
 
     let outcome = store.ensure_search_projection_initialized();
     let denied_reads = denied_reads.lock().unwrap();
@@ -402,6 +407,84 @@ fn ready_projection_initialization_does_not_read_corpus_tables() {
     assert_eq!(
         outcome.unwrap(),
         EventSearchBulkMaintenanceOutcome::Complete
+    );
+}
+
+#[test]
+fn read_only_search_rejects_a_malformed_ready_projection_without_repair() {
+    let temp = tempdir();
+    let path = temp.path().join("malformed-read-only.sqlite");
+    let store = Store::open(&path).unwrap();
+    store.insert_record(&stable_tie_record(1)).unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            DROP TABLE event_search_lookup;
+            CREATE TABLE event_search_lookup (
+                event_id TEXT NOT NULL,
+                history_record_id TEXT,
+                session_id TEXT,
+                role TEXT,
+                preview_text TEXT NOT NULL,
+                rank_bucket TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    drop(store);
+
+    let read_only = Store::open_read_only(&path).unwrap();
+    let denied_reads = deny_search_corpus_reads(&read_only);
+    assert_search_projection_fenced(read_only.search_records("stabletie", 10));
+    assert!(
+        denied_reads.lock().unwrap().is_empty(),
+        "malformed read-only search attempted corpus reads"
+    );
+    let ready_marker: i64 = read_only
+        .conn
+        .query_row(
+            "SELECT value FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ready_marker, 1, "read-only search must not persist a fence");
+}
+
+#[test]
+fn read_only_search_rejects_an_unknown_ready_version_without_corpus_reads() {
+    let temp = tempdir();
+    let path = temp.path().join("unknown-ready-version.sqlite");
+    let store = Store::open(&path).unwrap();
+    store.insert_record(&stable_tie_record(1)).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE search_projection_stats SET value = 99 WHERE key = 'search_projection_ready_version_v1'",
+            [],
+        )
+        .unwrap();
+    drop(store);
+
+    let read_only = Store::open_read_only(&path).unwrap();
+    let denied_reads = deny_search_corpus_reads(&read_only);
+    assert_search_projection_fenced(read_only.search_records("stabletie", 10));
+    assert!(
+        denied_reads.lock().unwrap().is_empty(),
+        "unknown-version read-only search attempted corpus reads"
+    );
+    let ready_marker: i64 = read_only
+        .conn
+        .query_row(
+            "SELECT value FROM search_projection_stats WHERE key = 'search_projection_ready_version_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ready_marker, 99,
+        "read-only search must not persist a fence"
     );
 }
 
