@@ -151,6 +151,34 @@ impl ImportExecutionState {
         self.attempted_work.clear();
     }
 
+    pub(crate) fn rebase_for_plan(
+        &self,
+        old_plan: &ImportPlan,
+        new_plan: &ImportPlan,
+        invalidated_paths: &BTreeSet<PathBuf>,
+    ) -> Self {
+        let mut rebased = Self::for_plan(new_plan);
+        rebased.attempted_work = self.attempted_work.clone();
+        for (new_index, new_source) in new_plan.sources.iter().enumerate() {
+            if invalidated_paths.contains(&new_source.source.path) {
+                continue;
+            }
+            let Some(old_index) = old_plan
+                .sources
+                .iter()
+                .position(|old_source| old_source.source == new_source.source)
+            else {
+                continue;
+            };
+            rebased.observed_preinventories[new_index] = self
+                .observed_preinventories
+                .get(old_index)
+                .cloned()
+                .flatten();
+        }
+        rebased
+    }
+
     pub(crate) fn record_retirement_attempt(
         &mut self,
         work: &ProviderFilePublicationRetirementWork,

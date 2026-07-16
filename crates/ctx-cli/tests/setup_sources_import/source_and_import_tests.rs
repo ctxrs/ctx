@@ -91,6 +91,13 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(stdout["schema_version"], 2);
+    assert_eq!(stdout["totals"]["durable_progress"], true);
+    assert!(stdout["totals"]["fresh_units_processed"].as_u64().unwrap() > 0);
+    assert_eq!(stdout["totals"]["recovery_units_processed"], 0);
+    assert_eq!(stdout["totals"]["fresh_units_pending"], 0);
+    assert_eq!(stdout["totals"]["fresh_units_pending_exact"], true);
+    assert_eq!(stdout["totals"]["recovery_units_pending"], 0);
+    assert_eq!(stdout["totals"]["recovery_units_pending_exact"], true);
     assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() > 0);
 
     let stderr = String::from_utf8(output.stderr).unwrap();

@@ -292,6 +292,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let predicate = import_work_class_predicate("catalog", class);
+        let inventory_published = catalog_inventory_material_published_predicate("catalog");
         let active_publication =
             crate::provider_files::catalog_candidate_is_global_publication("catalog");
         let order = import_work_order("catalog", class);
@@ -329,7 +330,8 @@ impl Store {
                        indexed_at_ms, 1 AS has_active_publication
                 FROM catalog_sessions AS catalog
                 WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
-                  AND is_stale = 0 AND {predicate} AND ({active_publication})
+                  AND is_stale = 0 AND {predicate} AND ({inventory_published})
+                  AND ({active_publication})
                 LIMIT 1
                 "#
             ))?;
@@ -370,7 +372,7 @@ impl Store {
                    indexed_at_ms, 0 AS has_active_publication
             FROM catalog_sessions AS catalog
             WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
-              AND {predicate}
+              AND {predicate} AND ({inventory_published})
             ORDER BY {order}
             LIMIT ?3
             "#
@@ -405,12 +407,13 @@ impl Store {
         class: ImportWorkClass,
     ) -> Result<usize> {
         let predicate = import_work_class_predicate("catalog", class);
+        let inventory_published = catalog_inventory_material_published_predicate("catalog");
         self.conn
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM catalog_sessions AS catalog \
                      WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
-                       AND {predicate}"
+                       AND {predicate} AND ({inventory_published})"
                 ),
                 params![provider.as_str(), source_root],
                 |row| row.get(0),

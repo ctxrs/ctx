@@ -33,14 +33,17 @@ struct SearchRefreshFailure {
 pub(crate) struct SearchRefreshRuntime {
     cached_work: Option<SearchRefreshWork>,
     source_watcher: Option<SearchRefreshSourceWatcher>,
+    source_watcher_paths: Option<Vec<PathBuf>>,
+    source_watcher_path_identities: Option<Vec<WatchedSourcePathIdentity>>,
+    last_watcher_fallback_reinventory_at: Option<Instant>,
     disk_io_pacer: Option<(ImportExecutionPolicy, DiskIoPacer)>,
 }
 
 struct SearchRefreshWork {
     source_fingerprint: String,
     publication_owner: Option<ProviderFilePublicationInventoryOwner>,
-    source_change_generation: u64,
     passes_since_reinventory: usize,
+    last_reinventory_at: Instant,
     plan: ImportPlan,
     execution_state: crate::commands::import::ImportExecutionState,
     inventory_failures: Vec<ImportSourceFailure>,
@@ -50,16 +53,40 @@ struct SearchRefreshWork {
 }
 
 struct SearchRefreshSourceWatcher {
-    generation: Arc<AtomicU64>,
-    watched_paths: Vec<PathBuf>,
+    changes: Arc<Mutex<SearchRefreshSourceChanges>>,
+    healthy: Arc<AtomicBool>,
     _watcher: RecommendedWatcher,
+}
+
+#[derive(Debug, Clone)]
+struct SearchRefreshWatch {
+    source_path: PathBuf,
+    match_path: PathBuf,
+    watch_path: PathBuf,
+    recursive: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SearchRefreshSourceChanges {
+    full_rebuild: bool,
+    dirty_paths: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchedSourcePathIdentity {
+    exists: bool,
+    is_dir: bool,
+    stable_id: Option<(u64, u64)>,
+    fallback_len: Option<u64>,
+    fallback_modified_at: Option<SystemTime>,
 }
 
 struct SearchRefreshExecution {
     totals: ImportTotals,
 }
 
-const DAEMON_SEARCH_REFRESH_REINVENTORY_PASSES: usize = 64;
+const DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
+const DAEMON_SEARCH_REFRESH_WATCHER_FALLBACK_INTERVAL: StdDuration = StdDuration::from_secs(30);
 
 impl SearchRefreshRuntime {
     pub(crate) fn install_daemon_disk_io_pacing(
@@ -88,66 +115,260 @@ impl SearchRefreshRuntime {
         self.cached_work = None;
     }
 
-    fn watcher_generation(&mut self, sources: &[SourceInfo]) -> Option<u64> {
+    fn watcher_changes(&mut self, sources: &[SourceInfo]) -> Option<SearchRefreshSourceChanges> {
         let watched_paths = watched_source_paths(sources);
-        let rebuild = self
+        let watched_path_identities = watched_source_path_identities(&watched_paths);
+        let paths_changed = self
+            .source_watcher_paths
+            .as_ref()
+            .is_none_or(|current| *current != watched_paths);
+        let path_identities_changed = self
+            .source_watcher_path_identities
+            .as_ref()
+            .is_none_or(|current| *current != watched_path_identities);
+        let watcher_unhealthy = self
             .source_watcher
             .as_ref()
-            .is_none_or(|watcher| watcher.watched_paths != watched_paths);
-        if rebuild {
+            .is_some_and(|watcher| !watcher.is_healthy());
+        if paths_changed || path_identities_changed || watcher_unhealthy {
             self.cached_work = None;
-            self.source_watcher = SearchRefreshSourceWatcher::new(watched_paths).ok();
+            self.source_watcher = None;
+            self.source_watcher_paths = Some(watched_paths.clone());
+            self.source_watcher_path_identities = Some(watched_path_identities);
+        }
+
+        let retry_due = daemon_search_refresh_watcher_retry_due(self.source_watcher.is_some());
+        if paths_changed || path_identities_changed || watcher_unhealthy || retry_due {
+            if let Ok(watcher) = SearchRefreshSourceWatcher::new(watched_paths) {
+                // A recovered watcher cannot account for changes made while it
+                // was unavailable, so rebuild once before trusting it.
+                if !paths_changed {
+                    self.cached_work = None;
+                }
+                self.source_watcher = Some(watcher);
+            }
+        }
+        if self.source_watcher.is_some() {
+            self.last_watcher_fallback_reinventory_at = None;
+        } else if daemon_search_refresh_watcher_fallback_due(
+            self.last_watcher_fallback_reinventory_at,
+        ) {
+            self.cached_work = None;
+            self.last_watcher_fallback_reinventory_at = Some(Instant::now());
         }
         self.source_watcher
             .as_ref()
-            .map(SearchRefreshSourceWatcher::generation)
+            .map(SearchRefreshSourceWatcher::take_changes)
     }
 
     #[cfg(test)]
-    fn force_source_change_for_test(&self) {
+    fn force_source_change_for_test(&self, path: &Path) {
         if let Some(watcher) = &self.source_watcher {
-            watcher.generation.fetch_add(1, Ordering::AcqRel);
+            watcher.mark_path_dirty(path);
         }
     }
 }
 
+fn daemon_search_refresh_watcher_retry_due(watcher_available: bool) -> bool {
+    !watcher_available
+}
+
+fn daemon_search_refresh_watcher_fallback_due(last_reinventory_at: Option<Instant>) -> bool {
+    last_reinventory_at
+        .is_none_or(|last| last.elapsed() >= DAEMON_SEARCH_REFRESH_WATCHER_FALLBACK_INTERVAL)
+}
+
 impl SearchRefreshSourceWatcher {
     fn new(watched_paths: Vec<PathBuf>) -> Result<Self> {
-        let generation = Arc::new(AtomicU64::new(0));
-        let callback_generation = Arc::clone(&generation);
+        let changes = Arc::new(Mutex::new(SearchRefreshSourceChanges::default()));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let callback_changes = Arc::clone(&changes);
+        let callback_healthy = Arc::clone(&healthy);
+        let watches = search_refresh_watch_specs(&watched_paths);
+        let callback_watches = watches.clone();
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
-                note_search_refresh_source_event(&callback_generation, event);
+                note_search_refresh_source_event(
+                    &callback_changes,
+                    &callback_healthy,
+                    &callback_watches,
+                    event,
+                );
             },
             NotifyConfig::default(),
         )
         .context("create daemon search refresh watcher")?;
-        for path in &watched_paths {
-            let mode = if path.is_dir() {
+        let mut watch_targets = Vec::<(PathBuf, bool)>::new();
+        for watch in &watches {
+            if let Some((_, recursive)) = watch_targets
+                .iter_mut()
+                .find(|(path, _)| *path == watch.watch_path)
+            {
+                *recursive |= watch.recursive;
+            } else {
+                watch_targets.push((watch.watch_path.clone(), watch.recursive));
+            }
+        }
+        for (watch_path, recursive) in watch_targets {
+            let mode = if recursive {
                 RecursiveMode::Recursive
             } else {
                 RecursiveMode::NonRecursive
             };
             watcher
-                .watch(path, mode)
-                .with_context(|| format!("watch search refresh source {}", path.display()))?;
+                .watch(&watch_path, mode)
+                .with_context(|| format!("watch search refresh source {}", watch_path.display()))?;
         }
         Ok(Self {
-            generation,
-            watched_paths,
+            changes,
+            healthy,
             _watcher: watcher,
         })
     }
 
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+    fn take_changes(&self) -> SearchRefreshSourceChanges {
+        let mut changes = self
+            .changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *changes)
+    }
+
+    fn mark_path_dirty(&self, path: &Path) {
+        self.changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dirty_paths
+            .insert(path.to_path_buf());
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 }
 
-fn note_search_refresh_source_event(generation: &AtomicU64, _event: notify::Result<notify::Event>) {
-    // A watcher error also invalidates the cache: after an error we can no
-    // longer prove that no source change was missed.
-    generation.fetch_add(1, Ordering::AcqRel);
+fn note_search_refresh_source_event(
+    changes: &Mutex<SearchRefreshSourceChanges>,
+    healthy: &AtomicBool,
+    watches: &[SearchRefreshWatch],
+    event: notify::Result<notify::Event>,
+) {
+    let Ok(event) = event else {
+        healthy.store(false, Ordering::Release);
+        changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_rebuild = true;
+        return;
+    };
+    if event.need_rescan() {
+        changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_rebuild = true;
+        return;
+    }
+    if search_refresh_event_is_non_mutating_access(event.kind) {
+        return;
+    }
+
+    let mut changes = changes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut unclassified = event.paths.is_empty();
+    for event_path in &event.paths {
+        let mut covered = false;
+        for watch in watches {
+            covered |= search_refresh_event_path_is_covered_by_watch(event_path, watch);
+            if search_refresh_event_path_matches_watch(event_path, watch) {
+                changes.dirty_paths.insert(watch.source_path.clone());
+            }
+        }
+        unclassified |= !covered;
+    }
+    if unclassified {
+        changes.full_rebuild = true;
+    }
+}
+
+fn search_refresh_watch_specs(paths: &[PathBuf]) -> Vec<SearchRefreshWatch> {
+    paths
+        .iter()
+        .map(|source_path| {
+            let is_dir = source_path.is_dir();
+            let match_path = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.clone());
+            let watch_path = if is_dir {
+                match_path.clone()
+            } else {
+                source_path
+                    .parent()
+                    .map(|parent| fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()))
+                    .unwrap_or_else(|| match_path.clone())
+            };
+            SearchRefreshWatch {
+                source_path: source_path.clone(),
+                match_path,
+                watch_path,
+                recursive: is_dir,
+            }
+        })
+        .collect()
+}
+
+fn search_refresh_event_path_matches_watch(event_path: &Path, watch: &SearchRefreshWatch) -> bool {
+    if watch.recursive {
+        return event_path == watch.match_path || event_path.starts_with(&watch.match_path);
+    }
+    if event_path == watch.match_path {
+        return true;
+    }
+    let Some(event_parent) = event_path.parent() else {
+        return false;
+    };
+    if event_parent != watch.watch_path {
+        return false;
+    }
+    let Some(source_name) = watch.match_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(event_name) = event_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let companion_prefix = format!("{source_name}-");
+    #[cfg(windows)]
+    {
+        event_name.eq_ignore_ascii_case(source_name)
+            || event_name
+                .to_ascii_lowercase()
+                .starts_with(&companion_prefix.to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        event_name == source_name || event_name.starts_with(&companion_prefix)
+    }
+}
+
+fn search_refresh_event_path_is_covered_by_watch(
+    event_path: &Path,
+    watch: &SearchRefreshWatch,
+) -> bool {
+    if watch.recursive {
+        return event_path == watch.watch_path || event_path.starts_with(&watch.watch_path);
+    }
+    event_path == watch.watch_path || event_path.parent() == Some(watch.watch_path.as_path())
+}
+
+fn search_refresh_event_is_non_mutating_access(kind: notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode};
+
+    matches!(
+        kind,
+        notify::EventKind::Access(
+            AccessKind::Read
+                | AccessKind::Open(_)
+                | AccessKind::Close(AccessMode::Read | AccessMode::Execute)
+        )
+    )
 }
 
 fn watched_source_paths(sources: &[SourceInfo]) -> Vec<PathBuf> {
@@ -156,6 +377,68 @@ fn watched_source_paths(sources: &[SourceInfo]) -> Vec<PathBuf> {
         unique.insert(source.path.clone());
     }
     unique.into_iter().collect()
+}
+
+fn watched_source_path_identities(paths: &[PathBuf]) -> Vec<WatchedSourcePathIdentity> {
+    paths
+        .iter()
+        .map(|path| match fs::metadata(path) {
+            Ok(metadata) => {
+                let stable_id = watched_source_path_stable_id(path, &metadata);
+                WatchedSourcePathIdentity {
+                    exists: true,
+                    is_dir: metadata.is_dir(),
+                    stable_id,
+                    fallback_len: stable_id.is_none().then(|| metadata.len()),
+                    fallback_modified_at: stable_id
+                        .is_none()
+                        .then(|| metadata.modified().ok())
+                        .flatten(),
+                }
+            }
+            Err(_) => WatchedSourcePathIdentity {
+                exists: false,
+                is_dir: false,
+                stable_id: None,
+                fallback_len: None,
+                fallback_modified_at: None,
+            },
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn watched_source_path_stable_id(_path: &Path, metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn watched_source_path_stable_id(path: &Path, _metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    (ok != 0).then(|| {
+        let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        (u64::from(info.dwVolumeSerialNumber), file_index)
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn watched_source_path_stable_id(_path: &Path, _metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 pub(crate) fn search_refresh_source_fingerprint(sources: &[SourceInfo]) -> String {

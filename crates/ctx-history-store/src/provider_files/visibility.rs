@@ -360,9 +360,12 @@ fn material_source_matches_replacement_owner_predicate(
 
 pub(crate) fn catalog_material_visible_predicate(catalog_alias: &str) -> String {
     let effective = effective_provider_file_publication_predicate("replacement");
+    let inventory_published =
+        crate::catalog::catalog_inventory_material_published_predicate(catalog_alias);
     format!(
         r#"
-        NOT EXISTS (
+        ({inventory_published})
+        AND NOT EXISTS (
             SELECT 1 FROM provider_file_publications AS replacement
             WHERE replacement.inventory_family = '{CATALOG_INVENTORY_FAMILY}'
               AND replacement.provider = {catalog_alias}.provider

@@ -143,6 +143,7 @@ thread_local! {
 
 pub struct DiskIoPacingGuard {
     previous: Option<DiskIoPacer>,
+    _store_pacing: ctx_history_store::EventSearchMaintenancePacingGuard,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -156,8 +157,11 @@ impl Drop for DiskIoPacingGuard {
 
 pub fn install_disk_io_pacer(pacer: DiskIoPacer) -> DiskIoPacingGuard {
     let previous = CURRENT_PACER.with(|slot| slot.borrow_mut().replace(pacer));
+    let store_pacing =
+        ctx_history_store::install_event_search_maintenance_pacer(pace_current_disk_io);
     DiskIoPacingGuard {
         previous,
+        _store_pacing: store_pacing,
         _not_send: PhantomData,
     }
 }
@@ -342,5 +346,29 @@ mod tests {
 
         assert_eq!(pacer.charged_bytes(), 200);
         assert_eq!(*time.now.lock().unwrap(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn installed_pacer_accounts_for_event_search_maintenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let (pacer, time) = fake_pacer(1024 * 1024, 1);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+        let store = ctx_history_store::Store::open(temp.path().join("work.sqlite")).unwrap();
+        let bulk_guard = store.begin_event_search_bulk_mode().unwrap();
+
+        assert_eq!(pacer.charged_bytes(), 0);
+        assert!(store
+            .finish_event_search_bulk_mode(&bulk_guard)
+            .unwrap()
+            .is_complete());
+        let charged = pacer.charged_bytes();
+
+        assert!(charged > 0);
+        assert!(!time.now.lock().unwrap().is_zero());
+        assert!(store
+            .finish_event_search_bulk_mode(&bulk_guard)
+            .unwrap()
+            .is_complete());
+        assert_eq!(pacer.charged_bytes(), charged);
     }
 }

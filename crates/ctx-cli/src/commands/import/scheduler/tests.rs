@@ -663,6 +663,46 @@ mod tests {
     }
 
     #[test]
+    fn rebased_execution_state_preserves_only_unaffected_source_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let (dirty_source, _, _) = recovery_source(&store, "/fixture/dirty", None);
+        let (stable_source, _, stable_generation) =
+            recovery_source(&store, "/fixture/stable", None);
+        let old_plan = ImportPlan {
+            sources: vec![dirty_source.clone(), stable_source.clone()],
+            fresh_units: 0,
+            recovery_units: 0,
+        };
+        let mut state = ImportExecutionState::for_plan(&old_plan);
+        state.observed_preinventories = vec![
+            Some(dirty_source.preinventory.clone()),
+            Some(stable_source.preinventory.clone()),
+        ];
+        state.attempted_work.insert("attempted-work".to_owned());
+
+        let new_plan = ImportPlan {
+            sources: vec![stable_source, dirty_source],
+            fresh_units: 0,
+            recovery_units: 0,
+        };
+        let rebased = state.rebase_for_plan(
+            &old_plan,
+            &new_plan,
+            &BTreeSet::from([PathBuf::from("/fixture/dirty")]),
+        );
+
+        assert_eq!(
+            rebased.observed_preinventories[0]
+                .as_ref()
+                .and_then(SourcePreinventory::inventory_generation),
+            Some(stable_generation)
+        );
+        assert!(rebased.observed_preinventories[1].is_none());
+        assert!(rebased.attempted_work.contains("attempted-work"));
+    }
+
+    #[test]
     fn selected_but_still_pending_work_is_not_completed_progress() {
         let mut result = ImportExecutionResult::default();
         result.add_slice(1, 0, 1, false);
