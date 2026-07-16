@@ -1562,7 +1562,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped_events"], 4);
+    assert_eq!(second["totals"]["skipped_events"], 0);
 
     let search =
         json_output(ctx(&temp).args(["search", "parser note", "--provider", "cline", "--json"]));
