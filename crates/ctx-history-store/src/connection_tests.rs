@@ -75,7 +75,7 @@ fn strict_truncating_checkpoint_reports_pinned_reader() {
 }
 
 #[test]
-fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
+fn bulk_search_mode_waits_for_paced_recovery_and_restores_saved_config() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
@@ -94,6 +94,17 @@ fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
     drop(guard);
 
     let reopened = Store::open(&db_path).unwrap();
+    assert_eq!(bulk_mode_marker(&reopened), Some(1));
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&reopened, table, "automerge", 4), 0);
+        assert_eq!(fts_config(&reopened, table, "crisismerge", 16), 1_000_000);
+    }
+
+    let _pacing = crate::install_event_search_maintenance_pacer(|_| {});
+    assert!(reopened
+        .advance_event_search_bulk_maintenance()
+        .unwrap()
+        .is_complete());
     assert_eq!(bulk_mode_marker(&reopened), None);
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&reopened, table, "automerge", 4), 8);
@@ -307,7 +318,7 @@ fn bulk_search_finish_preserves_preexisting_optimized_segment() {
 }
 
 #[test]
-fn bulk_search_recovery_resumes_legacy_in_progress_full_merge() {
+fn paced_bulk_search_recovery_resumes_legacy_in_progress_full_merge() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
@@ -333,6 +344,7 @@ fn bulk_search_recovery_resumes_legacy_in_progress_full_merge() {
     drop(store);
     drop(guard);
 
+    let _pacing = crate::install_event_search_maintenance_pacer(|_| {});
     let reopened = Store::open(&db_path).unwrap();
     assert_eq!(bulk_mode_marker(&reopened), None);
     assert_eq!(
@@ -393,7 +405,7 @@ fn event_search_segment_count(store: &Store) -> i64 {
 }
 
 #[test]
-fn interrupted_bounded_merge_resumes_after_reopen() {
+fn interrupted_bounded_merge_resumes_after_paced_reopen() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
@@ -432,6 +444,7 @@ fn interrupted_bounded_merge_resumes_after_reopen() {
     drop(store);
     drop(guard);
 
+    let _pacing = crate::install_event_search_maintenance_pacer(|_| {});
     let reopened = Store::open(&db_path).unwrap();
     assert_eq!(bulk_mode_marker(&reopened), None);
     let segments = reopened

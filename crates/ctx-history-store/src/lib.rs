@@ -22,6 +22,8 @@ mod sync;
 mod vcs;
 
 pub use archive::validate_archive_version;
+#[doc(hidden)]
+pub use bulk_search::{install_event_search_maintenance_pacer, EventSearchMaintenancePacingGuard};
 pub use bulk_search::{EventSearchBulkGuard, EventSearchBulkMaintenanceOutcome};
 pub use catalog::{
     CatalogCounts, CatalogImportWork, CatalogIndexedStatus, CatalogSession,
@@ -61,7 +63,7 @@ use std::{
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 53;
+pub(crate) const SCHEMA_VERSION: i64 = 54;
 
 pub struct Store {
     path: PathBuf,

@@ -91,6 +91,157 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    #[doc(hidden)]
+    pub fn catalog_inventory_generation_is_unpublished(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT current_generation = ?4 AND completed_generation = 0
+                FROM import_inventory_generations
+                WHERE provider = ?1
+                  AND source_root = ?2
+                  AND inventory_family = ?3
+                "#,
+                params![
+                    provider.as_str(),
+                    source_root,
+                    "catalog_sessions",
+                    capped_i64(inventory_generation),
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|unpublished| unpublished.unwrap_or(false))
+            .map_err(StoreError::from)
+    }
+
+    #[doc(hidden)]
+    pub fn delete_unpublished_catalog_sessions_batch(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+        limit: usize,
+    ) -> Result<Option<(usize, u64)>> {
+        self.delete_unpublished_catalog_sessions_batch_paced(
+            provider,
+            source_root,
+            inventory_generation,
+            limit,
+            |_| {},
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn delete_unpublished_catalog_sessions_batch_paced(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+        limit: usize,
+        pace: impl Fn(u64),
+    ) -> Result<Option<(usize, u64)>> {
+        with_immediate_transaction(&self.conn, || {
+            if !self.catalog_inventory_generation_is_unpublished(
+                provider,
+                source_root,
+                inventory_generation,
+            )? {
+                return Ok(None);
+            }
+            let (rows, bytes) = self.conn.query_row(
+                r#"
+                SELECT COUNT(*), COALESCE(SUM(
+                    length(source_path) + length(provider) + length(source_format)
+                    + length(source_root) + COALESCE(length(external_session_id), 0)
+                    + COALESCE(length(parent_external_session_id), 0)
+                    + length(agent_type) + COALESCE(length(role_hint), 0)
+                    + COALESCE(length(external_agent_id), 0) + COALESCE(length(cwd), 0)
+                    + length(metadata_json) + 256
+                ), 0)
+                FROM (
+                    SELECT *
+                    FROM catalog_sessions
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                    ORDER BY source_path
+                    LIMIT ?3
+                )
+                "#,
+                params![provider.as_str(), source_root, capped_i64(limit as u64),],
+                |row| {
+                    Ok((
+                        row.get::<_, usize>(0)?,
+                        nonnegative_i64_to_u64(row.get(1)?)?,
+                    ))
+                },
+            )?;
+            pace(bytes);
+            let deleted = self.conn.execute(
+                r#"
+                DELETE FROM catalog_sessions
+                WHERE rowid IN (
+                    SELECT rowid
+                    FROM catalog_sessions
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                    ORDER BY source_path
+                    LIMIT ?3
+                )
+                "#,
+                params![provider.as_str(), source_root, capped_i64(limit as u64),],
+            )?;
+            debug_assert_eq!(deleted, rows);
+            Ok(Some((deleted, bytes)))
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn catalog_sessions_have_external_path_owners(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        sessions: &[CatalogSession],
+    ) -> Result<bool> {
+        if sessions.is_empty()
+            || !self.conn.query_row(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM catalog_sessions
+                    WHERE provider != ?1 OR source_root != ?2
+                )
+                "#,
+                params![provider.as_str(), source_root],
+                |row| row.get(0),
+            )?
+        {
+            return Ok(false);
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM catalog_sessions
+                WHERE source_path = ?1
+                  AND (provider != ?2 OR source_root != ?3)
+            )
+            "#,
+        )?;
+        for session in sessions {
+            if stmt.query_row(
+                params![&session.source_path, provider.as_str(), source_root],
+                |row| row.get(0),
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn catalog_inventory_generation_is_complete(
         &self,
         provider: CaptureProvider,
@@ -816,60 +967,5 @@ impl Store {
                 |row| row.get::<_, usize>(0),
             )
             .map_err(Into::into)
-    }
-
-    pub fn mark_catalog_source_missing_paths_stale(
-        &self,
-        provider: CaptureProvider,
-        source_root: &str,
-        current_paths: &[String],
-        cataloged_at_ms: i64,
-        inventory_generation: u64,
-    ) -> Result<usize> {
-        self.conn.execute(
-                "CREATE TEMP TABLE IF NOT EXISTS temp_catalog_current_paths(source_path TEXT PRIMARY KEY)",
-                [],
-            )?;
-        self.conn
-            .execute("DELETE FROM temp_catalog_current_paths", [])?;
-        {
-            let mut stmt = self.conn.prepare(
-                "INSERT OR IGNORE INTO temp_catalog_current_paths(source_path) VALUES (?1)",
-            )?;
-            for path in current_paths {
-                stmt.execute(params![path.as_str()])?;
-            }
-        }
-        let changed = self.conn.execute(
-            r#"
-                UPDATE catalog_sessions
-                SET is_stale = 1, cataloged_at_ms = ?3
-                WHERE provider = ?1
-                  AND source_root = ?2
-                  AND is_stale = 0
-                  AND EXISTS (
-                      SELECT 1
-                      FROM import_inventory_generations AS inventory
-                      WHERE inventory.provider = ?1
-                        AND inventory.source_root = ?2
-                        AND inventory.inventory_family = 'catalog_sessions'
-                        AND inventory.current_generation = ?4
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM temp_catalog_current_paths current
-                      WHERE current.source_path = catalog_sessions.source_path
-                  )
-                "#,
-            params![
-                provider.as_str(),
-                source_root,
-                cataloged_at_ms,
-                capped_i64(inventory_generation)
-            ],
-        )?;
-        self.conn
-            .execute("DELETE FROM temp_catalog_current_paths", [])?;
-        Ok(changed)
     }
 }

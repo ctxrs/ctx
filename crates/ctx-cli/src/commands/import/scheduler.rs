@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ctx_history_core::canonical_provider_material_source_format;

@@ -1155,6 +1155,42 @@ fn schema_v22_adds_forgecode_provider_checks() {
 }
 
 #[test]
+fn v54_migration_recreates_stable_views_with_inventory_publication_fencing() {
+    let temp = tempdir();
+    let path = temp.path().join("v54-stable-views.sqlite");
+    drop(Store::open(&path).unwrap());
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP VIEW ctx_sources;\
+             CREATE VIEW ctx_sources AS SELECT 1 AS stale;\
+             PRAGMA user_version = 53;",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let view_sql: String = store
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'ctx_sources'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(view_sql.contains("import_inventory_generations"));
+    assert!(!view_sql.contains("SELECT 1 AS stale"));
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_v23_adds_mistral_vibe_provider_checks() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");

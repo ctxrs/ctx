@@ -395,14 +395,25 @@ fn unknown_process_lock_reports_running(
 }
 
 #[cfg(unix)]
-fn lower_semantic_worker_priority() {
+fn lower_daemon_worker_priority() {
     unsafe {
         let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
     }
 }
 
-#[cfg(not(unix))]
-fn lower_semantic_worker_priority() {}
+#[cfg(windows)]
+fn lower_daemon_worker_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+    };
+
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lower_daemon_worker_priority() {}
 
 fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {

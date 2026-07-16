@@ -158,6 +158,17 @@ fn current_retirement_observation_exists(store: &Store, table: &str, source_form
         .unwrap()
 }
 
+fn provider_file_publication_observation_invalidated(store: &Store) -> bool {
+    store
+        .conn
+        .query_row(
+            "SELECT inventory_observation_invalidated FROM provider_file_publications",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn retirement_ignores_opposite_family_and_wrong_format_current_observations() {
     for family in [
@@ -560,7 +571,85 @@ fn tombstoned_observation_retires_visibility_fence_and_can_be_adopted() {
 }
 
 #[test]
-fn explicit_observation_invalidation_survives_an_identical_inventory_revival() {
+fn changed_observation_rebind_clears_explicit_invalidation() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let original = source_file(10, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(original.provider, &original.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&original))
+        .unwrap();
+    let scope = store
+        .begin_provider_file_publication(
+            original.provider,
+            source_outcome(&original, generation, 110).observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    let source = capture_source_fixture(Uuid::from_u128(66), PATH_A, "rebound-owner");
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_capture_source(&source))
+        .unwrap();
+    let owner = store
+        .effective_provider_file_publication_inventory_owner()
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .invalidate_effective_provider_file_publication_observation(&owner, 120)
+        .unwrap());
+    assert!(provider_file_publication_observation_invalidated(&store));
+    store.abandon_provider_file_publication(scope).unwrap();
+
+    let changed = source_file(20, 130);
+    let changed_generation = store
+        .allocate_source_import_inventory_generation(changed.provider, &changed.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(changed_generation, std::slice::from_ref(&changed))
+        .unwrap();
+    let rebound = store
+        .begin_provider_file_publication(
+            changed.provider,
+            source_outcome(&changed, changed_generation, 140).observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            135,
+        )
+        .unwrap();
+
+    assert!(!provider_file_publication_observation_invalidated(&store));
+    assert_eq!(
+        store.provider_file_publication_phase(&rebound).unwrap(),
+        ProviderFilePublicationPhase::Preparing
+    );
+    let rebound_source =
+        capture_source_fixture(Uuid::from_u128(67), PATH_A, "rebound-new-observation");
+    store
+        .with_provider_file_publication_writes(&rebound, |store| {
+            store.upsert_capture_source(&rebound_source)
+        })
+        .unwrap();
+    reconcile_all(&store, &rebound, 1);
+    store
+        .finalize_provider_file_publication(
+            rebound,
+            source_outcome(&changed, changed_generation, 145),
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_capture_source(rebound_source.id).unwrap().id,
+        rebound_source.id
+    );
+    assert!(!store.has_pending_provider_file_publications().unwrap());
+}
+
+#[test]
+fn retirement_adoption_preserves_invalidation_after_identical_inventory_revival() {
     let temp = tempdir().unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let file = source_file(10, 100);
@@ -620,7 +709,7 @@ fn explicit_observation_invalidation_survives_an_identical_inventory_revival() {
         )
         .unwrap());
     store.abandon_provider_file_publication(scope).unwrap();
-    assert!(store
+    let retirement = store
         .begin_provider_file_publication_retirement(
             file.provider,
             MATERIAL_FORMAT,
@@ -629,7 +718,13 @@ fn explicit_observation_invalidation_survives_an_identical_inventory_revival() {
             125,
         )
         .unwrap()
-        .is_some());
+        .unwrap();
+    assert!(provider_file_publication_observation_invalidated(&store));
+    assert_eq!(
+        store.provider_file_publication_phase(&retirement).unwrap(),
+        ProviderFilePublicationPhase::Preparing
+    );
+    store.abandon_provider_file_publication(retirement).unwrap();
 }
 
 #[test]

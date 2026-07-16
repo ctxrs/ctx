@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::commands::import::catalog::{source_change_token, system_time_ms, SourceChangeEntry};
 use ctx_history_capture::{
-    observe_ordinary_file, observe_sqlite_source_generation, ProviderImportDependency,
-    ProviderImportUnitGrouping, ProviderImportUnitOwner, ProviderImportUnitSpec,
+    observe_ordinary_file, observe_sqlite_source_generation, pace_current_disk_io,
+    ProviderImportDependency, ProviderImportUnitGrouping, ProviderImportUnitOwner,
+    ProviderImportUnitSpec,
 };
 
 pub(crate) struct PersistedSourceImportObservation {
@@ -73,6 +74,13 @@ fn persist_source_import_observation_with_outcomes_inner(
         )?;
         before_outcomes();
         for outcome in outcomes {
+            pace_current_disk_io(
+                256u64
+                    .saturating_add(outcome.file.source_format.len() as u64)
+                    .saturating_add(outcome.file.source_root.len() as u64)
+                    .saturating_add(outcome.file.source_path.len() as u64)
+                    .saturating_add(serde_json::to_vec(&outcome.file.metadata)?.len() as u64),
+            );
             let changed = store.record_source_import_file_result(
                 outcome.file.provider,
                 SourceImportFileIndexUpdate {
@@ -149,13 +157,18 @@ fn persist_source_import_files_in_batch(
         .iter()
         .map(|file| file.source_path.clone())
         .collect::<Vec<_>>();
-    store.upsert_source_import_files(inventory_generation, files)?;
-    store.mark_source_import_missing_paths_stale(
+    store.upsert_source_import_files_with_pacing(
+        inventory_generation,
+        files,
+        pace_current_disk_io,
+    )?;
+    store.mark_source_import_missing_paths_stale_with_pacing(
         source.provider,
         source_root,
         &current_paths,
         utc_now().timestamp_millis(),
         inventory_generation,
+        pace_current_disk_io,
     )?;
     Ok(())
 }

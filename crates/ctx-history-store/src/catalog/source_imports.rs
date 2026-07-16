@@ -1,9 +1,45 @@
+const SOURCE_IMPORT_PERSIST_BATCH_ROWS: usize = 64;
+const SOURCE_IMPORT_PERSIST_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+const SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES: u64 = 256;
+
+fn source_import_persist_row_bytes(file: &SourceImportFile, metadata_json: &str) -> u64 {
+    [
+        file.provider.as_str(),
+        file.source_format.as_str(),
+        file.source_root.as_str(),
+        file.source_path.as_str(),
+        metadata_json,
+    ]
+    .into_iter()
+    .fold(SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES, |bytes, value| {
+        bytes.saturating_add(value.len() as u64)
+    })
+}
+
+fn source_import_current_path_batch(current_paths: &[String]) -> (usize, u64) {
+    let mut count = 0;
+    let mut bytes = 0_u64;
+    for source_path in current_paths.iter().take(SOURCE_IMPORT_PERSIST_BATCH_ROWS) {
+        let row_bytes =
+            SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES.saturating_add(source_path.len() as u64);
+        if count > 0 && bytes.saturating_add(row_bytes) > SOURCE_IMPORT_PERSIST_BATCH_BYTES {
+            break;
+        }
+        count += 1;
+        bytes = bytes.saturating_add(row_bytes);
+        if bytes >= SOURCE_IMPORT_PERSIST_BATCH_BYTES {
+            break;
+        }
+    }
+    (count, bytes)
+}
+
 impl Store {
     fn classify_source_import_pending_reason(
         &self,
         file: &SourceImportFile,
+        metadata_json: &str,
     ) -> Result<Option<ImportPendingReason>> {
-        let metadata_json = serde_json::to_string(&file.metadata)?;
         let prior = self
             .conn
             .query_row(
@@ -289,6 +325,16 @@ impl Store {
         inventory_generation: u64,
         files: &[SourceImportFile],
     ) -> Result<usize> {
+        self.upsert_source_import_files_with_pacing(inventory_generation, files, |_| {})
+    }
+
+    #[doc(hidden)]
+    pub fn upsert_source_import_files_with_pacing(
+        &self,
+        inventory_generation: u64,
+        files: &[SourceImportFile],
+        mut pace: impl FnMut(u64),
+    ) -> Result<usize> {
         if files.is_empty() {
             return Ok(0);
         }
@@ -419,21 +465,47 @@ impl Store {
                 "#,
         )?;
         let mut changed = 0;
-        for file in files {
-            let pending_reason = self.classify_source_import_pending_reason(file)?;
-            changed += stmt.execute(params![
-                file.provider.as_str(),
-                file.source_format.as_str(),
-                file.source_root.as_str(),
-                file.source_path.as_str(),
-                capped_i64(file.file_size_bytes),
-                file.file_modified_at_ms,
-                i64::from(file.import_revision),
-                file.observed_at_ms,
-                pending_reason.map(ImportPendingReason::as_str),
-                serde_json::to_string(&file.metadata)?,
-                capped_i64(inventory_generation),
-            ])?;
+        let mut start = 0;
+        while start < files.len() {
+            let mut batch = Vec::with_capacity(
+                SOURCE_IMPORT_PERSIST_BATCH_ROWS.min(files.len().saturating_sub(start)),
+            );
+            let mut batch_bytes = 0_u64;
+            for file in files[start..].iter().take(SOURCE_IMPORT_PERSIST_BATCH_ROWS) {
+                let metadata_json = serde_json::to_string(&file.metadata)?;
+                let row_bytes = source_import_persist_row_bytes(file, &metadata_json);
+                if !batch.is_empty()
+                    && batch_bytes.saturating_add(row_bytes) > SOURCE_IMPORT_PERSIST_BATCH_BYTES
+                {
+                    break;
+                }
+                batch_bytes = batch_bytes.saturating_add(row_bytes);
+                batch.push((file, metadata_json));
+                if batch_bytes >= SOURCE_IMPORT_PERSIST_BATCH_BYTES {
+                    break;
+                }
+            }
+
+            pace(batch_bytes);
+            let batch_len = batch.len();
+            for (file, metadata_json) in batch {
+                let pending_reason =
+                    self.classify_source_import_pending_reason(file, &metadata_json)?;
+                changed += stmt.execute(params![
+                    file.provider.as_str(),
+                    file.source_format.as_str(),
+                    file.source_root.as_str(),
+                    file.source_path.as_str(),
+                    capped_i64(file.file_size_bytes),
+                    file.file_modified_at_ms,
+                    i64::from(file.import_revision),
+                    file.observed_at_ms,
+                    pending_reason.map(ImportPendingReason::as_str),
+                    metadata_json,
+                    capped_i64(inventory_generation),
+                ])?;
+            }
+            start = start.saturating_add(batch_len);
         }
         Ok(changed)
     }
@@ -446,6 +518,47 @@ impl Store {
         observed_at_ms: i64,
         inventory_generation: u64,
     ) -> Result<usize> {
+        self.mark_source_import_missing_paths_stale_with_pacing(
+            provider,
+            source_root,
+            current_paths,
+            observed_at_ms,
+            inventory_generation,
+            |_| {},
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn mark_source_import_missing_paths_stale_with_pacing(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        current_paths: &[String],
+        observed_at_ms: i64,
+        inventory_generation: u64,
+        mut pace: impl FnMut(u64),
+    ) -> Result<usize> {
+        if self.conn.is_autocommit() {
+            self.begin_immediate_batch()?;
+            let result = self.mark_source_import_missing_paths_stale_with_pacing(
+                provider,
+                source_root,
+                current_paths,
+                observed_at_ms,
+                inventory_generation,
+                pace,
+            );
+            return match result {
+                Ok(changed) => {
+                    self.commit_batch()?;
+                    Ok(changed)
+                }
+                Err(error) => {
+                    let _ = self.rollback_batch();
+                    Err(error)
+                }
+            };
+        }
         self.conn.execute_batch(
                 "CREATE TEMP TABLE IF NOT EXISTS temp_source_import_current_paths (source_path TEXT PRIMARY KEY)",
             )?;
@@ -455,38 +568,104 @@ impl Store {
             let mut stmt = self.conn.prepare(
                 "INSERT OR IGNORE INTO temp_source_import_current_paths (source_path) VALUES (?1)",
             )?;
-            for source_path in current_paths {
-                stmt.execute(params![source_path])?;
+            let mut start = 0;
+            while start < current_paths.len() {
+                let (batch_len, batch_bytes) =
+                    source_import_current_path_batch(&current_paths[start..]);
+                pace(batch_bytes);
+                for source_path in &current_paths[start..start + batch_len] {
+                    stmt.execute(params![source_path])?;
+                }
+                start = start.saturating_add(batch_len);
             }
         }
-        let changed = self.conn.execute(
-            r#"
+        let mut changed = 0usize;
+        loop {
+            let (batch_rows, batch_bytes) = self.conn.query_row(
+                r#"
+                SELECT COUNT(*), COALESCE(SUM(
+                    length(provider) + length(source_format) + length(source_root)
+                    + length(source_path) + length(metadata_json) + ?4
+                ), 0)
+                FROM (
+                    SELECT provider, source_format, source_root, source_path, metadata_json
+                    FROM source_import_files
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                      AND is_stale = 0
+                      AND EXISTS (
+                          SELECT 1
+                          FROM import_inventory_generations AS inventory
+                          WHERE inventory.provider = ?1
+                            AND inventory.source_root = ?2
+                            AND inventory.inventory_family = 'source_import_files'
+                            AND inventory.current_generation = ?3
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM temp_source_import_current_paths AS current
+                          WHERE current.source_path = source_import_files.source_path
+                      )
+                    ORDER BY source_path
+                    LIMIT 64
+                )
+                "#,
+                params![
+                    provider.as_str(),
+                    source_root,
+                    capped_i64(inventory_generation),
+                    capped_i64(SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES),
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, usize>(0)?,
+                        nonnegative_i64_to_u64(row.get(1)?)?,
+                    ))
+                },
+            )?;
+            if batch_rows == 0 {
+                break;
+            }
+            pace(batch_bytes);
+            let batch_changed = self.conn.execute(
+                r#"
                 UPDATE source_import_files
                 SET is_stale = 1, observed_at_ms = ?3
-                WHERE provider = ?1
-                  AND source_root = ?2
-                  AND is_stale = 0
-                  AND EXISTS (
-                      SELECT 1
-                      FROM import_inventory_generations AS inventory
-                      WHERE inventory.provider = ?1
-                        AND inventory.source_root = ?2
-                        AND inventory.inventory_family = 'source_import_files'
-                        AND inventory.current_generation = ?4
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM temp_source_import_current_paths AS current
-                      WHERE current.source_path = source_import_files.source_path
+                WHERE rowid IN (
+                    SELECT rowid
+                    FROM source_import_files
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                      AND is_stale = 0
+                      AND EXISTS (
+                          SELECT 1
+                          FROM import_inventory_generations AS inventory
+                          WHERE inventory.provider = ?1
+                            AND inventory.source_root = ?2
+                            AND inventory.inventory_family = 'source_import_files'
+                            AND inventory.current_generation = ?4
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM temp_source_import_current_paths AS current
+                          WHERE current.source_path = source_import_files.source_path
+                      )
+                    ORDER BY source_path
+                    LIMIT 64
                   )
                 "#,
-            params![
-                provider.as_str(),
-                source_root,
-                observed_at_ms,
-                capped_i64(inventory_generation)
-            ],
-        )?;
+                params![
+                    provider.as_str(),
+                    source_root,
+                    observed_at_ms,
+                    capped_i64(inventory_generation)
+                ],
+            )?;
+            changed = changed.saturating_add(batch_changed);
+            if batch_changed == 0 {
+                break;
+            }
+        }
         self.conn
             .execute("DELETE FROM temp_source_import_current_paths", [])?;
         Ok(changed)
