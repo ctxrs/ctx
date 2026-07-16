@@ -50,8 +50,17 @@ fn codex_append_rejects_a_second_session_header_before_commit() {
             ProviderJsonlReplacementReason::AdditionalSessionHeader
         )
     ));
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].external_session_id.as_deref(),
+        Some("codex-original")
+    );
     assert_eq!(store.export_archive().unwrap().events.len(), event_count);
+    assert!(store
+        .search_event_hits("must roll back", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

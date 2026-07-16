@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     CaptureProvider, Event, EventType, ProviderEventEnvelope, ProviderSourceTrust,
 };
-use ctx_history_store::{EventSearchBulkMaintenanceOutcome, Store};
+use ctx_history_store::{EventSearchBulkMaintenanceOutcome, Store, StoreError};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -51,24 +51,53 @@ pub(crate) fn import_codex_session_paths_fast(
     let import_result =
         import_codex_session_paths_fast_bounded(paths, store, &options, skipped_by_bounds);
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
-    match (import_result, finish_result) {
-        (Ok(summary), Ok(EventSearchBulkMaintenanceOutcome::Complete)) => Ok(summary),
-        (Ok(mut summary), Ok(EventSearchBulkMaintenanceOutcome::Pending)) => {
+    match import_result {
+        Ok(mut summary) => {
+            apply_codex_event_search_finalization(&mut summary, finish_result)?;
+            Ok(summary)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn apply_codex_event_search_finalization(
+    summary: &mut ProviderImportSummary,
+    result: ctx_history_store::Result<EventSearchBulkMaintenanceOutcome>,
+) -> Result<()> {
+    match result {
+        Ok(EventSearchBulkMaintenanceOutcome::Complete) => Ok(()),
+        Ok(EventSearchBulkMaintenanceOutcome::Pending) => {
             summary.push_maintenance_warning(
                 crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
                 "event search maintenance remains queued",
             );
-            Ok(summary)
+            Ok(())
         }
-        (Ok(mut summary), Err(error)) => {
+        Err(error) if codex_finalization_error_is_retryable(&error) => {
             summary.push_maintenance_warning(
                 crate::ProviderImportMaintenanceKind::EventSearchFinalization,
                 error.to_string(),
             );
-            Ok(summary)
+            Ok(())
         }
-        (Err(err), _) => Err(err),
+        Err(error) => Err(error.into()),
     }
+}
+
+fn codex_finalization_error_is_retryable(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::WalCheckpointBusy { .. } | StoreError::BulkSearchImportBusy
+    ) || matches!(
+        error,
+        StoreError::Sql(error)
+            if matches!(
+                error.sqlite_error_code(),
+                Some(
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+            )
+    )
 }
 
 fn import_codex_session_paths_fast_bounded(
@@ -278,6 +307,7 @@ pub(crate) fn import_codex_session_reader_fast(
         .map(|path| path.display().to_string());
 
     let mut header = bootstrap_header;
+    let mut session_meta_seen = header.is_some();
     let mut header_persisted = false;
     let mut call_contexts = CodexToolCallContexts::from_resume_state(resume_state);
     let mut semantic_boundary = CodexSessionSemanticBoundary {
@@ -334,14 +364,17 @@ pub(crate) fn import_codex_session_reader_fast(
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         if entry_type == "session_meta" {
-            if reject_additional_session_header && header.is_some() {
-                return Ok(CodexSessionReaderDecision::ReplacementRequired(
-                    ProviderJsonlReplacementReason::AdditionalSessionHeader,
-                ));
-            }
-            if header.is_some() {
+            if session_meta_seen {
                 semantic_boundary.additional_session_header = true;
+                if reject_additional_session_header {
+                    return Ok(CodexSessionReaderDecision::ReplacementRequired(
+                        ProviderJsonlReplacementReason::AdditionalSessionHeader,
+                    ));
+                }
+                advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
+                continue;
             }
+            session_meta_seen = true;
             match codex_session_header(value) {
                 Ok(parsed) => {
                     call_contexts.clear();
@@ -582,42 +615,65 @@ pub(crate) fn import_codex_session_reader_bounded(
         result
     })();
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
-    match (import_result, finish_result) {
-        (Ok(summary), Ok(EventSearchBulkMaintenanceOutcome::Complete)) => Ok(summary),
-        (
-            Ok(CodexSessionBoundedImport::Imported {
-                mut summary,
-                boundary,
-            }),
-            Ok(EventSearchBulkMaintenanceOutcome::Pending),
-        ) => {
-            summary.push_maintenance_warning(
-                crate::ProviderImportMaintenanceKind::EventSearchFinalizationPending,
-                "event search maintenance remains queued",
-            );
+    match import_result {
+        Ok(CodexSessionBoundedImport::Imported {
+            mut summary,
+            boundary,
+        }) => {
+            apply_codex_event_search_finalization(&mut summary, finish_result)?;
             Ok(CodexSessionBoundedImport::Imported { summary, boundary })
         }
-        (
-            Ok(CodexSessionBoundedImport::ReplacementRequired(reason)),
-            Ok(EventSearchBulkMaintenanceOutcome::Pending),
-        ) => Ok(CodexSessionBoundedImport::ReplacementRequired(reason)),
-        (
-            Ok(CodexSessionBoundedImport::Imported {
-                mut summary,
-                boundary,
-            }),
-            Err(error),
-        ) => {
-            summary.push_maintenance_warning(
-                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
-                error.to_string(),
-            );
-            Ok(CodexSessionBoundedImport::Imported { summary, boundary })
+        Ok(CodexSessionBoundedImport::ReplacementRequired(reason)) => match finish_result {
+            Ok(_) => Ok(CodexSessionBoundedImport::ReplacementRequired(reason)),
+            Err(error) if codex_finalization_error_is_retryable(&error) => {
+                Ok(CodexSessionBoundedImport::ReplacementRequired(reason))
+            }
+            Err(error) => Err(error.into()),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod finalization_tests {
+    use super::*;
+
+    fn sqlite_store_error(code: i32) -> StoreError {
+        StoreError::Sql(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ))
+    }
+
+    #[test]
+    fn codex_finalization_defers_only_retryable_pressure() {
+        let retryable = [
+            StoreError::WalCheckpointBusy {
+                log_frames: 2,
+                checkpointed_frames: 1,
+            },
+            StoreError::BulkSearchImportBusy,
+            sqlite_store_error(rusqlite::ffi::SQLITE_BUSY),
+            sqlite_store_error(rusqlite::ffi::SQLITE_LOCKED),
+        ];
+        for error in retryable {
+            let mut summary = ProviderImportSummary::default();
+            apply_codex_event_search_finalization(&mut summary, Err(error)).unwrap();
+            assert_eq!(summary.maintenance_warnings.len(), 1);
         }
-        (Ok(CodexSessionBoundedImport::ReplacementRequired(reason)), Err(_)) => {
-            Ok(CodexSessionBoundedImport::ReplacementRequired(reason))
+
+        let fatal = [
+            sqlite_store_error(rusqlite::ffi::SQLITE_FULL),
+            sqlite_store_error(rusqlite::ffi::SQLITE_CORRUPT),
+            StoreError::Io(std::io::Error::other("fatal finalization I/O failure")),
+            StoreError::InvalidBulkSearchGuard,
+        ];
+        for error in fatal {
+            let mut summary = ProviderImportSummary::default();
+            let result = apply_codex_event_search_finalization(&mut summary, Err(error));
+            assert!(matches!(result, Err(CaptureError::Store(_))));
+            assert!(summary.maintenance_warnings.is_empty());
         }
-        (Err(err), _) => Err(err),
     }
 }
 

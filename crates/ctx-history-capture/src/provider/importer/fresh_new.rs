@@ -951,6 +951,7 @@ fn codex_fresh_new_checkpoint(
 ) -> Result<std::result::Result<ProviderJsonlAppendCheckpoint, ProviderJsonlReplacementReason>> {
     let mut reader = ProviderJsonlReader::open_replacement(path)?;
     let mut header = None;
+    let mut session_meta_seen = false;
     let mut call_contexts = CodexToolCallContexts::default();
     let mut line = Vec::new();
     loop {
@@ -968,6 +969,10 @@ fn codex_fresh_new_checkpoint(
             continue;
         };
         if value.get("type").and_then(serde_json::Value::as_str) == Some("session_meta") {
+            if session_meta_seen {
+                continue;
+            }
+            session_meta_seen = true;
             if let Ok(parsed) = codex_session_header(value) {
                 call_contexts.clear();
                 header = Some(parsed);
