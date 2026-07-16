@@ -63,11 +63,9 @@ type ImportOptions struct {
 
 // SearchOptions configures Client.Search.
 type SearchOptions struct {
-	Query                 string
-	Terms                 []string
+	Query                 *SearchQuery
 	Limit                 int
 	Backend               string
-	SemanticWeight        *float64
 	Provider              string
 	Workspace             string
 	Since                 string
@@ -160,18 +158,19 @@ func (c *Client) Sync(ctx context.Context, opts ImportOptions) (*ImportResponse,
 
 func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchResponse, error) {
 	if !opts.hasIntent() {
-		return nil, sdkError(ErrorKindInvalidArgument, "search requires a query, term, or file option", nil)
+		return nil, sdkError(ErrorKindInvalidArgument, "search requires a ctx-search-v1 query or file option", nil)
 	}
 	args := []string{"search"}
-	if opts.Query != "" {
-		args = append(args, opts.Query)
+	if opts.Query != nil {
+		queryJSON, err := SerializeSearchQuery(*opts.Query)
+		if err != nil {
+			return nil, sdkError(ErrorKindInvalidArgument, "invalid ctx-search-v1 query", err)
+		}
+		args = append(args, "--query-json", queryJSON)
 	}
 	args = append(args, "--json")
 	if opts.Limit > 0 {
 		args = append(args, "--limit", strconv.Itoa(opts.Limit))
-	}
-	for _, term := range opts.Terms {
-		args = append(args, "--term", term)
 	}
 	appendStringFlag := func(name, value string) {
 		if value != "" {
@@ -179,9 +178,6 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 		}
 	}
 	appendStringFlag("--backend", opts.Backend)
-	if opts.SemanticWeight != nil {
-		args = append(args, "--semantic-weight", strconv.FormatFloat(*opts.SemanticWeight, 'g', -1, 64))
-	}
 	appendStringFlag("--provider", opts.Provider)
 	appendStringFlag("--workspace", opts.Workspace)
 	appendStringFlag("--since", opts.Since)
@@ -209,15 +205,7 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 }
 
 func (opts SearchOptions) hasIntent() bool {
-	if strings.TrimSpace(opts.Query) != "" || strings.TrimSpace(opts.File) != "" {
-		return true
-	}
-	for _, term := range opts.Terms {
-		if strings.TrimSpace(term) != "" {
-			return true
-		}
-	}
-	return false
+	return opts.Query != nil || strings.TrimSpace(opts.File) != ""
 }
 
 func (c *Client) ShowSession(ctx context.Context, opts ShowSessionOptions) (*ShowSessionResponse, error) {

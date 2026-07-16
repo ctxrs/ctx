@@ -49,8 +49,9 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	}
 	fmt.Fprintf(stdout, "sync events=%d\n", syncResult.Import.Totals.ImportedEvents)
 
+	query := ctxagenthistory.NewSearchQuery(ctxagenthistory.SearchAll("local agent history"))
 	search, err := client.Search(ctx, ctxagenthistory.SearchOptions{
-		Query:   "local agent history",
+		Query:   &query,
 		Limit:   5,
 		Refresh: "off",
 	})
@@ -161,7 +162,15 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 		}
 	case "search":
 		envelope["search"] = map[string]any{
-			"query": "local agent history",
+			"schema_version": ctxagenthistory.SearchSchemaVersion,
+			"query": map[string]any{
+				"version": ctxagenthistory.SearchQueryVersion,
+				"any":     []map[string]any{{"all": "local agent history"}},
+			},
+			"query_execution": map[string]any{
+				"query_version":      ctxagenthistory.SearchQueryVersion,
+				"candidate_strategy": "bounded_union_rrf_v1",
+			},
 			"freshness": map[string]any{
 				"mode":        "off",
 				"status":      "skipped",
@@ -220,14 +229,14 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 
 func dogfoodEvent() map[string]any {
 	return map[string]any{
-		"ctxEventId":     fixtureEventID,
-		"ctxSessionId":   fixtureSessionID,
-		"sequence":       1,
-		"eventType":      "message",
-		"role":           "assistant",
-		"source":         "codex",
-		"cursor":         "line:1",
-		"text":           "local agent history search result",
+		"ctxEventId":   fixtureEventID,
+		"ctxSessionId": fixtureSessionID,
+		"sequence":     1,
+		"eventType":    "message",
+		"role":         "assistant",
+		"source":       "codex",
+		"cursor":       "line:1",
+		"text":         "local agent history search result",
 	}
 }
 

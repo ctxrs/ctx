@@ -36,7 +36,7 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	case "import", "sync":
 		envelope["import"] = camel
 	case "search":
-		envelope["search"] = camel
+		envelope["search"] = normalizeSearchPayload(rawObject)
 	case "showEvent":
 		envelope["event"] = map[string]any{
 			"event":  normalizeEventRecord(get(camel, "event")),
@@ -56,6 +56,16 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(envelope)
+}
+
+func normalizeSearchPayload(raw map[string]any) map[string]any {
+	normalized, _ := camelize(raw).(map[string]any)
+	delete(normalized, "schemaVersion")
+	delete(normalized, "queryExecution")
+	normalized["schema_version"] = raw["schema_version"]
+	normalized["query"] = raw["query"]
+	normalized["query_execution"] = raw["query_execution"]
+	return normalized
 }
 
 func agentHistoryOperationName(name string) string {

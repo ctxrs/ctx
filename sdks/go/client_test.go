@@ -44,8 +44,9 @@ func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 
 func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	transport := &recordingTransport{response: `{
-		"schema_version": 1,
-		"query": "panic",
+			"schema_version": 2,
+			"query": {"version":"ctx-search-v1","any":[{"all":"panic"},{"semantic":"sqlite retry"}]},
+			"query_execution": {"query_version":"ctx-search-v1","candidate_strategy":"bounded_union_rrf_v1"},
 		"filters": {},
 		"freshness": {"mode": "off", "status": "skipped", "source_count": 0, "totals": {}},
 		"generated_at": "2026-01-01T00:00:00Z",
@@ -54,14 +55,12 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 		"truncation": {}
 	}`}
 	client := NewClient(WithTransport(transport))
-	semanticWeight := 0.35
+	query := NewSearchQuery(SearchAll("panic"), SearchSemantic("sqlite retry"))
 
 	_, err := client.Search(context.Background(), SearchOptions{
-		Query:                 "panic",
-		Terms:                 []string{"sqlite", "retry"},
+		Query:                 &query,
 		Limit:                 5,
 		Backend:               "hybrid",
-		SemanticWeight:        &semanticWeight,
 		Provider:              "codex",
 		Workspace:             "ctx",
 		Since:                 "30d",
@@ -77,10 +76,8 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	}
 
 	want := []string{
-		"search", "panic", "--json", "--limit", "5",
-		"--term", "sqlite", "--term", "retry",
+		"search", "--query-json", `{"version":"ctx-search-v1","any":[{"all":"panic"},{"semantic":"sqlite retry"}]}`, "--json", "--limit", "5",
 		"--backend", "hybrid",
-		"--semantic-weight", "0.35",
 		"--provider", "codex",
 		"--workspace", "ctx",
 		"--since", "30d",
@@ -98,8 +95,15 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 
 func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{response: `{
-		"schema_version": 1,
-		"query": "agent history",
+			"schema_version": 2,
+			"query": {"version":"ctx-search-v1","any":[{"all":"agent history"}]},
+			"query_execution": {
+				"query_version":"ctx-search-v1",
+				"candidate_strategy":"bounded_union_rrf_v1",
+				"resolved":{"query_bytes":8192},
+				"consumed":{"query_bytes":13},
+				"semantic":{"attempted":false,"required":false,"readiness":"unavailable","effective_backend":"lexical","positive_text_rule_version":"ctx-search-positive-text-v1"}
+			},
 		"retrieval": {
 			"requested_mode": "hybrid",
 			"effective_mode": "lexical",
@@ -112,9 +116,9 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 		"results": [{
 			"result_scope": "event"
 		}]
-	}`}))
-
-	response, err := client.Search(context.Background(), SearchOptions{Query: "agent history"})
+		}`}))
+	query := NewSearchQuery(SearchAll("agent history"))
+	response, err := client.Search(context.Background(), SearchOptions{Query: &query})
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
 	}
@@ -136,17 +140,21 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 	if !ok || diagnostics["queryEmbedMs"] != float64(2) {
 		t.Fatalf("retrieval diagnostics were not camelized: %#v", retrieval)
 	}
+	if response.Search.SchemaVersion != SearchSchemaVersion || response.Search.QueryExecution.QueryVersion != SearchQueryVersion {
+		t.Fatalf("schema-v2 search contract was not preserved: %+v", response.Search)
+	}
+	if response.Search.Query == nil || response.Search.Query.Any[0].Value() != "agent history" {
+		t.Fatalf("canonical query was not decoded: %+v", response.Search.Query)
+	}
 }
 
-func TestSearchRequiresQueryTermOrFileBeforeTransport(t *testing.T) {
-	transport := &recordingTransport{response: `{"schema_version":1,"results":[]}`}
+func TestSearchRequiresQueryOrFileBeforeTransport(t *testing.T) {
+	transport := &recordingTransport{response: `{"schema_version":2,"query":null,"query_execution":{},"results":[]}`}
 	client := NewClient(WithTransport(transport))
 
 	for name, opts := range map[string]SearchOptions{
 		"empty":        {},
 		"filters only": {Refresh: "off", Limit: 5},
-		"blank query":  {Query: "   "},
-		"blank terms":  {Terms: []string{"", "   "}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := client.Search(context.Background(), opts); !IsErrorKind(err, ErrorKindInvalidArgument) {
@@ -156,6 +164,88 @@ func TestSearchRequiresQueryTermOrFileBeforeTransport(t *testing.T) {
 	}
 	if transport.op.Args != nil {
 		t.Fatalf("Search invoked transport despite invalid input: %#v", transport.op.Args)
+	}
+}
+
+func TestSearchQueryValidationRejectsInvalidShapesBeforeTransport(t *testing.T) {
+	transport := &recordingTransport{response: `{"schema_version":2,"query":null,"query_execution":{},"results":[]}`}
+	client := NewClient(WithTransport(transport))
+	invalid := []SearchQuery{
+		{Version: SearchQueryVersion},
+		{Version: SearchQueryVersion, MustNot: []SearchClause{SearchAll("excluded")}},
+		{Version: SearchQueryVersion, Must: []SearchClause{SearchSemantic("not allowed")}},
+		{Version: SearchQueryVersion, Any: []SearchClause{SearchSemantic("one"), SearchSemantic("two")}},
+		NewSearchQuery(SearchLiteral("x")),
+	}
+	for _, query := range invalid {
+		if _, err := client.Search(context.Background(), SearchOptions{Query: &query}); !IsErrorKind(err, ErrorKindInvalidArgument) {
+			t.Fatalf("expected invalid query error for %+v, got %v", query, err)
+		}
+	}
+	if transport.op.Args != nil {
+		t.Fatalf("invalid query invoked transport: %#v", transport.op.Args)
+	}
+}
+
+func TestSearchQueryJSONIsClosedAndCanonical(t *testing.T) {
+	var query SearchQuery
+	if err := json.Unmarshal([]byte(`{"version":"ctx-search-v1","any":[{"all":"  disk   pressure "},{"all":"disk pressure"}],"must_not":[{"literal":" logs_2.db "}]}`), &query); err != nil {
+		t.Fatalf("decode canonical query: %v", err)
+	}
+	serialized, err := SerializeSearchQuery(query)
+	if err != nil {
+		t.Fatalf("serialize canonical query: %v", err)
+	}
+	want := `{"version":"ctx-search-v1","any":[{"all":"disk pressure"}],"must_not":[{"literal":"logs_2.db"}]}`
+	if serialized != want {
+		t.Fatalf("canonical query mismatch\nwant: %s\n got: %s", want, serialized)
+	}
+	for _, raw := range []string{
+		`{"version":"ctx-search-v1","unknown":true,"any":[{"all":"ctx"}]}`,
+		`{"version":"ctx-search-v1","any":[{"all":"ctx","phrase":"ctx"}]}`,
+		`{"version":"ctx-search-v1","must":[{"semantic":"ctx"}]}`,
+	} {
+		if err := json.Unmarshal([]byte(raw), &query); err == nil {
+			t.Fatalf("expected closed-query rejection for %s", raw)
+		}
+	}
+}
+
+func TestSearchRejectsLegacyStringAndCamelCaseSchemaV2Fields(t *testing.T) {
+	query := NewSearchQuery(SearchAll("ctx"))
+	for _, response := range []string{
+		`{"schema_version":2,"query":"ctx","query_execution":{},"results":[]}`,
+		`{"schemaVersion":2,"query":{"version":"ctx-search-v1","any":[{"all":"ctx"}]},"query_execution":{},"results":[]}`,
+		`{"schema_version":2,"query":{"version":"ctx-search-v1","any":[{"all":"ctx"}]},"queryExecution":{},"results":[]}`,
+	} {
+		client := NewClient(WithTransport(fakeTransport{response: response}))
+		if _, err := client.Search(context.Background(), SearchOptions{Query: &query}); !IsErrorKind(err, ErrorKindDecode) {
+			t.Fatalf("expected schema-v2 decode rejection, got %v", err)
+		}
+	}
+}
+
+func TestSearchExecutionDiagnosticsUseExactSnakeCaseKeys(t *testing.T) {
+	data, err := json.Marshal(SearchQueryExecution{
+		QueryVersion:      SearchQueryVersion,
+		CandidateStrategy: "bounded_union_rrf_v1",
+		Semantic: SearchSemanticExecution{
+			Readiness:               SearchSemanticReady,
+			EffectiveBackend:        SearchEffectiveHybrid,
+			PositiveTextRuleVersion: "ctx-search-positive-text-v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal diagnostics: %v", err)
+	}
+	encoded := string(data)
+	for _, key := range []string{`"query_version"`, `"candidate_strategy"`, `"effective_backend"`, `"positive_text_rule_version"`} {
+		if !strings.Contains(encoded, key) {
+			t.Fatalf("diagnostics missing snake_case key %s: %s", key, encoded)
+		}
+	}
+	if strings.Contains(encoded, "queryVersion") || strings.Contains(encoded, "effectiveBackend") {
+		t.Fatalf("diagnostics emitted a camelCase alias: %s", encoded)
 	}
 }
 
