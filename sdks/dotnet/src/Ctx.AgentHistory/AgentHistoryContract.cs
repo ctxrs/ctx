@@ -100,12 +100,18 @@ internal static class AgentHistoryContract
                 "ctx search returned an unsupported schema version",
                 new JsonObject { ["expectedSchemaVersion"] = 2, ["actualSchemaVersion"] = schema });
         }
+        if (!raw.TryGetPropertyValue("query", out var rawQuery))
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx search response is missing its canonical query",
+                new JsonObject { ["field"] = "query" });
+        }
         SearchQueryV1? query = null;
-        if (raw["query"] is JsonObject rawQuery)
+        if (rawQuery is JsonObject rawQueryObject)
         {
             try
             {
-                query = SearchQueryV1.FromJson(rawQuery);
+                query = SearchQueryV1.FromJson(rawQueryObject);
             }
             catch (CtxAgentHistoryValidationException error)
             {
@@ -114,7 +120,7 @@ internal static class AgentHistoryContract
                     new JsonObject { ["field"] = "query", ["validation"] = error.Message });
             }
         }
-        else if (raw["query"] is not null)
+        else if (rawQuery is not null)
         {
             throw new CtxAgentHistoryProtocolException(
                 "ctx search response contains a non-object canonical query",
@@ -126,14 +132,17 @@ internal static class AgentHistoryContract
                 "ctx search response is missing query execution diagnostics",
                 new JsonObject { ["field"] = "query_execution" });
         }
+        if (raw["results"] is not JsonArray rawResults)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx search response is missing its results array",
+                new JsonObject { ["field"] = "results" });
+        }
         var search = (JsonObject)CamelizePublic(raw)!;
         var results = new JsonArray();
-        if (raw["results"] is JsonArray rawResults)
+        foreach (var result in rawResults)
         {
-            foreach (var result in rawResults)
-            {
-                results.Add(CamelizePublic(result));
-            }
+            results.Add(CamelizePublic(result));
         }
 
         search["schema_version"] = 2;
