@@ -54,7 +54,10 @@ AgentHistoryOptions.Search options = AgentHistoryOptions.search()
         .providerKey("dorkos")
         .sourceId("default")
         .sourceFormat("dorkos-history-v1")
-        .limit(Integer.valueOf(20));
+        .includeSubagents(true)
+        .eventType("message")
+        .limit(Integer.valueOf(20))
+        .refresh("off");
 ```
 
 Queries are sent with `ctx search --query-json`. Search results require

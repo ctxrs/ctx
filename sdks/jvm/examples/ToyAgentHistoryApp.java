@@ -26,6 +26,8 @@ public final class ToyAgentHistoryApp {
                 .providerKey("codex")
                 .sourceId("default")
                 .sourceFormat("codex_session_jsonl")
+                .includeSubagents(true)
+                .eventType("message")
                 .refresh("off")
                 .limit(Integer.valueOf(5)));
         ShowEventResponse shown = client.showEvent("evt-toy-1", AgentHistoryOptions.showEvent().window(Integer.valueOf(1)));
@@ -52,7 +54,10 @@ public final class ToyAgentHistoryApp {
                     + "\"schema_version\":2,"
                     + "\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"local agent history\"}],\"must\":[{\"all\":\"codex\"}]},"
                     + "\"query_execution\":" + queryExecution() + ","
-                    + "\"filters\":{\"provider\":\"codex\"},"
+                    + "\"filters\":{\"provider\":\"codex\","
+                    + "\"history_source\":\"codex/default\",\"provider_key\":\"codex\","
+                    + "\"source_id\":\"default\",\"source_format\":\"codex_session_jsonl\","
+                    + "\"include_subagents\":true,\"event_type\":\"message\"},"
                     + "\"freshness\":{\"mode\":\"off\",\"status\":\"skipped\",\"source_count\":0},"
                     + "\"results\":[{"
                     + "\"ctx_event_id\":\"evt-toy-1\","
