@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -59,9 +60,13 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 
 	_, err := client.Search(context.Background(), SearchOptions{
 		Query:                 &query,
-		Limit:                 5,
+		Limit:                 intPointer(5),
 		Backend:               "hybrid",
 		Provider:              "codex",
+		HistorySource:         "codex/default",
+		ProviderKey:           "codex",
+		SourceID:              "default",
+		SourceFormat:          "codex_session_jsonl",
 		Workspace:             "ctx",
 		Since:                 "30d",
 		EventType:             "message",
@@ -79,6 +84,10 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 		"search", "--query-json", `{"version":"ctx-search-v1","any":[{"all":"panic"},{"semantic":"sqlite retry"}]}`, "--json", "--limit", "5",
 		"--backend", "hybrid",
 		"--provider", "codex",
+		"--history-source", "codex/default",
+		"--provider-key", "codex",
+		"--source-id", "default",
+		"--source-format", "codex_session_jsonl",
 		"--workspace", "ctx",
 		"--since", "30d",
 		"--event-type", "message",
@@ -126,11 +135,13 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 	if !ok {
 		t.Fatalf("top-level retrieval was not decoded: %#v", response.Search.Retrieval)
 	}
-	if retrieval["requestedMode"] != "hybrid" || retrieval["effectiveMode"] != "lexical" || retrieval["semanticWeight"] != 0.0 {
+	if retrieval["requestedMode"] != "hybrid" || retrieval["effectiveMode"] != "lexical" {
 		t.Fatalf("top-level retrieval was not camelized: %#v", retrieval)
 	}
-	if retrieval["semanticFallbackCode"] != "semantic_retrieval_failed" {
-		t.Fatalf("retrieval fallback code was not camelized: %#v", retrieval)
+	for _, key := range []string{"semanticWeight", "semanticFallbackCode", "semanticFallback"} {
+		if _, exists := retrieval[key]; exists {
+			t.Fatalf("obsolete retrieval field %q survived normalization: %#v", key, retrieval)
+		}
 	}
 	coverage, ok := retrieval["coverage"].(map[string]any)
 	if !ok || coverage["embeddedItems"] != float64(4) || coverage["indexedNow"] != float64(1) {
@@ -154,7 +165,7 @@ func TestSearchRequiresQueryOrFileBeforeTransport(t *testing.T) {
 
 	for name, opts := range map[string]SearchOptions{
 		"empty":        {},
-		"filters only": {Refresh: "off", Limit: 5},
+		"filters only": {Refresh: "off", Limit: intPointer(5)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := client.Search(context.Background(), opts); !IsErrorKind(err, ErrorKindInvalidArgument) {
@@ -164,6 +175,24 @@ func TestSearchRequiresQueryOrFileBeforeTransport(t *testing.T) {
 	}
 	if transport.op.Args != nil {
 		t.Fatalf("Search invoked transport despite invalid input: %#v", transport.op.Args)
+	}
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func TestSearchRejectsExplicitLimitsOutsidePublicRange(t *testing.T) {
+	query := NewSearchQuery(SearchAll("bounded limit"))
+	client := NewClient(WithTransport(&recordingTransport{}))
+	for _, limit := range []int{-1, 0, searchMaxResults + 1} {
+		_, err := client.Search(context.Background(), SearchOptions{
+			Query: &query,
+			Limit: intPointer(limit),
+		})
+		if !IsErrorKind(err, ErrorKindInvalidArgument) {
+			t.Fatalf("limit %d returned %v", limit, err)
+		}
 	}
 }
 
@@ -199,6 +228,24 @@ func TestSearchQueryJSONIsClosedAndCanonical(t *testing.T) {
 	want := `{"version":"ctx-search-v1","any":[{"all":"disk pressure"}],"must_not":[{"literal":"logs_2.db"}]}`
 	if serialized != want {
 		t.Fatalf("canonical query mismatch\nwant: %s\n got: %s", want, serialized)
+	}
+	unicodeQuery := NewSearchQuery(
+		SearchAll("  cafe\u0301\u00a0\u4e16\u754c  "),
+		SearchAll("cafe\u0301 \u4e16\u754c"),
+	)
+	canonical, err := unicodeQuery.Canonical()
+	if err != nil {
+		t.Fatalf("canonicalize Unicode query: %v", err)
+	}
+	if len(canonical.Any) != 1 || canonical.Any[0].Value() != "cafe\u0301 \u4e16\u754c" {
+		t.Fatalf("Unicode whitespace or deduplication mismatch: %#v", canonical.Any)
+	}
+	exact := make([]SearchClause, 0, searchMaxClauses)
+	for index := 0; index < searchMaxClauses; index++ {
+		exact = append(exact, SearchAll(fmt.Sprintf("term%d", index)))
+	}
+	if _, err := NewSearchQuery(exact...).Canonical(); err != nil {
+		t.Fatalf("exact clause limit was rejected: %v", err)
 	}
 	for _, raw := range []string{
 		`{"version":"ctx-search-v1","unknown":true,"any":[{"all":"ctx"}]}`,

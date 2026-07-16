@@ -48,4 +48,6 @@ enum, and the typed `SearchExecutionDiagnostics` tree directly from
 Queries are canonicalized and validated before the local adapter invokes
 `ctx search --query-json <json> --json`. Search responses must use nested
 schema version 2 and include `query_execution`; those machine fields retain
-their exact `snake_case` wire names.
+their exact `snake_case` wire names. `SearchOptions` exposes provider/source,
+workspace/time, event/subagent, file, and session filters; result limits are
+validated in `1..=200` before the CLI is started.
