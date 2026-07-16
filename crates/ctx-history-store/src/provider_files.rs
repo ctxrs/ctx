@@ -33,6 +33,7 @@ use crate::{CatalogIndexedStatus, Result, Store, StoreError};
 
 include!("provider_files/types.rs");
 include!("provider_files/checkpoints.rs");
+include!("provider_files/fresh_new.rs");
 include!("provider_files/lifecycle_begin.rs");
 include!("provider_files/lifecycle_progress.rs");
 include!("provider_files/lifecycle_finalize.rs");

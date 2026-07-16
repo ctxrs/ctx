@@ -52,16 +52,9 @@ pub(crate) use cursors::{
     persist_provider_sync_cursor, provider_cursor_stream, provider_source_cursor_range,
     provider_sync_cursor,
 };
-pub(crate) use fresh_new::{
-    commit_prepared_fresh_new_batch, construct_codex_fresh_new_candidate,
-    construct_pi_fresh_new_candidate, plan_fresh_new_batch, prepare_fresh_new_batch,
-    FreshNewAdmission, FreshNewAtomicCommitDisposition, FreshNewAtomicCommitRequest,
-    FreshNewBatchCandidate, FreshNewBatchExecution, FreshNewBatchPlan, FreshNewCandidateEvidence,
-    FreshNewCandidateKind, FreshNewCandidateResult, FreshNewCandidateWork, FreshNewDurableOnly,
-    FreshNewDurableOnlyReason,
-    FreshNewFilePreparation, FreshNewObservation, FreshNewPreparedBatch, FreshNewPreparedFile,
-    FreshNewPreparation, FreshNewRejected, FRESH_NEW_BATCH_MAX_ACTUAL_UNITS,
-    FRESH_NEW_BATCH_MAX_BYTES, FRESH_NEW_BATCH_MAX_PATHS,
+pub use fresh_new::{
+    import_codex_fresh_new_batch, import_pi_fresh_new_batch, FreshNewImportContext,
+    FreshNewImportOutcome,
 };
 pub(crate) use identity::{
     pi_existing_event_identity_by_entry_id, provider_event_exists, provider_event_import_identity,
