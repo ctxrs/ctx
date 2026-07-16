@@ -218,7 +218,7 @@ pub(crate) fn junie_index_meta_for_events_path(
 pub(crate) fn junie_read_index(path: &Path) -> Result<Vec<JunieIndexMeta>> {
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut metas = Vec::new();
     let mut line = Vec::new();
     loop {
@@ -367,7 +367,7 @@ pub(crate) fn normalize_junie_session_events_file(
     };
 
     let file = File::open(&session_path.events_path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
     let mut line = Vec::new();
     let mut line_number = 0usize;
     while read_provider_jsonl_record_or_skip_oversized(

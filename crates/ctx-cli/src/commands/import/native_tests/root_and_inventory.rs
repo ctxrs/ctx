@@ -263,8 +263,7 @@ fn stale_root_plan_skips_after_newer_completion_wins_bulk_lock() {
         let progress = ProgressReporter::new(ProgressArg::None, false, "test-import", 0);
         let mut totals = ImportTotals::default();
         let mut imported_sources = Vec::new();
-        let mut successful_sources = BTreeSet::new();
-        let mut failed_sources = BTreeSet::new();
+        let mut native_reports = NativeSourceReports::default();
         let mut execution_state = ImportExecutionState::for_plan(&plan);
         let result = execute_import_plan_class_for_report_with_pre_lock_hook(
             &mut import_store,
@@ -282,11 +281,10 @@ fn stale_root_plan_skips_after_newer_completion_wins_bulk_lock() {
                 operation: "test-import",
             },
             &mut totals,
-            &mut imported_sources,
-            &mut successful_sources,
-            &mut failed_sources,
+            &mut native_reports,
             || waiting_tx.send(()).unwrap(),
         );
+        native_reports.append_json(&plan, &mut imported_sources);
         (result, totals, imported_sources)
     });
     waiting_rx.recv().unwrap();
@@ -361,9 +359,7 @@ fn waiting_root_plan_reobserves_a_change_before_skipping() {
         let mut import_store = Store::open(waiting_db_path).unwrap();
         let progress = ProgressReporter::new(ProgressArg::None, false, "test-import", 0);
         let mut totals = ImportTotals::default();
-        let mut imported_sources = Vec::new();
-        let mut successful_sources = BTreeSet::new();
-        let mut failed_sources = BTreeSet::new();
+        let mut native_reports = NativeSourceReports::default();
         let mut execution_state = ImportExecutionState::for_plan(&plan);
         let result = execute_import_plan_class_for_report_with_pre_lock_hook(
             &mut import_store,
@@ -381,11 +377,10 @@ fn waiting_root_plan_reobserves_a_change_before_skipping() {
                 operation: "test-import",
             },
             &mut totals,
-            &mut imported_sources,
-            &mut successful_sources,
-            &mut failed_sources,
+            &mut native_reports,
             || waiting_tx.send(()).unwrap(),
         );
+        native_reports.apply_totals(&mut totals);
         (result, totals)
     });
     waiting_rx.recv().unwrap();
@@ -410,7 +405,18 @@ fn waiting_root_plan_reobserves_a_change_before_skipping() {
 
     let (result, totals) = importer.join().unwrap();
     result.unwrap();
-    assert_eq!(totals.fresh_units_processed, 1);
+    let pending_after_wait = lock_store
+        .list_source_import_file_work(
+            source.provider,
+            &initial_checkpoint.source_root,
+            ImportWorkClass::Fresh,
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        totals.fresh_units_processed, 1,
+        "revalidated import totals: {totals:?}; pending: {pending_after_wait:?}"
+    );
     assert_eq!(totals.failed_sources, 0);
     assert!(totals.imported_events > 0);
     assert!(lock_store

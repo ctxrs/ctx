@@ -61,6 +61,7 @@ pub enum ProviderImportMaintenanceKind {
     TransactionContinuation,
     ImportInterruptedAfterCommit,
     EventSearchFinalization,
+    EventSearchFinalizationPending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +96,12 @@ impl ProviderImportSummary {
 
     pub fn requires_maintenance(&self) -> bool {
         !self.maintenance_warnings.is_empty()
+    }
+
+    pub(crate) fn has_checkpoint_blocking_maintenance(&self) -> bool {
+        self.maintenance_warnings.iter().any(|warning| {
+            warning.kind != ProviderImportMaintenanceKind::EventSearchFinalizationPending
+        })
     }
 
     pub(crate) fn push_maintenance_warning(

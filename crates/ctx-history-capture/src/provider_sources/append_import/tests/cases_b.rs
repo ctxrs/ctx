@@ -26,13 +26,13 @@ fn codex_append_rejects_a_second_session_header_before_commit() {
     );
     let event_count = store.export_archive().unwrap().events.len();
     append_raw(
-        &path,
-        &format!(
-            "{}{}",
-            jsonl(codex_message("assistant", "must roll back", 2)),
-            "{\"type\": \"session_meta\", \"payload\": {\"id\": \"codex-second\", \"timestamp\": \"2026-07-14T12:00:03Z\"}}\n"
-        ),
-    );
+            &path,
+            &format!(
+                "{}{}",
+                jsonl(codex_message("assistant", "must roll back", 2)),
+                "{\"type\": \"session_meta\", \"payload\": {\"id\": \"codex-second\", \"timestamp\": \"2026-07-14T12:00:03Z\"}}\n"
+            ),
+        );
     let decision = import_append_capable_provider_file(
         CaptureProvider::Codex,
         &mut store,
@@ -939,6 +939,233 @@ fn claude_and_tabnine_authoritative_identity_changes_are_not_append_admitted() {
                     ..
                 }
             )
+        ));
+    }
+}
+
+#[test]
+fn each_operational_format_streams_delta_and_handles_malformed_partial_and_rewrite() {
+    struct Case {
+        provider: CaptureProvider,
+        inventory_format: &'static str,
+        material_format: &'static str,
+        initial: String,
+        tail: String,
+        malformed: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            provider: CaptureProvider::Codex,
+            inventory_format: "codex_session_jsonl_tree",
+            material_format: "codex_session_jsonl",
+            initial: format!(
+                "{}{}",
+                jsonl(codex_header("codex-tree-delta")),
+                jsonl(codex_message("user", "codex tree initial", 1))
+            ),
+            tail: jsonl(codex_message("assistant", "codex tree delta", 2)),
+            malformed: "{\"type\":\"response_item\",oops}\n",
+        },
+        Case {
+            provider: CaptureProvider::Codex,
+            inventory_format: "codex_session_jsonl",
+            material_format: "codex_session_jsonl",
+            initial: format!(
+                "{}{}",
+                jsonl(codex_header("codex-file-delta")),
+                jsonl(codex_message("user", "codex file initial", 1))
+            ),
+            tail: jsonl(codex_message("assistant", "codex file delta", 2)),
+            malformed: "{\"type\":\"response_item\",oops}\n",
+        },
+        Case {
+            provider: CaptureProvider::Pi,
+            inventory_format: "pi_session_jsonl",
+            material_format: "pi_session_jsonl",
+            initial: format!(
+                "{}{}",
+                jsonl(json!({
+                    "type": "session",
+                    "id": "pi-delta",
+                    "timestamp": "2026-07-14T12:00:00Z"
+                })),
+                jsonl(json!({
+                    "type": "message",
+                    "id": "pi-initial",
+                    "timestamp": "2026-07-14T12:00:01Z",
+                    "message": {"role": "user", "content": "pi initial"}
+                }))
+            ),
+            tail: jsonl(json!({
+                "type": "model_change",
+                "id": "pi-tail",
+                "timestamp": "2026-07-14T12:00:02Z",
+                "provider": "test",
+                "model": "test-model"
+            })),
+            malformed: "{oops}\n",
+        },
+        Case {
+            provider: CaptureProvider::Claude,
+            inventory_format: "claude_projects_jsonl_tree",
+            material_format: "claude_projects_jsonl_tree",
+            initial: jsonl(json!({
+                "sessionId": "claude-delta",
+                "timestamp": "2026-07-14T12:00:00Z",
+                "type": "user",
+                "uuid": "claude-initial",
+                "message": {"role": "user", "content": "claude initial"}
+            })),
+            tail: jsonl(json!({
+                "sessionId": "claude-delta",
+                "timestamp": "2026-07-14T12:00:01Z",
+                "type": "progress",
+                "uuid": "claude-tail"
+            })),
+            malformed: "{oops}\n",
+        },
+        Case {
+            provider: CaptureProvider::Tabnine,
+            inventory_format: "tabnine_cli_chat_recording_jsonl",
+            material_format: "tabnine_cli_chat_recording_jsonl",
+            initial: format!(
+                "{}{}",
+                jsonl(json!({
+                    "sessionId": "tabnine-delta",
+                    "startTime": "2026-07-14T12:00:00Z"
+                })),
+                jsonl(json!({
+                    "id": "tabnine-initial",
+                    "timestamp": "2026-07-14T12:00:01Z",
+                    "type": "user",
+                    "content": "tabnine initial"
+                }))
+            ),
+            tail: jsonl(json!({
+                "id": "tabnine-tail",
+                "timestamp": "2026-07-14T12:00:02Z",
+                "type": "tabnine",
+                "toolCalls": [{
+                    "id": "tabnine-call",
+                    "name": "read_file",
+                    "args": {"file_path": "src/lib.rs"}
+                }]
+            })),
+            malformed: "{oops}\n",
+        },
+    ];
+
+    for (index, case) in cases.into_iter().enumerate() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(format!("case-{index}/session.jsonl"));
+        write_raw(&path, &case.initial);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let initial = imported(
+            import_append_capable_provider_file(
+                case.provider,
+                &mut store,
+                options(
+                    &path,
+                    case.inventory_format,
+                    case.material_format,
+                    ProviderAppendFileImportMode::AppendCapableReplacement,
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(initial.summary.failed, 0, "{case:?}", case = case.provider);
+        let source = store
+            .list_capture_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| {
+                source.descriptor.raw_source_path.as_deref()
+                    == Some(path.to_string_lossy().as_ref())
+            })
+            .expect("material capture source");
+        assert_eq!(
+            source.descriptor.source_format.as_deref(),
+            Some(case.material_format)
+        );
+        assert_eq!(
+            source.descriptor.source_root.as_deref(),
+            Some(path.parent().unwrap().to_string_lossy().as_ref())
+        );
+
+        append_raw(&path, &case.tail);
+        let delta = imported(
+            import_append_capable_provider_file(
+                case.provider,
+                &mut store,
+                options(
+                    &path,
+                    case.inventory_format,
+                    case.material_format,
+                    admitted(initial.checkpoint),
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(delta.summary.failed, 0, "{case:?}", case = case.provider);
+        assert_eq!(
+            delta.summary.imported_events,
+            1,
+            "{case:?}",
+            case = case.provider
+        );
+
+        append_raw(&path, case.malformed);
+        let malformed = imported(
+            import_append_capable_provider_file(
+                case.provider,
+                &mut store,
+                options(
+                    &path,
+                    case.inventory_format,
+                    case.material_format,
+                    admitted(delta.checkpoint.clone()),
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            malformed.checkpoint.complete_line_count,
+            delta.checkpoint.complete_line_count + 1,
+            "{case:?}",
+            case = case.provider
+        );
+
+        append_raw(&path, "{\"partial\"");
+        let partial = imported(
+            import_append_capable_provider_file(
+                case.provider,
+                &mut store,
+                options(
+                    &path,
+                    case.inventory_format,
+                    case.material_format,
+                    admitted(malformed.checkpoint.clone()),
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(partial.checkpoint, malformed.checkpoint);
+
+        fs::write(&path, "rewritten\n").unwrap();
+        assert!(matches!(
+            import_append_capable_provider_file(
+                case.provider,
+                &mut store,
+                options(
+                    &path,
+                    case.inventory_format,
+                    case.material_format,
+                    admitted(partial.checkpoint),
+                ),
+            )
+            .unwrap(),
+            ProviderAppendFileImportDecision::ReplacementRequired(_)
         ));
     }
 }

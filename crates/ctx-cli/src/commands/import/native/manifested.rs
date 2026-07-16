@@ -80,7 +80,7 @@ fn import_manifested_source_with_importer(
             &collected_files
         }
     };
-    if files.is_empty() {
+    if files.is_empty() && selection.is_none() {
         return Err(anyhow!(
             "no importable {} history files found under {}",
             source.provider.as_str(),
@@ -115,18 +115,22 @@ fn import_manifested_source_with_importer(
 
     let mut summary = ProviderImportSummary::default();
     let mut deferred_units = 0;
+    let mut durable_progress = false;
     let mut outcomes = Vec::with_capacity(selected_files.len());
     let mut system_error = None;
+    let append_only = provider_file_mutation_contract(source.provider, source.source_format)
+        == ProviderFileMutationContract::AppendOnlyNewlineDelimited;
     for pending_file in selected_files {
         let path = PathBuf::from(&pending_file.source_path);
         let mut pending_source = explicit_path_source(source.provider, path);
         pending_source.source_format = source.source_format;
-        let imported = if provider_file_mutation_contract(source.provider, source.source_format)
-            == ProviderFileMutationContract::AppendOnlyNewlineDelimited
-        {
+        let uses_bounded_publication =
+            append_only && selected_work_by_path.contains_key(pending_file.source_path.as_str());
+        let imported = if append_only {
             match selected_work_by_path.get(pending_file.source_path.as_str()) {
                 Some(work) => match import_manifested_append_source_file_work(
                     store,
+                    source,
                     &pending_source,
                     work,
                     preinventory_generation.ok_or_else(|| {
@@ -136,9 +140,15 @@ fn import_manifested_source_with_importer(
                     })?,
                 ) {
                     Ok(AppendImportOutcome::Imported(summary)) => Some(Ok(summary)),
-                    Ok(AppendImportOutcome::Deferred) => {
+                    Ok(AppendImportOutcome::Deferred {
+                        durable_progress: unit_progress,
+                    }) => {
                         deferred_units += 1;
-                        None
+                        durable_progress |= unit_progress;
+                        if unit_progress {
+                            break;
+                        }
+                        continue;
                     }
                     Err(error) => Some(Err(error)),
                 },
@@ -204,6 +214,20 @@ fn import_manifested_source_with_importer(
                 }
             }
         }
+        if uses_bounded_publication {
+            break;
+        }
+    }
+    if deferred_units > 0 && durable_progress {
+        return Ok(ProviderImportBatchOutcome {
+            summary,
+            completed_units: 0,
+            completed_bytes: 0,
+            deferred_units,
+            durable_progress,
+            post_import_inventory_generation: None,
+            post_import_preinventory: None,
+        });
     }
     let outcome_generation = outcome_generation.ok_or_else(|| {
         anyhow::Error::new(CaptureError::SystemInvariant(
@@ -230,6 +254,7 @@ fn import_manifested_source_with_importer(
                     completed_units: 0,
                     completed_bytes: 0,
                     deferred_units,
+                    durable_progress,
                     post_import_inventory_generation: None,
                     post_import_preinventory: None,
                 },
@@ -237,6 +262,7 @@ fn import_manifested_source_with_importer(
             ));
         }
     };
+    durable_progress |= persisted.durable_progress;
     let mut source_error = None;
     let mut completed_paths = BTreeSet::new();
     for outcome in outcomes {
@@ -278,6 +304,7 @@ fn import_manifested_source_with_importer(
         completed_units: completed_paths.len(),
         completed_bytes,
         deferred_units,
+        durable_progress,
         post_import_inventory_generation: Some(persisted.inventory_generation),
         post_import_preinventory: None,
     };
@@ -293,6 +320,7 @@ fn import_manifested_source_with_importer(
 struct PersistedManifestedOutcomes {
     current_outcomes: BTreeSet<String>,
     inventory_generation: u64,
+    durable_progress: bool,
 }
 
 fn persist_reobserved_manifested_outcomes(
@@ -302,6 +330,7 @@ fn persist_reobserved_manifested_outcomes(
     outcomes: &[ManifestedImportOutcome],
 ) -> Result<PersistedManifestedOutcomes> {
     let mut current_outcomes = BTreeSet::new();
+    let mut durable_progress = false;
     for outcome in outcomes {
         let Some(current) =
             observe_selected_source_import_file(source, &outcome.observation.source_path)?
@@ -309,6 +338,9 @@ fn persist_reobserved_manifested_outcomes(
             continue;
         };
         if !same_source_import_observation(&outcome.observation, &current) {
+            store
+                .upsert_source_import_files(inventory_generation, std::slice::from_ref(&current))?;
+            durable_progress = true;
             continue;
         }
         let changed = store.record_source_import_file_result(
@@ -333,6 +365,7 @@ fn persist_reobserved_manifested_outcomes(
     Ok(PersistedManifestedOutcomes {
         current_outcomes,
         inventory_generation,
+        durable_progress,
     })
 }
 

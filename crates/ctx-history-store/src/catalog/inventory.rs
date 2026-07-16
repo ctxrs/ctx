@@ -15,6 +15,44 @@ impl Store {
         self.allocate_import_inventory_generation(provider, source_root, "source_import_files")
     }
 
+    pub fn current_source_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Option<u64>> {
+        self.current_import_inventory_generation(provider, source_root, "source_import_files")
+    }
+
+    pub fn current_catalog_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Option<u64>> {
+        self.current_import_inventory_generation(provider, source_root, "catalog_sessions")
+    }
+
+    fn current_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_family: &str,
+    ) -> Result<Option<u64>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT current_generation
+                FROM import_inventory_generations
+                WHERE provider = ?1
+                  AND source_root = ?2
+                  AND inventory_family = ?3
+                "#,
+                params![provider.as_str(), source_root, inventory_family],
+                |row| nonnegative_i64_to_u64(row.get(0)?),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     pub fn catalog_inventory_generation_is_current(
         &self,
         provider: CaptureProvider,
@@ -214,7 +252,7 @@ impl Store {
                 SELECT provider, source_format, source_root, file_size_bytes,
                        file_modified_at_ms, import_revision, is_stale,
                        indexed_file_size_bytes, indexed_file_modified_at_ms,
-                       indexed_status, indexed_import_revision, pending_reason
+                       indexed_status, indexed_import_revision, pending_reason, metadata_json
                 FROM catalog_sessions
                 WHERE source_path = ?1
                 "#,
@@ -242,6 +280,7 @@ impl Store {
                             .get::<_, Option<String>>(11)?
                             .map(parse_text_enum)
                             .transpose()?,
+                        metadata_json: row.get(12)?,
                     })
                 },
             )
@@ -265,6 +304,7 @@ impl Store {
             && prior.file_size_bytes == session.file_size_bytes
             && prior.file_modified_at_ms == session.file_modified_at_ms
             && prior.import_revision == session.import_revision
+            && catalog_observation_metadata_matches(&prior.metadata_json, &session.metadata)
             && !prior.is_stale;
         if same_fingerprint && prior.pending_reason == Some(ImportPendingReason::ExplicitRescan) {
             return Ok(prior.pending_reason);
@@ -279,6 +319,7 @@ impl Store {
             let parser_revision_only = same_identity
                 && prior.file_size_bytes == session.file_size_bytes
                 && prior.file_modified_at_ms == session.file_modified_at_ms
+                && catalog_observation_metadata_matches(&prior.metadata_json, &session.metadata)
                 && prior.import_revision != session.import_revision
                 && !prior.is_stale;
             if parser_revision_only {
@@ -459,6 +500,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_at_ms
                         ELSE NULL
                     END,
@@ -469,6 +512,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_file_size_bytes
                         ELSE NULL
                     END,
@@ -479,6 +524,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_file_modified_at_ms
                         ELSE NULL
                     END,
@@ -489,6 +536,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_status
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -509,6 +558,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_error
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -529,6 +580,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_event_count
                         ELSE NULL
                     END,
@@ -539,6 +592,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.indexed_import_revision
                         ELSE NULL
                     END,
@@ -549,6 +604,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_at_ms
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -571,6 +628,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_file_size_bytes
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -593,6 +652,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_file_modified_at_ms
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -615,6 +676,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_file_sha256
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider
@@ -637,6 +700,8 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND json_extract(catalog_sessions.metadata_json, '$.file_observation_token_v1')
+                             IS json_extract(excluded.metadata_json, '$.file_observation_token_v1')
                         THEN catalog_sessions.last_imported_event_count
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
                          AND catalog_sessions.provider IS excluded.provider

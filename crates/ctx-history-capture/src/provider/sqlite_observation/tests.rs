@@ -3,6 +3,8 @@ mod tests {
 
     use rusqlite::Connection;
 
+    use crate::{install_disk_io_pacer, DiskIoPacer};
+
     use super::*;
 
     #[test]
@@ -48,6 +50,18 @@ mod tests {
                 "alternate checksum order for page size {page_size}"
             );
         }
+    }
+
+    #[test]
+    fn wal_validation_accounts_the_bytes_it_reads() {
+        let fixture = real_wal_fixture(512);
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+
+        let generation = observe_sqlite_source_generation(&fixture.db).unwrap();
+        let committed_wal_bytes = generation.wal.as_ref().unwrap().snapshot_len();
+
+        assert!(pacer.charged_bytes() >= committed_wal_bytes.saturating_mul(2));
     }
 
     #[test]

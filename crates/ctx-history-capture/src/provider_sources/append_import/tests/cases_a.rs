@@ -118,6 +118,7 @@ fn truncate_after_tolerant_materialization_dominates_invalid_header_certificatio
         ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(result) => {
             assert_eq!(result.reason, ProviderJsonlReplacementReason::FileShrank);
             assert!(result.summary.imported_events > 0);
+            assert_eq!(result.source_prefix_sha256, None);
         }
         other => panic!("expected mutation to dominate certification, got {other:?}"),
     }
@@ -135,6 +136,10 @@ fn identity_swap_after_tolerant_materialization_dominates_invalid_header_certifi
         jsonl(codex_header("codex-replaced-after-import")),
         jsonl(codex_message("user", "materialized before replacement", 1))
     );
+    let replacement_contents = contents.replacen("materialized", "Materialized", 1);
+    assert_eq!(replacement_contents.len(), contents.len());
+    let source_sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    let replacement_sha256 = format!("{:x}", Sha256::digest(replacement_contents.as_bytes()));
     write_raw(&path, &contents);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
@@ -149,7 +154,7 @@ fn identity_swap_after_tolerant_materialization_dominates_invalid_header_certifi
         ),
         |_| {
             fs::rename(&path, displaced).unwrap();
-            fs::write(&path, contents).unwrap();
+            fs::write(&path, replacement_contents).unwrap();
         },
     )
     .unwrap();
@@ -161,6 +166,14 @@ fn identity_swap_after_tolerant_materialization_dominates_invalid_header_certifi
                 ProviderJsonlReplacementReason::StableIdentityChanged
             );
             assert!(result.summary.imported_events > 0);
+            assert_eq!(
+                result.source_prefix_sha256.as_deref(),
+                Some(source_sha256.as_str())
+            );
+            assert_ne!(
+                result.source_prefix_sha256.as_deref(),
+                Some(replacement_sha256.as_str())
+            );
         }
         other => panic!("expected mutation to dominate certification, got {other:?}"),
     }
@@ -326,54 +339,54 @@ fn unexpected_checkpoint_permanent_error_after_commit_is_typed_and_retains_summa
 #[test]
 fn replacement_header_plus_partial_first_message_is_deferred() {
     let cases = [
-        (
-            CaptureProvider::Codex,
-            "codex_session_jsonl_tree",
-            "codex_session_jsonl",
-            format!(
-                "{}{{\"timestamp\":\"2026-07-14T12:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[",
-                jsonl(codex_header("codex-partial"))
+            (
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                format!(
+                    "{}{{\"timestamp\":\"2026-07-14T12:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[",
+                    jsonl(codex_header("codex-partial"))
+                ),
             ),
-        ),
-        (
-            CaptureProvider::Pi,
-            "pi_session_jsonl",
-            "pi_session_jsonl",
-            format!(
-                "{}{{\"type\":\"message\",\"id\":\"pi-user",
-                jsonl(json!({
-                    "type": "session",
-                    "id": "pi-partial",
-                    "timestamp": "2026-07-14T12:00:00Z"
-                }))
+            (
+                CaptureProvider::Pi,
+                "pi_session_jsonl",
+                "pi_session_jsonl",
+                format!(
+                    "{}{{\"type\":\"message\",\"id\":\"pi-user",
+                    jsonl(json!({
+                        "type": "session",
+                        "id": "pi-partial",
+                        "timestamp": "2026-07-14T12:00:00Z"
+                    }))
+                ),
             ),
-        ),
-        (
-            CaptureProvider::Claude,
-            "claude_projects_jsonl_tree",
-            "claude_projects_jsonl_tree",
-            format!(
-                "{}{{\"sessionId\":\"claude-partial\",\"type\":\"user\",\"message\":",
-                jsonl(json!({
-                    "sessionId": "claude-partial",
-                    "timestamp": "2026-07-14T12:00:00Z",
-                    "type": "system"
-                }))
+            (
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                "claude_projects_jsonl_tree",
+                format!(
+                    "{}{{\"sessionId\":\"claude-partial\",\"type\":\"user\",\"message\":",
+                    jsonl(json!({
+                        "sessionId": "claude-partial",
+                        "timestamp": "2026-07-14T12:00:00Z",
+                        "type": "system"
+                    }))
+                ),
             ),
-        ),
-        (
-            CaptureProvider::Tabnine,
-            "tabnine_cli_chat_recording_jsonl",
-            "tabnine_cli_chat_recording_jsonl",
-            format!(
-                "{}{{\"id\":\"tabnine-user\",\"type\":\"user\",\"content\":",
-                jsonl(json!({
-                    "sessionId": "tabnine-partial",
-                    "startTime": "2026-07-14T12:00:00Z"
-                }))
+            (
+                CaptureProvider::Tabnine,
+                "tabnine_cli_chat_recording_jsonl",
+                "tabnine_cli_chat_recording_jsonl",
+                format!(
+                    "{}{{\"id\":\"tabnine-user\",\"type\":\"user\",\"content\":",
+                    jsonl(json!({
+                        "sessionId": "tabnine-partial",
+                        "startTime": "2026-07-14T12:00:00Z"
+                    }))
+                ),
             ),
-        ),
-    ];
+        ];
 
     for (index, (provider, inventory_format, material_format, contents)) in
         cases.into_iter().enumerate()
@@ -399,6 +412,72 @@ fn replacement_header_plus_partial_first_message_is_deferred() {
         );
         assert!(store.list_sessions().unwrap().is_empty());
     }
+}
+
+#[test]
+fn append_import_stops_at_the_inventoried_size_when_the_file_grows() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("codex/growing.jsonl");
+    write_raw(
+        &path,
+        &format!(
+            "{}{}",
+            jsonl(codex_header("codex-growing")),
+            jsonl(codex_message("user", "inventoried message", 1))
+        ),
+    );
+    let replacement_options = options(
+        &path,
+        "codex_session_jsonl_tree",
+        "codex_session_jsonl",
+        ProviderAppendFileImportMode::AppendCapableReplacement,
+    );
+    let inventoried_size = replacement_options.observed_size;
+    append_raw(
+        &path,
+        &jsonl(codex_message(
+            "assistant",
+            "message appended after inventory",
+            2,
+        )),
+    );
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let first = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            replacement_options,
+        )
+        .unwrap(),
+    );
+    assert_eq!(first.summary.imported_events, 1);
+    assert_eq!(first.checkpoint.committed_offset, inventoried_size);
+    let first_archive = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
+    assert!(first_archive.contains("inventoried message"));
+    assert!(!first_archive.contains("message appended after inventory"));
+
+    let second = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                admitted(first.checkpoint),
+            ),
+        )
+        .unwrap(),
+    );
+    assert_eq!(second.summary.imported_events, 1);
+    assert_eq!(
+        second.checkpoint.committed_offset,
+        fs::metadata(&path).unwrap().len()
+    );
+    assert!(serde_json::to_string(&store.export_archive().unwrap())
+        .unwrap()
+        .contains("message appended after inventory"));
 }
 
 #[test]

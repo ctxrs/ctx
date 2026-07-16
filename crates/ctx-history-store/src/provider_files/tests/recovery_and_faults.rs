@@ -18,7 +18,7 @@ fn catalog_retain_completion_preserves_every_legacy_import_cursor_field() {
         file_modified_at_ms: 100,
         import_revision: 1,
         cataloged_at_ms: 101,
-        metadata: json!({}),
+        metadata: json!({"file_observation_token_v1": "recovery-catalog-token"}),
     };
     let first_generation = store
         .allocate_catalog_inventory_generation(catalog.provider, &catalog.source_root)
@@ -41,9 +41,10 @@ fn catalog_retain_completion_preserves_every_legacy_import_cursor_field() {
         .upsert_provider_file_checkpoint(
             ProviderFileImportOutcome {
                 provider: catalog.provider,
-                observation: ProviderFileInventoryObservation::Catalog {
+                observation: ProviderFileInventoryObservation::ObservedCatalog {
                     source_format: &catalog.source_format,
                     update: first_update,
+                    metadata: &catalog.metadata,
                 },
                 status: CatalogIndexedStatus::Indexed,
                 error: None,
@@ -76,9 +77,10 @@ fn catalog_retain_completion_preserves_every_legacy_import_cursor_field() {
     store
         .complete_provider_file_observation_retaining_checkpoint(ProviderFileImportOutcome {
             provider: catalog.provider,
-            observation: ProviderFileInventoryObservation::Catalog {
+            observation: ProviderFileInventoryObservation::ObservedCatalog {
                 source_format: &catalog.source_format,
                 update: second_update,
+                metadata: &catalog.metadata,
             },
             status: CatalogIndexedStatus::Indexed,
             error: None,
@@ -399,6 +401,7 @@ fn retirement_reopen_reconstructs_when_cursor_outlives_staging_rows() {
             )
             .unwrap()
             .unwrap();
+        prepare_all(&store, &retirement, 1);
         let progress = store
             .reconcile_provider_file_publication_slice(&retirement, 1)
             .unwrap();

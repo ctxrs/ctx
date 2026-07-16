@@ -68,6 +68,7 @@ impl Store {
                 serde_json::to_string(&source.sync.metadata)?,
             ],
         )?;
+        self.track_provider_file_publication_capture_source(source.id)?;
         Ok(())
     }
 

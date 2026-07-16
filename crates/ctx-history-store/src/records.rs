@@ -138,6 +138,7 @@ impl Store {
                 record.updated_at.to_rfc3339(),
             ],
         )?;
+        self.track_provider_file_publication_history_record(record.id)?;
         upsert_record_search_projection(&self.conn, record)?;
         Ok(())
     }
@@ -149,6 +150,7 @@ impl Store {
     fn upsert_record_inner(&self, record: &HistoryRecord) -> Result<()> {
         self.ensure_provider_file_history_record_write_allowed(record.id)?;
         self.upsert_record_row(record)?;
+        self.track_provider_file_publication_history_record(record.id)?;
         upsert_record_search_projection(&self.conn, record)?;
         Ok(())
     }
@@ -159,6 +161,10 @@ impl Store {
 
     fn delete_orphan_record_inner(&self, record_id: Uuid) -> Result<bool> {
         self.ensure_provider_file_history_record_write_allowed(record_id)?;
+        self.delete_orphan_record_row(record_id)
+    }
+
+    pub(crate) fn delete_orphan_record_row(&self, record_id: Uuid) -> Result<bool> {
         let record_id = record_id.to_string();
         let deleted = self.conn.execute(
             r#"
@@ -200,7 +206,10 @@ impl Store {
             self.begin_immediate_batch()?;
         }
         for record in records {
-            if let Err(err) = self.upsert_record_row(record) {
+            if let Err(err) = self
+                .upsert_record_row(record)
+                .and_then(|()| self.track_provider_file_publication_history_record(record.id))
+            {
                 if owns_transaction {
                     let _ = self.rollback_batch();
                 }
@@ -264,8 +273,7 @@ impl Store {
     }
 
     pub fn get_record(&self, id: Uuid) -> Result<HistoryRecord> {
-        let visible =
-            crate::provider_files::history_record_material_visible_predicate("history_records");
+        let visible = self.importer_history_record_material_visible_predicate("history_records");
         self.conn
             .query_row(
                 record_select_sql(&format!("WHERE id = ?1 AND {visible}")).as_str(),
@@ -281,8 +289,7 @@ impl Store {
     }
 
     pub fn list_records_page(&self, limit: usize, offset: usize) -> Result<Vec<HistoryRecord>> {
-        let visible =
-            crate::provider_files::history_record_material_visible_predicate("history_records");
+        let visible = self.importer_history_record_material_visible_predicate("history_records");
         let mut stmt = self.conn.prepare(
             record_select_sql(&format!(
                 "WHERE {visible} ORDER BY created_at DESC, id LIMIT ?1 OFFSET ?2"
@@ -331,8 +338,7 @@ impl Store {
         let limit_parameter = values.len();
         values.push(Value::Integer(offset as i64));
         let offset_parameter = values.len();
-        let visible =
-            crate::provider_files::history_record_material_visible_predicate("history_records");
+        let visible = self.importer_history_record_material_visible_predicate("history_records");
         let tail = format!(
             "WHERE ({}) AND {visible} ORDER BY ({coverage}) DESC, created_at DESC, id LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}",
             predicates.join(") OR (")
@@ -356,8 +362,7 @@ impl Store {
         let has_artifact_search = table_exists(&self.conn, "artifact_search")?;
         let has_record_scriptgram = record_scriptgram_table_ready(&self.conn)?;
         let has_event_scriptgram = event_scriptgram_table_ready(&self.conn)?;
-        let record_visible =
-            crate::provider_files::history_record_material_visible_predicate("record");
+        let record_visible = self.importer_history_record_material_visible_predicate("record");
         let event_visible = crate::provider_files::event_material_visible_predicate("event");
         let artifact_visible = crate::provider_files::direct_source_material_visible_predicate(
             "artifact",

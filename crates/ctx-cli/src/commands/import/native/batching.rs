@@ -11,8 +11,19 @@ fn import_one_source_inner_batched(
     }
     let record = import_record_for_source(source);
     let record_id = record.id;
-    let record_existed = history_record_exists(store, record_id)?;
-    store.upsert_record(&record)?;
+    let record_existed =
+        history_record_exists(store, record_id).context("inspect source import history record")?;
+    let selected_append_publication = match selection {
+        Some(SelectedImportWork::Catalog(_)) => true,
+        Some(SelectedImportWork::SourceFiles(_)) => {
+            provider_file_mutation_contract(source.provider, source.source_format)
+                == ProviderFileMutationContract::AppendOnlyNewlineDelimited
+        }
+        None => false,
+    };
+    if !record_existed && !selected_append_publication {
+        store.upsert_record(&record)?;
+    }
     if !source_uses_import_file_manifest(source)
         && provider_file_mutation_contract(source.provider, source.source_format)
             == ProviderFileMutationContract::AppendOnlyNewlineDelimited
@@ -25,14 +36,16 @@ fn import_one_source_inner_batched(
             }
             let import_result = import_append_capable_source_file_work(
                 store,
+                source,
                 &work[0],
                 preinventory.inventory_generation().ok_or_else(|| {
                     anyhow::Error::new(CaptureError::SystemInvariant(
                         "selected append source has no inventory generation",
                     ))
                 })?,
-                record_id,
-            );
+                &record,
+            )
+            .context("run selected append publication");
             return match import_result {
                 Ok(AppendImportOutcome::Imported(summary)) => {
                     let status = provider_summary_import_status(&summary);
@@ -57,6 +70,7 @@ fn import_one_source_inner_batched(
                             }
                         }),
                         deferred_units: 0,
+                        durable_progress: false,
                         post_import_inventory_generation: post_import
                             .as_ref()
                             .map(|observation| observation.inventory_generation),
@@ -64,22 +78,27 @@ fn import_one_source_inner_batched(
                             .map(|observation| observation.preinventory),
                     })
                 }
-                Ok(AppendImportOutcome::Deferred) => {
-                    if !record_existed {
+                Ok(AppendImportOutcome::Deferred { durable_progress }) => {
+                    if !record_existed && !durable_progress {
                         store.delete_orphan_record(record_id)?;
                     }
-                    let post_import = persist_reobserved_source_root_result(
-                        store,
-                        source,
-                        preinventory,
-                        CatalogIndexedStatus::Pending,
-                        "",
-                    )?;
+                    let post_import = if durable_progress {
+                        None
+                    } else {
+                        persist_reobserved_source_root_result(
+                            store,
+                            source,
+                            preinventory,
+                            CatalogIndexedStatus::Pending,
+                            "",
+                        )?
+                    };
                     Ok(ProviderImportBatchOutcome {
                         summary: ProviderImportSummary::default(),
                         completed_units: 0,
                         completed_bytes: 0,
                         deferred_units: 1,
+                        durable_progress,
                         post_import_inventory_generation: post_import
                             .as_ref()
                             .map(|observation| observation.inventory_generation),
@@ -112,6 +131,7 @@ fn import_one_source_inner_batched(
     let mut completed_units = 0;
     let mut completed_bytes = 0_u64;
     let mut deferred_units = 0;
+    let mut durable_progress = false;
     let mut post_import_inventory_generation = None;
     let mut post_import_preinventory = None;
     let summary = if source_uses_import_file_manifest(source)
@@ -132,8 +152,14 @@ fn import_one_source_inner_batched(
             completed_units = outcome.completed_units;
             completed_bytes = outcome.completed_bytes;
             deferred_units = outcome.deferred_units;
+            durable_progress = outcome.durable_progress;
             post_import_inventory_generation = outcome.post_import_inventory_generation;
-            post_import_preinventory = outcome.post_import_preinventory;
+            post_import_preinventory = outcome.post_import_preinventory.or_else(|| {
+                (outcome.deferred_units == 0
+                    && outcome.post_import_inventory_generation
+                        == preinventory.inventory_generation())
+                .then(|| preinventory.clone())
+            });
             outcome.summary
         })
     } else {
@@ -143,7 +169,7 @@ fn import_one_source_inner_batched(
                     import_incremental_codex_session_tree(
                         store,
                         source,
-                        record_id,
+                        &record,
                         progress.clone(),
                         preinventory.codex_session_catalog(),
                         preinventory.inventory_generation(),
@@ -154,6 +180,7 @@ fn import_one_source_inner_batched(
                         completed_units = outcome.completed_units;
                         completed_bytes = outcome.completed_bytes;
                         deferred_units = outcome.deferred_units;
+                        durable_progress = outcome.durable_progress;
                         post_import_inventory_generation = outcome.post_import_inventory_generation;
                         post_import_preinventory = outcome.post_import_preinventory;
                         outcome.summary
@@ -596,6 +623,17 @@ fn import_one_source_inner_batched(
     };
     let summary = match summary {
         Ok(mut summary) => {
+            if deferred_units > 0 {
+                return Ok(ProviderImportBatchOutcome {
+                    summary,
+                    completed_units,
+                    completed_bytes,
+                    deferred_units,
+                    durable_progress,
+                    post_import_inventory_generation,
+                    post_import_preinventory,
+                });
+            }
             // A manifested-source retry can contain only rejected files even though earlier
             // files under the same stable history record are already indexed. Preserve that
             // as a completed source with rejections; an orphan record is still cleaned up and
@@ -683,6 +721,7 @@ fn import_one_source_inner_batched(
         completed_units,
         completed_bytes,
         deferred_units,
+        durable_progress,
         post_import_inventory_generation,
         post_import_preinventory,
     })
