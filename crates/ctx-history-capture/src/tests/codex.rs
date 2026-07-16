@@ -1,7 +1,20 @@
 use super::support::*;
 
-#[test]
+fn codex_session_identity_shape(
+    store: &Store,
+    external_session_id: &str,
+) -> (AgentType, Option<String>, usize) {
+    let session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.external_session_id.as_deref() == Some(external_session_id))
+        .unwrap_or_else(|| panic!("missing Codex session {external_session_id}"));
+    let event_count = store.events_for_session(session.id).unwrap().len();
+    (session.agent_type, session.role_hint, event_count)
+}
 
+#[test]
 fn codex_session_tree_imports_messages_and_subagent_edges() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
@@ -91,6 +104,291 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     assert!(child_events
         .iter()
         .any(|event| event.payload.to_string().contains("local history search")));
+}
+
+#[test]
+fn codex_fast_slow_fresh_new_and_tail_keep_the_first_fixture_identity() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let root_path = fixture.join("2026/06/23/root.jsonl");
+    let child_path = fixture.join("2026/06/23/subagent.jsonl");
+    let paths = [&root_path, &child_path];
+    let mut direct_shapes = Vec::new();
+
+    for fast_event_inserts in [true, false] {
+        let mut store = Store::open(
+            temp.path()
+                .join(format!("direct-{fast_event_inserts}.sqlite")),
+        )
+        .unwrap();
+        for path in paths {
+            let summary = import_codex_session_jsonl(
+                path,
+                &mut store,
+                CodexSessionImportOptions {
+                    source_path: Some(fixture.clone()),
+                    fast_event_inserts,
+                    imported_at: "2026-06-23T16:30:00Z".parse().unwrap(),
+                    ..CodexSessionImportOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        }
+        let child = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.external_session_id.as_deref() == Some("codex-session-child"))
+            .unwrap();
+        let source = store
+            .get_capture_source(child.capture_source_id.unwrap())
+            .unwrap();
+        assert_eq!(
+            source.descriptor.raw_source_path.as_deref(),
+            child_path.to_str()
+        );
+        assert_eq!(source.descriptor.source_root.as_deref(), fixture.to_str());
+        direct_shapes.push((
+            codex_session_identity_shape(&store, "codex-session-root"),
+            codex_session_identity_shape(&store, "codex-session-child"),
+        ));
+    }
+
+    assert_eq!(direct_shapes[0], direct_shapes[1]);
+    let (root_shape, child_shape) = &direct_shapes[0];
+    assert_eq!(root_shape.0, AgentType::Primary);
+    assert_eq!(root_shape.2, 5);
+    assert_eq!(child_shape.0, AgentType::Subagent);
+    assert_eq!(child_shape.1.as_deref(), Some("worker"));
+    assert_eq!(child_shape.2, 2);
+
+    let mut fresh_store = Store::open(temp.path().join("fresh-new.sqlite")).unwrap();
+    let source_root = fixture.display().to_string();
+    let inventory_generation = fresh_store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
+    let catalog = catalog_codex_session_tree(
+        &fixture,
+        &fresh_store,
+        CodexSessionCatalogOptions {
+            source_root: Some(fixture.clone()),
+            observation_generation: Some(inventory_generation),
+            cataloged_at: "2026-06-23T16:29:00Z".parse().unwrap(),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(catalog.failed_sessions, 0);
+    let work = fresh_store
+        .list_catalog_import_work(
+            CaptureProvider::Codex,
+            &source_root,
+            ctx_history_store::ImportWorkClass::Fresh,
+            10,
+        )
+        .unwrap();
+    assert_eq!(work.len(), 2);
+    let fresh = crate::import_codex_fresh_new_batch(
+        &mut fresh_store,
+        work,
+        inventory_generation,
+        crate::FreshNewImportContext {
+            machine_id: CodexSessionImportOptions::default().machine_id,
+            history_record: ctx_history_core::HistoryRecord::new(
+                "Codex fixture import",
+                "",
+                Vec::new(),
+                "provider_import",
+                None,
+            ),
+        },
+    )
+    .unwrap();
+    assert_eq!(fresh.committed_paths.len(), 2);
+    assert!(fresh.rejected_paths.is_empty());
+    assert!(fresh.durable_only_paths.is_empty());
+    assert_eq!(fresh.summary.failed, 0, "{:?}", fresh.summary.failures);
+    assert_eq!(
+        (
+            codex_session_identity_shape(&fresh_store, "codex-session-root"),
+            codex_session_identity_shape(&fresh_store, "codex-session-child"),
+        ),
+        direct_shapes[0]
+    );
+
+    let child_bytes = fs::read(&child_path).unwrap();
+    let tail_start = child_bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(1)
+        .map(|(index, _)| u64::try_from(index + 1).unwrap())
+        .unwrap();
+    let mut tail_store = Store::open(temp.path().join("tail.sqlite")).unwrap();
+    let tail = import_codex_session_jsonl_tail(
+        &child_path,
+        tail_start,
+        &mut tail_store,
+        CodexSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-06-23T16:31:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(tail.failed, 0, "{:?}", tail.failures);
+    assert_eq!(
+        codex_session_identity_shape(&tail_store, "codex-session-child"),
+        direct_shapes[0].1
+    );
+    let tail_child = tail_store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.external_session_id.as_deref() == Some("codex-session-child"))
+        .unwrap();
+    let tail_source = tail_store
+        .get_capture_source(tail_child.capture_source_id.unwrap())
+        .unwrap();
+    assert_eq!(
+        tail_source.descriptor.raw_source_path.as_deref(),
+        child_path.to_str()
+    );
+    assert_eq!(
+        tail_source.descriptor.source_root.as_deref(),
+        fixture.to_str()
+    );
+}
+
+#[test]
+fn codex_malformed_first_metadata_never_yields_to_a_later_valid_identity() {
+    let temp = tempdir();
+    let source_root = temp.path().join("sessions");
+    fs::create_dir_all(&source_root).unwrap();
+    let path = source_root.join("malformed-first-header.jsonl");
+    let first_line = jsonl_line(json!({
+        "timestamp": "2026-07-16T12:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "timestamp": "2026-07-16T12:00:00Z",
+            "cwd": "/workspace",
+            "originator": "codex-cli"
+        }
+    }));
+    fs::write(
+        &path,
+        [
+            first_line.clone(),
+            jsonl_line(json!({
+                "timestamp": "2026-07-16T12:00:01Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "must-not-take-over",
+                    "timestamp": "2026-07-16T12:00:01Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-16T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "must not attach to the later metadata"
+                    }]
+                }
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    for fast_event_inserts in [true, false] {
+        let mut store = Store::open(
+            temp.path()
+                .join(format!("malformed-{fast_event_inserts}.sqlite")),
+        )
+        .unwrap();
+        let summary = import_codex_session_jsonl(
+            &path,
+            &mut store,
+            CodexSessionImportOptions {
+                source_path: Some(source_root.clone()),
+                fast_event_inserts,
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.failed > 0, "{:?}", summary.failures);
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    let mut tail_store = Store::open(temp.path().join("malformed-tail.sqlite")).unwrap();
+    let tail_error = import_codex_session_jsonl_tail(
+        &path,
+        first_line.len() as u64,
+        &mut tail_store,
+        CodexSessionImportOptions {
+            source_path: Some(source_root.clone()),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(tail_error.to_string().contains("session_meta missing id"));
+    assert!(tail_store.list_sessions().unwrap().is_empty());
+
+    let mut fresh_store = Store::open(temp.path().join("malformed-fresh.sqlite")).unwrap();
+    let source_root_display = source_root.display().to_string();
+    let inventory_generation = fresh_store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root_display)
+        .unwrap();
+    catalog_codex_session_tree(
+        &source_root,
+        &fresh_store,
+        CodexSessionCatalogOptions {
+            source_root: Some(source_root.clone()),
+            observation_generation: Some(inventory_generation),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap();
+    let work = fresh_store
+        .list_catalog_import_work(
+            CaptureProvider::Codex,
+            &source_root_display,
+            ctx_history_store::ImportWorkClass::Fresh,
+            10,
+        )
+        .unwrap();
+    assert_eq!(work.len(), 1);
+    assert_ne!(
+        work[0].session.external_session_id.as_deref(),
+        Some("must-not-take-over")
+    );
+    let fresh = crate::import_codex_fresh_new_batch(
+        &mut fresh_store,
+        work,
+        inventory_generation,
+        crate::FreshNewImportContext {
+            machine_id: CodexSessionImportOptions::default().machine_id,
+            history_record: ctx_history_core::HistoryRecord::new(
+                "Malformed Codex fixture import",
+                "",
+                Vec::new(),
+                "provider_import",
+                None,
+            ),
+        },
+    )
+    .unwrap();
+    assert!(fresh.committed_paths.is_empty());
+    assert!(fresh.rejected_paths.is_empty());
+    assert_eq!(fresh.durable_only_paths, vec![path.display().to_string()]);
+    assert!(fresh_store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
