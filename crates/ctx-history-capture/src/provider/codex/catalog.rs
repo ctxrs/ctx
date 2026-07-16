@@ -165,13 +165,12 @@ pub fn catalog_codex_session_tree(
 
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
-        if !initial_inventory_persisted && !sessions_to_persist.is_empty() {
-            persist_catalog_sessions_paced_in_current_batch(
-                store,
-                observation_generation,
-                &sessions_to_persist,
-            )?;
-        }
+        persist_catalog_sessions_for_publication(
+            store,
+            observation_generation,
+            &sessions_to_persist,
+            initial_inventory_persisted,
+        )?;
         if stale_session_count > 0 || has_missing_existing_paths {
             store.mark_catalog_source_missing_paths_stale_paced(
                 CaptureProvider::Codex,
@@ -236,13 +235,12 @@ pub fn catalog_codex_session_files(
     };
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
-        if !initial_inventory_persisted && !sessions.is_empty() {
-            persist_catalog_sessions_paced_in_current_batch(
-                store,
-                observation_generation,
-                &sessions,
-            )?;
-        }
+        persist_catalog_sessions_for_publication(
+            store,
+            observation_generation,
+            &sessions,
+            initial_inventory_persisted,
+        )?;
         if !store.complete_catalog_inventory_generation(
             CaptureProvider::Codex,
             &source_root,
@@ -327,6 +325,29 @@ fn persist_catalog_sessions_paced_in_current_batch(
     Ok(())
 }
 
+fn persist_catalog_sessions_for_publication(
+    store: &Store,
+    observation_generation: u64,
+    sessions: &[CatalogSession],
+    staged: bool,
+) -> Result<()> {
+    let source_root = sessions
+        .first()
+        .map(|session| session.source_root.as_str())
+        .unwrap_or_default();
+    let staged_complete = staged
+        && store.catalog_sessions_all_owned_by_source_paced(
+            CaptureProvider::Codex,
+            source_root,
+            sessions,
+            crate::pace_current_disk_io,
+        )?;
+    if !staged_complete && !sessions.is_empty() {
+        persist_catalog_sessions_paced_in_current_batch(store, observation_generation, sessions)?;
+    }
+    Ok(())
+}
+
 fn persist_initial_catalog_sessions_bounded_with_observer(
     store: &Store,
     observation_generation: u64,
@@ -337,10 +358,11 @@ fn persist_initial_catalog_sessions_bounded_with_observer(
         .first()
         .map(|session| session.source_root.as_str())
         .unwrap_or_default();
-    if store.catalog_sessions_have_external_path_owners(
+    if store.catalog_sessions_have_external_path_owners_paced(
         CaptureProvider::Codex,
         source_root,
         sessions,
+        crate::pace_current_disk_io,
     )? {
         return Ok(false);
     }
@@ -363,10 +385,11 @@ fn persist_initial_catalog_sessions_bounded_with_observer(
             )? {
                 return Err(CaptureError::InventorySuperseded);
             }
-            if store.catalog_sessions_have_external_path_owners(
+            if store.catalog_sessions_have_external_path_owners_paced(
                 CaptureProvider::Codex,
                 source_root,
                 &sessions[start..start + end],
+                crate::pace_current_disk_io,
             )? {
                 return Ok(false);
             }
@@ -403,6 +426,16 @@ pub(crate) fn persist_initial_catalog_sessions_bounded_for_test(
         sessions,
         batch_committed,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn persist_catalog_sessions_for_publication_for_test(
+    store: &Store,
+    observation_generation: u64,
+    sessions: &[CatalogSession],
+    staged: bool,
+) -> Result<()> {
+    persist_catalog_sessions_for_publication(store, observation_generation, sessions, staged)
 }
 
 fn catalog_persist_batch(sessions: &[CatalogSession], byte_limit: usize) -> Result<(usize, u64)> {

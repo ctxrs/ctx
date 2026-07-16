@@ -4,6 +4,7 @@ use serde_json::json;
 
 use crate::provider::codex::catalog::{
     catalog_parallelism, catalog_session_persist_bytes_for_test,
+    persist_catalog_sessions_for_publication_for_test,
     persist_initial_catalog_sessions_bounded_for_test,
 };
 use crate::{CaptureError, DiskIoPacer, CODEX_SESSION_SOURCE_FORMAT};
@@ -248,6 +249,77 @@ fn initial_catalog_path_rekey_race_falls_back_without_stealing_published_rows() 
         sessions.len()
     );
     assert!(store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, second_root)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn final_catalog_publication_reclaims_a_staged_path_stolen_after_the_last_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_root = "/history/new-root";
+    let second_root = "/history/racing-root";
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    let racing_store = Store::open(&db_path).unwrap();
+    let first_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, first_root)
+        .unwrap();
+    let sessions = (0..65)
+        .map(|index| catalog_persist_test_session(first_root, index))
+        .collect::<Vec<_>>();
+
+    assert!(persist_initial_catalog_sessions_bounded_for_test(
+        &store,
+        first_generation,
+        &sessions,
+        |persisted| {
+            if persisted != sessions.len() {
+                return;
+            }
+            let generation = racing_store
+                .allocate_catalog_inventory_generation(CaptureProvider::Codex, second_root)
+                .unwrap();
+            let mut racing = catalog_persist_test_session(second_root, 0);
+            racing.source_path = sessions[0].source_path.clone();
+            racing_store.begin_immediate_batch().unwrap();
+            racing_store
+                .upsert_catalog_sessions(generation, std::slice::from_ref(&racing))
+                .unwrap();
+            assert!(racing_store
+                .complete_catalog_inventory_generation(
+                    CaptureProvider::Codex,
+                    second_root,
+                    generation,
+                )
+                .unwrap());
+            racing_store.commit_batch().unwrap();
+        },
+    )
+    .unwrap());
+
+    store.begin_immediate_batch().unwrap();
+    persist_catalog_sessions_for_publication_for_test(&store, first_generation, &sessions, true)
+        .unwrap();
+    assert!(
+        store
+            .complete_catalog_inventory_generation(
+                CaptureProvider::Codex,
+                first_root,
+                first_generation,
+            )
+            .unwrap()
+    );
+    store.commit_batch().unwrap();
+
+    assert_eq!(
+        store
+            .list_catalog_sessions_for_source(CaptureProvider::Codex, first_root)
+            .unwrap()
+            .len(),
+        sessions.len()
+    );
+    assert!(racing_store
         .list_catalog_sessions_for_source(CaptureProvider::Codex, second_root)
         .unwrap()
         .is_empty());

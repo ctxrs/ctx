@@ -539,25 +539,16 @@ impl Store {
         mut pace: impl FnMut(u64),
     ) -> Result<usize> {
         if self.conn.is_autocommit() {
-            self.begin_immediate_batch()?;
-            let result = self.mark_source_import_missing_paths_stale_with_pacing(
-                provider,
-                source_root,
-                current_paths,
-                observed_at_ms,
-                inventory_generation,
-                pace,
-            );
-            return match result {
-                Ok(changed) => {
-                    self.commit_batch()?;
-                    Ok(changed)
-                }
-                Err(error) => {
-                    let _ = self.rollback_batch();
-                    Err(error)
-                }
-            };
+            return with_immediate_transaction(&self.conn, || {
+                self.mark_source_import_missing_paths_stale_with_pacing(
+                    provider,
+                    source_root,
+                    current_paths,
+                    observed_at_ms,
+                    inventory_generation,
+                    pace,
+                )
+            });
         }
         self.conn.execute_batch(
                 "CREATE TEMP TABLE IF NOT EXISTS temp_source_import_current_paths (source_path TEXT PRIMARY KEY)",
