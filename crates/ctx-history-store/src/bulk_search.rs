@@ -43,15 +43,18 @@ const BULK_MODE_TEST_REMAINING_MERGE_PASSES_KEY: &str =
     "event_search_bulk_mode_v1:test_remaining_merge_passes";
 const FTS_AUTOMERGE_DEFAULT: i64 = 4;
 const FTS_CRISISMERGE_DEFAULT: i64 = 16;
-const FTS_BULK_CRISISMERGE: i64 = 1_000_000;
+// FTS5 has 2,000 segment ids across all levels, while crisismerge is a
+// per-level threshold. Keep three nearly-full levels below that global limit.
+// The owning importer normally advances bounded maintenance every 256 batches;
+// this setting protects writes from connections that do not share its cadence.
+pub(crate) const FTS_BULK_CRISISMERGE: i64 = 512;
 // FTS5's merge page budget is not a hard upper bound on WAL pages: merging a
 // large segment can rewrite substantially more data inside one statement.
 // Keep each step deliberately small so checkpoints remain safe on large real
 // indexes, not only on compact synthetic fixtures.
 const FTS_MERGE_PAGE_BUDGET: i64 = 16;
-// Target one WAL write and one checkpoint copy per requested or observed FTS
-// byte. FTS5 may amplify both operations beyond the nominal page estimate.
-const FTS_MAINTENANCE_IO_PASSES: u64 = 2;
+const BULK_SEARCH_WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const FTS_BULK_MAINTENANCE_BATCHES: usize = 256;
 // Preserve the common changed-pass plus quiescence-pass completion path while
 // putting a hard ceiling on large or resumed merge backlogs.
 const EVENT_SEARCH_MERGE_PASSES_PER_CALL: usize = 2;
@@ -59,6 +62,39 @@ const BULK_LOCK_SUFFIX: &str = ".event-search-bulk.lock.sqlite";
 
 thread_local! {
     static EVENT_SEARCH_MAINTENANCE_PACER: Cell<Option<fn(u64)>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+type RestorePostCommitHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+static RESTORE_POST_COMMIT_HOOK: std::sync::Mutex<Option<(PathBuf, RestorePostCommitHook)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_restore_post_commit_hook(store_path: PathBuf, hook: RestorePostCommitHook) {
+    let mut pending = RESTORE_POST_COMMIT_HOOK.lock().unwrap();
+    assert!(
+        pending.is_none(),
+        "restore post-commit hook already installed"
+    );
+    *pending = Some((store_path, hook));
+}
+
+#[cfg(test)]
+fn run_restore_post_commit_hook(store_path: &std::path::Path) {
+    let hook = {
+        let mut pending = RESTORE_POST_COMMIT_HOOK.lock().unwrap();
+        match pending.as_ref() {
+            Some((expected_path, _)) if expected_path == store_path => {
+                pending.take().map(|(_, hook)| hook)
+            }
+            _ => None,
+        }
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 /// Restores the previous thread-local event-search maintenance pacer on drop.
@@ -101,9 +137,9 @@ pub struct EventSearchBulkGuard {
 
 /// Result of one bounded event-search maintenance slice.
 ///
-/// `Pending` is durable: the bulk-mode marker remains present and a later
-/// maintenance call can resume without restarting the merge. It can also mean
-/// that an in-progress provider publication currently fences FTS maintenance.
+/// `Pending` never discards merge work: durable debt retains the bulk marker so
+/// a later call can resume. It can also mean that a provider publication fences
+/// FTS maintenance or WAL high-water admission is suspended for a checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventSearchBulkMaintenanceOutcome {
     Complete,
@@ -114,6 +150,13 @@ impl EventSearchBulkMaintenanceOutcome {
     pub fn is_complete(self) -> bool {
         self == Self::Complete
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeriodicMergeStepOutcome {
+    Changed,
+    Quiescent,
+    Fenced,
 }
 
 impl Drop for EventSearchBulkGuard {
@@ -192,6 +235,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
+        self.event_search_bulk_batches.store(0, Ordering::SeqCst);
         Ok(guard)
     }
 
@@ -218,6 +262,11 @@ impl Store {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if !bulk_mode_pending(self)? {
+            // Marker removal may already have committed before a pinned reader
+            // rejected the final checkpoint. The owning guard must retry that
+            // strict handoff instead of inferring completion from marker state.
+            self.pace_and_checkpoint_wal_truncate_required()?;
+            self.event_search_bulk_batches.store(0, Ordering::SeqCst);
             return Ok(EventSearchBulkMaintenanceOutcome::Complete);
         }
         // A bounded provider publication can intentionally span scheduler
@@ -229,10 +278,88 @@ impl Store {
         }
         for _ in 0..EVENT_SEARCH_MERGE_PASSES_PER_CALL {
             if self.finish_event_search_bulk_mode_step()? {
+                self.event_search_bulk_batches.store(0, Ordering::SeqCst);
                 return Ok(EventSearchBulkMaintenanceOutcome::Complete);
             }
         }
         self.event_search_bulk_maintenance_outcome()
+    }
+
+    /// Record one committed import batch and periodically advance bounded FTS
+    /// merge debt without clearing the outer bulk marker or restoring config.
+    pub fn maintain_event_search_bulk_mode(&self) -> Result<EventSearchBulkMaintenanceOutcome> {
+        if self.event_search_bulk_depth.load(Ordering::SeqCst) == 0 {
+            return self.event_search_bulk_admission_outcome();
+        }
+        let batches = self
+            .event_search_bulk_batches
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        if batches < FTS_BULK_MAINTENANCE_BATCHES {
+            return self.event_search_bulk_admission_outcome();
+        }
+        if self.has_pending_provider_file_publications()? {
+            return Ok(EventSearchBulkMaintenanceOutcome::Pending);
+        }
+        for _ in 0..EVENT_SEARCH_MERGE_PASSES_PER_CALL {
+            match self.maintain_event_search_bulk_mode_step()? {
+                PeriodicMergeStepOutcome::Changed => {}
+                PeriodicMergeStepOutcome::Quiescent => {
+                    self.event_search_bulk_batches.store(0, Ordering::SeqCst);
+                    return self.event_search_bulk_admission_outcome();
+                }
+                PeriodicMergeStepOutcome::Fenced => {
+                    return Ok(EventSearchBulkMaintenanceOutcome::Pending);
+                }
+            }
+        }
+        // Keep the cadence armed. The next committed batch advances another
+        // bounded slice instead of waiting for 256 more segments to accumulate.
+        self.event_search_bulk_admission_outcome()
+    }
+
+    fn maintain_event_search_bulk_mode_step(&self) -> Result<PeriodicMergeStepOutcome> {
+        let pacing = begin_fts_maintenance_pacing(
+            self,
+            EVENT_SEARCH_FTS_TABLES.len(),
+            FTS_MERGE_PAGE_BUDGET,
+        )?;
+        self.begin_immediate_batch()?;
+        let result = (|| {
+            if !bulk_mode_pending(self)? {
+                return Ok(PeriodicMergeStepOutcome::Quiescent);
+            }
+            if self.has_pending_provider_file_publications()? {
+                return Ok(PeriodicMergeStepOutcome::Fenced);
+            }
+            Ok(if merge_event_search_tables_in_transaction(self)? {
+                PeriodicMergeStepOutcome::Changed
+            } else {
+                PeriodicMergeStepOutcome::Quiescent
+            })
+        })();
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let _ = self.rollback_batch();
+                return Err(err);
+            }
+        };
+        if let Err(err) = self.commit_batch() {
+            let _ = self.rollback_batch();
+            return Err(err);
+        }
+        pace_observed_fts_wal_growth(self, pacing)?;
+        match outcome {
+            PeriodicMergeStepOutcome::Changed => {
+                self.checkpoint_event_search_merge_step(true)?;
+            }
+            PeriodicMergeStepOutcome::Quiescent => {
+                self.checkpoint_event_search_merge_step(false)?;
+            }
+            PeriodicMergeStepOutcome::Fenced => {}
+        }
+        Ok(outcome)
     }
 
     pub fn event_search_bulk_maintenance_outcome(
@@ -245,15 +372,28 @@ impl Store {
         })
     }
 
+    /// Whether another bounded bulk-import group may be admitted without first
+    /// completing the required high-water checkpoint.
+    ///
+    /// Callers check this between committed groups. `Pending` suspends admission
+    /// at the 64 MiB observed-WAL high-water, bounding overshoot to the one group
+    /// that was already admitted before the threshold became observable.
+    pub fn event_search_bulk_admission_outcome(&self) -> Result<EventSearchBulkMaintenanceOutcome> {
+        Ok(
+            if observed_wal_bytes(self)?.unwrap_or_default() >= BULK_SEARCH_WAL_TRUNCATE_MIN_BYTES {
+                EventSearchBulkMaintenanceOutcome::Pending
+            } else {
+                EventSearchBulkMaintenanceOutcome::Complete
+            },
+        )
+    }
+
     pub fn advance_event_search_bulk_maintenance(
         &self,
     ) -> Result<EventSearchBulkMaintenanceOutcome> {
         let guard = self
             .acquire_event_search_bulk_lock(self.busy_timeout)?
             .ok_or(StoreError::BulkSearchImportBusy)?;
-        if !bulk_mode_pending(self)? {
-            return Ok(EventSearchBulkMaintenanceOutcome::Complete);
-        }
         self.finish_event_search_bulk_mode(&guard)
     }
 
@@ -339,7 +479,7 @@ impl Store {
     }
 
     fn merge_fts_table_step(&self, table: &'static str, page_budget: i64) -> Result<bool> {
-        let nominal_bytes = pace_fts_maintenance(self, 1, page_budget)?;
+        let pacing = begin_fts_maintenance_pacing(self, 1, page_budget)?;
         self.begin_immediate_batch()?;
         let result = merge_fts_table_in_transaction(self, table, page_budget);
         let changed = match result {
@@ -353,8 +493,8 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        pace_observed_fts_wal(self, nominal_bytes)?;
-        self.checkpoint_wal_truncate_required()?;
+        pace_observed_fts_wal_growth(self, pacing)?;
+        self.pace_and_checkpoint_wal_truncate_required()?;
         Ok(changed)
     }
 
@@ -362,8 +502,11 @@ impl Store {
     /// A quiescent pass is checkpointed before a second locked pass may restore
     /// settings, so a failed large-WAL checkpoint always leaves recovery marked.
     fn finish_event_search_bulk_mode_step(&self) -> Result<bool> {
-        let nominal_bytes =
-            pace_fts_maintenance(self, EVENT_SEARCH_FTS_TABLES.len(), FTS_MERGE_PAGE_BUDGET)?;
+        let pacing = begin_fts_maintenance_pacing(
+            self,
+            EVENT_SEARCH_FTS_TABLES.len(),
+            FTS_MERGE_PAGE_BUDGET,
+        )?;
         self.begin_immediate_batch()?;
         let result = (|| {
             if !bulk_mode_pending(self)? {
@@ -382,8 +525,8 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        pace_observed_fts_wal(self, nominal_bytes)?;
-        self.checkpoint_wal_truncate_required()?;
+        pace_observed_fts_wal_growth(self, pacing)?;
+        self.checkpoint_event_search_merge_step(!quiescent)?;
         if !quiescent {
             return Ok(false);
         }
@@ -394,8 +537,11 @@ impl Store {
     /// If the final config-only checkpoint is pinned, the preceding potentially
     /// large merge WAL has already been truncated successfully.
     fn restore_event_search_bulk_mode_if_quiescent(&self) -> Result<bool> {
-        let nominal_bytes =
-            pace_fts_maintenance(self, EVENT_SEARCH_FTS_TABLES.len(), FTS_MERGE_PAGE_BUDGET)?;
+        let pacing = begin_fts_maintenance_pacing(
+            self,
+            EVENT_SEARCH_FTS_TABLES.len(),
+            FTS_MERGE_PAGE_BUDGET,
+        )?;
         self.begin_immediate_batch()?;
         let result = (|| {
             if !bulk_mode_pending(self)? {
@@ -419,9 +565,50 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        pace_observed_fts_wal(self, nominal_bytes)?;
-        self.checkpoint_wal_truncate_required()?;
+        pace_observed_fts_wal_growth(self, pacing)?;
+        if finished {
+            #[cfg(test)]
+            run_restore_post_commit_hook(&self.path);
+            self.pace_and_checkpoint_wal_truncate_required()?;
+        } else {
+            self.checkpoint_event_search_merge_step(true)?;
+        }
         Ok(finished)
+    }
+
+    /// Changed merge steps checkpoint only at the shared WAL high-water. A
+    /// quiescent pass always checkpoints strictly before config restoration.
+    fn checkpoint_event_search_merge_step(&self, changed: bool) -> Result<()> {
+        if changed {
+            self.pace_and_checkpoint_wal_truncate_required_if_larger_than(
+                BULK_SEARCH_WAL_TRUNCATE_MIN_BYTES,
+            )?;
+        } else {
+            self.pace_and_checkpoint_wal_truncate_required()?;
+        }
+        Ok(())
+    }
+
+    fn pace_and_checkpoint_wal_truncate_required_if_larger_than(
+        &self,
+        min_bytes: u64,
+    ) -> Result<bool> {
+        let Some(wal_bytes) = observed_wal_bytes(self)? else {
+            return Ok(false);
+        };
+        if wal_bytes < min_bytes {
+            return Ok(false);
+        }
+        pace_fts_checkpoint_copy(wal_bytes);
+        self.checkpoint_wal_truncate_required()?;
+        Ok(true)
+    }
+
+    fn pace_and_checkpoint_wal_truncate_required(&self) -> Result<()> {
+        if let Some(wal_bytes) = observed_wal_bytes(self)? {
+            pace_fts_checkpoint_copy(wal_bytes);
+        }
+        self.checkpoint_wal_truncate_required()
     }
 
     fn acquire_event_search_bulk_lock(
@@ -461,27 +648,44 @@ fn merge_fts_table_in_transaction(
     Ok(store.conn.total_changes().saturating_sub(before) >= 2)
 }
 
-fn pace_fts_maintenance(store: &Store, table_count: usize, page_budget: i64) -> Result<u64> {
+#[derive(Debug, Clone, Copy, Default)]
+struct FtsMaintenancePacing {
+    wal_bytes_before: u64,
+    nominal_write_bytes: u64,
+}
+
+fn begin_fts_maintenance_pacing(
+    store: &Store,
+    table_count: usize,
+    page_budget: i64,
+) -> Result<FtsMaintenancePacing> {
     let Some(pacer) = event_search_maintenance_pacer() else {
-        return Ok(0);
+        return Ok(FtsMaintenancePacing::default());
     };
+    let wal_bytes_before = observed_wal_bytes(store)?.unwrap_or_default();
     let page_size = store
         .conn
         .query_row("PRAGMA page_size", [], |row| row.get::<_, u64>(0))?;
-    let logical_bytes = page_size
+    let nominal_write_bytes = page_size
         .saturating_mul(page_budget.unsigned_abs())
-        .saturating_mul(table_count as u64)
-        .saturating_mul(FTS_MAINTENANCE_IO_PASSES);
-    pacer(logical_bytes);
-    Ok(logical_bytes)
+        .saturating_mul(table_count as u64);
+    pacer(nominal_write_bytes);
+    Ok(FtsMaintenancePacing {
+        wal_bytes_before,
+        nominal_write_bytes,
+    })
 }
 
-fn pace_observed_fts_wal(store: &Store, nominal_bytes: u64) -> Result<()> {
+fn pace_observed_fts_wal_growth(store: &Store, pacing: FtsMaintenancePacing) -> Result<()> {
     let Some(pacer) = event_search_maintenance_pacer() else {
         return Ok(());
     };
-    if let Some(wal_bytes) = observed_wal_bytes(store)? {
-        let supplement = observed_wal_supplement_bytes(nominal_bytes, wal_bytes);
+    if let Some(wal_bytes_after) = observed_wal_bytes(store)? {
+        let supplement = observed_wal_growth_supplement_bytes(
+            pacing.nominal_write_bytes,
+            pacing.wal_bytes_before,
+            wal_bytes_after,
+        );
         if supplement > 0 {
             pacer(supplement);
         }
@@ -489,10 +693,23 @@ fn pace_observed_fts_wal(store: &Store, nominal_bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn observed_wal_supplement_bytes(nominal_bytes: u64, wal_bytes: u64) -> u64 {
-    wal_bytes
-        .saturating_mul(FTS_MAINTENANCE_IO_PASSES)
-        .saturating_sub(nominal_bytes)
+fn observed_wal_growth_supplement_bytes(
+    nominal_write_bytes: u64,
+    wal_bytes_before: u64,
+    wal_bytes_after: u64,
+) -> u64 {
+    wal_bytes_after
+        .saturating_sub(wal_bytes_before)
+        .saturating_sub(nominal_write_bytes)
+}
+
+fn pace_fts_checkpoint_copy(wal_bytes: u64) {
+    if wal_bytes == 0 {
+        return;
+    }
+    if let Some(pacer) = event_search_maintenance_pacer() {
+        pacer(wal_bytes);
+    }
 }
 
 fn event_search_maintenance_pacer() -> Option<fn(u64)> {
@@ -773,15 +990,23 @@ mod tests {
     }
 
     #[test]
-    fn observed_wal_supplement_targets_two_passes_minus_nominal_precharge() {
+    fn observed_wal_growth_supplement_does_not_recharge_accumulated_wal() {
         let nominal_bytes = 256;
-        let wal_bytes = 1_024;
-        let supplement = observed_wal_supplement_bytes(nominal_bytes, wal_bytes);
+        let wal_bytes_before = 1_024;
+        let wal_bytes_after = 4_096;
+        let supplement =
+            observed_wal_growth_supplement_bytes(nominal_bytes, wal_bytes_before, wal_bytes_after);
 
-        assert_eq!(supplement, 1_792);
-        assert_eq!(nominal_bytes + supplement, wal_bytes * 2);
-        assert_eq!(observed_wal_supplement_bytes(2_048, wal_bytes), 0);
-        assert_eq!(observed_wal_supplement_bytes(4_096, wal_bytes), 0);
+        assert_eq!(supplement, 2_816);
+        assert_eq!(nominal_bytes + supplement, 3_072);
+        assert_eq!(
+            observed_wal_growth_supplement_bytes(4_096, wal_bytes_before, wal_bytes_after),
+            0
+        );
+        assert_eq!(
+            observed_wal_growth_supplement_bytes(nominal_bytes, wal_bytes_after, wal_bytes_before),
+            0
+        );
     }
 
     #[test]
@@ -802,28 +1027,25 @@ mod tests {
             store.finish_event_search_bulk_mode(&guard).unwrap(),
             EventSearchBulkMaintenanceOutcome::Pending
         );
-        let nominal_step_bytes = page_size
-            * FTS_MERGE_PAGE_BUDGET as u64
-            * EVENT_SEARCH_FTS_TABLES.len() as u64
-            * FTS_MAINTENANCE_IO_PASSES;
+        let nominal_step_bytes =
+            page_size * FTS_MERGE_PAGE_BUDGET as u64 * EVENT_SEARCH_FTS_TABLES.len() as u64;
         let charges = maintenance_charges();
         assert_eq!(
             charges.len(),
             EVENT_SEARCH_MERGE_PASSES_PER_CALL * 2,
-            "each merge step must precharge and then supplement for observed WAL"
+            "each merge step must precharge and then supplement observed WAL growth"
         );
         for step_charges in charges.chunks_exact(2) {
             assert_eq!(step_charges[0], nominal_step_bytes);
-            assert!(step_charges[1] > 0, "checkpoint WAL was not supplemented");
+            assert!(step_charges[1] > 0, "merge WAL growth was not supplemented");
         }
         assert!(
             charges[1] > nominal_step_bytes,
             "fixture did not produce WAL amplification beyond the nominal precharge"
         );
-        assert_eq!(
-            observed_wal_bytes(&store).unwrap().unwrap_or_default(),
-            0,
-            "observed WAL must be charged before the truncating checkpoint"
+        assert!(
+            observed_wal_bytes(&store).unwrap().unwrap_or_default() > 0,
+            "sub-threshold merge steps should coalesce their checkpoint"
         );
         assert_eq!(
             store.event_search_bulk_maintenance_outcome().unwrap(),
