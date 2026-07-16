@@ -281,7 +281,20 @@ internal static class Program
         camelExecution["queryExecution"] = Clone(camelExecution["query_execution"]);
         camelExecution.Remove("query_execution");
 
-        foreach (var response in new[] { schemaOne, stringQuery, camelSchema, camelExecution })
+        var missingQuery = EmptySearchObject();
+        missingQuery.Remove("query");
+
+        var missingResults = EmptySearchObject();
+        missingResults.Remove("results");
+
+        var fractionalSchema = EmptySearchObject();
+        fractionalSchema["schema_version"] = 2.5;
+
+        foreach (var response in new[]
+        {
+            schemaOne, stringQuery, camelSchema, camelExecution,
+            missingQuery, missingResults, fractionalSchema
+        })
         {
             var client = new AgentHistoryClient(new RecordingTransport(response.ToJsonString()));
             await ThrowsAsync<CtxAgentHistoryProtocolException>(() => client.SearchAsync(new SearchOptions
