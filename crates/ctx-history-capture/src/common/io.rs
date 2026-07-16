@@ -471,7 +471,12 @@ pub(crate) fn ensure_provider_path_parents_are_not_symlinks(path: &Path) -> Resu
 
 pub(crate) fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str) -> Result<String> {
     let file = File::open(path)?;
-    let mut reader = file.take((max_bytes as u64).saturating_add(1));
+    read_text_limited(file, max_bytes, label)
+}
+
+fn read_text_limited(reader: impl Read, max_bytes: usize, label: &str) -> Result<String> {
+    let reader = crate::disk_io_pacing::PacedReader::new(reader);
+    let mut reader = reader.take((max_bytes as u64).saturating_add(1));
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     if bytes.len() > max_bytes {
@@ -659,6 +664,43 @@ pub(crate) fn read_json_file_limited(path: &Path, max_bytes: usize, label: &str)
 mod tests {
     use super::*;
     use std::io::BufReader;
+
+    use crate::{install_disk_io_pacer, DiskIoPacer};
+
+    struct ReservationObservedReader {
+        pacer: DiskIoPacer,
+        expected_reserved_bytes: u64,
+    }
+
+    impl Read for ReservationObservedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            assert_eq!(self.pacer.charged_bytes(), self.expected_reserved_bytes);
+            buffer.fill(b'x');
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn limited_text_reads_reserve_shared_budget_before_physical_reads() {
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+
+        for expected_reserved_bytes in [4, 8] {
+            let error = read_text_limited(
+                ReservationObservedReader {
+                    pacer: pacer.clone(),
+                    expected_reserved_bytes,
+                },
+                3,
+                "provider fixture",
+            )
+            .expect_err("the max-plus-one byte must preserve the size error");
+
+            assert!(matches!(error, CaptureError::InvalidPayload(_)));
+        }
+
+        assert_eq!(pacer.charged_bytes(), 8);
+    }
 
     #[test]
     fn oversized_line_discard_is_bounded_without_a_newline() {
