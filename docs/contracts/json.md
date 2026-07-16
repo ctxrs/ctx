@@ -390,7 +390,8 @@ the transcript row in `event`.
 ## Search
 
 ```bash
-ctx search <query>|--term <term>|--file <path> --json
+ctx search [<query>] [--term <term>] [--phrase <phrase>] [--literal <literal>]
+  [--semantic <text>] [--must <clause>] [--exclude <clause>] [--file <path>] --json
 ```
 
 Returns:
@@ -398,6 +399,7 @@ Returns:
 - `schema_version`;
 - `payload_type: "search_results"`;
 - `query`;
+- `query_execution`;
 - `filters`;
 - `freshness`;
 - `retrieval`;
@@ -463,12 +465,7 @@ Search JSON is local/private by default.
 
 - `requested_mode`, one of `hybrid`, `semantic`, or `lexical`;
 - `effective_mode`, one of `lexical`, `semantic`, or `hybrid`;
-- `semantic_weight`, the effective semantic contribution used for ranking. It
-  is `0.0` when the effective mode is lexical, even if a semantic weight was
-  requested;
 - `semantic_status`;
-- `semantic_fallback_code`, nullable/omitted stable reason code for clients;
-- `semantic_fallback`, nullable/omitted;
 - `embedding_model`, nullable/omitted;
 - `coverage`;
 - `worker`, using the same shape as `status.semantic`, nullable/omitted;
@@ -484,17 +481,13 @@ Search JSON is local/private by default.
 - `ready`, sidecar coverage is complete for the current searchable item count
   and dirty work is drained.
 
-`retrieval.semantic_fallback_code`, when present, is the stable machine-readable
-reason why the requested semantic/hybrid path degraded to lexical.
-`retrieval.semantic_fallback`, when present, is the human-readable explanation.
-
 `retrieval.coverage` includes `embedded_items`, `embedded_chunks`,
 `searchable_items`, `indexed_now`, and `dirty_items` when known. Coverage counts
 are numbers when present; null count fields are pruned from public SDK fixtures
 and typed SDK shapes.
 
 The SDK `agent-history-v1` contract camel-cases the same retrieval fields
-(`requestedMode`, `effectiveMode`, `semanticWeight`, and so on). SDK contract
+(`requestedMode`, `effectiveMode`, `semanticStatus`, and so on). SDK contract
 search results expose retrieval at the top level of `search`; TypeScript and
 Python type the core retrieval/coverage fields, while Go, .NET, JVM, and Swift
 preserve retrieval as camel-cased JSON values. Per-hit retrieval details are not
@@ -561,10 +554,13 @@ search, SQL, showing sessions, and showing events. Tool results include
 output may include absolute paths, source metadata, snippets, and transcript
 text, and the MCP host may log or forward it.
 
-MCP search does not refresh or import provider history and currently uses the
-lexical search path only. It also excludes the active Codex session tree by
+MCP search does not refresh or import provider history. It supports the same
+bounded lexical, semantic, and hybrid query contract as CLI search, and
+excludes the active Codex session tree by
 default when `CODEX_THREAD_ID` is set; pass `include_current_session: true` to
-opt back in.
+opt back in. The complete MCP search tool result, including rendered text and
+structured content, is capped at 2 MiB and reports transport trimming through
+the same `query_execution.truncation_reasons` diagnostics.
 
 The MCP `sql` tool uses the same `sql_result` JSON contract as `ctx sql
 --json`, always read-only.
