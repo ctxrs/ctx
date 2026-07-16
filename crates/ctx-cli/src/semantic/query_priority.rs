@@ -68,6 +68,21 @@ impl SemanticQueryPriorityGate {
         _request: &AuthenticatedSemanticQueryRequest,
         deadline: Option<Instant>,
     ) -> Result<SemanticForegroundQueryPermit, SemanticQueryPriorityError> {
+        self.begin_foreground_query(deadline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_test_foreground_query(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<SemanticForegroundQueryPermit, SemanticQueryPriorityError> {
+        self.begin_foreground_query(deadline)
+    }
+
+    fn begin_foreground_query(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<SemanticForegroundQueryPermit, SemanticQueryPriorityError> {
         let mut state = self.inner.state();
         state.waiting_foreground_queries = state.waiting_foreground_queries.saturating_add(1);
         state.generation = state.generation.wrapping_add(1);

@@ -44,7 +44,12 @@ fn backfill_semantic_embeddings(
         indexed = indexed.saturating_add(outcome.indexed_chunks);
         consumed_event_ids.extend(outcome.consumed_event_ids);
         if !consumed_event_ids.is_empty() {
+            ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+            let write_batch = priority
+                .begin_document_batch(deadline)
+                .map_err(|error| anyhow!(error))?;
             vector_store.dequeue_dirty_events(&consumed_event_ids)?;
+            drop(write_batch);
         }
         if indexed > 0 && !json_output {
             eprintln!(
@@ -92,15 +97,22 @@ fn backfill_semantic_embeddings(
         let embedder_batch_size = lock_shared_semantic_embedder(embedder)?
             .as_ref()
             .map(|embedder| embedder.batch_size);
-        if embedder_batch_size.is_some_and(|batch_size| {
-            max_to_index.saturating_sub(indexed) < batch_size
-        }) {
+        if embedder_batch_size
+            .is_some_and(|batch_size| max_to_index.saturating_sub(indexed) < batch_size)
+        {
             break;
         }
         let docs = store.recent_event_embedding_documents(before, 512)?;
         if docs.is_empty() {
             if continue_past_indexed_pages {
+                ctx_history_capture::pace_current_disk_io(
+                    SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES,
+                );
+                let write_batch = priority
+                    .begin_document_batch(deadline)
+                    .map_err(|error| anyhow!(error))?;
                 vector_store.set_backfill_cursor(None)?;
+                drop(write_batch);
             }
             break;
         }
@@ -123,10 +135,8 @@ fn backfill_semantic_embeddings(
         )?;
         let added = outcome.indexed_chunks;
         indexed = indexed.saturating_add(added);
-        let consumed_cursor = semantic_contiguous_consumed_cursor(
-            &doc_cursors,
-            &outcome.consumed_event_ids,
-        );
+        let consumed_cursor =
+            semantic_contiguous_consumed_cursor(&doc_cursors, &outcome.consumed_event_ids);
         if !json_output {
             eprintln!("semantic index: embedded {indexed} chunks (scanned {scanned} events)");
         }
@@ -141,11 +151,23 @@ fn backfill_semantic_embeddings(
             let stored_cursor = vector_store.backfill_cursor()?;
             before = stored_cursor.or(consumed_cursor);
             if stored_cursor.is_none() {
+                ctx_history_capture::pace_current_disk_io(
+                    SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES,
+                );
+                let write_batch = priority
+                    .begin_document_batch(deadline)
+                    .map_err(|error| anyhow!(error))?;
                 vector_store.set_backfill_cursor(before)?;
+                drop(write_batch);
             }
         } else {
             before = consumed_cursor;
+            ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+            let write_batch = priority
+                .begin_document_batch(deadline)
+                .map_err(|error| anyhow!(error))?;
             vector_store.set_backfill_cursor(before)?;
+            drop(write_batch);
         }
     }
     Ok(indexed)
@@ -261,10 +283,17 @@ fn index_semantic_documents(
             .max(1)
     };
     let mut embeddings = Vec::with_capacity(texts.len());
+    let mut precharged_vector_bytes = 0_u64;
     for batch in texts.chunks(batch_size) {
         if semantic_deadline_reached(deadline) {
             break;
         }
+        let batch_vector_bytes = (batch.len() as u64)
+            .saturating_mul(SEMANTIC_DIMENSIONS as u64)
+            .saturating_mul(std::mem::size_of::<f32>() as u64)
+            .saturating_mul(2);
+        ctx_history_capture::pace_current_disk_io(batch_vector_bytes);
+        precharged_vector_bytes = precharged_vector_bytes.saturating_add(batch_vector_bytes);
         let document_batch = match priority.begin_document_batch(deadline) {
             Ok(permit) => permit,
             Err(query_priority::SemanticQueryPriorityError::DeadlineElapsed) => break,
@@ -284,12 +313,27 @@ fn index_semantic_documents(
     let items = pending
         .into_iter()
         .zip(embeddings)
-        .map(|(doc, embedding)| {
-            existing_hashes.insert(doc.event_id, doc.source_text_hash.clone());
-            (doc, embedding)
-        })
+        .map(|(doc, embedding)| (doc, embedding))
         .collect::<Vec<_>>();
-    vector_store.upsert_chunk_embeddings(&items)?;
+    let write_batch = match priority.begin_document_batch(deadline) {
+        Ok(permit) => permit,
+        Err(query_priority::SemanticQueryPriorityError::DeadlineElapsed) => {
+            return Ok(SemanticIndexOutcome {
+                indexed_chunks: 0,
+                consumed_event_ids: semantic_contiguous_consumed_event_ids(
+                    &considered_event_ids,
+                    &unchanged_event_ids,
+                ),
+            });
+        }
+    };
+    let supplemental_vector_bytes =
+        vector_store.upsert_chunk_embeddings_precharged(&items, precharged_vector_bytes)?;
+    drop(write_batch);
+    ctx_history_capture::pace_current_disk_io(supplemental_vector_bytes);
+    for (doc, _) in &items {
+        existing_hashes.insert(doc.event_id, doc.source_text_hash.clone());
+    }
     unchanged_event_ids.extend(completed_event_ids);
     let consumed_event_ids =
         semantic_contiguous_consumed_event_ids(&considered_event_ids, &unchanged_event_ids);
@@ -375,11 +419,20 @@ fn semantic_rust_full_scan_chunk_limit() -> usize {
 }
 
 fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) -> Result<bool> {
-    if vector_store.sqlite_vec0_search_ready().unwrap_or(false) {
+    if vector_store.sqlite_vec0_search_ready()? {
         return Ok(true);
     }
-    let stats = vector_store.cached_or_exact_stats()?;
-    Ok(stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit())
+    let Some(stats) = vector_store.cached_stats()? else {
+        return Ok(false);
+    };
+    Ok(
+        stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit()
+            && stats
+                .embedded_chunks
+                .saturating_mul(SEMANTIC_DIMENSIONS)
+                .saturating_mul(std::mem::size_of::<f32>())
+                <= SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES,
+    )
 }
 
 fn semantic_chunks_for_document(

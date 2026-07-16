@@ -1,6 +1,19 @@
 impl SemanticVectorStore {
     fn search(&self, query_embedding: &[f32], limit: usize) -> Result<SemanticVectorSearch> {
-        self.search_with_event_filter(query_embedding, limit, None)
+        self.search_until(
+            query_embedding,
+            limit,
+            Instant::now() + SEMANTIC_VECTOR_SEARCH_TIMEOUT,
+        )
+    }
+
+    fn search_until(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<SemanticVectorSearch> {
+        self.search_with_event_filter(query_embedding, limit, None, deadline)
     }
 
     fn search_event_ids(
@@ -12,7 +25,25 @@ impl SemanticVectorStore {
         if event_ids.is_empty() {
             return Ok(SemanticVectorSearch::default());
         }
-        self.search_with_event_filter(query_embedding, limit, Some(event_ids))
+        self.search_event_ids_until(
+            query_embedding,
+            event_ids,
+            limit,
+            Instant::now() + SEMANTIC_VECTOR_SEARCH_TIMEOUT,
+        )
+    }
+
+    fn search_event_ids_until(
+        &self,
+        query_embedding: &[f32],
+        event_ids: &[Uuid],
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<SemanticVectorSearch> {
+        if event_ids.is_empty() {
+            return Ok(SemanticVectorSearch::default());
+        }
+        self.search_with_event_filter(query_embedding, limit, Some(event_ids), deadline)
     }
 
     fn search_with_event_filter(
@@ -20,11 +51,66 @@ impl SemanticVectorStore {
         query_embedding: &[f32],
         limit: usize,
         event_ids: Option<&[Uuid]>,
+        deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
+        if Instant::now() >= deadline {
+            return Err(SemanticVectorStorePending::new(
+                "semantic vector retrieval deadline elapsed",
+            )
+            .into());
+        }
+        self.conn.progress_handler(
+            SEMANTIC_SQL_PROGRESS_OPS,
+            Some(move || Instant::now() >= deadline),
+        );
+        let result = self.search_with_event_filter_inner(query_embedding, limit, event_ids);
+        self.conn.progress_handler(0, None::<fn() -> bool>);
+        let deadline_elapsed = Instant::now() >= deadline;
+        match result {
+            Err(error) if Self::sqlite_operation_interrupted(&error) => Err(
+                SemanticVectorStorePending::new("semantic vector retrieval deadline elapsed")
+                    .into(),
+            ),
+            Ok(_) if deadline_elapsed => Err(SemanticVectorStorePending::new(
+                "semantic vector retrieval deadline elapsed",
+            )
+            .into()),
+            result => result,
+        }
+    }
+
+    fn search_with_event_filter_inner(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        event_ids: Option<&[Uuid]>,
+    ) -> Result<SemanticVectorSearch> {
+        if event_ids.is_some_and(|ids| {
+            ids.len() > query_service_contract::SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS
+        }) {
+            return Err(SemanticVectorStorePending::new(
+                "semantic candidate event set exceeds the bounded SQL variable limit",
+            )
+            .into());
+        }
+        let stats = self
+            .cached_stats()?
+            .ok_or_else(|| SemanticVectorStorePending::new("cached stats are untrusted"))?;
         if event_ids.is_none() && self.sqlite_vec0_search_ready()? {
-            if let Ok(search) = self.search_sqlite_vec0(query_embedding, limit) {
-                return Ok(search);
-            }
+            return self.search_sqlite_vec0(query_embedding, limit, stats);
+        }
+        if event_ids.is_none()
+            && (stats.embedded_chunks > semantic_rust_full_scan_chunk_limit()
+                || stats
+                    .embedded_chunks
+                    .saturating_mul(SEMANTIC_DIMENSIONS)
+                    .saturating_mul(std::mem::size_of::<f32>())
+                    > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES)
+        {
+            return Err(SemanticVectorStorePending::new(
+                "trusted corpus exceeds the bounded blob fallback",
+            )
+            .into());
         }
 
         let scan_started = Instant::now();
@@ -41,10 +127,10 @@ impl SemanticVectorStore {
         let mut sql = r#"
             SELECT event_id, source_text_sha256, start_char, end_char, embedding_f32
             FROM event_embedding_chunks
-            WHERE model_key = ?1
-              AND dimensions = ?2
+            WHERE model_key = ? AND dimensions = ?
             "#
         .to_owned();
+        let chunk_cap = semantic_rust_full_scan_chunk_limit();
         let mut query_params = vec![
             SqlValue::from(semantic_model_key().to_owned()),
             SqlValue::from(SEMANTIC_DIMENSIONS as i64),
@@ -62,9 +148,11 @@ impl SemanticVectorStore {
                     .iter()
                     .map(|event_id| SqlValue::from(event_id.to_string())),
             );
+            sql.push_str(" ORDER BY rowid LIMIT ?");
+            query_params.push(SqlValue::from(chunk_cap.saturating_add(1) as i64));
         } else {
-            sql.push_str(" ORDER BY event_seq DESC LIMIT ?");
-            query_params.push(SqlValue::from(SEMANTIC_FULL_SCAN_MAX_CHUNKS as i64));
+            sql.push_str(" ORDER BY rowid LIMIT ?");
+            query_params.push(SqlValue::from(chunk_cap.saturating_add(1) as i64));
         }
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(query_params))?;
@@ -81,8 +169,14 @@ impl SemanticVectorStore {
             let blob: Vec<u8> = row.get(4)?;
             chunks_scanned = chunks_scanned.saturating_add(1);
             vector_bytes_read = vector_bytes_read.saturating_add(blob.len());
-            if event_ids.is_none() && vector_bytes_read > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES {
-                break;
+            if chunks_scanned > chunk_cap
+                || vector_bytes_read > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
+                || (event_ids.is_none() && chunks_scanned > stats.embedded_chunks)
+            {
+                return Err(SemanticVectorStorePending::new(
+                    "semantic blob retrieval exceeded its trusted row or byte bound",
+                )
+                .into());
             }
             let Some(similarity) = dot_product_f32_blob(query_embedding, &blob)? else {
                 continue;
@@ -112,6 +206,12 @@ impl SemanticVectorStore {
                 _ => {}
             }
         }
+        if event_ids.is_none() && chunks_scanned != stats.embedded_chunks {
+            return Err(SemanticVectorStorePending::new(
+                "canonical rows drifted from trusted stats",
+            )
+            .into());
+        }
         let events_scored = best_by_event.len();
         let mut top = best_by_event.into_values().collect::<Vec<_>>();
         if top.len() > limit {
@@ -135,10 +235,13 @@ impl SemanticVectorStore {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        stats: SemanticSidecarStats,
     ) -> Result<SemanticVectorSearch> {
         let scan_started = Instant::now();
         let query_blob = serialize_f32_blob(query_embedding);
-        let stats = self.cached_or_exact_stats()?;
+        let slot = self
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .ok_or_else(|| SemanticVectorStorePending::new("projection slot is missing"))?;
         let limit = limit.clamp(1, SEMANTIC_SQLITE_VEC0_MAX_K);
         let max_k = stats
             .embedded_chunks
@@ -153,15 +256,18 @@ impl SemanticVectorStore {
             let mut stmt = self.conn.prepare(
                 r#"
                 SELECT m.event_id, m.source_text_sha256, m.start_char, m.end_char, v.distance
-                FROM event_embedding_vec0 AS v
-                JOIN event_embedding_vec0_meta AS m ON m.rowid = v.rowid
+                FROM event_embedding_vec0_v2 AS v
+                JOIN event_embedding_vec0_meta_v2 AS m ON m.rowid = v.rowid
 	                WHERE v.embedding MATCH ?1
 	                  AND v.k = ?2
-	                  AND m.model_key = ?3
+	                  AND v.slot = ?3
+	                  AND m.model_key = ?4
+	                  AND m.slot = ?3
 	                ORDER BY v.distance
 	                "#,
             )?;
-            let mut rows = stmt.query(params![&query_blob, k as i64, semantic_model_key()])?;
+            let mut rows =
+                stmt.query(params![&query_blob, k as i64, slot, semantic_model_key()])?;
             while let Some(row) = rows.next()? {
                 rows_returned = rows_returned.saturating_add(1);
                 let event_id = Uuid::parse_str(&row.get::<_, String>(0)?)
@@ -206,9 +312,10 @@ impl SemanticVectorStore {
             && k >= max_k
             && max_k < stats.embedded_chunks
         {
-            return Err(anyhow!(
-                "sqlite vec0 top-k cap reached before enough unique semantic events"
-            ));
+            return Err(SemanticVectorStorePending::new(
+                "sqlite vec0 top-k cap reached before enough unique semantic events",
+            )
+            .into());
         }
         let mut hits = best_by_event.into_values().collect::<Vec<_>>();
         if hits.len() > limit {

@@ -12,15 +12,15 @@ use std::{
 use std::io::Read;
 #[cfg(unix)]
 use std::net::Shutdown;
+#[cfg(ctx_sqlite_vec)]
+use std::os::raw::c_char;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::os::unix::{
     ffi::OsStrExt,
     fs::{OpenOptionsExt, PermissionsExt},
 };
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(ctx_sqlite_vec)]
-use std::os::raw::c_char;
 #[cfg(ctx_sqlite_vec)]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -41,8 +41,8 @@ use ctx_history_store::{EventEmbeddingDocument, Store};
 use crate::commands::{
     import::{error_summary, import_totals_json, ImportTotals},
     search::{
-        refresh_sources_for_search_with_runtime, search_refresh_has_publication_work,
-        search_refresh_failure_totals, search_refresh_plugin_sources,
+        refresh_sources_for_search_with_runtime, search_refresh_failure_totals,
+        search_refresh_has_publication_work, search_refresh_plugin_sources,
         search_refresh_source_fingerprint, search_refresh_sources, RefreshArg,
     },
 };
@@ -155,6 +155,7 @@ const SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES: usize = 512 * 1024 * 1024;
 const SEMANTIC_VECTOR_BACKEND_RUST: &str = "rust_blob_scan";
 const SEMANTIC_VECTOR_BACKEND_SQLITE_VEC: &str = "sqlite_vec0";
 const SEMANTIC_SQLITE_VEC0_MAX_K: usize = 4_096;
+const SEMANTIC_VECTOR_SEARCH_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 #[cfg(ctx_semantic_fastembed)]
 const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
 #[cfg(ctx_semantic_fastembed)]
@@ -168,8 +169,15 @@ const SEMANTIC_WORKER_MAX_SECONDS_DEFAULT: u64 = 60;
 pub(crate) const SEMANTIC_WORKER_MAX_SECONDS_CAP: u64 = 86_400;
 const SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS: u64 = 15;
 const SEMANTIC_VECTOR_BUSY_TIMEOUT_MS: u64 = 30_000;
-const SEMANTIC_PRUNE_EVENTS_PER_PASS: usize = 256;
-const SEMANTIC_PRUNE_EVENT_BATCH: usize = 1_000;
+const SEMANTIC_PRUNE_EVENTS_PER_PASS: usize = SEMANTIC_SIDECAR_MAINTENANCE_ROWS;
+const SEMANTIC_SIDECAR_SCHEMA_VERSION: i64 = 6;
+const SEMANTIC_SIDECAR_TRUST_VERSION: i64 = 2;
+const SEMANTIC_SIDECAR_MAINTENANCE_ROWS: usize = 64;
+const SEMANTIC_SIDECAR_MAINTENANCE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const SEMANTIC_SIDECAR_MAINTENANCE_MAX_MILLIS: u64 = 25;
+const SEMANTIC_SQL_PROGRESS_OPS: i32 = 1_000;
+const SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES: u64 =
+    SEMANTIC_SIDECAR_MAINTENANCE_MAX_BYTES as u64;
 const SEMANTIC_DEADLINE_CHUNKS_PER_SECOND: usize = 3;
 const SEMANTIC_DEADLINE_MIN_CHUNK_BATCH: usize = 16;
 const DAEMON_DIR: &str = "daemon";
@@ -198,12 +206,6 @@ const PID_LOCK_ACQUIRE_RETRY: StdDuration = StdDuration::from_millis(2);
 const DAEMON_SEMANTIC_RESERVE_GRACE_SECS: u64 = 10;
 const DAEMON_MIN_REMAINING_FOR_JOB_SECS: u64 = 2;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum SemanticReportCountMode {
-    ExactOnCacheMiss,
-    CachedOrStatusFile,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticWorkerReport {
     status: String,
@@ -219,6 +221,7 @@ pub(crate) struct SemanticWorkerReport {
     searchable_items_known: bool,
     embedded_items: usize,
     embedded_chunks: usize,
+    sidecar_stats_known: bool,
     dirty_items: usize,
     queued_items_estimate: usize,
     model_cache_available: bool,
@@ -246,14 +249,15 @@ impl SemanticWorkerReport {
             searchable_items_known: false,
             embedded_items: 0,
             embedded_chunks: 0,
+            sidecar_stats_known: false,
             dirty_items: 0,
             queued_items_estimate: 0,
             model_cache_available: semantic_model_cache_available(&semantic_worker_cache_dir(
                 data_root,
             )),
-            model_acquisition: semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
+            model_acquisition: semantic_model_acquisition_status_json(&semantic_worker_cache_dir(
+                data_root,
+            )),
             embed_policy: Some(semantic_embed_policy_status_json()),
             embedding_runtime: None,
             vector_path: semantic_vector_path(data_root),
@@ -263,7 +267,7 @@ impl SemanticWorkerReport {
     }
 
     fn coverage_ratio(&self) -> Option<f64> {
-        if !self.searchable_items_known || self.searchable_items == 0 {
+        if !self.searchable_items_known || !self.sidecar_stats_known || self.searchable_items == 0 {
             None
         } else {
             Some((self.embedded_items as f64 / self.searchable_items as f64).min(1.0))
@@ -287,6 +291,7 @@ impl SemanticWorkerReport {
                 "searchable_items_known": self.searchable_items_known,
                 "embedded_items": self.embedded_items,
                 "embedded_chunks": self.embedded_chunks,
+                "sidecar_stats_known": self.sidecar_stats_known,
                 "dirty_items": self.dirty_items,
                 "queued_items_estimate": self.queued_items_estimate,
                 "coverage_ratio": self.coverage_ratio(),
@@ -400,7 +405,11 @@ impl SemanticRetrievalReport {
 }
 
 fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
-    if !worker.searchable_items_known || worker.searchable_items == 0 || worker.embedded_items == 0 {
+    if !worker.searchable_items_known
+        || !worker.sidecar_stats_known
+        || worker.searchable_items == 0
+        || worker.embedded_items == 0
+    {
         "unavailable"
     } else if semantic_worker_coverage_ready(worker) {
         "ready"
@@ -411,6 +420,7 @@ fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
 
 fn semantic_worker_coverage_ready(worker: &SemanticWorkerReport) -> bool {
     worker.searchable_items_known
+        && worker.sidecar_stats_known
         && worker.searchable_items > 0
         && worker.embedded_items >= worker.searchable_items
         && worker.dirty_items == 0
@@ -433,13 +443,12 @@ pub(crate) fn search_packet_file_filter_with_backend(
         ctx_protocol::SearchEffectiveBackend::Lexical;
     packet.query_execution.semantic.completeness =
         ctx_protocol::SearchSemanticCompleteness::NotAttempted;
-    packet.query_execution.semantic.skip_reason = Some(if requested_backend
-        == SearchBackendArg::Hybrid
-    {
-        ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible
-    } else {
-        ctx_protocol::SearchSemanticSkipReason::Disabled
-    });
+    packet.query_execution.semantic.skip_reason =
+        Some(if requested_backend == SearchBackendArg::Hybrid {
+            ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible
+        } else {
+            ctx_protocol::SearchSemanticSkipReason::Disabled
+        });
     packet.query_execution.semantic.positive_text_rule_version =
         ctx_protocol::SEARCH_POSITIVE_TEXT_RULE_VERSION.to_owned();
 
@@ -460,7 +469,10 @@ pub(crate) fn search_packet_query_with_backend(
     _refresh_mode: RefreshArg,
     emit_warnings: bool,
 ) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
-    let query = query.clone().canonicalized().map_err(|error| anyhow!(error))?;
+    let query = query
+        .clone()
+        .canonicalized()
+        .map_err(|error| anyhow!(error))?;
     let explicit_semantic = query.explicit_semantic_text();
     if requested_backend == SearchBackendArg::Lexical && explicit_semantic.is_some() {
         return Err(anyhow!(
@@ -481,7 +493,8 @@ pub(crate) fn search_packet_query_with_backend(
     }
 
     let worker = semantic_worker_report_cached(data_root, Some(store))?;
-    let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
+    let mut retrieval =
+        SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
     retrieval.worker = Some(worker.clone());
     retrieval.apply_worker_coverage(&worker);
     retrieval.vector_path = Some(semantic_vector_path(data_root));
@@ -542,7 +555,8 @@ pub(crate) fn search_packet_query_with_backend(
         );
     }
 
-    let candidate_ids = if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank {
+    let candidate_ids = if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank
+    {
         let mut lexical_envelope = ctx_protocol::SearchRequestEnvelope::new(query.clone());
         lexical_envelope.semantic_policy = ctx_protocol::SearchSemanticPolicy::Disabled;
         let lexical_packet =
@@ -572,11 +586,8 @@ pub(crate) fn search_packet_query_with_backend(
         .map(Vec::len)
         .unwrap_or(ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED)
         .clamp(1, ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED);
-    let mut clause = query_service_contract::SemanticQueryClauseRequest::new(
-        0,
-        semantic_text,
-        hit_limit,
-    );
+    let mut clause =
+        query_service_contract::SemanticQueryClauseRequest::new(0, semantic_text, hit_limit);
     if let Some(candidate_ids) = candidate_ids {
         clause = clause.with_candidate_event_ids(candidate_ids);
     }
@@ -585,46 +596,44 @@ pub(crate) fn search_packet_query_with_backend(
         request_mode,
         vec![clause],
     );
-    let response = match daemon_semantic_query_request(
-        data_root,
-        request,
-        StdDuration::from_secs(30),
-    ) {
-        Ok(Some(response)) => response,
-        Ok(None) => {
-            return semantic_query_unavailable(
-                store,
-                data_root,
-                query,
-                options,
-                retrieval,
-                request_mode,
-                ctx_protocol::SearchSemanticReadiness::Unavailable,
-                "daemon_query_service_unavailable",
-                "daemon semantic query service is not available",
-                emit_warnings,
-            );
-        }
-        Err(error) => {
-            return semantic_query_unavailable(
-                store,
-                data_root,
-                query,
-                options,
-                retrieval,
-                request_mode,
-                ctx_protocol::SearchSemanticReadiness::Unavailable,
-                "semantic_retrieval_failed",
-                &format!("daemon semantic retrieval failed: {error:#}"),
-                emit_warnings,
-            );
-        }
-    };
+    let response =
+        match daemon_semantic_query_request(data_root, request, StdDuration::from_secs(30)) {
+            Ok(Some(response)) => response,
+            Ok(None) => {
+                return semantic_query_unavailable(
+                    store,
+                    data_root,
+                    query,
+                    options,
+                    retrieval,
+                    request_mode,
+                    ctx_protocol::SearchSemanticReadiness::Unavailable,
+                    "daemon_query_service_unavailable",
+                    "daemon semantic query service is not available",
+                    emit_warnings,
+                );
+            }
+            Err(error) => {
+                return semantic_query_unavailable(
+                    store,
+                    data_root,
+                    query,
+                    options,
+                    retrieval,
+                    request_mode,
+                    ctx_protocol::SearchSemanticReadiness::Unavailable,
+                    "semantic_retrieval_failed",
+                    &format!("daemon semantic retrieval failed: {error:#}"),
+                    emit_warnings,
+                );
+            }
+        };
     retrieval.readiness = response.readiness.clone();
     if !response.ok {
-        let failure = response.error.as_ref().ok_or_else(|| {
-            anyhow!("typed semantic query failure did not include an error")
-        })?;
+        let failure = response
+            .error
+            .as_ref()
+            .ok_or_else(|| anyhow!("typed semantic query failure did not include an error"))?;
         let message = format!("{} ({:?})", failure.message, failure.code);
         return semantic_query_unavailable(
             store,
@@ -649,13 +658,12 @@ pub(crate) fn search_packet_query_with_backend(
     retrieval.semantic_status = semantic_readiness_status(response.readiness.as_ref());
     let semantic_input = semantic_protocol_input(&response, clause);
     let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
-    envelope.semantic_policy = if request_mode
-        == readiness::SemanticRetrievalRequestMode::AutomaticRerank
-    {
-        ctx_protocol::SearchSemanticPolicy::AutomaticRerank
-    } else {
-        ctx_protocol::SearchSemanticPolicy::Disabled
-    };
+    envelope.semantic_policy =
+        if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank {
+            ctx_protocol::SearchSemanticPolicy::AutomaticRerank
+        } else {
+            ctx_protocol::SearchSemanticPolicy::Disabled
+        };
     envelope.semantic = Some(semantic_input);
     let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
     retrieval.effective_mode = match packet.query_execution.semantic.effective_backend {
@@ -680,12 +688,10 @@ fn semantic_query_unavailable(
     emit_warnings: bool,
 ) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
     if request_mode == readiness::SemanticRetrievalRequestMode::ExplicitSemantic {
-        return Err(anyhow::Error::new(
-            ctx_history_search::SearchError::SemanticNotReady { readiness },
-        )
-        .context(format!(
-            "explicit semantic unavailable [{code}]: {message}"
-        )));
+        return Err(
+            anyhow::Error::new(ctx_history_search::SearchError::SemanticNotReady { readiness })
+                .context(format!("explicit semantic unavailable [{code}]: {message}")),
+        );
     }
     retrieval.effective_mode = SearchBackendArg::Lexical;
     retrieval.embedding_model = None;
@@ -773,9 +779,7 @@ fn semantic_readiness_status(
     }
 }
 
-fn semantic_failure_code(
-    code: query_service_contract::SemanticQueryFailureCode,
-) -> &'static str {
+fn semantic_failure_code(code: query_service_contract::SemanticQueryFailureCode) -> &'static str {
     use query_service_contract::SemanticQueryFailureCode as Code;
     match code {
         Code::AuthenticationFailed => "authentication_failed",
@@ -865,11 +869,97 @@ struct SemanticChunkDocument {
     end_char: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SemanticSidecarStats {
     embedded_items: usize,
     embedded_chunks: usize,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticSidecarTrustState {
+    Ready,
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SemanticSidecarMaintenanceOutcome {
+    rows_processed: usize,
+    logical_bytes: u64,
+    supplemental_bytes: u64,
+    state: Option<SemanticSidecarTrustState>,
+}
+
+impl SemanticSidecarMaintenanceOutcome {
+    fn pending(rows_processed: usize, logical_bytes: u64) -> Self {
+        Self {
+            rows_processed,
+            logical_bytes,
+            supplemental_bytes: 0,
+            state: Some(SemanticSidecarTrustState::Pending),
+        }
+    }
+
+    fn ready(rows_processed: usize, logical_bytes: u64) -> Self {
+        Self {
+            rows_processed,
+            logical_bytes,
+            supplemental_bytes: 0,
+            state: Some(SemanticSidecarTrustState::Ready),
+        }
+    }
+
+    fn is_ready(self) -> bool {
+        self.state == Some(SemanticSidecarTrustState::Ready)
+    }
+}
+
+#[derive(Debug)]
+struct SemanticVectorStorePending {
+    reason: &'static str,
+}
+
+impl SemanticVectorStorePending {
+    fn new(reason: &'static str) -> Self {
+        Self { reason }
+    }
+}
+
+impl fmt::Display for SemanticVectorStorePending {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "semantic vector store maintenance is pending: {}",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for SemanticVectorStorePending {}
+
+#[derive(Debug)]
+struct SemanticVectorStoreTerminal {
+    reason: String,
+}
+
+impl SemanticVectorStoreTerminal {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl fmt::Display for SemanticVectorStoreTerminal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "semantic vector store is unsupported: {}",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for SemanticVectorStoreTerminal {}
 
 #[derive(Debug, Default)]
 struct SemanticIndexOutcome {
@@ -881,8 +971,10 @@ struct SemanticIndexOutcome {
 struct SemanticPruneOutcome {
     deleted_chunks: usize,
     queued_stale_events: usize,
+    supplemental_bytes: u64,
 }
 
 struct SemanticVectorStore {
     conn: Connection,
+    path: PathBuf,
 }

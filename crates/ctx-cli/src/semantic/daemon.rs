@@ -883,13 +883,14 @@ fn handle_daemon_query_stream_inner<S: std::io::Write>(
             );
         }
     };
-    let response = execute_daemon_semantic_query(data_root, embedder, &authenticated)
+    let response = execute_daemon_semantic_query(data_root, embedder, &authenticated, deadline)
         .unwrap_or_else(|error| {
+            let retryable = semantic_query_error_retryable(&error);
             query_service_contract::SemanticQueryServiceResponse::failure(
                 query_service_contract::SemanticQueryFailure::new(
                     query_service_contract::SemanticQueryFailureCode::RetrievalFailed,
                     format!("semantic retrieval failed: {error:#}"),
-                    true,
+                    retryable,
                 ),
             )
         });
@@ -902,7 +903,14 @@ fn execute_daemon_semantic_query(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
     request: &query_service_contract::AuthenticatedSemanticQueryRequest,
+    deadline: Instant,
 ) -> Result<query_service_contract::SemanticQueryServiceResponse> {
+    if Instant::now() >= deadline {
+        return Err(SemanticVectorStorePending::new(
+            "semantic retrieval deadline elapsed before store access",
+        )
+        .into());
+    }
     let db_path = database_path(data_root.to_path_buf());
     let store = open_existing_store_read_only(&db_path, "daemon semantic query")?;
     let report = semantic_worker_report_cached(data_root, Some(&store))?;
@@ -921,13 +929,14 @@ fn execute_daemon_semantic_query(
         .first()
         .ok_or_else(|| anyhow!("authenticated semantic query has no clause"))?;
     let filtered = clause.candidate_event_ids.as_ref();
-    let vector_backend_available = filtered.is_some()
-        || semantic_full_corpus_vector_scan_ready(&vector_store).unwrap_or(false);
+    let sidecar_trusted = vector_store.sidecar_trust_state()? == SemanticSidecarTrustState::Ready;
+    let vector_backend_available = sidecar_trusted
+        && (filtered.is_some() || semantic_full_corpus_vector_scan_ready(&vector_store)?);
     let readiness = semantic_readiness_for_report(
         data_root,
         &report,
         model_resident,
-        true,
+        sidecar_trusted,
         vector_backend_available,
     )?;
     if !readiness.retrieval_available {
@@ -941,16 +950,28 @@ fn execute_daemon_semantic_query(
     let embed_started = Instant::now();
     let (query_embedding, _runtime) =
         embed_query_with_resident_runtime(embedder, clause.text.trim().to_owned())?;
+    if Instant::now() >= deadline {
+        return Err(SemanticVectorStorePending::new(
+            "semantic retrieval deadline elapsed during query embedding",
+        )
+        .into());
+    }
     let query_embed_ms = embed_started.elapsed().as_millis() as u64;
     let vector_limit = clause.hit_limit.max(1);
     let vector_search = if let Some(event_ids) = filtered {
-        vector_store.search_event_ids(&query_embedding, event_ids, vector_limit)?
+        vector_store.search_event_ids_until(&query_embedding, event_ids, vector_limit, deadline)?
     } else {
-        vector_store.search(&query_embedding, vector_limit)?
+        vector_store.search_until(&query_embedding, vector_limit, deadline)?
     };
     let stats = vector_search.stats.clone();
     let mut hits = vector_search.hits;
     let current_hashes = current_semantic_source_hashes(&store, &hits)?;
+    if Instant::now() >= deadline {
+        return Err(SemanticVectorStorePending::new(
+            "semantic retrieval deadline elapsed during source validation",
+        )
+        .into());
+    }
     hits.retain(|hit| {
         current_hashes
             .get(&hit.event_id)
@@ -1370,6 +1391,7 @@ fn run_daemon_once(
     deadline: Option<Instant>,
     semantic_enabled: bool,
 ) -> Result<DaemonIteration> {
+    let _daemon_disk_pacing = runtime.history_refresh.install_daemon_disk_io_pacing();
     if semantic_enabled && semantic_bootstrap_should_run_first(data_root, runtime)? {
         let mut history_refresh_job =
             daemon_history_refresh_skipped_job("semantic_bootstrap_in_progress");
@@ -1454,16 +1476,21 @@ fn enrich_daemon_semantic_job_status(
 ) -> Value {
     let report = semantic_worker_report_for_daemon(data_root);
     let model_resident = daemon_runtime_embedder_loaded(runtime);
-    let sidecar_available = SemanticVectorStore::open_read_only(&semantic_vector_path(data_root))
+    let vector_store = SemanticVectorStore::open_read_only(&semantic_vector_path(data_root))
         .ok()
-        .flatten()
-        .is_some();
+        .flatten();
+    let sidecar_available = vector_store.as_ref().is_some_and(|store| {
+        store.sidecar_trust_state().ok() == Some(SemanticSidecarTrustState::Ready)
+    });
+    let vector_backend_available = vector_store
+        .as_ref()
+        .is_some_and(|store| semantic_full_corpus_vector_scan_ready(store).unwrap_or(false));
     let readiness = semantic_readiness_for_report(
         data_root,
         &report,
         model_resident,
         sidecar_available,
-        sidecar_available,
+        vector_backend_available,
     )
     .ok();
     if let Some(object) = job.as_object_mut() {
@@ -1483,8 +1510,7 @@ fn enrich_daemon_semantic_job_status(
         );
         object.insert(
             "query_priority".to_owned(),
-            serde_json::to_value(runtime.semantic_query_priority.snapshot())
-                .unwrap_or(Value::Null),
+            serde_json::to_value(runtime.semantic_query_priority.snapshot()).unwrap_or(Value::Null),
         );
     }
     compact_json(job)
@@ -1503,8 +1529,34 @@ fn semantic_bootstrap_should_run_first(
     {
         return Ok(false);
     }
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let sidecar_permit = runtime
+        .semantic_query_priority
+        .begin_document_batch(None)
+        .map_err(|error| anyhow!(error))?;
+    let terminal_sidecar = SemanticVectorStore::open_read_only(&semantic_vector_path(data_root))
+        .ok()
+        .flatten()
+        .as_ref()
+        .is_some_and(|store| {
+            store
+                .active_terminal_maintenance_failure()
+                .ok()
+                .flatten()
+                .is_some()
+        });
+    drop(sidecar_permit);
+    if terminal_sidecar {
+        return Ok(false);
+    }
     let store = Store::open(&db_path).context("open ctx store for daemon semantic bootstrap")?;
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let refresh_permit = runtime
+        .semantic_query_priority
+        .begin_document_batch(None)
+        .map_err(|error| anyhow!(error))?;
     refresh_semantic_document_count_cache(&store)?;
+    drop(refresh_permit);
     let report = semantic_worker_report(data_root, Some(&store))?;
     Ok(report.searchable_items > 0
         && report.queued_items_estimate > 0
@@ -1523,6 +1575,9 @@ fn refresh_semantic_document_count_cache(store: &Store) -> Result<()> {
 }
 
 fn daemon_semantic_job_did_work(value: &Value) -> bool {
+    if value.get("status").and_then(Value::as_str) == Some("maintenance_pending") {
+        return true;
+    }
     value
         .get("indexed_chunks")
         .and_then(Value::as_u64)
@@ -1708,6 +1763,34 @@ fn run_daemon_semantic_job(
     semantic_enabled: bool,
 ) -> Result<Value> {
     let last_run_at_ms = utc_now().timestamp_millis();
+    match run_daemon_semantic_job_inner(
+        args,
+        data_root,
+        runtime,
+        deadline,
+        semantic_enabled,
+        last_run_at_ms,
+    ) {
+        Ok(job) => Ok(job),
+        Err(error) if semantic_sidecar_busy(&error) => {
+            Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms))
+        }
+        Err(error) => Ok(daemon_semantic_terminal_maintenance_job(
+            data_root,
+            last_run_at_ms,
+            format!("{error:#}"),
+        )),
+    }
+}
+
+fn run_daemon_semantic_job_inner(
+    args: &DaemonRunArgs,
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
+    last_run_at_ms: i64,
+) -> Result<Value> {
     if !semantic_enabled {
         let report = semantic_worker_report_best_effort(data_root);
         return Ok(daemon_semantic_job_json(
@@ -1738,13 +1821,178 @@ fn run_daemon_semantic_job(
         ));
     }
 
-    let store = Store::open(&db_path).context("open ctx store for daemon semantic job")?;
-    refresh_semantic_document_count_cache(&store)?;
-    let mut before = semantic_worker_report(data_root, Some(&store))?;
-    if semantic_report_should_queue_recent_work(&before)
-        && queue_recent_semantic_work(data_root, &store, "daemon_recent").unwrap_or(0) > 0
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let vector_path = semantic_vector_path(data_root);
+    let open_permit = match runtime
+        .semantic_query_priority
+        .begin_document_batch(deadline)
     {
-        before = semantic_worker_report(data_root, Some(&store))?;
+        Ok(permit) => permit,
+        Err(query_priority::SemanticQueryPriorityError::DeadlineElapsed) => {
+            let report = semantic_worker_report_best_effort(data_root);
+            return Ok(daemon_semantic_job_json(
+                "skipped",
+                Some("daemon_deadline"),
+                last_run_at_ms,
+                &report,
+                None,
+                None,
+            ));
+        }
+    };
+    let maintenance_store = SemanticVectorStore::open(&vector_path);
+    drop(open_permit);
+    let mut maintenance_store = match maintenance_store {
+        Ok(store) => store,
+        Err(error) if semantic_sidecar_busy(&error) => {
+            return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
+        }
+        Err(error) if semantic_deterministic_sidecar_error(&error) => {
+            return Ok(daemon_semantic_terminal_maintenance_job(
+                data_root,
+                last_run_at_ms,
+                format!("{error:#}"),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let maintenance_nominal = maintenance_store.maintenance_precharge_bytes()?;
+    ctx_history_capture::pace_current_disk_io(maintenance_nominal);
+    let maintenance_permit = match runtime
+        .semantic_query_priority
+        .begin_document_batch(deadline)
+    {
+        Ok(permit) => permit,
+        Err(query_priority::SemanticQueryPriorityError::DeadlineElapsed) => {
+            let report = semantic_worker_report_best_effort(data_root);
+            return Ok(daemon_semantic_job_json(
+                "skipped",
+                Some("daemon_deadline"),
+                last_run_at_ms,
+                &report,
+                None,
+                None,
+            ));
+        }
+    };
+    match maintenance_store.active_terminal_maintenance_failure() {
+        Ok(Some(message)) => {
+            drop(maintenance_permit);
+            return Ok(daemon_semantic_terminal_maintenance_job(
+                data_root,
+                last_run_at_ms,
+                message,
+            ));
+        }
+        Ok(None) => {}
+        Err(error) if semantic_sidecar_busy(&error) => {
+            drop(maintenance_permit);
+            return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            let recorded = maintenance_store.record_terminal_maintenance_failure(&message);
+            drop(maintenance_permit);
+            if let Err(record_error) = recorded {
+                if semantic_sidecar_busy(&record_error) {
+                    return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
+                }
+                return Ok(daemon_semantic_terminal_maintenance_job(
+                    data_root,
+                    last_run_at_ms,
+                    format!(
+                        "{message}; failed to persist terminal sidecar state: {record_error:#}"
+                    ),
+                ));
+            }
+            return Ok(daemon_semantic_terminal_maintenance_job(
+                data_root,
+                last_run_at_ms,
+                message,
+            ));
+        }
+    }
+    let maintenance = match maintenance_store.run_maintenance_slice_precharged(maintenance_nominal)
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if semantic_sidecar_busy(&error) {
+                drop(maintenance_permit);
+                return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
+            }
+            let message = semantic_terminal_maintenance_message(&error)
+                .unwrap_or_else(|| format!("{error:#}"));
+            let recorded = maintenance_store.record_terminal_maintenance_failure(&message);
+            drop(maintenance_permit);
+            match recorded {
+                Ok(()) => {
+                    return Ok(daemon_semantic_terminal_maintenance_job(
+                        data_root,
+                        last_run_at_ms,
+                        message,
+                    ));
+                }
+                Err(error) if semantic_sidecar_busy(&error) => {
+                    return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
+                }
+                Err(record_error) => {
+                    return Ok(daemon_semantic_terminal_maintenance_job(
+                        data_root,
+                        last_run_at_ms,
+                        format!(
+                            "{message}; failed to persist terminal sidecar state: {record_error:#}"
+                        ),
+                    ));
+                }
+            }
+        }
+    };
+    drop(maintenance_permit);
+    ctx_history_capture::pace_current_disk_io(maintenance.supplemental_bytes);
+    drop(maintenance_store);
+    if !maintenance.is_ready() {
+        let report = semantic_worker_report_cached(data_root, None)?;
+        let mut job = daemon_semantic_job_json(
+            "maintenance_pending",
+            Some("sidecar_maintenance"),
+            last_run_at_ms,
+            &report,
+            None,
+            None,
+        );
+        if let Some(object) = job.as_object_mut() {
+            object.insert(
+                "maintenance_rows".to_owned(),
+                json!(maintenance.rows_processed),
+            );
+            object.insert(
+                "maintenance_logical_bytes".to_owned(),
+                json!(maintenance.logical_bytes),
+            );
+        }
+        return Ok(compact_json(job));
+    }
+
+    let store = Store::open(&db_path).context("open ctx store for daemon semantic job")?;
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let source_refresh_permit = runtime
+        .semantic_query_priority
+        .begin_document_batch(deadline)
+        .map_err(|error| anyhow!(error))?;
+    refresh_semantic_document_count_cache(&store)?;
+    drop(source_refresh_permit);
+    let mut before = semantic_worker_report(data_root, Some(&store))?;
+    if semantic_report_should_queue_recent_work(&before) {
+        ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+        let queue_permit = runtime
+            .semantic_query_priority
+            .begin_document_batch(deadline)
+            .map_err(|error| anyhow!(error))?;
+        let queued = queue_recent_semantic_work(data_root, &store, "daemon_recent").unwrap_or(0);
+        drop(queue_permit);
+        if queued > 0 {
+            before = semantic_worker_report(data_root, Some(&store))?;
+        }
     }
     if before.searchable_items == 0 {
         return Ok(daemon_semantic_job_json(
@@ -2040,6 +2288,112 @@ fn daemon_semantic_failed_job(data_root: &Path, message: String) -> Value {
     )
 }
 
+fn daemon_semantic_terminal_maintenance_job(
+    data_root: &Path,
+    last_run_at_ms: i64,
+    message: String,
+) -> Value {
+    let report = semantic_worker_report_for_daemon(data_root);
+    let mut value = daemon_semantic_job_json(
+        "degraded",
+        Some("sidecar_maintenance_terminal"),
+        last_run_at_ms,
+        &report,
+        None,
+        Some(message),
+    );
+    value["retryable"] = Value::Bool(false);
+    compact_json(value)
+}
+
+fn daemon_semantic_sidecar_busy_job(data_root: &Path, last_run_at_ms: i64) -> Value {
+    let report = semantic_worker_report_for_daemon(data_root);
+    let mut value = daemon_semantic_job_json(
+        "skipped",
+        Some("sidecar_busy"),
+        last_run_at_ms,
+        &report,
+        None,
+        None,
+    );
+    value["retryable"] = Value::Bool(true);
+    compact_json(value)
+}
+
+fn semantic_terminal_maintenance_message(error: &anyhow::Error) -> Option<String> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<SemanticVectorStoreTerminal>()
+            .map(ToString::to_string)
+    })
+}
+
+fn semantic_sidecar_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(inner, _))
+                if matches!(
+                    inner.code,
+                    rusqlite::ErrorCode::DatabaseBusy
+                        | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}
+
+fn semantic_deterministic_sidecar_error(error: &anyhow::Error) -> bool {
+    if semantic_terminal_maintenance_message(error).is_some() {
+        return true;
+    }
+    error.chain().any(|cause| {
+        let Some(error) = cause.downcast_ref::<rusqlite::Error>() else {
+            return false;
+        };
+        !matches!(
+            error,
+            rusqlite::Error::SqliteFailure(inner, _)
+                if matches!(
+                    inner.code,
+                    rusqlite::ErrorCode::DatabaseBusy
+                        | rusqlite::ErrorCode::DatabaseLocked
+                        | rusqlite::ErrorCode::OperationInterrupted
+                )
+        )
+    })
+}
+
+fn semantic_query_error_retryable(error: &anyhow::Error) -> bool {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<SemanticVectorStorePending>().is_some())
+    {
+        return true;
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SemanticVectorStoreTerminal>()
+            .is_some()
+    }) {
+        return false;
+    }
+    let sqlite_code = error.chain().find_map(|cause| {
+        let rusqlite::Error::SqliteFailure(inner, _) = cause.downcast_ref::<rusqlite::Error>()?
+        else {
+            return None;
+        };
+        Some(inner.code)
+    });
+    matches!(
+        sqlite_code,
+        Some(
+            rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+                | rusqlite::ErrorCode::OperationInterrupted
+        )
+    )
+}
+
 fn daemon_semantic_job_json(
     status: &str,
     reason: Option<&str>,
@@ -2271,16 +2625,31 @@ fn run_semantic_worker_inner_with_embedder(
         ));
     }
     let store = Store::open(&db_path).context("open ctx store for semantic worker")?;
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let source_refresh_permit = priority
+        .begin_document_batch(None)
+        .map_err(|error| anyhow!(error))?;
     refresh_semantic_document_count_cache(&store)?;
+    drop(source_refresh_permit);
     let vector_path = semantic_vector_path(data_root);
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let prune_permit = priority
+        .begin_document_batch(None)
+        .map_err(|error| anyhow!(error))?;
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
-    let prune_outcome = vector_store.prune_ineligible_events(&store)?;
+    let prune_outcome = vector_store.prune_ineligible_events_precharged(&store)?;
+    drop(prune_permit);
+    ctx_history_capture::pace_current_disk_io(prune_outcome.supplemental_bytes);
     let started_at_ms = utc_now().timestamp_millis();
     let initial_stats = vector_store
         .cached_stats()?
-        .unwrap_or_else(SemanticSidecarStats::default);
-    let initial_dirty_items = vector_store.dirty_event_count()?;
-    let searchable_items = store.event_embedding_document_count_cached_or_exact()?;
+        .ok_or_else(|| SemanticVectorStorePending::new("worker stats are untrusted"))?;
+    let initial_sidecar_generation =
+        vector_store.maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?;
+    let initial_dirty_items = vector_store.bounded_dirty_event_count()?;
+    let searchable_items = store
+        .cached_event_embedding_document_count()?
+        .ok_or_else(|| anyhow!("semantic source count cache is untrusted"))?;
     let initial_queued_items_estimate = searchable_items
         .saturating_sub(initial_stats.embedded_items)
         .max(initial_dirty_items);
@@ -2305,6 +2674,8 @@ fn run_semantic_worker_inner_with_embedder(
             "searchable_items": searchable_items,
             "embedded_items": initial_stats.embedded_items,
             "embedded_chunks": initial_stats.embedded_chunks,
+            "sidecar_trust_version": SEMANTIC_SIDECAR_TRUST_VERSION,
+            "sidecar_generation": initial_sidecar_generation,
             "dirty_items": initial_dirty_items,
             "embed_policy": starting_embed_policy,
             "embedding_runtime": starting_embedding_runtime,
@@ -2339,15 +2710,29 @@ fn run_semantic_worker_inner_with_embedder(
     let elapsed_ms = elapsed.as_millis() as u64;
     let final_stats = vector_store
         .cached_stats()?
-        .unwrap_or_else(SemanticSidecarStats::default);
-    let final_dirty_items = vector_store.dirty_event_count()?;
+        .ok_or_else(|| SemanticVectorStorePending::new("worker stats became untrusted"))?;
+    let final_sidecar_generation =
+        vector_store.maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?;
+    let final_dirty_items = vector_store.bounded_dirty_event_count()?;
+    ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+    let source_refresh_permit = priority
+        .begin_document_batch(None)
+        .map_err(|error| anyhow!(error))?;
     refresh_semantic_document_count_cache(&store)?;
-    let searchable_items = store.event_embedding_document_count_cached_or_exact()?;
+    drop(source_refresh_permit);
+    let searchable_items = store
+        .cached_event_embedding_document_count()?
+        .ok_or_else(|| anyhow!("semantic source count cache is untrusted"))?;
     let status = if searchable_items > 0
         && final_stats.embedded_items >= searchable_items
         && final_dirty_items == 0
     {
+        ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+        let cursor_permit = priority
+            .begin_document_batch(None)
+            .map_err(|error| anyhow!(error))?;
         vector_store.set_backfill_cursor(None)?;
+        drop(cursor_permit);
         "ready"
     } else if elapsed >= StdDuration::from_secs(max_seconds) {
         "budget_exhausted"
@@ -2373,6 +2758,8 @@ fn run_semantic_worker_inner_with_embedder(
             "searchable_items": searchable_items,
             "embedded_items": final_stats.embedded_items,
             "embedded_chunks": final_stats.embedded_chunks,
+            "sidecar_trust_version": SEMANTIC_SIDECAR_TRUST_VERSION,
+            "sidecar_generation": final_sidecar_generation,
             "dirty_items": final_dirty_items,
             "embed_policy": finished_embed_policy,
             "embedding_runtime": finished_embedding_runtime,
