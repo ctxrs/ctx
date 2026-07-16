@@ -507,7 +507,7 @@ mod freshness_tests {
 
         write_pi_source(&dirty.path, 2, "dirty-changed");
         runtime.force_source_change_for_test(&dirty.path);
-        let refreshed = refresh_with_runtime(
+        let mut refreshed = refresh_with_runtime(
             &data_root,
             &mut runtime,
             vec![dirty.clone(), unchanged.clone()],
@@ -530,6 +530,25 @@ mod freshness_tests {
                 .passes_since_reinventory,
             18
         );
+        let mut fresh_units_processed = refreshed.fresh_units_processed;
+        for _ in 0..16 {
+            if refreshed.fresh_units_pending == 0 {
+                break;
+            }
+            refreshed = refresh_with_runtime(
+                &data_root,
+                &mut runtime,
+                vec![dirty.clone(), unchanged.clone()],
+            );
+            fresh_units_processed =
+                fresh_units_processed.saturating_add(refreshed.fresh_units_processed);
+        }
+        assert_eq!(fresh_units_processed, 2, "{refreshed:?}");
+        assert_eq!(refreshed.fresh_units_pending, 0, "{refreshed:?}");
+        assert_eq!(
+            cached_inventory_generation(&runtime, &unchanged),
+            unchanged_generation
+        );
     }
 
     #[test]
@@ -551,6 +570,9 @@ mod freshness_tests {
             }
         }
         assert!(pending_without_publication);
+        // A real next pass would immediately start the remaining recovery unit.
+        // Align only the cached owner so this call isolates the elapsed sweep.
+        runtime.cached_work.as_mut().unwrap().publication_owner = None;
         let first_generation = cached_inventory_generation(&runtime, &source);
         runtime.cached_work.as_mut().unwrap().last_reinventory_at =
             Instant::now() - DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL;
