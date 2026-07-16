@@ -142,7 +142,10 @@ final class AgentHistoryValue {
                         || "configPath".equals(key)
                         || "itemType".equals(key)
                         || "payloadType".equals(key)
-                        || "recordType".equals(key)) {
+                        || "recordType".equals(key)
+                        || "semanticWeight".equals(key)
+                        || "semanticFallbackCode".equals(key)
+                        || "semanticFallback".equals(key)) {
                     continue;
                 }
                 out.put(key, camelize(entry.getValue()));

@@ -119,6 +119,10 @@ public final class AgentHistoryOptions {
         private Integer limit;
         private String backend;
         private String provider;
+        private String historySource;
+        private String providerKey;
+        private String sourceId;
+        private String sourceFormat;
         private String workspace;
         private String since;
         private boolean primaryOnly;
@@ -145,6 +149,22 @@ public final class AgentHistoryOptions {
 
         public String provider() {
             return provider;
+        }
+
+        public String historySource() {
+            return historySource;
+        }
+
+        public String providerKey() {
+            return providerKey;
+        }
+
+        public String sourceId() {
+            return sourceId;
+        }
+
+        public String sourceFormat() {
+            return sourceFormat;
         }
 
         public String workspace() {
@@ -205,6 +225,26 @@ public final class AgentHistoryOptions {
 
         public Search provider(String provider) {
             this.provider = provider;
+            return this;
+        }
+
+        public Search historySource(String historySource) {
+            this.historySource = historySource;
+            return this;
+        }
+
+        public Search providerKey(String providerKey) {
+            this.providerKey = providerKey;
+            return this;
+        }
+
+        public Search sourceId(String sourceId) {
+            this.sourceId = sourceId;
+            return this;
+        }
+
+        public Search sourceFormat(String sourceFormat) {
+            this.sourceFormat = sourceFormat;
             return this;
         }
 

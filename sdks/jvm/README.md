@@ -41,10 +41,28 @@ SearchQuery query = SearchQuery.builder()
 SearchResponse response = client.search(AgentHistoryOptions.search().query(query));
 ```
 
-The adapter validates the query and sends it with `ctx search --query-json`.
-Search results require `schema_version: 2` and expose typed bounded-execution,
-semantic readiness, coverage, completeness, and truncation diagnostics through
-`SearchQueryExecution`.
+The adapter collapses Unicode whitespace in non-literal clauses, trims literals,
+removes duplicates within each placement, and then validates the 32-clause cap,
+UTF-8 byte budgets, and the 1 to 32 analyzed-token range. Explicit result limits
+must be from 1 to 200. Source identity filters map directly to their CLI flags:
+
+```java
+AgentHistoryOptions.Search options = AgentHistoryOptions.search()
+        .query(query)
+        .provider("custom")
+        .historySource("dorkos/default")
+        .providerKey("dorkos")
+        .sourceId("default")
+        .sourceFormat("dorkos-history-v1")
+        .limit(Integer.valueOf(20));
+```
+
+Queries are sent with `ctx search --query-json`. Search results require
+`schema_version: 2` and expose typed bounded-execution, semantic readiness,
+coverage, completeness, and truncation diagnostics through
+`SearchQueryExecution`. Top-level retrieval diagnostics remain available with
+camel-cased keys; obsolete semantic weight/fallback fields and per-hit retrieval
+details are omitted from the canonical SDK response.
 
 ## Example
 
