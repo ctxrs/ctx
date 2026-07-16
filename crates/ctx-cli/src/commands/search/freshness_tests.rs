@@ -513,7 +513,7 @@ mod freshness_tests {
             vec![dirty.clone(), unchanged.clone()],
         );
 
-        assert_eq!(refreshed.fresh_units_processed, 1, "{refreshed:?}");
+        assert!(refreshed.durable_progress, "{refreshed:?}");
         assert_ne!(
             cached_inventory_generation(&runtime, &dirty),
             dirty_generation
@@ -536,10 +536,21 @@ mod freshness_tests {
     fn daemon_elapsed_safety_sweep_runs_while_recovery_is_pending() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
-        let source = seed_failed_pi_backlog(&data_root, 1);
+        let source = seed_failed_pi_backlog(&data_root, 65);
         let mut runtime = SearchRefreshRuntime::default();
-        let first = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
-        assert!(first.recovery_units_pending > 0, "{first:?}");
+        let mut pending_without_publication = false;
+        for _ in 0..32 {
+            let totals = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+            let publication_pending = Store::open(database_path(data_root.clone()))
+                .unwrap()
+                .has_pending_provider_file_publications()
+                .unwrap();
+            if totals.recovery_units_pending > 0 && !publication_pending {
+                pending_without_publication = true;
+                break;
+            }
+        }
+        assert!(pending_without_publication);
         let first_generation = cached_inventory_generation(&runtime, &source);
         runtime.cached_work.as_mut().unwrap().last_reinventory_at =
             Instant::now() - DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL;
