@@ -527,6 +527,7 @@ dependencies = [
  "chrono",
  "ctx-history-core",
  "ctx-history-store",
+ "ctx-protocol",
  "regex",
  "serde",
  "serde_json",

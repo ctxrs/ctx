@@ -1,10 +1,17 @@
 use chrono::Utc;
 use ctx_history_core::EventType;
+use ctx_protocol::{
+    search_analyzed_tokens, SearchClause, SearchEnvelopeError, SearchQueryError,
+    SearchSemanticReadiness,
+};
 use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::snippets::non_blank;
+use crate::SearchExecutionDiagnostics;
+
+pub const SEARCH_BUDGET_EXHAUSTED_ERROR_CODE: &str = "search_budget_exhausted";
 
 pub const DEFAULT_RESULT_LIMIT: usize = 10;
 pub const MAX_RESULT_LIMIT: usize = 200;
@@ -17,6 +24,25 @@ pub(crate) const FILTERED_SEARCH_MAX_PAGES: usize = 20;
 pub enum SearchError {
     #[error("store error: {0}")]
     Store(#[from] ctx_history_store::StoreError),
+    #[error("invalid structured search query: {0}")]
+    Query(#[from] SearchQueryError),
+    #[error("invalid structured search envelope: {0}")]
+    Envelope(#[from] SearchEnvelopeError),
+    #[error("explicit semantic search requires ready candidates; readiness is {readiness:?}")]
+    SemanticNotReady { readiness: SearchSemanticReadiness },
+    #[error("semantic candidate has invalid ctx event id {0:?}")]
+    InvalidSemanticCandidateId(String),
+    #[error("failed to serialize bounded search response: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("serialized search envelope exceeds its {maximum} byte budget without results")]
+    ResponseEnvelopeTooLarge { maximum: usize },
+    #[error(
+        "{SEARCH_BUDGET_EXHAUSTED_ERROR_CODE}: structured search timed out after {timeout_ms}ms"
+    )]
+    TimedOut {
+        timeout_ms: u64,
+        diagnostics: Box<SearchExecutionDiagnostics>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, SearchError>;
@@ -137,4 +163,40 @@ pub(crate) fn query_terms(query: &str) -> Vec<String> {
         terms.push(term);
     }
     terms
+}
+
+pub(crate) fn clause_matches_text(clause: &SearchClause, text: &str) -> bool {
+    match clause {
+        SearchClause::All(value) => {
+            let needle = analyzed_sequence(value);
+            let haystack = analyzed_sequence(text);
+            !needle.is_empty()
+                && needle.iter().all(|term| {
+                    if term.is_ascii() {
+                        haystack.iter().any(|candidate| candidate == term)
+                    } else {
+                        haystack.iter().any(|candidate| candidate.contains(term))
+                    }
+                })
+        }
+        SearchClause::Phrase(value) => {
+            let needle = analyzed_sequence(value);
+            let haystack = analyzed_sequence(text);
+            if needle.len() == 1 && !needle[0].is_ascii() {
+                return haystack
+                    .iter()
+                    .any(|candidate| candidate.contains(&needle[0]));
+            }
+            !needle.is_empty()
+                && haystack
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_slice())
+        }
+        SearchClause::Literal(value) => text.contains(value),
+        SearchClause::Semantic(_) => false,
+    }
+}
+
+fn analyzed_sequence(value: &str) -> Vec<String> {
+    search_analyzed_tokens(value)
 }
