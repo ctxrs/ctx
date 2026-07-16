@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     fmt,
     sync::{Arc, Condvar, Mutex, MutexGuard},
@@ -62,10 +60,6 @@ impl SemanticQueryPriorityInner {
 }
 
 impl SemanticQueryPriorityGate {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     // Call only after the complete request has been read and authenticated.
     // The gate mutex is released before this returns, so embedder and store
     // locks can be acquired while the permit is held without lock inversion.
@@ -135,22 +129,6 @@ impl SemanticQueryPriorityGate {
         state.generation = state.generation.wrapping_add(1);
         drop(state);
         Ok(SemanticDocumentBatchPermit {
-            inner: self.inner.clone(),
-        })
-    }
-
-    pub(crate) fn try_begin_document_batch(&self) -> Option<SemanticDocumentBatchPermit> {
-        let mut state = self.inner.state();
-        if state.document_batch_active
-            || state.waiting_foreground_queries > 0
-            || state.active_foreground_queries > 0
-        {
-            return None;
-        }
-        state.document_batch_active = true;
-        state.generation = state.generation.wrapping_add(1);
-        drop(state);
-        Some(SemanticDocumentBatchPermit {
             inner: self.inner.clone(),
         })
     }

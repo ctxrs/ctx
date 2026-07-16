@@ -237,58 +237,6 @@ fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
     Ok(sql)
 }
 
-fn semantic_query_text(query: &str, terms: &[String]) -> String {
-    let mut parts = Vec::new();
-    if !query.trim().is_empty() {
-        parts.push(query.trim().to_owned());
-    }
-    parts.extend(
-        terms
-            .iter()
-            .map(|term| term.trim())
-            .filter(|term| !term.is_empty())
-            .map(str::to_owned),
-    );
-    parts.join(" ")
-}
-
-fn semantic_filters_need_overfetch(filters: &ctx_history_search::SearchFilters) -> bool {
-    semantic_filters_require_lexical_fallback(filters)
-        || !filters.include_subagents
-        || filters.exclude_provider_session.is_some()
-}
-
-fn semantic_filters_require_lexical_fallback(filters: &ctx_history_search::SearchFilters) -> bool {
-    filters.session.is_some()
-        || filters.provider.is_some()
-        || filters.history_source.is_some()
-        || filters.provider_key.is_some()
-        || filters.source_id.is_some()
-        || filters.source_format.is_some()
-        || filters
-            .repo
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || filters.since.is_some()
-        || filters.primary_only
-        || filters.event_type.is_some()
-        || filters
-            .file
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-}
-
-fn semantic_hybrid_coverage_ready(
-    embedded_items: usize,
-    searchable_items: usize,
-    dirty_items: usize,
-) -> bool {
-    if searchable_items == 0 {
-        return true;
-    }
-    embedded_items >= searchable_items && dirty_items == 0
-}
-
 fn semantic_status_needs_exact_sidecar_stats(
     searchable_items: usize,
     dirty_items: usize,
@@ -298,77 +246,6 @@ fn semantic_status_needs_exact_sidecar_stats(
         return false;
     }
     stats.embedded_items >= searchable_items
-}
-
-fn semantic_hits_for_text_query(
-    data_root: &Path,
-    store: &Store,
-    vector_store: &SemanticVectorStore,
-    semantic_text: &str,
-    limit: usize,
-    event_filter: Option<&[Uuid]>,
-) -> Result<(
-    Vec<ctx_history_search::SemanticEventHit>,
-    SemanticRetrievalDiagnostics,
-)> {
-    let (query_embedding, query_embed_ms) = daemon_query_embedding(data_root, semantic_text)?
-        .ok_or_else(|| anyhow!("daemon semantic query service is not available"))?;
-    let semantic_hit_search =
-        semantic_hits_for_query(store, vector_store, &query_embedding, limit, event_filter)?;
-    let mut diagnostics = semantic_hit_search.diagnostics;
-    diagnostics.query_embed_ms = Some(query_embed_ms);
-    Ok((semantic_hit_search.hits, diagnostics))
-}
-
-fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Option<(Vec<f32>, u64)>> {
-    let Some(response) = daemon_query_request(
-        data_root,
-        compact_json(json!({
-            "schema_version": 1,
-            "op": "embed_query",
-            "model_key": semantic_model_key(),
-            "text": semantic_text,
-        })),
-        StdDuration::from_secs(30),
-        1024 * 1024,
-    )? else {
-        return Ok(None);
-    };
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        let message = response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("daemon query failed");
-        return Err(anyhow!("{message}"));
-    }
-    let model_key = response.get("model_key").and_then(Value::as_str).unwrap_or("");
-    if model_key != semantic_model_key() {
-        return Err(anyhow!("daemon query response model key mismatch"));
-    }
-    let query_embed_ms = response
-        .get("query_embed_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let embedding = response
-        .get("embedding")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("daemon query response missing embedding"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_f64()
-                .map(|value| value as f32)
-                .ok_or_else(|| anyhow!("daemon query embedding contains a non-number"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if embedding.len() != SEMANTIC_DIMENSIONS {
-        return Err(anyhow!(
-            "daemon query embedding returned {} dimensions, expected {}",
-            embedding.len(),
-            SEMANTIC_DIMENSIONS
-        ));
-    }
-    Ok(Some((embedding, query_embed_ms)))
 }
 
 #[cfg(ctx_semantic_fastembed)]

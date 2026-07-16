@@ -123,6 +123,34 @@ fn daemon_query_request(
     Ok(Some(response))
 }
 
+fn daemon_semantic_query_request(
+    data_root: &Path,
+    request: query_service_contract::SemanticQueryServiceRequest,
+    timeout: StdDuration,
+) -> Result<Option<query_service_contract::SemanticQueryServiceResponse>> {
+    request
+        .validate_for_model(semantic_model_key())
+        .context("validate semantic query request")?;
+    let request_value = serde_json::to_value(&request).context("serialize semantic query request")?;
+    let Some(response_value) = daemon_query_request(
+        data_root,
+        request_value,
+        timeout,
+        ctx_protocol::SEARCH_MAX_SERIALIZED_RESPONSE_BYTES as u64,
+    )?
+    else {
+        return Ok(None);
+    };
+    let response = serde_json::from_value::<
+        query_service_contract::SemanticQueryServiceResponse,
+    >(response_value)
+    .context("parse typed semantic query response")?;
+    response
+        .validate_for_request(&request, semantic_model_key())
+        .context("validate typed semantic query response")?;
+    Ok(Some(response))
+}
+
 fn daemon_query_roundtrip(
     endpoint: &DaemonQueryEndpoint,
     request: &[u8],

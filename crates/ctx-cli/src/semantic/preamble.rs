@@ -147,12 +147,9 @@ impl std::error::Error for SemanticModelLoadDeferred {}
 fn semantic_model_key() -> &'static str {
     SEMANTIC_MODEL_KEY
 }
-const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
-const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
 const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
-const SEMANTIC_VECTOR_OVERFETCH: usize = 4;
 const SEMANTIC_FULL_SCAN_MAX_CHUNKS: usize = 250_000;
 const SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES: usize = 512 * 1024 * 1024;
 const SEMANTIC_VECTOR_BACKEND_RUST: &str = "rust_blob_scan";
@@ -335,10 +332,7 @@ pub(crate) fn semantic_worker_report_configured_json(
 pub(crate) struct SemanticRetrievalReport {
     requested_mode: SearchBackendArg,
     effective_mode: SearchBackendArg,
-    semantic_weight: f32,
     semantic_status: &'static str,
-    semantic_fallback_code: Option<&'static str>,
-    semantic_fallback: Option<String>,
     embedding_model: Option<String>,
     embedded_items: usize,
     embedded_chunks: usize,
@@ -346,7 +340,8 @@ pub(crate) struct SemanticRetrievalReport {
     indexed_now: usize,
     vector_path: Option<PathBuf>,
     worker: Option<SemanticWorkerReport>,
-    diagnostics: Option<SemanticRetrievalDiagnostics>,
+    readiness: Option<readiness::SemanticReadinessDiagnostics>,
+    diagnostics: Option<readiness::SemanticRetrievalDiagnostics>,
 }
 
 impl SemanticRetrievalReport {
@@ -354,10 +349,7 @@ impl SemanticRetrievalReport {
         Self {
             requested_mode,
             effective_mode: SearchBackendArg::Lexical,
-            semantic_weight: 0.0,
             semantic_status: "skipped",
-            semantic_fallback_code: None,
-            semantic_fallback: None,
             embedding_model: None,
             embedded_items: 0,
             embedded_chunks: 0,
@@ -365,6 +357,7 @@ impl SemanticRetrievalReport {
             indexed_now: 0,
             vector_path: None,
             worker: None,
+            readiness: None,
             diagnostics: None,
         }
     }
@@ -380,19 +373,11 @@ impl SemanticRetrievalReport {
         self.semantic_status = semantic_status_from_worker(worker);
     }
 
-    fn set_semantic_fallback(&mut self, code: &'static str, message: impl Into<String>) {
-        self.semantic_fallback_code = Some(code);
-        self.semantic_fallback = Some(message.into());
-    }
-
     pub(crate) fn to_json(&self) -> Value {
         compact_json(json!({
             "requested_mode": self.requested_mode.as_str(),
             "effective_mode": self.effective_mode.as_str(),
-            "semantic_weight": self.semantic_weight,
             "semantic_status": self.semantic_status,
-            "semantic_fallback_code": self.semantic_fallback_code,
-            "semantic_fallback": self.semantic_fallback,
             "embedding_model": self.embedding_model,
             "coverage": {
                 "embedded_items": self.embedded_items,
@@ -404,7 +389,8 @@ impl SemanticRetrievalReport {
             },
             "vector_path": self.vector_path.as_ref().map(|path| path.display().to_string()),
             "worker": self.worker.as_ref().map(SemanticWorkerReport::to_json),
-            "diagnostics": self.diagnostics.as_ref().map(SemanticRetrievalDiagnostics::to_json),
+            "readiness": self.readiness.as_ref().and_then(|value| serde_json::to_value(value).ok()),
+            "diagnostics": self.diagnostics.as_ref().and_then(|value| serde_json::to_value(value).ok()),
         }))
     }
 
@@ -430,459 +416,367 @@ fn semantic_worker_coverage_ready(worker: &SemanticWorkerReport) -> bool {
         && worker.dirty_items == 0
 }
 
-#[derive(Debug, Clone, Default)]
-struct SemanticRetrievalDiagnostics {
-    vector_backend: Option<&'static str>,
-    query_embed_ms: Option<u64>,
-    vector_scan_ms: Option<u64>,
-    chunks_scanned: Option<usize>,
-    vector_bytes_read: Option<usize>,
-    events_scored: Option<usize>,
-    hydration_ms: Option<u64>,
-    stale_events_dropped: Option<usize>,
-    semantic_candidates: Option<usize>,
-}
-
-impl SemanticRetrievalDiagnostics {
-    fn to_json(&self) -> Value {
-        compact_json(json!({
-            "vector_backend": self.vector_backend,
-            "query_embed_ms": self.query_embed_ms,
-            "vector_scan_ms": self.vector_scan_ms,
-            "chunks_scanned": self.chunks_scanned,
-            "vector_bytes_read": self.vector_bytes_read,
-            "events_scored": self.events_scored,
-            "hydration_ms": self.hydration_ms,
-            "stale_events_dropped": self.stale_events_dropped,
-            "semantic_candidates": self.semantic_candidates,
-        }))
+pub(crate) fn search_packet_file_filter_with_backend(
+    store: &Store,
+    options: &ctx_history_search::PacketOptions,
+    requested_backend: SearchBackendArg,
+    _emit_warnings: bool,
+) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
+    if requested_backend == SearchBackendArg::Semantic {
+        return Err(anyhow!(
+            "the semantic backend requires one explicit --semantic clause"
+        ));
     }
+
+    let mut packet = ctx_history_search::search_packet_file_filter(store, options)?;
+    packet.query_execution.semantic.effective_backend =
+        ctx_protocol::SearchEffectiveBackend::Lexical;
+    packet.query_execution.semantic.completeness =
+        ctx_protocol::SearchSemanticCompleteness::NotAttempted;
+    packet.query_execution.semantic.skip_reason = Some(if requested_backend
+        == SearchBackendArg::Hybrid
+    {
+        ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible
+    } else {
+        ctx_protocol::SearchSemanticSkipReason::Disabled
+    });
+    packet.query_execution.semantic.positive_text_rule_version =
+        ctx_protocol::SEARCH_POSITIVE_TEXT_RULE_VERSION.to_owned();
+
+    Ok((
+        packet,
+        SemanticRetrievalReport::lexical(requested_backend, 0),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn search_packet_with_backend(
+pub(crate) fn search_packet_query_with_backend(
     store: &Store,
     data_root: &Path,
-    query: &str,
-    terms: &[String],
+    query: &ctx_protocol::SearchQuery,
     options: &ctx_history_search::PacketOptions,
     requested_backend: SearchBackendArg,
     semantic_enabled: bool,
-    semantic_weight: f32,
     _refresh_mode: RefreshArg,
     emit_warnings: bool,
 ) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
-    let uses_composed_terms = terms.iter().any(|term| !term.trim().is_empty());
-    let semantic_text = semantic_query_text(query, terms);
-    let mut effective_backend = requested_backend;
-
-    let filters_require_semantic_fallback =
-        matches!(
-            effective_backend,
-            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-        ) && semantic_filters_require_lexical_fallback(&options.filters);
-    let terms_require_semantic_fallback = matches!(
-        effective_backend,
-        SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-    ) && uses_composed_terms;
-    if filters_require_semantic_fallback && requested_backend == SearchBackendArg::Semantic {
+    let query = query.clone().canonicalized().map_err(|error| anyhow!(error))?;
+    let explicit_semantic = query.explicit_semantic_text();
+    if requested_backend == SearchBackendArg::Lexical && explicit_semantic.is_some() {
         return Err(anyhow!(
-            "semantic search does not yet support these filters; use --backend hybrid or --backend lexical"
+            "the lexical backend does not support an explicit semantic clause"
         ));
     }
-    if terms_require_semantic_fallback && requested_backend == SearchBackendArg::Semantic {
+    if requested_backend == SearchBackendArg::Semantic && explicit_semantic.is_none() {
         return Err(anyhow!(
-            "semantic search does not yet preserve --term OR semantics; use --backend hybrid or --backend lexical"
+            "the semantic backend requires one explicit --semantic clause"
         ));
     }
-    if filters_require_semantic_fallback || terms_require_semantic_fallback {
-        effective_backend = SearchBackendArg::Lexical;
+
+    let worker = semantic_worker_report_cached(data_root, Some(store))?;
+    let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
+    retrieval.worker = Some(worker.clone());
+    retrieval.apply_worker_coverage(&worker);
+    retrieval.vector_path = Some(semantic_vector_path(data_root));
+
+    if requested_backend == SearchBackendArg::Lexical {
+        let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
+        envelope.semantic_policy = ctx_protocol::SearchSemanticPolicy::Disabled;
+        let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+        return Ok((packet, retrieval));
     }
 
-    let lexical_search_packet = || -> Result<ctx_history_search::SearchPacket> {
-        if uses_composed_terms {
-            ctx_history_search::search_packet_terms(store, query, terms, options)
-                .map_err(Into::into)
-        } else {
-            ctx_history_search::search_packet(store, query, options).map_err(Into::into)
+    let request_mode = if explicit_semantic.is_some() {
+        readiness::SemanticRetrievalRequestMode::ExplicitSemantic
+    } else {
+        readiness::SemanticRetrievalRequestMode::AutomaticRerank
+    };
+    let semantic_text = match request_mode {
+        readiness::SemanticRetrievalRequestMode::ExplicitSemantic => {
+            explicit_semantic.unwrap_or_default().to_owned()
+        }
+        readiness::SemanticRetrievalRequestMode::AutomaticRerank => {
+            let Some(text) = query.automatic_rerank_text() else {
+                let envelope = ctx_protocol::SearchRequestEnvelope::new(query);
+                let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+                retrieval.semantic_status = "skipped";
+                return Ok((packet, retrieval));
+            };
+            text
         }
     };
 
-    if !semantic_enabled
-        && matches!(
-            requested_backend,
-            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-        )
-    {
-        if requested_backend == SearchBackendArg::Semantic {
-            return Err(anyhow!(
-                "semantic search is disabled. Set [search] semantic = true in ctx config to enable the local semantic preview"
-            ));
-        }
-        let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, 0);
-        retrieval.effective_mode = SearchBackendArg::Lexical;
-        retrieval.semantic_weight = 0.0;
-        retrieval.semantic_status = "disabled";
-        retrieval.set_semantic_fallback(
+    if !semantic_enabled {
+        return semantic_query_unavailable(
+            store,
+            data_root,
+            query,
+            options,
+            retrieval,
+            request_mode,
+            ctx_protocol::SearchSemanticReadiness::NotReady,
             "semantic_disabled",
             "local semantic search is disabled by configuration",
-        );
-        warn_if(
             emit_warnings,
-            "warning: local semantic search is disabled; falling back to lexical search",
-        );
-        return Ok((lexical_search_packet()?, retrieval));
-    }
-
-    if !semantic_query_service_supported()
-        && matches!(
-            requested_backend,
-            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-        )
-    {
-        if requested_backend == SearchBackendArg::Semantic {
-            return Err(anyhow!(
-                "local semantic search is not supported on this platform yet"
-            ));
-        }
-        let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, 0);
-        retrieval.effective_mode = SearchBackendArg::Lexical;
-        retrieval.semantic_weight = 0.0;
-        retrieval.semantic_status = "unavailable";
-        retrieval.set_semantic_fallback(
-            "unsupported_platform",
-            "local semantic search is not supported on this platform yet",
-        );
-        warn_if(
-            emit_warnings,
-            "warning: local semantic search is not supported on this platform; falling back to lexical search",
-        );
-        return Ok((lexical_search_packet()?, retrieval));
-    }
-
-    let semantic_cache_dir = semantic_worker_cache_dir(data_root);
-    let vector_path = semantic_vector_path(data_root);
-
-    let worker_report = if matches!(
-        effective_backend,
-        SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-    ) {
-        semantic_worker_report_cached(data_root, Some(store))?
-    } else {
-        semantic_worker_report_best_effort(data_root)
-    };
-    let searchable_items = worker_report.searchable_items;
-    let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, searchable_items);
-    retrieval.worker = Some(worker_report.clone());
-    retrieval.apply_worker_counts(&worker_report);
-    if matches!(
-        requested_backend,
-        SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-    ) {
-        retrieval.apply_worker_coverage(&worker_report);
-    }
-
-    if matches!(
-        effective_backend,
-        SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-    ) && semantic_text.trim().is_empty()
-    {
-        return Err(anyhow!(
-            "semantic search needs a text query; add a query or --term"
-        ));
-    }
-
-    if filters_require_semantic_fallback
-        && matches!(
-            requested_backend,
-            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-        )
-    {
-        retrieval.set_semantic_fallback(
-            "filtered_vector_lookup_unsupported",
-            "semantic search does not yet support filtered vector lookup",
-        );
-        warn_if(
-            emit_warnings,
-            "warning: semantic search does not yet support these filters; falling back to lexical search",
-        );
-    } else if terms_require_semantic_fallback
-        && matches!(
-            requested_backend,
-            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-        )
-    {
-        retrieval.set_semantic_fallback(
-            "term_or_semantics_unsupported",
-            "semantic search does not yet preserve --term OR semantics",
-        );
-        warn_if(
-            emit_warnings,
-            "warning: semantic search does not yet preserve --term OR semantics; falling back to lexical search",
         );
     }
-
-    let packet = if matches!(
-        effective_backend,
-        SearchBackendArg::Semantic | SearchBackendArg::Hybrid
-    ) {
-        semantic_or_hybrid_search_packet(
-            data_root,
+    if !semantic_query_service_supported() {
+        return semantic_query_unavailable(
             store,
+            data_root,
+            query,
             options,
-            &lexical_search_packet,
-            &mut retrieval,
-            &worker_report,
-            &vector_path,
-            &semantic_cache_dir,
-            &semantic_text,
-            effective_backend,
-            semantic_weight,
+            retrieval,
+            request_mode,
+            ctx_protocol::SearchSemanticReadiness::Unsupported,
+            "unsupported_platform",
+            "local semantic search is not supported on this platform",
             emit_warnings,
-        )?
-    } else {
-        lexical_search_packet()?
-    };
+        );
+    }
 
+    let candidate_ids = if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank {
+        let mut lexical_envelope = ctx_protocol::SearchRequestEnvelope::new(query.clone());
+        lexical_envelope.semantic_policy = ctx_protocol::SearchSemanticPolicy::Disabled;
+        let lexical_packet =
+            ctx_history_search::search_packet_envelope(store, &lexical_envelope, options)?;
+        let ids = lexical_packet
+            .results
+            .iter()
+            .filter_map(|result| result.event_id)
+            .take(ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED)
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
+            envelope.semantic = Some(ctx_protocol::SearchSemanticInput {
+                readiness: ctx_protocol::SearchSemanticReadiness::Ready,
+                ..ctx_protocol::SearchSemanticInput::default()
+            });
+            let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+            retrieval.semantic_status = "ready";
+            return Ok((packet, retrieval));
+        }
+        Some(ids)
+    } else {
+        None
+    };
+    let hit_limit = candidate_ids
+        .as_ref()
+        .map(Vec::len)
+        .unwrap_or(ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED)
+        .clamp(1, ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED);
+    let mut clause = query_service_contract::SemanticQueryClauseRequest::new(
+        0,
+        semantic_text,
+        hit_limit,
+    );
+    if let Some(candidate_ids) = candidate_ids {
+        clause = clause.with_candidate_event_ids(candidate_ids);
+    }
+    let request = query_service_contract::SemanticQueryServiceRequest::new(
+        semantic_model_key(),
+        request_mode,
+        vec![clause],
+    );
+    let response = match daemon_semantic_query_request(
+        data_root,
+        request,
+        StdDuration::from_secs(30),
+    ) {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            return semantic_query_unavailable(
+                store,
+                data_root,
+                query,
+                options,
+                retrieval,
+                request_mode,
+                ctx_protocol::SearchSemanticReadiness::Unavailable,
+                "daemon_query_service_unavailable",
+                "daemon semantic query service is not available",
+                emit_warnings,
+            );
+        }
+        Err(error) => {
+            return semantic_query_unavailable(
+                store,
+                data_root,
+                query,
+                options,
+                retrieval,
+                request_mode,
+                ctx_protocol::SearchSemanticReadiness::Unavailable,
+                "semantic_retrieval_failed",
+                &format!("daemon semantic retrieval failed: {error:#}"),
+                emit_warnings,
+            );
+        }
+    };
+    retrieval.readiness = response.readiness.clone();
+    if !response.ok {
+        let failure = response.error.as_ref().ok_or_else(|| {
+            anyhow!("typed semantic query failure did not include an error")
+        })?;
+        let message = format!("{} ({:?})", failure.message, failure.code);
+        return semantic_query_unavailable(
+            store,
+            data_root,
+            query,
+            options,
+            retrieval,
+            request_mode,
+            semantic_protocol_readiness(response.readiness.as_ref()),
+            semantic_failure_code(failure.code),
+            &message,
+            emit_warnings,
+        );
+    }
+
+    let clause = response
+        .clauses
+        .first()
+        .ok_or_else(|| anyhow!("semantic query response did not contain a clause"))?;
+    retrieval.diagnostics = Some(clause.diagnostics.clone());
+    retrieval.embedding_model = Some(SEMANTIC_MODEL_ID.to_owned());
+    retrieval.semantic_status = semantic_readiness_status(response.readiness.as_ref());
+    let semantic_input = semantic_protocol_input(&response, clause);
+    let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
+    envelope.semantic_policy = if request_mode
+        == readiness::SemanticRetrievalRequestMode::AutomaticRerank
+    {
+        ctx_protocol::SearchSemanticPolicy::AutomaticRerank
+    } else {
+        ctx_protocol::SearchSemanticPolicy::Disabled
+    };
+    envelope.semantic = Some(semantic_input);
+    let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+    retrieval.effective_mode = match packet.query_execution.semantic.effective_backend {
+        ctx_protocol::SearchEffectiveBackend::Semantic => SearchBackendArg::Semantic,
+        ctx_protocol::SearchEffectiveBackend::Hybrid => SearchBackendArg::Hybrid,
+        _ => SearchBackendArg::Lexical,
+    };
     Ok((packet, retrieval))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn semantic_or_hybrid_search_packet(
-    data_root: &Path,
+fn semantic_query_unavailable(
     store: &Store,
+    data_root: &Path,
+    query: ctx_protocol::SearchQuery,
     options: &ctx_history_search::PacketOptions,
-    lexical_search_packet: &dyn Fn() -> Result<ctx_history_search::SearchPacket>,
-    retrieval: &mut SemanticRetrievalReport,
-    worker_report: &SemanticWorkerReport,
-    vector_path: &Path,
-    semantic_cache_dir: &Path,
-    semantic_text: &str,
-    effective_backend: SearchBackendArg,
-    semantic_weight: f32,
+    mut retrieval: SemanticRetrievalReport,
+    request_mode: readiness::SemanticRetrievalRequestMode,
+    readiness: ctx_protocol::SearchSemanticReadiness,
+    code: &'static str,
+    message: &str,
     emit_warnings: bool,
-) -> Result<ctx_history_search::SearchPacket> {
-    match SemanticVectorStore::open_read_only(vector_path) {
-        Ok(Some(vector_store)) => {
-            *retrieval = SemanticRetrievalReport {
-                requested_mode: retrieval.requested_mode,
-                effective_mode: effective_backend,
-                semantic_weight: if effective_backend == SearchBackendArg::Hybrid {
-                    semantic_weight
-                } else {
-                    1.0
-                },
-                semantic_status: semantic_status_from_worker(worker_report),
-                semantic_fallback_code: None,
-                semantic_fallback: None,
-                embedding_model: Some(SEMANTIC_MODEL_ID.to_owned()),
-                embedded_items: worker_report.embedded_items,
-                embedded_chunks: worker_report.embedded_chunks,
-                searchable_items: worker_report.searchable_items,
-                indexed_now: 0,
-                vector_path: Some(vector_path.to_path_buf()),
-                worker: Some(worker_report.clone()),
-                diagnostics: None,
-            };
+) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
+    if request_mode == readiness::SemanticRetrievalRequestMode::ExplicitSemantic {
+        return Err(anyhow!("explicit semantic unavailable [{code}]: {message}"));
+    }
+    retrieval.effective_mode = SearchBackendArg::Lexical;
+    retrieval.embedding_model = None;
+    retrieval.semantic_status = match readiness {
+        ctx_protocol::SearchSemanticReadiness::Unsupported => "unsupported",
+        ctx_protocol::SearchSemanticReadiness::NotReady => "not_ready",
+        _ => "unavailable",
+    };
+    let readiness_diagnostics = retrieval.readiness.clone().or_else(|| {
+        retrieval
+            .worker
+            .as_ref()
+            .map(|worker| semantic_readiness_for_status(data_root, worker))
+    });
+    retrieval.diagnostics = readiness_diagnostics.as_ref().map(|readiness| {
+        readiness::SemanticRetrievalDiagnostics::automatic_fallback(readiness, true)
+    });
+    warn_if(
+        emit_warnings,
+        "warning: semantic reranking is unavailable; returning unchanged lexical results",
+    );
+    let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
+    envelope.semantic = Some(ctx_protocol::SearchSemanticInput {
+        readiness,
+        ..ctx_protocol::SearchSemanticInput::default()
+    });
+    let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+    Ok((packet, retrieval))
+}
 
-            if worker_report.embedded_items == 0 {
-                if effective_backend == SearchBackendArg::Semantic {
-                    if !worker_report.model_cache_available
-                        || !semantic_model_cache_available(semantic_cache_dir)
-                    {
-                        return Err(anyhow!(
-                            "semantic index has no embedded event chunks and semantic model is not available in the local cache; semantic-only search will not initialize or download {SEMANTIC_MODEL_ID} during search"
-                        ));
-                    }
-                    return Err(anyhow!(
-                        "semantic index has no embedded event chunks yet; ctx search does not start semantic indexing"
-                    ));
-                }
-                retrieval.effective_mode = SearchBackendArg::Lexical;
-                retrieval.semantic_weight = 0.0;
-                retrieval.embedding_model = None;
-                retrieval.set_semantic_fallback(
-                    "semantic_index_empty",
-                    "semantic index has no embedded event chunks",
-                );
-                warn_if(
-                    emit_warnings,
-                    "warning: semantic index is empty; falling back to lexical search",
-                );
-                return lexical_search_packet();
-            }
+fn semantic_protocol_input(
+    response: &query_service_contract::SemanticQueryServiceResponse,
+    clause: &query_service_contract::SemanticQueryClauseResponse,
+) -> ctx_protocol::SearchSemanticInput {
+    let readiness = response.readiness.as_ref();
+    ctx_protocol::SearchSemanticInput {
+        readiness: semantic_protocol_readiness(readiness),
+        backend: clause.diagnostics.vector_backend.clone(),
+        candidates: clause
+            .hits
+            .iter()
+            .map(|hit| ctx_protocol::SearchSemanticCandidate {
+                ctx_event_id: hit.event_id.to_string(),
+            })
+            .collect(),
+        indexed_documents: readiness.map(|value| value.coverage.indexed_items as u64),
+        searchable_documents: readiness
+            .and_then(|value| value.coverage.searchable_items)
+            .map(|value| value as u64),
+        coverage_complete: readiness.is_some_and(|value| value.coverage.is_complete()),
+    }
+}
 
-            if effective_backend == SearchBackendArg::Hybrid
-                && (!worker_report.searchable_items_known
-                    || !semantic_hybrid_coverage_ready(
-                        worker_report.embedded_items,
-                        worker_report.searchable_items,
-                        worker_report.dirty_items,
-                    ))
-            {
-                retrieval.effective_mode = SearchBackendArg::Lexical;
-                retrieval.semantic_weight = 0.0;
-                retrieval.embedding_model = None;
-                if worker_report.searchable_items_known {
-                    retrieval.set_semantic_fallback(
-                        "semantic_coverage_not_ready",
-                        format!(
-                            "semantic coverage is incomplete or dirty for hybrid ranking ({}/{} items embedded, {} dirty)",
-                            worker_report.embedded_items,
-                            worker_report.searchable_items,
-                            worker_report.dirty_items
-                        ),
-                    );
-                } else {
-                    retrieval.set_semantic_fallback(
-                        "semantic_coverage_unknown",
-                        "semantic coverage is not cached yet; wait for the daemon to refresh indexing status",
-                    );
-                }
-                warn_if(
-                    emit_warnings,
-                    "warning: semantic coverage is incomplete or dirty for hybrid ranking; falling back to lexical search",
-                );
-                return lexical_search_packet();
-            }
-
-            if !worker_report.model_cache_available
-                || !semantic_model_cache_available(semantic_cache_dir)
-            {
-                if effective_backend == SearchBackendArg::Semantic {
-                    return Err(anyhow!(
-                        "semantic model is not available in the local cache; semantic-only search will not initialize or download {SEMANTIC_MODEL_ID} during search"
-                    ));
-                }
-                retrieval.effective_mode = SearchBackendArg::Lexical;
-                retrieval.semantic_weight = 0.0;
-                retrieval.embedding_model = None;
-                retrieval.set_semantic_fallback(
-                    "model_cache_missing",
-                    "semantic model is not available in the local cache",
-                );
-                warn_if(
-                    emit_warnings,
-                    "warning: semantic model is not available in the local cache; falling back to lexical search",
-                );
-                return lexical_search_packet();
-            }
-
-            if !daemon_query_service_available(data_root) {
-                let message = "daemon semantic query service is not available; run `ctx daemon run` or use the default background refresh mode to start it";
-                if effective_backend == SearchBackendArg::Semantic {
-                    return Err(anyhow!("{message}"));
-                }
-                retrieval.effective_mode = SearchBackendArg::Lexical;
-                retrieval.semantic_weight = 0.0;
-                retrieval.embedding_model = None;
-                retrieval.semantic_status = "unavailable";
-                retrieval.set_semantic_fallback("daemon_query_service_unavailable", message);
-                warn_if(
-                    emit_warnings,
-                    "warning: daemon semantic query service is not available; falling back to lexical search",
-                );
-                return lexical_search_packet();
-            }
-
-            let semantic_candidate_limit = if semantic_filters_need_overfetch(&options.filters) {
-                SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES.max(options.limit.saturating_mul(100))
-            } else {
-                SEMANTIC_SEARCH_CANDIDATES.max(options.limit.saturating_mul(8))
-            };
-            match semantic_hits_for_text_query(
-                data_root,
-                store,
-                &vector_store,
-                semantic_text,
-                semantic_candidate_limit,
-                None,
-            ) {
-                Ok((semantic_hits, diagnostics)) => {
-                    retrieval.diagnostics = Some(diagnostics);
-                    ctx_history_search::semantic_event_search_packet(
-                        store,
-                        semantic_text,
-                        options,
-                        &semantic_hits,
-                        semantic_weight,
-                        effective_backend == SearchBackendArg::Hybrid,
-                    )
-                    .map_err(Into::into)
-                }
-                Err(error) => {
-                    let error_message = format!("{error:#}");
-                    if effective_backend == SearchBackendArg::Semantic {
-                        return Err(anyhow!("semantic search failed: {error_message}"));
-                    }
-                    retrieval.effective_mode = SearchBackendArg::Lexical;
-                    retrieval.semantic_weight = 0.0;
-                    retrieval.embedding_model = None;
-                    retrieval.semantic_status = "unavailable";
-                    retrieval.diagnostics = None;
-                    if error_message.contains("daemon query")
-                        || error_message.contains("daemon semantic query service")
-                    {
-                        retrieval.set_semantic_fallback(
-                            "daemon_query_service_unavailable",
-                            format!("daemon semantic query service failed: {error_message}"),
-                        );
-                    } else {
-                        retrieval.set_semantic_fallback(
-                            "semantic_retrieval_failed",
-                            format!("semantic retrieval failed: {error_message}"),
-                        );
-                    }
-                    warn_if(
-                        emit_warnings,
-                        "warning: semantic retrieval failed; falling back to lexical search",
-                    );
-                    lexical_search_packet()
-                }
-            }
+fn semantic_protocol_readiness(
+    readiness: Option<&readiness::SemanticReadinessDiagnostics>,
+) -> ctx_protocol::SearchSemanticReadiness {
+    match readiness {
+        Some(value) if value.retrieval_available => ctx_protocol::SearchSemanticReadiness::Ready,
+        Some(value) if value.state == readiness::SemanticReadinessState::Unsupported => {
+            ctx_protocol::SearchSemanticReadiness::Unsupported
         }
-        Ok(None) => {
-            if effective_backend == SearchBackendArg::Semantic {
-                if !worker_report.model_cache_available
-                    || !semantic_model_cache_available(semantic_cache_dir)
-                {
-                    return Err(anyhow!(
-                        "semantic index is not available yet and semantic model is not available in the local cache; semantic-only search will not initialize or download {SEMANTIC_MODEL_ID} during search"
-                    ));
-                }
-                return Err(anyhow!(
-                    "semantic index is not available yet; ctx search does not start semantic indexing"
-                ));
-            }
-            retrieval.effective_mode = SearchBackendArg::Lexical;
-            retrieval.semantic_weight = 0.0;
-            retrieval.embedding_model = None;
-            retrieval.set_semantic_fallback(
-                "semantic_index_missing",
-                "semantic index is not available yet",
-            );
-            warn_if(
-                emit_warnings,
-                "warning: semantic index is not available yet; falling back to lexical search",
-            );
-            lexical_search_packet()
+        Some(value)
+            if matches!(
+                value.state,
+                readiness::SemanticReadinessState::RetryDeferred
+                    | readiness::SemanticReadinessState::Partial
+            ) =>
+        {
+            ctx_protocol::SearchSemanticReadiness::NotReady
         }
-        Err(error) => {
-            let message = format!("semantic index could not be opened: {error:#}");
-            if effective_backend == SearchBackendArg::Semantic {
-                return Err(anyhow!(message));
-            }
-            retrieval.effective_mode = SearchBackendArg::Lexical;
-            retrieval.semantic_weight = 0.0;
-            retrieval.embedding_model = None;
-            retrieval.semantic_status = "unavailable";
-            retrieval.set_semantic_fallback("semantic_index_open_error", message);
-            warn_if(
-                emit_warnings,
-                "warning: semantic index could not be opened; falling back to lexical search",
-            );
-            lexical_search_packet()
-        }
+        _ => ctx_protocol::SearchSemanticReadiness::Unavailable,
+    }
+}
+
+fn semantic_readiness_status(
+    readiness: Option<&readiness::SemanticReadinessDiagnostics>,
+) -> &'static str {
+    match readiness.map(|value| value.state) {
+        Some(readiness::SemanticReadinessState::Ready) => "ready",
+        Some(readiness::SemanticReadinessState::Partial) => "partial",
+        Some(readiness::SemanticReadinessState::RetryDeferred) => "retry_deferred",
+        Some(readiness::SemanticReadinessState::Unsupported) => "unsupported",
+        Some(readiness::SemanticReadinessState::Failed) => "failed",
+        _ => "unavailable",
+    }
+}
+
+fn semantic_failure_code(
+    code: query_service_contract::SemanticQueryFailureCode,
+) -> &'static str {
+    use query_service_contract::SemanticQueryFailureCode as Code;
+    match code {
+        Code::AuthenticationFailed => "authentication_failed",
+        Code::UnsupportedSchema => "unsupported_schema",
+        Code::InvalidRequest => "invalid_request",
+        Code::ModelMismatch => "model_mismatch",
+        Code::NotReady => "not_ready",
+        Code::RetryDeferred => "retry_deferred",
+        Code::Busy => "busy",
+        Code::RetrievalFailed => "retrieval_failed",
+        Code::CandidateLimitExceeded => "candidate_limit_exceeded",
+        Code::VectorByteLimitExceeded => "vector_byte_limit_exceeded",
+        Code::Internal => "internal",
     }
 }
 
@@ -942,11 +836,6 @@ struct SemanticVectorSearchStats {
 struct SemanticVectorSearch {
     hits: Vec<SemanticVectorHit>,
     stats: SemanticVectorSearchStats,
-}
-
-struct SemanticHitSearch {
-    hits: Vec<ctx_history_search::SemanticEventHit>,
-    diagnostics: SemanticRetrievalDiagnostics,
 }
 
 #[derive(Debug, Clone)]

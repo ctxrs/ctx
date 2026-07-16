@@ -3,6 +3,7 @@ fn backfill_semantic_embeddings(
     store: &Store,
     vector_store: &mut SemanticVectorStore,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: &query_priority::SemanticQueryPriorityGate,
     model_init_ms: &mut Option<u64>,
     cache_dir: &Path,
     query_text: Option<&str>,
@@ -32,6 +33,7 @@ fn backfill_semantic_embeddings(
         let outcome = index_semantic_documents(
             vector_store,
             embedder,
+            priority,
             model_init_ms,
             cache_dir,
             &mut existing_hashes,
@@ -65,6 +67,7 @@ fn backfill_semantic_embeddings(
                 let outcome = index_semantic_documents(
                     vector_store,
                     embedder,
+                    priority,
                     model_init_ms,
                     cache_dir,
                     &mut existing_hashes,
@@ -110,6 +113,7 @@ fn backfill_semantic_embeddings(
         let outcome = index_semantic_documents(
             vector_store,
             embedder,
+            priority,
             model_init_ms,
             cache_dir,
             &mut existing_hashes,
@@ -180,6 +184,7 @@ fn extend_existing_hashes_for_docs(
 fn index_semantic_documents(
     vector_store: &mut SemanticVectorStore,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: &query_priority::SemanticQueryPriorityGate,
     model_init_ms: &mut Option<u64>,
     cache_dir: &Path,
     existing_hashes: &mut HashMap<Uuid, String>,
@@ -260,9 +265,16 @@ fn index_semantic_documents(
         if semantic_deadline_reached(deadline) {
             break;
         }
-        let (batch_embeddings, _) =
+        let document_batch = match priority.begin_document_batch(deadline) {
+            Ok(permit) => permit,
+            Err(query_priority::SemanticQueryPriorityError::DeadlineElapsed) => break,
+        };
+        let (batch_embeddings, quiet_policy, active) =
             embed_documents_with_shared_runtime(embedder, cache_dir, batch.to_vec(), deadline)?;
+        drop(document_batch);
         embeddings.extend(batch_embeddings);
+        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        throttle_semantic_batch(active, quiet_policy, remaining);
     }
     let complete_prefix = semantic_complete_embedding_prefix(&pending, embeddings.len());
     pending.truncate(complete_prefix);
@@ -671,88 +683,6 @@ fn compare_semantic_hits_desc(
         .similarity
         .partial_cmp(&left.similarity)
         .unwrap_or(std::cmp::Ordering::Equal)
-}
-
-fn semantic_hits_for_query(
-    store: &Store,
-    vector_store: &SemanticVectorStore,
-    query_embedding: &[f32],
-    limit: usize,
-    event_filter: Option<&[Uuid]>,
-) -> Result<SemanticHitSearch> {
-    if event_filter.is_none() && !semantic_full_corpus_vector_scan_ready(vector_store)? {
-        let stats = vector_store.cached_or_exact_stats()?;
-        return Err(anyhow!(
-            "semantic vector backend cannot scan full sidecar locally ({} chunks exceed rust scan cap of {} and sqlite-vec is unavailable)",
-            stats.embedded_chunks,
-            semantic_rust_full_scan_chunk_limit()
-        ));
-    }
-    let sqlite_vec0_full_scan_ready =
-        event_filter.is_none() && vector_store.sqlite_vec0_search_ready().unwrap_or(false);
-    let vector_limit = if sqlite_vec0_full_scan_ready {
-        limit.max(1)
-    } else {
-        limit.saturating_mul(SEMANTIC_VECTOR_OVERFETCH).max(limit)
-    };
-    let vector_search = if let Some(event_filter) = event_filter {
-        vector_store.search_event_ids(query_embedding, event_filter, vector_limit)?
-    } else {
-        vector_store.search(query_embedding, vector_limit)?
-    };
-    let mut diagnostics = SemanticRetrievalDiagnostics {
-        vector_backend: vector_search.stats.backend,
-        vector_scan_ms: Some(vector_search.stats.scan_ms),
-        chunks_scanned: Some(vector_search.stats.chunks_scanned),
-        vector_bytes_read: Some(vector_search.stats.vector_bytes_read),
-        events_scored: Some(vector_search.stats.events_scored),
-        ..SemanticRetrievalDiagnostics::default()
-    };
-    let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
-    for hit in vector_search.hits {
-        let replace = best_by_event
-            .get(&hit.event_id)
-            .map(|existing| hit.similarity > existing.similarity)
-            .unwrap_or(true);
-        if replace {
-            best_by_event.insert(hit.event_id, hit);
-        }
-    }
-    let mut vector_hits = best_by_event.into_values().collect::<Vec<_>>();
-    vector_hits.sort_by(compare_semantic_hits_desc);
-    let current_hashes = current_semantic_source_hashes(store, &vector_hits)?;
-    let before_stale_filter = vector_hits.len();
-    vector_hits.retain(|hit| {
-        current_hashes
-            .get(&hit.event_id)
-            .is_some_and(|hash| hash == &hit.source_text_hash)
-    });
-    diagnostics.stale_events_dropped = Some(before_stale_filter.saturating_sub(vector_hits.len()));
-    if vector_hits.len() > limit {
-        vector_hits.truncate(limit);
-    }
-    let chunk_ranges = vector_hits
-        .iter()
-        .map(|hit| (hit.event_id, (hit.start_char, hit.end_char)))
-        .collect::<HashMap<_, _>>();
-    let hydration_started = Instant::now();
-    let hydrated_hits = store.semantic_event_hits_by_id(&chunk_ranges)?;
-    diagnostics.hydration_ms = Some(hydration_started.elapsed().as_millis() as u64);
-    let hydrated_by_id = hydrated_hits
-        .into_iter()
-        .map(|hit| (hit.event_id, hit))
-        .collect::<HashMap<_, _>>();
-    let mut hits = Vec::new();
-    for vector_hit in vector_hits {
-        if let Some(hit) = hydrated_by_id.get(&vector_hit.event_id).cloned() {
-            hits.push(ctx_history_search::SemanticEventHit {
-                hit,
-                similarity: vector_hit.similarity,
-            });
-        }
-    }
-    diagnostics.semantic_candidates = Some(hits.len());
-    Ok(SemanticHitSearch { hits, diagnostics })
 }
 
 fn current_semantic_source_hashes(

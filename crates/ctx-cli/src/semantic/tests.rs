@@ -492,18 +492,6 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_semantic_readiness_requires_complete_coverage() {
-        assert!(semantic_hybrid_coverage_ready(0, 0, 0));
-        assert!(semantic_hybrid_coverage_ready(10, 10, 0));
-        assert!(semantic_hybrid_coverage_ready(11, 10, 0));
-
-        assert!(!semantic_hybrid_coverage_ready(0, 10, 0));
-        assert!(!semantic_hybrid_coverage_ready(1_000, 100_000, 0));
-        assert!(!semantic_hybrid_coverage_ready(99_999, 100_000, 0));
-        assert!(!semantic_hybrid_coverage_ready(10, 10, 1));
-    }
-
-    #[test]
     fn daemon_recent_queue_marks_user_anchor_dirty_when_assistant_changes() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let data_root = temp.path();
@@ -563,15 +551,17 @@ mod tests {
         let _lock = SemanticWorkerLock::acquire(temp.path())?
             .expect("test should acquire semantic worker lock");
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
-        let err = search_packet_with_backend(
+        let query = ctx_protocol::SearchQuery::new(vec![ctx_protocol::SearchClause::semantic(
+            "semantic daemon scheduling fixture",
+        )])
+        .canonicalized()?;
+        let err = search_packet_query_with_backend(
             &store,
             temp.path(),
-            "semantic daemon scheduling fixture",
-            &[],
+            &query,
             &ctx_history_search::PacketOptions::default(),
             SearchBackendArg::Semantic,
             true,
-            1.0,
             RefreshArg::Off,
             false,
         )
@@ -752,27 +742,94 @@ mod tests {
         write_searchable_store(temp.path(), 1)?;
         let vector_path = semantic_vector_path(temp.path());
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
+        let query = ctx_protocol::SearchQuery::new(vec![ctx_protocol::SearchClause::all(
+            "semantic daemon scheduling fixture",
+        )])
+        .canonicalized()?;
 
-        let (packet, retrieval) = search_packet_with_backend(
+        let (packet, retrieval) = search_packet_query_with_backend(
             &store,
             temp.path(),
-            "semantic daemon scheduling fixture",
-            &[],
+            &query,
             &ctx_history_search::PacketOptions::default(),
             SearchBackendArg::Hybrid,
             false,
-            0.35,
             RefreshArg::Off,
             false,
         )?;
 
         assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
+        assert!(packet.query_execution.semantic.attempted);
+        assert!(!packet.query_execution.semantic.required);
         assert_eq!(
-            retrieval.to_json()["semantic_fallback_code"],
-            "semantic_disabled"
+            packet.query_execution.semantic.readiness,
+            ctx_protocol::SearchSemanticReadiness::NotReady
+        );
+        assert_eq!(
+            packet.query_execution.semantic.effective_backend,
+            ctx_protocol::SearchEffectiveBackend::Lexical
+        );
+        assert_eq!(
+            packet.query_execution.semantic.skip_reason,
+            Some(ctx_protocol::SearchSemanticSkipReason::NotReady)
         );
         assert_eq!(packet.query, "semantic daemon scheduling fixture");
         assert!(!vector_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn file_only_hybrid_search_stays_bounded_and_lexical() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = Store::open(database_path(temp.path().to_path_buf()))?;
+        let mut options = ctx_history_search::PacketOptions::default();
+        options.filters.file = Some("src/lib.rs".to_owned());
+
+        let (packet, retrieval) = search_packet_file_filter_with_backend(
+            &store,
+            &options,
+            SearchBackendArg::Hybrid,
+            false,
+        )?;
+
+        assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
+        assert_eq!(
+            packet.query_execution.candidate_strategy,
+            "indexed_file_touch_bounded"
+        );
+        assert!(!packet.query_execution.semantic.attempted);
+        assert!(!packet.query_execution.semantic.required);
+        assert_eq!(
+            packet.query_execution.semantic.effective_backend,
+            ctx_protocol::SearchEffectiveBackend::Lexical
+        );
+        assert_eq!(
+            packet.query_execution.semantic.completeness,
+            ctx_protocol::SearchSemanticCompleteness::NotAttempted
+        );
+        assert_eq!(
+            packet.query_execution.semantic.skip_reason,
+            Some(ctx_protocol::SearchSemanticSkipReason::QueryShapeNotEligible)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn file_only_semantic_backend_requires_an_explicit_clause() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = Store::open(database_path(temp.path().to_path_buf()))?;
+        let mut options = ctx_history_search::PacketOptions::default();
+        options.filters.file = Some("src/lib.rs".to_owned());
+
+        let error = search_packet_file_filter_with_backend(
+            &store,
+            &options,
+            SearchBackendArg::Semantic,
+            false,
+        )
+        .expect_err("file-only search has no explicit semantic clause");
+
+        assert!(format!("{error:#}").contains("requires one explicit --semantic clause"));
         Ok(())
     }
 
@@ -793,35 +850,47 @@ mod tests {
         drop(vector_store);
 
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
-        let (packet, retrieval) = search_packet_with_backend(
+        let lexical_query = ctx_protocol::SearchQuery::new(vec![
+            ctx_protocol::SearchClause::all("semantic daemon scheduling fixture"),
+        ])
+        .canonicalized()?;
+        let (packet, retrieval) = search_packet_query_with_backend(
             &store,
             temp.path(),
-            "semantic daemon scheduling fixture",
-            &[],
+            &lexical_query,
             &ctx_history_search::PacketOptions::default(),
             SearchBackendArg::Hybrid,
             true,
-            0.35,
             RefreshArg::Off,
             false,
         )?;
 
         assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
         assert_eq!(
-            retrieval.to_json()["semantic_fallback_code"],
-            "daemon_query_service_unavailable"
+            packet.query_execution.semantic.effective_backend,
+            ctx_protocol::SearchEffectiveBackend::Lexical
+        );
+        assert_eq!(
+            packet.query_execution.semantic.readiness,
+            ctx_protocol::SearchSemanticReadiness::Unavailable
+        );
+        assert_eq!(
+            packet.query_execution.semantic.skip_reason,
+            Some(ctx_protocol::SearchSemanticSkipReason::Unavailable)
         );
         assert_eq!(packet.query, "semantic daemon scheduling fixture");
 
-        let err = search_packet_with_backend(
+        let semantic_query = ctx_protocol::SearchQuery::new(vec![
+            ctx_protocol::SearchClause::semantic("semantic daemon scheduling fixture"),
+        ])
+        .canonicalized()?;
+        let err = search_packet_query_with_backend(
             &store,
             temp.path(),
-            "semantic daemon scheduling fixture",
-            &[],
+            &semantic_query,
             &ctx_history_search::PacketOptions::default(),
             SearchBackendArg::Semantic,
             true,
-            1.0,
             RefreshArg::Off,
             false,
         )
@@ -1449,6 +1518,140 @@ mod tests {
 
 }
 
+#[cfg(test)]
+mod model_retry_tests {
+    use super::*;
+
+    fn retry_policy() -> model_retry::SemanticModelRetryPolicy {
+        model_retry::SemanticModelRetryPolicy {
+            initial_backoff: StdDuration::from_millis(10),
+            max_backoff: StdDuration::from_millis(80),
+        }
+    }
+
+    #[test]
+    fn retryable_model_failures_back_off_indefinitely_and_persist_status() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let retry_path = temp.path().join("model-retry.json");
+        let store = model_retry::SemanticModelRetryStore::new(&retry_path, retry_policy());
+        let mut now_ms = 1_000_i64;
+        let mut final_next_retry_at_ms = None;
+
+        for expected_attempt in 1..=8 {
+            let (_, eligibility) = store.record_failure(
+                semantic_model_key(),
+                now_ms,
+                model_retry::SemanticModelFailure::retryable(
+                    model_retry::SemanticModelFailureClass::Acquisition,
+                    "transient acquisition failure",
+                ),
+            )?;
+            let model_retry::SemanticModelRetryEligibility::Deferred {
+                attempt,
+                next_eligible_at_ms,
+                ..
+            } = eligibility
+            else {
+                panic!("retryable failure must remain deferred");
+            };
+            assert_eq!(attempt, expected_attempt);
+            assert!(next_eligible_at_ms > now_ms);
+            final_next_retry_at_ms = Some(next_eligible_at_ms);
+            if expected_attempt < 8 {
+                now_ms = next_eligible_at_ms;
+            }
+        }
+
+        let status = model_retry::SemanticModelRetryStore::new(&retry_path, retry_policy())
+            .status(semantic_model_key(), now_ms)?;
+        assert_eq!(status.attempt, 8);
+        assert_eq!(status.next_retry_at_ms, final_next_retry_at_ms);
+        assert!(status.retryable);
+        assert!(!status.terminal);
+        let readiness = readiness::SemanticReadinessDiagnostics::evaluate(
+            readiness::SemanticReadinessInputs {
+                enabled: true,
+                supported: true,
+                model_available: false,
+                sidecar_available: true,
+                vector_backend_available: true,
+                coverage: readiness::SemanticCoverageDiagnostics {
+                    indexed_items: 1,
+                    indexed_chunks: 1,
+                    searchable_items: Some(1),
+                    dirty_items: 0,
+                    queued_items: 0,
+                },
+                model_retry: status.clone(),
+            },
+        );
+        assert_eq!(
+            readiness.state,
+            readiness::SemanticReadinessState::RetryDeferred
+        );
+        assert!(matches!(
+            readiness.primary_blocker(),
+            Some(readiness::SemanticReadinessBlocker::ModelRetryDeferred {
+                attempt: 8,
+                ..
+            })
+        ));
+        let status_json = serde_json::to_value(&status)?;
+        assert!(status_json.get("max_attempts").is_none());
+        assert!(status_json.get("exhausted").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_integrity_failure_does_not_retry() -> Result<()> {
+        let mut state = model_retry::SemanticModelRetryState::new(semantic_model_key());
+        let eligibility = state.record_failure(
+            semantic_model_key(),
+            1_000,
+            model_retry::SemanticModelFailure::terminal(
+                model_retry::SemanticModelFailureClass::Integrity,
+                "digest mismatch",
+            ),
+            retry_policy(),
+        )?;
+        assert!(matches!(
+            eligibility,
+            model_retry::SemanticModelRetryEligibility::Terminal { attempt: 1, .. }
+        ));
+        let status = state.status(1_000, retry_policy())?;
+        assert_eq!(status.attempt, 1);
+        assert!(!status.retryable);
+        assert!(status.terminal);
+        assert_eq!(status.next_retry_at_ms, None);
+        let readiness = readiness::SemanticReadinessDiagnostics::evaluate(
+            readiness::SemanticReadinessInputs {
+                enabled: true,
+                supported: true,
+                model_available: false,
+                sidecar_available: true,
+                vector_backend_available: true,
+                coverage: readiness::SemanticCoverageDiagnostics {
+                    indexed_items: 1,
+                    indexed_chunks: 1,
+                    searchable_items: Some(1),
+                    dirty_items: 0,
+                    queued_items: 0,
+                },
+                model_retry: status,
+            },
+        );
+        assert_eq!(readiness.state, readiness::SemanticReadinessState::Failed);
+        assert!(matches!(
+            readiness.primary_blocker(),
+            Some(readiness::SemanticReadinessBlocker::ModelFailureTerminal {
+                attempt: 1,
+                ..
+            })
+        ));
+        Ok(())
+    }
+}
+
 #[cfg(all(test, not(ctx_semantic_fastembed)))]
 mod unsupported_platform_tests {
     use super::*;
@@ -1492,37 +1695,57 @@ mod unsupported_platform_tests {
         fs::create_dir_all(temp.path())?;
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
         insert_test_event(&store, "semantic unsupported platform lexical fallback fixture")?;
+        let lexical_query = ctx_protocol::SearchQuery::new(vec![
+            ctx_protocol::SearchClause::all(
+                "semantic unsupported platform lexical fallback fixture",
+            ),
+        ])
+        .canonicalized()?;
 
-        let (packet, retrieval) = search_packet_with_backend(
+        let (packet, retrieval) = search_packet_query_with_backend(
             &store,
             temp.path(),
-            "semantic unsupported platform lexical fallback fixture",
-            &[],
+            &lexical_query,
             &ctx_history_search::PacketOptions::default(),
             SearchBackendArg::Hybrid,
             true,
-            0.35,
             RefreshArg::Off,
             false,
         )?;
 
         assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
-        assert_eq!(retrieval.to_json()["semantic_status"], "unavailable");
-        assert_eq!(retrieval.to_json()["semantic_fallback_code"], "unsupported_platform");
+        assert_eq!(retrieval.to_json()["semantic_status"], "unsupported");
+        assert!(packet.query_execution.semantic.attempted);
+        assert_eq!(
+            packet.query_execution.semantic.readiness,
+            ctx_protocol::SearchSemanticReadiness::Unsupported
+        );
+        assert_eq!(
+            packet.query_execution.semantic.effective_backend,
+            ctx_protocol::SearchEffectiveBackend::Lexical
+        );
+        assert_eq!(
+            packet.query_execution.semantic.skip_reason,
+            Some(ctx_protocol::SearchSemanticSkipReason::Unsupported)
+        );
         assert_eq!(
             packet.query,
             "semantic unsupported platform lexical fallback fixture"
         );
 
-        let error = search_packet_with_backend(
+        let semantic_query = ctx_protocol::SearchQuery::new(vec![
+            ctx_protocol::SearchClause::semantic(
+                "semantic unsupported platform lexical fallback fixture",
+            ),
+        ])
+        .canonicalized()?;
+        let error = search_packet_query_with_backend(
             &store,
             temp.path(),
-            "semantic unsupported platform lexical fallback fixture",
-            &[],
+            &semantic_query,
             &ctx_history_search::PacketOptions::default(),
             SearchBackendArg::Semantic,
             true,
-            1.0,
             RefreshArg::Off,
             false,
         )
@@ -1544,6 +1767,7 @@ mod query_service_transport_tests {
         start_daemon_query_service_with_request_timeout(
             data_root,
             Arc::new(Mutex::new(None)),
+            query_priority::SemanticQueryPriorityGate::default(),
             TEST_QUERY_REQUEST_READ_TIMEOUT,
         )
     }
@@ -1653,6 +1877,87 @@ mod query_service_transport_tests {
         assert!(activity.begin_request().is_none());
     }
 
+    #[test]
+    fn typed_query_authentication_fails_before_foreground_priority() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let embedder = Arc::new(Mutex::new(None));
+        let priority = query_priority::SemanticQueryPriorityGate::default();
+        let request = query_service_contract::SemanticQueryServiceRequest::new(
+            semantic_model_key(),
+            readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            vec![query_service_contract::SemanticQueryClauseRequest::new(
+                0,
+                "authentication boundary",
+                10,
+            )],
+        );
+        let mut response_bytes = Vec::new();
+
+        handle_daemon_query_stream_inner(
+            temp.path(),
+            &embedder,
+            &priority,
+            "0123456789abcdef0123456789abcdef",
+            &mut response_bytes,
+            &serde_json::to_string(&request)?,
+        )?;
+
+        let response: query_service_contract::SemanticQueryServiceResponse =
+            serde_json::from_slice(&response_bytes)?;
+        assert_eq!(
+            response.error.map(|error| error.code),
+            Some(query_service_contract::SemanticQueryFailureCode::AuthenticationFailed)
+        );
+        let snapshot = priority.snapshot();
+        assert_eq!(snapshot.waiting_foreground_queries, 0);
+        assert_eq!(snapshot.active_foreground_queries, 0);
+        assert!(!snapshot.document_batch_active);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_query_never_initializes_a_missing_model() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _store = Store::open(database_path(temp.path().to_path_buf()))?;
+        let _vector_store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
+        let embedder = Arc::new(Mutex::new(None));
+        let priority = query_priority::SemanticQueryPriorityGate::default();
+        let token = "0123456789abcdef0123456789abcdef";
+        let mut request = query_service_contract::SemanticQueryServiceRequest::new(
+            semantic_model_key(),
+            readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            vec![query_service_contract::SemanticQueryClauseRequest::new(
+                0,
+                "resident model only",
+                10,
+            )],
+        );
+        request.token = token.to_owned();
+        let mut response_bytes = Vec::new();
+
+        handle_daemon_query_stream_inner(
+            temp.path(),
+            &embedder,
+            &priority,
+            token,
+            &mut response_bytes,
+            &serde_json::to_string(&request)?,
+        )?;
+
+        let response: query_service_contract::SemanticQueryServiceResponse =
+            serde_json::from_slice(&response_bytes)?;
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.map(|error| error.code),
+            Some(query_service_contract::SemanticQueryFailureCode::NotReady)
+        );
+        assert!(embedder.lock().expect("embedder lock").is_none());
+        let snapshot = priority.snapshot();
+        assert_eq!(snapshot.active_foreground_queries, 0);
+        assert!(!snapshot.document_batch_active);
+        Ok(())
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn stalled_query_client_is_discarded_and_next_query_is_served() -> Result<()> {
@@ -1688,6 +1993,7 @@ mod query_service_transport_tests {
         let service = start_daemon_query_service_with_request_timeout(
             temp.path(),
             embedder.clone(),
+            query_priority::SemanticQueryPriorityGate::default(),
             TEST_QUERY_REQUEST_READ_TIMEOUT,
         )?;
         let _embedder_guard = embedder.lock().expect("test embedder lock");

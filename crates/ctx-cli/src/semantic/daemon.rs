@@ -7,6 +7,7 @@ struct DaemonIteration {
 #[derive(Default)]
 struct DaemonRuntime {
     semantic_embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+    semantic_query_priority: query_priority::SemanticQueryPriorityGate,
     semantic_bootstrap_passes_since_refresh: usize,
     history_refresh: crate::commands::search::SearchRefreshRuntime,
 }
@@ -52,8 +53,8 @@ fn embed_documents_with_shared_runtime(
     shared: &Arc<Mutex<Option<SemanticEmbedder>>>,
     cache_dir: &Path,
     texts: Vec<String>,
-    deadline: Option<Instant>,
-) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy)> {
+    _deadline: Option<Instant>,
+) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy, StdDuration)> {
     let mut guard = lock_shared_semantic_embedder(shared)?;
     let started = Instant::now();
     let first = guard
@@ -83,37 +84,24 @@ fn embed_documents_with_shared_runtime(
         .quiet_policy();
     drop(guard);
     let active = started.elapsed();
-    let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-    throttle_semantic_batch(active, quiet_policy, remaining);
-    Ok((embeddings, quiet_policy))
+    Ok((embeddings, quiet_policy, active))
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn embed_query_with_shared_runtime(
+fn embed_query_with_resident_runtime(
     shared: &Arc<Mutex<Option<SemanticEmbedder>>>,
-    cache_dir: &Path,
     query: String,
 ) -> Result<(Vec<f32>, SemanticEmbeddingRuntimeInfo)> {
     let mut guard = lock_shared_semantic_embedder(shared)?;
-    let first = guard
+    let embedding = guard
         .as_mut()
-        .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-        .embed_query(query.clone());
-    let embedding = match first {
+        .ok_or_else(|| anyhow!("semantic model is not resident in the daemon query service"))?
+        .embed_query(query);
+    let embedding = match embedding {
         Ok(embedding) => embedding,
-        Err(first_error) => {
-            let runtime = guard
-                .as_ref()
-                .ok_or_else(|| anyhow!("semantic embedder disappeared after inference failure"))?
-                .runtime_info();
+        Err(error) => {
             *guard = None;
-            let mut replacement = reacquire_semantic_embedder(cache_dir, &runtime)
-                .context("reinitialize semantic embedder after query inference failure")?;
-            let retry = replacement.embed_query(query).with_context(|| {
-                format!("semantic query inference failed twice; first failure: {first_error:#}")
-            })?;
-            *guard = Some(replacement);
-            retry
+            return Err(error).context("semantic query inference failed");
         }
     };
     let runtime = guard
@@ -135,8 +123,10 @@ struct DaemonQueryService {
     pipe_name: String,
 }
 
-const DAEMON_QUERY_REQUEST_MAX_BYTES: usize = 256 * 1024;
+const DAEMON_QUERY_REQUEST_MAX_BYTES: usize = ctx_protocol::SEARCH_MAX_QUERY_JSON_BYTES
+    + ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED * 48;
 const DAEMON_QUERY_REQUEST_READ_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+const DAEMON_QUERY_EXECUTION_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
@@ -326,10 +316,12 @@ fn bind_daemon_query_listener(
 fn start_daemon_query_service(
     data_root: &Path,
     embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: query_priority::SemanticQueryPriorityGate,
 ) -> Result<DaemonQueryService> {
     start_daemon_query_service_with_request_timeout(
         data_root,
         embedder,
+        priority,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
     )
 }
@@ -338,6 +330,7 @@ fn start_daemon_query_service(
 fn start_daemon_query_service_with_request_timeout(
     data_root: &Path,
     embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: query_priority::SemanticQueryPriorityGate,
     request_read_timeout: StdDuration,
 ) -> Result<DaemonQueryService> {
     let root = daemon_root_path(data_root);
@@ -392,6 +385,7 @@ fn start_daemon_query_service_with_request_timeout(
                         handle_daemon_query_stream(
                             &thread_data_root,
                             &embedder,
+                            &priority,
                             &thread_token,
                             stream,
                             request,
@@ -439,10 +433,12 @@ fn configure_daemon_query_stream_unix(
 fn start_daemon_query_service(
     data_root: &Path,
     embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: query_priority::SemanticQueryPriorityGate,
 ) -> Result<DaemonQueryService> {
     start_daemon_query_service_with_request_timeout(
         data_root,
         embedder,
+        priority,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
     )
 }
@@ -451,6 +447,7 @@ fn start_daemon_query_service(
 fn start_daemon_query_service_with_request_timeout(
     data_root: &Path,
     embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: query_priority::SemanticQueryPriorityGate,
     request_read_timeout: StdDuration,
 ) -> Result<DaemonQueryService> {
     let root = daemon_root_path(data_root);
@@ -499,6 +496,7 @@ fn start_daemon_query_service_with_request_timeout(
                 handle_daemon_query_stream(
                     &thread_data_root,
                     &embedder,
+                    &priority,
                     &thread_token,
                     stream,
                     request,
@@ -760,6 +758,7 @@ fn wake_windows_daemon_query_pipe(pipe_name: &str) {
 fn start_daemon_query_service(
     _data_root: &Path,
     _embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+    _priority: query_priority::SemanticQueryPriorityGate,
 ) -> Result<DaemonQueryService> {
     Err(anyhow!(
         "daemon query service is not supported on this platform"
@@ -769,12 +768,13 @@ fn start_daemon_query_service(
 fn handle_daemon_query_stream<S: std::io::Write>(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: &query_priority::SemanticQueryPriorityGate,
     token: &str,
     mut stream: S,
     request: Result<String>,
 ) {
     let result = request.and_then(|body| {
-        handle_daemon_query_stream_inner(data_root, embedder, token, &mut stream, &body)
+        handle_daemon_query_stream_inner(data_root, embedder, priority, token, &mut stream, &body)
     });
     if let Err(error) = result {
         let _ = writeln!(
@@ -792,16 +792,27 @@ fn handle_daemon_query_stream<S: std::io::Write>(
 fn handle_daemon_query_stream_inner<S: std::io::Write>(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: &query_priority::SemanticQueryPriorityGate,
     token: &str,
     stream: &mut S,
     body: &str,
 ) -> Result<()> {
     let request: Value = serde_json::from_str(body).context("parse daemon query request")?;
-    if request.get("token").and_then(Value::as_str) != Some(token) {
-        return Err(anyhow!("daemon query authentication failed"));
-    }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if op == "ping" {
+        let supplied_token = request
+            .get("token")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if token.is_empty()
+            || ring::constant_time::verify_slices_are_equal(
+                supplied_token.as_bytes(),
+                token.as_bytes(),
+            )
+            .is_err()
+        {
+            return Err(anyhow!("daemon query authentication failed"));
+        }
         let (runtime, busy) = match embedder.try_lock() {
             Ok(guard) => (
                 guard
@@ -827,52 +838,184 @@ fn handle_daemon_query_stream_inner<S: std::io::Write>(
         )?;
         return Ok(());
     }
-    if op != "embed_query" {
-        return Err(anyhow!("unknown daemon query operation `{op}`"));
-    }
-    let model_key = request
-        .get("model_key")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if model_key != semantic_model_key() {
-        return Err(anyhow!("daemon query model key mismatch"));
-    }
-    let text = request
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if text.is_empty() {
-        return Err(anyhow!("daemon query text is empty"));
-    }
-    let started = Instant::now();
+    let typed_request = match serde_json::from_value::<
+        query_service_contract::SemanticQueryServiceRequest,
+    >(request)
     {
-        let mut guard = lock_shared_semantic_embedder(embedder)?;
-        if guard.is_none() {
-            let cache_dir = semantic_worker_cache_dir(data_root);
-            if !semantic_model_cache_available(&cache_dir) {
-                return Err(anyhow!(
-                    "semantic model cache is not available to daemon query service"
-                ));
-            }
-            *guard = Some(new_semantic_embedder(&cache_dir)?);
+        Ok(request) => request,
+        Err(error) => {
+            return write_semantic_query_response(
+                stream,
+                &query_service_contract::SemanticQueryServiceResponse::failure(
+                    query_service_contract::SemanticQueryFailure::new(
+                        query_service_contract::SemanticQueryFailureCode::InvalidRequest,
+                        format!("invalid semantic query request: {error}"),
+                        false,
+                    ),
+                ),
+            );
+        }
+    };
+    let authenticated = match typed_request.authenticate_and_validate(token, semantic_model_key()) {
+        Ok(request) => request,
+        Err(error) => {
+            return write_semantic_query_response(
+                stream,
+                &query_service_contract::SemanticQueryServiceResponse::failure(
+                    error.into_failure(),
+                ),
+            );
+        }
+    };
+    let deadline = Instant::now() + DAEMON_QUERY_EXECUTION_TIMEOUT;
+    let foreground = match priority.begin_authenticated_query(&authenticated, Some(deadline)) {
+        Ok(permit) => permit,
+        Err(_) => {
+            return write_semantic_query_response(
+                stream,
+                &query_service_contract::SemanticQueryServiceResponse::failure(
+                    query_service_contract::SemanticQueryFailure::new(
+                        query_service_contract::SemanticQueryFailureCode::Busy,
+                        "semantic query waited too long for foreground priority",
+                        true,
+                    ),
+                ),
+            );
+        }
+    };
+    let response = execute_daemon_semantic_query(data_root, embedder, &authenticated)
+        .unwrap_or_else(|error| {
+            query_service_contract::SemanticQueryServiceResponse::failure(
+                query_service_contract::SemanticQueryFailure::new(
+                    query_service_contract::SemanticQueryFailureCode::RetrievalFailed,
+                    format!("semantic retrieval failed: {error:#}"),
+                    true,
+                ),
+            )
+        });
+    drop(foreground);
+    write_semantic_query_response(stream, &response)?;
+    Ok(())
+}
+
+fn execute_daemon_semantic_query(
+    data_root: &Path,
+    embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    request: &query_service_contract::AuthenticatedSemanticQueryRequest,
+) -> Result<query_service_contract::SemanticQueryServiceResponse> {
+    let db_path = database_path(data_root.to_path_buf());
+    let store = open_existing_store_read_only(&db_path, "daemon semantic query")?;
+    let report = semantic_worker_report_cached(data_root, Some(&store))?;
+    let vector_path = semantic_vector_path(data_root);
+    let Some(vector_store) = SemanticVectorStore::open_read_only(&vector_path)? else {
+        let readiness = semantic_readiness_for_report(data_root, &report, false, false, false)?;
+        return Ok(
+            query_service_contract::SemanticQueryServiceResponse::explicit_semantic_unavailable(
+                &readiness,
+            ),
+        );
+    };
+    let model_resident = lock_shared_semantic_embedder(embedder)?.is_some();
+    let clause = request
+        .clauses()
+        .first()
+        .ok_or_else(|| anyhow!("authenticated semantic query has no clause"))?;
+    let filtered = clause.candidate_event_ids.as_ref();
+    let vector_backend_available = filtered.is_some()
+        || semantic_full_corpus_vector_scan_ready(&vector_store).unwrap_or(false);
+    let readiness = semantic_readiness_for_report(
+        data_root,
+        &report,
+        model_resident,
+        true,
+        vector_backend_available,
+    )?;
+    if !readiness.retrieval_available {
+        return Ok(
+            query_service_contract::SemanticQueryServiceResponse::explicit_semantic_unavailable(
+                &readiness,
+            ),
+        );
+    }
+
+    let embed_started = Instant::now();
+    let (query_embedding, _runtime) =
+        embed_query_with_resident_runtime(embedder, clause.text.trim().to_owned())?;
+    let query_embed_ms = embed_started.elapsed().as_millis() as u64;
+    let vector_limit = clause.hit_limit.max(1);
+    let vector_search = if let Some(event_ids) = filtered {
+        vector_store.search_event_ids(&query_embedding, event_ids, vector_limit)?
+    } else {
+        vector_store.search(&query_embedding, vector_limit)?
+    };
+    let stats = vector_search.stats.clone();
+    let mut hits = vector_search.hits;
+    let current_hashes = current_semantic_source_hashes(&store, &hits)?;
+    hits.retain(|hit| {
+        current_hashes
+            .get(&hit.event_id)
+            .is_some_and(|hash| hash == &hit.source_text_hash)
+    });
+    hits.truncate(clause.hit_limit);
+
+    let mut diagnostics = match request.request_mode() {
+        readiness::SemanticRetrievalRequestMode::AutomaticRerank => {
+            readiness::SemanticRetrievalDiagnostics::automatic_success(readiness.state)
+        }
+        readiness::SemanticRetrievalRequestMode::ExplicitSemantic => {
+            readiness::SemanticRetrievalDiagnostics::explicit_success(readiness.state)
         }
     }
-    let cache_dir = semantic_worker_cache_dir(data_root);
-    let (embedding, runtime) =
-        embed_query_with_shared_runtime(embedder, &cache_dir, text.to_owned())?;
-    let query_embed_ms = started.elapsed().as_millis() as u64;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::to_string(&compact_json(json!({
-            "ok": true,
-            "model_key": semantic_model_key(),
-            "embedding_runtime": runtime.to_json(),
-            "query_embed_ms": query_embed_ms,
-            "embedding": embedding,
-        })))?
-    )?;
+    .with_candidate_state(
+        filtered.map_or(stats.events_scored, Vec::len),
+        query_service_contract::SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS,
+    )
+    .with_vector_byte_state(
+        stats.vector_bytes_read as u64,
+        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES as u64,
+        Some(stats.vector_bytes_read as u64),
+    );
+    diagnostics.vector_backend = stats.backend.map(str::to_owned);
+    diagnostics.query_embed_ms = Some(query_embed_ms);
+    diagnostics.vector_scan_ms = Some(stats.scan_ms);
+    diagnostics.chunks_scanned = Some(stats.chunks_scanned);
+    diagnostics.events_scored = Some(stats.events_scored);
+    diagnostics.hits_returned = Some(hits.len());
+    let clause_response = query_service_contract::SemanticQueryClauseResponse {
+        clause_id: clause.clause_id,
+        hits: hits
+            .into_iter()
+            .map(|hit| query_service_contract::SemanticQueryVectorHit {
+                event_id: hit.event_id,
+                similarity: hit.similarity,
+                source_text_hash: hit.source_text_hash,
+                start_char: hit.start_char,
+                end_char: hit.end_char,
+            })
+            .collect(),
+        diagnostics,
+    };
+    query_service_contract::SemanticQueryServiceResponse::success(
+        request,
+        readiness,
+        vec![clause_response],
+    )
+    .map_err(|error| anyhow!(error))
+}
+
+fn write_semantic_query_response<S: std::io::Write>(
+    stream: &mut S,
+    response: &query_service_contract::SemanticQueryServiceResponse,
+) -> Result<()> {
+    let body = serde_json::to_vec(response).context("serialize semantic query response")?;
+    if body.len() > ctx_protocol::SEARCH_MAX_SERIALIZED_RESPONSE_BYTES {
+        return Err(anyhow!(
+            "semantic query response exceeds the {} byte limit",
+            ctx_protocol::SEARCH_MAX_SERIALIZED_RESPONSE_BYTES
+        ));
+    }
+    stream.write_all(&body)?;
+    stream.write_all(b"\n")?;
     Ok(())
 }
 
@@ -1142,6 +1285,7 @@ fn run_daemon_inner(
         Some(start_daemon_query_service(
             data_root,
             runtime.semantic_embedder.clone(),
+            runtime.semantic_query_priority.clone(),
         )?)
     } else {
         None
@@ -1242,6 +1386,7 @@ fn run_daemon_once(
                 .unwrap_or_else(|error| {
                     daemon_semantic_failed_job(data_root, format!("{error:#}"))
                 });
+        let semantic_job = enrich_daemon_semantic_job_status(data_root, runtime, semantic_job);
         let semantic_did_work = daemon_semantic_job_did_work(&semantic_job);
         runtime.semantic_bootstrap_passes_since_refresh = runtime
             .semantic_bootstrap_passes_since_refresh
@@ -1286,6 +1431,7 @@ fn run_daemon_once(
         Ok(value) => value,
         Err(error) => daemon_semantic_failed_job(data_root, format!("{error:#}")),
     };
+    let semantic_job = enrich_daemon_semantic_job_status(data_root, runtime, semantic_job);
     let semantic_did_work = daemon_semantic_job_did_work(&semantic_job);
     write_daemon_job_status_unless_deadline_skip(
         &daemon_semantic_job_path(data_root),
@@ -1299,6 +1445,49 @@ fn run_daemon_once(
         did_work: history_refresh_did_work || semantic_did_work,
         failed: daemon_job_failed(&history_refresh_job) || daemon_job_failed(&semantic_job),
     })
+}
+
+fn enrich_daemon_semantic_job_status(
+    data_root: &Path,
+    runtime: &DaemonRuntime,
+    mut job: Value,
+) -> Value {
+    let report = semantic_worker_report_for_daemon(data_root);
+    let model_resident = daemon_runtime_embedder_loaded(runtime);
+    let sidecar_available = SemanticVectorStore::open_read_only(&semantic_vector_path(data_root))
+        .ok()
+        .flatten()
+        .is_some();
+    let readiness = semantic_readiness_for_report(
+        data_root,
+        &report,
+        model_resident,
+        sidecar_available,
+        sidecar_available,
+    )
+    .ok();
+    if let Some(object) = job.as_object_mut() {
+        object.insert("model_resident".to_owned(), Value::Bool(model_resident));
+        object.insert(
+            "model_retry".to_owned(),
+            readiness
+                .as_ref()
+                .and_then(|value| serde_json::to_value(&value.model_retry).ok())
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "readiness".to_owned(),
+            readiness
+                .and_then(|value| serde_json::to_value(value).ok())
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "query_priority".to_owned(),
+            serde_json::to_value(runtime.semantic_query_priority.snapshot())
+                .unwrap_or(Value::Null),
+        );
+    }
+    compact_json(job)
 }
 
 fn semantic_bootstrap_should_run_first(
@@ -1585,10 +1774,36 @@ fn run_daemon_semantic_job(
     }
     if semantic_daemon_model_load_needed(&before, daemon_runtime_embedder_loaded(runtime)) {
         let cache_dir = semantic_worker_cache_dir(data_root);
+        let retry_store = semantic_model_retry_store(data_root);
+        let now_ms = utc_now().timestamp_millis();
+        let (_, retry_eligibility) = retry_store
+            .eligibility(semantic_model_key(), now_ms)
+            .map_err(|error| anyhow!(error))?;
+        if let Some(failure) = retry_eligibility.into_failure() {
+            let (reason, message) = match failure {
+                model_retry::SemanticModelRetryFailure::Deferred { failure, .. } => {
+                    ("model_retry_deferred", failure.message)
+                }
+                model_retry::SemanticModelRetryFailure::Terminal { failure, .. } => {
+                    ("model_failure_terminal", failure.message)
+                }
+            };
+            return Ok(daemon_semantic_job_json(
+                "skipped",
+                Some(reason),
+                last_run_at_ms,
+                &before,
+                None,
+                Some(message),
+            ));
+        }
         let _ = write_semantic_model_acquisition_status(data_root, "acquiring_model", None);
         match acquire_semantic_embedder(&cache_dir) {
             Ok(embedder) => {
                 *lock_daemon_runtime_embedder(runtime)? = Some(embedder);
+                retry_store
+                    .record_success(semantic_model_key())
+                    .map_err(|error| anyhow!(error))?;
                 let embedding_runtime =
                     shared_semantic_embedder_runtime_status_json(&runtime.semantic_embedder)?;
                 let embed_policy =
@@ -1604,6 +1819,16 @@ fn run_daemon_semantic_job(
                 let deferred = error
                     .downcast_ref::<SemanticModelLoadDeferred>()
                     .expect("matched semantic model load deferral");
+                retry_store
+                    .record_failure(
+                        semantic_model_key(),
+                        now_ms,
+                        model_retry::SemanticModelFailure::retryable(
+                            model_retry::SemanticModelFailureClass::MemoryDeferred,
+                            deferred.to_string(),
+                        ),
+                    )
+                    .map_err(|error| anyhow!(error))?;
                 let _ = write_semantic_model_load_deferred_status(data_root, deferred);
                 let report = semantic_worker_report(data_root, Some(&store))?;
                 return Ok(daemon_semantic_model_load_deferred_job(
@@ -1620,6 +1845,20 @@ fn run_daemon_semantic_job(
                 } else {
                     "model_acquisition_failed"
                 };
+                let failure = if integrity_failure {
+                    model_retry::SemanticModelFailure::terminal(
+                        model_retry::SemanticModelFailureClass::Integrity,
+                        message.clone(),
+                    )
+                } else {
+                    model_retry::SemanticModelFailure::retryable(
+                        model_retry::SemanticModelFailureClass::Acquisition,
+                        message.clone(),
+                    )
+                };
+                retry_store
+                    .record_failure(semantic_model_key(), now_ms, failure)
+                    .map_err(|error| anyhow!(error))?;
                 let _ = write_semantic_model_acquisition_status(
                     data_root,
                     failure_code,
@@ -1669,9 +1908,20 @@ fn run_daemon_semantic_job(
         data_root,
         None,
         &runtime.semantic_embedder,
+        &runtime.semantic_query_priority,
     );
     if let Err(error) = worker_result {
         if let Some(deferred) = error.downcast_ref::<SemanticModelLoadDeferred>() {
+            semantic_model_retry_store(data_root)
+                .record_failure(
+                    semantic_model_key(),
+                    utc_now().timestamp_millis(),
+                    model_retry::SemanticModelFailure::retryable(
+                        model_retry::SemanticModelFailureClass::MemoryDeferred,
+                        deferred.to_string(),
+                    ),
+                )
+                .map_err(|retry_error| anyhow!(retry_error))?;
             let _ = write_semantic_model_load_deferred_status(data_root, deferred);
             let report = semantic_worker_report_for_daemon(data_root);
             return Ok(daemon_semantic_model_load_deferred_job(
@@ -1681,6 +1931,19 @@ fn run_daemon_semantic_job(
             ));
         }
         let message = format!("{error:#}");
+        if semantic_worker_error_is_model_related(&message) {
+            semantic_model_retry_store(data_root)
+                .record_failure(
+                    semantic_model_key(),
+                    utc_now().timestamp_millis(),
+                    model_retry::SemanticModelFailure::retryable(
+                        model_retry::SemanticModelFailureClass::Inference,
+                        message.clone(),
+                    ),
+                )
+                .map_err(|retry_error| anyhow!(retry_error))?;
+            *lock_daemon_runtime_embedder(runtime)? = None;
+        }
         let _ = write_semantic_worker_failure_status(data_root, message.clone());
         let report = semantic_worker_report_for_daemon(data_root);
         return Ok(daemon_semantic_job_json(
@@ -1725,6 +1988,21 @@ fn daemon_semantic_requested_seconds(args: &DaemonRunArgs) -> u64 {
 
 fn semantic_daemon_model_load_needed(report: &SemanticWorkerReport, runtime_loaded: bool) -> bool {
     report.searchable_items > 0 && !runtime_loaded
+}
+
+fn semantic_worker_error_is_model_related(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "embed",
+        "inference",
+        "onnx",
+        "core ml",
+        "coreml",
+        "tokenizer",
+        "model runtime",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn daemon_semantic_worker_seconds_budget(args: &DaemonRunArgs, deadline: Option<Instant>) -> u64 {
@@ -1972,6 +2250,7 @@ fn run_semantic_worker_inner_with_embedder(
     data_root: &Path,
     query_hint: Option<String>,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    priority: &query_priority::SemanticQueryPriorityGate,
 ) -> Result<()> {
     let Some(_lock) = SemanticWorkerLock::acquire(data_root)? else {
         return Ok(());
@@ -2044,6 +2323,7 @@ fn run_semantic_worker_inner_with_embedder(
             &store,
             &mut vector_store,
             embedder,
+            priority,
             &mut model_init_ms,
             &cache_dir,
             query_hint.as_deref(),
