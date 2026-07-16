@@ -8,6 +8,12 @@ mod search;
 mod snippets;
 mod source;
 
+pub use ctx_protocol::{
+    SearchClause, SearchExecutionConsumption, SearchExecutionLimits, SearchQuery,
+    SearchRequestEnvelope, SearchSemanticCandidate, SearchSemanticCompleteness,
+    SearchSemanticCoverage, SearchSemanticDiagnostics, SearchSemanticInput, SearchSemanticPolicy,
+    SearchSemanticReadiness, SearchSemanticSkipReason,
+};
 pub use packet::{
     SearchExecutionDiagnostics, SearchPacket, SearchPacketResult, SearchResultScope,
     SemanticEventHit, SEARCH_PACKET_SCHEMA_VERSION,
@@ -19,15 +25,9 @@ pub use query::{
 };
 pub use search::{
     search_packet, search_packet_envelope, search_packet_file_filter, search_packet_query,
-    search_packet_terms, semantic_event_search_packet,
+    search_packet_terms,
 };
 pub use snippets::{display_snippet, event_preview_text};
-pub use ctx_protocol::{
-    SearchClause, SearchExecutionConsumption, SearchExecutionLimits, SearchQuery,
-    SearchRequestEnvelope, SearchSemanticCandidate, SearchSemanticCompleteness,
-    SearchSemanticCoverage, SearchSemanticDiagnostics, SearchSemanticInput, SearchSemanticPolicy,
-    SearchSemanticReadiness, SearchSemanticSkipReason,
-};
 
 #[cfg(test)]
 mod tests;

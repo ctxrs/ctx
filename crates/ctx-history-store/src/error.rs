@@ -114,6 +114,8 @@ pub enum StoreError {
     },
     #[error("SQL query timed out after {timeout_ms}ms")]
     RawSqlTimedOut { timeout_ms: u64 },
+    #[error("bounded search lookup timed out after {timeout_ms}ms")]
+    BoundedSearchTimedOut { timeout_ms: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
