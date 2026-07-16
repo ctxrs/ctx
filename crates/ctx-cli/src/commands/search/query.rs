@@ -29,13 +29,26 @@ struct SearchRefreshFailure {
     totals: ImportTotals,
 }
 
-#[derive(Default)]
 pub(crate) struct SearchRefreshRuntime {
     cached_work: Option<SearchRefreshWork>,
     source_watcher: Option<SearchRefreshSourceWatcher>,
     source_watcher_paths: Option<Vec<PathBuf>>,
     source_watcher_path_identities: Option<Vec<WatchedSourcePathIdentity>>,
-    last_watcher_fallback_reinventory_at: Option<Instant>,
+    watcher_degraded: bool,
+    watcher_recovery_pending: bool,
+    watcher_error: Option<String>,
+    watcher_retry_failures: u32,
+    next_watcher_retry_at: Option<Instant>,
+    next_watcher_retry_at_ms: Option<i64>,
+    degraded_inventory_passes: u32,
+    pending_inventory_reason: Option<SearchInventoryReason>,
+    inventory_progress: Option<SearchInventoryProgress>,
+    inventory_error: Option<String>,
+    last_inventory_completed_at_ms: Option<i64>,
+    next_inventory_at: Option<Instant>,
+    next_inventory_at_ms: Option<i64>,
+    durable_source_fingerprint: Option<String>,
+    restored_daemon_status: bool,
     disk_io_pacer: Option<(ImportExecutionPolicy, DiskIoPacer)>,
 }
 
@@ -55,7 +68,43 @@ struct SearchRefreshWork {
 struct SearchRefreshSourceWatcher {
     changes: Arc<Mutex<SearchRefreshSourceChanges>>,
     healthy: Arc<AtomicBool>,
+    error: Arc<Mutex<Option<String>>>,
     _watcher: RecommendedWatcher,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchInventoryReason {
+    Startup,
+    SourcesChanged,
+    WatcherLoss,
+    WatcherRecovery,
+    DegradedFallback,
+    HealthySweep,
+}
+
+impl SearchInventoryReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::SourcesChanged => "sources_changed",
+            Self::WatcherLoss => "watcher_loss",
+            Self::WatcherRecovery => "watcher_recovery",
+            Self::DegradedFallback => "degraded_fallback",
+            Self::HealthySweep => "healthy_sweep",
+        }
+    }
+
+}
+
+#[derive(Debug, Clone)]
+struct SearchInventoryProgress {
+    source_fingerprint: String,
+    reason: SearchInventoryReason,
+    started_at_ms: i64,
+    next_source_index: usize,
+    total_sources: usize,
+    completed_source_bytes: u64,
+    completed_directory_entry_stat_operations: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +135,40 @@ struct SearchRefreshExecution {
 }
 
 const DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
-const DAEMON_SEARCH_REFRESH_WATCHER_FALLBACK_INTERVAL: StdDuration = StdDuration::from_secs(30);
+const DAEMON_SEARCH_REFRESH_RETRY_DELAYS: [StdDuration; 5] = [
+    StdDuration::from_secs(30),
+    StdDuration::from_secs(60),
+    StdDuration::from_secs(2 * 60),
+    StdDuration::from_secs(4 * 60),
+    StdDuration::from_secs(5 * 60),
+];
+
+impl Default for SearchRefreshRuntime {
+    fn default() -> Self {
+        Self {
+            cached_work: None,
+            source_watcher: None,
+            source_watcher_paths: None,
+            source_watcher_path_identities: None,
+            watcher_degraded: false,
+            watcher_recovery_pending: false,
+            watcher_error: None,
+            watcher_retry_failures: 0,
+            next_watcher_retry_at: None,
+            next_watcher_retry_at_ms: None,
+            degraded_inventory_passes: 0,
+            pending_inventory_reason: None,
+            inventory_progress: None,
+            inventory_error: None,
+            last_inventory_completed_at_ms: None,
+            next_inventory_at: None,
+            next_inventory_at_ms: None,
+            durable_source_fingerprint: None,
+            restored_daemon_status: false,
+            disk_io_pacer: None,
+        }
+    }
+}
 
 impl SearchRefreshRuntime {
     pub(crate) fn install_daemon_disk_io_pacing(
@@ -115,9 +197,136 @@ impl SearchRefreshRuntime {
         self.cached_work = None;
     }
 
+    pub(crate) fn restore_daemon_status(&mut self, value: Option<&Value>) {
+        if self.restored_daemon_status {
+            return;
+        }
+        self.restored_daemon_status = true;
+        let Some(value) = value else {
+            return;
+        };
+        let now = Instant::now();
+        let now_ms = search_refresh_now_ms();
+        self.durable_source_fingerprint = value
+            .get("source_fingerprint")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(watcher) = value.get("watcher") {
+            self.watcher_degraded = watcher
+                .get("degraded")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            self.watcher_recovery_pending = watcher
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state == "recovering");
+            self.watcher_error = watcher
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            self.watcher_retry_failures = watcher
+                .get("retry_failures")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            self.next_watcher_retry_at_ms = watcher.get("next_retry_at_ms").and_then(Value::as_i64);
+            self.next_watcher_retry_at = self
+                .next_watcher_retry_at_ms
+                .and_then(|at_ms| search_refresh_future_instant(now, now_ms, at_ms));
+        }
+        let Some(inventory) = value.get("inventory") else {
+            return;
+        };
+        if self.durable_source_fingerprint.is_none() {
+            self.durable_source_fingerprint = inventory
+                .get("source_fingerprint")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        self.inventory_error = inventory
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.last_inventory_completed_at_ms = inventory
+            .get("last_completed_at_ms")
+            .and_then(Value::as_i64);
+        self.next_inventory_at_ms = inventory.get("next_at_ms").and_then(Value::as_i64);
+        self.next_inventory_at = self
+            .next_inventory_at_ms
+            .and_then(|at_ms| search_refresh_future_instant(now, now_ms, at_ms));
+        self.degraded_inventory_passes = inventory
+            .get("degraded_passes")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0);
+        if inventory.get("state").and_then(Value::as_str) != Some("in_progress") {
+            return;
+        }
+        // Inventory pages are accumulated in memory. After a daemon restart,
+        // replay from page zero so previously completed pages cannot disappear
+        // from the rebuilt plan. Preserve quiet restart behavior by waiting one
+        // degraded-inventory interval instead of immediately rescanning.
+        let restart_delay = daemon_search_refresh_retry_delay(1);
+        self.next_inventory_at = now.checked_add(restart_delay);
+        self.next_inventory_at_ms = search_refresh_timestamp_after(now_ms, restart_delay);
+    }
+
+    pub(crate) fn daemon_status_json(&self) -> Value {
+        let now = Instant::now();
+        let watcher_state = if self.watcher_degraded {
+            if self.source_watcher.is_some() && self.watcher_recovery_pending {
+                "recovering"
+            } else {
+                "degraded"
+            }
+        } else if self.source_watcher.is_some() {
+            "healthy"
+        } else {
+            "initializing"
+        };
+        let inventory_progress = self.inventory_progress.as_ref().map(|progress| {
+            json!({
+                "source_fingerprint": progress.source_fingerprint,
+                "reason": progress.reason.as_str(),
+                "started_at_ms": progress.started_at_ms,
+                "completed_sources": progress.next_source_index,
+                "total_sources": progress.total_sources,
+                "source_bytes": progress.completed_source_bytes,
+                "directory_entry_stat_operations": progress.completed_directory_entry_stat_operations,
+            })
+        });
+        json!({
+            "watcher": {
+                "state": watcher_state,
+                "degraded": self.watcher_degraded,
+                "error": self.watcher_error,
+                "retry_failures": self.watcher_retry_failures,
+                "next_retry_at_ms": self.next_watcher_retry_at_ms,
+                "next_retry_after_ms": self.next_watcher_retry_at.map(|retry| {
+                    u64::try_from(retry.saturating_duration_since(now).as_millis())
+                        .unwrap_or(u64::MAX)
+                }),
+            },
+            "inventory": {
+                "state": if self.inventory_progress.is_some() { "in_progress" } else { "idle" },
+                "source_fingerprint": self.durable_source_fingerprint,
+                "progress": inventory_progress,
+                "error": self.inventory_error,
+                "last_completed_at_ms": self.last_inventory_completed_at_ms,
+                "next_at_ms": self.next_inventory_at_ms,
+                "next_fallback_at_ms": self.watcher_degraded.then_some(self.next_inventory_at_ms).flatten(),
+                "next_sweep_at_ms": (!self.watcher_degraded).then_some(self.next_inventory_at_ms).flatten(),
+                "degraded_passes": self.degraded_inventory_passes,
+            },
+        })
+    }
+
     fn watcher_changes(&mut self, sources: &[SourceInfo]) -> Option<SearchRefreshSourceChanges> {
+        let now = Instant::now();
+        let now_ms = search_refresh_now_ms();
         let watched_paths = watched_source_paths(sources);
         let watched_path_identities = watched_source_path_identities(&watched_paths);
+        let watcher_was_configured = self.source_watcher_paths.is_some();
         let paths_changed = self
             .source_watcher_paths
             .as_ref()
@@ -130,35 +339,242 @@ impl SearchRefreshRuntime {
             .source_watcher
             .as_ref()
             .is_some_and(|watcher| !watcher.is_healthy());
-        if paths_changed || path_identities_changed || watcher_unhealthy {
+        if watcher_unhealthy {
+            let error = self
+                .source_watcher
+                .as_ref()
+                .and_then(SearchRefreshSourceWatcher::error)
+                .unwrap_or_else(|| "source watcher stopped reporting reliable events".to_owned());
             self.cached_work = None;
+            self.source_watcher = None;
+            self.enter_watcher_degraded(error, now, now_ms, true);
+        }
+        if paths_changed || path_identities_changed {
+            if watcher_was_configured {
+                self.cached_work = None;
+                self.request_inventory(SearchInventoryReason::SourcesChanged);
+            }
+            if path_identities_changed && watcher_was_configured {
+                self.enter_watcher_degraded(
+                    "watched source identity changed".to_owned(),
+                    now,
+                    now_ms,
+                    true,
+                );
+            }
             self.source_watcher = None;
             self.source_watcher_paths = Some(watched_paths.clone());
             self.source_watcher_path_identities = Some(watched_path_identities);
         }
 
-        let retry_due = daemon_search_refresh_watcher_retry_due(self.source_watcher.is_some());
-        if paths_changed || path_identities_changed || watcher_unhealthy || retry_due {
-            if let Ok(watcher) = SearchRefreshSourceWatcher::new(watched_paths) {
-                // A recovered watcher cannot account for changes made while it
-                // was unavailable, so rebuild once before trusting it.
-                if !paths_changed {
-                    self.cached_work = None;
+        let retry_due = self.source_watcher.is_none()
+            && self.next_watcher_retry_at.is_none_or(|retry| now >= retry);
+        let target_setup_due = (paths_changed || path_identities_changed)
+            && (!self.watcher_degraded
+                || self.next_watcher_retry_at.is_none_or(|retry| now >= retry));
+        if target_setup_due || retry_due {
+            match SearchRefreshSourceWatcher::new(watched_paths) {
+                Ok(watcher) => {
+                    self.source_watcher = Some(watcher);
+                    self.next_watcher_retry_at = None;
+                    self.next_watcher_retry_at_ms = None;
+                    if self.watcher_degraded {
+                        self.watcher_recovery_pending = true;
+                        self.request_inventory(SearchInventoryReason::WatcherRecovery);
+                    }
                 }
-                self.source_watcher = Some(watcher);
+                Err(error) => {
+                    self.enter_watcher_degraded(
+                        error_summary(&error),
+                        now,
+                        now_ms,
+                        self.inventory_progress.is_none(),
+                    );
+                }
             }
-        }
-        if self.source_watcher.is_some() {
-            self.last_watcher_fallback_reinventory_at = None;
-        } else if daemon_search_refresh_watcher_fallback_due(
-            self.last_watcher_fallback_reinventory_at,
-        ) {
-            self.cached_work = None;
-            self.last_watcher_fallback_reinventory_at = Some(Instant::now());
         }
         self.source_watcher
             .as_ref()
             .map(SearchRefreshSourceWatcher::take_changes)
+    }
+
+    fn enter_watcher_degraded(
+        &mut self,
+        error: String,
+        now: Instant,
+        now_ms: i64,
+        immediate_reconciliation: bool,
+    ) {
+        let newly_degraded = !self.watcher_degraded;
+        self.watcher_degraded = true;
+        self.watcher_recovery_pending = false;
+        self.watcher_error = Some(error);
+        if newly_degraded {
+            self.degraded_inventory_passes = 0;
+        }
+        if immediate_reconciliation && newly_degraded {
+            self.request_inventory(SearchInventoryReason::WatcherLoss);
+        }
+        self.schedule_watcher_retry(now, now_ms);
+    }
+
+    fn schedule_watcher_retry(&mut self, now: Instant, now_ms: i64) {
+        self.watcher_retry_failures = self.watcher_retry_failures.saturating_add(1);
+        let delay = daemon_search_refresh_retry_delay(self.watcher_retry_failures);
+        self.next_watcher_retry_at = now.checked_add(delay);
+        self.next_watcher_retry_at_ms = search_refresh_timestamp_after(now_ms, delay);
+    }
+
+    fn request_inventory(&mut self, reason: SearchInventoryReason) {
+        self.pending_inventory_reason = Some(reason);
+        self.next_inventory_at = None;
+        self.next_inventory_at_ms = None;
+    }
+
+    fn prepare_inventory(
+        &mut self,
+        source_fingerprint: &str,
+        total_sources: usize,
+        force_rebuild: bool,
+    ) -> bool {
+        if self.inventory_progress.as_ref().is_some_and(|progress| {
+            progress.source_fingerprint != source_fingerprint
+                || progress.total_sources != total_sources
+        }) {
+            self.inventory_progress = None;
+            self.cached_work = None;
+            self.request_inventory(SearchInventoryReason::SourcesChanged);
+        }
+        if self.inventory_progress.is_some() {
+            return true;
+        }
+        let now = Instant::now();
+        let reason = self.pending_inventory_reason.take().or_else(|| {
+            if force_rebuild {
+                Some(SearchInventoryReason::SourcesChanged)
+            } else if self.cached_work.is_none()
+                && self.last_inventory_completed_at_ms.is_none()
+                && self.next_inventory_at.is_none_or(|next| now >= next)
+            {
+                Some(SearchInventoryReason::Startup)
+            } else if self.next_inventory_at.is_some_and(|next| now >= next) {
+                Some(if self.watcher_degraded {
+                    SearchInventoryReason::DegradedFallback
+                } else {
+                    SearchInventoryReason::HealthySweep
+                })
+            } else {
+                None
+            }
+        });
+        let Some(reason) = reason else {
+            return false;
+        };
+        self.cached_work = None;
+        self.inventory_error = None;
+        self.next_inventory_at = None;
+        self.next_inventory_at_ms = None;
+        self.inventory_progress = Some(SearchInventoryProgress {
+            source_fingerprint: source_fingerprint.to_owned(),
+            reason,
+            started_at_ms: search_refresh_now_ms(),
+            next_source_index: 0,
+            total_sources,
+            completed_source_bytes: 0,
+            completed_directory_entry_stat_operations: 0,
+        });
+        true
+    }
+
+    fn durable_sources_changed(&self, source_fingerprint: &str) -> bool {
+        self.durable_source_fingerprint
+            .as_deref()
+            .is_some_and(|durable| durable != source_fingerprint)
+    }
+
+    fn next_inventory_source_index(&self) -> Option<usize> {
+        self.inventory_progress.as_ref().and_then(|progress| {
+            (progress.next_source_index < progress.total_sources)
+                .then_some(progress.next_source_index)
+        })
+    }
+
+    fn note_inventory_source_completed(&mut self, source_bytes: u64, operations: u64) {
+        let Some(progress) = self.inventory_progress.as_mut() else {
+            return;
+        };
+        progress.next_source_index = progress.next_source_index.saturating_add(1);
+        progress.completed_source_bytes =
+            progress.completed_source_bytes.saturating_add(source_bytes);
+        progress.completed_directory_entry_stat_operations = progress
+            .completed_directory_entry_stat_operations
+            .saturating_add(operations);
+        self.inventory_error = None;
+    }
+
+    fn note_inventory_error(&mut self, error: String) {
+        self.inventory_error = Some(error);
+    }
+
+    fn inventory_is_complete(&self) -> bool {
+        self.inventory_progress
+            .as_ref()
+            .is_some_and(|progress| progress.next_source_index >= progress.total_sources)
+    }
+
+    fn complete_inventory(&mut self) {
+        let now = Instant::now();
+        let now_ms = search_refresh_now_ms();
+        let completed_reason = self
+            .inventory_progress
+            .as_ref()
+            .map(|progress| progress.reason);
+        self.durable_source_fingerprint = self
+            .inventory_progress
+            .as_ref()
+            .map(|progress| progress.source_fingerprint.clone());
+        if self
+            .source_watcher
+            .as_ref()
+            .is_some_and(|watcher| !watcher.is_healthy())
+        {
+            let error = self
+                .source_watcher
+                .as_ref()
+                .and_then(SearchRefreshSourceWatcher::error)
+                .unwrap_or_else(|| "source watcher failed during inventory".to_owned());
+            self.source_watcher = None;
+            self.enter_watcher_degraded(error, now, now_ms, false);
+        }
+        self.inventory_progress = None;
+        self.inventory_error = None;
+        self.last_inventory_completed_at_ms = Some(now_ms);
+        if self.watcher_degraded
+            && self.source_watcher.is_some()
+            && self.watcher_recovery_pending
+            && completed_reason == Some(SearchInventoryReason::WatcherRecovery)
+        {
+            self.watcher_degraded = false;
+            self.watcher_recovery_pending = false;
+            self.watcher_error = None;
+            self.watcher_retry_failures = 0;
+            self.next_watcher_retry_at = None;
+            self.next_watcher_retry_at_ms = None;
+            self.degraded_inventory_passes = 0;
+        }
+        if self.pending_inventory_reason.is_some() {
+            self.next_inventory_at = None;
+            self.next_inventory_at_ms = None;
+            return;
+        }
+        let delay = if self.watcher_degraded {
+            self.degraded_inventory_passes = self.degraded_inventory_passes.saturating_add(1);
+            daemon_search_refresh_retry_delay(self.degraded_inventory_passes)
+        } else {
+            DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL
+        };
+        self.next_inventory_at = now.checked_add(delay);
+        self.next_inventory_at_ms = search_refresh_timestamp_after(now_ms, delay);
     }
 
     #[cfg(test)]
@@ -169,21 +585,42 @@ impl SearchRefreshRuntime {
     }
 }
 
-fn daemon_search_refresh_watcher_retry_due(watcher_available: bool) -> bool {
-    !watcher_available
+fn daemon_search_refresh_retry_delay(failure: u32) -> StdDuration {
+    let index = usize::try_from(failure.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(DAEMON_SEARCH_REFRESH_RETRY_DELAYS.len().saturating_sub(1));
+    DAEMON_SEARCH_REFRESH_RETRY_DELAYS[index]
 }
 
-fn daemon_search_refresh_watcher_fallback_due(last_reinventory_at: Option<Instant>) -> bool {
-    last_reinventory_at
-        .is_none_or(|last| last.elapsed() >= DAEMON_SEARCH_REFRESH_WATCHER_FALLBACK_INTERVAL)
+fn search_refresh_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(i64::MAX)
+}
+
+fn search_refresh_timestamp_after(now_ms: i64, delay: StdDuration) -> Option<i64> {
+    let delay_ms = i64::try_from(delay.as_millis()).ok()?;
+    now_ms.checked_add(delay_ms)
+}
+
+fn search_refresh_future_instant(now: Instant, now_ms: i64, at_ms: i64) -> Option<Instant> {
+    let remaining_ms = at_ms.saturating_sub(now_ms);
+    if remaining_ms <= 0 {
+        return Some(now);
+    }
+    now.checked_add(StdDuration::from_millis(u64::try_from(remaining_ms).ok()?))
 }
 
 impl SearchRefreshSourceWatcher {
     fn new(watched_paths: Vec<PathBuf>) -> Result<Self> {
         let changes = Arc::new(Mutex::new(SearchRefreshSourceChanges::default()));
         let healthy = Arc::new(AtomicBool::new(true));
+        let error = Arc::new(Mutex::new(None));
         let callback_changes = Arc::clone(&changes);
         let callback_healthy = Arc::clone(&healthy);
+        let callback_error = Arc::clone(&error);
         let watches = search_refresh_watch_specs(&watched_paths);
         let callback_watches = watches.clone();
         let mut watcher = RecommendedWatcher::new(
@@ -191,6 +628,7 @@ impl SearchRefreshSourceWatcher {
                 note_search_refresh_source_event(
                     &callback_changes,
                     &callback_healthy,
+                    &callback_error,
                     &callback_watches,
                     event,
                 );
@@ -222,6 +660,7 @@ impl SearchRefreshSourceWatcher {
         Ok(Self {
             changes,
             healthy,
+            error,
             _watcher: watcher,
         })
     }
@@ -246,23 +685,42 @@ impl SearchRefreshSourceWatcher {
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
     }
+
+    fn error(&self) -> Option<String> {
+        self.error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 fn note_search_refresh_source_event(
     changes: &Mutex<SearchRefreshSourceChanges>,
     healthy: &AtomicBool,
+    last_error: &Mutex<Option<String>>,
     watches: &[SearchRefreshWatch],
     event: notify::Result<notify::Event>,
 ) {
-    let Ok(event) = event else {
-        healthy.store(false, Ordering::Release);
-        changes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .full_rebuild = true;
-        return;
+    let event = match event {
+        Ok(event) => event,
+        Err(error) => {
+            healthy.store(false, Ordering::Release);
+            *last_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            changes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .full_rebuild = true;
+            return;
+        }
     };
     if event.need_rescan() {
+        healthy.store(false, Ordering::Release);
+        *last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some("watcher requested a full filesystem rescan".to_owned());
         changes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

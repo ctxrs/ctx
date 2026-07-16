@@ -40,26 +40,37 @@ pub(crate) struct ImportInventory {
 
 pub(crate) fn inventory_import_sources(
     store: &Store,
+    sources: Vec<SourceInfo>,
+    full_rescan: bool,
+) -> Result<ImportInventory> {
+    inventory_import_sources_page(store, sources, full_rescan, true)
+}
+
+pub(crate) fn inventory_import_sources_page(
+    store: &Store,
     mut sources: Vec<SourceInfo>,
     full_rescan: bool,
+    include_publication_owner: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
     if let Some(owner) = store.effective_provider_file_publication_inventory_owner()? {
         sources.retain(|source| !source_matches_publication_owner(source, &owner));
-        let plan = publication_owner_plan(owner)?;
-        inventory.totals.sources += 1;
-        inventory.totals.source_files += 1;
-        inventory.totals.source_bytes = plan.stats.bytes;
-        match &plan.preinventory {
-            SourcePreinventory::CodexSessionCatalog { .. } => {
-                inventory.totals.codex_catalog_sources += 1;
+        if include_publication_owner {
+            let plan = publication_owner_plan(owner)?;
+            inventory.totals.sources += 1;
+            inventory.totals.source_files += 1;
+            inventory.totals.source_bytes = plan.stats.bytes;
+            match &plan.preinventory {
+                SourcePreinventory::CodexSessionCatalog { .. } => {
+                    inventory.totals.codex_catalog_sources += 1;
+                }
+                SourcePreinventory::SourceImportFiles { .. } => {
+                    inventory.totals.source_import_files += 1;
+                }
+                SourcePreinventory::None | SourcePreinventory::SourceRoot { .. } => {}
             }
-            SourcePreinventory::SourceImportFiles { .. } => {
-                inventory.totals.source_import_files += 1;
-            }
-            SourcePreinventory::None | SourcePreinventory::SourceRoot { .. } => {}
+            inventory.sources.push(plan);
         }
-        inventory.sources.push(plan);
     }
     for source in sources {
         inventory.totals.sources += 1;
@@ -103,7 +114,7 @@ pub(crate) fn inventory_import_sources(
     Ok(inventory)
 }
 
-fn source_matches_publication_owner(
+pub(crate) fn source_matches_publication_owner(
     source: &SourceInfo,
     owner: &ProviderFilePublicationInventoryOwner,
 ) -> bool {

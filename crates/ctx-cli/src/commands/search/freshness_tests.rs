@@ -227,6 +227,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &[],
             Err(notify::Error::generic("deterministic watcher failure")),
         );
@@ -243,6 +244,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &[],
             Ok(notify::Event::new(notify::EventKind::Access(
                 notify::event::AccessKind::Read,
@@ -251,6 +253,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &[],
             Ok(notify::Event::new(notify::EventKind::Access(
                 notify::event::AccessKind::Open(notify::event::AccessMode::Any),
@@ -277,6 +280,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &watches,
             Ok(
                 notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
@@ -302,6 +306,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &watches,
             Ok(
                 notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
@@ -326,6 +331,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &watches,
             Ok(
                 notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
@@ -352,6 +358,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &watches,
             Ok(
                 notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
@@ -377,6 +384,7 @@ mod freshness_tests {
         note_search_refresh_source_event(
             &changes,
             &healthy,
+            &Mutex::new(None),
             &watches,
             Ok(
                 notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
@@ -465,16 +473,21 @@ mod freshness_tests {
     }
 
     #[test]
-    fn daemon_failed_watcher_retries_on_each_daemon_pass() {
-        assert!(daemon_search_refresh_watcher_retry_due(false));
-        assert!(!daemon_search_refresh_watcher_retry_due(true));
-        assert!(daemon_search_refresh_watcher_fallback_due(None));
-        assert!(!daemon_search_refresh_watcher_fallback_due(Some(
-            Instant::now()
-        )));
-        assert!(daemon_search_refresh_watcher_fallback_due(Some(
-            Instant::now() - DAEMON_SEARCH_REFRESH_WATCHER_FALLBACK_INTERVAL
-        )));
+    fn daemon_failed_watcher_uses_capped_retry_and_fallback_delays() {
+        assert_eq!(
+            (1..=7)
+                .map(daemon_search_refresh_retry_delay)
+                .collect::<Vec<_>>(),
+            vec![
+                StdDuration::from_secs(30),
+                StdDuration::from_secs(60),
+                StdDuration::from_secs(2 * 60),
+                StdDuration::from_secs(4 * 60),
+                StdDuration::from_secs(5 * 60),
+                StdDuration::from_secs(5 * 60),
+                StdDuration::from_secs(5 * 60),
+            ]
+        );
     }
 
     #[test]
@@ -491,11 +504,18 @@ mod freshness_tests {
         assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
 
         let mut runtime = SearchRefreshRuntime::default();
-        let cached = refresh_with_runtime(
+        let mut cached = refresh_with_runtime(
             &data_root,
             &mut runtime,
             vec![dirty.clone(), unchanged.clone()],
         );
+        while runtime.inventory_progress.is_some() {
+            cached = refresh_with_runtime(
+                &data_root,
+                &mut runtime,
+                vec![dirty.clone(), unchanged.clone()],
+            );
+        }
         assert_eq!(cached.fresh_units_pending, 0, "{cached:?}");
         let dirty_generation = cached_inventory_generation(&runtime, &dirty);
         let unchanged_generation = cached_inventory_generation(&runtime, &unchanged);
