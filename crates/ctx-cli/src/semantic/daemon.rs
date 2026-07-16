@@ -10,6 +10,7 @@ struct DaemonRuntime {
     semantic_query_priority: query_priority::SemanticQueryPriorityGate,
     semantic_bootstrap_passes_since_refresh: usize,
     history_refresh: crate::commands::search::SearchRefreshRuntime,
+    history_refresh_restart_pending: bool,
 }
 
 fn daemon_runtime_embedder_loaded(runtime: &DaemonRuntime) -> bool {
@@ -993,7 +994,7 @@ fn execute_daemon_semantic_query(
     )
     .with_vector_byte_state(
         stats.vector_bytes_read as u64,
-        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES as u64,
+        semantic_streaming_scan_vector_byte_limit() as u64,
         Some(stats.vector_bytes_read as u64),
     );
     diagnostics.vector_backend = stats.backend.map(str::to_owned);
@@ -1299,6 +1300,8 @@ fn run_daemon_inner(
 
     let mut runtime = DaemonRuntime::default();
     let prior_history_refresh = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
+    runtime.history_refresh_restart_pending =
+        daemon_history_refresh_inventory_in_progress(prior_history_refresh.as_ref());
     runtime
         .history_refresh
         .restore_daemon_status(prior_history_refresh.as_ref());
@@ -1314,6 +1317,9 @@ fn run_daemon_inner(
     let mut idle_since: Option<Instant> = None;
     let mut observed_query_generation = 0;
     loop {
+        if daemon_history_refresh_keeps_daemon_alive(&runtime) {
+            idle_since = None;
+        }
         observe_daemon_query_activity(
             query_service
                 .as_ref()
@@ -1425,18 +1431,32 @@ fn run_daemon_once(
         });
     }
 
-    let history_refresh_job =
-        if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-            run_daemon_history_refresh_job(data_root, runtime)
-        } else {
-            Ok(daemon_history_refresh_skipped_job("daemon_deadline"))
-        };
+    let inventory_before = daemon_history_refresh_inventory_marker(&runtime.history_refresh);
+    let history_refresh_attempted =
+        daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS);
+    let history_refresh_job = if history_refresh_attempted {
+        run_daemon_history_refresh_job(data_root, runtime)
+    } else {
+        Ok(daemon_history_refresh_skipped_job("daemon_deadline"))
+    };
+    let inventory_after = daemon_history_refresh_inventory_marker(&runtime.history_refresh);
+    let inventory_page_completed =
+        daemon_history_refresh_inventory_page_completed(inventory_before, inventory_after);
     let mut history_refresh_job = match history_refresh_job {
         Ok(value) => value,
         Err(error) => daemon_history_refresh_failed_job(format!("{error:#}")),
     };
+    if runtime.history_refresh_restart_pending
+        && history_refresh_attempted
+        && (inventory_after.in_progress
+            || inventory_page_completed
+            || history_refresh_job.get("reason").and_then(Value::as_str) == Some("no_sources"))
+    {
+        runtime.history_refresh_restart_pending = false;
+    }
     add_daemon_history_refresh_runtime_status(&mut history_refresh_job, &runtime.history_refresh);
-    let history_refresh_did_work = daemon_history_refresh_job_did_work(&history_refresh_job);
+    let history_refresh_did_work =
+        inventory_page_completed || daemon_history_refresh_job_did_work(&history_refresh_job);
     runtime.semantic_bootstrap_passes_since_refresh = 0;
     write_daemon_job_status_unless_deadline_skip(
         &daemon_history_refresh_job_path(data_root),
@@ -1615,6 +1635,56 @@ fn daemon_deadline_has_min_budget(deadline: Option<Instant>, min_secs: u64) -> b
     remaining >= StdDuration::from_secs(min_secs)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DaemonHistoryRefreshInventoryMarker {
+    in_progress: bool,
+    completed_sources: u64,
+    last_completed_at_ms: Option<i64>,
+}
+
+fn daemon_history_refresh_inventory_in_progress(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| value.get("inventory"))
+        .and_then(|inventory| inventory.get("state"))
+        .and_then(Value::as_str)
+        == Some("in_progress")
+}
+
+fn daemon_history_refresh_inventory_marker(
+    runtime: &crate::commands::search::SearchRefreshRuntime,
+) -> DaemonHistoryRefreshInventoryMarker {
+    let status = runtime.daemon_status_json();
+    let inventory = status.get("inventory");
+    DaemonHistoryRefreshInventoryMarker {
+        in_progress: inventory
+            .and_then(|inventory| inventory.get("state"))
+            .and_then(Value::as_str)
+            == Some("in_progress"),
+        completed_sources: inventory
+            .and_then(|inventory| inventory.get("progress"))
+            .and_then(|progress| progress.get("completed_sources"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        last_completed_at_ms: inventory
+            .and_then(|inventory| inventory.get("last_completed_at_ms"))
+            .and_then(Value::as_i64),
+    }
+}
+
+fn daemon_history_refresh_inventory_page_completed(
+    before: DaemonHistoryRefreshInventoryMarker,
+    after: DaemonHistoryRefreshInventoryMarker,
+) -> bool {
+    (after.in_progress && after.completed_sources > before.completed_sources)
+        || (after.last_completed_at_ms.is_some()
+            && after.last_completed_at_ms != before.last_completed_at_ms)
+}
+
+fn daemon_history_refresh_keeps_daemon_alive(runtime: &DaemonRuntime) -> bool {
+    runtime.history_refresh_restart_pending
+        || daemon_history_refresh_inventory_marker(&runtime.history_refresh).in_progress
+}
+
 fn run_daemon_history_refresh_job(data_root: &Path, runtime: &mut DaemonRuntime) -> Result<Value> {
     #[cfg(all(test, ctx_sqlite_vec))]
     if let Some(value) = daemon_test_job("history_refresh") {
@@ -1772,10 +1842,15 @@ fn run_daemon_semantic_job(
         last_run_at_ms,
     ) {
         Ok(job) => Ok(job),
-        Err(error) if semantic_sidecar_busy(&error) => {
-            Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms))
+        Err(error) if semantic_deterministic_sidecar_error(&error) => {
+            Ok(daemon_semantic_terminal_maintenance_job(
+                data_root,
+                last_run_at_ms,
+                semantic_terminal_maintenance_message(&error)
+                    .unwrap_or_else(|| format!("{error:#}")),
+            ))
         }
-        Err(error) => Ok(daemon_semantic_terminal_maintenance_job(
+        Err(error) => Ok(daemon_semantic_retryable_job(
             data_root,
             last_run_at_ms,
             format!("{error:#}"),
@@ -1844,16 +1919,6 @@ fn run_daemon_semantic_job_inner(
     drop(open_permit);
     let mut maintenance_store = match maintenance_store {
         Ok(store) => store,
-        Err(error) if semantic_sidecar_busy(&error) => {
-            return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
-        }
-        Err(error) if semantic_deterministic_sidecar_error(&error) => {
-            return Ok(daemon_semantic_terminal_maintenance_job(
-                data_root,
-                last_run_at_ms,
-                format!("{error:#}"),
-            ));
-        }
         Err(error) => return Err(error),
     };
     let maintenance_nominal = maintenance_store.maintenance_precharge_bytes()?;
@@ -1885,43 +1950,19 @@ fn run_daemon_semantic_job_inner(
             ));
         }
         Ok(None) => {}
-        Err(error) if semantic_sidecar_busy(&error) => {
-            drop(maintenance_permit);
-            return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
-        }
         Err(error) => {
-            let message = format!("{error:#}");
-            let recorded = maintenance_store.record_terminal_maintenance_failure(&message);
             drop(maintenance_permit);
-            if let Err(record_error) = recorded {
-                if semantic_sidecar_busy(&record_error) {
-                    return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
-                }
-                return Ok(daemon_semantic_terminal_maintenance_job(
-                    data_root,
-                    last_run_at_ms,
-                    format!(
-                        "{message}; failed to persist terminal sidecar state: {record_error:#}"
-                    ),
-                ));
-            }
-            return Ok(daemon_semantic_terminal_maintenance_job(
-                data_root,
-                last_run_at_ms,
-                message,
-            ));
+            return Err(error);
         }
     }
     let maintenance = match maintenance_store.run_maintenance_slice_precharged(maintenance_nominal)
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            if semantic_sidecar_busy(&error) {
+            let Some(message) = semantic_terminal_maintenance_message(&error) else {
                 drop(maintenance_permit);
-                return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
-            }
-            let message = semantic_terminal_maintenance_message(&error)
-                .unwrap_or_else(|| format!("{error:#}"));
+                return Err(error);
+            };
             let recorded = maintenance_store.record_terminal_maintenance_failure(&message);
             drop(maintenance_permit);
             match recorded {
@@ -1931,9 +1972,6 @@ fn run_daemon_semantic_job_inner(
                         last_run_at_ms,
                         message,
                     ));
-                }
-                Err(error) if semantic_sidecar_busy(&error) => {
-                    return Ok(daemon_semantic_sidecar_busy_job(data_root, last_run_at_ms));
                 }
                 Err(record_error) => {
                     return Ok(daemon_semantic_terminal_maintenance_job(
@@ -2159,6 +2197,9 @@ fn run_daemon_semantic_job_inner(
         &runtime.semantic_query_priority,
     );
     if let Err(error) = worker_result {
+        if semantic_deterministic_sidecar_error(&error) {
+            return Err(error);
+        }
         if let Some(deferred) = error.downcast_ref::<SemanticModelLoadDeferred>() {
             semantic_model_retry_store(data_root)
                 .record_failure(
@@ -2193,14 +2234,10 @@ fn run_daemon_semantic_job_inner(
             *lock_daemon_runtime_embedder(runtime)? = None;
         }
         let _ = write_semantic_worker_failure_status(data_root, message.clone());
-        let report = semantic_worker_report_for_daemon(data_root);
-        return Ok(daemon_semantic_job_json(
-            "failed",
-            None,
+        return Ok(daemon_semantic_retryable_job(
+            data_root,
             last_run_at_ms,
-            &report,
-            None,
-            Some(message),
+            message,
         ));
     }
     let report = semantic_worker_report_for_daemon(data_root);
@@ -2306,15 +2343,15 @@ fn daemon_semantic_terminal_maintenance_job(
     compact_json(value)
 }
 
-fn daemon_semantic_sidecar_busy_job(data_root: &Path, last_run_at_ms: i64) -> Value {
+fn daemon_semantic_retryable_job(data_root: &Path, last_run_at_ms: i64, message: String) -> Value {
     let report = semantic_worker_report_for_daemon(data_root);
     let mut value = daemon_semantic_job_json(
-        "skipped",
-        Some("sidecar_busy"),
+        "degraded",
+        Some("semantic_retryable_error"),
         last_run_at_ms,
         &report,
         None,
-        None,
+        Some(message),
     );
     value["retryable"] = Value::Bool(true);
     compact_json(value)
@@ -2328,39 +2365,8 @@ fn semantic_terminal_maintenance_message(error: &anyhow::Error) -> Option<String
     })
 }
 
-fn semantic_sidecar_busy(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::SqliteFailure(inner, _))
-                if matches!(
-                    inner.code,
-                    rusqlite::ErrorCode::DatabaseBusy
-                        | rusqlite::ErrorCode::DatabaseLocked
-                )
-        )
-    })
-}
-
 fn semantic_deterministic_sidecar_error(error: &anyhow::Error) -> bool {
-    if semantic_terminal_maintenance_message(error).is_some() {
-        return true;
-    }
-    error.chain().any(|cause| {
-        let Some(error) = cause.downcast_ref::<rusqlite::Error>() else {
-            return false;
-        };
-        !matches!(
-            error,
-            rusqlite::Error::SqliteFailure(inner, _)
-                if matches!(
-                    inner.code,
-                    rusqlite::ErrorCode::DatabaseBusy
-                        | rusqlite::ErrorCode::DatabaseLocked
-                        | rusqlite::ErrorCode::OperationInterrupted
-                )
-        )
-    })
+    semantic_terminal_maintenance_message(error).is_some()
 }
 
 fn semantic_query_error_retryable(error: &anyhow::Error) -> bool {
@@ -2390,6 +2396,10 @@ fn semantic_query_error_retryable(error: &anyhow::Error) -> bool {
             rusqlite::ErrorCode::DatabaseBusy
                 | rusqlite::ErrorCode::DatabaseLocked
                 | rusqlite::ErrorCode::OperationInterrupted
+                | rusqlite::ErrorCode::SystemIoFailure
+                | rusqlite::ErrorCode::DiskFull
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::OutOfMemory
         )
     )
 }

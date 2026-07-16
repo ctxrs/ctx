@@ -1399,6 +1399,53 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_vec0_preflights_one_streaming_attempt_and_reports_enforced_work() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let event_id = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[(
+            test_chunk(event_id, 1, "bounded"),
+            test_embedding(1.0, 0.0),
+        )])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+
+        assert_eq!(
+            semantic_streaming_scan_chunk_limit(),
+            SEMANTIC_SQLITE_VEC0_MAX_K.min(ctx_protocol::SEARCH_MAX_CANDIDATE_ROWS)
+        );
+        assert!(15_327 <= semantic_streaming_scan_chunk_limit());
+        let search = store.search(&test_embedding(1.0, 0.0), 1)?;
+        assert_eq!(search.stats.chunks_scanned, 1);
+        assert_eq!(
+            search.stats.vector_bytes_read,
+            SEMANTIC_DIMENSIONS * std::mem::size_of::<f32>()
+        );
+        assert_eq!(search.stats.events_scored, 1);
+
+        store.conn.execute(
+            r#"
+            UPDATE semantic_index_stats
+            SET embedded_chunks = ?2
+            WHERE model_key = ?1
+            "#,
+            params![
+                semantic_model_key(),
+                semantic_streaming_scan_chunk_limit().saturating_add(1) as i64
+            ],
+        )?;
+        let error = store
+            .search(&test_embedding(1.0, 0.0), 1)
+            .expect_err("oversized streaming corpus must fail before vec0");
+        assert!(error
+            .to_string()
+            .contains("exceeds the bounded sqlite vec0 streaming scan"));
+        assert!(error
+            .chain()
+            .any(|cause| cause.downcast_ref::<SemanticVectorStorePending>().is_some()));
+        Ok(())
+    }
+
+    #[test]
     fn rust_full_scan_requires_sidecar_within_cap_without_vec0() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
@@ -2056,6 +2103,198 @@ mod tests {
     }
 
     #[test]
+    fn vec0_schema_validation_rejects_wrong_metric_missing_and_extra_columns() -> Result<()> {
+        {
+            let temp = tempfile::tempdir()?;
+            let store = SemanticVectorStore::open(&temp.path().join("wrong-metric.sqlite"))?;
+            assert!(store.ensure_sqlite_vec0_schema_for_maintenance()?);
+            store
+                .conn
+                .execute_batch(&format!("DROP TABLE {SQLITE_VEC0_TABLE};"))?;
+            store.conn.execute_batch(&format!(
+                r#"
+                CREATE VIRTUAL TABLE {SQLITE_VEC0_TABLE}
+                USING vec0(
+                    embedding float[{SEMANTIC_DIMENSIONS}] distance_metric=l2,
+                    slot INTEGER PARTITION KEY,
+                    model_key TEXT PARTITION KEY
+                );
+                "#
+            ))?;
+            assert!(!store.sqlite_vec0_schema_compatible()?);
+        }
+
+        {
+            let temp = tempfile::tempdir()?;
+            let store = SemanticVectorStore::open(&temp.path().join("missing-column.sqlite"))?;
+            assert!(store.ensure_sqlite_vec0_schema_for_maintenance()?);
+            store.conn.execute_batch(&format!(
+                "ALTER TABLE {SQLITE_VEC0_META_TABLE} DROP COLUMN end_char;"
+            ))?;
+            assert!(!store.sqlite_vec0_schema_compatible()?);
+        }
+
+        {
+            let temp = tempfile::tempdir()?;
+            let store = SemanticVectorStore::open(&temp.path().join("extra-column.sqlite"))?;
+            assert!(store.ensure_sqlite_vec0_schema_for_maintenance()?);
+            store.conn.execute_batch(&format!(
+                "ALTER TABLE {SQLITE_VEC0_META_TABLE} ADD COLUMN unexpected TEXT;"
+            ))?;
+            assert!(!store.sqlite_vec0_schema_compatible()?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn partial_vec0_schema_is_terminal_and_never_dropped() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        store.conn.execute_batch(&format!(
+            r#"
+            CREATE TABLE {SQLITE_VEC0_META_TABLE} (
+                rowid INTEGER PRIMARY KEY,
+                marker TEXT NOT NULL
+            );
+            INSERT INTO {SQLITE_VEC0_META_TABLE}(rowid, marker) VALUES (7, 'preserve');
+            "#
+        ))?;
+
+        let error = store
+            .ensure_sqlite_vec0_schema_for_maintenance()
+            .expect_err("partial vec0 schema must fail closed");
+
+        assert!(semantic_terminal_maintenance_message(&error).is_some());
+        assert!(!sqlite_table_exists(&store.conn, SQLITE_VEC0_TABLE)?);
+        assert_eq!(
+            store.conn.query_row(
+                &format!("SELECT marker FROM {SQLITE_VEC0_META_TABLE} WHERE rowid = 7"),
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "preserve"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_model_dimensions_index_bounds_foreign_model_blob_plan() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let tx = store.conn.unchecked_transaction()?;
+        for index in 0..8_i64 {
+            tx.execute(
+                r#"
+                INSERT INTO event_embedding_chunks
+                    (event_id, model_key, event_seq, chunk_index, chunk_count,
+                     source_text_sha256, chunk_text_sha256, start_char, end_char,
+                     dimensions, embedding_f32, embedded_at_ms)
+                VALUES (?1, 'foreign:model', ?2, 0, 1, 'foreign', 'foreign', 0, 1,
+                        ?3, ?4, 1)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    index,
+                    SEMANTIC_DIMENSIONS as i64,
+                    serialize_f32_blob(&test_embedding(1.0, 0.0))
+                ],
+            )?;
+        }
+        tx.commit()?;
+
+        let mut stmt = store.conn.prepare(&format!(
+            r#"
+            EXPLAIN QUERY PLAN
+            SELECT event_id, source_text_sha256, start_char, end_char, embedding_f32
+            FROM event_embedding_chunks INDEXED BY {CANONICAL_MODEL_DIMENSIONS_INDEX}
+            WHERE model_key = ?1 AND dimensions = ?2
+            ORDER BY rowid
+            LIMIT ?3
+            "#
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                semantic_model_key(),
+                SEMANTIC_DIMENSIONS as i64,
+                semantic_rust_full_scan_chunk_limit() as i64
+            ],
+            |row| row.get::<_, String>(3),
+        )?;
+        let plan = rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+        assert!(plan.contains(CANONICAL_MODEL_DIMENSIONS_INDEX), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_fingerprint_tracks_the_offending_non_head_row() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let first_event = Uuid::new_v4();
+        let offending_event = Uuid::new_v4();
+        let embedding = serialize_f32_blob(&test_embedding(1.0, 0.0));
+        for (event_id, dimensions, seq) in [
+            (first_event, SEMANTIC_DIMENSIONS as i64, 1_i64),
+            (offending_event, SEMANTIC_DIMENSIONS as i64 + 1, 2_i64),
+        ] {
+            store.conn.execute(
+                r#"
+                INSERT INTO event_embedding_chunks
+                    (event_id, model_key, event_seq, chunk_index, chunk_count,
+                     source_text_sha256, chunk_text_sha256, start_char, end_char,
+                     dimensions, embedding_f32, embedded_at_ms)
+                VALUES (?1, ?2, ?3, 0, 1, ?4, ?4, 0, 1, ?5, ?6, 1)
+                "#,
+                params![
+                    event_id.to_string(),
+                    semantic_model_key(),
+                    seq,
+                    event_id.to_string(),
+                    dimensions,
+                    &embedding
+                ],
+            )?;
+        }
+        store.conn.execute(
+            "UPDATE semantic_index_stats SET trust_version = 0 WHERE model_key = ?1",
+            [semantic_model_key()],
+        )?;
+
+        let mut terminal_error = None;
+        for _ in 0..16 {
+            match store.run_maintenance_slice() {
+                Ok(_) => {}
+                Err(error) => {
+                    terminal_error = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = terminal_error.expect("malformed second row must become terminal");
+        let message = semantic_terminal_maintenance_message(&error).expect("typed terminal error");
+        store.record_terminal_maintenance_failure(&message)?;
+        assert_eq!(
+            store.active_terminal_maintenance_failure()?,
+            Some(message.clone())
+        );
+
+        store.conn.execute(
+            r#"
+            UPDATE event_embedding_chunks
+            SET dimensions = ?2
+            WHERE event_id = ?1 AND model_key = ?3
+            "#,
+            params![
+                offending_event.to_string(),
+                SEMANTIC_DIMENSIONS as i64,
+                semantic_model_key()
+            ],
+        )?;
+        assert_eq!(store.active_terminal_maintenance_failure()?, None);
+        Ok(())
+    }
+
+    #[test]
     fn sqlite_vec0_overfetches_until_unique_events_match_rust_scan() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
@@ -2151,12 +2390,13 @@ mod tests {
             let projection_rowid = tx.last_insert_rowid();
             tx.execute(
                 &format!(
-                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot) VALUES (?1, ?2, ?3)"
+                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot, model_key) VALUES (?1, ?2, ?3, ?4)"
                 ),
                 params![
                     projection_rowid,
                     serialize_f32_blob(&test_embedding(1.0, 0.0)),
-                    inactive_slot
+                    inactive_slot,
+                    semantic_model_key()
                 ],
             )?;
         }
@@ -2177,6 +2417,118 @@ mod tests {
                 .map(|hit| hit.event_id)
                 .collect::<Vec<_>>()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_vec0_model_partition_excludes_old_model_vectors_and_changes_the_plan() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let close_event = Uuid::new_v4();
+        let far_event = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[
+            (
+                test_chunk(close_event, 2, "current-close"),
+                test_embedding(0.9, 0.1),
+            ),
+            (
+                test_chunk(far_event, 1, "current-far"),
+                test_embedding(0.0, 1.0),
+            ),
+        ])?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+        let active_slot = store
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .expect("active slot");
+        let old_model_key = "old:model-transition";
+        let tx = store.conn.transaction()?;
+        for index in 0..8_i64 {
+            tx.execute(
+                &format!(
+                    r#"
+                    INSERT INTO {SQLITE_VEC0_META_TABLE}
+                        (slot, canonical_rowid, event_id, model_key, event_seq, chunk_index,
+                         source_text_sha256, start_char, end_char)
+                    VALUES (?1, ?2, ?3, ?4, ?5, 0, 'old', 0, 1)
+                    "#
+                ),
+                params![
+                    active_slot,
+                    20_000 + index,
+                    Uuid::new_v4().to_string(),
+                    old_model_key,
+                    20_000 + index
+                ],
+            )?;
+            let projection_rowid = tx.last_insert_rowid();
+            tx.execute(
+                &format!(
+                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot, model_key) VALUES (?1, ?2, ?3, ?4)"
+                ),
+                params![
+                    projection_rowid,
+                    serialize_f32_blob(&test_embedding(1.0, 0.0)),
+                    active_slot,
+                    old_model_key
+                ],
+            )?;
+        }
+        tx.commit()?;
+
+        let query = test_embedding(1.0, 0.0);
+        let projected = store.search(&query, 2)?;
+        let canonical = store.search_event_ids(&query, &[close_event, far_event], 2)?;
+        assert_eq!(
+            projected
+                .hits
+                .iter()
+                .map(|hit| hit.event_id)
+                .collect::<Vec<_>>(),
+            canonical
+                .hits
+                .iter()
+                .map(|hit| hit.event_id)
+                .collect::<Vec<_>>()
+        );
+
+        let query_blob = serialize_f32_blob(&query);
+        let plan_with_model = {
+            let mut stmt = store.conn.prepare(&format!(
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT rowid
+                FROM {SQLITE_VEC0_TABLE}
+                WHERE slot = ?1 AND model_key = ?2
+                  AND embedding MATCH ?3 AND k = ?4
+                ORDER BY distance
+                "#
+            ))?;
+            let rows = stmt.query_map(
+                params![active_slot, semantic_model_key(), &query_blob, 2_i64],
+                |row| row.get::<_, String>(3),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n")
+        };
+        let plan_without_model = {
+            let mut stmt = store.conn.prepare(&format!(
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT rowid
+                FROM {SQLITE_VEC0_TABLE}
+                WHERE slot = ?1 AND embedding MATCH ?2 AND k = ?3
+                ORDER BY distance
+                "#
+            ))?;
+            let rows = stmt.query_map(params![active_slot, &query_blob, 2_i64], |row| {
+                row.get::<_, String>(3)
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n")
+        };
+        assert!(
+            plan_with_model.contains("VIRTUAL TABLE INDEX"),
+            "{plan_with_model}"
+        );
+        assert_ne!(plan_with_model, plan_without_model);
         Ok(())
     }
 
@@ -2302,11 +2654,14 @@ mod tests {
             params![close_rowid],
         )?;
         store.conn.execute(
-            &format!("INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot) VALUES (?1, ?2, ?3)"),
+            &format!(
+                "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot, model_key) VALUES (?1, ?2, ?3, ?4)"
+            ),
             params![
                 close_rowid,
                 serialize_f32_blob(&test_embedding(0.0, 1.0)),
-                active_slot
+                active_slot,
+                semantic_model_key()
             ],
         )?;
 
