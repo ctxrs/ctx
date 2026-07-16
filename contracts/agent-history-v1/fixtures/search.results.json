@@ -7,7 +7,16 @@
     "dataRoot": "/tmp/ctx-sdk-fixture"
   },
   "search": {
-    "query": "local agent history",
+    "query": {
+      "version": "ctx-search-v1",
+      "any": [
+        { "all": "local agent history" },
+        { "semantic": "find prior work on local history retrieval" }
+      ],
+      "must_not": [
+        { "all": "postgres vacuum" }
+      ]
+    },
     "filters": {
       "provider": "codex"
     },
@@ -24,11 +33,8 @@
     "retrieval": {
       "requestedMode": "hybrid",
       "effectiveMode": "hybrid",
-      "semanticWeight": 0.35,
       "semanticStatus": "ready",
-      "semanticFallbackCode": null,
-      "semanticFallback": null,
-      "embeddingModel": "sentence-transformers/all-MiniLM-L6-v2",
+      "embeddingModel": "intfloat/multilingual-e5-small",
       "coverage": {
         "embeddedItems": 1200,
         "embeddedChunks": 1500,
@@ -86,6 +92,69 @@
       "limit": 20
     },
     "truncation": {
+      "truncated": false
+    },
+    "query_execution": {
+      "query_version": "ctx-search-v1",
+      "candidate_strategy": "bounded_union_rrf_v1",
+      "resolved": {
+        "query_bytes": 8192,
+        "clauses": 32,
+        "analyzed_tokens_per_clause": 32,
+        "candidates_per_positive_seed": 1024,
+        "candidate_rows": 16384,
+        "retained_candidate_ids": 8192,
+        "residual_rows": 8192,
+        "verification_bytes": 16777216,
+        "verification_lookup_bytes": 16384,
+        "hydrated_rows": 256,
+        "hydration_input_bytes": 8388608,
+        "hydration_input_bytes_per_event": 65536,
+        "returned_text_bytes": 524288,
+        "serialized_response_bytes": 2097152,
+        "results": 20,
+        "elapsed_ms": 10000
+      },
+      "consumed": {
+        "query_bytes": 73,
+        "clauses": 3,
+        "analyzed_tokens": 12,
+        "candidate_rows": 2,
+        "retained_candidate_ids": 1,
+        "residual_rows": 1,
+        "hydrated_rows": 1,
+        "legacy_fallback_rows": 0,
+        "verification_bytes": 128,
+        "largest_verification_lookup_bytes": 128,
+        "hydration_input_bytes": 512,
+        "largest_hydration_input_bytes": 512,
+        "returned_results": 1,
+        "returned_text_bytes": 33,
+        "serialized_response_bytes": 4096,
+        "elapsed_ms": 4
+      },
+      "semantic": {
+        "attempted": true,
+        "required": true,
+        "readiness": "ready",
+        "effective_backend": "hybrid",
+        "backend": "daemon",
+        "coverage": {
+          "candidates_supplied": 2,
+          "candidates_consumed": 2,
+          "candidates_used": 1,
+          "truncated": false
+        },
+        "completeness": "complete",
+        "positive_text_rule_version": "ctx-search-positive-text-v1"
+      },
+      "rrf_k": 60,
+      "per_branch_candidate_rows": 1024,
+      "clauses_executed": 3,
+      "verification_dropped": 0,
+      "filter_verification_dropped": 0,
+      "candidate_budget_exhausted": false,
+      "timed_out": false,
       "truncated": false
     }
   }

@@ -100,11 +100,202 @@
       },
       "additionalProperties": true
     },
+    "searchLexicalClause": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["all"],
+          "properties": { "all": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["phrase"],
+          "properties": { "phrase": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["literal"],
+          "properties": {
+            "literal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Runtime validation requires 3..=256 UTF-8 bytes, an indexed anchor, and at most 32 analyzed tokens. JSON Schema string lengths count Unicode code points."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "searchSemanticClause": {
+      "type": "object",
+      "required": ["semantic"],
+      "properties": { "semantic": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+      "additionalProperties": false
+    },
+    "searchAnyClause": {
+      "oneOf": [
+        { "$ref": "#/$defs/searchLexicalClause" },
+        { "$ref": "#/$defs/searchSemanticClause" }
+      ]
+    },
+    "searchQueryV1": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": { "const": "ctx-search-v1" },
+        "any": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/searchAnyClause" },
+          "contains": { "$ref": "#/$defs/searchSemanticClause" },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        "must": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/searchLexicalClause" }
+        },
+        "must_not": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/searchLexicalClause" }
+        }
+      },
+      "anyOf": [
+        { "required": ["any"], "properties": { "any": { "minItems": 1 } } },
+        { "required": ["must"], "properties": { "must": { "minItems": 1 } } }
+      ],
+      "additionalProperties": false
+    },
+    "searchExecutionLimits": {
+      "type": "object",
+      "required": [
+        "query_bytes", "clauses", "analyzed_tokens_per_clause",
+        "candidates_per_positive_seed", "candidate_rows", "retained_candidate_ids",
+        "residual_rows", "verification_bytes", "verification_lookup_bytes",
+        "hydrated_rows", "hydration_input_bytes", "hydration_input_bytes_per_event",
+        "returned_text_bytes", "serialized_response_bytes", "results", "elapsed_ms"
+      ],
+      "properties": {
+        "query_bytes": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "clauses": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "analyzed_tokens_per_clause": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "candidates_per_positive_seed": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "candidate_rows": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "retained_candidate_ids": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "residual_rows": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "verification_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "verification_lookup_bytes": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "hydrated_rows": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "hydration_input_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "hydration_input_bytes_per_event": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "returned_text_bytes": { "type": "integer", "minimum": 1, "maximum": 524288 },
+        "serialized_response_bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 },
+        "results": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "elapsed_ms": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "searchExecutionConsumption": {
+      "type": "object",
+      "required": [
+        "query_bytes", "clauses", "analyzed_tokens", "candidate_rows",
+        "retained_candidate_ids", "residual_rows", "hydrated_rows",
+        "legacy_fallback_rows", "verification_bytes", "largest_verification_lookup_bytes",
+        "hydration_input_bytes", "largest_hydration_input_bytes", "returned_results",
+        "returned_text_bytes", "serialized_response_bytes", "elapsed_ms"
+      ],
+      "properties": {
+        "query_bytes": { "type": "integer", "minimum": 0 },
+        "clauses": { "type": "integer", "minimum": 0 },
+        "analyzed_tokens": { "type": "integer", "minimum": 0 },
+        "candidate_rows": { "type": "integer", "minimum": 0 },
+        "retained_candidate_ids": { "type": "integer", "minimum": 0 },
+        "residual_rows": { "type": "integer", "minimum": 0 },
+        "hydrated_rows": { "type": "integer", "minimum": 0 },
+        "legacy_fallback_rows": { "type": "integer", "minimum": 0 },
+        "verification_bytes": { "type": "integer", "minimum": 0 },
+        "largest_verification_lookup_bytes": { "type": "integer", "minimum": 0 },
+        "hydration_input_bytes": { "type": "integer", "minimum": 0 },
+        "largest_hydration_input_bytes": { "type": "integer", "minimum": 0 },
+        "returned_results": { "type": "integer", "minimum": 0 },
+        "returned_text_bytes": { "type": "integer", "minimum": 0 },
+        "serialized_response_bytes": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "searchSemanticCoverage": {
+      "type": "object",
+      "required": ["candidates_supplied", "candidates_consumed", "candidates_used", "truncated"],
+      "properties": {
+        "candidates_supplied": { "type": "integer", "minimum": 0 },
+        "candidates_consumed": { "type": "integer", "minimum": 0 },
+        "candidates_used": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "searchSemanticDiagnostics": {
+      "type": "object",
+      "required": [
+        "attempted", "required", "readiness", "effective_backend", "coverage",
+        "completeness", "positive_text_rule_version"
+      ],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "required": { "type": "boolean" },
+        "readiness": { "enum": ["ready", "not_ready", "unsupported", "unavailable"] },
+        "effective_backend": { "enum": ["none", "lexical", "semantic", "hybrid"] },
+        "backend": { "type": "string" },
+        "coverage": { "$ref": "#/$defs/searchSemanticCoverage" },
+        "completeness": { "enum": ["not_attempted", "complete", "partial", "skipped"] },
+        "skip_reason": {
+          "enum": ["disabled", "unavailable", "not_ready", "unsupported", "no_lexical_candidates"]
+        },
+        "positive_text_rule_version": { "const": "ctx-search-positive-text-v1" }
+      },
+      "additionalProperties": false
+    },
+    "searchExecution": {
+      "type": "object",
+      "required": [
+        "query_version", "candidate_strategy", "resolved", "consumed", "semantic",
+        "rrf_k", "per_branch_candidate_rows", "clauses_executed", "verification_dropped",
+        "filter_verification_dropped", "candidate_budget_exhausted", "timed_out", "truncated"
+      ],
+      "properties": {
+        "query_version": { "const": "ctx-search-v1" },
+        "candidate_strategy": { "type": "string" },
+        "resolved": { "$ref": "#/$defs/searchExecutionLimits" },
+        "consumed": { "$ref": "#/$defs/searchExecutionConsumption" },
+        "semantic": { "$ref": "#/$defs/searchSemanticDiagnostics" },
+        "rrf_k": { "type": "integer", "minimum": 1 },
+        "per_branch_candidate_rows": { "type": "integer", "minimum": 0 },
+        "clauses_executed": { "type": "integer", "minimum": 0 },
+        "verification_dropped": { "type": "integer", "minimum": 0 },
+        "filter_verification_dropped": { "type": "integer", "minimum": 0 },
+        "candidate_budget_exhausted": { "type": "boolean" },
+        "timed_out": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "truncation_reasons": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
     "searchResult": {
       "type": "object",
-      "required": ["query", "results"],
+      "required": ["query", "results", "query_execution"],
       "properties": {
-        "query": { "type": ["string", "null"] },
+        "query": {
+          "oneOf": [
+            { "$ref": "#/$defs/searchQueryV1" },
+            { "type": "null" }
+          ]
+        },
         "filters": { "type": "object", "additionalProperties": true },
         "freshness": { "$ref": "#/$defs/freshness" },
         "retrieval": { "$ref": "#/$defs/searchRetrieval" },
@@ -114,7 +305,8 @@
           "items": { "$ref": "#/$defs/searchHit" }
         },
         "pagination": { "type": "object", "additionalProperties": true },
-        "truncation": { "type": "object", "additionalProperties": true }
+        "truncation": { "type": "object", "additionalProperties": true },
+        "query_execution": { "$ref": "#/$defs/searchExecution" }
       },
       "additionalProperties": true
     },
@@ -164,10 +356,7 @@
           "type": ["string", "null"],
           "enum": ["lexical", "semantic", "hybrid", null]
         },
-        "semanticWeight": { "type": ["number", "null"] },
         "semanticStatus": { "type": ["string", "null"] },
-        "semanticFallbackCode": { "type": ["string", "null"] },
-        "semanticFallback": { "type": ["string", "null"] },
         "embeddingModel": { "type": ["string", "null"] },
         "coverage": {
           "type": "object",

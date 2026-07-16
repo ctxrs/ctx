@@ -11,6 +11,7 @@ const MCP_TEXT_MAX_CELL_CHARS: usize = 80;
 
 pub(super) fn render_tool_text(value: &Value) -> String {
     match value.get("payload_type").and_then(Value::as_str) {
+        Some("search_error") => render_search_error_text(value),
         Some("sql_result") => render_sql_text(value),
         Some("session_transcript") => render_session_text(value),
         Some("event_window") => render_event_window_text(value),
@@ -182,10 +183,10 @@ fn render_search_text(value: &Value) -> String {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let mut out = String::from("ctx search\n");
-    if let Some(query) = value.get("query").and_then(Value::as_str) {
+    if let Some(query) = value.get("query").and_then(render_search_query) {
         out.push_str(&format!(
             "query: {}\n",
-            clip_inline(query, MCP_TEXT_MAX_SNIPPET_CHARS)
+            clip_inline(&query, MCP_TEXT_MAX_SNIPPET_CHARS)
         ));
     }
     if let Some(freshness) = value.get("freshness") {
@@ -241,6 +242,64 @@ fn render_search_text(value: &Value) -> String {
         MCP_TEXT_MAX_SEARCH_RESULTS,
         "results",
     );
+    out
+}
+
+fn render_search_query(value: &Value) -> Option<String> {
+    if let Some(query) = value.as_str() {
+        return Some(query.to_owned());
+    }
+    let object = value.as_object()?;
+    if object.get("version").and_then(Value::as_str) != Some("ctx-search-v1") {
+        return None;
+    }
+    if object.get("must").is_none() && object.get("must_not").is_none() {
+        let single_all = object
+            .get("any")
+            .and_then(Value::as_array)
+            .filter(|clauses| clauses.len() == 1)
+            .and_then(|clauses| clauses.first())
+            .and_then(Value::as_object)
+            .filter(|clause| clause.len() == 1)
+            .and_then(|clause| clause.get("all"))
+            .and_then(Value::as_str);
+        if let Some(single_all) = single_all {
+            return Some(single_all.to_owned());
+        }
+    }
+    let mut groups = Vec::new();
+    for (placement, joiner) in [("any", " | "), ("must", " & "), ("must_not", " | ")] {
+        let clauses = object
+            .get(placement)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(render_search_clause)
+            .collect::<Vec<_>>();
+        if !clauses.is_empty() {
+            groups.push(format!("{placement}({})", clauses.join(joiner)));
+        }
+    }
+    (!groups.is_empty()).then(|| groups.join(" "))
+}
+
+fn render_search_clause(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    let (kind, value) = object.iter().next()?;
+    if object.len() != 1 {
+        return None;
+    }
+    value.as_str().map(|value| format!("{kind}:{value}"))
+}
+
+fn render_search_error_text(value: &Value) -> String {
+    let mut out = String::from("ctx search error\n");
+    let Some(error) = value.get("error") else {
+        return out;
+    };
+    push_key_value(&mut out, "code", error.get("code"));
+    push_key_value(&mut out, "message", error.get("message"));
+    push_key_value(&mut out, "retryable", error.get("retryable"));
     out
 }
 
@@ -316,23 +375,9 @@ fn push_retrieval_summary(out: &mut String, retrieval: Option<&Value>) {
         &[
             ("requested", "requested_mode"),
             ("effective", "effective_mode"),
-            ("semantic_weight", "semantic_weight"),
             ("semantic_status", "semantic_status"),
         ],
     );
-    if let Some(fallback_code) =
-        value_field(retrieval, "semantic_fallback_code").filter(|code| !code.trim().is_empty())
-    {
-        out.push_str(&format!("semantic_fallback: {fallback_code}\n"));
-    }
-    if let Some(fallback) =
-        value_field(retrieval, "semantic_fallback").filter(|message| !message.trim().is_empty())
-    {
-        out.push_str(&format!(
-            "semantic_fallback_detail: {}\n",
-            clip_inline(&fallback, MCP_TEXT_MAX_SNIPPET_CHARS)
-        ));
-    }
     if let Some(coverage) = retrieval.get("coverage") {
         push_object_summary(
             out,

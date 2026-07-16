@@ -7,9 +7,10 @@
     "dataRoot": "/tmp/ctx-sdk-fixture"
   },
   "search": {
-    "query": "no matches",
+    "query": null,
     "filters": {
-      "provider": "codex"
+      "provider": "codex",
+      "file": "src/missing.rs"
     },
     "freshness": {
       "mode": "off",
@@ -22,10 +23,7 @@
     "retrieval": {
       "requestedMode": "hybrid",
       "effectiveMode": "lexical",
-      "semanticWeight": 0,
       "semanticStatus": "skipped",
-      "semanticFallbackCode": null,
-      "semanticFallback": null,
       "coverage": {
         "embeddedItems": 0,
         "embeddedChunks": 0,
@@ -40,6 +38,69 @@
       "hasMore": false
     },
     "truncation": {
+      "truncated": false
+    },
+    "query_execution": {
+      "query_version": "ctx-search-v1",
+      "candidate_strategy": "bounded_file_filter_v1",
+      "resolved": {
+        "query_bytes": 8192,
+        "clauses": 32,
+        "analyzed_tokens_per_clause": 32,
+        "candidates_per_positive_seed": 1024,
+        "candidate_rows": 16384,
+        "retained_candidate_ids": 8192,
+        "residual_rows": 8192,
+        "verification_bytes": 16777216,
+        "verification_lookup_bytes": 16384,
+        "hydrated_rows": 256,
+        "hydration_input_bytes": 8388608,
+        "hydration_input_bytes_per_event": 65536,
+        "returned_text_bytes": 524288,
+        "serialized_response_bytes": 2097152,
+        "results": 20,
+        "elapsed_ms": 10000
+      },
+      "consumed": {
+        "query_bytes": 0,
+        "clauses": 0,
+        "analyzed_tokens": 0,
+        "candidate_rows": 0,
+        "retained_candidate_ids": 0,
+        "residual_rows": 0,
+        "hydrated_rows": 0,
+        "legacy_fallback_rows": 0,
+        "verification_bytes": 0,
+        "largest_verification_lookup_bytes": 0,
+        "hydration_input_bytes": 0,
+        "largest_hydration_input_bytes": 0,
+        "returned_results": 0,
+        "returned_text_bytes": 0,
+        "serialized_response_bytes": 2048,
+        "elapsed_ms": 1
+      },
+      "semantic": {
+        "attempted": false,
+        "required": false,
+        "readiness": "unavailable",
+        "effective_backend": "lexical",
+        "coverage": {
+          "candidates_supplied": 0,
+          "candidates_consumed": 0,
+          "candidates_used": 0,
+          "truncated": false
+        },
+        "completeness": "not_attempted",
+        "skip_reason": "disabled",
+        "positive_text_rule_version": "ctx-search-positive-text-v1"
+      },
+      "rrf_k": 60,
+      "per_branch_candidate_rows": 0,
+      "clauses_executed": 0,
+      "verification_dropped": 0,
+      "filter_verification_dropped": 0,
+      "candidate_budget_exhausted": false,
+      "timed_out": false,
       "truncated": false
     }
   }
