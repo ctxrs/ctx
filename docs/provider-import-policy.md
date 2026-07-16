@@ -49,9 +49,67 @@ cannot replace or complete a newer observation. The generation is a concurrency
 fence, not per-row seen state: unchanged catalog and source rows are not rewritten
 just because another inventory completed.
 
+Import plans are checked again after acquiring the shared bulk-import lock. A
+plan that waited behind a newer completed generation does not normalize the
+source again. Manifested sources are re-inventoried once after normalization;
+that complete O(files) observation is persisted at a new generation before only
+owner/dependency fingerprints that still match exactly receive their outcome.
+Changed and new units remain pending, while removed owners become stale.
+
 Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including
 manifested per-file imports, but its final compaction remains bounded.
+
+## Import Unit Observation
+
+Inventory tracks the logical unit an adapter reads, not merely the file passed
+to it. A per-file unit has one canonical owner and includes every companion that
+can affect normalization in its change token. For example, a session JSONL file
+may own adjacent metadata, and a SQLite database owns its `-wal` and rollback
+`-journal` when present. SQLite tokens combine file identity/stat data,
+platform file identity and change time for the main database, validated WAL
+commit-prefix state, and rollback-journal sentinels. Supported Unix and Windows
+platforms therefore do not hash an entire database during normal probes; other
+platforms use an explicit full-hash fallback. SQLite `-shm` files are excluded
+because they are rebuildable, nondurable coordination state, contain no
+transaction data, and can change during read-only access. A companion-only
+change therefore selects the owner once, while an unchanged unit remains a
+no-op.
+
+Optional non-SQLite companions also contribute an absence watch while missing.
+The watch combines the candidate path with parent-directory metadata, so a
+portable observable directory-metadata change invalidates the logical-unit
+token. This is conservative: unrelated directory-entry churn may select a unit
+whose optional companion remains absent. It is not an absolute ABA detector on
+filesystems whose directory timestamps are coarse or externally restored.
+SQLite sidecars instead use the exact stable-generation observation described
+below; tying a missing sidecar to its parent directory would make unrelated
+SQLite coordination-file churn select the unit.
+
+SQLite discovery predicates use observe-probe-observe and accept either result
+only while the generation remains stable. A valid committed WAL prefix or hot
+single-database rollback journal uses an exact-length, generation-checked copy
+in private ctx-owned RAII temporary storage. Snapshot directories and files are
+owner-private from their atomic creation, and copies have a fixed byte ceiling
+and free-space reserve. Provider `-shm` files are never copied; SQLite may
+rebuild private temporary coordination state before the connection becomes
+query-only. Partial or oversized active generations retry later, stale WAL
+frames are excluded, and rollback journals defer only while their referenced
+super-journal still exists. A child journal whose super-journal has been deleted
+is non-hot post-commit residue under SQLite's recovery rules; relative native
+super-journal names are resolved beside the child journal. Observation retries
+a bounded number of times and never modifies provider-owned files.
+
+Providers whose adapters normalize a whole document or root may remain
+whole-source replacement units. Native one-shot discovery still scans the
+declared source in O(files) as the correctness fallback; import-unit inventory
+does not imply filesystem-event O(delta) discovery. Observation and import must
+remain read-only with respect to provider-owned files.
+
+Persisted source-root and canonical-owner identities must be valid UTF-8 while
+display-only dependency labels may be lossy. Inventory rejects an unpersistable
+identity instead of aliasing distinct native paths through replacement
+characters in the existing text schema.
 
 ## Default Import Shape
 

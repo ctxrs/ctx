@@ -8,6 +8,7 @@ use ctx_history_core::CaptureProvider;
 use serde_json::Value;
 
 use super::{
+    import_units::provider_import_unit_spec,
     probes::{default_location_import_probe, BoundedProbe},
     reasons::{empty_source_reason, probe_io_error_reason, unknown_source_reason},
     revisions::provider_import_revision,
@@ -918,6 +919,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         source_kind,
         import_support: explicit_import_support,
         catalog_support: spec.catalog_support,
+        import_unit: provider_import_unit_spec(source_format),
         status: if matches!(explicit_import_support, ProviderImportSupport::Unsupported) {
             ProviderSourceStatus::Unsupported
         } else if exists {
@@ -974,6 +976,7 @@ fn provider_source_from_location(
         source_kind: location.source_kind,
         import_support: spec.import_support,
         catalog_support: spec.catalog_support,
+        import_unit: provider_import_unit_spec(location.source_format),
         status,
         unsupported_reason,
     }

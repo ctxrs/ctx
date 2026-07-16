@@ -15,6 +15,124 @@ impl Store {
         self.allocate_import_inventory_generation(provider, source_root, "source_import_files")
     }
 
+    pub fn catalog_inventory_generation_is_current(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        self.import_inventory_generation_is_current(
+            provider,
+            source_root,
+            "catalog_sessions",
+            inventory_generation,
+        )
+    }
+
+    pub fn catalog_inventory_generation_is_complete(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT current_generation = ?4 AND completed_generation = ?4\n\
+                 FROM import_inventory_generations\n\
+                 WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
+                params![
+                    provider.as_str(),
+                    source_root,
+                    "catalog_sessions",
+                    capped_i64(inventory_generation)
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|complete| complete.unwrap_or(false))
+            .map_err(StoreError::from)
+    }
+
+    pub fn catalog_inventory_generation_is_complete_without_pending(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                format!(
+                    "SELECT current_generation = ?4\n\
+                            AND completed_generation = ?4\n\
+                            AND NOT EXISTS (\n\
+                                SELECT 1 FROM catalog_sessions\n\
+                                WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0\n\
+                                  AND {}\n\
+                            )\n\
+                     FROM import_inventory_generations\n\
+                     WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
+                    catalog_pending_import_condition_sql("catalog_sessions")
+                )
+                .as_str(),
+                params![
+                    provider.as_str(),
+                    source_root,
+                    "catalog_sessions",
+                    capped_i64(inventory_generation)
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|complete| complete.unwrap_or(false))
+            .map_err(StoreError::from)
+    }
+
+    pub fn complete_catalog_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE import_inventory_generations\n\
+             SET completed_generation = ?4\n\
+             WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3\n\
+               AND current_generation = ?4",
+            params![
+                provider.as_str(),
+                source_root,
+                "catalog_sessions",
+                capped_i64(inventory_generation)
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    fn import_inventory_generation_is_current(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_family: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT current_generation = ?4\n\
+                 FROM import_inventory_generations\n\
+                 WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
+                params![
+                    provider.as_str(),
+                    source_root,
+                    inventory_family,
+                    capped_i64(inventory_generation)
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|current| current.unwrap_or(false))
+            .map_err(StoreError::from)
+    }
+
     fn allocate_import_inventory_generation(
         &self,
         provider: CaptureProvider,
@@ -24,8 +142,8 @@ impl Store {
         let generation = self.conn.query_row(
             r#"
             INSERT INTO import_inventory_generations
-                (provider, source_root, inventory_family, current_generation)
-            VALUES (?1, ?2, ?3, 1)
+                (provider, source_root, inventory_family, current_generation, completed_generation)
+            VALUES (?1, ?2, ?3, 1, 0)
             ON CONFLICT(provider, source_root, inventory_family) DO UPDATE SET
                 current_generation = current_generation + 1
             RETURNING current_generation

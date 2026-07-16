@@ -35,7 +35,8 @@ impl Store {
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
                          AND source_import_files.import_revision = excluded.import_revision
-                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                         AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                               AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_at_ms
                         ELSE NULL
@@ -45,7 +46,8 @@ impl Store {
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
                          AND source_import_files.import_revision = excluded.import_revision
-                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                         AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                               AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_file_size_bytes
                         ELSE NULL
@@ -55,7 +57,8 @@ impl Store {
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
                          AND source_import_files.import_revision = excluded.import_revision
-                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                         AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                               AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_file_modified_at_ms
                         ELSE NULL
@@ -65,7 +68,8 @@ impl Store {
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
                          AND source_import_files.import_revision = excluded.import_revision
-                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                         AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                               AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_status
                         ELSE 'pending'
@@ -75,7 +79,8 @@ impl Store {
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
                          AND source_import_files.import_revision = excluded.import_revision
-                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                         AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                               AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_error
                         ELSE NULL
@@ -85,7 +90,8 @@ impl Store {
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
                          AND source_import_files.import_revision = excluded.import_revision
-                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                         AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                               AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_import_revision
                         ELSE NULL

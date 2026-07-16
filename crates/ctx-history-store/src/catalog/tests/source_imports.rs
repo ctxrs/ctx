@@ -223,6 +223,64 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
 }
 
 #[test]
+fn logical_import_unit_change_token_marks_same_owner_stat_pending() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.local/share/opencode/opencode.db";
+    let mut file = SourceImportFile {
+        provider: CaptureProvider::OpenCode,
+        source_format: "opencode_sqlite".into(),
+        source_root: root.into(),
+        source_path: root.into(),
+        file_size_bytes: 42,
+        file_modified_at_ms: observed_at_ms,
+        import_revision: 1,
+        observed_at_ms,
+        metadata: serde_json::json!({
+            "inventory_unit": "logical_import_unit",
+            "change_token_v1": "before",
+            "dependencies": ["opencode.db-wal"],
+        }),
+    };
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+    store
+        .mark_source_import_file_indexed(
+            CaptureProvider::OpenCode,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: root,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
+                inventory_generation: current_source_generation(
+                    &store,
+                    CaptureProvider::OpenCode,
+                    root,
+                ),
+                metadata: &file.metadata,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    assert!(store
+        .list_pending_source_import_files(CaptureProvider::OpenCode, root)
+        .unwrap()
+        .is_empty());
+
+    file.metadata["change_token_v1"] = serde_json::json!("after");
+    file.observed_at_ms += 1;
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
+
+    assert_eq!(
+        store
+            .list_pending_source_import_files(CaptureProvider::OpenCode, root)
+            .unwrap(),
+        vec![file]
+    );
+}
+
+#[test]
 fn source_import_format_change_marks_same_stat_source_pending() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -617,6 +675,52 @@ fn reversed_source_generations_and_metadata_fence_stale_results() {
         newer_file.metadata
     );
     assert_eq!(newer.source_import_file_counts().unwrap().stale, 0);
+}
+
+#[test]
+fn catalog_inventory_generation_currentness_tracks_allocation_order() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/tmp/codex-generation-currentness";
+    let first = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    assert!(store
+        .catalog_inventory_generation_is_current(CaptureProvider::Codex, source_root, first,)
+        .unwrap());
+    assert!(!store
+        .catalog_inventory_generation_is_complete(CaptureProvider::Codex, source_root, first)
+        .unwrap());
+    assert!(store
+        .complete_catalog_inventory_generation(CaptureProvider::Codex, source_root, first)
+        .unwrap());
+    assert!(store
+        .catalog_inventory_generation_is_complete_without_pending(
+            CaptureProvider::Codex,
+            source_root,
+            first,
+        )
+        .unwrap());
+
+    let second = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    assert!(!store
+        .catalog_inventory_generation_is_current(CaptureProvider::Codex, source_root, first,)
+        .unwrap());
+    assert!(store
+        .catalog_inventory_generation_is_current(CaptureProvider::Codex, source_root, second,)
+        .unwrap());
+    assert!(!store
+        .catalog_inventory_generation_is_complete_without_pending(
+            CaptureProvider::Codex,
+            source_root,
+            second,
+        )
+        .unwrap());
+    assert!(!store
+        .complete_catalog_inventory_generation(CaptureProvider::Codex, source_root, first)
+        .unwrap());
 }
 
 #[test]
