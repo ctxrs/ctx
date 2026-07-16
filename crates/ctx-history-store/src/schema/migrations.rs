@@ -116,6 +116,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 54 {
         migrate_publication_retirement_to_v54(conn)?;
     }
+    if user_version < 55 {
+        migrate_stable_views_to_v55(conn)?;
+    }
     Ok(())
 }
 
@@ -1112,6 +1115,28 @@ pub(super) fn migrate_publication_retirement_to_v54(conn: &Connection) -> Result
             "#,
         )?;
         conn.execute_batch("PRAGMA user_version = 54;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+fn migrate_stable_views_to_v55(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        drop_stable_sql_views(conn)?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch("PRAGMA user_version = 55;")?;
         Ok(())
     })();
 

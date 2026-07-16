@@ -211,6 +211,337 @@ fn catalog_observation_token_refreshes_legacy_row_once() {
 }
 
 #[test]
+fn source_import_inventory_pacing_precharges_exact_bounded_write_chunks() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/home/user/.claude/projects";
+    let files = (0..65)
+        .map(|index| {
+            let source_path = format!("{source_root}/{index:03}.jsonl");
+            let mut file = source_import_file(
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                source_root,
+                &source_path,
+                1_000 + index,
+            );
+            file.metadata = serde_json::json!({"inventory_index": index});
+            file
+        })
+        .collect::<Vec<_>>();
+    let current_paths = files
+        .iter()
+        .map(|file| file.source_path.clone())
+        .collect::<Vec<_>>();
+    let generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, source_root)
+        .unwrap();
+    let row_bytes = files
+        .iter()
+        .map(|file| {
+            let metadata_json = serde_json::to_string(&file.metadata).unwrap();
+            [
+                file.provider.as_str(),
+                file.source_format.as_str(),
+                file.source_root.as_str(),
+                file.source_path.as_str(),
+                metadata_json.as_str(),
+            ]
+            .into_iter()
+            .fold(
+                super::SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES,
+                |bytes, value| bytes.saturating_add(value.len() as u64),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_upsert_charges = vec![
+        row_bytes[..64].iter().sum::<u64>(),
+        row_bytes[64..].iter().sum::<u64>(),
+    ];
+    let path_bytes = current_paths
+        .iter()
+        .map(|path| {
+            super::SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES.saturating_add(path.len() as u64)
+        })
+        .collect::<Vec<_>>();
+    let expected_path_charges = vec![
+        path_bytes[..64].iter().sum::<u64>(),
+        path_bytes[64..].iter().sum::<u64>(),
+    ];
+
+    let mut upsert_charges = Vec::new();
+    let mut rows_before_charge = Vec::new();
+    assert_eq!(
+        store
+            .upsert_source_import_files_with_pacing(generation, &files, |bytes| {
+                upsert_charges.push(bytes);
+                rows_before_charge.push(
+                    store
+                        .conn
+                        .query_row("SELECT COUNT(*) FROM source_import_files", [], |row| {
+                            row.get::<_, usize>(0)
+                        })
+                        .unwrap(),
+                );
+            })
+            .unwrap(),
+        files.len()
+    );
+    assert_eq!(upsert_charges, expected_upsert_charges);
+    assert_eq!(rows_before_charge, vec![0, 64]);
+
+    let mut path_charges = Vec::new();
+    let mut paths_before_charge = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &current_paths,
+                2_000,
+                generation,
+                |bytes| {
+                    path_charges.push(bytes);
+                    paths_before_charge.push(
+                        store
+                            .conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM temp_source_import_current_paths",
+                                [],
+                                |row| row.get::<_, usize>(0),
+                            )
+                            .unwrap(),
+                    );
+                },
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(path_charges, expected_path_charges);
+    assert_eq!(paths_before_charge, vec![0, 64]);
+
+    let mut repeated_upsert_charges = Vec::new();
+    assert_eq!(
+        store
+            .upsert_source_import_files_with_pacing(generation, &files, |bytes| {
+                repeated_upsert_charges.push(bytes);
+            })
+            .unwrap(),
+        0
+    );
+    assert_eq!(repeated_upsert_charges, expected_upsert_charges);
+
+    let mut repeated_path_charges = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &current_paths,
+                3_000,
+                generation,
+                |bytes| repeated_path_charges.push(bytes),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(repeated_path_charges, expected_path_charges);
+
+    let mut stale_observations = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &current_paths[..64],
+                4_000,
+                generation,
+                |bytes| {
+                    let temp_paths = store
+                        .conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM temp_source_import_current_paths",
+                            [],
+                            |row| row.get::<_, usize>(0),
+                        )
+                        .unwrap();
+                    let omitted_is_stale = store
+                        .conn
+                        .query_row(
+                            "SELECT is_stale FROM source_import_files WHERE source_path = ?1",
+                            params![&current_paths[64]],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap();
+                    stale_observations.push((bytes, temp_paths, omitted_is_stale));
+                },
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        stale_observations,
+        vec![
+            (path_bytes[..64].iter().sum::<u64>(), 0, false),
+            (row_bytes[64], 64, false),
+        ]
+    );
+
+    store
+        .conn
+        .execute("UPDATE source_import_files SET is_stale = 0", [])
+        .unwrap();
+    let mut stale_batch_charges = Vec::new();
+    let mut stale_rows_before_charge = Vec::new();
+    assert_eq!(
+        store
+            .mark_source_import_missing_paths_stale_with_pacing(
+                CaptureProvider::Claude,
+                source_root,
+                &[],
+                5_000,
+                generation,
+                |bytes| {
+                    stale_batch_charges.push(bytes);
+                    stale_rows_before_charge.push(
+                        store
+                            .conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM source_import_files WHERE is_stale != 0",
+                                [],
+                                |row| row.get::<_, usize>(0),
+                            )
+                            .unwrap(),
+                    );
+                },
+            )
+            .unwrap(),
+        files.len()
+    );
+    assert_eq!(stale_batch_charges, expected_upsert_charges);
+    assert_eq!(stale_rows_before_charge, vec![0, 64]);
+    assert!(store
+        .conn
+        .query_row(
+            "SELECT is_stale FROM source_import_files WHERE source_path = ?1",
+            params![&current_paths[64]],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+}
+
+#[test]
+fn direct_batched_stale_marking_rolls_back_all_rows_on_a_late_error() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/home/user/.claude/projects";
+    let files = (0..65)
+        .map(|index| {
+            let path = format!("{source_root}/{index:03}.jsonl");
+            source_import_file(
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                source_root,
+                &path,
+                1_000 + index,
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(source_generation, &files)
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            CREATE TRIGGER fail_late_source_stale
+            BEFORE UPDATE OF is_stale ON source_import_files
+            WHEN NEW.is_stale = 1
+             AND OLD.source_path = '/home/user/.claude/projects/064.jsonl'
+            BEGIN
+                SELECT RAISE(ABORT, 'late source stale failure');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    assert!(store
+        .mark_source_import_missing_paths_stale(
+            CaptureProvider::Claude,
+            source_root,
+            &[],
+            2_000,
+            source_generation,
+        )
+        .is_err());
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_import_files WHERE is_stale != 0",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    let catalog_root = "/home/user/.codex/sessions";
+    let sessions = (0..65)
+        .map(|index| {
+            let path = format!("{catalog_root}/{index:03}.jsonl");
+            catalog_session(&path, &format!("session-{index:03}"), 3_000 + index)
+        })
+        .collect::<Vec<_>>();
+    let catalog_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, catalog_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(catalog_generation, &sessions)
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            CREATE TRIGGER fail_late_catalog_stale
+            BEFORE UPDATE OF is_stale ON catalog_sessions
+            WHEN NEW.is_stale = 1
+             AND OLD.source_path = '/home/user/.codex/sessions/064.jsonl'
+            BEGIN
+                SELECT RAISE(ABORT, 'late catalog stale failure');
+            END;
+            "#,
+        )
+        .unwrap();
+
+    assert!(store
+        .mark_catalog_source_missing_paths_stale(
+            CaptureProvider::Codex,
+            catalog_root,
+            &[],
+            4_000,
+            catalog_generation,
+        )
+        .is_err());
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale != 0",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

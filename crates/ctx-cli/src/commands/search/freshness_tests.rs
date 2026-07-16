@@ -106,6 +106,19 @@ mod freshness_tests {
         .unwrap()
     }
 
+    fn cached_inventory_generation(runtime: &SearchRefreshRuntime, source: &SourceInfo) -> u64 {
+        runtime
+            .cached_work
+            .as_ref()
+            .unwrap()
+            .plan
+            .sources
+            .iter()
+            .find(|planned| planned.source.path == source.path)
+            .and_then(|planned| planned.preinventory.inventory_generation())
+            .unwrap()
+    }
+
     fn leave_unmutated_pi_publication(store: &Store, source: &SourceInfo) {
         let inventory = inventory_import_sources(store, vec![source.clone()], false).unwrap();
         let inventory_generation = match &inventory.sources[0].preinventory {
@@ -190,29 +203,328 @@ mod freshness_tests {
     }
 
     #[test]
-    fn daemon_cached_refresh_watcher_generation_tracks_source_changes() {
+    fn daemon_cached_refresh_watcher_tracks_source_changes() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
         let source = write_pi_source(&data_root.join("pi-watch"), 1, "watch");
         let mut runtime = SearchRefreshRuntime::default();
 
-        let initial = runtime.watcher_generation(std::slice::from_ref(&source));
-        assert_eq!(initial, Some(0));
-        runtime.force_source_change_for_test();
-        let changed = runtime.watcher_generation(std::slice::from_ref(&source));
-        assert_eq!(changed, Some(1));
+        let initial = runtime.watcher_changes(std::slice::from_ref(&source));
+        assert_eq!(initial, Some(SearchRefreshSourceChanges::default()));
+        runtime.force_source_change_for_test(&source.path);
+        let changed = runtime
+            .watcher_changes(std::slice::from_ref(&source))
+            .unwrap();
+        assert!(!changed.full_rebuild);
+        assert_eq!(changed.dirty_paths, BTreeSet::from([source.path]));
     }
 
     #[test]
     fn daemon_cached_refresh_watcher_errors_invalidate_cached_work() {
-        let generation = AtomicU64::new(0);
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
 
         note_search_refresh_source_event(
-            &generation,
+            &changes,
+            &healthy,
+            &[],
             Err(notify::Error::generic("deterministic watcher failure")),
         );
 
-        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert!(changes.into_inner().unwrap().full_rebuild);
+        assert!(!healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_cached_refresh_watcher_ignores_non_mutating_access() {
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
+
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &[],
+            Ok(notify::Event::new(notify::EventKind::Access(
+                notify::event::AccessKind::Read,
+            ))),
+        );
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &[],
+            Ok(notify::Event::new(notify::EventKind::Access(
+                notify::event::AccessKind::Open(notify::event::AccessMode::Any),
+            ))),
+        );
+        assert_eq!(
+            changes.into_inner().unwrap(),
+            SearchRefreshSourceChanges::default()
+        );
+        assert!(healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_cached_refresh_watcher_scopes_mutations_to_matching_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
+        let watches = search_refresh_watch_specs(&[first.clone(), second]);
+
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &watches,
+            Ok(
+                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                    .add_path(first.join("session.jsonl")),
+            ),
+        );
+
+        let changes = changes.into_inner().unwrap();
+        assert!(!changes.full_rebuild);
+        assert_eq!(changes.dirty_paths, BTreeSet::from([first]));
+        assert!(healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_cached_refresh_watcher_maps_sqlite_sidecars_to_the_database_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("history.sqlite");
+        fs::write(&database, []).unwrap();
+        let watches = search_refresh_watch_specs(std::slice::from_ref(&database));
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
+
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &watches,
+            Ok(
+                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                    .add_path(temp.path().join("history.sqlite-wal")),
+            ),
+        );
+
+        let changes = changes.into_inner().unwrap();
+        assert!(!changes.full_rebuild);
+        assert_eq!(changes.dirty_paths, BTreeSet::from([database]));
+    }
+
+    #[test]
+    fn daemon_cached_refresh_watcher_ignores_unrelated_file_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("history.sqlite");
+        fs::write(&database, []).unwrap();
+        let watches = search_refresh_watch_specs(std::slice::from_ref(&database));
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
+
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &watches,
+            Ok(
+                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                    .add_path(temp.path().join("unrelated.sqlite")),
+            ),
+        );
+
+        assert_eq!(
+            changes.into_inner().unwrap(),
+            SearchRefreshSourceChanges::default()
+        );
+        assert!(healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_cached_refresh_watcher_invalidates_out_of_scope_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("history.sqlite");
+        fs::write(&database, []).unwrap();
+        let watches = search_refresh_watch_specs(std::slice::from_ref(&database));
+        let changes = Mutex::new(SearchRefreshSourceChanges::default());
+        let healthy = AtomicBool::new(true);
+
+        note_search_refresh_source_event(
+            &changes,
+            &healthy,
+            &watches,
+            Ok(
+                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                    .add_path(temp.path().join("other").join("history.sqlite")),
+            ),
+        );
+
+        let changes = changes.into_inner().unwrap();
+        assert!(changes.full_rebuild);
+        assert!(changes.dirty_paths.is_empty());
+        assert!(healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_cached_refresh_watcher_invalidates_ambiguous_access() {
+        use notify::event::{AccessKind, AccessMode};
+
+        for access in [
+            AccessKind::Any,
+            AccessKind::Other,
+            AccessKind::Close(AccessMode::Any),
+            AccessKind::Close(AccessMode::Write),
+            AccessKind::Close(AccessMode::Other),
+        ] {
+            assert!(!search_refresh_event_is_non_mutating_access(
+                notify::EventKind::Access(access)
+            ));
+        }
+        for access in [
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Open(AccessMode::Write),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Execute),
+        ] {
+            assert!(search_refresh_event_is_non_mutating_access(
+                notify::EventKind::Access(access)
+            ));
+        }
+    }
+
+    #[test]
+    fn daemon_watcher_root_identity_changes_when_path_is_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("watched-root");
+        fs::create_dir(&root).unwrap();
+        let initial = watched_source_path_identities(std::slice::from_ref(&root));
+
+        fs::rename(&root, temp.path().join("old-root")).unwrap();
+        fs::create_dir(&root).unwrap();
+        let replaced = watched_source_path_identities(std::slice::from_ref(&root));
+
+        assert_ne!(initial, replaced);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn daemon_watcher_root_identity_ignores_directory_content_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("watched-root");
+        fs::create_dir(&root).unwrap();
+        let initial = watched_source_path_identities(std::slice::from_ref(&root));
+
+        fs::write(root.join("new-session.jsonl"), b"new session").unwrap();
+        let changed = watched_source_path_identities(std::slice::from_ref(&root));
+
+        assert_eq!(initial, changed);
+        assert!(initial[0].stable_id.is_some());
+    }
+
+    #[test]
+    fn daemon_periodic_reinventory_uses_elapsed_time_not_backlog_state() {
+        assert!(!daemon_search_refresh_reinventory_due(
+            DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL - StdDuration::from_secs(1),
+            false,
+        ));
+        assert!(daemon_search_refresh_reinventory_due(
+            DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL,
+            false,
+        ));
+        assert!(!daemon_search_refresh_reinventory_due(
+            DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL,
+            true,
+        ));
+    }
+
+    #[test]
+    fn daemon_failed_watcher_retries_on_each_daemon_pass() {
+        assert!(daemon_search_refresh_watcher_retry_due(false));
+        assert!(!daemon_search_refresh_watcher_retry_due(true));
+        assert!(daemon_search_refresh_watcher_fallback_due(None));
+        assert!(!daemon_search_refresh_watcher_fallback_due(Some(
+            Instant::now()
+        )));
+        assert!(daemon_search_refresh_watcher_fallback_due(Some(
+            Instant::now() - DAEMON_SEARCH_REFRESH_WATCHER_FALLBACK_INTERVAL
+        )));
+    }
+
+    #[test]
+    fn daemon_scoped_refresh_preserves_unaffected_plan_and_full_sweep_age() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let dirty = write_pi_source(&data_root.join("pi-dirty"), 1, "dirty");
+        let unchanged = write_pi_source(&data_root.join("pi-unchanged"), 1, "unchanged");
+        let baseline = refresh(
+            &data_root,
+            vec![dirty.clone(), unchanged.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+
+        let mut runtime = SearchRefreshRuntime::default();
+        let cached = refresh_with_runtime(
+            &data_root,
+            &mut runtime,
+            vec![dirty.clone(), unchanged.clone()],
+        );
+        assert_eq!(cached.fresh_units_pending, 0, "{cached:?}");
+        let dirty_generation = cached_inventory_generation(&runtime, &dirty);
+        let unchanged_generation = cached_inventory_generation(&runtime, &unchanged);
+        runtime
+            .cached_work
+            .as_mut()
+            .unwrap()
+            .passes_since_reinventory = 17;
+
+        write_pi_source(&dirty.path, 2, "dirty-changed");
+        runtime.force_source_change_for_test(&dirty.path);
+        let refreshed = refresh_with_runtime(
+            &data_root,
+            &mut runtime,
+            vec![dirty.clone(), unchanged.clone()],
+        );
+
+        assert_eq!(refreshed.fresh_units_processed, 1, "{refreshed:?}");
+        assert_ne!(
+            cached_inventory_generation(&runtime, &dirty),
+            dirty_generation
+        );
+        assert_eq!(
+            cached_inventory_generation(&runtime, &unchanged),
+            unchanged_generation
+        );
+        assert_eq!(
+            runtime
+                .cached_work
+                .as_ref()
+                .unwrap()
+                .passes_since_reinventory,
+            18
+        );
+    }
+
+    #[test]
+    fn daemon_elapsed_safety_sweep_runs_while_recovery_is_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let source = seed_failed_pi_backlog(&data_root, 1);
+        let mut runtime = SearchRefreshRuntime::default();
+        let first = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        assert!(first.recovery_units_pending > 0, "{first:?}");
+        let first_generation = cached_inventory_generation(&runtime, &source);
+        runtime.cached_work.as_mut().unwrap().last_reinventory_at =
+            Instant::now() - DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL;
+
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+
+        assert_ne!(
+            cached_inventory_generation(&runtime, &source),
+            first_generation
+        );
     }
 
     #[test]

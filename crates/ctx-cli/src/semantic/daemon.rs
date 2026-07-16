@@ -1070,9 +1070,7 @@ fn run_daemon(args: DaemonRunArgs, data_root: PathBuf, config: &AppConfig) -> Re
         ));
     }
     let semantic_enabled = config.semantic_search_enabled() && semantic_query_service_supported();
-    if semantic_enabled {
-        lower_semantic_worker_priority();
-    }
+    lower_daemon_worker_priority();
     let report = match run_daemon_inner(
         args.clone(),
         &data_root,

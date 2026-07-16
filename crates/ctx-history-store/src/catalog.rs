@@ -320,6 +320,7 @@ impl FromStr for CatalogIndexedStatus {
 }
 
 include!("catalog/inventory.rs");
+include!("catalog/inventory_pacing.rs");
 include!("catalog/pending_work.rs");
 include!("catalog/source_imports.rs");
 include!("catalog/counts.rs");
@@ -353,6 +354,21 @@ fn catalog_observation_token(metadata: &Value) -> Option<&str> {
 fn catalog_session_select_sql(tail: &str) -> String {
     format!(
         "SELECT source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, import_revision, cataloged_at_ms, metadata_json FROM catalog_sessions {tail}"
+    )
+}
+
+pub(crate) fn catalog_inventory_material_published_predicate(alias: &str) -> String {
+    format!(
+        r#"
+        NOT EXISTS (
+            SELECT 1
+            FROM import_inventory_generations AS catalog_inventory
+            WHERE catalog_inventory.provider = {alias}.provider
+              AND catalog_inventory.source_root = {alias}.source_root
+              AND catalog_inventory.inventory_family = 'catalog_sessions'
+              AND catalog_inventory.completed_generation = 0
+        )
+        "#
     )
 }
 

@@ -189,53 +189,28 @@ fn refresh_sources_for_search_inner(
     let had_indexed_content = store.indexed_history_item_count()? > 0;
     let search_projection_needs_backfill = store.event_search_projection_needs_backfill()?;
     let source_fingerprint = search_refresh_source_fingerprint(&sources);
-    let watcher_generation = runtime
+    let watcher_changes = runtime
         .as_deref_mut()
-        .and_then(|runtime| runtime.watcher_generation(&sources));
-    if runtime.is_some() && watcher_generation.is_none() {
-        if let Some(runtime) = runtime.as_deref_mut() {
-            runtime.invalidate();
-        }
-        let inventory = inventory_import_sources(&store, sources, false)?;
-        let refresh_source_count = inventory
-            .totals
-            .sources
-            .saturating_add(plugin_sources.len());
-        let plan = ImportPlan::build(&store, inventory.sources)?;
-        let inventory_failures = inventory.failures;
-        let failed_inventory_pending =
-            failed_inventory_pending_counts(&store, &inventory_failures)?;
-        let planned_total_bytes = inventory.totals.source_bytes;
-        let mut execution_state = crate::commands::import::ImportExecutionState::for_plan(&plan);
-        return execute_search_refresh_work(
-            data_root,
-            &mut store,
-            refresh_source_count,
-            had_indexed_content,
-            search_projection_needs_backfill,
-            plugin_sources,
-            refresh,
-            json_output,
-            execution_policy,
-            &plan,
-            &mut execution_state,
-            inventory_failures,
-            failed_inventory_pending,
-            planned_total_bytes,
-        )
-        .map(|execution| execution.totals);
-    }
+        .and_then(|runtime| runtime.watcher_changes(&sources));
     let work = if let Some(runtime) = runtime.as_deref_mut() {
         let publication_owner = store.effective_provider_file_publication_inventory_owner()?;
         let publication_pending = publication_owner.is_some();
+        let periodic_reinventory = runtime.cached_work.as_ref().is_some_and(|cached| {
+            daemon_search_refresh_reinventory_due(
+                cached.last_reinventory_at.elapsed(),
+                publication_pending,
+            )
+        });
         let rebuild = runtime.cached_work.as_ref().is_none_or(|cached| {
             cached.source_fingerprint != source_fingerprint
                 || cached.publication_owner != publication_owner
-                || watcher_generation != Some(cached.source_change_generation)
-                || (!publication_pending
-                    && cached.passes_since_reinventory >= DAEMON_SEARCH_REFRESH_REINVENTORY_PASSES)
+                || watcher_changes
+                    .as_ref()
+                    .is_some_and(|changes| changes.full_rebuild)
+                || periodic_reinventory
         });
         if rebuild {
+            runtime.cached_work = None;
             let inventory = inventory_import_sources(&store, sources, false)?;
             let inventoried_source_count = inventory.totals.sources;
             let plan = ImportPlan::build(&store, inventory.sources)?;
@@ -245,8 +220,8 @@ fn refresh_sources_for_search_inner(
             runtime.cached_work = Some(SearchRefreshWork {
                 source_fingerprint,
                 publication_owner,
-                source_change_generation: watcher_generation.unwrap_or(0),
                 passes_since_reinventory: 0,
+                last_reinventory_at: Instant::now(),
                 execution_state: crate::commands::import::ImportExecutionState::for_plan(&plan),
                 plan,
                 inventory_failures,
@@ -254,6 +229,22 @@ fn refresh_sources_for_search_inner(
                 inventoried_source_count,
                 planned_total_bytes: inventory.totals.source_bytes,
             });
+        } else if let Some(changes) = watcher_changes {
+            if !changes.dirty_paths.is_empty() {
+                let refresh_result = refresh_dirty_search_sources(
+                    &store,
+                    &sources,
+                    &changes.dirty_paths,
+                    runtime
+                        .cached_work
+                        .as_mut()
+                        .expect("daemon refresh cache must be populated"),
+                );
+                if let Err(error) = refresh_result {
+                    runtime.invalidate();
+                    return Err(error);
+                }
+            }
         }
         let work = runtime
             .cached_work
@@ -319,4 +310,52 @@ fn refresh_sources_for_search_inner(
             Err(error)
         }
     }
+}
+
+fn refresh_dirty_search_sources(
+    store: &Store,
+    sources: &[SourceInfo],
+    dirty_paths: &BTreeSet<PathBuf>,
+    work: &mut SearchRefreshWork,
+) -> Result<()> {
+    let dirty_sources = sources
+        .iter()
+        .filter(|source| dirty_paths.contains(&source.path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if dirty_sources.is_empty() {
+        return Ok(());
+    }
+
+    let inventory = inventory_import_sources(store, dirty_sources, false)?;
+    let mut planned_sources = work.plan.sources.clone();
+    planned_sources.retain(|planned| !dirty_paths.contains(&planned.source.path));
+    planned_sources.extend(
+        inventory
+            .sources
+            .into_iter()
+            .filter(|planned| dirty_paths.contains(&planned.source.path)),
+    );
+    let plan = ImportPlan::build(store, planned_sources)?;
+
+    work.inventory_failures
+        .retain(|failure| !dirty_paths.contains(&failure.source.path));
+    work.inventory_failures.extend(inventory.failures);
+    work.failed_inventory_pending =
+        failed_inventory_pending_counts(store, &work.inventory_failures)?;
+    work.planned_total_bytes = plan.sources.iter().fold(0u64, |total, source| {
+        total.saturating_add(source.stats.bytes)
+    });
+    work.execution_state = work
+        .execution_state
+        .rebase_for_plan(&work.plan, &plan, dirty_paths);
+    work.plan = plan;
+    Ok(())
+}
+
+fn daemon_search_refresh_reinventory_due(
+    elapsed_since_reinventory: StdDuration,
+    publication_pending: bool,
+) -> bool {
+    !publication_pending && elapsed_since_reinventory >= DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL
 }
