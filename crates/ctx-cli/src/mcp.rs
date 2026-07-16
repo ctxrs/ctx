@@ -231,6 +231,8 @@ fn handle_message(message: Value, data_root: &Path, initialized: &mut bool) -> O
             Some(json!({ "error": "send initialize before calling ctx MCP tools" })),
         ));
     }
+    let is_search_tool_call =
+        method == "tools/call" && params.get("name").and_then(Value::as_str) == Some("search");
     let result = match method {
         "initialize" => {
             *initialized = true;
@@ -242,6 +244,7 @@ fn handle_message(message: Value, data_root: &Path, initialized: &mut bool) -> O
         _ => Err(json_rpc_error(-32601, "Method not found", None)),
     };
     Some(match result {
+        Ok(result) if is_search_tool_call => bounded_search_rpc_response(id, result),
         Ok(result) => success_response(id, result),
         Err(error) => {
             if let Some(object) = error.as_object() {
@@ -373,7 +376,6 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
     };
 
     Ok(match result {
-        Ok(value) if name == "search" => bounded_search_tool_result(value),
         Ok(value) => tool_result(value),
         Err(err) if name == "search" => search_tool_error_result(err),
         Err(err) => tool_error_result(err),
@@ -709,15 +711,25 @@ fn tool_result(structured: Value) -> Value {
     })
 }
 
-fn bounded_search_tool_result(mut structured: Value) -> Value {
+fn bounded_search_rpc_response(id: Value, result: Value) -> Value {
+    let Some(mut structured) = result.get("structuredContent").cloned() else {
+        return bounded_untrimmable_search_response(id, result);
+    };
+    if structured
+        .get("results")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return bounded_untrimmable_search_response(id, result);
+    }
     let result_count = structured
         .get("results")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    match render_search_tool_result(&mut structured) {
+    match render_search_rpc_response(&id, &mut structured) {
         Ok((result, bytes)) if bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES => return result,
         Ok(_) => {}
-        Err(error) => return search_tool_error_result(error),
+        Err(error) => return bounded_search_error_rpc_response(id, error),
     }
 
     let mut smallest = 0_usize;
@@ -727,7 +739,7 @@ fn bounded_search_tool_result(mut structured: Value) -> Value {
         let keep = smallest + (largest - smallest) / 2;
         let mut candidate = structured.clone();
         truncate_search_transport(&mut candidate, keep);
-        match render_search_tool_result(&mut candidate) {
+        match render_search_rpc_response(&id, &mut candidate) {
             Ok((result, bytes)) if bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES => {
                 best = Some(result);
                 smallest = keep.saturating_add(1);
@@ -738,37 +750,88 @@ fn bounded_search_tool_result(mut structured: Value) -> Value {
                 }
                 largest = keep - 1;
             }
-            Err(error) => return search_tool_error_result(error),
+            Err(error) => {
+                return bounded_search_error_rpc_response(id, error);
+            }
         }
     }
 
     best.unwrap_or_else(|| {
-        search_tool_error_result(anyhow!(
-            "bounded MCP search metadata exceeds the {SEARCH_MAX_SERIALIZED_RESPONSE_BYTES}-byte response cap"
-        ))
+        bounded_search_error_rpc_response(
+            id,
+            anyhow!(
+                "bounded MCP search metadata exceeds the {SEARCH_MAX_SERIALIZED_RESPONSE_BYTES}-byte response cap"
+            ),
+        )
     })
 }
 
-fn render_search_tool_result(structured: &mut Value) -> Result<(Value, usize)> {
+fn bounded_untrimmable_search_response(id: Value, result: Value) -> Value {
+    let response = success_response(id.clone(), result);
+    match framed_response_bytes(&response) {
+        Ok(bytes) if bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES => response,
+        Ok(_) => bounded_search_error_rpc_response(
+            id,
+            anyhow!(
+                "bounded MCP search response exceeds the {SEARCH_MAX_SERIALIZED_RESPONSE_BYTES}-byte response cap"
+            ),
+        ),
+        Err(error) => bounded_search_error_rpc_response(id, error),
+    }
+}
+
+fn bounded_search_error_rpc_response(id: Value, error: anyhow::Error) -> Value {
+    let response = success_response(id.clone(), search_tool_error_result(error));
+    if framed_response_bytes(&response)
+        .is_ok_and(|bytes| bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES)
+    {
+        return response;
+    }
+
+    let response = success_response(
+        id,
+        search_tool_error_result(anyhow!(
+            "bounded MCP search error exceeded the response cap"
+        )),
+    );
+    if framed_response_bytes(&response)
+        .is_ok_and(|bytes| bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES)
+    {
+        return response;
+    }
+    error_response(
+        Value::Null,
+        -32603,
+        "bounded MCP search response exceeded its byte cap",
+        None,
+    )
+}
+
+fn framed_response_bytes(response: &Value) -> Result<usize> {
+    Ok(serde_json::to_vec(response)
+        .context("serialize bounded MCP search response")?
+        .len()
+        .saturating_add(1))
+}
+
+fn render_search_rpc_response(id: &Value, structured: &mut Value) -> Result<(Value, usize)> {
     for _ in 0..8 {
-        let result = tool_result(structured.clone());
-        let serialized_bytes = serde_json::to_vec(&result)
-            .context("serialize bounded MCP search result")?
-            .len();
+        let response = success_response(id.clone(), tool_result(structured.clone()));
+        let serialized_bytes = framed_response_bytes(&response)?;
         let Some(consumed) = structured
             .get_mut("query_execution")
             .and_then(Value::as_object_mut)
             .and_then(|execution| execution.get_mut("consumed"))
             .and_then(Value::as_object_mut)
         else {
-            return Ok((result, serialized_bytes));
+            return Ok((response, serialized_bytes));
         };
         if consumed
             .get("serialized_response_bytes")
             .and_then(Value::as_u64)
             == Some(serialized_bytes as u64)
         {
-            return Ok((result, serialized_bytes));
+            return Ok((response, serialized_bytes));
         }
         consumed.insert(
             "serialized_response_bytes".to_owned(),
@@ -1339,24 +1402,28 @@ mod search_contract_tests {
                 })
             })
             .collect::<Vec<_>>();
-        let result = bounded_search_tool_result(json!({
-            "results": results,
-            "pagination": {"has_more": false},
-            "truncation": {"truncated": false, "omitted_results": 0},
-            "query_execution": {
-                "consumed": {
-                    "returned_results": 200,
-                    "returned_text_bytes": 4_000_000,
-                    "serialized_response_bytes": 0,
+        let id = json!("i".repeat(MCP_MAX_LINE_BYTES / 2));
+        let result = bounded_search_rpc_response(
+            id,
+            tool_result(json!({
+                "results": results,
+                "pagination": {"has_more": false},
+                "truncation": {"truncated": false, "omitted_results": 0},
+                "query_execution": {
+                    "consumed": {
+                        "returned_results": 200,
+                        "returned_text_bytes": 4_000_000,
+                        "serialized_response_bytes": 0,
+                    },
+                    "truncated": false,
+                    "truncation_reasons": [],
                 },
-                "truncated": false,
-                "truncation_reasons": [],
-            },
-        }));
+            })),
+        );
 
-        let serialized_bytes = serde_json::to_vec(&result).unwrap().len();
+        let serialized_bytes = serde_json::to_vec(&result).unwrap().len() + 1;
         assert!(serialized_bytes <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES);
-        let structured = &result["structuredContent"];
+        let structured = &result["result"]["structuredContent"];
         assert_eq!(structured["query_execution"]["truncated"], true);
         assert_eq!(structured["pagination"]["has_more"], true);
         let returned_results = structured["results"].as_array().unwrap().len() as u64;
@@ -1376,5 +1443,18 @@ mod search_contract_tests {
             .as_array()
             .unwrap()
             .contains(&json!("serialized_response_bytes")));
+    }
+
+    #[test]
+    fn search_error_response_is_capped_after_json_rpc_framing() {
+        let result = bounded_search_rpc_response(
+            json!("error-request"),
+            search_tool_error_result(anyhow!(
+                "x".repeat(SEARCH_MAX_SERIALIZED_RESPONSE_BYTES.saturating_mul(2))
+            )),
+        );
+
+        assert!(framed_response_bytes(&result).unwrap() <= SEARCH_MAX_SERIALIZED_RESPONSE_BYTES);
+        assert_eq!(result["result"]["isError"], true);
     }
 }

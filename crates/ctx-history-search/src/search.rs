@@ -157,7 +157,7 @@ pub fn search_packet_envelope(
     lexical_query
         .any
         .retain(|clause| !matches!(clause, SearchClause::Semantic(_)));
-    let has_lexical_positive = lexical_query.positive_clause_count() > 0;
+    let has_lexical_positive = has_lexical_positive_branch(&lexical_query, semantic_required);
     let mut packet = if has_lexical_positive {
         search_packet_query_lexical(store, &lexical_query, &options, &resolved, started)?
     } else {
@@ -403,6 +403,11 @@ pub fn search_packet_envelope(
     }
     finalize_structured_packet(&mut packet, started)?;
     Ok(packet)
+}
+
+fn has_lexical_positive_branch(query: &SearchQuery, semantic_required: bool) -> bool {
+    query.any.iter().any(SearchClause::is_lexical)
+        || (!semantic_required && query.any.is_empty() && !query.must.is_empty())
 }
 
 fn rerank_automatic_semantic_candidates(semantic_ids: &[Uuid], packet: &mut SearchPacket) {
@@ -2241,5 +2246,19 @@ mod timeout_tests {
 
         assert_eq!(lexical_first, semantic_first);
         assert!(lexical_first > reciprocal_rank(2));
+    }
+
+    #[test]
+    fn semantic_hard_requirements_do_not_create_a_lexical_positive_branch() {
+        let mut semantic_only = SearchQuery::new(vec![SearchClause::semantic("disk pressure")]);
+        semantic_only.must.push(SearchClause::all("codex"));
+        assert!(!has_lexical_positive_branch(&semantic_only, true));
+
+        semantic_only.any.push(SearchClause::all("disk pressure"));
+        assert!(has_lexical_positive_branch(&semantic_only, true));
+
+        let mut must_only = SearchQuery::new(Vec::new());
+        must_only.must.push(SearchClause::all("codex"));
+        assert!(has_lexical_positive_branch(&must_only, false));
     }
 }

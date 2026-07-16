@@ -93,7 +93,6 @@ impl SearchInventoryReason {
             Self::HealthySweep => "healthy_sweep",
         }
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -1199,11 +1198,7 @@ pub(crate) fn run_search(
             }
         }
         if packet.results.is_empty() {
-            if let Some(file) = args
-                .file
-                .as_deref()
-                .filter(|_| query_spec.is_none())
-            {
+            if let Some(file) = args.file.as_deref().filter(|_| query_spec.is_none()) {
                 println!("no indexed events touched {}", file.display());
                 let indexed_items = indexed_history_item_count(&store)?;
                 if indexed_items == 0 {
@@ -1257,31 +1252,32 @@ pub(crate) fn resolve_search_backend(
 ) -> Result<SearchBackendArg> {
     let semantic_enabled = config.semantic_search_enabled();
     match backend {
-        Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow!(
-            "semantic search is disabled. Set [search] semantic = true in ctx config to enable the local semantic preview"
+        Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(semantic_backend_error(
+            ctx_protocol::SearchSemanticReadiness::NotReady,
+            "semantic search is disabled. Set [search] semantic = true in ctx config to enable the local semantic preview",
         )),
-        Some(SearchBackendArg::Semantic) if !semantic::semantic_query_service_supported() => Err(
-            anyhow!(
-                "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical"
-            ),
-        ),
-        Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(anyhow!(
-            "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
-        )),
-        value
-            if semantic_enabled
-                && semantic::semantic_query_service_supported()
-                && !config.daemon.enabled
-                && !matches!(value, Some(SearchBackendArg::Lexical)) =>
-        {
-            Err(anyhow!(
-                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
+        Some(SearchBackendArg::Semantic) if !semantic::semantic_query_service_supported() => {
+            Err(semantic_backend_error(
+                ctx_protocol::SearchSemanticReadiness::Unsupported,
+                "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical",
             ))
         }
+        Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(semantic_backend_error(
+            ctx_protocol::SearchSemanticReadiness::Unavailable,
+            "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical",
+        )),
         Some(value) => Ok(value),
         None if semantic_enabled => Ok(SearchBackendArg::Hybrid),
         None => Ok(SearchBackendArg::Lexical),
     }
+}
+
+fn semantic_backend_error(
+    readiness: ctx_protocol::SearchSemanticReadiness,
+    message: &str,
+) -> anyhow::Error {
+    anyhow::Error::new(ctx_history_search::SearchError::SemanticNotReady { readiness })
+        .context(message.to_owned())
 }
 
 fn existing_store_indexed_content(db_path: &Path) -> Option<bool> {
