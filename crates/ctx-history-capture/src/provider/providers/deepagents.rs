@@ -255,7 +255,7 @@ pub(crate) fn deepagents_events_by_thread(
     for row in rows {
         let Some(thread) = threads.get(&row.thread_id) else {
             result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            result.summary.sample_failure(ProviderImportFailure {
                 line: provider_line_from_index(row.row_number),
                 error: format!(
                     "Deep Agents writes row references unknown thread_id {}",
@@ -268,7 +268,7 @@ pub(crate) fn deepagents_events_by_thread(
             Ok(messages) => messages,
             Err(err) => {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: provider_line_from_index(row.row_number),
                     error: err.to_string(),
                 });

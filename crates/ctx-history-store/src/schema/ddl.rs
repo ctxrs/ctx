@@ -244,6 +244,76 @@ CREATE TABLE IF NOT EXISTS source_import_files (
     PRIMARY KEY (provider, source_root, source_path)
 );
 
+CREATE TABLE IF NOT EXISTS provider_file_checkpoints (
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+    source_root TEXT NOT NULL CHECK (length(source_root) > 0),
+    source_path TEXT NOT NULL CHECK (length(source_path) > 0),
+    import_revision INTEGER NOT NULL CHECK (import_revision > 0),
+    checkpoint_version INTEGER NOT NULL CHECK (checkpoint_version > 0),
+    stable_file_identity TEXT NOT NULL CHECK (length(stable_file_identity) > 0),
+    committed_byte_offset INTEGER NOT NULL CHECK (committed_byte_offset >= 0),
+    committed_complete_line_count INTEGER NOT NULL CHECK (committed_complete_line_count >= 0),
+    head_sha256 TEXT NOT NULL CHECK (length(head_sha256) = 64),
+    boundary_sha256 TEXT NOT NULL CHECK (length(boundary_sha256) = 64),
+    resume_state BLOB CHECK (resume_state IS NULL OR length(resume_state) BETWEEN 1 AND 65536),
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (provider, source_format, source_root, source_path)
+);
+
+CREATE TABLE IF NOT EXISTS provider_file_publications (
+    replacement_id TEXT NOT NULL UNIQUE,
+    owner_id TEXT NOT NULL CHECK (length(owner_id) = 64),
+    publication_kind TEXT NOT NULL CHECK (publication_kind IN ('incremental', 'replacement')),
+    staging_id TEXT NOT NULL CHECK (length(staging_id) = 64),
+    provider TEXT NOT NULL,
+    inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+    inventory_source_format TEXT NOT NULL CHECK (length(inventory_source_format) > 0),
+    inventory_source_root TEXT NOT NULL CHECK (length(inventory_source_root) > 0),
+    source_path TEXT NOT NULL CHECK (length(source_path) > 0),
+    material_source_format TEXT NOT NULL CHECK (length(material_source_format) > 0),
+    material_source_root TEXT NOT NULL CHECK (length(material_source_root) > 0),
+    inventory_generation INTEGER NOT NULL CHECK (inventory_generation > 0),
+    file_size_bytes INTEGER NOT NULL CHECK (file_size_bytes >= 0),
+    file_modified_at_ms INTEGER NOT NULL,
+    import_revision INTEGER NOT NULL CHECK (import_revision > 0),
+    metadata_json TEXT,
+    mutation_started INTEGER NOT NULL DEFAULT 0 CHECK (mutation_started IN (0, 1)),
+    preparation_complete INTEGER NOT NULL DEFAULT 0 CHECK (preparation_complete IN (0, 1)),
+    preparation_cursor TEXT,
+    cleanup_phase INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_phase BETWEEN 0 AND 14),
+    cleanup_source_cursor TEXT,
+    cleanup_entity_cursor TEXT,
+    removed_artifacts INTEGER NOT NULL DEFAULT 0 CHECK (removed_artifacts >= 0),
+    removed_summaries INTEGER NOT NULL DEFAULT 0 CHECK (removed_summaries >= 0),
+    removed_history_record_links INTEGER NOT NULL DEFAULT 0 CHECK (removed_history_record_links >= 0),
+    removed_history_records INTEGER NOT NULL DEFAULT 0 CHECK (removed_history_records >= 0),
+    removed_history_record_tags INTEGER NOT NULL DEFAULT 0 CHECK (removed_history_record_tags >= 0),
+    removed_record_edges INTEGER NOT NULL DEFAULT 0 CHECK (removed_record_edges >= 0),
+    removed_audit_log_entries INTEGER NOT NULL DEFAULT 0 CHECK (removed_audit_log_entries >= 0),
+    removed_vcs_workspaces INTEGER NOT NULL DEFAULT 0 CHECK (removed_vcs_workspaces >= 0),
+    removed_vcs_changes INTEGER NOT NULL DEFAULT 0 CHECK (removed_vcs_changes >= 0),
+    removed_events INTEGER NOT NULL DEFAULT 0 CHECK (removed_events >= 0),
+    removed_runs INTEGER NOT NULL DEFAULT 0 CHECK (removed_runs >= 0),
+    removed_files_touched INTEGER NOT NULL DEFAULT 0 CHECK (removed_files_touched >= 0),
+    removed_session_edges INTEGER NOT NULL DEFAULT 0 CHECK (removed_session_edges >= 0),
+    tombstoned_sessions INTEGER NOT NULL DEFAULT 0 CHECK (tombstoned_sessions >= 0),
+    started_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (provider, material_source_format, material_source_root, source_path)
+);
+
+CREATE TABLE IF NOT EXISTS semantic_replacement_revision (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    current_revision INTEGER NOT NULL CHECK (current_revision >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS search_projection_stats (
+    key TEXT PRIMARY KEY NOT NULL,
+    value INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS vcs_workspaces (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('git', 'jj')),

@@ -1,5 +1,5 @@
 use ctx_history_core::{EntityTimestamps, VcsChange, VcsWorkspace};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use crate::connection::{
@@ -11,6 +11,23 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_vcs_workspace(&self, workspace: &VcsWorkspace) -> Result<Uuid> {
+        self.with_provider_file_publication_write(|| self.upsert_vcs_workspace_inner(workspace))
+    }
+
+    fn upsert_vcs_workspace_inner(&self, workspace: &VcsWorkspace) -> Result<Uuid> {
+        let conflict_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM vcs_workspaces WHERE kind = ?1 AND repo_fingerprint = ?2",
+                params![workspace.kind.as_str(), workspace.repo_fingerprint.as_str()],
+                |row| parse_uuid(row.get::<_, String>(0)?),
+            )
+            .optional()?;
+        self.ensure_provider_file_direct_source_write_allowed(
+            "vcs_workspaces",
+            conflict_id.unwrap_or(workspace.id),
+            workspace.source_id,
+        )?;
         self.conn.execute(
                 r#"
                 INSERT INTO vcs_workspaces
@@ -53,24 +70,52 @@ impl Store {
                     serde_json::to_string(&workspace.sync.metadata)?,
                 ],
             )?;
-        self.conn
+        let id = self
+            .conn
             .query_row(
                 "SELECT id FROM vcs_workspaces WHERE kind = ?1 AND repo_fingerprint = ?2",
                 params![workspace.kind.as_str(), workspace.repo_fingerprint.as_str()],
                 |row| parse_uuid(row.get::<_, String>(0)?),
             )
-            .map_err(StoreError::from)
+            .map_err(StoreError::from)?;
+        self.track_provider_file_publication_direct_entity("vcs_workspace", "vcs_workspaces", id)?;
+        Ok(id)
     }
 
     pub(crate) fn list_vcs_workspaces(&self) -> Result<Vec<VcsWorkspace>> {
-        let mut stmt = self
-            .conn
-            .prepare(vcs_workspace_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let visible = crate::provider_files::direct_source_material_visible_predicate(
+            "vcs_workspaces",
+            "source_id",
+        );
+        let mut stmt = self.conn.prepare(
+            vcs_workspace_select_sql(&format!("WHERE {visible} ORDER BY updated_at_ms, id"))
+                .as_str(),
+        )?;
         let rows = stmt.query_map([], vcs_workspace_from_row)?;
         collect_rows(rows)
     }
 
     pub fn upsert_vcs_change(&self, change: &VcsChange) -> Result<Uuid> {
+        self.with_provider_file_publication_write(|| self.upsert_vcs_change_inner(change))
+    }
+
+    fn upsert_vcs_change_inner(&self, change: &VcsChange) -> Result<Uuid> {
+        let conflict_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM vcs_changes WHERE vcs_workspace_id = ?1 AND kind = ?2 AND change_id = ?3",
+                params![
+                    change.vcs_workspace_id.to_string(),
+                    change.kind.as_str(),
+                    change.change_id.as_str(),
+                ],
+                |row| parse_uuid(row.get::<_, String>(0)?),
+            )
+            .optional()?;
+        self.ensure_provider_file_vcs_change_write_allowed(
+            conflict_id.unwrap_or(change.id),
+            change,
+        )?;
         self.conn.execute(
                 r#"
                 INSERT INTO vcs_changes
@@ -112,35 +157,51 @@ impl Store {
                     serde_json::to_string(&change.sync.metadata)?,
                 ],
             )?;
-        self.conn
+        let id = self.conn
                 .query_row(
                     "SELECT id FROM vcs_changes WHERE vcs_workspace_id = ?1 AND kind = ?2 AND change_id = ?3",
                     params![change.vcs_workspace_id.to_string(), change.kind.as_str(), change.change_id.as_str()],
                     |row| parse_uuid(row.get::<_, String>(0)?),
                 )
-                .map_err(StoreError::from)
+                .map_err(StoreError::from)?;
+        self.track_provider_file_publication_direct_entity("vcs_change", "vcs_changes", id)?;
+        if change.source_id.is_none() {
+            self.track_provider_file_publication_direct_entity(
+                "vcs_workspace",
+                "vcs_workspaces",
+                change.vcs_workspace_id,
+            )?;
+        }
+        Ok(id)
     }
 
     pub(crate) fn list_vcs_changes(&self) -> Result<Vec<VcsChange>> {
-        let mut stmt = self
-            .conn
-            .prepare(vcs_change_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let visible = crate::provider_files::vcs_change_material_visible_predicate("vcs_changes");
+        let mut stmt = self.conn.prepare(
+            vcs_change_select_sql(&format!("WHERE {visible} ORDER BY updated_at_ms, id")).as_str(),
+        )?;
         let rows = stmt.query_map([], vcs_change_from_row)?;
         collect_rows(rows)
     }
 
     pub fn vcs_changes_for_record(&self, record_id: Uuid) -> Result<Vec<VcsChange>> {
+        let change_visible =
+            crate::provider_files::vcs_change_material_visible_predicate("vcs_changes");
+        let link_visible =
+            crate::provider_files::history_record_link_material_visible_predicate("link");
         let mut stmt = self.conn.prepare(
-            vcs_change_select_sql(
+            vcs_change_select_sql(&format!(
                 r#"
                     WHERE id IN (
                         SELECT target_id
-                        FROM history_record_links
+                        FROM history_record_links AS link
                         WHERE history_record_id = ?1 AND target_type = 'vcs_change'
+                          AND {link_visible}
                     )
+                    AND {change_visible}
                     ORDER BY updated_at_ms DESC, id
                     "#,
-            )
+            ))
             .as_str(),
         )?;
         let rows = stmt.query_map(params![record_id.to_string()], vcs_change_from_row)?;

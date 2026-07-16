@@ -94,6 +94,53 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
 }
 
 #[test]
+fn codex_fast_import_retains_summary_when_search_finalization_is_pinned() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let path = temp.path().join("pinned-codex.jsonl");
+    fs::write(
+        &path,
+        concat!(
+            "{\"timestamp\":\"2026-07-14T19:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"pinned-codex\",\"cwd\":\"/workspace\"}}\n",
+            "{\"timestamp\":\"2026-07-14T19:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"durably imported\"}]}}\n"
+        ),
+    )
+    .unwrap();
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    reader
+        .query_row("SELECT COUNT(*) FROM event_search", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            fast_event_inserts: true,
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.maintenance_warnings.len(), 1);
+    assert_eq!(
+        summary.maintenance_warnings[0].kind,
+        crate::ProviderImportMaintenanceKind::EventSearchFinalization
+    );
+    assert!(summary.maintenance_warnings[0]
+        .error
+        .contains("WAL checkpoint could not complete"));
+    assert_eq!(store.export_archive().unwrap().events.len(), 1);
+
+    reader.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn codex_parallel_join_panic_is_a_typed_system_failure() {
     let error = std::thread::scope(|scope| {
         let handle = scope.spawn(|| -> crate::Result<()> {
@@ -1520,9 +1567,16 @@ fn codex_fast_session_stream_uses_shared_bounded_batches() {
         0
     );
 
-    let error = import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default())
-        .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    let summary =
+        import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default())
+            .unwrap();
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 64);
+    assert!(summary.requires_maintenance());
+    assert!(summary.maintenance_warnings.iter().any(|warning| {
+        warning.kind == crate::ProviderImportMaintenanceKind::WalCheckpoint
+            && warning.error.contains("ctx index is busy")
+    }));
     reader.execute_batch("ROLLBACK").unwrap();
 
     let conn = Connection::open(&db_path).unwrap();
@@ -1585,9 +1639,16 @@ fn codex_parallel_normalized_stream_uses_shared_bounded_batches() {
         0
     );
 
-    let error = import_codex_session_paths(paths, &mut store, CodexSessionImportOptions::default())
-        .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    let summary =
+        import_codex_session_paths(paths, &mut store, CodexSessionImportOptions::default())
+            .unwrap();
+    assert_eq!(summary.imported_sessions, 13);
+    assert_eq!(summary.imported_events, 51);
+    assert!(summary.requires_maintenance());
+    assert!(summary.maintenance_warnings.iter().any(|warning| {
+        warning.kind == crate::ProviderImportMaintenanceKind::WalCheckpoint
+            && warning.error.contains("ctx index is busy")
+    }));
     reader.execute_batch("ROLLBACK").unwrap();
 
     let conn = Connection::open(&db_path).unwrap();
@@ -1663,14 +1724,20 @@ fn codex_tail_stream_uses_shared_bounded_batches() {
             .unwrap(),
         1
     );
-    let error = import_codex_session_jsonl_tail(
+    let summary = import_codex_session_jsonl_tail(
         &path,
         tail_start,
         &mut store,
         CodexSessionImportOptions::default(),
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    .unwrap();
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 64);
+    assert!(summary.requires_maintenance());
+    assert!(summary.maintenance_warnings.iter().any(|warning| {
+        warning.kind == crate::ProviderImportMaintenanceKind::WalCheckpoint
+            && warning.error.contains("ctx index is busy")
+    }));
     reader.execute_batch("ROLLBACK").unwrap();
 
     let conn = Connection::open(&db_path).unwrap();
@@ -1810,13 +1877,14 @@ fn codex_structured_failed_tool_output_creates_failed_diagnostic_event() {
             }
         }
     });
+    let mut call_contexts = CodexToolCallContexts::default();
     let event = codex_tool_output_event(
         &payload,
         12,
         DateTime::parse_from_rfc3339("2026-06-24T01:00:04.500Z")
             .unwrap()
             .with_timezone(&Utc),
-        &std::collections::BTreeMap::new(),
+        &mut call_contexts,
     )
     .expect("structured failed output should be retained");
 
@@ -1833,13 +1901,14 @@ fn codex_failed_diff_output_omits_raw_diff_preview() {
         "call_id": "call-failed-diff",
         "output": "Process exited with code 1\nOutput:\ndiff --git a/src/lib.rs b/src/lib.rs\n@@\n-old raw diff\n+new raw diff\n"
     });
+    let mut call_contexts = CodexToolCallContexts::default();
     let event = codex_tool_output_event(
         &payload,
         13,
         DateTime::parse_from_rfc3339("2026-06-24T01:00:05.000Z")
             .unwrap()
             .with_timezone(&Utc),
-        &std::collections::BTreeMap::new(),
+        &mut call_contexts,
     )
     .expect("failed diff output should keep a diagnostic event");
 
@@ -1862,13 +1931,14 @@ fn codex_nested_failed_diff_output_omits_raw_diff_preview() {
             }
         }
     });
+    let mut call_contexts = CodexToolCallContexts::default();
     let event = codex_tool_output_event(
         &payload,
         14,
         DateTime::parse_from_rfc3339("2026-06-24T01:00:05.500Z")
             .unwrap()
             .with_timezone(&Utc),
-        &std::collections::BTreeMap::new(),
+        &mut call_contexts,
     )
     .expect("nested failed diff output should keep a diagnostic event");
 

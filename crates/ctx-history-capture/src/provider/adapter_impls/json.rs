@@ -68,7 +68,7 @@ impl ProviderCaptureAdapter for ClaudeProjectsJsonlAdapter {
         }
         if merged.captures.is_empty() && merged.summary.failed == 0 {
             merged.summary.failed += 1;
-            merged.summary.failures.push(ProviderImportFailure {
+            merged.summary.sample_failure(ProviderImportFailure {
                 line: 0,
                 error: "Claude Code project JSONL contained no real conversation messages"
                     .to_owned(),

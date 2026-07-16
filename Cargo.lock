@@ -539,12 +539,15 @@ version = "0.25.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
+ "fs2",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

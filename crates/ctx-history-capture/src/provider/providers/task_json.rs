@@ -425,7 +425,7 @@ pub(crate) fn read_task_json_optional(
         Ok(value) => Some(value),
         Err(err) => {
             summary.failed += 1;
-            summary.failures.push(ProviderImportFailure {
+            summary.sample_failure(ProviderImportFailure {
                 line,
                 error: format!("{file_name}: {err}"),
             });

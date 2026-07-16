@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File},
     io::BufReader,
     path::{Path, PathBuf},
@@ -20,18 +19,18 @@ use crate::provider::importer::{
     import_normalized_provider_captures, import_provider_capture_line,
     import_provider_capture_lines, import_provider_file_touched_line,
     resolve_pending_provider_edges_batched, validate_provider_event_for_import,
-    ProviderImportCaches, ProviderImportTransaction,
+    ProviderImportCaches, ProviderImportTransaction, ProviderImportTransactionStep,
 };
 use crate::provider::native::provider_output_event_is_failure;
 use crate::{
     CaptureError, CodexSessionImportOptions, NormalizedProviderImportOptions,
     ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure, ProviderImportSummary,
-    ProviderNormalizationResult, Result,
+    ProviderJsonlReader, ProviderJsonlRecordRead, ProviderNormalizationResult, Result,
 };
 
 use crate::provider::codex::events::{
     codex_session_capture, codex_session_header, codex_session_line_capture,
-    codex_session_line_timestamp, CodexSessionLineContext, CodexToolCallContext,
+    codex_session_line_timestamp, CodexSessionLineContext, CodexToolCallContexts,
 };
 use crate::provider::codex::fast_import::{
     codex_session_paths_total_bytes, import_codex_provider_event_fast,
@@ -52,12 +51,10 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         path: &Path,
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
-        ensure_regular_provider_transcript_file(path)?;
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
+        let mut reader = ProviderJsonlReader::open_replacement(path)?;
         let mut result = ProviderNormalizationResult::default();
         let mut header = None;
-        let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let mut call_contexts = CodexToolCallContexts::default();
         let mut has_real_message_content = false;
         let mut skipped_oversized_events = 0usize;
         let raw_source_path = context
@@ -68,13 +65,19 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         let mut line_number = 0usize;
         let mut line = Vec::new();
         loop {
-            match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
-                ProviderJsonlLineRead::Eof => break,
-                ProviderJsonlLineRead::Line { .. } => {
-                    line_number += 1;
+            match reader.read_record(&mut line)? {
+                ProviderJsonlRecordRead::Eof => break,
+                ProviderJsonlRecordRead::Record {
+                    line_number: current,
+                    ..
+                } => {
+                    line_number = usize::try_from(current).unwrap_or(usize::MAX);
                 }
-                ProviderJsonlLineRead::Oversized { .. } => {
-                    line_number += 1;
+                ProviderJsonlRecordRead::Oversized {
+                    line_number: current,
+                    ..
+                } => {
+                    line_number = usize::try_from(current).unwrap_or(usize::MAX);
                     result.summary.skipped += 1;
                     if header.is_none() {
                         result.summary.skipped_sessions += 1;
@@ -84,6 +87,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                     result.summary.skipped_events += 1;
                     continue;
                 }
+                ProviderJsonlRecordRead::DeferredPartial { .. } => break,
             }
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
@@ -91,17 +95,13 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
             if !should_parse_codex_session_line(&line) {
                 continue;
             }
-            if should_skip_codex_tool_output_line(&line) {
-                result.summary.skipped += 1;
-                result.summary.skipped_events += 1;
-                continue;
-            }
+            let skip_tool_output = should_skip_codex_tool_output_line(&line);
 
             let value: Value = match serde_json::from_slice(&line) {
                 Ok(value) => value,
                 Err(err) => {
                     result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
+                    result.summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
@@ -128,7 +128,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                     }
                     Err(err) => {
                         result.summary.failed += 1;
-                        result.summary.failures.push(ProviderImportFailure {
+                        result.summary.sample_failure(ProviderImportFailure {
                             line: line_number,
                             error: err.to_string(),
                         });
@@ -139,7 +139,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
 
             let Some(header) = header.as_ref() else {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: "codex session entry appeared before session_meta".to_owned(),
                 });
@@ -149,7 +149,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                 Ok(occurred_at) => occurred_at,
                 Err(err) => {
                     result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
+                    result.summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
@@ -165,8 +165,14 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                     occurred_at,
                     raw_source_path: raw_source_path.as_deref(),
                     source_root: context.source_root_display().as_deref(),
+                    source_format: crate::CODEX_SESSION_SOURCE_FORMAT,
                 },
             );
+            if skip_tool_output {
+                result.summary.skipped += 1;
+                result.summary.skipped_events += 1;
+                line_capture.event = None;
+            }
             if let Some(event) = line_capture.event.take() {
                 if codex_event_has_real_conversation_content(&event) {
                     has_real_message_content = true;
@@ -195,7 +201,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
             result.files_touched.clear();
             if skipped_oversized_events == 0 && result.summary.failed == 0 {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: "codex session JSONL contained no real message content".to_owned(),
                 });
@@ -209,6 +215,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CodexSessionConversationScan {
     pub(crate) has_real_conversation: bool,
+    pub(crate) has_additional_session_header: bool,
     pub(crate) has_malformed_header: bool,
     pub(crate) has_malformed_relevant_line: bool,
     pub(crate) oversized_required_header: bool,
@@ -228,20 +235,17 @@ pub(crate) fn codex_event_has_real_conversation_content(event: &ProviderEventEnv
             .is_some_and(|text| !text.trim().is_empty())
 }
 
-pub(crate) fn codex_session_file_conversation_scan(
-    path: &Path,
+pub(crate) fn codex_session_reader_conversation_scan(
+    reader: &mut ProviderJsonlReader,
 ) -> Result<CodexSessionConversationScan> {
-    ensure_regular_provider_transcript_file(path)?;
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut scan = CodexSessionConversationScan::default();
     let mut header_seen = false;
     loop {
-        match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
-            ProviderJsonlLineRead::Eof => break,
-            ProviderJsonlLineRead::Line { .. } => {}
-            ProviderJsonlLineRead::Oversized { .. } => {
+        match reader.read_record(&mut line)? {
+            ProviderJsonlRecordRead::Eof => break,
+            ProviderJsonlRecordRead::Record { .. } => {}
+            ProviderJsonlRecordRead::Oversized { .. } => {
                 if header_seen {
                     scan.oversized_events = scan.oversized_events.saturating_add(1);
                     continue;
@@ -249,6 +253,7 @@ pub(crate) fn codex_session_file_conversation_scan(
                 scan.oversized_required_header = true;
                 return Ok(scan);
             }
+            ProviderJsonlRecordRead::DeferredPartial { .. } => break,
         }
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
@@ -263,6 +268,9 @@ pub(crate) fn codex_session_file_conversation_scan(
         };
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
             if codex_session_header(value.clone()).is_ok() {
+                if header_seen {
+                    scan.has_additional_session_header = true;
+                }
                 header_seen = true;
             } else {
                 scan.has_malformed_header = true;
@@ -294,6 +302,38 @@ pub(crate) fn codex_session_file_conversation_scan(
         }
     }
     Ok(scan)
+}
+
+pub(crate) fn codex_session_reader_has_additional_header(
+    reader: &mut ProviderJsonlReader,
+) -> Result<bool> {
+    let mut line = Vec::new();
+    loop {
+        match reader.read_record(&mut line)? {
+            ProviderJsonlRecordRead::Eof | ProviderJsonlRecordRead::DeferredPartial { .. } => {
+                return Ok(false);
+            }
+            ProviderJsonlRecordRead::Oversized { .. } => continue,
+            ProviderJsonlRecordRead::Record { .. } => {}
+        }
+        if !contains_bytes(&line, b"session_meta") {
+            continue;
+        }
+        if serde_json::from_slice::<Value>(&line)
+            .is_ok_and(|value| value.get("type").and_then(Value::as_str) == Some("session_meta"))
+        {
+            return Ok(true);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn codex_session_file_conversation_scan(
+    path: &Path,
+) -> Result<CodexSessionConversationScan> {
+    ensure_regular_provider_transcript_file(path)?;
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    codex_session_reader_conversation_scan(&mut reader)
 }
 pub(crate) fn should_parse_codex_session_line(line: &[u8]) -> bool {
     if contains_bytes(line, br#""type":"session_meta""#)
@@ -463,8 +503,14 @@ pub fn import_codex_session_jsonl_tail(
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
         (Ok(summary), Ok(())) => Ok(summary),
-        (_, Err(err)) => Err(err.into()),
-        (Err(err), Ok(())) => Err(err),
+        (Ok(mut summary), Err(error)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
+                error.to_string(),
+            );
+            Ok(summary)
+        }
+        (Err(error), _) => Err(error),
     }
 }
 
@@ -514,7 +560,7 @@ fn import_codex_session_jsonl_tail_bounded(
 
         match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
             ProviderJsonlLineRead::Eof => return Ok(summary),
-            ProviderJsonlLineRead::Line { bytes } => {
+            ProviderJsonlLineRead::Line { bytes, .. } => {
                 line_number += 1;
                 position = position.saturating_add(bytes as u64);
             }
@@ -530,11 +576,11 @@ fn import_codex_session_jsonl_tail_bounded(
         while position < start_offset {
             match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
                 ProviderJsonlLineRead::Eof => return Ok(summary),
-                ProviderJsonlLineRead::Line { bytes } => {
+                ProviderJsonlLineRead::Line { bytes, .. } => {
                     line_number += 1;
                     position = position.saturating_add(bytes as u64);
                 }
-                ProviderJsonlLineRead::Oversized { bytes } => {
+                ProviderJsonlLineRead::Oversized { bytes, .. } => {
                     line_number += 1;
                     position = position.saturating_add(bytes as u64);
                     summary.skipped += 1;
@@ -548,16 +594,16 @@ fn import_codex_session_jsonl_tail_bounded(
         let transaction = transaction.as_mut().expect("transaction was initialized");
         let mut header_persisted = false;
 
-        let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let mut call_contexts = CodexToolCallContexts::default();
         let mut completed_bytes = 0u64;
         loop {
             match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
                 ProviderJsonlLineRead::Eof => break,
-                ProviderJsonlLineRead::Line { bytes } => {
+                ProviderJsonlLineRead::Line { bytes, .. } => {
                     line_number += 1;
                     completed_bytes = completed_bytes.saturating_add(bytes as u64);
                 }
-                ProviderJsonlLineRead::Oversized { bytes } => {
+                ProviderJsonlLineRead::Oversized { bytes, .. } => {
                     line_number += 1;
                     completed_bytes = completed_bytes.saturating_add(bytes as u64);
                     summary.skipped += 1;
@@ -580,17 +626,13 @@ fn import_codex_session_jsonl_tail_bounded(
             if !should_parse_codex_session_line(&line) {
                 continue;
             }
-            if should_skip_codex_tool_output_line(&line) {
-                summary.skipped += 1;
-                summary.skipped_events += 1;
-                continue;
-            }
+            let skip_tool_output = should_skip_codex_tool_output_line(&line);
 
             let value: Value = match serde_json::from_slice(&line) {
                 Ok(value) => value,
                 Err(err) => {
                     summary.failed += 1;
-                    summary.failures.push(ProviderImportFailure {
+                    summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
@@ -608,7 +650,7 @@ fn import_codex_session_jsonl_tail_bounded(
                 Ok(occurred_at) => occurred_at,
                 Err(err) => {
                     summary.failed += 1;
-                    summary.failures.push(ProviderImportFailure {
+                    summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
@@ -624,8 +666,14 @@ fn import_codex_session_jsonl_tail_bounded(
                     occurred_at,
                     raw_source_path: raw_source_path.as_deref(),
                     source_root: context.source_root_display().as_deref(),
+                    source_format: crate::CODEX_SESSION_SOURCE_FORMAT,
                 },
             );
+            if skip_tool_output {
+                summary.skipped += 1;
+                summary.skipped_events += 1;
+                line_capture.event = None;
+            }
             let event = match line_capture.event.take() {
                 Some(event) if event.event_type == EventType::Notice => {
                     summary.skipped += 1;
@@ -635,7 +683,7 @@ fn import_codex_session_jsonl_tail_bounded(
                 Some(event) => {
                     if let Err(err) = validate_provider_event_for_import(&event) {
                         summary.failed += 1;
-                        summary.failures.push(ProviderImportFailure {
+                        summary.sample_failure(ProviderImportFailure {
                             line: line_number,
                             error: err.to_string(),
                         });
@@ -646,8 +694,12 @@ fn import_codex_session_jsonl_tail_bounded(
                 None => None,
             };
             let has_content = event.is_some() || !line_capture.files_touched.is_empty();
-            if has_content {
-                transaction.prepare_unit(store, line.len())?;
+            if has_content
+                && transaction.prepare_unit(store, line.len())?
+                    == ProviderImportTransactionStep::Halted
+            {
+                transaction.apply_maintenance_warning(&mut summary);
+                return Ok(summary);
             }
             if !header_persisted && has_content {
                 let header_capture =
@@ -672,14 +724,19 @@ fn import_codex_session_jsonl_tail_bounded(
                     context.imported_at,
                     raw_source_path.as_deref(),
                     source_root.as_deref(),
+                    crate::CODEX_SESSION_SOURCE_FORMAT,
                 )?);
             }
             for (_, file) in line_capture.files_touched {
                 import_provider_file_touched_line(store, &file, &import_options)?;
                 summary.accepted_content_records += 1;
             }
-            if has_content {
-                transaction.record_unit(store, line.len())?;
+            if has_content
+                && transaction.record_unit(store, line.len())?
+                    == ProviderImportTransactionStep::Halted
+            {
+                transaction.apply_maintenance_warning(&mut summary);
+                return Ok(summary);
             }
             report_codex_import_progress(
                 options,
@@ -692,8 +749,26 @@ fn import_codex_session_jsonl_tail_bounded(
             );
         }
 
-        resolve_pending_provider_edges_batched(store, &mut summary, &mut caches, transaction)?;
-        transaction.commit(store)?;
+        if let Err(error) =
+            resolve_pending_provider_edges_batched(store, &mut summary, &mut caches, transaction)
+        {
+            transaction.rollback(store);
+            if matches!(error, CaptureError::CommittedImportMaintenance)
+                || transaction.record_interruption_after_commit(&error)
+            {
+                transaction.apply_maintenance_warning(&mut summary);
+                return Ok(summary);
+            }
+            return Err(error);
+        }
+        if let Err(error) = transaction.commit(store) {
+            if transaction.record_interruption_after_commit(&error) {
+                transaction.apply_maintenance_warning(&mut summary);
+                return Ok(summary);
+            }
+            return Err(error);
+        }
+        transaction.apply_maintenance_warning(&mut summary);
         Ok(summary)
     })();
 
@@ -786,8 +861,14 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
         (Ok(summary), Ok(())) => Ok(summary),
-        (_, Err(err)) => Err(err.into()),
-        (Err(err), Ok(())) => Err(err),
+        (Ok(mut summary), Err(error)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
+                error.to_string(),
+            );
+            Ok(summary)
+        }
+        (Err(error), _) => Err(error),
     }
 }
 

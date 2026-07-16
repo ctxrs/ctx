@@ -1,5 +1,7 @@
 use rusqlite::types::Value;
 
+use crate::provider_files::event_material_visible_predicate;
+
 pub(super) fn lexical_event_search_query(
     match_clauses: Vec<String>,
     limit: usize,
@@ -106,7 +108,9 @@ pub(super) fn event_search_hit_sql(from_sql: &str, score_sql: &str, tail_sql: &s
         LEFT JOIN capture_sources session_source ON session_source.id = COALESCE(s.capture_source_id, rs.capture_source_id)
         LEFT JOIN capture_sources run_source ON run_source.id = r.source_id
         LEFT JOIN history_records wr ON wr.id = COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id, r.history_record_id)
+        WHERE {}
         {tail_sql}
-        "#
+        "#,
+        event_material_visible_predicate("e")
     )
 }

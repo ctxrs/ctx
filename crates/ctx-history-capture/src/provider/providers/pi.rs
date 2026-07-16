@@ -1,8 +1,4 @@
-use std::{
-    fs::{self, File},
-    io::BufReader,
-    path::Path,
-};
+use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -11,26 +7,28 @@ use ctx_history_core::{
     ProviderSourceEnvelope, ProviderSourceTrust, SessionStatus,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use crate::provider::providers::native_jsonl::native_jsonl_missing_reason;
 use crate::provider::providers::real_content::event_has_real_conversation_content;
 
-use crate::common::io::{
-    collect_jsonl_paths, ensure_regular_provider_transcript_file,
-    read_provider_jsonl_record_or_skip_oversized,
-};
+use crate::common::path_inventory::SortedJsonlPathInventory;
+use crate::common::scratch::CaptureScratchSpace;
 use crate::common::time::parse_optional_rfc3339_field;
 use crate::provider::adapter::PiSessionJsonlAdapter;
-use crate::provider::importer::provider_cursor_stream;
+use crate::provider::importer::{
+    provider_cursor_stream, ProviderNormalizationBatcher, ProviderSessionContentPolicy,
+};
 use crate::provider::native::{
     provider_capped_json, provider_policy_body, provider_policy_event_text,
 };
 use crate::{
     fnv1a64, CaptureError, ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure,
-    ProviderNormalizationResult, Result, PROVIDER_MAX_PREVIEW_CHARS,
+    ProviderJsonlReader, ProviderNormalizationResult, Result, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
+#[derive(Clone)]
 pub(crate) struct PiSessionHeader {
     pub(crate) id: String,
     pub(crate) version: Option<u64>,
@@ -38,6 +36,184 @@ pub(crate) struct PiSessionHeader {
     pub(crate) cwd: Option<String>,
     pub(crate) parent_session: Option<String>,
     pub(crate) raw: Value,
+}
+
+pub(crate) struct PiJsonlScan {
+    pub(crate) has_real_message: bool,
+    pub(crate) additional_session_header: bool,
+    pub(crate) failed: usize,
+    pub(crate) last_line_number: usize,
+    pub(crate) admission: PiSessionAdmission,
+}
+
+pub(crate) struct PiSessionAdmission {
+    connection: Connection,
+    _scratch: CaptureScratchSpace,
+}
+
+impl PiSessionAdmission {
+    fn new() -> Result<Self> {
+        let scratch = CaptureScratchSpace::create("pi-admission")?;
+        drop(scratch.create_file("pi-session-admission.sqlite")?);
+        let connection = Connection::open(scratch.path().join("pi-session-admission.sqlite"))?;
+        connection.execute_batch(
+            "CREATE TABLE session_admission (
+                 provider_session_id TEXT PRIMARY KEY NOT NULL,
+                 has_capture INTEGER NOT NULL DEFAULT 0 CHECK (has_capture IN (0, 1)),
+                 has_real_message INTEGER NOT NULL DEFAULT 0 CHECK (has_real_message IN (0, 1))
+             ) WITHOUT ROWID;",
+        )?;
+        Ok(Self {
+            connection,
+            _scratch: scratch,
+        })
+    }
+
+    fn observe_session(&self, provider_session_id: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO session_admission (provider_session_id) VALUES (?1)",
+            params![provider_session_id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_capture(&self, provider_session_id: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE session_admission SET has_capture = 1 WHERE provider_session_id = ?1",
+            params![provider_session_id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_real(&self, provider_session_id: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE session_admission SET has_real_message = 1 WHERE provider_session_id = ?1",
+            params![provider_session_id],
+        )?;
+        Ok(())
+    }
+
+    fn admits(&self, provider_session_id: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT has_real_message FROM session_admission WHERE provider_session_id = ?1",
+            params![provider_session_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn filter_batch(
+        &self,
+        mut normalization: ProviderNormalizationResult,
+    ) -> Result<ProviderNormalizationResult> {
+        let mut captures = Vec::with_capacity(normalization.captures.len());
+        for capture in normalization.captures {
+            if self.admits(&capture.1.session.provider_session_id)? {
+                captures.push(capture);
+            } else {
+                normalization.summary.skipped += 1;
+                if capture.1.event.is_some() {
+                    normalization.summary.skipped_events += 1;
+                }
+            }
+        }
+        normalization.captures = captures;
+
+        let mut files_touched = Vec::with_capacity(normalization.files_touched.len());
+        for file in normalization.files_touched {
+            if self.admits(&file.1.provider_session_id)? {
+                files_touched.push(file);
+            } else {
+                normalization.summary.skipped += 1;
+            }
+        }
+        normalization.files_touched = files_touched;
+        Ok(normalization)
+    }
+
+    pub(crate) fn rejected_session_count(&self) -> Result<usize> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM session_admission
+             WHERE has_capture = 1 AND has_real_message = 0",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+pub(crate) fn scan_pi_session_jsonl_reader(
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    bootstrap_header: Option<PiSessionHeader>,
+    reject_additional_session_header: bool,
+) -> Result<std::result::Result<PiJsonlScan, crate::ProviderJsonlReplacementReason>> {
+    let admission = PiSessionAdmission::new()?;
+    let mut header = bootstrap_header;
+    if let Some(header) = header.as_ref() {
+        admission.observe_session(&header.id)?;
+    }
+    let mut additional_session_header = false;
+    let mut has_real_message = false;
+    let mut failed = 0usize;
+    let mut scratch_summary = crate::ProviderImportSummary::default();
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    while reader.read_record_or_skip_oversized(&mut line, &mut line_number, &mut scratch_summary)? {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
+        };
+        if value.get("type").and_then(Value::as_str) == Some("session") {
+            if reject_additional_session_header && header.is_some() {
+                reader.restart_import_position()?;
+                return Ok(Err(
+                    crate::ProviderJsonlReplacementReason::AdditionalSessionHeader,
+                ));
+            }
+            if header.is_some() {
+                additional_session_header = true;
+            }
+            match pi_session_header(value) {
+                Ok(parsed) => {
+                    admission.observe_session(&parsed.id)?;
+                    header = Some(parsed);
+                }
+                Err(_) => failed += 1,
+            }
+            continue;
+        }
+        let Some(header) = header.as_ref() else {
+            failed += 1;
+            continue;
+        };
+        match pi_session_capture(header, Some(value), line_number, context) {
+            Ok(capture) => {
+                admission.mark_capture(&header.id)?;
+                let row_has_real = capture
+                    .event
+                    .as_ref()
+                    .is_some_and(pi_event_has_real_message_content);
+                if row_has_real {
+                    has_real_message = true;
+                    admission.mark_real(&header.id)?;
+                }
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    reader.restart_import_position()?;
+    Ok(Ok(PiJsonlScan {
+        has_real_message,
+        additional_session_header,
+        failed,
+        last_line_number: line_number,
+        admission,
+    }))
 }
 
 impl ProviderCaptureAdapter for PiSessionJsonlAdapter {
@@ -66,10 +242,8 @@ pub(crate) fn normalize_pi_session_jsonl_path(
         return normalize_pi_session_jsonl_file(path, context);
     }
 
-    let mut paths = Vec::new();
-    collect_jsonl_paths(path, &mut paths)?;
-    paths.sort();
-    if paths.is_empty() {
+    let path_inventory = SortedJsonlPathInventory::build(path, |_| true)?;
+    if path_inventory.metrics().paths == 0 {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
             reason: native_jsonl_missing_reason(CaptureProvider::Pi),
@@ -77,14 +251,15 @@ pub(crate) fn normalize_pi_session_jsonl_path(
     }
 
     let mut merged = ProviderNormalizationResult::default();
-    for path in paths {
+    path_inventory.for_each(|file_path| {
         let mut file_context = context.clone();
-        file_context.source_path = Some(path.clone());
-        let mut result = normalize_pi_session_jsonl_file(&path, &file_context)?;
+        file_context.source_path = Some(file_path.clone());
+        let mut result = normalize_pi_session_jsonl_file(&file_path, &file_context)?;
         merged.summary.merge(result.summary);
         merged.captures.append(&mut result.captures);
         merged.files_touched.append(&mut result.files_touched);
-    }
+        Ok(())
+    })?;
     Ok(merged)
 }
 
@@ -92,97 +267,139 @@ pub(crate) fn normalize_pi_session_jsonl_file(
     path: &Path,
     context: &ProviderAdapterContext,
 ) -> Result<ProviderNormalizationResult> {
-    ensure_regular_provider_transcript_file(path)?;
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    normalize_pi_session_jsonl_reader(
+        &mut reader,
+        context,
+        None,
+        ProviderSessionContentPolicy::RequireRealMessage,
+        false,
+    )
+    .map(|decision| {
+        decision
+            .expect("replacement Pi parsing cannot request replacement")
+            .0
+    })
+}
+
+pub(crate) fn normalize_pi_session_jsonl_reader(
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    bootstrap_header: Option<PiSessionHeader>,
+    content_policy: ProviderSessionContentPolicy,
+    reject_additional_session_header: bool,
+) -> Result<
+    std::result::Result<(ProviderNormalizationResult, bool), crate::ProviderJsonlReplacementReason>,
+> {
+    let scan = match scan_pi_session_jsonl_reader(
+        reader,
+        context,
+        bootstrap_header.clone(),
+        reject_additional_session_header,
+    )? {
+        Ok(scan) => scan,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let retain_captures = scan.has_real_message
+        || content_policy == ProviderSessionContentPolicy::AllowTailWithoutRealMessage;
     let mut result = ProviderNormalizationResult::default();
-    let mut header = None;
-    let mut captures = Vec::new();
-    let mut has_real_message_content = false;
+    stream_pi_session_jsonl_reader(reader, context, bootstrap_header, |mut batch| {
+        if !retain_captures {
+            batch.captures.clear();
+            batch.files_touched.clear();
+        }
+        result.summary.merge(batch.summary);
+        result.captures.append(&mut batch.captures);
+        result.files_touched.append(&mut batch.files_touched);
+        Ok(())
+    })?;
+    debug_assert_eq!(result.summary.failed, scan.failed);
+    if !retain_captures && result.summary.failed == 0 {
+        result.summary.failed += 1;
+        result.summary.sample_failure(ProviderImportFailure {
+            line: scan.last_line_number,
+            error: "pi session JSONL contained no real message content".to_owned(),
+        });
+    }
+
+    Ok(Ok((result, scan.additional_session_header)))
+}
+
+pub(crate) fn stream_pi_session_jsonl_reader<F>(
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    bootstrap_header: Option<PiSessionHeader>,
+    emit: F,
+) -> Result<()>
+where
+    F: FnMut(ProviderNormalizationResult) -> Result<()>,
+{
+    let mut batches = ProviderNormalizationBatcher::new(emit);
+    let mut header = bootstrap_header;
     let mut line = Vec::new();
     let mut line_number = 0usize;
 
-    while read_provider_jsonl_record_or_skip_oversized(
-        &mut reader,
+    while reader.read_record_or_skip_oversized(
         &mut line,
         &mut line_number,
-        &mut result.summary,
+        &mut batches.current_mut().summary,
     )? {
         if line.iter().all(u8::is_ascii_whitespace) {
+            batches.record_processed()?;
             continue;
         }
-
-        let value: Value = match serde_json::from_slice::<Value>(&line) {
+        let value: Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(err) => {
+                let result = batches.current_mut();
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: err.to_string(),
                 });
+                batches.record_processed()?;
                 continue;
             }
         };
-        let entry_type = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if entry_type == "session" {
+        if value.get("type").and_then(Value::as_str) == Some("session") {
             match pi_session_header(value) {
-                Ok(parsed) => {
-                    header = Some(parsed);
-                }
+                Ok(parsed) => header = Some(parsed),
                 Err(err) => {
+                    let result = batches.current_mut();
                     result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
+                    result.summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
                 }
             }
+            batches.record_processed()?;
             continue;
         }
-
         let Some(header) = header.as_ref() else {
+            let result = batches.current_mut();
             result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            result.summary.sample_failure(ProviderImportFailure {
                 line: line_number,
                 error: "pi session entry appeared before session header".to_owned(),
             });
+            batches.record_processed()?;
             continue;
         };
         match pi_session_capture(header, Some(value), line_number, context) {
-            Ok(capture) => {
-                if capture
-                    .event
-                    .as_ref()
-                    .is_some_and(pi_event_has_real_message_content)
-                {
-                    has_real_message_content = true;
-                }
-                captures.push((line_number, capture));
-            }
+            Ok(capture) => batches.current_mut().captures.push((line_number, capture)),
             Err(err) => {
+                let result = batches.current_mut();
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: err.to_string(),
                 });
             }
         }
+        batches.record_processed()?;
     }
-
-    if has_real_message_content {
-        result.captures = captures;
-    } else if result.summary.failed == 0 {
-        result.summary.failed += 1;
-        result.summary.failures.push(ProviderImportFailure {
-            line: line_number,
-            error: "pi session JSONL contained no real message content".to_owned(),
-        });
-    }
-
-    Ok(result)
+    batches.finish()
 }
 
 pub(crate) fn pi_event_has_real_message_content(event: &ProviderEventEnvelope) -> bool {

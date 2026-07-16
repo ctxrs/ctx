@@ -40,6 +40,18 @@ pub enum ProviderSourceStatus {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProviderFileMutationContract {
+    #[default]
+    WholeReplacement,
+    /// The provider owns an append-only, newline-delimited log. Incremental
+    /// validation proves stable identity, monotonic size, and unchanged head
+    /// and committed-boundary sentinels; it is not a cryptographic proof that
+    /// arbitrary bytes in the historical middle were never externally edited.
+    /// Such edits violate this source contract and require explicit replacement.
+    AppendOnlyNewlineDelimited,
+}
+
 impl ProviderSourceStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -125,6 +137,7 @@ pub struct ProviderSource {
     pub import_support: ProviderImportSupport,
     pub catalog_support: ProviderCatalogSupport,
     pub import_unit: ProviderImportUnitSpec,
+    pub mutation_contract: ProviderFileMutationContract,
     pub status: ProviderSourceStatus,
     pub unsupported_reason: Option<&'static str>,
 }

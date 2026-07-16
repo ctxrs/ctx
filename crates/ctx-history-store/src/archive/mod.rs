@@ -16,27 +16,48 @@ use crate::archive::conflicts::{
 use crate::archive::import::{
     import_rich_archive_entities_tx, upsert_capture_source_tx, upsert_record_tx,
 };
+use crate::connection::with_read_transaction;
 use crate::object_store::{
     ensure_regular_blob_file, object_relative_path, sha256_hex, BlobWriteGuard, LEGACY_BLOBS_DIR,
 };
+use crate::provider_files::ensure_archive_provider_file_writes_allowed;
 use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn export_archive(&self) -> Result<SessionHistoryArchive> {
-        Ok(SessionHistoryArchive {
-            schema_version: 2,
-            version: 2,
-            records: self.list_records(usize::MAX)?,
-            capture_sources: self.list_capture_sources()?,
-            sessions: self.list_sessions()?,
-            runs: self.list_runs()?,
-            events: self.list_events()?,
-            artifact_records: self.list_artifacts()?,
-            vcs_workspaces: self.list_vcs_workspaces()?,
-            vcs_changes: self.list_vcs_changes()?,
-            history_record_links: self.list_history_record_links()?,
-            summaries: self.list_summaries()?,
-            files_touched: self.list_files_touched()?,
+        self.export_archive_inner(|| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn export_archive_with_hook(
+        &self,
+        after_first_read: impl FnOnce(),
+    ) -> Result<SessionHistoryArchive> {
+        self.export_archive_inner(after_first_read)
+    }
+
+    fn export_archive_inner(
+        &self,
+        after_first_read: impl FnOnce(),
+    ) -> Result<SessionHistoryArchive> {
+        with_read_transaction(&self.conn, || {
+            let records = self.list_records(usize::MAX)?;
+            after_first_read();
+            Ok(SessionHistoryArchive {
+                schema_version: 2,
+                version: 2,
+                records,
+                capture_sources: self.list_capture_sources()?,
+                sessions: self.list_sessions()?,
+                runs: self.list_runs()?,
+                events: self.list_events()?,
+                artifact_records: self.list_artifacts()?,
+                vcs_workspaces: self.list_vcs_workspaces()?,
+                vcs_changes: self.list_vcs_changes()?,
+                history_record_links: self.list_history_record_links()?,
+                summaries: self.list_summaries()?,
+                files_touched: self.list_files_touched()?,
+            })
         })
     }
 
@@ -48,7 +69,10 @@ impl Store {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure_archive_provider_file_writes_allowed(&tx, archive, None)?;
         reject_import_invariant_conflicts(&tx, archive)?;
         if !overwrite {
             reject_import_conflicts(&tx, archive)?;
@@ -76,7 +100,10 @@ impl Store {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure_archive_provider_file_writes_allowed(&tx, archive, Some((source_id, source)))?;
         reject_import_invariant_conflicts(&tx, archive)?;
         if !overwrite {
             reject_capture_source_import_conflict(&tx, source_id)?;

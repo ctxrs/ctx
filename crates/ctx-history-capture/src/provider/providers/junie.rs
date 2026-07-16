@@ -97,7 +97,7 @@ pub(crate) fn normalize_junie_session_events(
             }
             Err(err) => {
                 merged.summary.failed += 1;
-                merged.summary.failures.push(ProviderImportFailure {
+                merged.summary.sample_failure(ProviderImportFailure {
                     line: session_ordinal.saturating_add(1),
                     error: err.to_string(),
                 });

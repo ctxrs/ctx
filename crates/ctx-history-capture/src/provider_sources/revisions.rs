@@ -17,11 +17,18 @@ macro_rules! revision {
             revision: DEFAULT_PROVIDER_IMPORT_REVISION,
         }
     };
+    ($provider:ident, $source_format:literal, $revision:literal) => {
+        ProviderImportRevision {
+            provider: CaptureProvider::$provider,
+            source_format: $source_format,
+            revision: $revision,
+        }
+    };
 }
 
 pub const PROVIDER_IMPORT_REVISIONS: &[ProviderImportRevision] = &[
-    revision!(Codex, "codex_session_jsonl_tree"),
-    revision!(Codex, "codex_session_jsonl"),
+    revision!(Codex, "codex_session_jsonl_tree", 2),
+    revision!(Codex, "codex_session_jsonl", 2),
     revision!(Codex, "codex_history_jsonl"),
     revision!(Pi, "pi_session_jsonl"),
     revision!(Claude, "claude_projects_jsonl_tree"),
@@ -33,7 +40,7 @@ pub const PROVIDER_IMPORT_REVISIONS: &[ProviderImportRevision] = &[
     revision!(Goose, "goose_sessions_sqlite"),
     revision!(Antigravity, "antigravity_cli_transcript_jsonl_tree"),
     revision!(Gemini, "gemini_cli_chat_recording_jsonl"),
-    revision!(Tabnine, "tabnine_cli_chat_recording_jsonl"),
+    revision!(Tabnine, "tabnine_cli_chat_recording_jsonl", 2),
     revision!(Cursor, "cursor_agent_transcript_jsonl_tree"),
     revision!(Cursor, "cursor_agent_transcript_jsonl"),
     revision!(Windsurf, "windsurf_cascade_hook_transcript_jsonl_tree"),

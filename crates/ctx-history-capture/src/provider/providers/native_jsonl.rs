@@ -1,7 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs::File,
-    io::BufReader,
     path::{Path, PathBuf},
 };
 
@@ -14,20 +12,20 @@ use ctx_history_core::{
 };
 use serde_json::{json, Value};
 
-use crate::common::io::{
-    collect_jsonl_paths, ensure_regular_provider_transcript_file,
-    read_provider_jsonl_record_or_skip_oversized,
-};
+use crate::common::io::collect_jsonl_paths;
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::file_touches::provider_file_touches_from_raw_value;
-use crate::provider::importer::provider_cursor_stream;
+use crate::provider::importer::{
+    provider_cursor_stream, provider_event_is_real_conversation_message,
+    ProviderNormalizationBatcher,
+};
 use crate::provider::native::{
     antigravity_tool_call_text, provider_capped_json, provider_capped_json_value,
     provider_policy_body, provider_policy_event_text, provider_role, provider_value_text,
 };
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderNormalizationResult,
-    Result, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderJsonlReader,
+    ProviderNormalizationResult, Result, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 mod windsurf;
@@ -38,7 +36,7 @@ pub(crate) fn normalize_jsonl_tree(
     path: &Path,
     context: &ProviderAdapterContext,
     provider: CaptureProvider,
-    source_format: &'static str,
+    source_format: &str,
 ) -> Result<ProviderNormalizationResult> {
     let mut paths = Vec::new();
     collect_jsonl_paths(path, &mut paths)?;
@@ -157,121 +155,332 @@ pub(crate) fn normalize_native_jsonl_session_file(
     path: &Path,
     context: &ProviderAdapterContext,
     provider: CaptureProvider,
-    source_format: &'static str,
+    source_format: &str,
 ) -> Result<ProviderNormalizationResult> {
-    ensure_regular_provider_transcript_file(path)?;
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut result = ProviderNormalizationResult::default();
-    let mut rows = Vec::new();
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    let authoritative_started_at = if provider == CaptureProvider::Tabnine {
+        scan_native_jsonl_session_reader(path, &mut reader, context, provider, source_format)?
+            .header
+            .as_ref()
+            .and_then(|header| native_jsonl_header_start_time(provider, header))
+    } else {
+        None
+    };
+    normalize_native_jsonl_session_reader(
+        path,
+        &mut reader,
+        context,
+        provider,
+        source_format,
+        None,
+        authoritative_started_at,
+    )
+}
+
+pub(crate) struct NativeJsonlScan {
+    pub(crate) header: Option<Value>,
+    pub(crate) has_real_message: bool,
+    pub(crate) summary: crate::ProviderImportSummary,
+    pub(crate) valid_records: usize,
+    pub(crate) first_valid_line: Option<usize>,
+}
+
+pub(crate) fn scan_native_jsonl_session_reader(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    provider: CaptureProvider,
+    source_format: &str,
+) -> Result<NativeJsonlScan> {
+    let mut summary = crate::ProviderImportSummary::default();
+    let mut header = None;
+    let mut valid_records = 0usize;
+    let mut first_valid_line = None;
+    let mut has_real_message = false;
     let mut line = Vec::new();
     let mut line_number = 0usize;
-
-    while read_provider_jsonl_record_or_skip_oversized(
-        &mut reader,
-        &mut line,
-        &mut line_number,
-        &mut result.summary,
-    )? {
+    while reader.read_record_or_skip_oversized(&mut line, &mut line_number, &mut summary)? {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         let value: Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(err) => {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                summary.failed += 1;
+                summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: native_jsonl_file_failure(path, format!("malformed JSONL: {err}")),
                 });
                 continue;
             }
         };
-        rows.push((line_number, value));
+        valid_records += 1;
+        first_valid_line.get_or_insert(line_number);
+        if header.is_none()
+            && (matches!(
+                provider,
+                CaptureProvider::Antigravity | CaptureProvider::Windsurf
+            ) || native_jsonl_header_session_id(provider, &value).is_some())
+        {
+            header = Some(value.clone());
+        }
+        let occurred_at = native_jsonl_timestamp(&value).unwrap_or(context.imported_at);
+        has_real_message |=
+            native_jsonl_event(provider, source_format, &value, line_number, occurred_at)
+                .as_ref()
+                .is_some_and(provider_event_is_real_conversation_message);
     }
+    reader.restart_import_position()?;
+    Ok(NativeJsonlScan {
+        header,
+        has_real_message,
+        summary,
+        valid_records,
+        first_valid_line,
+    })
+}
 
-    let header_index = if provider == CaptureProvider::Antigravity {
-        if rows.is_empty() {
-            if result.summary.failed == 0 {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
-                    line: 0,
-                    error: native_jsonl_file_failure(path, native_jsonl_missing_reason(provider)),
-                });
-            }
-            return Ok(result);
-        }
-        0
-    } else if provider == CaptureProvider::Windsurf {
-        if rows.is_empty() {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: native_jsonl_missing_reason(provider),
+pub(crate) fn normalize_native_jsonl_session_reader(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    provider: CaptureProvider,
+    source_format: &str,
+    bootstrap_header: Option<Value>,
+    authoritative_started_at: Option<DateTime<Utc>>,
+) -> Result<ProviderNormalizationResult> {
+    let scan = scan_native_jsonl_session_reader(path, reader, context, provider, source_format)?;
+    let header = if let Some(header) = bootstrap_header {
+        if native_jsonl_header_session_id(provider, &header).is_none() {
+            let mut result = ProviderNormalizationResult {
+                summary: scan.summary,
+                ..ProviderNormalizationResult::default()
+            };
+            result.summary.failed += 1;
+            result.summary.sample_failure(ProviderImportFailure {
+                line: 1,
+                error: "no importable native JSONL session header".to_owned(),
             });
-        }
-        0
-    } else {
-        if rows.is_empty() {
-            if result.summary.failed == 0 {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
-                    line: 0,
-                    error: native_jsonl_missing_reason(provider).to_owned(),
-                });
-            }
             return Ok(result);
         }
-        let Some(header_index) = rows
-            .iter()
-            .position(|(_, value)| native_jsonl_header_session_id(provider, value).is_some())
-        else {
-            if let Some((line_number, _)) = rows.first() {
+        header
+    } else {
+        if provider == CaptureProvider::Antigravity {
+            if scan.valid_records == 0 {
+                let mut result = ProviderNormalizationResult {
+                    summary: scan.summary,
+                    ..ProviderNormalizationResult::default()
+                };
+                if result.summary.failed == 0 {
+                    result.summary.failed += 1;
+                    result.summary.sample_failure(ProviderImportFailure {
+                        line: 0,
+                        error: native_jsonl_file_failure(
+                            path,
+                            native_jsonl_missing_reason(provider),
+                        ),
+                    });
+                }
+                return Ok(result);
+            }
+        } else if provider == CaptureProvider::Windsurf {
+            if scan.valid_records == 0 {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path: path.to_path_buf(),
+                    reason: native_jsonl_missing_reason(provider),
+                });
+            }
+        } else {
+            if scan.valid_records == 0 {
+                let mut result = ProviderNormalizationResult {
+                    summary: scan.summary,
+                    ..ProviderNormalizationResult::default()
+                };
+                if result.summary.failed == 0 {
+                    result.summary.failed += 1;
+                    result.summary.sample_failure(ProviderImportFailure {
+                        line: 0,
+                        error: native_jsonl_missing_reason(provider).to_owned(),
+                    });
+                }
+                return Ok(result);
+            }
+            if scan.header.is_none() {
+                let mut result = ProviderNormalizationResult {
+                    summary: scan.summary,
+                    ..ProviderNormalizationResult::default()
+                };
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
-                    line: *line_number,
+                result.summary.sample_failure(ProviderImportFailure {
+                    line: scan.first_valid_line.unwrap_or(0),
                     error: "no importable native JSONL session header".to_owned(),
                 });
                 return Ok(result);
             }
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: native_jsonl_missing_reason(provider),
-            });
+        }
+        scan.header
+            .expect("a native JSONL header was established by the bounded scan")
+    };
+    let started_at = authoritative_started_at.unwrap_or_else(|| {
+        native_jsonl_timestamp(&header)
+            .or_else(|| native_jsonl_header_start_time(provider, &header))
+            .unwrap_or(context.imported_at)
+    });
+    let mut result = ProviderNormalizationResult::default();
+    stream_native_jsonl_session_reader(
+        path,
+        reader,
+        context,
+        NativeJsonlStreamOptions {
+            provider,
+            source_format,
+            header,
+            started_at,
+        },
+        |mut batch| {
+            result.summary.merge(batch.summary);
+            result.captures.append(&mut batch.captures);
+            result.files_touched.append(&mut batch.files_touched);
+            Ok(())
+        },
+    )?;
+    Ok(result)
+}
+
+pub(crate) struct NativeJsonlStreamOptions<'a> {
+    pub(crate) provider: CaptureProvider,
+    pub(crate) source_format: &'a str,
+    pub(crate) header: Value,
+    pub(crate) started_at: DateTime<Utc>,
+}
+
+pub(crate) fn stream_native_jsonl_session_reader<F>(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    options: NativeJsonlStreamOptions<'_>,
+    emit: F,
+) -> Result<()>
+where
+    F: FnMut(ProviderNormalizationResult) -> Result<()>,
+{
+    let metadata = NativeJsonlNormalizationMetadata::new(
+        path,
+        context,
+        options.provider,
+        options.source_format,
+        options.header,
+        options.started_at,
+    );
+    let mut batches = ProviderNormalizationBatcher::new(emit);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    while reader.read_record_or_skip_oversized(
+        &mut line,
+        &mut line_number,
+        &mut batches.current_mut().summary,
+    )? {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            batches.record_processed()?;
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                let result = batches.current_mut();
+                result.summary.failed += 1;
+                result.summary.sample_failure(ProviderImportFailure {
+                    line: line_number,
+                    error: native_jsonl_file_failure(path, format!("malformed JSONL: {err}")),
+                });
+                batches.record_processed()?;
+                continue;
+            }
         };
-        header_index
-    };
+        metadata.push_row(batches.current_mut(), line_number, value);
+        batches.record_processed()?;
+    }
+    batches.finish()
+}
 
-    let header = rows[header_index].1.clone();
-    let native_session_id = match provider {
-        CaptureProvider::Antigravity => {
-            antigravity_session_id_from_path(path).unwrap_or_else(|| "unknown-session".to_owned())
-        }
-        CaptureProvider::Windsurf => {
-            windsurf_session_id_from_path(path).unwrap_or_else(|| "unknown-session".to_owned())
-        }
-        _ => native_jsonl_header_session_id(provider, &header)
-            .unwrap_or_else(|| "unknown-session".to_owned()),
-    };
-    let (provider_session_id, parent_provider_session_id, external_agent_id, agent_type) =
-        native_jsonl_path_session(provider, path, &header, &native_session_id);
-    let started_at = native_jsonl_timestamp(&header)
-        .or_else(|| native_jsonl_header_start_time(provider, &header))
-        .unwrap_or(context.imported_at);
-    let cwd = native_jsonl_header_cwd(provider, &header);
-    let is_subagent = parent_provider_session_id.is_some() || agent_type == AgentType::Subagent;
-    let raw_source_path = path.display().to_string();
+struct NativeJsonlNormalizationMetadata {
+    provider: CaptureProvider,
+    source_format: String,
+    header: Value,
+    native_session_id: String,
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    external_agent_id: Option<String>,
+    agent_type: AgentType,
+    is_subagent: bool,
+    started_at: DateTime<Utc>,
+    cwd: Option<String>,
+    machine_id: String,
+    imported_at: DateTime<Utc>,
+    raw_source_path: String,
+    source_root: Option<String>,
+}
 
-    for (line_number, value) in rows {
-        let occurred_at = native_jsonl_timestamp(&value).unwrap_or(started_at);
-        let event = native_jsonl_event(provider, source_format, &value, line_number, occurred_at);
+impl NativeJsonlNormalizationMetadata {
+    fn new(
+        path: &Path,
+        context: &ProviderAdapterContext,
+        provider: CaptureProvider,
+        source_format: &str,
+        header: Value,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        let native_session_id = match provider {
+            CaptureProvider::Antigravity => antigravity_session_id_from_path(path)
+                .unwrap_or_else(|| "unknown-session".to_owned()),
+            CaptureProvider::Windsurf => {
+                windsurf_session_id_from_path(path).unwrap_or_else(|| "unknown-session".to_owned())
+            }
+            _ => native_jsonl_header_session_id(provider, &header)
+                .unwrap_or_else(|| "unknown-session".to_owned()),
+        };
+        let (provider_session_id, parent_provider_session_id, external_agent_id, agent_type) =
+            native_jsonl_path_session(provider, path, &header, &native_session_id);
+        let is_subagent = parent_provider_session_id.is_some() || agent_type == AgentType::Subagent;
+        let raw_source_path = path.display().to_string();
+        Self {
+            provider,
+            source_format: source_format.to_owned(),
+            cwd: native_jsonl_header_cwd(provider, &header),
+            header,
+            native_session_id,
+            provider_session_id,
+            parent_provider_session_id,
+            external_agent_id,
+            agent_type,
+            is_subagent,
+            started_at,
+            machine_id: context.machine_id.clone(),
+            imported_at: context.imported_at,
+            source_root: context
+                .source_root_display()
+                .or_else(|| Some(raw_source_path.clone())),
+            raw_source_path,
+        }
+    }
+
+    fn push_row(&self, result: &mut ProviderNormalizationResult, line_number: usize, value: Value) {
+        let occurred_at = native_jsonl_timestamp(&value).unwrap_or(self.started_at);
+        let event = native_jsonl_event(
+            self.provider,
+            &self.source_format,
+            &value,
+            line_number,
+            occurred_at,
+        );
         if let Some(event) = &event {
             result
                 .files_touched
                 .extend(provider_file_touches_from_raw_value(
-                    provider,
-                    &provider_session_id,
-                    source_format,
-                    Some(raw_source_path.as_str()),
+                    self.provider,
+                    &self.provider_session_id,
+                    &self.source_format,
+                    Some(self.raw_source_path.as_str()),
                     &value,
                     event,
                     line_number,
@@ -281,61 +490,72 @@ pub(crate) fn normalize_native_jsonl_session_file(
             line_number,
             ProviderCaptureEnvelope {
                 schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
-                provider,
+                provider: self.provider,
                 source: ProviderSourceEnvelope {
-                    source_format: source_format.to_owned(),
-                    machine_id: context.machine_id.clone(),
-                    observed_at: context.imported_at,
-                    raw_source_path: Some(raw_source_path.clone()),
-                    source_root: context
-                        .source_root_display()
-                        .or_else(|| Some(raw_source_path.clone())),
+                    source_format: self.source_format.clone(),
+                    machine_id: self.machine_id.clone(),
+                    observed_at: self.imported_at,
+                    raw_source_path: Some(self.raw_source_path.clone()),
+                    source_root: self.source_root.clone(),
                     trust: ProviderSourceTrust::ProviderNative,
                     fidelity: Fidelity::Imported,
                     cursor: Some(ProviderCursorRange {
                         before: None,
                         after: Some(ProviderCursorCheckpoint {
-                            stream: provider_cursor_stream(provider, source_format),
-                            cursor: format!("{}:line:{line_number}", path.display()),
+                            stream: provider_cursor_stream(self.provider, &self.source_format),
+                            cursor: format!("{}:line:{line_number}", self.raw_source_path),
                             observed_at: occurred_at,
                         }),
                     }),
                     idempotency_key: Some(format!(
-                        "provider-source:{}:{source_format}:{provider_session_id}",
-                        provider.as_str()
+                        "provider-source:{}:{}:{}",
+                        self.provider.as_str(),
+                        self.source_format,
+                        self.provider_session_id
                     )),
                     metadata: json!({
-                        "adapter": source_format,
-                        "native_session_id": native_session_id,
-                        "source_path": raw_source_path.clone(),
+                        "adapter": self.source_format,
+                        "native_session_id": self.native_session_id,
+                        "source_path": self.raw_source_path,
                     }),
                 },
                 session: ProviderSessionEnvelope {
-                    provider_session_id: provider_session_id.clone(),
-                    parent_provider_session_id: parent_provider_session_id.clone(),
-                    root_provider_session_id: parent_provider_session_id.clone(),
-                    external_agent_id: external_agent_id.clone(),
-                    agent_type,
-                    role_hint: Some(if is_subagent { "subagent" } else { "primary" }.to_owned()),
-                    is_primary: !is_subagent,
-                    status: native_jsonl_session_status(provider, &header),
-                    started_at,
+                    provider_session_id: self.provider_session_id.clone(),
+                    parent_provider_session_id: self.parent_provider_session_id.clone(),
+                    root_provider_session_id: self.parent_provider_session_id.clone(),
+                    external_agent_id: self.external_agent_id.clone(),
+                    agent_type: self.agent_type,
+                    role_hint: Some(
+                        if self.is_subagent {
+                            "subagent"
+                        } else {
+                            "primary"
+                        }
+                        .to_owned(),
+                    ),
+                    is_primary: !self.is_subagent,
+                    status: native_jsonl_session_status(self.provider, &self.header),
+                    started_at: self.started_at,
                     ended_at: None,
-                    cwd: cwd.clone(),
+                    cwd: self.cwd.clone(),
                     fidelity: Fidelity::Imported,
                     idempotency_key: Some(format!(
-                        "provider-session:{}:{provider_session_id}",
-                        provider.as_str()
+                        "provider-session:{}:{}",
+                        self.provider.as_str(),
+                        self.provider_session_id
                     )),
                     artifacts: Vec::new(),
-                    metadata: native_jsonl_session_metadata(provider, source_format, &header, path),
+                    metadata: native_jsonl_session_metadata(
+                        self.provider,
+                        &self.source_format,
+                        &self.header,
+                        Path::new(&self.raw_source_path),
+                    ),
                 },
                 event,
             },
         ));
     }
-
-    Ok(result)
 }
 
 fn native_jsonl_file_failure(path: &Path, reason: impl AsRef<str>) -> String {
@@ -466,508 +686,7 @@ pub(crate) fn native_jsonl_path_session(
     }
 }
 
-pub(crate) fn antigravity_session_id_from_path(path: &Path) -> Option<String> {
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
-        .collect();
-    components
-        .windows(2)
-        .find_map(|window| {
-            (window[0] == "brain" && !window[1].trim().is_empty()).then(|| window[1].clone())
-        })
-        .or_else(|| {
-            components.windows(2).find_map(|window| {
-                (window[1] == ".system_generated" && !window[0].trim().is_empty())
-                    .then(|| window[0].clone())
-            })
-        })
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.trim().is_empty())
-                .map(str::to_owned)
-        })
-}
+include!("native_jsonl/events.rs");
 
-pub(crate) fn windsurf_session_id_from_path(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.trim().is_empty())
-        .map(str::to_owned)
-}
-
-pub(crate) fn native_jsonl_timestamp(value: &Value) -> Option<DateTime<Utc>> {
-    value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_rfc3339_utc)
-        .or_else(|| {
-            value
-                .get("created_at")
-                .and_then(Value::as_str)
-                .and_then(parse_rfc3339_utc)
-        })
-        .or_else(|| {
-            value
-                .pointer("/time/created")
-                .and_then(Value::as_i64)
-                .and_then(DateTime::<Utc>::from_timestamp_millis)
-        })
-}
-
-pub(crate) fn native_jsonl_session_status(
-    provider: CaptureProvider,
-    header: &Value,
-) -> SessionStatus {
-    if provider == CaptureProvider::CopilotCli
-        && header.get("type").and_then(Value::as_str) == Some("abort")
-    {
-        SessionStatus::Interrupted
-    } else {
-        SessionStatus::Imported
-    }
-}
-
-pub(crate) fn native_jsonl_session_metadata(
-    provider: CaptureProvider,
-    source_format: &str,
-    header: &Value,
-    path: &Path,
-) -> Value {
-    json!({
-        "source_format": source_format,
-        "provider": provider.as_str(),
-        "source_path": path.display().to_string(),
-        "header": provider_capped_json(header, PROVIDER_MAX_PREVIEW_CHARS),
-    })
-}
-
-pub(crate) fn native_jsonl_event(
-    provider: CaptureProvider,
-    source_format: &str,
-    value: &Value,
-    line_number: usize,
-    occurred_at: DateTime<Utc>,
-) -> Option<ProviderEventEnvelope> {
-    let event_type = native_jsonl_event_type(provider, value);
-    let entry_type = native_jsonl_entry_type(provider, value);
-    let role = native_jsonl_role(provider, value);
-    let text = native_jsonl_event_text(provider, value, event_type, &entry_type);
-    let body_value = if provider == CaptureProvider::Windsurf {
-        windsurf_event_body(value)
-    } else {
-        value.clone()
-    };
-    let retained_text = provider_policy_event_text(event_type, &text, &body_value);
-    let event_id = native_jsonl_event_id(provider, value, line_number);
-    let tool_calls = if provider == CaptureProvider::Antigravity {
-        value.get("tool_calls").map(|calls| {
-            provider_capped_json_value(
-                &provider_policy_body(EventType::ToolCall, calls),
-                PROVIDER_MAX_PREVIEW_CHARS,
-            )
-        })
-    } else {
-        None
-    };
-    let body = provider_capped_json(
-        &provider_policy_body(event_type, &body_value),
-        PROVIDER_MAX_PREVIEW_CHARS,
-    );
-
-    Some(ProviderEventEnvelope {
-        provider_event_index: (line_number - 1) as u64,
-        provider_event_hash: Some(event_id.clone()),
-        cursor: Some(event_id.clone()),
-        event_type,
-        role: Some(role),
-        occurred_at,
-        fidelity: Fidelity::Imported,
-        idempotency_key: Some(format!(
-            "provider-event:{}:{source_format}:{event_id}",
-            provider.as_str()
-        )),
-        artifacts: Vec::new(),
-        payload: json!({
-            "entry_type": entry_type,
-            "event_id": event_id,
-            "native_step_index": value.get("step_index").and_then(Value::as_u64),
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "tool_calls": tool_calls,
-            "body": body,
-        }),
-        metadata: json!({
-            "source": source_format,
-            "source_format": source_format,
-            "line": line_number,
-            "entry_type": entry_type,
-            "status": value.get("status").and_then(Value::as_str),
-            "model": native_jsonl_model(provider, value),
-            "tokens": native_jsonl_tokens(provider, value),
-        }),
-    })
-}
-
-pub(crate) fn native_jsonl_event_id(
-    provider: CaptureProvider,
-    value: &Value,
-    line_number: usize,
-) -> String {
-    if provider == CaptureProvider::Antigravity {
-        if let Some(step_index) = value.get("step_index").and_then(Value::as_u64) {
-            return format!("step-{step_index}");
-        }
-    }
-    value
-        .get("id")
-        .or_else(|| value.get("uuid"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("line-{line_number}"))
-}
-
-pub(crate) fn native_jsonl_entry_type(provider: CaptureProvider, value: &Value) -> String {
-    match provider {
-        CaptureProvider::Antigravity => value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown"),
-        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
-            if value.get("$set").is_some() {
-                "$set"
-            } else if value.get("$rewindTo").is_some() {
-                "$rewindTo"
-            } else {
-                value
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-            }
-        }
-        _ => value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown"),
-    }
-    .to_owned()
-}
-
-pub(crate) fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventType {
-    match provider {
-        CaptureProvider::Antigravity => match value.get("type").and_then(Value::as_str) {
-            Some("USER_INPUT" | "CONVERSATION_HISTORY") => EventType::Message,
-            Some("PLANNER_RESPONSE") => {
-                if value.get("tool_calls").is_some() {
-                    EventType::ToolCall
-                } else {
-                    EventType::Message
-                }
-            }
-            Some("CODE_ACTION") => EventType::ToolCall,
-            Some("CHECKPOINT") => EventType::Summary,
-            Some("SYSTEM_MESSAGE") => EventType::Notice,
-            _ => EventType::Notice,
-        },
-        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
-            if value.get("$set").is_some() || value.get("$rewindTo").is_some() {
-                EventType::Notice
-            } else if value.get("toolCalls").is_some() {
-                if gemini_tool_calls_have_result(value) {
-                    EventType::ToolOutput
-                } else {
-                    EventType::ToolCall
-                }
-            } else {
-                match value.get("type").and_then(Value::as_str) {
-                    Some("user" | "gemini" | "tabnine") => EventType::Message,
-                    _ => EventType::Notice,
-                }
-            }
-        }
-        CaptureProvider::FactoryAiDroid => match value.get("type").and_then(Value::as_str) {
-            Some("message") if droid_content_has(value, "tool_use") => EventType::ToolCall,
-            Some("message") if droid_content_has(value, "tool_result") => EventType::ToolOutput,
-            Some("message") => EventType::Message,
-            Some("compaction_state") => EventType::Summary,
-            Some("todo_state" | "session_start") => EventType::Notice,
-            _ => EventType::Notice,
-        },
-        CaptureProvider::CopilotCli => match value.get("type").and_then(Value::as_str) {
-            Some("user.message" | "assistant.message") => EventType::Message,
-            Some("tool.execution_start") => EventType::ToolCall,
-            Some("tool.execution_complete") => EventType::ToolOutput,
-            Some("session.truncation") => EventType::Summary,
-            Some("abort") => EventType::Notice,
-            _ => EventType::Notice,
-        },
-        CaptureProvider::Cursor => {
-            if native_jsonl_content_has(value, "tool_result") {
-                EventType::ToolOutput
-            } else if native_jsonl_content_has(value, "tool_use") {
-                EventType::ToolCall
-            } else {
-                match value
-                    .get("event")
-                    .or_else(|| value.get("type"))
-                    .or_else(|| value.get("role"))
-                    .and_then(Value::as_str)
-                {
-                    Some("turn_ended" | "summary") => EventType::Summary,
-                    Some("user" | "assistant") => EventType::Message,
-                    _ => EventType::Notice,
-                }
-            }
-        }
-        CaptureProvider::Windsurf => match value.get("type").and_then(Value::as_str) {
-            Some("user_input" | "planner_response") => EventType::Message,
-            Some("code_action") => EventType::ToolCall,
-            Some("summary" | "checkpoint") => EventType::Summary,
-            _ => EventType::Notice,
-        },
-        CaptureProvider::Qoder => match value.get("type").and_then(Value::as_str) {
-            Some("assistant") if native_jsonl_content_has(value, "tool_use") => EventType::ToolCall,
-            Some("user") if native_jsonl_content_has(value, "tool_result") => EventType::ToolOutput,
-            Some("user" | "assistant") => EventType::Message,
-            Some("progress") => EventType::Notice,
-            Some("session_meta") => EventType::Notice,
-            _ if value.get("toolUseResult").is_some() => EventType::ToolOutput,
-            _ => EventType::Notice,
-        },
-        CaptureProvider::QwenCode => match value.get("type").and_then(Value::as_str) {
-            Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
-                EventType::ToolCall
-            }
-            Some("tool_result") => EventType::ToolOutput,
-            Some("user" | "assistant") => EventType::Message,
-            Some("system") => EventType::Notice,
-            _ if value.get("toolCallResult").is_some() => EventType::ToolOutput,
-            _ => EventType::Notice,
-        },
-        _ => EventType::Notice,
-    }
-}
-
-pub(crate) fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
-    match provider {
-        CaptureProvider::Antigravity => match value.get("source").and_then(Value::as_str) {
-            Some("user") => EventRole::User,
-            Some("planner" | "agent" | "assistant") => EventRole::Assistant,
-            Some("tool" | "executor") => EventRole::Tool,
-            Some("system") => EventRole::System,
-            _ => match value.get("type").and_then(Value::as_str) {
-                Some("USER_INPUT") => EventRole::User,
-                Some("SYSTEM_MESSAGE" | "CHECKPOINT") => EventRole::System,
-                _ => EventRole::Assistant,
-            },
-        },
-        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
-            match value.get("type").and_then(Value::as_str) {
-                Some("user") => EventRole::User,
-                Some("gemini" | "tabnine") => EventRole::Assistant,
-                _ => EventRole::System,
-            }
-        }
-        CaptureProvider::FactoryAiDroid => provider_role(
-            value
-                .get("role")
-                .or_else(|| value.pointer("/message/role"))
-                .and_then(Value::as_str),
-        ),
-        CaptureProvider::CopilotCli => match value.get("type").and_then(Value::as_str) {
-            Some("user.message") => EventRole::User,
-            Some("assistant.message") => EventRole::Assistant,
-            Some("tool.execution_start" | "tool.execution_complete") => EventRole::Tool,
-            _ => EventRole::System,
-        },
-        CaptureProvider::Cursor => provider_role(
-            value
-                .get("role")
-                .or_else(|| value.pointer("/message/role"))
-                .and_then(Value::as_str),
-        ),
-        CaptureProvider::Windsurf => match value.get("type").and_then(Value::as_str) {
-            Some("user_input") => EventRole::User,
-            Some("planner_response") => EventRole::Assistant,
-            Some("code_action") => EventRole::Tool,
-            _ => EventRole::Unknown,
-        },
-        CaptureProvider::Qoder => provider_role(
-            value
-                .pointer("/message/role")
-                .or_else(|| value.get("type"))
-                .and_then(Value::as_str),
-        ),
-        CaptureProvider::QwenCode => provider_role(
-            value
-                .pointer("/message/role")
-                .or_else(|| value.get("type"))
-                .and_then(Value::as_str),
-        ),
-        _ => EventRole::Unknown,
-    }
-}
-
-pub(crate) fn native_jsonl_event_text(
-    provider: CaptureProvider,
-    value: &Value,
-    event_type: EventType,
-    entry_type: &str,
-) -> String {
-    match provider {
-        CaptureProvider::Antigravity => value
-            .get("content")
-            .and_then(provider_value_text)
-            .map(|content| {
-                value
-                    .get("tool_calls")
-                    .and_then(antigravity_tool_call_text)
-                    .map(|tools| format!("{content}\n{tools}"))
-                    .unwrap_or(content)
-            })
-            .or_else(|| value.get("thinking").and_then(provider_value_text))
-            .or_else(|| value.get("tool_calls").and_then(antigravity_tool_call_text))
-            .unwrap_or_default(),
-        CaptureProvider::Gemini | CaptureProvider::Tabnine => value
-            .get("content")
-            .and_then(provider_value_text)
-            .or_else(|| value.get("toolCalls").and_then(provider_value_text))
-            .or_else(|| value.get("$set").and_then(provider_value_text))
-            .or_else(|| {
-                value
-                    .get("$rewindTo")
-                    .and_then(Value::as_str)
-                    .map(|id| format!("rewind to {id}"))
-            })
-            .unwrap_or_default(),
-        CaptureProvider::FactoryAiDroid => value
-            .get("content")
-            .or_else(|| value.pointer("/message/content"))
-            .and_then(provider_value_text)
-            .or_else(|| {
-                value
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| value.get("items").and_then(provider_value_text))
-            .unwrap_or_default(),
-        CaptureProvider::CopilotCli => value
-            .pointer("/data/content")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                value
-                    .pointer("/data/result/content")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| {
-                value
-                    .pointer("/data/error/message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| {
-                value
-                    .pointer("/data/toolName")
-                    .and_then(Value::as_str)
-                    .map(|tool| format!("tool {tool}"))
-            })
-            .unwrap_or_default(),
-        CaptureProvider::Cursor => value
-            .pointer("/message/content")
-            .or_else(|| value.get("content"))
-            .and_then(provider_value_text)
-            .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_default(),
-        CaptureProvider::Windsurf => windsurf_event_text(value, entry_type),
-        CaptureProvider::Qoder => {
-            let primary = if event_type == EventType::ToolOutput {
-                value
-                    .get("toolUseResult")
-                    .or_else(|| value.pointer("/message/content"))
-            } else {
-                value
-                    .pointer("/message/content")
-                    .or_else(|| value.get("toolUseResult"))
-            };
-            primary
-                .or_else(|| value.pointer("/data/content"))
-                .and_then(provider_value_text)
-                .unwrap_or_default()
-        }
-        CaptureProvider::QwenCode => value
-            .pointer("/message/content")
-            .or_else(|| value.get("message"))
-            .and_then(provider_value_text)
-            .or_else(|| value.get("toolCallResult").and_then(provider_value_text))
-            .or_else(|| value.get("content").and_then(provider_value_text))
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-pub(crate) fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value> {
-    match provider {
-        CaptureProvider::Antigravity => value.get("model").cloned(),
-        CaptureProvider::Gemini | CaptureProvider::Tabnine => value.get("model").cloned(),
-        CaptureProvider::FactoryAiDroid => value
-            .get("model")
-            .cloned()
-            .or_else(|| value.pointer("/message/model").cloned())
-            .or_else(|| value.pointer("/metadata/model").cloned()),
-        CaptureProvider::CopilotCli => value.pointer("/data/selectedModel").cloned(),
-        CaptureProvider::QwenCode => value
-            .get("model")
-            .cloned()
-            .or_else(|| value.pointer("/message/model").cloned()),
-        CaptureProvider::Qoder => value
-            .get("model")
-            .cloned()
-            .or_else(|| value.pointer("/message/model").cloned()),
-        _ => None,
-    }
-}
-
-pub(crate) fn native_jsonl_tokens(_provider: CaptureProvider, value: &Value) -> Option<Value> {
-    value
-        .get("tokens")
-        .or_else(|| value.get("usageMetadata"))
-        .cloned()
-}
-
-pub(crate) fn gemini_tool_calls_have_result(value: &Value) -> bool {
-    value
-        .get("toolCalls")
-        .and_then(Value::as_array)
-        .map(|calls| calls.iter().any(|call| call.get("result").is_some()))
-        .unwrap_or(false)
-}
-
-pub(crate) fn droid_content_has(value: &Value, expected: &str) -> bool {
-    value
-        .get("content")
-        .or_else(|| value.pointer("/message/content"))
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
-        })
-        .unwrap_or(false)
-}
-
-pub(crate) fn native_jsonl_content_has(value: &Value, expected: &str) -> bool {
-    value
-        .pointer("/message/content")
-        .or_else(|| value.get("content"))
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
-        })
-        .unwrap_or(false)
-}
+#[cfg(test)]
+mod tests;

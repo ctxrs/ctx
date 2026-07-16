@@ -4,11 +4,13 @@ impl Store {
         provider: CaptureProvider,
         source_root: &str,
     ) -> Result<Vec<CatalogSession>> {
+        let visible = crate::provider_files::catalog_material_visible_predicate("catalog_sessions");
         let mut stmt = self.conn.prepare(
             format!(
                 "{} WHERE provider = ?1
                        AND source_root = ?2
                        AND is_stale = 0
+                       AND {visible}
                        AND {}
                      ORDER BY session_started_at_ms, source_path",
                 catalog_session_select_sql(""),
@@ -28,11 +30,13 @@ impl Store {
         provider: CaptureProvider,
         source_root: &str,
     ) -> Result<Vec<CatalogSession>> {
+        let visible = crate::provider_files::catalog_material_visible_predicate("catalog_sessions");
         let mut stmt = self.conn.prepare(
             format!(
                 "{} WHERE provider = ?1
                        AND source_root = ?2
                        AND is_stale = 0
+                       AND {visible}
                      ORDER BY session_started_at_ms, source_path",
                 catalog_session_select_sql("")
             )
@@ -64,6 +68,49 @@ impl Store {
         update: CatalogSourceIndexUpdate<'_>,
         status: CatalogIndexedStatus,
         error: Option<&str>,
+    ) -> Result<usize> {
+        self.with_provider_file_inventory_result_write(
+            provider,
+            update.source_root,
+            update.source_path,
+            || {
+                self.record_catalog_source_import_result_inner(
+                    provider,
+                    update,
+                    status,
+                    error,
+                    status.preserves_native_resume_checkpoint(),
+                )
+            },
+        )
+    }
+
+    pub(crate) fn record_catalog_source_import_result_preserving_legacy_cursor(
+        &self,
+        provider: CaptureProvider,
+        update: CatalogSourceIndexUpdate<'_>,
+        status: CatalogIndexedStatus,
+        error: Option<&str>,
+    ) -> Result<usize> {
+        self.with_provider_file_inventory_result_write(
+            provider,
+            update.source_root,
+            update.source_path,
+            || {
+                self.record_catalog_source_import_result_inner(
+                    provider, update, status, error, false,
+                )
+            },
+        )
+    }
+
+    fn record_catalog_source_import_result_inner(
+        &self,
+        provider: CaptureProvider,
+        update: CatalogSourceIndexUpdate<'_>,
+        status: CatalogIndexedStatus,
+        error: Option<&str>,
+        advance_legacy_cursor: bool,
     ) -> Result<usize> {
         let changed = self.conn.execute(
             r#"
@@ -107,7 +154,7 @@ impl Store {
                 status.as_str(),
                 update.file_sha256,
                 error,
-                status.preserves_native_resume_checkpoint(),
+                advance_legacy_cursor,
                 i64::from(update.import_revision),
                 capped_i64(update.inventory_generation),
             ],
@@ -121,9 +168,11 @@ impl Store {
         source_root: &str,
         source_path: &str,
     ) -> Result<Option<CatalogSourceIndexState>> {
+        let visible = crate::provider_files::catalog_material_visible_predicate("catalog_sessions");
         self.conn
             .query_row(
-                r#"
+                &format!(
+                    r#"
                     SELECT last_imported_file_size_bytes,
                            last_imported_file_modified_at_ms,
                            last_imported_event_count,
@@ -134,7 +183,9 @@ impl Store {
                       AND source_root = ?2
                       AND source_path = ?3
                       AND is_stale = 0
-                    "#,
+                      AND {visible}
+                    "#
+                ),
                 params![provider.as_str(), source_root, source_path],
                 |row| {
                     let last_imported_file_size_bytes = row
