@@ -8,6 +8,7 @@ use rusqlite::{params, ErrorCode};
 use uuid::Uuid;
 
 use crate::connection::{parse_optional_uuid, parse_uuid};
+use crate::search::bounded_candidates::normalized_scope_text;
 use crate::{Result, Store};
 
 pub const MAX_FILE_SEARCH_CANDIDATES: usize = 1_024;

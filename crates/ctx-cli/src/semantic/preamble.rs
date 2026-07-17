@@ -494,14 +494,13 @@ pub(crate) fn search_packet_query_with_backend(
         ));
     }
 
-    let worker = semantic_worker_report_cached(data_root, Some(store))?;
-    let mut retrieval =
-        SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
-    retrieval.worker = Some(worker.clone());
-    retrieval.apply_worker_coverage(&worker);
-    retrieval.vector_path = Some(semantic_vector_path(data_root));
-
     if requested_backend == SearchBackendArg::Lexical {
+        let worker = semantic_worker_report_cached(data_root, Some(store))?;
+        let mut retrieval =
+            SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
+        retrieval.worker = Some(worker.clone());
+        retrieval.apply_worker_coverage(&worker);
+        retrieval.vector_path = Some(semantic_vector_path(data_root));
         let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
         envelope.semantic_policy = ctx_protocol::SearchSemanticPolicy::Disabled;
         let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
@@ -521,6 +520,12 @@ pub(crate) fn search_packet_query_with_backend(
             let Some(text) = query.automatic_rerank_text() else {
                 let envelope = ctx_protocol::SearchRequestEnvelope::new(query);
                 let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+                let worker = semantic_worker_report_cached(data_root, Some(store))?;
+                let mut retrieval =
+                    SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
+                retrieval.worker = Some(worker.clone());
+                retrieval.apply_worker_coverage(&worker);
+                retrieval.vector_path = Some(semantic_vector_path(data_root));
                 retrieval.semantic_status = "skipped";
                 return Ok((packet, retrieval));
             };
@@ -528,12 +533,26 @@ pub(crate) fn search_packet_query_with_backend(
         }
     };
 
+    let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
+    envelope.semantic_policy =
+        if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank {
+            ctx_protocol::SearchSemanticPolicy::AutomaticRerank
+        } else {
+            ctx_protocol::SearchSemanticPolicy::Disabled
+        };
+    let execution = ctx_history_search::begin_search_packet_envelope(store, &envelope, options)?;
+    let worker = semantic_worker_report_cached(data_root, Some(store))?;
+    let mut retrieval =
+        SemanticRetrievalReport::lexical(requested_backend, worker.searchable_items);
+    retrieval.worker = Some(worker.clone());
+    retrieval.apply_worker_coverage(&worker);
+    retrieval.vector_path = Some(semantic_vector_path(data_root));
+
     if !semantic_enabled {
         return semantic_query_unavailable(
+            execution,
             store,
             data_root,
-            query,
-            options,
             retrieval,
             request_mode,
             ctx_protocol::SearchSemanticReadiness::NotReady,
@@ -544,10 +563,9 @@ pub(crate) fn search_packet_query_with_backend(
     }
     if !semantic_query_service_supported() {
         return semantic_query_unavailable(
+            execution,
             store,
             data_root,
-            query,
-            options,
             retrieval,
             request_mode,
             ctx_protocol::SearchSemanticReadiness::Unsupported,
@@ -557,25 +575,35 @@ pub(crate) fn search_packet_query_with_backend(
         );
     }
 
+    let semantic_allocation = execution.semantic_candidate_limit();
+    let semantic_candidate_row_limit = execution.semantic_candidate_row_limit();
+    if semantic_allocation == 0 {
+        return semantic_query_unavailable(
+            execution,
+            store,
+            data_root,
+            retrieval,
+            request_mode,
+            ctx_protocol::SearchSemanticReadiness::Unavailable,
+            "semantic_candidate_budget_exhausted",
+            "the shared search envelope has no remaining semantic candidate allocation",
+            emit_warnings,
+        );
+    }
     let candidate_ids = if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank
     {
-        let mut lexical_envelope = ctx_protocol::SearchRequestEnvelope::new(query.clone());
-        lexical_envelope.semantic_policy = ctx_protocol::SearchSemanticPolicy::Disabled;
-        let lexical_packet =
-            ctx_history_search::search_packet_envelope(store, &lexical_envelope, options)?;
-        let ids = lexical_packet
-            .results
-            .iter()
-            .filter_map(|result| result.event_id)
-            .take(ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED)
-            .collect::<Vec<_>>();
+        let ids = execution.automatic_semantic_candidate_ids();
         if ids.is_empty() {
-            let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
-            envelope.semantic = Some(ctx_protocol::SearchSemanticInput {
-                readiness: ctx_protocol::SearchSemanticReadiness::Ready,
-                ..ctx_protocol::SearchSemanticInput::default()
-            });
-            let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+            let packet = execution.finish_with_semantic(
+                store,
+                Some(ctx_protocol::SearchSemanticInput {
+                    readiness: ctx_protocol::SearchSemanticReadiness::Ready,
+                    indexed_documents: Some(worker.embedded_items as u64),
+                    searchable_documents: Some(worker.searchable_items as u64),
+                    coverage_complete: semantic_worker_coverage_ready(&worker),
+                    ..ctx_protocol::SearchSemanticInput::default()
+                }),
+            )?;
             retrieval.semantic_status = "ready";
             return Ok((packet, retrieval));
         }
@@ -586,50 +614,70 @@ pub(crate) fn search_packet_query_with_backend(
     let hit_limit = candidate_ids
         .as_ref()
         .map(Vec::len)
-        .unwrap_or(ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED)
-        .clamp(1, ctx_protocol::SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED);
+        .unwrap_or(semantic_allocation)
+        .clamp(1, semantic_allocation);
+    let semantic_timeout = match execution.semantic_time_budget() {
+        Ok(timeout) => timeout,
+        Err(error) => {
+            if request_mode == readiness::SemanticRetrievalRequestMode::ExplicitSemantic {
+                return Err(error.into());
+            }
+            return semantic_query_unavailable(
+                execution,
+                store,
+                data_root,
+                retrieval,
+                request_mode,
+                ctx_protocol::SearchSemanticReadiness::Unavailable,
+                "semantic_deadline_exhausted",
+                "the shared search deadline elapsed before semantic retrieval",
+                emit_warnings,
+            );
+        }
+    };
+    let execution_timeout_ms = semantic_timeout.as_millis().clamp(1, u128::from(u64::MAX)) as u64;
+    let requested_semantic_candidates = candidate_ids.as_ref().map_or(hit_limit, Vec::len);
     let mut clause =
-        query_service_contract::SemanticQueryClauseRequest::new(0, semantic_text, hit_limit);
+        query_service_contract::SemanticQueryClauseRequest::new(0, semantic_text, hit_limit)
+            .with_candidate_row_limit(semantic_candidate_row_limit);
     if let Some(candidate_ids) = candidate_ids {
         clause = clause.with_candidate_event_ids(candidate_ids);
     }
     let request = query_service_contract::SemanticQueryServiceRequest::new(
         semantic_model_key(),
         request_mode,
+        execution_timeout_ms,
         vec![clause],
     );
-    let response =
-        match daemon_semantic_query_request(data_root, request, StdDuration::from_secs(30)) {
-            Ok(Some(response)) => response,
-            Ok(None) => {
-                return semantic_query_unavailable(
-                    store,
-                    data_root,
-                    query,
-                    options,
-                    retrieval,
-                    request_mode,
-                    ctx_protocol::SearchSemanticReadiness::Unavailable,
-                    "daemon_query_service_unavailable",
-                    "daemon semantic query service is not available",
-                    emit_warnings,
-                );
-            }
-            Err(error) => {
-                return semantic_query_unavailable(
-                    store,
-                    data_root,
-                    query,
-                    options,
-                    retrieval,
-                    request_mode,
-                    ctx_protocol::SearchSemanticReadiness::Unavailable,
-                    "semantic_retrieval_failed",
-                    &format!("daemon semantic retrieval failed: {error:#}"),
-                    emit_warnings,
-                );
-            }
-        };
+    let response = match daemon_semantic_query_request(data_root, request, semantic_timeout) {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            return semantic_query_unavailable(
+                execution,
+                store,
+                data_root,
+                retrieval,
+                request_mode,
+                ctx_protocol::SearchSemanticReadiness::Unavailable,
+                "daemon_query_service_unavailable",
+                "daemon semantic query service is not available",
+                emit_warnings,
+            );
+        }
+        Err(error) => {
+            return semantic_query_unavailable(
+                execution,
+                store,
+                data_root,
+                retrieval,
+                request_mode,
+                ctx_protocol::SearchSemanticReadiness::Unavailable,
+                "semantic_retrieval_failed",
+                &format!("daemon semantic retrieval failed: {error:#}"),
+                emit_warnings,
+            );
+        }
+    };
     retrieval.readiness = response.readiness.clone();
     if !response.ok {
         let failure = response
@@ -638,10 +686,9 @@ pub(crate) fn search_packet_query_with_backend(
             .ok_or_else(|| anyhow!("typed semantic query failure did not include an error"))?;
         let message = format!("{} ({:?})", failure.message, failure.code);
         return semantic_query_unavailable(
+            execution,
             store,
             data_root,
-            query,
-            options,
             retrieval,
             request_mode,
             semantic_protocol_readiness(response.readiness.as_ref()),
@@ -658,16 +705,8 @@ pub(crate) fn search_packet_query_with_backend(
     retrieval.diagnostics = Some(clause.diagnostics.clone());
     retrieval.embedding_model = Some(SEMANTIC_MODEL_ID.to_owned());
     retrieval.semantic_status = semantic_readiness_status(response.readiness.as_ref());
-    let semantic_input = semantic_protocol_input(&response, clause);
-    let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
-    envelope.semantic_policy =
-        if request_mode == readiness::SemanticRetrievalRequestMode::AutomaticRerank {
-            ctx_protocol::SearchSemanticPolicy::AutomaticRerank
-        } else {
-            ctx_protocol::SearchSemanticPolicy::Disabled
-        };
-    envelope.semantic = Some(semantic_input);
-    let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+    let semantic_input = semantic_protocol_input(&response, clause, requested_semantic_candidates);
+    let packet = execution.finish_with_semantic(store, Some(semantic_input))?;
     retrieval.effective_mode = match packet.query_execution.semantic.effective_backend {
         ctx_protocol::SearchEffectiveBackend::Semantic => SearchBackendArg::Semantic,
         ctx_protocol::SearchEffectiveBackend::Hybrid => SearchBackendArg::Hybrid,
@@ -678,10 +717,9 @@ pub(crate) fn search_packet_query_with_backend(
 
 #[allow(clippy::too_many_arguments)]
 fn semantic_query_unavailable(
+    execution: ctx_history_search::SearchPacketExecution,
     store: &Store,
     data_root: &Path,
-    query: ctx_protocol::SearchQuery,
-    options: &ctx_history_search::PacketOptions,
     mut retrieval: SemanticRetrievalReport,
     request_mode: readiness::SemanticRetrievalRequestMode,
     readiness: ctx_protocol::SearchSemanticReadiness,
@@ -715,18 +753,20 @@ fn semantic_query_unavailable(
         emit_warnings,
         "warning: semantic reranking is unavailable; returning unchanged lexical results",
     );
-    let mut envelope = ctx_protocol::SearchRequestEnvelope::new(query);
-    envelope.semantic = Some(ctx_protocol::SearchSemanticInput {
-        readiness,
-        ..ctx_protocol::SearchSemanticInput::default()
-    });
-    let packet = ctx_history_search::search_packet_envelope(store, &envelope, options)?;
+    let packet = execution.finish_with_semantic(
+        store,
+        Some(ctx_protocol::SearchSemanticInput {
+            readiness,
+            ..ctx_protocol::SearchSemanticInput::default()
+        }),
+    )?;
     Ok((packet, retrieval))
 }
 
 fn semantic_protocol_input(
     response: &query_service_contract::SemanticQueryServiceResponse,
     clause: &query_service_contract::SemanticQueryClauseResponse,
+    requested_candidates: usize,
 ) -> ctx_protocol::SearchSemanticInput {
     let readiness = response.readiness.as_ref();
     ctx_protocol::SearchSemanticInput {
@@ -739,6 +779,11 @@ fn semantic_protocol_input(
                 ctx_event_id: hit.event_id.to_string(),
             })
             .collect(),
+        requested_candidates,
+        candidate_rows_examined: clause
+            .diagnostics
+            .events_scored
+            .unwrap_or(clause.hits.len()),
         indexed_documents: readiness.map(|value| value.coverage.indexed_items as u64),
         searchable_documents: readiness
             .and_then(|value| value.coverage.searchable_items)

@@ -32,6 +32,10 @@ pub enum SearchError {
     SemanticNotReady { readiness: SearchSemanticReadiness },
     #[error("semantic candidate has invalid ctx event id {0:?}")]
     InvalidSemanticCandidateId(String),
+    #[error(
+        "semantic candidate retrieval examined {actual} rows; remaining shared budget is {maximum}"
+    )]
+    SemanticCandidateBudgetExceeded { actual: usize, maximum: usize },
     #[error("failed to serialize bounded search response: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("serialized search envelope exceeds its {maximum} byte budget without results")]

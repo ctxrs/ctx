@@ -24,8 +24,8 @@ pub use query::{
     SEARCH_BUDGET_EXHAUSTED_ERROR_CODE,
 };
 pub use search::{
-    search_packet, search_packet_envelope, search_packet_file_filter, search_packet_query,
-    search_packet_terms,
+    begin_search_packet_envelope, search_packet, search_packet_envelope, search_packet_file_filter,
+    search_packet_query, search_packet_terms, SearchPacketExecution,
 };
 pub use snippets::{display_snippet, event_preview_text};
 

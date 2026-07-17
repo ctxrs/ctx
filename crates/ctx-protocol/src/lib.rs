@@ -508,6 +508,10 @@ pub struct SearchSemanticInput {
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<SearchSemanticCandidate>,
+    #[serde(default)]
+    pub requested_candidates: usize,
+    #[serde(default)]
+    pub candidate_rows_examined: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_documents: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -549,6 +553,18 @@ impl SearchRequestEnvelope {
                     maximum: SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED,
                 });
             }
+            if semantic.requested_candidates > SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED {
+                return Err(SearchEnvelopeError::TooManyRequestedSemanticCandidates {
+                    actual: semantic.requested_candidates,
+                    maximum: SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED,
+                });
+            }
+            if semantic.candidate_rows_examined > SEARCH_MAX_CANDIDATE_ROWS {
+                return Err(SearchEnvelopeError::TooManySemanticCandidateRows {
+                    actual: semantic.candidate_rows_examined,
+                    maximum: SEARCH_MAX_CANDIDATE_ROWS,
+                });
+            }
             if semantic.readiness != SearchSemanticReadiness::Ready
                 && !semantic.candidates.is_empty()
             {
@@ -574,6 +590,12 @@ impl SearchRequestEnvelope {
                     });
                 }
             }
+            if semantic.requested_candidates == 0 {
+                semantic.requested_candidates = semantic.candidates.len();
+            }
+            if semantic.candidate_rows_examined == 0 {
+                semantic.candidate_rows_examined = semantic.candidates.len();
+            }
             semantic.backend = semantic
                 .backend
                 .take()
@@ -588,6 +610,8 @@ impl SearchRequestEnvelope {
 pub enum SearchEnvelopeError {
     Query(SearchQueryError),
     TooManySemanticCandidates { actual: usize, maximum: usize },
+    TooManyRequestedSemanticCandidates { actual: usize, maximum: usize },
+    TooManySemanticCandidateRows { actual: usize, maximum: usize },
     CandidatesWithoutReadiness,
     CandidatesWhileDisabled,
     InvalidCandidateIdentity { actual: usize, maximum: usize },
@@ -606,6 +630,14 @@ impl std::fmt::Display for SearchEnvelopeError {
             Self::TooManySemanticCandidates { actual, maximum } => write!(
                 formatter,
                 "semantic input has {actual} candidates; maximum is {maximum}"
+            ),
+            Self::TooManyRequestedSemanticCandidates { actual, maximum } => write!(
+                formatter,
+                "semantic input requested {actual} candidates; maximum is {maximum}"
+            ),
+            Self::TooManySemanticCandidateRows { actual, maximum } => write!(
+                formatter,
+                "semantic input examined {actual} candidate rows; maximum is {maximum}"
             ),
             Self::CandidatesWithoutReadiness => write!(
                 formatter,
@@ -1655,6 +1687,8 @@ mod tests {
                     ctx_event_id: format!("event-{index}"),
                 })
                 .collect(),
+            requested_candidates: SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED,
+            candidate_rows_examined: SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED,
             indexed_documents: Some(1_024),
             searchable_documents: Some(1_024),
             coverage_complete: true,
