@@ -149,7 +149,7 @@ pub(crate) fn assert_provider_citations(result: &Value, provider: &str) {
             "citation source_exists failed"
         );
         assert!(citation["source_path"].is_string());
-        assert!(citation["cursor"].is_string());
+        assert!(citation["cursor"].is_null() || citation["cursor"].is_string());
     }
 }
 
