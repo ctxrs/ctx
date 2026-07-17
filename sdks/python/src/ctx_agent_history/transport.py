@@ -413,7 +413,9 @@ class LocalCliAdapter:
 
         try:
             return self._supervise_process(command, process, uses_windows_launcher)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                raise
             _terminate_process_scope(process)
             _close_process_pipes(process)
             raise
@@ -452,7 +454,9 @@ class LocalCliAdapter:
                 stop,
                 readers,
             )
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                raise
             stop.set()
             _terminate_process_scope(process)
             _close_process_pipes(process)
@@ -506,6 +510,7 @@ class LocalCliAdapter:
         teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
         for reader in readers:
             reader.join(max(0.0, teardown_deadline - time.monotonic()))
+        _close_process_pipes(process)
 
         overflow = stdout_capture.overflow or stderr_capture.overflow
         capture_error = stdout_capture.error or stderr_capture.error
@@ -523,7 +528,11 @@ class LocalCliAdapter:
                     "timeout": self.config.timeout,
                 },
             )
-        if capture_error is not None or any(reader.is_alive() for reader in readers):
+        if (
+            failure == "capture"
+            or capture_error is not None
+            or any(reader.is_alive() for reader in readers)
+        ):
             stream, error = capture_error or ("pipe", RuntimeError("reader did not stop"))
             raise CtxAgentHistoryProtocolError(
                 "ctx CLI output capture failed",
