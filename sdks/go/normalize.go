@@ -62,9 +62,15 @@ func normalizeSearchPayload(raw map[string]any) map[string]any {
 	normalized, _ := camelize(raw).(map[string]any)
 	delete(normalized, "schemaVersion")
 	delete(normalized, "queryExecution")
-	normalized["schema_version"] = raw["schema_version"]
-	normalized["query"] = raw["query"]
-	normalized["query_execution"] = raw["query_execution"]
+	if value, ok := raw["schema_version"]; ok {
+		normalized["schema_version"] = value
+	}
+	if value, ok := raw["query"]; ok {
+		normalized["query"] = value
+	}
+	if value, ok := raw["query_execution"]; ok {
+		normalized["query_execution"] = value
+	}
 	return normalized
 }
 

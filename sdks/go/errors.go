@@ -118,6 +118,16 @@ func captureFailureSDKError(command []string, stream string, err error) *Error {
 	}
 }
 
+func invalidUTF8SDKError(command []string, stream string) *Error {
+	return &Error{
+		Kind:     ErrorKindDecode,
+		Message:  "ctx returned invalid UTF-8",
+		Command:  append([]string(nil), command...),
+		ExitCode: -1,
+		Stream:   stream,
+	}
+}
+
 func firstLine(value string) string {
 	for i, r := range value {
 		if r == '\n' || r == '\r' {

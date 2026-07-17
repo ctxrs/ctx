@@ -839,8 +839,8 @@ function spawnCommand(command, args, options) {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
-    const stdoutChunks = [];
-    const stderrChunks = [];
+    const stdoutBuffer = Buffer.allocUnsafe(LOCAL_STDOUT_CAP_BYTES);
+    const stderrBuffer = Buffer.allocUnsafe(LOCAL_STDERR_CAP_BYTES);
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
@@ -861,7 +861,7 @@ function spawnCommand(command, args, options) {
       const remaining = cap - consumed;
       if (bytes.length > remaining) {
         if (remaining > 0) {
-          (stream === "stdout" ? stdoutChunks : stderrChunks).push(bytes.subarray(0, remaining));
+          bytes.copy(stream === "stdout" ? stdoutBuffer : stderrBuffer, consumed, 0, remaining);
         }
         fail(
           new CtxParseError("ctx CLI output exceeded its capture limit", {
@@ -871,7 +871,7 @@ function spawnCommand(command, args, options) {
         );
         return;
       }
-      (stream === "stdout" ? stdoutChunks : stderrChunks).push(bytes);
+      bytes.copy(stream === "stdout" ? stdoutBuffer : stderrBuffer, consumed);
       if (stream === "stdout") stdoutBytes += bytes.length;
       else stderrBytes += bytes.length;
     };
@@ -888,6 +888,24 @@ function spawnCommand(command, args, options) {
 
     child.stdout.on("data", (chunk) => capture("stdout", chunk));
     child.stderr.on("data", (chunk) => capture("stderr", chunk));
+    child.stdout.on("error", (cause) => {
+      fail(
+        new CtxParseError("ctx CLI stdout capture failed", {
+          code: "capture_failure",
+          details: { command, args, stream: "stdout" },
+          cause,
+        }),
+      );
+    });
+    child.stderr.on("error", (cause) => {
+      fail(
+        new CtxParseError("ctx CLI stderr capture failed", {
+          code: "capture_failure",
+          details: { command, args, stream: "stderr" },
+          cause,
+        }),
+      );
+    });
     child.on("error", (cause) => {
       fail(
         new CtxCliError(`failed to start ${command}`, {
@@ -911,17 +929,16 @@ function spawnCommand(command, args, options) {
     });
     child.on("close", (exitCode, signal) => {
       if (settled) return;
-      settled = true;
       clearTimeout(timeout);
       clearTimeout(drainTimer);
       let stdout;
       let stderr;
       try {
         const decoder = new TextDecoder("utf-8", { fatal: true });
-        stdout = decoder.decode(Buffer.concat(stdoutChunks, stdoutBytes));
-        stderr = decoder.decode(Buffer.concat(stderrChunks, stderrBytes));
+        stdout = decoder.decode(stdoutBuffer.subarray(0, stdoutBytes));
+        stderr = decoder.decode(stderrBuffer.subarray(0, stderrBytes));
       } catch (cause) {
-        reject(
+        fail(
           new CtxParseError("ctx returned invalid UTF-8", {
             details: { command, args },
             cause,
@@ -929,7 +946,14 @@ function spawnCommand(command, args, options) {
         );
         return;
       }
-      resolve({ command, args, exitCode, signal, stdout, stderr });
+      const result = { command, args, exitCode, signal, stdout, stderr };
+      if (exitCode !== 0 || signal !== null) {
+        settled = true;
+        void terminateProcessScope(child).finally(() => resolve(result));
+        return;
+      }
+      settled = true;
+      resolve(result);
     });
   });
 }
@@ -971,7 +995,19 @@ async function terminateProcessScope(child) {
   try {
     child.kill("SIGKILL");
   } catch {}
-  await new Promise((resolve) => setTimeout(resolve, LOCAL_DRAIN_GRACE_MS));
+  await Promise.race([
+    waitForChildExit(child),
+    new Promise((resolve) => setTimeout(resolve, LOCAL_TEARDOWN_MS)),
+  ]);
+}
+
+function waitForChildExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    child.once("exit", resolve);
+  });
 }
 
 function parseCtxVersion(raw) {

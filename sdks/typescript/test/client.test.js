@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -556,6 +557,13 @@ test("local adapter drains both streams and enforces byte caps", async () => {
   assert.equal(Buffer.byteLength(completed.stdout), 200000);
   assert.equal(Buffer.byteLength(completed.stderr), 200000);
 
+  const alternating = await adapter.execute([
+    "-e",
+    "for(let i=0;i<30;i++){process.stdout.write(Buffer.alloc(8192,97));process.stderr.write(Buffer.alloc(8192,98))}",
+  ]);
+  assert.equal(Buffer.byteLength(alternating.stdout), 30 * 8192);
+  assert.equal(Buffer.byteLength(alternating.stderr), 30 * 8192);
+
   for (const [stream, descriptor, size, capBytes] of [
     ["stdout", "stdout", 2 * 1024 * 1024 + 1, 2 * 1024 * 1024],
     ["stderr", "stderr", 256 * 1024 + 1, 256 * 1024],
@@ -575,22 +583,84 @@ test("local adapter drains both streams and enforces byte caps", async () => {
         !("stderr" in error.details),
     );
   }
-});
 
-test("local adapter bounds inherited-pipe teardown", async () => {
-  const { LocalCliAdapter } = await import("../src/index.js");
-  const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 5_000 });
   const started = Date.now();
   await assert.rejects(
     () =>
       adapter.execute([
         "-e",
-        "require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:'inherit'});",
+        "process.stderr.write(Buffer.alloc(262145,120));setInterval(()=>process.stdout.write('x'),10)",
       ]),
-    (error) => error instanceof CtxParseError && error.code === "capture_failure",
+    (error) =>
+      error instanceof CtxParseError &&
+      error.code === "capture_limit" &&
+      error.details.stream === "stderr",
   );
   assert.ok(Date.now() - started < 2_000);
 });
+
+test("local adapter bounds inherited-pipe teardown", async () => {
+  if (process.platform === "win32") return;
+  const { LocalCliAdapter } = await import("../src/index.js");
+  const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 5_000 });
+  const directory = await mkdtemp(join(tmpdir(), "ctx-ts-scope-"));
+  const pidPath = join(directory, "child.pid");
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      () =>
+        adapter.execute([
+          "-e",
+          `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setTimeout(()=>{},60000)'],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));`,
+        ]),
+      (error) => error instanceof CtxParseError && error.code === "capture_failure",
+    );
+    assert.ok(Date.now() - started < 2_000);
+    await assertProcessExited(Number(await readFile(pidPath, "utf8")));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("successful local command does not kill detached daemon child", async () => {
+  if (process.platform === "win32") return;
+  const { LocalCliAdapter } = await import("../src/index.js");
+  const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 2_000 });
+  const directory = await mkdtemp(join(tmpdir(), "ctx-ts-detached-"));
+  const pidPath = join(directory, "child.pid");
+  let pid;
+  try {
+    const completed = await adapter.execute([
+      "-e",
+      `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{detached:true,stdio:'ignore'});c.unref();fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));process.stdout.write('{}');`,
+    ]);
+    assert.equal(completed.stdout, "{}");
+    pid = Number(await readFile(pidPath, "utf8"));
+    process.kill(pid, 0);
+  } finally {
+    if (pid) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+      await assertProcessExited(pid);
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function assertProcessExited(pid) {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`owned process ${pid} survived bounded teardown`);
+}
 
 test("hosted client is an explicit placeholder", async () => {
   const client = createHostedAgentHistoryClient({ baseUrl: "https://ctx.example.invalid" });

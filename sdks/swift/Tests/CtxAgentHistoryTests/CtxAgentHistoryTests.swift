@@ -1,4 +1,9 @@
 import XCTest
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 @testable import CtxAgentHistory
 
 final class CtxAgentHistoryTests: XCTestCase {
@@ -356,6 +361,92 @@ final class CtxAgentHistoryTests: XCTestCase {
             let decoded = try decoder.decode(AgentHistoryContractError.self, from: encoder.encode(contractError))
             XCTAssertEqual(decoded.code, code)
             XCTAssertEqual(decoded.message, code.rawValue)
+        }
+    }
+
+    func testProcessRunnerAdversarialCaptureMatrix() throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
+            throw XCTSkip("python3 is unavailable for the process-scope fixture")
+        }
+        let runner = ProcessCommandRunner()
+        let dual = try runner.run(CommandRequest(
+            command: "/usr/bin/python3",
+            arguments: [
+                "-c",
+                "import os,threading; a=threading.Thread(target=lambda:os.write(1,b'a'*245760)); b=threading.Thread(target=lambda:os.write(2,b'b'*245760)); a.start(); b.start(); a.join(); b.join()"
+            ],
+            timeout: 2
+        ))
+        XCTAssertEqual(dual.stdout.count, 245_760)
+        XCTAssertEqual(dual.stderr.count, 245_760)
+
+        let started = Date()
+        XCTAssertThrowsError(try runner.run(CommandRequest(
+            command: "/usr/bin/python3",
+            arguments: ["-c", "import os,time; os.write(2,b'x'*262145); time.sleep(60)"],
+            timeout: 2
+        ))) { error in
+            let sdkError = error as? CtxAgentHistorySDKError
+            XCTAssertEqual(sdkError?.code, .captureLimit)
+            XCTAssertEqual(sdkError?.details?.objectValue?["stream"], .string("stderr"))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    }
+
+    func testProcessRunnerBoundsInheritedPipeTeardown() throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
+            throw XCTSkip("python3 is unavailable for the process-scope fixture")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let alive = directory.appendingPathComponent("child.alive")
+        let started = Date()
+        XCTAssertThrowsError(try ProcessCommandRunner().run(CommandRequest(
+            command: "/usr/bin/python3",
+            arguments: [
+                "-c",
+                "import subprocess,sys; subprocess.Popen([sys.executable,'-c',\"import signal,time,pathlib,sys; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(.5); pathlib.Path(sys.argv[1]).write_text('alive'); time.sleep(60)\",sys.argv[1]],stdout=sys.stdout,stderr=sys.stderr)",
+                alive.path
+            ],
+            timeout: 5
+        ))) { error in
+            let sdkError = error as? CtxAgentHistorySDKError
+            XCTAssertEqual(sdkError?.code, .captureFailure)
+            XCTAssertEqual(sdkError?.details?.objectValue?["stream"], .string("pipe"))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        Thread.sleep(forTimeInterval: 0.7)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alive.path))
+    }
+
+    func testProcessRunnerSuccessReleasesLongLivedChild() throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
+            throw XCTSkip("python3 is unavailable for the process-scope fixture")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let alive = directory.appendingPathComponent("child.alive")
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let result = try ProcessCommandRunner().run(CommandRequest(
+            command: "/usr/bin/python3",
+            arguments: [
+                "-c",
+                "import subprocess,sys; c=subprocess.Popen([sys.executable,'-c',\"import time,pathlib,sys; time.sleep(.5); pathlib.Path(sys.argv[1]).write_text('alive'); time.sleep(60)\",sys.argv[1]],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); open(sys.argv[2],'w').write(str(c.pid)); print('{}')",
+                alive.path,
+                pidFile.path
+            ],
+            timeout: 2
+        ))
+        XCTAssertEqual(String(data: result.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), "{}")
+        let deadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: alive.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: alive.path))
+        if let rawPID = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(rawPID) {
+            _ = kill(pid, SIGKILL)
         }
     }
 

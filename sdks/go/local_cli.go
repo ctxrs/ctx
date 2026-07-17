@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -89,6 +91,12 @@ func (a *LocalCLIAdapter) Do(ctx context.Context, op Operation) ([]byte, error) 
 	if len(result.Stderr) > localStderrCapBytes {
 		return nil, captureLimitSDKError(append([]string{a.path}, args...), "stderr", localStderrCapBytes)
 	}
+	if !utf8.Valid(result.Stdout) {
+		return nil, invalidUTF8SDKError(append([]string{a.path}, args...), "stdout")
+	}
+	if !utf8.Valid(result.Stderr) {
+		return nil, invalidUTF8SDKError(append([]string{a.path}, args...), "stderr")
+	}
 	if result.Err != nil {
 		var captureError *captureLimitError
 		if errors.As(result.Err, &captureError) {
@@ -132,78 +140,137 @@ func (execCommandRunner) Run(ctx context.Context, path string, args []string, en
 		return commandResult{ExitCode: -1, Err: err}
 	}
 	cmd := exec.Command(path, args...)
-	configureProcessScope(cmd)
+	scope, err := newOwnedProcessScope(cmd)
+	if err != nil {
+		return commandResult{ExitCode: -1, Err: err}
+	}
+	defer scope.Close()
 	if len(env) > 0 {
 		cmd.Env = append(cmd.Environ(), env...)
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return commandResult{ExitCode: -1, Err: err}
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return commandResult{ExitCode: -1, Err: err}
-	}
+	stdout := newBoundedCaptureWriter("stdout", localStdoutCapBytes)
+	stderr := newBoundedCaptureWriter("stderr", localStderrCapBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = localTeardownDelay
 	if err := cmd.Start(); err != nil {
 		return commandResult{ExitCode: -1, Err: err}
 	}
-
-	stdoutResults := make(chan captureResult, 1)
-	stderrResults := make(chan captureResult, 1)
 	waitResults := make(chan error, 1)
-	go func() { stdoutResults <- readBoundedPipe(stdoutPipe, "stdout", localStdoutCapBytes) }()
-	go func() { stderrResults <- readBoundedPipe(stderrPipe, "stderr", localStderrCapBytes) }()
 	go func() { waitResults <- cmd.Wait() }()
-
-	var stdout, stderr captureResult
-	var stdoutDone, stderrDone, waitDone bool
-	var waitErr error
-	var drainDeadline <-chan time.Time
-	for !stdoutDone || !stderrDone || !waitDone {
-		select {
-		case stdout = <-stdoutResults:
-			stdoutDone = true
-			stdoutResults = nil
-			if stdout.Err != nil {
-				waitErr = abortCommand(cmd, stdoutPipe, stderrPipe, waitResults, waitDone, stdout.Err)
-				return commandResult{Stdout: stdout.Data, Stderr: stderr.Data, ExitCode: exitCode(waitErr), Err: stdout.Err}
-			}
-		case stderr = <-stderrResults:
-			stderrDone = true
-			stderrResults = nil
-			if stderr.Err != nil {
-				waitErr = abortCommand(cmd, stdoutPipe, stderrPipe, waitResults, waitDone, stderr.Err)
-				return commandResult{Stdout: stdout.Data, Stderr: stderr.Data, ExitCode: exitCode(waitErr), Err: stderr.Err}
-			}
-		case waitErr = <-waitResults:
-			waitDone = true
-			waitResults = nil
-			if !stdoutDone || !stderrDone {
-				drainDeadline = time.After(localTeardownDelay)
-			}
-		case <-drainDeadline:
-			failure := &captureFailureError{Stream: "pipe", Err: errors.New("descendant retained a CLI output pipe")}
-			_ = abortCommand(cmd, stdoutPipe, stderrPipe, waitResults, waitDone, failure)
-			return commandResult{Stdout: stdout.Data, Stderr: stderr.Data, ExitCode: exitCode(waitErr), Err: failure}
-		case <-ctx.Done():
-			waitErr = abortCommand(cmd, stdoutPipe, stderrPipe, waitResults, waitDone, ctx.Err())
-			return commandResult{Stdout: stdout.Data, Stderr: stderr.Data, ExitCode: exitCode(waitErr), Err: ctx.Err()}
-		}
-		if waitDone && stdoutDone && stderrDone {
-			drainDeadline = nil
-		}
+	if err := scope.AfterStart(cmd); err != nil {
+		scope.Terminate(cmd)
+		return commandResult{ExitCode: exitCode(boundedWait(waitResults, err)), Err: err}
 	}
 
-	resultExitCode := 0
+	var waitErr error
+	select {
+	case waitErr = <-waitResults:
+	case overflow := <-stdout.Failures():
+		scope.Terminate(cmd)
+		waitErr = boundedWait(waitResults, overflow)
+		return commandResult{ExitCode: exitCode(waitErr), Err: overflow}
+	case overflow := <-stderr.Failures():
+		scope.Terminate(cmd)
+		waitErr = boundedWait(waitResults, overflow)
+		return commandResult{ExitCode: exitCode(waitErr), Err: overflow}
+	case <-ctx.Done():
+		scope.Terminate(cmd)
+		waitErr = boundedWait(waitResults, ctx.Err())
+		return commandResult{ExitCode: exitCode(waitErr), Err: ctx.Err()}
+	}
+	if failure := stdout.Failure(); failure != nil {
+		scope.Terminate(cmd)
+		return commandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(waitErr), Err: failure}
+	}
+	if failure := stderr.Failure(); failure != nil {
+		scope.Terminate(cmd)
+		return commandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(waitErr), Err: failure}
+	}
+	if errors.Is(waitErr, exec.ErrWaitDelay) {
+		scope.Terminate(cmd)
+		failure := &captureFailureError{Stream: "pipe", Err: errors.New("descendant retained a CLI output pipe")}
+		return commandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: -1, Err: failure}
+	}
 	if waitErr != nil {
-		resultExitCode = exitCode(waitErr)
+		scope.Terminate(cmd)
+	}
+	if !utf8.Valid(stdout.Bytes()) || !utf8.Valid(stderr.Bytes()) {
+		scope.Terminate(cmd)
 	}
 	return commandResult{
-		Stdout:   stdout.Data,
-		Stderr:   stderr.Data,
-		ExitCode: resultExitCode,
+		Stdout:   stdout.Bytes(),
+		Stderr:   stderr.Bytes(),
+		ExitCode: exitCode(waitErr),
 		Err:      waitErr,
 	}
+}
+
+func boundedWait(waitResults <-chan error, fallback error) error {
+	select {
+	case err := <-waitResults:
+		if err != nil {
+			return err
+		}
+	case <-time.After(localTeardownLimit):
+	}
+	return fallback
+}
+
+type boundedCaptureWriter struct {
+	mu       sync.Mutex
+	data     []byte
+	stream   string
+	capBytes int
+	failure  error
+	failures chan error
+}
+
+func newBoundedCaptureWriter(stream string, capBytes int) *boundedCaptureWriter {
+	return &boundedCaptureWriter{
+		data:     make([]byte, 0, capBytes),
+		stream:   stream,
+		capBytes: capBytes,
+		failures: make(chan error, 1),
+	}
+}
+
+func (w *boundedCaptureWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failure != nil {
+		return 0, w.failure
+	}
+	remaining := w.capBytes - len(w.data)
+	if len(data) > remaining {
+		if remaining > 0 {
+			w.data = append(w.data, data[:remaining]...)
+		}
+		w.failure = &captureLimitError{Stream: w.stream, CapBytes: w.capBytes}
+		select {
+		case w.failures <- w.failure:
+		default:
+		}
+		return 0, w.failure
+	}
+	w.data = append(w.data, data...)
+	return len(data), nil
+}
+
+func (w *boundedCaptureWriter) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.data
+}
+
+func (w *boundedCaptureWriter) Failure() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.failure
+}
+
+func (w *boundedCaptureWriter) Failures() <-chan error {
+	return w.failures
 }
 
 type captureResult struct {
@@ -234,30 +301,6 @@ func readBoundedPipe(stream io.Reader, name string, capBytes int) captureResult 
 			return captureResult{Data: output.Bytes(), Err: &captureFailureError{Stream: name, Err: err}}
 		}
 	}
-}
-
-func abortCommand(
-	cmd *exec.Cmd,
-	stdout io.Closer,
-	stderr io.Closer,
-	waitResults <-chan error,
-	waitDone bool,
-	fallback error,
-) error {
-	terminateProcessScope(cmd)
-	_ = stdout.Close()
-	_ = stderr.Close()
-	if waitDone || waitResults == nil {
-		return fallback
-	}
-	select {
-	case err := <-waitResults:
-		if err != nil {
-			return err
-		}
-	case <-time.After(localTeardownLimit):
-	}
-	return fallback
 }
 
 func exitCode(err error) int {

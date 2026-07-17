@@ -480,21 +480,11 @@ class LocalCliAdapter:
                 cause=error,
             )
 
-        stdout_bytes = stdout_capture.value()
-        stderr_bytes = stderr_capture.value()
-        returncode = process.returncode if process.returncode is not None else -1
-        if returncode != 0:
-            raise CtxAgentHistoryCliError(
-                "ctx CLI command failed",
-                command=command,
-                exit_code=returncode,
-                stderr=_decode_process_output(stderr_bytes),
-                stdout=_decode_process_output(stdout_bytes),
-            )
         try:
-            stdout = _decode_process_output_strict(stdout_bytes)
-            stderr = _decode_process_output_strict(stderr_bytes)
+            stdout = _decode_process_output_strict(stdout_capture.value())
+            stderr = _decode_process_output_strict(stderr_capture.value())
         except UnicodeDecodeError as exc:
+            _terminate_process_scope(process)
             raise CtxAgentHistoryProtocolError(
                 "ctx returned invalid UTF-8",
                 details={
@@ -502,6 +492,16 @@ class LocalCliAdapter:
                 },
                 cause=exc,
             ) from exc
+        returncode = process.returncode if process.returncode is not None else -1
+        if returncode != 0:
+            _terminate_process_scope(process)
+            raise CtxAgentHistoryCliError(
+                "ctx CLI command failed",
+                command=command,
+                exit_code=returncode,
+                stderr=stderr,
+                stdout=stdout,
+            )
         return subprocess.CompletedProcess(
             command,
             returncode,
@@ -529,7 +529,7 @@ class _BoundedCapture:
     def __init__(self, stream: str, cap: int) -> None:
         self.stream = stream
         self.cap = cap
-        self.chunks: list[bytes] = []
+        self.data = bytearray(cap)
         self.size = 0
         self.overflow: Optional[tuple[str, int]] = None
         self.error: Optional[tuple[str, BaseException]] = None
@@ -538,16 +538,16 @@ class _BoundedCapture:
         remaining = self.cap - self.size
         if len(chunk) > remaining:
             if remaining > 0:
-                self.chunks.append(chunk[:remaining])
+                self.data[self.size : self.size + remaining] = memoryview(chunk)[:remaining]
                 self.size += remaining
             self.overflow = (self.stream, self.cap)
             return False
-        self.chunks.append(chunk)
+        self.data[self.size : self.size + len(chunk)] = chunk
         self.size += len(chunk)
         return True
 
-    def value(self) -> bytes:
-        return b"".join(self.chunks)
+    def value(self) -> memoryview:
+        return memoryview(self.data)[: self.size]
 
 
 def _drain_process_stream(
@@ -697,21 +697,11 @@ def _extend_option(args: list[str], flag: str, value: Optional[str]) -> None:
         args.extend([flag, value])
 
 
-def _decode_process_output(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
-
-
 def _decode_process_output_strict(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
         return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="strict")
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return str(value, "utf-8", errors="strict")
     return str(value)

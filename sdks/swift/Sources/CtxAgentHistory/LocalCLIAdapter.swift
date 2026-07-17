@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 private let localStdoutCapBytes = 2 * 1024 * 1024
 private let localStderrCapBytes = 256 * 1024
@@ -56,7 +60,15 @@ public struct ProcessCommandRunner: CommandRunner {
 
     public func run(_ request: CommandRequest) throws -> CommandResult {
         let process = Process()
-        if request.command.contains("/") {
+        let setsid = Self.setsidPath
+        if let setsid {
+            process.executableURL = URL(fileURLWithPath: setsid)
+            if request.command.contains("/") {
+                process.arguments = [request.command] + request.arguments
+            } else {
+                process.arguments = ["/usr/bin/env", request.command] + request.arguments
+            }
+        } else if request.command.contains("/") {
             process.executableURL = URL(fileURLWithPath: request.command)
             process.arguments = request.arguments
         } else {
@@ -85,8 +97,8 @@ public struct ProcessCommandRunner: CommandRunner {
                 exitCode: -1
             )
         }
-        let processScope = OwnedProcessScope(process: process)
-        defer { processScope.terminate() }
+        let processScope = OwnedProcessScope(process: process, ownsProcessGroup: setsid != nil)
+        defer { processScope.close() }
 
         let stdoutData = LockedCapture(stream: "stdout", capBytes: localStdoutCapBytes)
         let stderrData = LockedCapture(stream: "stderr", capBytes: localStderrCapBytes)
@@ -127,13 +139,31 @@ public struct ProcessCommandRunner: CommandRunner {
                 .sdkError(command: [request.command] + request.arguments)
         }
         if let issue = stdoutData.issue() ?? stderrData.issue() {
+            abort(processScope, stdout, stderr, pipeReaders)
             throw issue.sdkError(command: [request.command] + request.arguments)
         }
+        let capturedStdout = stdoutData.data()
+        let capturedStderr = stderrData.data()
+        for (stream, data) in [("stdout", capturedStdout), ("stderr", capturedStderr)] where String(data: data, encoding: .utf8) == nil {
+            processScope.terminate()
+            throw CaptureIssue.failure(stream: stream, cause: "output was not valid UTF-8")
+                .sdkError(command: [request.command] + request.arguments)
+        }
+        if process.terminationStatus != 0 {
+            processScope.terminate()
+        }
         return CommandResult(
-            stdout: stdoutData.data(),
-            stderr: stderrData.data(),
+            stdout: capturedStdout,
+            stderr: capturedStderr,
             exitCode: process.terminationStatus
         )
+    }
+
+    private static var setsidPath: String? {
+        for path in ["/usr/bin/setsid", "/bin/setsid"] where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
     }
 
     private func abort(
@@ -183,12 +213,13 @@ private final class LockedCapture: @unchecked Sendable {
     private let lock = NSLock()
     private let stream: String
     private let capBytes: Int
-    private var captured = Data()
+    private var captured: Data
     private var captureIssue: CaptureIssue?
 
     init(stream: String, capBytes: Int) {
         self.stream = stream
         self.capBytes = capBytes
+        captured = Data(capacity: capBytes)
     }
 
     func read(from handle: FileHandle) {
@@ -238,10 +269,10 @@ private final class OwnedProcessScope {
     private let lock = NSLock()
     private var terminated = false
 
-    init(process: Process) {
+    init(process: Process, ownsProcessGroup: Bool) {
         self.process = process
         processIdentifier = process.processIdentifier
-        ownsProcessGroup = setpgid(processIdentifier, processIdentifier) == 0
+        self.ownsProcessGroup = ownsProcessGroup || setpgid(processIdentifier, processIdentifier) == 0
     }
 
     func terminate() {
@@ -268,6 +299,12 @@ private final class OwnedProcessScope {
         while process.isRunning, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.005)
         }
+    }
+
+    func close() {
+        lock.lock()
+        terminated = true
+        lock.unlock()
     }
 }
 

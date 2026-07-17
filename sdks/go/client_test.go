@@ -7,10 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestStatusDecodesAgentHistoryV1(t *testing.T) {
@@ -386,6 +392,43 @@ func TestLocalCLIAdapterCommandFailureIsStructured(t *testing.T) {
 	}
 }
 
+func TestLocalCLIAdapterRejectsInvalidUTF8BeforeInterpretingExit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result commandResult
+		stream string
+	}{
+		{
+			name:   "successful stdout",
+			result: commandResult{Stdout: []byte{0xff}},
+			stream: "stdout",
+		},
+		{
+			name: "failed stderr",
+			result: commandResult{
+				Stdout:   []byte(`{}`),
+				Stderr:   []byte{0xff},
+				ExitCode: 1,
+				Err:      errors.New("exit status 1"),
+			},
+			stream: "stderr",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := NewLocalCLIAdapter(WithCLIPath("ctx"))
+			adapter.runner = fakeRunner{result: test.result}
+			_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--json"}})
+			var sdkErr *Error
+			if !errors.As(err, &sdkErr) || sdkErr.Kind != ErrorKindDecode || sdkErr.Stream != test.stream {
+				t.Fatalf("expected typed %s UTF-8 error, got %#v", test.stream, err)
+			}
+			if sdkErr.Stdout != "" || sdkErr.Stderr != "" {
+				t.Fatal("invalid UTF-8 error retained process output")
+			}
+		})
+	}
+}
+
 func TestLocalCLIAdapterClassifiesContextTimeout(t *testing.T) {
 	adapter := NewLocalCLIAdapter(WithCLIPath("ctx"))
 	adapter.runner = fakeRunner{result: commandResult{Err: context.DeadlineExceeded, ExitCode: -1}}
@@ -419,6 +462,153 @@ func TestLocalCLICaptureLimitIsBoundedAndTyped(t *testing.T) {
 	if sdkErr.Stdout != "" || sdkErr.Stderr != "" {
 		t.Fatal("capture-limit error retained process output")
 	}
+}
+
+func TestLocalCLIProcessCaptureAdversarialMatrix(t *testing.T) {
+	runner := execCommandRunner{}
+	command := os.Args[0]
+
+	dual := runner.Run(context.Background(), command, helperProcessArgs("dual"), helperProcessEnv())
+	if dual.Err != nil {
+		t.Fatalf("dual-stream helper failed: %v", dual.Err)
+	}
+	if len(dual.Stdout) != 30*8192 || len(dual.Stderr) != 30*8192 {
+		t.Fatalf("unexpected dual capture sizes: stdout=%d stderr=%d", len(dual.Stdout), len(dual.Stderr))
+	}
+
+	started := time.Now()
+	overflow := runner.Run(context.Background(), command, helperProcessArgs("stderr-first"), helperProcessEnv())
+	var limit *captureLimitError
+	if !errors.As(overflow.Err, &limit) || limit.Stream != "stderr" {
+		t.Fatalf("expected stderr capture overflow, got %#v", overflow)
+	}
+	if time.Since(started) >= 2*time.Second {
+		t.Fatalf("stderr-first overflow exceeded teardown deadline: %s", time.Since(started))
+	}
+}
+
+func TestLocalCLIProcessScopeKillsInheritedHandleDescendant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("process-scope adversarial test")
+	}
+	directory := t.TempDir()
+	pidPath := filepath.Join(directory, "child.pid")
+	alivePath := filepath.Join(directory, "child.alive")
+	started := time.Now()
+	result := execCommandRunner{}.Run(
+		context.Background(),
+		os.Args[0],
+		helperProcessArgs("inherit", pidPath, alivePath),
+		helperProcessEnv(),
+	)
+	var failure *captureFailureError
+	if !errors.As(result.Err, &failure) || failure.Stream != "pipe" {
+		t.Fatalf("expected inherited-pipe capture failure, got %#v", result)
+	}
+	if time.Since(started) >= 2*time.Second {
+		t.Fatalf("inherited-pipe teardown exceeded deadline: %s", time.Since(started))
+	}
+	time.Sleep(700 * time.Millisecond)
+	if _, err := os.Stat(alivePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned descendant survived bounded teardown: %v", err)
+	}
+}
+
+func TestLocalCLISuccessReleasesProcessScope(t *testing.T) {
+	if testing.Short() {
+		t.Skip("process-scope lifecycle test")
+	}
+	directory := t.TempDir()
+	pidPath := filepath.Join(directory, "child.pid")
+	alivePath := filepath.Join(directory, "child.alive")
+	result := execCommandRunner{}.Run(
+		context.Background(),
+		os.Args[0],
+		helperProcessArgs("success-child", pidPath, alivePath),
+		helperProcessEnv(),
+	)
+	if result.Err != nil || string(result.Stdout) != "{}" {
+		t.Fatalf("successful helper failed: %#v", result)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(alivePath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("successful command killed its long-lived child")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rawPID, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(string(rawPID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if process, err := os.FindProcess(pid); err == nil {
+		_ = process.Kill()
+	}
+}
+
+func TestLocalCLIHelperProcess(t *testing.T) {
+	if os.Getenv("CTX_GO_SDK_HELPER") != "1" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || separator+1 >= len(os.Args) {
+		os.Exit(97)
+	}
+	args := os.Args[separator+1:]
+	switch args[0] {
+	case "dual":
+		block := bytes.Repeat([]byte{'x'}, 8192)
+		for index := 0; index < 30; index++ {
+			_, _ = os.Stdout.Write(block)
+			_, _ = os.Stderr.Write(block)
+		}
+	case "stderr-first":
+		_, _ = os.Stderr.Write(bytes.Repeat([]byte{'x'}, localStderrCapBytes+1))
+		time.Sleep(time.Minute)
+	case "inherit", "success-child":
+		if len(args) != 3 {
+			os.Exit(98)
+		}
+		child := exec.Command(os.Args[0], helperProcessArgs("linger", args[2])...)
+		child.Env = helperProcessEnv()
+		if args[0] == "inherit" {
+			child.Stdout = os.Stdout
+			child.Stderr = os.Stderr
+		}
+		if err := child.Start(); err != nil {
+			os.Exit(99)
+		}
+		_ = os.WriteFile(args[1], []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+		if args[0] == "success-child" {
+			_, _ = os.Stdout.Write([]byte("{}"))
+		}
+	case "linger":
+		if len(args) != 2 {
+			os.Exit(100)
+		}
+		signal.Ignore(syscall.Signal(15))
+		time.Sleep(500 * time.Millisecond)
+		_ = os.WriteFile(args[1], []byte("alive"), 0o600)
+		time.Sleep(time.Minute)
+	default:
+		os.Exit(101)
+	}
+	os.Exit(0)
+}
+
+func helperProcessArgs(mode string, args ...string) []string {
+	return append([]string{"-test.run=^TestLocalCLIHelperProcess$", "--", mode}, args...)
+}
+
+func helperProcessEnv() []string {
+	return append(os.Environ(), "CTX_GO_SDK_HELPER=1")
 }
 
 func TestLocalCLIAdapterAddsDataRootEnvironment(t *testing.T) {
@@ -494,7 +684,7 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	if search.Search.Pagination == nil || search.Search.Pagination.Limit != 20 {
 		t.Fatalf("unexpected pagination: %+v", search.Search.Pagination)
 	}
-	if search.Search.Truncation == nil || search.Search.Truncation.Truncated {
+	if search.Search.Truncation == nil || !search.Search.Truncation.Truncated || search.Search.Truncation.Reason != "semantic_coverage_incomplete" {
 		t.Fatalf("unexpected truncation: %+v", search.Search.Truncation)
 	}
 

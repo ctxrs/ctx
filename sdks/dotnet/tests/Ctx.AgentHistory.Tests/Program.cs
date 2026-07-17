@@ -18,6 +18,7 @@ internal static class Program
             ("decodes schema-v2 search diagnostics", DecodesSearchDiagnostics),
             ("rejects noncanonical schema-v2 responses", RejectsNoncanonicalSearchSchemas),
             ("bounds local CLI output capture", BoundsLocalCliCapture),
+            ("handles adversarial local CLI process capture", AdversarialLocalCliCapture),
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show and locate commands", WrapsShowAndLocate),
             ("reports versioning metadata", ReportsVersioning),
@@ -138,7 +139,7 @@ internal static class Program
 
         Equal("search --query-json {\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"retry\"},{\"semantic\":\"timeout backoff behavior\"}],\"must\":[{\"all\":\"ctx\"}]} --limit 5 --backend hybrid --provider codex --history-source codex/default --provider-key codex --source-id default --source-format codex_session_jsonl --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --json", Join(transport.Calls[0]));
         Equal("search", response.Operation);
-        Equal("retry", response.Search.Query!.Any[0].Value);
+        Equal("agent history", response.Search.Query!.Any[0].Value);
         Equal("off", response.Search.Freshness!.Mode ?? "");
     }
 
@@ -355,6 +356,100 @@ internal static class Program
             Equal(2 * 1024 * 1024, error.Details["capBytes"]!.GetValue<int>());
             True(!error.Details.ContainsKey("stdout"), "capture error exposed retained stdout");
             True(!error.Details.ContainsKey("stderr"), "capture error exposed retained stderr");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task AdversarialLocalCliCapture()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        var directory = Path.Combine(Path.GetTempPath(), $"ctx-dotnet-process-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            async Task<string> Script(string name, string body)
+            {
+                var path = Path.Combine(directory, name);
+                await File.WriteAllTextAsync(path, "#!/bin/sh\n" + body);
+                File.SetUnixFileMode(
+                    path,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                return path;
+            }
+
+            var dual = await Script(
+                "dual",
+                "(head -c 245760 /dev/zero | tr '\\000' ' ') &\n(head -c 245760 /dev/zero | tr '\\000' ' ' >&2) &\nwait\nprintf '{}'\n");
+            var dualAdapter = new LocalCliAdapter(new LocalAgentHistoryConfig
+            {
+                CtxBinary = dual,
+                Timeout = TimeSpan.FromSeconds(2)
+            });
+            _ = await dualAdapter.ExecuteJsonAsync("status", []);
+
+            var stderrFirst = await Script(
+                "stderr-first",
+                "head -c 262145 /dev/zero >&2\nsleep 60\n");
+            var started = Stopwatch.StartNew();
+            var overflow = await ThrowsAsync<CtxAgentHistoryException>(() =>
+                new LocalCliAdapter(new LocalAgentHistoryConfig
+                {
+                    CtxBinary = stderrFirst,
+                    Timeout = TimeSpan.FromSeconds(2)
+                }).ExecuteJsonAsync("status", []));
+            Equal("capture_limit", overflow.Code);
+            Equal("stderr", overflow.Details["stream"]!.GetValue<string>());
+            True(started.Elapsed < TimeSpan.FromSeconds(2), "stderr-first overflow exceeded bounded teardown");
+
+            var inheritedAlive = Path.Combine(directory, "inherited.alive");
+            var inherited = await Script(
+                "inherited",
+                $"(trap '' TERM; sleep .5; touch '{inheritedAlive}'; sleep 60) &\nexit 0\n");
+            started.Restart();
+            var inheritedError = await ThrowsAsync<CtxAgentHistoryException>(() =>
+                new LocalCliAdapter(new LocalAgentHistoryConfig
+                {
+                    CtxBinary = inherited,
+                    Timeout = TimeSpan.FromSeconds(5)
+                }).ExecuteJsonAsync("status", []));
+            Equal("capture_failure", inheritedError.Code);
+            True(started.Elapsed < TimeSpan.FromSeconds(2), "inherited-pipe teardown exceeded its deadline");
+            await Task.Delay(700);
+            True(!File.Exists(inheritedAlive), "owned inherited-handle descendant survived teardown");
+
+            var successAlive = Path.Combine(directory, "success.alive");
+            var successPid = Path.Combine(directory, "success.pid");
+            var success = await Script(
+                "success-child",
+                $"(sleep .5; touch '{successAlive}'; sleep 60) >/dev/null 2>&1 &\necho $! > '{successPid}'\nprintf '{{}}'\n");
+            _ = await new LocalCliAdapter(new LocalAgentHistoryConfig
+            {
+                CtxBinary = success,
+                Timeout = TimeSpan.FromSeconds(2)
+            }).ExecuteJsonAsync("status", []);
+            var deadline = Stopwatch.StartNew();
+            while (!File.Exists(successAlive) && deadline.Elapsed < TimeSpan.FromSeconds(2))
+            {
+                await Task.Delay(10);
+            }
+            True(File.Exists(successAlive), "successful command terminated its long-lived child");
+            if (int.TryParse(await File.ReadAllTextAsync(successPid), out var pid))
+            {
+                try
+                {
+                    Process.GetProcessById(pid).Kill(entireProcessTree: true);
+                }
+                catch (ArgumentException)
+                {
+                    // The fixture may already have exited.
+                }
+            }
         }
         finally
         {
