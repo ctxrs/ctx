@@ -1188,11 +1188,7 @@ pub(super) fn migrate_lightweight_event_index_to_v56(conn: &Connection) -> Resul
     }
 }
 
-pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Result<()> {
-    migrate_pending_work_projection_to_v57_with_mode(conn, false)
-}
-
-fn migrate_pending_work_projection_to_v57_with_mode(
+pub(super) fn migrate_pending_work_projection_to_v57_with_mode(
     conn: &Connection,
     fresh_empty_store: bool,
 ) -> Result<()> {

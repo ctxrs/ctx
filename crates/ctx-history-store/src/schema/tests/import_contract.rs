@@ -386,6 +386,241 @@ fn schema_v46_upgrade_preserves_index_rootpages_and_uses_trigger_only_invariant(
         .contains("duplicate provider session for capture source identity"));
 }
 
+fn install_parent_v57_pending_fixture(store: &Store, partial: bool) {
+    let user_version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, 57);
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO catalog_sessions (
+              source_path, provider, source_format, source_root, agent_type,
+              file_size_bytes, file_modified_at_ms, cataloged_at_ms, pending_reason
+            ) VALUES (
+              '/parent-v57/catalog.jsonl', 'codex', 'codex_session_jsonl',
+              '/parent-v57', 'primary', 10, 1, 1, 'explicit_rescan'
+            );
+            INSERT INTO source_import_files (
+              provider, source_format, source_root, source_path,
+              file_size_bytes, file_modified_at_ms, observed_at_ms, pending_reason
+            ) VALUES (
+              'pi', 'pi_session_jsonl', '/parent-v57',
+              '/parent-v57/source.jsonl', 20, 1, 1, 'fresh_changed'
+            );
+            "#,
+        )
+        .unwrap();
+
+    let trigger_names = store
+        .conn
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND (\
+               name LIKE 'trg_%_pending_work_%' OR \
+               name LIKE 'trg_%_pending_count_%' OR \
+               name LIKE 'trg_capture_sources_pending_material_owner_%'\
+             )",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for trigger_name in trigger_names {
+        store
+            .conn
+            .execute_batch(&format!("DROP TRIGGER {trigger_name}"))
+            .unwrap();
+    }
+
+    // Exact pending-work table shape from parent 961eaea2.
+    store
+        .conn
+        .execute_batch(
+            r#"
+            DROP INDEX IF EXISTS idx_catalog_sessions_pending_fresh_attempt;
+            DROP INDEX IF EXISTS idx_catalog_sessions_pending_recovery_attempt;
+            DROP INDEX IF EXISTS idx_source_import_files_pending_fresh_attempt;
+            DROP INDEX IF EXISTS idx_source_import_files_pending_recovery_attempt;
+            DROP INDEX IF EXISTS idx_capture_sources_provider_material_owner;
+            DROP TABLE import_pending_work_state;
+            DROP TABLE import_pending_work_counts;
+            DROP TABLE import_pending_work;
+            DROP TABLE import_pending_reason_repairs;
+            DROP TABLE import_pending_legacy_material_owners;
+
+            CREATE TABLE import_pending_reason_repairs (
+                inventory_family TEXT PRIMARY KEY NOT NULL
+                  CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+                cursor_provider TEXT,
+                cursor_source_root TEXT,
+                cursor_source_path TEXT,
+                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
+            );
+            CREATE TABLE import_pending_work (
+                inventory_family TEXT NOT NULL
+                  CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+                provider TEXT NOT NULL,
+                source_root TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
+                indexed_at_ms INTEGER,
+                PRIMARY KEY (inventory_family, provider, source_root, source_path)
+            ) WITHOUT ROWID;
+            CREATE TABLE import_pending_work_counts (
+                inventory_family TEXT NOT NULL
+                  CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+                provider TEXT NOT NULL,
+                source_root TEXT NOT NULL,
+                work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
+                pending_count INTEGER NOT NULL CHECK (pending_count > 0),
+                PRIMARY KEY (inventory_family, provider, source_root, work_class)
+            ) WITHOUT ROWID;
+            CREATE TABLE import_pending_work_state (
+                singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+                selection_mode TEXT NOT NULL CHECK (selection_mode IN ('direct', 'projection'))
+            ) WITHOUT ROWID;
+            CREATE INDEX idx_import_pending_work_selection
+            ON import_pending_work (
+              inventory_family, provider, source_root, work_class,
+              indexed_at_ms, source_path
+            );
+
+            INSERT INTO import_pending_work_state (singleton, selection_mode)
+            VALUES (1, 'projection');
+            INSERT INTO import_pending_work (
+              inventory_family, provider, source_root, source_path,
+              work_class, indexed_at_ms
+            ) VALUES
+              ('catalog_sessions', 'codex', '/parent-v57',
+               '/parent-v57/catalog.jsonl', 'fresh', NULL),
+              ('source_import_files', 'pi', '/parent-v57',
+               '/parent-v57/ghost.jsonl', 'recovery', NULL);
+            INSERT INTO import_pending_work_counts (
+              inventory_family, provider, source_root, work_class, pending_count
+            ) VALUES
+              ('catalog_sessions', 'codex', '/parent-v57', 'fresh', 17),
+              ('source_import_files', 'pi', '/parent-v57', 'recovery', 23);
+            "#,
+        )
+        .unwrap();
+    let repair_rows = if partial {
+        r#"
+        INSERT INTO import_pending_reason_repairs (
+          inventory_family, cursor_provider, cursor_source_root,
+          cursor_source_path, completed
+        ) VALUES
+          ('catalog_sessions', 'codex', '/parent-v57', '/parent-v57/catalog.jsonl', 0),
+          ('source_import_files', 'pi', '/parent-v57', '/parent-v57/source.jsonl', 0);
+        "#
+    } else {
+        r#"
+        INSERT INTO import_pending_reason_repairs (
+          inventory_family, cursor_provider, cursor_source_root,
+          cursor_source_path, completed
+        ) VALUES
+          ('catalog_sessions', 'codex', '/parent-v57', '/parent-v57/catalog.jsonl', 1),
+          ('source_import_files', 'pi', '/parent-v57', '/parent-v57/source.jsonl', 1);
+        "#
+    };
+    store.conn.execute_batch(repair_rows).unwrap();
+    let unchanged_user_version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(unchanged_user_version, 57);
+}
+
+#[test]
+fn parent_v57_completed_and_partial_projections_restart_without_version_downgrade() {
+    for partial in [false, true] {
+        let temp = tempdir();
+        let path = temp.path().join(if partial {
+            "parent-v57-partial.sqlite"
+        } else {
+            "parent-v57-completed.sqlite"
+        });
+        let store = Store::open(&path).unwrap();
+        install_parent_v57_pending_fixture(&store, partial);
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            57
+        );
+        let reset_state: (i64, i64, bool, bool) = store
+            .conn
+            .query_row(
+                "SELECT projection_version, material_projection_version, \
+                   legacy_cleanup_complete, \
+                   (SELECT COUNT(*) = 2 AND COALESCE(MAX(cursor_rowid), -1) = 0 \
+                      AND COALESCE(MAX(completed), -1) = 0 \
+                    FROM import_pending_reason_repairs) \
+                 FROM import_pending_work_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(reset_state, (2, 3, false, true));
+        assert!(!store.import_pending_work_is_ready().unwrap());
+
+        let mut complete = false;
+        for _ in 0..32 {
+            if store
+                .repair_import_pending_reasons(2, 16 * 1024, std::time::Duration::from_secs(1))
+                .unwrap()
+                .complete
+            {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+        let projected: Vec<(String, String, i64)> = store
+            .conn
+            .prepare(
+                "SELECT source_path, work_class, projection_version \
+                 FROM import_pending_work ORDER BY source_path",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            projected,
+            vec![
+                ("/parent-v57/catalog.jsonl".into(), "recovery".into(), 2),
+                ("/parent-v57/source.jsonl".into(), "fresh".into(), 2),
+            ]
+        );
+        let counts: Vec<(String, String, i64)> = store
+            .conn
+            .prepare(
+                "SELECT inventory_family, work_class, pending_count \
+                 FROM import_pending_work_counts ORDER BY inventory_family",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                ("catalog_sessions".into(), "recovery".into(), 1),
+                ("source_import_files".into(), "fresh".into(), 1),
+            ]
+        );
+    }
+}
+
 #[test]
 fn v57_migration_creates_empty_projection_without_reading_inventory() {
     let temp = tempdir();
@@ -457,7 +692,8 @@ fn v57_migration_creates_empty_projection_without_reading_inventory() {
         }
     }));
 
-    crate::schema::migrations::migrate_pending_work_projection_to_v57(&conn).unwrap();
+    crate::schema::migrations::migrate_pending_work_projection_to_v57_with_mode(&conn, false)
+        .unwrap();
     assert!(forbidden_actions.lock().unwrap().is_empty());
     assert_eq!(conn.total_changes() - total_changes_before, 3);
     let inventory_rootpages_after = ["catalog_sessions", "source_import_files"].map(|table| {
@@ -504,7 +740,8 @@ fn v57_migration_reuses_a_preexisting_compatible_selection_index() {
         .execute_batch("PRAGMA user_version = 56")
         .unwrap();
 
-    crate::schema::migrations::migrate_pending_work_projection_to_v57(&store.conn).unwrap();
+    crate::schema::migrations::migrate_pending_work_projection_to_v57_with_mode(&store.conn, false)
+        .unwrap();
 
     let rootpage_after: i64 = store
         .conn

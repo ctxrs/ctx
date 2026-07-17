@@ -319,6 +319,7 @@ struct LegacyPendingProjectionRow {
     provider: String,
     source_root: String,
     tail: String,
+    projection_version: i64,
     estimated_bytes: usize,
 }
 
