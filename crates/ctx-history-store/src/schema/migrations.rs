@@ -11,7 +11,6 @@ use crate::schema::ddl::{
     SOURCE_IMPORT_FILE_STATE_COLUMNS,
 };
 use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
-use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::provider_session_identity::{
     backfill_capture_source_identity_columns, prepare_provider_session_migrations,
     restore_invariants_after_capture_source_rebuild, suspend_invariants_for_capture_source_rebuild,
@@ -136,7 +135,6 @@ fn migrate_to_v1(conn: &Connection) -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         ensure_columns(conn, "history_records", HISTORY_RECORD_COLUMNS)?;
         backfill_legacy_tables(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 1;")?;
         Ok(())
     })();
@@ -161,7 +159,6 @@ fn migrate_to_v2(conn: &Connection) -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         ensure_columns(conn, "history_records", HISTORY_RECORD_COLUMNS)?;
         backfill_legacy_tables(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 2;")?;
         Ok(())
     })();
@@ -186,7 +183,6 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         ensure_columns(conn, "history_records", HISTORY_RECORD_COLUMNS)?;
         backfill_legacy_tables(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 3;")?;
         Ok(())
     })();
@@ -210,7 +206,6 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         rebuild_capture_sources_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 4;")?;
         Ok(())
     })();
@@ -244,7 +239,6 @@ fn migrate_to_v5(conn: &Connection) -> Result<()> {
             "catalog_sessions",
             CATALOG_SESSION_IMPORT_STATE_COLUMNS,
         )?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 5;")?;
         Ok(())
     })();
@@ -272,7 +266,6 @@ fn migrate_to_v6(conn: &Connection) -> Result<()> {
             "catalog_sessions",
             CATALOG_SESSION_IMPORT_STATE_COLUMNS,
         )?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 6;")?;
         Ok(())
     })();
@@ -297,7 +290,6 @@ fn migrate_to_v7(conn: &Connection) -> Result<()> {
     let migration = (|| -> Result<()> {
         rebuild_capture_sources_provider_check(conn)?;
         rebuild_catalog_sessions_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 7;")?;
         Ok(())
     })();
@@ -350,7 +342,6 @@ fn migrate_to_v8(conn: &Connection) -> Result<()> {
         drop_fts_table_if_column_exists(conn, "event_search", "work_record_id")?;
         drop_fts_table_if_column_exists(conn, "artifact_search", "work_record_id")?;
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 8;")?;
         Ok(())
     })();
@@ -379,7 +370,6 @@ fn migrate_to_v9(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 9;")?;
         Ok(())
     })();
@@ -401,7 +391,6 @@ fn migrate_to_v9(conn: &Connection) -> Result<()> {
 fn migrate_to_v10(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 10;")?;
         Ok(())
     })();
@@ -502,7 +491,6 @@ fn migrate_to_v14(conn: &Connection) -> Result<()> {
         rebuild_source_import_files_provider_check(conn)?;
         backfill_catalog_session_import_checkpoints(conn)?;
         create_stable_sql_views(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 14;")?;
         Ok(())
     })();
@@ -538,7 +526,6 @@ fn migrate_to_v15(conn: &Connection) -> Result<()> {
         rebuild_capture_sources_provider_check(conn)?;
         rebuild_catalog_sessions_provider_check(conn)?;
         rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 15;")?;
         Ok(())
@@ -575,7 +562,6 @@ fn migrate_to_v16(conn: &Connection) -> Result<()> {
         rebuild_capture_sources_provider_check(conn)?;
         rebuild_catalog_sessions_provider_check(conn)?;
         rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 16;")?;
         Ok(())
@@ -612,7 +598,6 @@ fn migrate_to_v42(conn: &Connection) -> Result<()> {
         rebuild_capture_sources_provider_check(conn)?;
         rebuild_catalog_sessions_provider_check(conn)?;
         rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 42;")?;
         Ok(())
@@ -648,7 +633,6 @@ fn migrate_to_v43(conn: &Connection) -> Result<()> {
         if stable_sql_views_exist(conn)? {
             drop_stable_sql_views(conn)?;
         }
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 43;")?;
         Ok(())
@@ -686,7 +670,6 @@ fn migrate_to_v44(conn: &Connection) -> Result<()> {
         drop_fts_table_if_exists(conn, "event_search")?;
         drop_fts_table_if_exists(conn, "artifact_search")?;
         create_fts_tables_if_supported(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 44;")?;
         Ok(())
@@ -723,7 +706,6 @@ fn migrate_to_v46(conn: &Connection) -> Result<()> {
         rebuild_capture_sources_provider_check(conn)?;
         rebuild_catalog_sessions_provider_check(conn)?;
         rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 46;")?;
         Ok(())
@@ -768,7 +750,6 @@ pub(super) fn migrate_import_outcomes_to_v48(conn: &Connection) -> Result<()> {
         )?;
         widen_import_outcome_checks(conn)?;
         install_schema_writer_fence(conn, 48)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 48;")?;
         Ok(())
@@ -893,7 +874,6 @@ pub(super) fn migrate_provider_publication_to_v51(conn: &Connection) -> Result<(
             drop_stable_sql_views(conn)?;
         }
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch(
             "INSERT OR IGNORE INTO semantic_replacement_revision (singleton, current_revision) VALUES (1, 0);\
