@@ -3,7 +3,7 @@ use std::{
     fmt,
 };
 
-use ring::constant_time;
+use ring::hmac;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -28,6 +28,20 @@ pub(crate) const SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS: usize =
 pub(crate) const SEMANTIC_QUERY_MAX_HITS_PER_CLAUSE: usize =
     SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
 pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_HITS: usize = SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
+
+const AUTHENTICATION_TOKEN_CONTEXT: &[u8] = b"ctx local query authentication v1";
+
+pub(super) fn authentication_tokens_match(supplied: &str, expected: &str) -> bool {
+    let supplied_key = hmac::Key::new(hmac::HMAC_SHA256, supplied.as_bytes());
+    let supplied_tag = hmac::sign(&supplied_key, AUTHENTICATION_TOKEN_CONTEXT);
+    let expected_key = hmac::Key::new(hmac::HMAC_SHA256, expected.as_bytes());
+    hmac::verify(
+        &expected_key,
+        AUTHENTICATION_TOKEN_CONTEXT,
+        supplied_tag.as_ref(),
+    )
+    .is_ok()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,13 +101,7 @@ impl SemanticQueryServiceRequest {
         expected_token: &str,
         expected_model_key: &str,
     ) -> Result<AuthenticatedSemanticQueryRequest, SemanticQueryContractError> {
-        if expected_token.is_empty()
-            || constant_time::verify_slices_are_equal(
-                self.token.as_bytes(),
-                expected_token.as_bytes(),
-            )
-            .is_err()
-        {
+        if expected_token.is_empty() || !authentication_tokens_match(&self.token, expected_token) {
             return Err(SemanticQueryContractError::new(
                 SemanticQueryFailureCode::AuthenticationFailed,
                 "semantic query authentication failed",

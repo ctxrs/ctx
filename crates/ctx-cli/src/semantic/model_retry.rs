@@ -129,7 +129,7 @@ impl SemanticModelRetryState {
         now_ms: i64,
         policy: SemanticModelRetryPolicy,
     ) -> Result<SemanticModelRetryEligibility, SemanticModelRetryPolicyError> {
-        let policy = policy.validate()?;
+        policy.validate()?;
         let Some(failure) = self.last_failure.as_ref() else {
             return Ok(SemanticModelRetryEligibility::Eligible {
                 attempt: self.attempt.saturating_add(1),
