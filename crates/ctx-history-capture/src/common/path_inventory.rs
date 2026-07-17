@@ -25,6 +25,7 @@ pub struct BoundedSourcePathInventory {
     storage: Option<PathInventoryStorage>,
     pending_paths: Vec<(Vec<u8>, Vec<u8>)>,
     metrics: SortedPathInventoryMetrics,
+    restart_required: bool,
 }
 
 #[derive(Debug, Default)]
@@ -50,6 +51,7 @@ impl BoundedSourcePathInventory {
             storage: None,
             pending_paths: Vec::with_capacity(PATH_INSERT_BATCH),
             metrics: SortedPathInventoryMetrics::default(),
+            restart_required: false,
         }
     }
 
@@ -59,6 +61,7 @@ impl BoundedSourcePathInventory {
             storage: None,
             pending_paths: Vec::with_capacity(PATH_INSERT_BATCH),
             metrics: SortedPathInventoryMetrics::default(),
+            restart_required: false,
         }
     }
 
@@ -70,6 +73,9 @@ impl BoundedSourcePathInventory {
         &mut self,
         budget: FilesystemTraversalBudget,
     ) -> Result<SourcePathInventorySlice> {
+        if self.restart_required {
+            self.restart_after_traversal_failure()?;
+        }
         if self.storage.is_none() {
             self.storage = Some(PathInventoryStorage::create()?);
             return Ok(SourcePathInventorySlice::default());
@@ -86,7 +92,7 @@ impl BoundedSourcePathInventory {
             Err(error) => {
                 if self.cursor.error_recovery() == FilesystemTraversalErrorRecovery::RestartRequired
                 {
-                    self.restart_after_traversal_failure()?;
+                    self.restart_required = true;
                 }
                 return Err(error);
             }
@@ -133,6 +139,7 @@ impl BoundedSourcePathInventory {
         self.storage = Some(replacement);
         self.pending_paths.clear();
         self.metrics = SortedPathInventoryMetrics::default();
+        self.restart_required = false;
         Ok(())
     }
 
@@ -595,17 +602,18 @@ mod tests {
 
     #[test]
     fn bounded_inventory_restarts_after_an_indeterminate_directory_read() {
-        use crate::common::io::{inject_traversal_failure_once, TraversalFailurePoint};
+        use crate::common::io::{inject_traversal_failure_after, TraversalFailurePoint};
 
         let temp = tempfile::tempdir().unwrap();
         let mut expected = Vec::new();
-        for index in 0..17 {
+        for index in 0..193 {
             let path = temp.path().join(format!("path-{index:04}.jsonl"));
             fs::write(&path, "{}\n").unwrap();
             expected.push(path);
         }
         expected.sort();
         let mut inventory = BoundedSourcePathInventory::new_jsonl(temp.path());
+        assert!(!inventory.advance().unwrap().complete);
         assert!(!inventory.advance().unwrap().complete);
         let first_scratch = inventory
             .storage
@@ -614,9 +622,26 @@ mod tests {
             ._scratch
             .path()
             .to_path_buf();
-        inject_traversal_failure_once(TraversalFailurePoint::AfterReadDirectoryEntry);
+        let persisted_before_failure = inventory
+            .storage
+            .as_ref()
+            .unwrap()
+            .connection
+            .query_row("SELECT COUNT(*) FROM paths", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap();
+        assert!(persisted_before_failure > 0);
+        inject_traversal_failure_after(TraversalFailurePoint::AfterReadDirectoryEntry, 2);
 
         assert!(inventory.advance().is_err());
+        assert!(inventory.restart_required);
+        assert!(!inventory.pending_paths.is_empty());
+        assert_eq!(
+            inventory.storage.as_ref().unwrap()._scratch.path(),
+            first_scratch
+        );
+        assert!(!inventory.advance().unwrap().complete);
         let restarted_scratch = inventory
             .storage
             .as_ref()
@@ -627,10 +652,21 @@ mod tests {
         assert_ne!(restarted_scratch, first_scratch);
         while !inventory.advance().unwrap().complete {}
 
-        let page = inventory.paths_page(None, PATH_INSERT_BATCH).unwrap();
-        assert!(page.complete);
-        assert_eq!(page.paths, expected);
-        assert_eq!(inventory.metrics().discovered_files, 17);
+        let mut cursor = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = inventory
+                .paths_page(cursor.as_deref(), PATH_INSERT_BATCH)
+                .unwrap();
+            observed.extend(page.paths);
+            cursor = page.next_cursor;
+            if page.complete {
+                break;
+            }
+        }
+        assert_eq!(observed, expected);
+        assert!(observed.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(inventory.metrics().discovered_files, 193);
     }
 
     #[test]

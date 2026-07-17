@@ -71,40 +71,57 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scratch_cleanup_rejects_a_renamed_run_replaced_by_a_symlink() {
+    fn scratch_cleanup_handoff_does_not_delete_a_swapped_live_run() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("scratch");
-        let scratch = CaptureScratchSpace::create_in(root, "tamper").unwrap();
-        let scratch_path = scratch.path().to_path_buf();
-        for index in 0..(SCRATCH_DELETE_FILES_PER_PAGE + 8) {
-            fs::write(
-                scratch_path.join(format!("payload-{index:03}.bin")),
-                b"private scratch data",
-            )
-            .unwrap();
-        }
-        let moved_path = temp.path().join("moved-run");
-        let replacement_target = temp.path().join("replacement-target");
-        fs::create_dir(&replacement_target).unwrap();
-        let sentinel = replacement_target.join("sentinel");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        let replacement = create_abandoned_run(&root, 1);
+        let sentinel = replacement.join("sentinel");
         fs::write(&sentinel, b"must survive").unwrap();
-        inject_scratch_cleanup_tamper_once(1, moved_path.clone(), replacement_target.clone());
+        let replacement_lease = open_private_regular_file(&replacement.join(LEASE_NAME)).unwrap();
+        FileExt::lock_exclusive(&replacement_lease).unwrap();
+        let run = UnixScratchRun::open(&target).unwrap();
+        let target_lease = run.open_lease().unwrap().unwrap();
+        FileExt::lock_exclusive(&target_lease).unwrap();
+        let moved_target = root.join("handoff-original");
+        fs::rename(&target, &moved_target).unwrap();
+        fs::rename(&replacement, &target).unwrap();
 
-        let error = remove_private_scratch_run(&scratch_path).unwrap_err();
+        let error = remove_anchored_scratch_run(&run, &target).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("changed identity"));
-        assert!(fs::read_dir(&moved_path).unwrap().next().is_some());
-        assert!(scratch_path
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(fs::read(sentinel).unwrap(), b"must survive");
-        fs::remove_file(&scratch_path).unwrap();
-        fs::rename(&moved_path, &scratch_path).unwrap();
-        drop(scratch);
-        assert!(!scratch_path.exists());
+        assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"must survive");
+        assert!(moved_target.join(OWNER_NAME).exists());
+        FileExt::unlock(&target_lease).unwrap();
+        FileExt::unlock(&replacement_lease).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_finalization_does_not_report_success_after_final_rmdir_swap() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        let replacement = root.join("empty-replacement");
+        create_private_directory(&replacement).unwrap();
+        let run = UnixScratchRun::open(&target).unwrap();
+        let target_lease = run.open_lease().unwrap().unwrap();
+        FileExt::lock_exclusive(&target_lease).unwrap();
+        let moved_target = root.join("finalization-original");
+        inject_scratch_finalization_swap_once(moved_target.clone(), replacement);
+
+        let error = remove_anchored_scratch_run(&run, &target).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("did not unlink the anchored run"));
+        assert!(!target.exists());
+        assert!(moved_target.is_dir());
+        assert_eq!(fs::read_dir(&moved_target).unwrap().count(), 0);
+        FileExt::unlock(&target_lease).unwrap();
     }
 
     #[cfg(unix)]

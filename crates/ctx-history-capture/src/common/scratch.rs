@@ -76,10 +76,10 @@ impl CaptureScratchSpace {
             return;
         };
         if let Some(lease) = self.lease.take() {
+            let _ = cleanup_owned_scratch_run(&self.path, &lease);
             let _ = FileExt::unlock(&lease);
             drop(lease);
         }
-        let _ = remove_private_scratch_run(&self.path);
     }
 }
 
@@ -281,27 +281,9 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
             continue;
         }
         let path = run_path(root, run_id);
-        match validate_scratch_run_directory(&path) {
-            Ok(()) => {}
+        match cleanup_abandoned_scratch_run(&path) {
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        }
-        let lease_path = path.join(LEASE_NAME);
-        let lease = match open_private_regular_file(&lease_path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                remove_private_scratch_run(&path)?;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        match FileExt::try_lock_exclusive(&lease) {
-            Ok(()) => {
-                FileExt::unlock(&lease)?;
-                drop(lease);
-                remove_private_scratch_run(&path)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
         }
     }
@@ -309,10 +291,78 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
+fn cleanup_owned_scratch_run(path: &Path, lease: &File) -> io::Result<()> {
     let run = UnixScratchRun::open(path)?;
+    run.validate_held_lease(lease)?;
+    remove_anchored_scratch_run(&run, path)
+}
+
+#[cfg(windows)]
+fn cleanup_owned_scratch_run(path: &Path, lease: &File) -> io::Result<()> {
+    let run = WindowsScratchRun::open(path)?;
+    run.validate_held_lease(path, lease)?;
+    remove_anchored_scratch_run(&run, path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn cleanup_owned_scratch_run(_path: &Path, _lease: &File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private capture scratch is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn cleanup_abandoned_scratch_run(path: &Path) -> io::Result<bool> {
+    let run = UnixScratchRun::open(path)?;
+    let Some(lease) = run.open_lease()? else {
+        remove_anchored_scratch_run(&run, path)?;
+        return Ok(true);
+    };
+    match FileExt::try_lock_exclusive(&lease) {
+        Ok(()) => {
+            let removal = remove_anchored_scratch_run(&run, path);
+            let unlock = FileExt::unlock(&lease);
+            removal?;
+            unlock?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn cleanup_abandoned_scratch_run(path: &Path) -> io::Result<bool> {
+    let run = WindowsScratchRun::open(path)?;
+    let Some(lease) = run.open_lease(path)? else {
+        remove_anchored_scratch_run(&run, path)?;
+        return Ok(true);
+    };
+    match FileExt::try_lock_exclusive(&lease) {
+        Ok(()) => {
+            let removal = remove_anchored_scratch_run(&run, path);
+            let unlock = FileExt::unlock(&lease);
+            removal?;
+            unlock?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn cleanup_abandoned_scratch_run(_path: &Path) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private capture scratch is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn remove_anchored_scratch_run(run: &UnixScratchRun, path: &Path) -> io::Result<()> {
     loop {
-        maybe_tamper_scratch_cleanup(path)?;
         if run.remove_page(path)? {
             return Ok(());
         }
@@ -321,22 +371,13 @@ fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
-    let run = WindowsScratchRun::open(path)?;
+fn remove_anchored_scratch_run(run: &WindowsScratchRun, path: &Path) -> io::Result<()> {
     loop {
         if run.remove_page(path)? {
             return Ok(());
         }
         std::thread::yield_now();
     }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn remove_private_scratch_run(_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "private capture scratch is unsupported on this platform",
-    ))
 }
 
 #[cfg(any(unix, windows))]
@@ -398,13 +439,62 @@ impl UnixScratchRun {
         }
         let directory = unsafe { File::from_raw_fd(descriptor) };
         validate_private_directory_handle(&directory)?;
-        let identity = scratch_directory_identity(&directory)?;
+        let identity = scratch_handle_identity(&directory)?;
         Ok(Self {
             parent,
             directory,
             name,
             identity,
         })
+    }
+
+    fn open_lease(&self) -> io::Result<Option<File>> {
+        match self.open_relative_file(LEASE_NAME) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn validate_held_lease(&self, lease: &File) -> io::Result<()> {
+        let anchored = self.open_lease()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch lease disappeared before cleanup",
+            )
+        })?;
+        if scratch_handle_identity(&anchored)? != scratch_handle_identity(lease)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch lease changed identity before cleanup",
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_relative_file(&self, name: &str) -> io::Result<File> {
+        use std::os::unix::{ffi::OsStrExt, io::AsRawFd, io::FromRawFd};
+
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch file name contains an invalid byte",
+            )
+        })?;
+        crate::pace_current_filesystem_operation(name.as_bytes().len() as u64);
+        let descriptor = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        validate_private_file_handle(&file)?;
+        Ok(file)
     }
 
     fn remove_page(&self, path: &Path) -> io::Result<bool> {
@@ -472,26 +562,14 @@ impl UnixScratchRun {
             self.revalidate(path)?;
             return Ok(false);
         }
-        self.revalidate(path)?;
-        pace_filesystem_path(path);
-        if unsafe {
-            libc::unlinkat(
-                self.parent.as_raw_fd(),
-                self.name.as_ptr(),
-                libc::AT_REMOVEDIR,
-            )
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(true)
+        self.finalize(path)
     }
 
     fn revalidate(&self, path: &Path) -> io::Result<()> {
         use std::os::unix::io::AsRawFd;
 
         pace_filesystem_path(path);
-        if scratch_directory_identity(&self.directory)? != self.identity {
+        if scratch_handle_identity(&self.directory)? != self.identity {
             return Err(scratch_directory_changed_error());
         }
         pace_filesystem_path(path);
@@ -525,10 +603,11 @@ impl UnixScratchRun {
         use std::os::unix::{io::AsRawFd, io::FromRawFd};
 
         pace_filesystem_path(path);
+        let current = b".\0";
         let descriptor = unsafe {
             libc::openat(
-                self.parent.as_raw_fd(),
-                self.name.as_ptr(),
+                self.directory.as_raw_fd(),
+                current.as_ptr().cast(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
             )
         };
@@ -537,10 +616,90 @@ impl UnixScratchRun {
         }
         let directory = unsafe { File::from_raw_fd(descriptor) };
         validate_private_directory_handle(&directory)?;
-        if scratch_directory_identity(&directory)? != self.identity {
+        if scratch_handle_identity(&directory)? != self.identity {
             return Err(scratch_directory_changed_error());
         }
         Ok(directory)
+    }
+
+    fn finalize(&self, path: &Path) -> io::Result<bool> {
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt, io::AsRawFd};
+
+        self.revalidate(path)?;
+        let quarantine =
+            std::ffi::CString::new(format!(".ctx-cleanup-{}", uuid::Uuid::new_v4().simple()))
+                .map_err(|_| io::Error::other("capture scratch quarantine name is invalid"))?;
+        let quarantine_path =
+            path.with_file_name(std::ffi::OsStr::from_bytes(quarantine.as_bytes()));
+        pace_filesystem_path(&quarantine_path);
+        rename_scratch_entry_no_replace(self.parent.as_raw_fd(), &self.name, &quarantine)?;
+        if self.identity_at(&quarantine)? != self.identity {
+            let restore = unsafe {
+                libc::renameat(
+                    self.parent.as_raw_fd(),
+                    quarantine.as_ptr(),
+                    self.parent.as_raw_fd(),
+                    self.name.as_ptr(),
+                )
+            };
+            if restore != 0 {
+                return Err(io::Error::other(format!(
+                    "capture scratch finalization found a substituted run and could not restore it: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            return Err(scratch_directory_changed_error());
+        }
+        if self.identity_at(&quarantine)? != self.identity {
+            return Err(scratch_directory_changed_error());
+        }
+        maybe_swap_scratch_before_final_unlink(&quarantine_path)?;
+        pace_filesystem_path(&quarantine_path);
+        if unsafe {
+            libc::unlinkat(
+                self.parent.as_raw_fd(),
+                quarantine.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        crate::pace_current_filesystem_operation(0);
+        if self.directory.metadata()?.nlink() != 0 {
+            return Err(io::Error::other(
+                "capture scratch finalization did not unlink the anchored run",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn identity_at(&self, name: &std::ffi::CStr) -> io::Result<ScratchDirectoryIdentity> {
+        use std::os::unix::io::AsRawFd;
+
+        crate::pace_current_filesystem_operation(name.to_bytes().len() as u64);
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::zeroed();
+        if unsafe {
+            libc::fstatat(
+                self.parent.as_raw_fd(),
+                name.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_uid != unsafe { libc::geteuid() }
+        {
+            return Err(scratch_directory_changed_error());
+        }
+        Ok(ScratchDirectoryIdentity {
+            device: u64::try_from(metadata.st_dev).unwrap_or(u64::MAX),
+            inode: u64::try_from(metadata.st_ino).unwrap_or(u64::MAX),
+        })
     }
 }
 
@@ -556,6 +715,44 @@ impl Drop for UnixDirectoryStream {
     }
 }
 
+#[cfg(unix)]
+fn rename_scratch_entry_no_replace(
+    parent: std::os::unix::io::RawFd,
+    source: &std::ffi::CStr,
+    destination: &std::ffi::CStr,
+) -> io::Result<()> {
+    crate::pace_current_filesystem_operations(
+        2,
+        source
+            .to_bytes()
+            .len()
+            .saturating_add(destination.to_bytes().len()) as u64,
+    );
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    let destination_status = unsafe {
+        libc::fstatat(
+            parent,
+            destination.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if destination_status == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "capture scratch quarantine already exists",
+        ));
+    }
+    let destination_error = io::Error::last_os_error();
+    if destination_error.kind() != io::ErrorKind::NotFound {
+        return Err(destination_error);
+    }
+    if unsafe { libc::renameat(parent, source.as_ptr(), parent, destination.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 struct WindowsScratchRun {
     directory: File,
@@ -567,11 +764,39 @@ impl WindowsScratchRun {
     fn open(path: &Path) -> io::Result<Self> {
         let directory = open_existing_directory_for_cleanup(path)?;
         validate_private_directory_handle(&directory)?;
-        let identity = scratch_directory_identity(&directory)?;
+        let identity = scratch_handle_identity(&directory)?;
         Ok(Self {
             directory,
             identity,
         })
+    }
+
+    fn open_lease(&self, path: &Path) -> io::Result<Option<File>> {
+        self.revalidate(path)?;
+        let lease_path = path.join(LEASE_NAME);
+        let lease = match open_private_regular_file(&lease_path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        self.revalidate(path)?;
+        Ok(lease)
+    }
+
+    fn validate_held_lease(&self, path: &Path, lease: &File) -> io::Result<()> {
+        let anchored = self.open_lease(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch lease disappeared before cleanup",
+            )
+        })?;
+        if scratch_handle_identity(&anchored)? != scratch_handle_identity(lease)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch lease changed identity before cleanup",
+            ));
+        }
+        Ok(())
     }
 
     fn remove_page(&self, path: &Path) -> io::Result<bool> {
@@ -616,8 +841,8 @@ impl WindowsScratchRun {
     fn revalidate(&self, path: &Path) -> io::Result<()> {
         let current = open_existing_directory_no_follow(path)?;
         validate_private_directory_handle(&current)?;
-        if scratch_directory_identity(&self.directory)? != self.identity
-            || scratch_directory_identity(&current)? != self.identity
+        if scratch_handle_identity(&self.directory)? != self.identity
+            || scratch_handle_identity(&current)? != self.identity
         {
             return Err(scratch_directory_changed_error());
         }
@@ -634,63 +859,41 @@ fn scratch_directory_changed_error() -> io::Error {
 }
 
 #[cfg(all(test, unix))]
-struct ScratchCleanupTamper {
-    pages_before_tamper: usize,
+struct ScratchFinalizationSwap {
     moved_path: PathBuf,
-    replacement_target: PathBuf,
+    replacement_path: PathBuf,
 }
 
 #[cfg(all(test, unix))]
 thread_local! {
-    static SCRATCH_CLEANUP_TAMPER_ONCE: std::cell::RefCell<Option<ScratchCleanupTamper>> = const {
+    static SCRATCH_FINALIZATION_SWAP_ONCE: std::cell::RefCell<Option<ScratchFinalizationSwap>> = const {
         std::cell::RefCell::new(None)
     };
 }
 
 #[cfg(all(test, unix))]
-fn inject_scratch_cleanup_tamper_once(
-    pages_before_tamper: usize,
-    moved_path: PathBuf,
-    replacement_target: PathBuf,
-) {
-    SCRATCH_CLEANUP_TAMPER_ONCE.with(|slot| {
-        *slot.borrow_mut() = Some(ScratchCleanupTamper {
-            pages_before_tamper,
+fn inject_scratch_finalization_swap_once(moved_path: PathBuf, replacement_path: PathBuf) {
+    SCRATCH_FINALIZATION_SWAP_ONCE.with(|slot| {
+        *slot.borrow_mut() = Some(ScratchFinalizationSwap {
             moved_path,
-            replacement_target,
+            replacement_path,
         });
     });
 }
 
 #[cfg(all(test, unix))]
-fn maybe_tamper_scratch_cleanup(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::symlink;
-
-    let tamper = SCRATCH_CLEANUP_TAMPER_ONCE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(tamper) = slot.as_mut() else {
-            return None;
-        };
-        if tamper.pages_before_tamper > 0 {
-            tamper.pages_before_tamper -= 1;
-            return None;
-        }
-        slot.take()
-    });
-    let Some(tamper) = tamper else {
+fn maybe_swap_scratch_before_final_unlink(path: &Path) -> io::Result<()> {
+    let swap = SCRATCH_FINALIZATION_SWAP_ONCE.with(|slot| slot.borrow_mut().take());
+    let Some(swap) = swap else {
         return Ok(());
     };
-    fs::rename(path, &tamper.moved_path)?;
-    symlink(tamper.replacement_target, path)
+    fs::rename(path, &swap.moved_path)?;
+    fs::rename(swap.replacement_path, path)
 }
 
 #[cfg(all(unix, not(test)))]
-fn maybe_tamper_scratch_cleanup(_path: &Path) -> io::Result<()> {
+fn maybe_swap_scratch_before_final_unlink(_path: &Path) -> io::Result<()> {
     Ok(())
-}
-
-fn validate_scratch_run_directory(path: &Path) -> io::Result<()> {
-    validate_private_directory(path)
 }
 
 fn validate_private_directory(path: &Path) -> io::Result<()> {
@@ -747,7 +950,7 @@ fn validate_private_file_handle(file: &File) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn scratch_directory_identity(directory: &File) -> io::Result<ScratchDirectoryIdentity> {
+fn scratch_handle_identity(directory: &File) -> io::Result<ScratchDirectoryIdentity> {
     use std::os::unix::fs::MetadataExt;
 
     crate::pace_current_filesystem_operation(0);
@@ -759,7 +962,7 @@ fn scratch_directory_identity(directory: &File) -> io::Result<ScratchDirectoryId
 }
 
 #[cfg(windows)]
-fn scratch_directory_identity(directory: &File) -> io::Result<ScratchDirectoryIdentity> {
+fn scratch_handle_identity(directory: &File) -> io::Result<ScratchDirectoryIdentity> {
     use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
         FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
