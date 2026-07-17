@@ -7,6 +7,7 @@ mod v47_provider_session_repair_tests;
 use crate::schema::ddl::{
     ensure_columns, table_exists, table_has_column, CAPTURE_SOURCE_IDENTITY_COLUMNS,
     CATALOG_SESSION_IMPORT_STATE_COLUMNS, CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
+    LEGACY_CATALOG_IMPORT_REVISION_COLUMNS, LEGACY_SOURCE_IMPORT_REVISION_COLUMNS,
     SOURCE_IMPORT_FILE_STATE_COLUMNS,
 };
 use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
@@ -22,6 +23,7 @@ use crate::schema::scriptgram::migrate_to_v45;
 use crate::schema::views::{
     create_stable_sql_views, drop_stable_sql_views, stable_sql_views_exist,
 };
+use crate::schema::writer_fence::install_schema_writer_fence;
 use crate::search::projections::{
     mark_search_projection_rebuild_required,
     trust_existing_search_projection_if_not_rebuild_pending,
@@ -757,14 +759,15 @@ pub(super) fn migrate_import_outcomes_to_v48(conn: &Connection) -> Result<()> {
         ensure_columns(
             conn,
             "catalog_sessions",
-            CATALOG_SESSION_IMPORT_STATE_COLUMNS,
+            LEGACY_CATALOG_IMPORT_REVISION_COLUMNS,
         )?;
         ensure_columns(
             conn,
             "source_import_files",
-            SOURCE_IMPORT_FILE_STATE_COLUMNS,
+            LEGACY_SOURCE_IMPORT_REVISION_COLUMNS,
         )?;
         widen_import_outcome_checks(conn)?;
+        install_schema_writer_fence(conn, 48)?;
         conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 48;")?;
@@ -1013,22 +1016,10 @@ pub(super) fn migrate_fresh_scheduling_to_v52(conn: &Connection) -> Result<()> {
             )?;
         }
         if !table_has_column(conn, "catalog_sessions", "pending_reason")? {
-            conn.execute_batch(
-                "ALTER TABLE catalog_sessions ADD COLUMN pending_reason TEXT \
-                 CHECK (pending_reason IS NULL OR pending_reason IN \
-                 ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', \
-                  'recovery_replacement', 'parser_revision', 'missing_material', \
-                  'abandoned_publication', 'legacy', 'explicit_rescan'));",
-            )?;
+            conn.execute_batch("ALTER TABLE catalog_sessions ADD COLUMN pending_reason TEXT;")?;
         }
         if !table_has_column(conn, "source_import_files", "pending_reason")? {
-            conn.execute_batch(
-                "ALTER TABLE source_import_files ADD COLUMN pending_reason TEXT \
-                 CHECK (pending_reason IS NULL OR pending_reason IN \
-                 ('fresh_new', 'fresh_changed', 'fresh_append', 'recovery_retry', \
-                  'recovery_replacement', 'parser_revision', 'missing_material', \
-                 'abandoned_publication', 'legacy', 'explicit_rescan'));",
-            )?;
+            conn.execute_batch("ALTER TABLE source_import_files ADD COLUMN pending_reason TEXT;")?;
         }
         conn.execute_batch(
             r#"

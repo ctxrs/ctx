@@ -8,6 +8,7 @@ pub(crate) mod scriptgram;
 #[cfg(test)]
 mod tests;
 pub(crate) mod views;
+pub(crate) mod writer_fence;
 
 use rusqlite::Connection;
 

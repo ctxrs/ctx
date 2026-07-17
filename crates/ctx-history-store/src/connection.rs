@@ -279,6 +279,7 @@ struct WalCheckpointOutcome {
 
 pub(crate) fn configure_connection(conn: &Connection, busy_timeout: Duration) -> Result<()> {
     conn.busy_timeout(busy_timeout)?;
+    crate::schema::writer_fence::register_schema_writer_version(conn)?;
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
@@ -365,6 +366,7 @@ pub(crate) fn configure_read_only_connection(
     busy_timeout: Duration,
 ) -> Result<()> {
     conn.busy_timeout(busy_timeout)?;
+    crate::schema::writer_fence::register_schema_writer_version(conn)?;
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
