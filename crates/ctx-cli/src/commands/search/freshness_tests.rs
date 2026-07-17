@@ -2,10 +2,10 @@
 mod freshness_tests {
     use super::*;
     use crate::commands::import::{
-        inject_inventory_failure_once, repair_import_maintenance, run_import_internal,
-        ImportFailureType, ImportInventory, ImportInventoryFailures,
-        ImportMaintenancePendingReason, ImportMaintenanceStep, ImportRunOptions,
-        InventoryFailurePoint, NativeSourceReports,
+        inject_import_maintenance_progress_steps, inject_inventory_failure_once,
+        repair_import_maintenance, run_import_internal, ImportFailureType, ImportInventory,
+        ImportInventoryFailures, ImportMaintenancePendingReason, ImportMaintenanceStep,
+        ImportRunOptions, InventoryFailurePoint, NativeSourceReports,
     };
     use crate::provider_args::NativeProviderArg;
     use crate::provider_sources::explicit_path_source;
@@ -1920,6 +1920,98 @@ mod freshness_tests {
     }
 
     #[test]
+    fn drain_processes_healthy_recovery_tail_before_returning_blocked_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let healthy = seed_failed_pi_backlog(&data_root, 1);
+        let owner = write_pi_source(&data_root.join("pi-z-blocked-owner"), 1, "blocked-owner");
+        let baseline = refresh(
+            &data_root,
+            vec![owner.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+
+        let store = Store::open(database_path(data_root.clone())).unwrap();
+        let inventory =
+            inventory_import_sources(&store, vec![healthy.clone(), owner.clone()], false).unwrap();
+        let owner_plan = inventory
+            .sources
+            .iter()
+            .find(|planned| planned.source.path == owner.path)
+            .unwrap();
+        assert_eq!(
+            store
+                .schedule_source_import_explicit_rescan(
+                    owner.provider,
+                    owner.path.to_str().unwrap(),
+                    owner_plan.preinventory.inventory_generation().unwrap(),
+                )
+                .unwrap(),
+            1
+        );
+        let plan = ImportPlan::build(&store, inventory.sources).unwrap();
+        assert_eq!(plan.recovery_units, 2);
+        drop(store);
+
+        let mut totals = refresh(&data_root, vec![healthy], ImportExecutionPolicy::Drain);
+        assert_eq!(totals.recovery_units_processed, 1, "{totals:?}");
+
+        let mut store = Store::open(database_path(data_root.clone())).unwrap();
+        let owner_store = Store::open(database_path(data_root.clone())).unwrap();
+        let owner_scope = begin_unmutated_pi_publication(&owner_store, &owner);
+        let progress = ProgressReporter::new(ProgressArg::None, false, "search-refresh", 0);
+        let mut first_refresh_failure = None;
+        let mut imported_sources = BTreeSet::new();
+        let mut failed_sources = BTreeSet::new();
+        let mut inventory_failures = ImportInventoryFailures::new(Vec::new());
+        let mut failed_inventory_pending = (0, 0);
+        reset_search_reinventory_count();
+        let (final_plan, maintenance_complete, final_checkpoint_allowed) =
+            drain_search_refresh_to_fixed_point(
+                &mut store,
+                &plan,
+                &progress,
+                false,
+                true,
+                &mut totals,
+                &mut first_refresh_failure,
+                &mut imported_sources,
+                &mut failed_sources,
+                &mut inventory_failures,
+                &mut failed_inventory_pending,
+                true,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(totals.recovery_units_processed, 1, "{totals:?}");
+        assert!(totals.failed_sources > 0, "{totals:?}");
+        assert!(maintenance_complete);
+        assert!(!final_checkpoint_allowed);
+        assert!(
+            final_plan
+                .pending_count(&store, ImportWorkClass::Recovery)
+                .unwrap()
+                > 0
+        );
+        assert_eq!(search_reinventory_count(), 1, "{totals:?}");
+        assert_eq!(
+            failed_sources,
+            BTreeSet::from([crate::commands::import::ImportSourceIdentity::new(&owner)])
+        );
+        assert!(store.has_pending_provider_file_publications().unwrap());
+        let archive = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
+        assert!(archive.contains("recovery 0"), "{archive}");
+
+        let aborted = owner_store
+            .abort_provider_file_publication(owner_scope)
+            .unwrap();
+        assert!(matches!(aborted, std::ops::ControlFlow::Continue(_)));
+        assert!(drain_import_maintenance(&store).unwrap().is_complete());
+    }
+
+    #[test]
     fn native_reports_keep_source_identity_when_publication_owner_disappears() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
@@ -2790,9 +2882,53 @@ mod freshness_tests {
                 Some(crate::commands::import::DrainFixedPointBlocker::RetryableExternal),
             )
             .unwrap(),
-            crate::commands::import::DrainFixedPointAction::RetryableBlocked(
-                crate::commands::import::DrainFixedPointBlocker::RetryableExternal
+            crate::commands::import::DrainFixedPointAction::Reinventory
+        );
+        assert_eq!(
+            crate::commands::import::drain_fixed_point_action(
+                true,
+                true,
+                Some(
+                    crate::commands::import::DrainFixedPointBlocker::Maintenance(
+                        ImportMaintenancePendingReason::MaintenanceWriter,
+                    )
+                ),
             )
+            .unwrap(),
+            crate::commands::import::DrainFixedPointAction::RetryableBlocked(
+                crate::commands::import::DrainFixedPointBlocker::Maintenance(
+                    ImportMaintenancePendingReason::MaintenanceWriter,
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn drain_finishes_multi_page_maintenance_without_reinventorying_a_large_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let source = write_many_codex_sources(&data_root.join("codex-large"), 65, "maintenance");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+        assert_eq!(baseline.recovery_units_pending, 0, "{baseline:?}");
+
+        reset_search_reinventory_count();
+        inject_import_maintenance_progress_steps(3);
+        let totals = refresh(&data_root, vec![source], ImportExecutionPolicy::Drain);
+
+        assert!(totals.durable_progress, "{totals:?}");
+        assert_eq!(totals.fresh_units_processed, 0, "{totals:?}");
+        assert_eq!(totals.recovery_units_processed, 0, "{totals:?}");
+        assert_eq!(totals.fresh_units_pending, 0, "{totals:?}");
+        assert_eq!(totals.recovery_units_pending, 0, "{totals:?}");
+        assert_eq!(
+            search_reinventory_count(),
+            0,
+            "maintenance-only progress restarted inventory of the 65-session tree"
         );
     }
 }
