@@ -806,11 +806,7 @@ fn handle_daemon_query_stream_inner<S: std::io::Write>(
             .and_then(Value::as_str)
             .unwrap_or_default();
         if token.is_empty()
-            || ring::constant_time::verify_slices_are_equal(
-                supplied_token.as_bytes(),
-                token.as_bytes(),
-            )
-            .is_err()
+            || !query_service_contract::authentication_tokens_match(supplied_token, token)
         {
             return Err(anyhow!("daemon query authentication failed"));
         }
