@@ -8,12 +8,9 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,6 +26,8 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
     private static final long POLL_MILLIS = 5;
     private static final long DRAIN_GRACE_MILLIS = 100;
     private static final long TEARDOWN_MILLIS = 1_000;
+    private static final int WINDOWS_DRAIN_FAILURE_EXIT = 252;
+    private static final byte WINDOWS_LAUNCHER_ACK = 0x06;
     private final LocalCliConfig config;
     private final CommandRunner runner;
 
@@ -128,6 +127,16 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
                     false,
                     details,
                     cause);
+        } catch (CaptureCancelledException cause) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("command", command);
+            details.put("args", new ArrayList<>(args));
+            throw new CtxAgentHistoryException(
+                    "cancelled",
+                    "ctx CLI command was cancelled",
+                    false,
+                    details,
+                    cause);
         } catch (Exception cause) {
             throw cliError("ctx command could not be executed", args, new CommandResult("", "", -1), cause);
         }
@@ -202,6 +211,7 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
 
             Process process = builder.start();
             OwnedProcessScope scope = new OwnedProcessScope(process, launch.ownsProcessGroup);
+            if (!launch.windowsHandshake) close(process.getOutputStream());
             ExecutorService readers = Executors.newFixedThreadPool(2, runnable -> {
                 Thread thread = new Thread(runnable, "ctx-sdk-cli-capture");
                 thread.setDaemon(true);
@@ -211,58 +221,95 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
                     () -> readBounded(process.getInputStream(), "stdout", STDOUT_CAP_BYTES));
             Future<CapturedBytes> stderr = readers.submit(
                     () -> readBounded(process.getErrorStream(), "stderr", STDERR_CAP_BYTES));
-            long deadlineNanos = System.nanoTime()
-                    + TimeUnit.MILLISECONDS.toNanos(Math.max(1L, request.timeoutMillis()));
-            boolean timedOut = false;
-            Throwable captureFailure = null;
-            while (process.isAlive()) {
-                captureFailure = completedFailure(stdout);
-                if (captureFailure == null) captureFailure = completedFailure(stderr);
-                if (captureFailure != null) break;
-                if (System.nanoTime() >= deadlineNanos) {
-                    timedOut = true;
-                    break;
-                }
-                Thread.sleep(POLL_MILLIS);
-            }
-            if (timedOut || captureFailure != null) {
-                scope.terminate();
-                close(process.getInputStream());
-                close(process.getErrorStream());
-                finishReaders(readers, scope);
-                if (captureFailure != null) rethrowCapture(captureFailure);
-                return new CommandResult("", "ctx command timed out", -1);
-            }
-
-            CapturedBytes stdoutBytes;
-            CapturedBytes stderrBytes;
-            String stdoutText;
-            String stderrText;
             try {
-                stdoutBytes = stdout.get(DRAIN_GRACE_MILLIS, TimeUnit.MILLISECONDS);
-                stderrBytes = stderr.get(DRAIN_GRACE_MILLIS, TimeUnit.MILLISECONDS);
-                if (process.exitValue() != 0) scope.terminate();
-                stdoutText = decodeUtf8(stdoutBytes, "stdout");
-                stderrText = decodeUtf8(stderrBytes, "stderr");
-            } catch (CaptureFailureException error) {
+                long deadlineNanos = System.nanoTime()
+                        + TimeUnit.MILLISECONDS.toNanos(Math.max(1L, request.timeoutMillis()));
+                boolean timedOut = false;
+                boolean launcherAcknowledged = false;
+                Throwable captureFailure = null;
+                while (process.isAlive()) {
+                    captureFailure = completedFailure(stdout);
+                    if (captureFailure == null) captureFailure = completedFailure(stderr);
+                    if (captureFailure != null) break;
+                    if (launch.windowsHandshake
+                            && !launcherAcknowledged
+                            && stdout.isDone()
+                            && stderr.isDone()) {
+                        try {
+                            acknowledgeLauncher(process);
+                        } catch (IOException error) {
+                            scope.terminate();
+                            close(process.getInputStream());
+                            close(process.getErrorStream());
+                            finishReaders(readers, scope);
+                            throw new CaptureFailureException("pipe", error);
+                        }
+                        launcherAcknowledged = true;
+                    }
+                    if (System.nanoTime() >= deadlineNanos) {
+                        timedOut = true;
+                        break;
+                    }
+                    Thread.sleep(POLL_MILLIS);
+                }
+                if (timedOut || captureFailure != null) {
+                    scope.terminate();
+                    close(process.getInputStream());
+                    close(process.getErrorStream());
+                    finishReaders(readers, scope);
+                    if (captureFailure != null) rethrowCapture(captureFailure);
+                    return new CommandResult("", "ctx command timed out", -1);
+                }
+
+                CapturedBytes stdoutBytes;
+                CapturedBytes stderrBytes;
+                String stdoutText;
+                String stderrText;
+                try {
+                    stdoutBytes = stdout.get(DRAIN_GRACE_MILLIS, TimeUnit.MILLISECONDS);
+                    stderrBytes = stderr.get(DRAIN_GRACE_MILLIS, TimeUnit.MILLISECONDS);
+                    if (process.exitValue() != 0) scope.terminate();
+                    stdoutText = decodeUtf8(stdoutBytes, "stdout");
+                    stderrText = decodeUtf8(stderrBytes, "stderr");
+                } catch (CaptureFailureException error) {
+                    scope.terminate();
+                    throw error;
+                } catch (TimeoutException error) {
+                    scope.terminate();
+                    throw new CaptureFailureException("pipe", error);
+                } catch (ExecutionException error) {
+                    scope.terminate();
+                    rethrowCapture(error.getCause());
+                    throw new CaptureFailureException("pipe", error);
+                } finally {
+                    close(process.getInputStream());
+                    close(process.getErrorStream());
+                    finishReaders(readers, scope);
+                }
+                if (launch.windowsHandshake && process.exitValue() == WINDOWS_DRAIN_FAILURE_EXIT) {
+                    throw new CaptureFailureException(
+                            "pipe", new IOException("a descendant retained a CLI output pipe"));
+                }
+                return new CommandResult(
+                        stdoutText,
+                        stderrText,
+                        process.exitValue());
+            } catch (InterruptedException error) {
+                Thread.interrupted();
                 scope.terminate();
-                throw error;
-            } catch (TimeoutException error) {
-                scope.terminate();
-                throw new CaptureFailureException("pipe", error);
-            } catch (ExecutionException error) {
-                scope.terminate();
-                rethrowCapture(error.getCause());
-                throw new CaptureFailureException("pipe", error);
-            } finally {
                 close(process.getInputStream());
                 close(process.getErrorStream());
-                finishReaders(readers, scope);
+                close(process.getOutputStream());
+                finishReadersAfterInterruption(readers, scope);
+                Thread.currentThread().interrupt();
+                throw new CaptureCancelledException(error);
             }
-            return new CommandResult(
-                    stdoutText,
-                    stderrText,
-                    process.exitValue());
+        }
+
+        private static void acknowledgeLauncher(Process process) throws IOException {
+            process.getOutputStream().write(WINDOWS_LAUNCHER_ACK);
+            process.getOutputStream().flush();
+            close(process.getOutputStream());
         }
 
         private static CapturedBytes readBounded(InputStream stream, String name, int capBytes)
@@ -286,14 +333,15 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
             return new CapturedBytes(output, captured);
         }
 
-        private static Throwable completedFailure(Future<CapturedBytes> future) {
+        private static Throwable completedFailure(Future<CapturedBytes> future)
+                throws InterruptedException {
             if (!future.isDone()) return null;
             try {
                 future.get();
                 return null;
             } catch (ExecutionException error) {
                 return error.getCause();
-            } catch (Exception error) {
+            } catch (java.util.concurrent.CancellationException error) {
                 return error;
             }
         }
@@ -324,15 +372,39 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
             }
         }
 
-        private static void finishReaders(ExecutorService readers, OwnedProcessScope scope) {
+        private static void close(java.io.OutputStream stream) {
+            try {
+                stream.close();
+            } catch (IOException ignored) {
+                // The process scope has already been terminated.
+            }
+        }
+
+        private static void finishReaders(ExecutorService readers, OwnedProcessScope scope)
+                throws InterruptedException {
+            scope.terminate();
             readers.shutdownNow();
             try {
                 readers.awaitTermination(TEARDOWN_MILLIS, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
             } finally {
                 scope.close();
             }
+        }
+
+        private static void finishReadersAfterInterruption(
+                ExecutorService readers, OwnedProcessScope scope) {
+            scope.terminate();
+            readers.shutdownNow();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TEARDOWN_MILLIS);
+            while (!readers.isTerminated() && System.nanoTime() < deadline) {
+                try {
+                    long remaining = Math.max(1L, deadline - System.nanoTime());
+                    readers.awaitTermination(remaining, TimeUnit.NANOSECONDS);
+                } catch (InterruptedException ignored) {
+                    Thread.interrupted();
+                }
+            }
+            scope.close();
         }
 
         private static final class CapturedBytes {
@@ -346,28 +418,70 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
         }
 
         private static final class ProcessLaunch {
+            private static final String LAUNCHER_ARG = "__ctx_sdk_process_scope_v1";
+            private static final String LAUNCHER_ENV = "CTX_SDK_PROCESS_SCOPE_LAUNCHER";
             private static final String[] SETSID_PATHS = {"/usr/bin/setsid", "/bin/setsid"};
             private final List<String> command;
             private final boolean ownsProcessGroup;
+            private final boolean windowsHandshake;
 
-            private ProcessLaunch(List<String> command, boolean ownsProcessGroup) {
+            private ProcessLaunch(
+                    List<String> command,
+                    boolean ownsProcessGroup,
+                    boolean windowsHandshake) {
                 this.command = command;
                 this.ownsProcessGroup = ownsProcessGroup;
+                this.windowsHandshake = windowsHandshake;
             }
 
-            static ProcessLaunch forRequest(CommandRequest request) {
+            static ProcessLaunch forRequest(CommandRequest request)
+                    throws CaptureFailureException {
                 List<String> command = new ArrayList<>();
                 String setsid = setsidPath();
+                String launcher = launcherPath(request);
+                if ((isWindows() && launcher == null)
+                        || (!isWindows() && setsid == null && launcher == null)) {
+                    throw new CaptureFailureException(
+                            "process_scope",
+                            new IOException("local CLI process containment is unavailable"));
+                }
                 if (setsid != null) {
                     command.add(setsid);
                 }
+                if (launcher != null) {
+                    command.add(launcher);
+                    command.add(LAUNCHER_ARG);
+                    command.add("--");
+                }
                 command.add(request.command());
                 command.addAll(request.args());
-                return new ProcessLaunch(command, setsid != null);
+                boolean windowsHandshake = launcher != null && isWindows();
+                boolean ownsProcessGroup = !isWindows();
+                return new ProcessLaunch(command, ownsProcessGroup, windowsHandshake);
+            }
+
+            private static String launcherPath(CommandRequest request) {
+                String override = request.env().get(LAUNCHER_ENV);
+                if (override == null || override.isEmpty()) override = System.getenv(LAUNCHER_ENV);
+                if (override != null && !override.isEmpty()) return override;
+                String name = new File(request.command()).getName().toLowerCase(java.util.Locale.ROOT);
+                if (name.equals("ctx")
+                        || name.equals("ctx.exe")
+                        || name.startsWith("ctx-")
+                        || name.startsWith("ctx_")) {
+                    return request.command();
+                }
+                return null;
+            }
+
+            private static boolean isWindows() {
+                return System.getProperty("os.name", "")
+                        .toLowerCase(java.util.Locale.ROOT)
+                        .contains("win");
             }
 
             private static String setsidPath() {
-                if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")) {
+                if (isWindows()) {
                     return null;
                 }
                 for (String path : SETSID_PATHS) {
@@ -381,30 +495,16 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
     private static final class OwnedProcessScope implements AutoCloseable {
         private final Process process;
         private final boolean ownsProcessGroup;
-        private final Set<ProcessHandle> observed = ConcurrentHashMap.newKeySet();
-        private final Thread tracker;
-        private volatile boolean running = true;
+        private boolean terminated;
 
         OwnedProcessScope(Process process, boolean ownsProcessGroup) {
             this.process = process;
             this.ownsProcessGroup = ownsProcessGroup;
-            if (!ownsProcessGroup) refresh();
-            tracker = new Thread(() -> {
-                while (running) {
-                    if (!this.ownsProcessGroup) refresh();
-                    try {
-                        Thread.sleep(POLL_MILLIS);
-                    } catch (InterruptedException ignored) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
-            }, "ctx-sdk-process-scope");
-            tracker.setDaemon(true);
-            tracker.start();
         }
 
-        void terminate() {
+        synchronized void terminate() {
+            if (terminated) return;
+            terminated = true;
             if (ownsProcessGroup) {
                 signalProcessGroup("-TERM");
                 try {
@@ -420,30 +520,12 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
                 }
                 return;
             }
-            refresh();
-            List<ProcessHandle> handles = new ArrayList<>(observed);
-            handles.add(process.toHandle());
-            handles.sort(Comparator.comparingLong(ProcessHandle::pid).reversed());
-            for (ProcessHandle handle : handles) {
-                if (handle.isAlive()) handle.destroy();
-            }
+            if (process.isAlive()) process.destroyForcibly();
             try {
-                Thread.sleep(DRAIN_GRACE_MILLIS);
+                process.waitFor(TEARDOWN_MILLIS, TimeUnit.MILLISECONDS);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
-            for (ProcessHandle handle : handles) {
-                if (handle.isAlive()) handle.destroyForcibly();
-            }
-            try {
-                process.waitFor(TEARDOWN_MILLIS / 2, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-        }
-
-        private void refresh() {
-            process.toHandle().descendants().forEach(observed::add);
         }
 
         private void signalProcessGroup(String signal) {
@@ -463,13 +545,7 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
 
         @Override
         public void close() {
-            running = false;
-            tracker.interrupt();
-            try {
-                tracker.join(DRAIN_GRACE_MILLIS);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
+            terminate();
         }
     }
 
@@ -490,6 +566,12 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
         CaptureFailureException(String stream, Throwable cause) {
             super("ctx CLI " + stream + " capture failed", cause);
             this.stream = stream;
+        }
+    }
+
+    private static final class CaptureCancelledException extends IOException {
+        CaptureCancelledException(InterruptedException cause) {
+            super("ctx CLI command was cancelled", cause);
         }
     }
 }

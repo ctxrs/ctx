@@ -386,15 +386,16 @@ class LocalCliAdapter:
         env = os.environ.copy()
         if self.config.env:
             env.update(self.config.env)
+        launch_command, uses_windows_launcher = _scoped_launch_command(command, env)
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         try:
             process = subprocess.Popen(
-                command,
+                launch_command,
                 cwd=str(self.config.cwd) if self.config.cwd is not None else None,
                 env=env,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if uses_windows_launcher else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=os.name != "nt",
@@ -433,7 +434,14 @@ class LocalCliAdapter:
             else time.monotonic() + max(0.0, self.config.timeout)
         )
         failure: Optional[str] = None
+        launcher_acknowledged = False
         while process.poll() is None and not stop.wait(_PROCESS_POLL_SECONDS):
+            if (
+                uses_windows_launcher
+                and not launcher_acknowledged
+                and all(not reader.is_alive() for reader in readers)
+            ):
+                launcher_acknowledged = _acknowledge_windows_launcher(process)
             if deadline is not None and time.monotonic() >= deadline:
                 failure = "timeout"
                 stop.set()
@@ -479,6 +487,11 @@ class LocalCliAdapter:
                 details={"command": command, "stream": stream},
                 cause=error,
             )
+        if uses_windows_launcher and process.returncode == _WINDOWS_DRAIN_FAILURE_EXIT:
+            raise CtxAgentHistoryProtocolError(
+                "ctx CLI output capture failed",
+                details={"command": command, "stream": "pipe"},
+            )
 
         try:
             stdout = _decode_process_output_strict(stdout_capture.value())
@@ -502,6 +515,8 @@ class LocalCliAdapter:
                 stderr=stderr,
                 stdout=stdout,
             )
+        if os.name != "nt":
+            _terminate_process_scope(process)
         return subprocess.CompletedProcess(
             command,
             returncode,
@@ -523,6 +538,43 @@ _READ_BUFFER_BYTES = 64 * 1024
 _PROCESS_POLL_SECONDS = 0.01
 _CLEAN_DRAIN_SECONDS = 0.1
 _TEARDOWN_SECONDS = 1.0
+_PROCESS_SCOPE_LAUNCHER_ARG = "__ctx_sdk_process_scope_v1"
+_PROCESS_SCOPE_LAUNCHER_ENV = "CTX_SDK_PROCESS_SCOPE_LAUNCHER"
+_WINDOWS_DRAIN_FAILURE_EXIT = 252
+_WINDOWS_LAUNCHER_ACK = b"\x06"
+
+
+def _scoped_launch_command(
+    command: list[str], env: dict[str, str]
+) -> tuple[list[str], bool]:
+    launcher = env.get(_PROCESS_SCOPE_LAUNCHER_ENV)
+    executable_name = Path(command[0]).name.lower()
+    if launcher is None and (
+        executable_name in {"ctx", "ctx.exe"}
+        or executable_name.startswith(("ctx-", "ctx_"))
+    ):
+        launcher = command[0]
+    if launcher is None:
+        if os.name == "nt":
+            raise CtxAgentHistoryError(
+                "local CLI process containment is unavailable",
+                code="backend_unavailable",
+                details={"backend": "process_scope", "platform": "windows"},
+            )
+        return command, False
+    return [launcher, _PROCESS_SCOPE_LAUNCHER_ARG, "--", *command], os.name == "nt"
+
+
+def _acknowledge_windows_launcher(process: subprocess.Popen[bytes]) -> bool:
+    if process.stdin is None:
+        return False
+    try:
+        process.stdin.write(_WINDOWS_LAUNCHER_ACK)
+        process.stdin.flush()
+        process.stdin.close()
+        return True
+    except (BrokenPipeError, OSError, ValueError):
+        return False
 
 
 class _BoundedCapture:
@@ -598,10 +650,14 @@ def _terminate_process_scope(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=_TEARDOWN_SECONDS / 2)
     except subprocess.TimeoutExpired:
         process.kill()
+        try:
+            process.wait(timeout=_TEARDOWN_SECONDS / 2)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
-    for stream in (process.stdout, process.stderr):
+    for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
             try:
                 stream.close()

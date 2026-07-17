@@ -833,10 +833,11 @@ function normalizeRunResult(result, command, args) {
 
 function spawnCommand(command, args, options) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const launch = scopedLaunch(command, args, options.env);
+    const child = spawn(launch.command, launch.args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [launch.windowsHandshake ? "pipe" : "ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
     const stdoutBuffer = Buffer.allocUnsafe(LOCAL_STDOUT_CAP_BYTES);
@@ -844,6 +845,9 @@ function spawnCommand(command, args, options) {
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    let stdoutEnded = false;
+    let stderrEnded = false;
+    let launcherAcknowledged = false;
     let drainTimer;
     const timeout = setTimeout(() => {
       fail(
@@ -888,6 +892,28 @@ function spawnCommand(command, args, options) {
 
     child.stdout.on("data", (chunk) => capture("stdout", chunk));
     child.stderr.on("data", (chunk) => capture("stderr", chunk));
+    const acknowledgeLauncher = () => {
+      if (
+        !launch.windowsHandshake ||
+        launcherAcknowledged ||
+        !stdoutEnded ||
+        !stderrEnded ||
+        settled
+      ) {
+        return;
+      }
+      launcherAcknowledged = true;
+      child.stdin?.end(Buffer.from([WINDOWS_LAUNCHER_ACK]));
+    };
+    child.stdin?.on("error", () => {});
+    child.stdout.on("end", () => {
+      stdoutEnded = true;
+      acknowledgeLauncher();
+    });
+    child.stderr.on("end", () => {
+      stderrEnded = true;
+      acknowledgeLauncher();
+    });
     child.stdout.on("error", (cause) => {
       fail(
         new CtxParseError("ctx CLI stdout capture failed", {
@@ -947,39 +973,79 @@ function spawnCommand(command, args, options) {
         return;
       }
       const result = { command, args, exitCode, signal, stdout, stderr };
+      if (launch.windowsHandshake && exitCode === WINDOWS_DRAIN_FAILURE_EXIT) {
+        fail(
+          new CtxParseError("ctx CLI output capture failed", {
+            code: "capture_failure",
+            details: { command, args, stream: "pipe" },
+          }),
+        );
+        return;
+      }
       if (exitCode !== 0 || signal !== null) {
         settled = true;
         void terminateProcessScope(child).finally(() => resolve(result));
         return;
       }
       settled = true;
-      resolve(result);
+      void terminateProcessScope(child).finally(() => resolve(result));
     });
   });
+}
+
+const PROCESS_SCOPE_LAUNCHER_ARG = "__ctx_sdk_process_scope_v1";
+const PROCESS_SCOPE_LAUNCHER_ENV = "CTX_SDK_PROCESS_SCOPE_LAUNCHER";
+const WINDOWS_DRAIN_FAILURE_EXIT = 252;
+const WINDOWS_LAUNCHER_ACK = 0x06;
+
+function scopedLaunch(command, args, env) {
+  const executableName = String(command).split(/[\\/]/).at(-1).toLowerCase();
+  const looksLikeCtx =
+    executableName === "ctx" ||
+    executableName === "ctx.exe" ||
+    executableName.startsWith("ctx-") ||
+    executableName.startsWith("ctx_");
+  const launcher = env?.[PROCESS_SCOPE_LAUNCHER_ENV] || (looksLikeCtx ? command : undefined);
+  if (!launcher) {
+    if (process.platform === "win32") {
+      throw new CtxParseError("local CLI process containment is unavailable", {
+        code: "backend_unavailable",
+        details: { backend: "process_scope", platform: "windows" },
+      });
+    }
+    return { command, args, windowsHandshake: false };
+  }
+  return {
+    command: launcher,
+    args: [PROCESS_SCOPE_LAUNCHER_ARG, "--", command, ...args],
+    windowsHandshake: process.platform === "win32",
+  };
 }
 
 async function terminateProcessScope(child) {
   const pid = child.pid;
   if (pid) {
     if (process.platform === "win32") {
-      await new Promise((resolve) => {
-        const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-          stdio: "ignore",
-          windowsHide: true,
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise((resolve) => {
+          const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          const deadline = setTimeout(() => {
+            killer.kill();
+            resolve();
+          }, LOCAL_TEARDOWN_MS / 2);
+          killer.on("error", () => {
+            clearTimeout(deadline);
+            resolve();
+          });
+          killer.on("close", () => {
+            clearTimeout(deadline);
+            resolve();
+          });
         });
-        const deadline = setTimeout(() => {
-          killer.kill();
-          resolve();
-        }, LOCAL_TEARDOWN_MS / 2);
-        killer.on("error", () => {
-          clearTimeout(deadline);
-          resolve();
-        });
-        killer.on("close", () => {
-          clearTimeout(deadline);
-          resolve();
-        });
-      });
+      }
     } else {
       try {
         process.kill(-pid, "SIGTERM");

@@ -2879,6 +2879,11 @@ fn maybe_autostart_daemon_inner(
     json_output: bool,
     allow_json_output: bool,
 ) {
+    // An SDK launcher owns the complete command scope. It may use an existing daemon, but starting
+    // a persistent service inside that short-lived scope would be misleading.
+    if crate::sdk_process_scope::active() {
+        return;
+    }
     if semantic_env_flag(DAEMON_BACKGROUND_CHILD_ENV) {
         return;
     }

@@ -547,6 +547,25 @@ test("raises timeout errors from the local adapter", async () => {
   );
 });
 
+test("Windows local adapter fails closed without a process-scope launcher", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only containment contract");
+    return;
+  }
+  const { LocalCliAdapter } = await import("../src/index.js");
+  const adapter = new LocalCliAdapter({
+    ctxPath: process.execPath,
+    env: { CTX_SDK_PROCESS_SCOPE_LAUNCHER: "" },
+  });
+  await assert.rejects(
+    () => adapter.execute(["--version"]),
+    (error) =>
+      error instanceof CtxParseError &&
+      error.code === "backend_unavailable" &&
+      error.details.backend === "process_scope",
+  );
+});
+
 test("local adapter drains both streams and enforces byte caps", async () => {
   const { LocalCliAdapter } = await import("../src/index.js");
   const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 2_000 });
@@ -559,7 +578,7 @@ test("local adapter drains both streams and enforces byte caps", async () => {
 
   const alternating = await adapter.execute([
     "-e",
-    "for(let i=0;i<30;i++){process.stdout.write(Buffer.alloc(8192,97));process.stderr.write(Buffer.alloc(8192,98))}",
+    "const {spawn}=require('node:child_process');let n=0;const done=()=>{if(++n===2)process.exit(0)};spawn(process.execPath,['-e','process.stdout.write(Buffer.alloc(245760,97))'],{stdio:['ignore',1,'ignore']}).on('exit',done);spawn(process.execPath,['-e','process.stdout.write(Buffer.alloc(245760,98))'],{stdio:['ignore',2,'ignore']}).on('exit',done)",
   ]);
   assert.equal(Buffer.byteLength(alternating.stdout), 30 * 8192);
   assert.equal(Buffer.byteLength(alternating.stderr), 30 * 8192);
@@ -600,7 +619,7 @@ test("local adapter drains both streams and enforces byte caps", async () => {
 });
 
 test("local adapter bounds inherited-pipe teardown", async () => {
-  if (process.platform === "win32") return;
+  if (process.platform === "win32" && !process.env.CTX_SDK_PROCESS_SCOPE_LAUNCHER) return;
   const { LocalCliAdapter } = await import("../src/index.js");
   const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 5_000 });
   const directory = await mkdtemp(join(tmpdir(), "ctx-ts-scope-"));
@@ -622,21 +641,22 @@ test("local adapter bounds inherited-pipe teardown", async () => {
   }
 });
 
-test("successful local command does not kill detached daemon child", async () => {
-  if (process.platform === "win32") return;
+test("successful local command kills same-scope child with closed pipes", async () => {
+  if (process.platform === "win32" && !process.env.CTX_SDK_PROCESS_SCOPE_LAUNCHER) return;
   const { LocalCliAdapter } = await import("../src/index.js");
   const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 2_000 });
-  const directory = await mkdtemp(join(tmpdir(), "ctx-ts-detached-"));
+  const directory = await mkdtemp(join(tmpdir(), "ctx-ts-success-scope-"));
   const pidPath = join(directory, "child.pid");
   let pid;
   try {
     const completed = await adapter.execute([
       "-e",
-      `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{detached:true,stdio:'ignore'});c.unref();fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));process.stdout.write('{}');`,
+      `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setTimeout(()=>{},60000)'],{stdio:'ignore'});fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));process.stdout.write('{}');`,
     ]);
     assert.equal(completed.stdout, "{}");
     pid = Number(await readFile(pidPath, "utf8"));
-    process.kill(pid, 0);
+    await assertProcessExited(pid);
+    pid = undefined;
   } finally {
     if (pid) {
       try {

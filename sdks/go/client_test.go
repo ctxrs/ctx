@@ -565,10 +565,21 @@ func TestLocalCLIHelperProcess(t *testing.T) {
 	switch args[0] {
 	case "dual":
 		block := bytes.Repeat([]byte{'x'}, 8192)
-		for index := 0; index < 30; index++ {
-			_, _ = os.Stdout.Write(block)
-			_, _ = os.Stderr.Write(block)
-		}
+		var writers sync.WaitGroup
+		writers.Add(2)
+		go func() {
+			defer writers.Done()
+			for index := 0; index < 30; index++ {
+				_, _ = os.Stdout.Write(block)
+			}
+		}()
+		go func() {
+			defer writers.Done()
+			for index := 0; index < 30; index++ {
+				_, _ = os.Stderr.Write(block)
+			}
+		}()
+		writers.Wait()
 	case "stderr-first":
 		_, _ = os.Stderr.Write(bytes.Repeat([]byte{'x'}, localStderrCapBytes+1))
 		time.Sleep(time.Minute)

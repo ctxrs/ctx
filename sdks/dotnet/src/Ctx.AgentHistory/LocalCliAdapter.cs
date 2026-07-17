@@ -16,6 +16,10 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
     private static readonly TimeSpan DrainGrace = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan TeardownLimit = TimeSpan.FromSeconds(1);
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private const string ProcessScopeLauncherArgument = "__ctx_sdk_process_scope_v1";
+    private const string ProcessScopeLauncherEnvironment = "CTX_SDK_PROCESS_SCOPE_LAUNCHER";
+    private const int WindowsDrainFailureExit = 252;
+    private const byte WindowsLauncherAck = 0x06;
 
     public LocalCliAdapter(LocalAgentHistoryConfig? config = null)
     {
@@ -110,12 +114,23 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         }
 
         var command = BuildCommand(args);
+        var launcher = FindProcessScopeLauncher(Config.CtxBinary, Config.Environment);
         var setsid = OperatingSystem.IsWindows() ? null : FindSetsid();
+        if ((OperatingSystem.IsWindows() && launcher is null)
+            || (!OperatingSystem.IsWindows() && launcher is null && setsid is null))
+        {
+            throw CaptureFailure(
+                "process_scope",
+                new PlatformNotSupportedException("local CLI process containment is unavailable"));
+        }
+        var launchTarget = launcher ?? Config.CtxBinary;
+        var usesWindowsLauncher = OperatingSystem.IsWindows() && launcher is not null;
         var startInfo = new ProcessStartInfo
         {
-            FileName = setsid ?? Config.CtxBinary,
+            FileName = setsid ?? launchTarget,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = usesWindowsLauncher,
             UseShellExecute = false
         };
         if (!string.IsNullOrWhiteSpace(Config.WorkingDirectory))
@@ -124,6 +139,12 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         }
         if (setsid is not null)
         {
+            startInfo.ArgumentList.Add(launchTarget);
+        }
+        if (launcher is not null)
+        {
+            startInfo.ArgumentList.Add(ProcessScopeLauncherArgument);
+            startInfo.ArgumentList.Add("--");
             startInfo.ArgumentList.Add(Config.CtxBinary);
         }
         foreach (var arg in command.Skip(1))
@@ -154,7 +175,9 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         {
             throw new CtxAgentHistoryCliException("failed to execute ctx CLI", command, -1, "", ex.Message, innerException: ex);
         }
-        using var processScope = OwnedProcessScope.Attach(process, setsid is not null);
+        using var processScope = OwnedProcessScope.Attach(
+            process,
+            !OperatingSystem.IsWindows());
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (Config.Timeout is { } timeout)
@@ -185,6 +208,21 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             {
                 await AbortAsync(process, processScope, captureCancellation, captureTask).ConfigureAwait(false);
                 throw CaptureError(captureFailure);
+            }
+            if (usesWindowsLauncher)
+            {
+                try
+                {
+                    await process.StandardInput.BaseStream
+                        .WriteAsync(new[] { WindowsLauncherAck }, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    await process.StandardInput.BaseStream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                    process.StandardInput.Close();
+                }
+                catch (IOException)
+                {
+                    // The launcher may have already reported a bounded drain failure.
+                }
             }
             completed = await Task.WhenAny(exitTask, cancellationSignal).ConfigureAwait(false);
         }
@@ -236,6 +274,10 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         if (process.ExitCode != 0)
         {
             processScope.Terminate();
+            if (usesWindowsLauncher && process.ExitCode == WindowsDrainFailureExit)
+            {
+                throw CaptureFailure("pipe", new IOException("a descendant retained a CLI output pipe"));
+            }
             throw new CtxAgentHistoryCliException("ctx CLI command failed", command, process.ExitCode, outText, errText);
         }
 
@@ -283,6 +325,29 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             }
         }
         return null;
+    }
+
+    private static string? FindProcessScopeLauncher(
+        string command,
+        IReadOnlyDictionary<string, string?>? environment)
+    {
+        if (environment is not null
+            && environment.TryGetValue(ProcessScopeLauncherEnvironment, out var configured)
+            && !string.IsNullOrWhiteSpace(configured))
+        {
+            return configured;
+        }
+        var inherited = Environment.GetEnvironmentVariable(ProcessScopeLauncherEnvironment);
+        if (!string.IsNullOrWhiteSpace(inherited))
+        {
+            return inherited;
+        }
+        var name = Path.GetFileName(command).ToLowerInvariant();
+        return name is "ctx" or "ctx.exe"
+            || name.StartsWith("ctx-", StringComparison.Ordinal)
+            || name.StartsWith("ctx_", StringComparison.Ordinal)
+            ? command
+            : null;
     }
 
     private static async Task<CapturedBytes> ReadBoundedAsync(
@@ -390,27 +455,18 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         private readonly Process process;
         private readonly int processId;
         private readonly bool ownsUnixProcessGroup;
-        private IntPtr jobHandle;
         private bool terminated;
 
-        private OwnedProcessScope(Process process, bool ownsUnixProcessGroup, IntPtr jobHandle)
+        private OwnedProcessScope(Process process, bool ownsUnixProcessGroup)
         {
             this.process = process;
             processId = process.Id;
             this.ownsUnixProcessGroup = ownsUnixProcessGroup;
-            this.jobHandle = jobHandle;
         }
 
         public static OwnedProcessScope Attach(Process process, bool ownsUnixProcessGroup)
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return new OwnedProcessScope(process, false, CreateWindowsJob(process));
-            }
-            return new OwnedProcessScope(
-                process,
-                ownsUnixProcessGroup || SetProcessGroup(process.Id, process.Id) == 0,
-                IntPtr.Zero);
+            return new OwnedProcessScope(process, ownsUnixProcessGroup);
         }
 
         public void Terminate()
@@ -422,15 +478,9 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             terminated = true;
             if (ownsUnixProcessGroup)
             {
-                if (Kill(-processId, 15) == 0)
-                {
-                    Thread.Sleep(DrainGrace);
-                    _ = Kill(-processId, 9);
-                }
-            }
-            if (jobHandle != IntPtr.Zero)
-            {
-                _ = TerminateJobObject(jobHandle, 1);
+                _ = Kill(-processId, 15);
+                Thread.Sleep(DrainGrace);
+                _ = Kill(-processId, 9);
             }
             try
             {
@@ -447,62 +497,11 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
         public void Dispose()
         {
-            CloseJob();
+            Terminate();
         }
-
-        private void CloseJob()
-        {
-            if (jobHandle == IntPtr.Zero)
-            {
-                return;
-            }
-            _ = CloseHandle(jobHandle);
-            jobHandle = IntPtr.Zero;
-        }
-
-        private static IntPtr CreateWindowsJob(Process process)
-        {
-            var job = CreateJobObject(IntPtr.Zero, null);
-            if (job == IntPtr.Zero)
-            {
-                return IntPtr.Zero;
-            }
-            try
-            {
-                if (!AssignProcessToJobObject(job, process.Handle))
-                {
-                    _ = CloseHandle(job);
-                    return IntPtr.Zero;
-                }
-                return job;
-            }
-            catch
-            {
-                _ = CloseHandle(job);
-                return IntPtr.Zero;
-            }
-        }
-
-        [DllImport("libc", EntryPoint = "setpgid", SetLastError = true)]
-        private static extern int SetProcessGroup(int processId, int processGroupId);
 
         [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
         private static extern int Kill(int processId, int signal);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string? name);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CloseHandle(IntPtr handle);
 
     }
 
