@@ -82,7 +82,8 @@ public final class AgentHistoryClientTest {
         assertEquals("ctx-search-v1", response.getSearch().getQueryExecution().queryVersion());
         assertEquals("codex", response.getSearch().getFilters().getProvider());
         assertEquals(Integer.valueOf(20), response.getSearch().getPagination().getLimit());
-        assertEquals(Boolean.FALSE, response.getSearch().getTruncation().getTruncated());
+        assertEquals(Boolean.TRUE, response.getSearch().getTruncation().getTruncated());
+        assertEquals("semantic_coverage_incomplete", response.getSearch().getTruncation().getReason());
         assertEquals(Integer.valueOf(1), Integer.valueOf(response.getSearch().getResults().size()));
         SearchHit hit = response.getSearch().getResults().get(0);
         assertEquals("11111111-1111-4111-8111-111111111111", hit.getCtxEventId());

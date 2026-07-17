@@ -117,7 +117,7 @@ class _FakeCtx:
 
     def __enter__(self) -> Path:
         self._tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self._tmp.name) / "ctx"
+        self.path = Path(self._tmp.name) / "fake-ctx"
         self.path.write_text(_fake_ctx_script(), encoding="utf-8")
         self.path.chmod(self.path.stat().st_mode | stat.S_IXUSR)
         return self.path
