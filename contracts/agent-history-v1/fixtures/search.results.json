@@ -129,7 +129,6 @@
         "retained_candidate_ids": 1,
         "residual_rows": 1,
         "hydrated_rows": 1,
-        "legacy_fallback_rows": 0,
         "verification_bytes": 128,
         "largest_verification_lookup_bytes": 128,
         "hydration_input_bytes": 512,
