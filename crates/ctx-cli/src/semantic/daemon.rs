@@ -931,7 +931,9 @@ fn execute_daemon_semantic_query(
         .ok_or_else(|| anyhow!("authenticated semantic query has no clause"))?;
     let filtered = clause.candidate_event_ids.as_ref();
     let sidecar_trusted = vector_store.sidecar_trust_state()? == SemanticSidecarTrustState::Ready;
+    let projection_available = vector_store.sqlite_vec0_search_ready()?;
     let vector_backend_available = sidecar_trusted
+        && projection_available
         && (filtered.is_some() || semantic_full_corpus_vector_scan_ready(&vector_store)?);
     let readiness = semantic_readiness_for_report(
         data_root,
@@ -994,7 +996,7 @@ fn execute_daemon_semantic_query(
     )
     .with_vector_byte_state(
         stats.vector_bytes_read as u64,
-        semantic_streaming_scan_vector_byte_limit() as u64,
+        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES as u64,
         Some(stats.vector_bytes_read as u64),
     );
     diagnostics.vector_backend = stats.backend.map(str::to_owned);
