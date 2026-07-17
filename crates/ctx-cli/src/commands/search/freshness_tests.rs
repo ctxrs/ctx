@@ -1249,6 +1249,76 @@ mod freshness_tests {
     }
 
     #[test]
+    fn daemon_owner_transition_restarts_inventory_without_merging_a_stale_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let owner = write_pi_source(&data_root.join("pi-transition-owner"), 1, "owner");
+        let first = write_pi_source(&data_root.join("pi-transition-first"), 1, "first");
+        let second = write_pi_source(&data_root.join("pi-transition-second"), 1, "second");
+        let baseline = refresh(
+            &data_root,
+            vec![owner.clone(), first.clone(), second.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+
+        let sources = vec![first.clone(), second.clone()];
+        let mut runtime = SearchRefreshRuntime::default();
+        for _ in 0..64 {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+            if runtime.inventory_progress.as_ref().is_some_and(|progress| {
+                progress.next_source_index == 1 && progress.total_sources == 2
+            }) {
+                break;
+            }
+        }
+        let stale_marker = runtime
+            .inventory_progress
+            .as_ref()
+            .unwrap()
+            .cursor
+            .publication_state_marker()
+            .to_owned();
+        assert!(runtime.cached_work.as_ref().is_some_and(|work| {
+            work.plan
+                .sources
+                .iter()
+                .any(|planned| planned.source.path == first.path)
+        }));
+
+        let store = Store::open(database_path(data_root.clone())).unwrap();
+        leave_unmutated_pi_publication(&store, &owner);
+        let transitioned_marker = store
+            .effective_provider_file_publication_inventory_snapshot()
+            .unwrap()
+            .0;
+        assert_ne!(stale_marker, transitioned_marker);
+        drop(store);
+
+        let _ = refresh_with_runtime(&data_root, &mut runtime, sources);
+
+        let progress = runtime.inventory_progress.as_ref().unwrap();
+        assert_eq!(progress.reason, SearchInventoryReason::PublicationChanged);
+        assert_eq!(progress.next_source_index, 1);
+        assert_eq!(
+            progress.cursor.publication_state_marker(),
+            transitioned_marker
+        );
+        let planned_paths = runtime
+            .cached_work
+            .as_ref()
+            .unwrap()
+            .plan
+            .sources
+            .iter()
+            .map(|planned| planned.source.path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(planned_paths, BTreeSet::from([owner.path]));
+        assert!(!planned_paths.contains(&first.path));
+        assert!(!planned_paths.contains(&second.path));
+    }
+
+    #[test]
     fn pending_report_includes_publication_created_after_plan_inventory() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
@@ -2172,5 +2242,21 @@ mod freshness_tests {
         assert!(serde_json::to_string(&store.export_archive().unwrap())
             .unwrap()
             .contains("setup fresh tail after recovery"));
+    }
+
+    #[test]
+    fn drain_fixed_point_rejects_pending_work_without_progress_or_blocker() {
+        let error =
+            crate::commands::import::drain_fixed_point_action(true, false, false).unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<ctx_history_capture::CaptureError>(),
+            Some(ctx_history_capture::CaptureError::SystemInvariant(
+                "drain import work remained pending without durable progress"
+            ))
+        )));
+        assert_eq!(
+            crate::commands::import::drain_fixed_point_action(true, false, true).unwrap(),
+            crate::commands::import::DrainFixedPointAction::RetryableBlocked
+        );
     }
 }

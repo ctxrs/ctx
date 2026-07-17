@@ -81,6 +81,7 @@ use crate::{
 
 mod catalog;
 mod explicit;
+mod fixed_point;
 mod inventory;
 mod manifest;
 mod native;
@@ -95,6 +96,7 @@ use catalog::{
     import_record_for_history_source_plugin, import_record_for_source, source_stats,
 };
 use explicit::run_explicit_format_import;
+pub(crate) use fixed_point::{drain_fixed_point_action, DrainFixedPointAction};
 #[cfg(test)]
 pub(crate) use inventory::{inject_inventory_failure_once, InventoryFailurePoint};
 pub(crate) use inventory::{
@@ -250,9 +252,6 @@ pub(crate) fn run_import_internal(
     let mut imported_sources = Vec::new();
     let opening_maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
     totals.durable_progress |= opening_maintenance.processed_rows > 0;
-    totals.recovery_units_processed = totals
-        .recovery_units_processed
-        .saturating_add(opening_maintenance.processed_rows);
     totals.recovery_units_pending = usize::from(!opening_maintenance.complete);
 
     if let Some(format) = args.format {
@@ -286,9 +285,6 @@ pub(crate) fn run_import_internal(
     if requests.is_empty() && plugin_requests.is_empty() && !has_publication_work {
         let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
         totals.durable_progress |= maintenance.processed_rows > 0;
-        totals.recovery_units_processed = totals
-            .recovery_units_processed
-            .saturating_add(maintenance.processed_rows);
         totals.recovery_units_pending = usize::from(!maintenance.complete);
         if options.allow_empty_sources {
             let mut report = ImportReport::empty(args.resume);
@@ -305,10 +301,11 @@ pub(crate) fn run_import_internal(
     inventory_progress.message("inventorying", "Preparing local history...");
     let inventory = inventory_import_sources(&store, requests, args.resume)
         .context("inventory local history sources")?;
-    let plan = ImportPlan::build(&store, inventory.sources)?;
+    let mut plan = ImportPlan::build(&store, inventory.sources)?;
     let mut execution_state = ImportExecutionState::for_plan(&plan);
     let inventory_failures = inventory.failures;
-    let failed_inventory_pending = failed_inventory_pending_counts(&store, &inventory_failures)?;
+    let mut failed_inventory_pending =
+        failed_inventory_pending_counts(&store, &inventory_failures)?;
     let planned_total_bytes = inventory.totals.source_bytes;
     inventory_progress.done(
         "inventorying",
@@ -378,7 +375,14 @@ pub(crate) fn run_import_internal(
     }
 
     let native_import_requested = !plan.sources.is_empty() || plan.recovery_units > 0;
+    let reinventory_sources = plan
+        .sources
+        .iter()
+        .map(|planned| planned.source.clone())
+        .collect::<Vec<_>>();
     let mut native_reports = NativeSourceReports::default();
+    let mut pass_made_durable_progress = false;
+    let mut pass_retryable_blocker = false;
     loop {
         execution_state.begin_new_pass();
         let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
@@ -396,7 +400,9 @@ pub(crate) fn run_import_internal(
             &mut totals,
             &mut native_reports,
         )?;
-        if !result.made_durable_progress() {
+        pass_made_durable_progress |= result.made_durable_progress;
+        pass_retryable_blocker |= result.retryable_blocker;
+        if !result.result.made_durable_progress() {
             break;
         }
     }
@@ -474,26 +480,119 @@ pub(crate) fn run_import_internal(
         }
     }
 
-    let mut maintenance_complete = loop {
-        execution_state.begin_new_pass();
-        let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
-        totals.durable_progress |= maintenance.processed_rows > 0;
-        let recovery_units = plan.pending_count(&store, ImportWorkClass::Recovery)?;
-        let result = execute_import_plan_class_for_report(
-            &mut store,
-            &plan,
-            &mut execution_state,
-            ImportWorkClass::Recovery,
-            recovery_units,
-            &progress,
-            options,
-            &mut totals,
-            &mut native_reports,
-        )?;
-        let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
-        if fresh_units > 0 {
+    let maintenance_complete = 'fixed_point: loop {
+        let mut maintenance_complete = loop {
             execution_state.begin_new_pass();
-            let fresh_result = execute_import_plan_class_for_report(
+            let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
+            totals.durable_progress |= maintenance.processed_rows > 0;
+            pass_made_durable_progress |= maintenance.processed_rows > 0;
+            let recovery_units = plan.pending_count(&store, ImportWorkClass::Recovery)?;
+            let result = execute_import_plan_class_for_report(
+                &mut store,
+                &plan,
+                &mut execution_state,
+                ImportWorkClass::Recovery,
+                recovery_units,
+                &progress,
+                options,
+                &mut totals,
+                &mut native_reports,
+            )?;
+            pass_made_durable_progress |= result.made_durable_progress;
+            pass_retryable_blocker |= result.retryable_blocker;
+            let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
+            if fresh_units > 0 {
+                execution_state.begin_new_pass();
+                let fresh_result = execute_import_plan_class_for_report(
+                    &mut store,
+                    &plan,
+                    &mut execution_state,
+                    ImportWorkClass::Fresh,
+                    fresh_units,
+                    &progress,
+                    options,
+                    &mut totals,
+                    &mut native_reports,
+                )?;
+                pass_made_durable_progress |= fresh_result.made_durable_progress;
+                pass_retryable_blocker |= fresh_result.retryable_blocker;
+                if fresh_result.result.made_durable_progress() {
+                    continue;
+                }
+                let recovery_units_pending =
+                    plan.pending_count(&store, ImportWorkClass::Recovery)?;
+                if recovery_units_pending > 0
+                    && (maintenance.processed_rows > 0 || result.result.made_durable_progress())
+                {
+                    continue;
+                }
+                break maintenance.complete;
+            }
+            let (_, recovery_units_pending) = plan.pending_counts(&store)?;
+            if maintenance.complete && recovery_units_pending == 0 {
+                break true;
+            }
+            if maintenance.processed_rows == 0 && !result.result.made_durable_progress() {
+                break maintenance.complete;
+            }
+        };
+        let trailing_maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
+        totals.durable_progress |= trailing_maintenance.processed_rows > 0;
+        pass_made_durable_progress |= trailing_maintenance.processed_rows > 0;
+        maintenance_complete &= trailing_maintenance.complete;
+
+        let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(&store)?;
+        let has_pending_work = fresh_units_pending > 0
+            || recovery_units_pending > 0
+            || !maintenance_complete
+            || has_provider_file_publication_work(&store)?;
+        match drain_fixed_point_action(
+            has_pending_work,
+            pass_made_durable_progress,
+            pass_retryable_blocker,
+        )? {
+            DrainFixedPointAction::Complete | DrainFixedPointAction::RetryableBlocked => {
+                break 'fixed_point maintenance_complete;
+            }
+            DrainFixedPointAction::Reinventory => {}
+        }
+
+        let inventory = inventory_import_sources(&store, reinventory_sources.clone(), false)
+            .context("re-inventory local history sources after import progress")?;
+        if !inventory.failures.is_empty() {
+            failed_inventory_pending =
+                failed_inventory_pending_counts(&store, &inventory.failures)?;
+            for failure in inventory.failures {
+                totals.add_source_failure(&failure.stats);
+                progress.done(
+                    "inventorying",
+                    format!(
+                        "skipped {}: {}",
+                        failure.source.provider.as_str(),
+                        source_error_reason(&failure.source, &failure.error)
+                    ),
+                    0,
+                );
+                if options.print_human {
+                    progress.finish_line();
+                    print_source_failed(&failure);
+                }
+                imported_sources.push(source_failure_json(&failure));
+            }
+            break 'fixed_point maintenance_complete;
+        }
+        plan = ImportPlan::build(&store, inventory.sources)?;
+        execution_state = ImportExecutionState::for_plan(&plan);
+        pass_made_durable_progress = false;
+        pass_retryable_blocker = false;
+
+        loop {
+            execution_state.begin_new_pass();
+            let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
+            if fresh_units == 0 {
+                break;
+            }
+            let result = execute_import_plan_class_for_report(
                 &mut store,
                 &plan,
                 &mut execution_state,
@@ -504,28 +603,13 @@ pub(crate) fn run_import_internal(
                 &mut totals,
                 &mut native_reports,
             )?;
-            if fresh_result.made_durable_progress() {
-                continue;
+            pass_made_durable_progress |= result.made_durable_progress;
+            pass_retryable_blocker |= result.retryable_blocker;
+            if !result.result.made_durable_progress() {
+                break;
             }
-            let recovery_units_pending = plan.pending_count(&store, ImportWorkClass::Recovery)?;
-            if recovery_units_pending > 0
-                && (maintenance.processed_rows > 0 || result.made_durable_progress())
-            {
-                continue;
-            }
-            break maintenance.complete;
-        }
-        let (_, recovery_units_pending) = plan.pending_counts(&store)?;
-        if maintenance.complete && recovery_units_pending == 0 {
-            break true;
-        }
-        if maintenance.processed_rows == 0 && !result.made_durable_progress() {
-            break maintenance.complete;
         }
     };
-    let trailing_maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
-    totals.durable_progress |= trailing_maintenance.processed_rows > 0;
-    maintenance_complete &= trailing_maintenance.complete;
 
     let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(&store)?;
     totals.fresh_units_pending =
@@ -625,8 +709,8 @@ fn execute_import_plan_class_for_report(
     options: ImportRunOptions,
     totals: &mut ImportTotals,
     native_reports: &mut NativeSourceReports,
-) -> Result<ImportExecutionResult> {
-    execute_import_plan_class_for_report_with_pre_lock_hook(
+) -> Result<ImportClassExecution> {
+    execute_import_plan_class_for_report_tracked(
         store,
         plan,
         execution_state,
@@ -640,6 +724,13 @@ fn execute_import_plan_class_for_report(
     )
 }
 
+#[derive(Debug)]
+struct ImportClassExecution {
+    result: ImportExecutionResult,
+    made_durable_progress: bool,
+    retryable_blocker: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_import_plan_class_for_report_with_pre_lock_hook(
     store: &mut Store,
@@ -651,10 +742,40 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
     options: ImportRunOptions,
     totals: &mut ImportTotals,
     native_reports: &mut NativeSourceReports,
-    mut before_bulk_lock: impl FnMut(),
+    before_bulk_lock: impl FnMut(),
 ) -> Result<ImportExecutionResult> {
+    Ok(execute_import_plan_class_for_report_tracked(
+        store,
+        plan,
+        execution_state,
+        class,
+        remaining_units,
+        progress,
+        options,
+        totals,
+        native_reports,
+        before_bulk_lock,
+    )?
+    .result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_import_plan_class_for_report_tracked(
+    store: &mut Store,
+    plan: &ImportPlan,
+    execution_state: &mut ImportExecutionState,
+    class: ImportWorkClass,
+    mut remaining_units: usize,
+    progress: &ProgressReporter,
+    options: ImportRunOptions,
+    totals: &mut ImportTotals,
+    native_reports: &mut NativeSourceReports,
+    mut before_bulk_lock: impl FnMut(),
+) -> Result<ImportClassExecution> {
     let mut completed_bytes = 0u64;
     let mut execution_result = ImportExecutionResult::default();
+    let mut made_durable_progress = false;
+    let mut retryable_blocker = false;
     while remaining_units > 0 {
         let Some(executable) = plan.select_slice_for_execution_with_pre_lock_hook(
             store,
@@ -840,6 +961,8 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
                     system_error = Some(err);
                     break;
                 }
+                retryable_blocker |=
+                    import_error_retryability(&err) == ImportRetryability::Retryable;
                 let failure_stats = SourceStats {
                     files: selected.stats.files.saturating_sub(
                         outcome_completed_units.saturating_add(outcome_deferred_units),
@@ -899,6 +1022,9 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
             deferred_units,
             maintenance_progress || source_durable_progress,
         );
+        made_durable_progress |=
+            completed_units > 0 || maintenance_progress || source_durable_progress;
+        retryable_blocker |= stop_admission || deferred_units > 0;
         if stop_admission {
             execution_result.stop_admission();
         }
@@ -914,7 +1040,11 @@ fn execute_import_plan_class_for_report_with_pre_lock_hook(
             break;
         }
     }
-    Ok(execution_result)
+    Ok(ImportClassExecution {
+        result: execution_result,
+        made_durable_progress,
+        retryable_blocker,
+    })
 }
 
 fn source_provider_label(source: &SourceInfo) -> &'static str {
