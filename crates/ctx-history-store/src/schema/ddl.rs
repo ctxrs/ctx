@@ -280,6 +280,32 @@ CREATE TABLE IF NOT EXISTS import_pending_reason_repairs (
     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS import_pending_work (
+    inventory_family TEXT NOT NULL
+      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+    provider TEXT NOT NULL,
+    source_root TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
+    indexed_at_ms INTEGER,
+    PRIMARY KEY (inventory_family, provider, source_root, source_path)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS import_pending_work_counts (
+    inventory_family TEXT NOT NULL
+      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+    provider TEXT NOT NULL,
+    source_root TEXT NOT NULL,
+    work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
+    pending_count INTEGER NOT NULL CHECK (pending_count > 0),
+    PRIMARY KEY (inventory_family, provider, source_root, work_class)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS import_pending_work_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    selection_mode TEXT NOT NULL CHECK (selection_mode IN ('direct', 'projection'))
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS provider_file_checkpoints (
     provider TEXT NOT NULL,
     source_format TEXT NOT NULL CHECK (length(source_format) > 0),

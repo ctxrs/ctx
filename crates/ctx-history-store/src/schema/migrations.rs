@@ -11,6 +11,8 @@ use crate::schema::ddl::{
     SOURCE_IMPORT_FILE_STATE_COLUMNS,
 };
 use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
+use crate::schema::import_pending_work::install_import_pending_work_invariants;
+use crate::schema::indexes::IMPORT_PENDING_WORK_SELECTION_INDEX_SQL;
 use crate::schema::provider_session_identity::{
     backfill_capture_source_identity_columns, prepare_provider_session_migrations,
     restore_invariants_after_capture_source_rebuild, suspend_invariants_for_capture_source_rebuild,
@@ -125,6 +127,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     }
     if user_version < 56 {
         migrate_lightweight_event_index_to_v56(conn)?;
+    }
+    if user_version < 57 {
+        migrate_pending_work_projection_to_v57(conn)?;
     }
     Ok(())
 }
@@ -1175,6 +1180,51 @@ pub(super) fn migrate_lightweight_event_index_to_v56(conn: &Connection) -> Resul
         }
     }
 }
+
+pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        // CREATE_TABLES_SQL adds only the empty projection and aggregate tables
+        // on an existing store. The sole projection index is therefore also
+        // created empty, before triggers can mirror any new inventory writes.
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        conn.execute_batch(IMPORT_PENDING_WORK_SELECTION_INDEX_SQL)?;
+        conn.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO import_pending_work_state (singleton, selection_mode)
+            VALUES (1, 'projection');
+
+            INSERT OR IGNORE INTO import_pending_reason_repairs (inventory_family)
+            VALUES ('catalog_sessions'), ('source_import_files');
+
+            UPDATE import_pending_reason_repairs
+            SET cursor_provider = NULL,
+                cursor_source_root = NULL,
+                cursor_source_path = NULL,
+                completed = 0
+            WHERE inventory_family IN ('catalog_sessions', 'source_import_files');
+
+            PRAGMA user_version = 57;
+            "#,
+        )?;
+        install_import_pending_work_invariants(conn)?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
 fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
     if table_exists(conn, "catalog_sessions")? {
         conn.execute(

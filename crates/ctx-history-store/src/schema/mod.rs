@@ -1,5 +1,6 @@
 pub(crate) mod ddl;
 pub(crate) mod fts;
+pub(crate) mod import_pending_work;
 pub(crate) mod indexes;
 pub(crate) mod migrations;
 pub(crate) mod provider_session_identity;
@@ -36,6 +37,13 @@ pub(crate) fn migrate_to_latest(conn: &Connection) -> Result<()> {
         )?;
     migrations::run_migrations(conn, user_version)?;
     conn.execute_batch(provider_session_identity::PROVIDER_SESSION_INVARIANTS_SQL)?;
+    if fresh_empty_store {
+        conn.execute(
+            "UPDATE import_pending_work_state SET selection_mode = 'direct' WHERE singleton = 1",
+            [],
+        )?;
+    }
+    import_pending_work::install_import_pending_work_invariants(conn)?;
     create_fts_tables_if_supported(conn)?;
     conn.execute_batch(BASELINE_INDEXES_SQL)?;
     conn.execute_batch(REPAIR_LEDGER_INITIALIZATION_SQL)?;
