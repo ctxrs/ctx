@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import threading
@@ -410,6 +411,19 @@ class LocalCliAdapter:
                 cause=exc,
             ) from exc
 
+        try:
+            return self._supervise_process(command, process, uses_windows_launcher)
+        except BaseException:
+            _terminate_process_scope(process)
+            _close_process_pipes(process)
+            raise
+
+    def _supervise_process(
+        self,
+        command: list[str],
+        process: subprocess.Popen[bytes],
+        uses_windows_launcher: bool,
+    ) -> subprocess.CompletedProcess[str]:
         stdout_capture = _BoundedCapture("stdout", _STDOUT_CAP_BYTES)
         stderr_capture = _BoundedCapture("stderr", _STDERR_CAP_BYTES)
         stop = threading.Event()
@@ -428,6 +442,35 @@ class LocalCliAdapter:
         for reader in readers:
             reader.start()
 
+        try:
+            return self._monitor_process(
+                command,
+                process,
+                uses_windows_launcher,
+                stdout_capture,
+                stderr_capture,
+                stop,
+                readers,
+            )
+        except BaseException:
+            stop.set()
+            _terminate_process_scope(process)
+            _close_process_pipes(process)
+            teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
+            for reader in readers:
+                reader.join(max(0.0, teardown_deadline - time.monotonic()))
+            raise
+
+    def _monitor_process(
+        self,
+        command: list[str],
+        process: subprocess.Popen[bytes],
+        uses_windows_launcher: bool,
+        stdout_capture: _BoundedCapture,
+        stderr_capture: _BoundedCapture,
+        stop: threading.Event,
+        readers: list[threading.Thread],
+    ) -> subprocess.CompletedProcess[str]:
         deadline = (
             None
             if self.config.timeout is None
@@ -625,27 +668,31 @@ def _drain_process_stream(
 
 def _terminate_process_scope(process: subprocess.Popen[bytes]) -> None:
     if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_TEARDOWN_SECONDS / 2,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            process.kill()
-    else:
+        if process.poll() is None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_TEARDOWN_SECONDS / 2,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                process.kill()
+    elif _process_group_exists(process.pid):
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except (OSError, ProcessLookupError):
             pass
-        time.sleep(0.1)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
+        deadline = time.monotonic() + 0.1
+        while _process_group_exists(process.pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if _process_group_exists(process.pid):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
     try:
         process.wait(timeout=_TEARDOWN_SECONDS / 2)
     except subprocess.TimeoutExpired:
@@ -654,6 +701,18 @@ def _terminate_process_scope(process: subprocess.Popen[bytes]) -> None:
             process.wait(timeout=_TEARDOWN_SECONDS / 2)
         except subprocess.TimeoutExpired:
             pass
+
+
+def _process_group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:

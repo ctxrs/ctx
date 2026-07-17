@@ -115,19 +115,16 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
         var command = BuildCommand(args);
         var launcher = FindProcessScopeLauncher(Config.CtxBinary, Config.Environment);
-        var setsid = OperatingSystem.IsWindows() ? null : FindSetsid();
-        if ((OperatingSystem.IsWindows() && launcher is null)
-            || (!OperatingSystem.IsWindows() && launcher is null && setsid is null))
+        if (launcher is null)
         {
             throw CaptureFailure(
                 "process_scope",
                 new PlatformNotSupportedException("local CLI process containment is unavailable"));
         }
-        var launchTarget = launcher ?? Config.CtxBinary;
-        var usesWindowsLauncher = OperatingSystem.IsWindows() && launcher is not null;
+        var usesWindowsLauncher = OperatingSystem.IsWindows();
         var startInfo = new ProcessStartInfo
         {
-            FileName = setsid ?? launchTarget,
+            FileName = launcher,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             RedirectStandardInput = usesWindowsLauncher,
@@ -137,16 +134,9 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         {
             startInfo.WorkingDirectory = Config.WorkingDirectory;
         }
-        if (setsid is not null)
-        {
-            startInfo.ArgumentList.Add(launchTarget);
-        }
-        if (launcher is not null)
-        {
-            startInfo.ArgumentList.Add(ProcessScopeLauncherArgument);
-            startInfo.ArgumentList.Add("--");
-            startInfo.ArgumentList.Add(Config.CtxBinary);
-        }
+        startInfo.ArgumentList.Add(ProcessScopeLauncherArgument);
+        startInfo.ArgumentList.Add("--");
+        startInfo.ArgumentList.Add(Config.CtxBinary);
         foreach (var arg in command.Skip(1))
         {
             startInfo.ArgumentList.Add(arg);
@@ -313,18 +303,6 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         }
         command.AddRange(args);
         return command;
-    }
-
-    private static string? FindSetsid()
-    {
-        foreach (var path in new[] { "/usr/bin/setsid", "/bin/setsid" })
-        {
-            if (File.Exists(path))
-            {
-                return path;
-            }
-        }
-        return null;
     }
 
     private static string? FindProcessScopeLauncher(
