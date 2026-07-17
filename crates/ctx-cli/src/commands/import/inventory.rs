@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -53,18 +53,37 @@ fn drain_import_inventory(
     full_rescan: bool,
     include_publication_owner: bool,
 ) -> Result<ImportInventory> {
-    let mut cursor =
-        ImportInventoryCursor::new(store, sources, full_rescan, include_publication_owner)?;
-    let mut inventory = ImportInventory::default();
+    let mut publication_transition_attempt = 0u32;
     loop {
-        match cursor.advance(store)? {
-            ImportInventoryCursorStep::Pending(_) => std::thread::yield_now(),
-            ImportInventoryCursorStep::SourceComplete(page) => {
-                merge_import_inventory(&mut inventory, page)
+        let mut cursor = ImportInventoryCursor::new(
+            store,
+            sources.clone(),
+            full_rescan,
+            include_publication_owner,
+        )?;
+        let mut inventory = ImportInventory::default();
+        loop {
+            match cursor.advance(store)? {
+                ImportInventoryCursorStep::Pending(_) => std::thread::yield_now(),
+                ImportInventoryCursorStep::SourceComplete(page) => {
+                    merge_import_inventory(&mut inventory, page)
+                }
+                ImportInventoryCursorStep::Complete => return Ok(inventory),
+                ImportInventoryCursorStep::PublicationTransition(_) => break,
             }
-            ImportInventoryCursorStep::Complete => return Ok(inventory),
         }
+        publication_transition_attempt = publication_transition_attempt.saturating_add(1);
+        backoff_after_publication_transition(publication_transition_attempt);
     }
+}
+
+fn backoff_after_publication_transition(attempt: u32) {
+    if attempt == 1 {
+        std::thread::yield_now();
+        return;
+    }
+    let shift = attempt.saturating_sub(2).min(5);
+    std::thread::sleep(Duration::from_millis(1u64 << shift));
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -78,6 +97,13 @@ pub(crate) enum ImportInventoryCursorStep {
     Pending(ImportInventorySliceProgress),
     SourceComplete(ImportInventory),
     Complete,
+    PublicationTransition(ImportInventoryPublicationTransition),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportInventoryPublicationTransition {
+    pub(crate) expected_state_marker: String,
+    pub(crate) current_state_marker: String,
 }
 
 pub(crate) enum DirtySourcePathInventoryOutcome {
@@ -235,7 +261,7 @@ pub(crate) struct ImportInventoryCursor {
 impl ImportInventoryCursor {
     pub(crate) fn new(
         store: &Store,
-        mut sources: Vec<SourceInfo>,
+        sources: Vec<SourceInfo>,
         full_rescan: bool,
         include_publication_owner: bool,
     ) -> Result<Self> {
@@ -285,7 +311,52 @@ impl ImportInventoryCursor {
         self.publication_owner.as_ref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn inject_publication_transition_once(
+        point: usize,
+        transition: impl FnOnce(&Store) -> Result<()> + 'static,
+    ) {
+        inject_inventory_publication_transition_once(
+            inventory_publication_transition_point_for_test(point),
+            transition,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publication_transition_injection_pending() -> bool {
+        inventory_publication_transition_injection_pending()
+    }
+
     pub(crate) fn advance(&mut self, store: &Store) -> Result<ImportInventoryCursorStep> {
+        let synthetic_owner_page = self.publication_plan.is_some();
+        if synthetic_owner_page {
+            maybe_inject_inventory_publication_transition(
+                store,
+                InventoryPublicationTransitionPoint::BeforeSyntheticOwnerPage,
+            )?;
+        }
+        let step = self.advance_unfenced(store)?;
+        if synthetic_owner_page {
+            maybe_inject_inventory_publication_transition(
+                store,
+                InventoryPublicationTransitionPoint::AfterSyntheticOwnerPage,
+            )?;
+        }
+        let current_state_marker = store
+            .effective_provider_file_publication_inventory_snapshot()?
+            .0;
+        if current_state_marker != self.publication_state_marker {
+            return Ok(ImportInventoryCursorStep::PublicationTransition(
+                ImportInventoryPublicationTransition {
+                    expected_state_marker: self.publication_state_marker.clone(),
+                    current_state_marker,
+                },
+            ));
+        }
+        Ok(step)
+    }
+
+    fn advance_unfenced(&mut self, store: &Store) -> Result<ImportInventoryCursorStep> {
         if let Some(plan) = self.publication_plan.take() {
             return Ok(ImportInventoryCursorStep::SourceComplete(
                 import_inventory_for_plan(plan, None, 1),
@@ -426,16 +497,94 @@ pub(crate) enum InventoryFailurePoint {
     ManifestAfterObservation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InventoryPublicationTransitionPoint {
+    BeforeSyntheticOwnerPage,
+    AfterSyntheticOwnerPage,
+    CodexDiscover,
+    CodexValidate,
+    CodexProcess,
+    CodexStale,
+    CodexResume,
+    CodexBeforeComplete,
+}
+
 #[cfg(test)]
 thread_local! {
     static INVENTORY_FAILURE_ONCE: std::cell::Cell<Option<InventoryFailurePoint>> = const {
         std::cell::Cell::new(None)
     };
+
+    static INVENTORY_PUBLICATION_TRANSITION_ONCE: std::cell::RefCell<Option<(
+        InventoryPublicationTransitionPoint,
+        Box<dyn FnOnce(&Store) -> Result<()>>,
+    )>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub(crate) fn inject_inventory_failure_once(point: InventoryFailurePoint) {
     INVENTORY_FAILURE_ONCE.with(|slot| slot.set(Some(point)));
+}
+
+#[cfg(test)]
+fn inject_inventory_publication_transition_once(
+    point: InventoryPublicationTransitionPoint,
+    transition: impl FnOnce(&Store) -> Result<()> + 'static,
+) {
+    INVENTORY_PUBLICATION_TRANSITION_ONCE.with(|slot| {
+        let replaced = slot.borrow_mut().replace((point, Box::new(transition)));
+        assert!(
+            replaced.is_none(),
+            "publication transition injection already armed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn inventory_publication_transition_injection_pending() -> bool {
+    INVENTORY_PUBLICATION_TRANSITION_ONCE.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+fn inventory_publication_transition_point_for_test(
+    point: usize,
+) -> InventoryPublicationTransitionPoint {
+    match point {
+        0 => InventoryPublicationTransitionPoint::BeforeSyntheticOwnerPage,
+        1 => InventoryPublicationTransitionPoint::AfterSyntheticOwnerPage,
+        2 => InventoryPublicationTransitionPoint::CodexDiscover,
+        3 => InventoryPublicationTransitionPoint::CodexValidate,
+        4 => InventoryPublicationTransitionPoint::CodexProcess,
+        5 => InventoryPublicationTransitionPoint::CodexStale,
+        6 => InventoryPublicationTransitionPoint::CodexResume,
+        7 => InventoryPublicationTransitionPoint::CodexBeforeComplete,
+        _ => panic!("unknown publication transition test point {point}"),
+    }
+}
+
+#[cfg(test)]
+fn maybe_inject_inventory_publication_transition(
+    store: &Store,
+    point: InventoryPublicationTransitionPoint,
+) -> Result<()> {
+    let transition = INVENTORY_PUBLICATION_TRANSITION_ONCE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(armed, _)| *armed == point) {
+            slot.take().map(|(_, transition)| transition)
+        } else {
+            None
+        }
+    });
+    transition.map_or(Ok(()), |transition| transition(store))
+}
+
+#[cfg(not(test))]
+#[inline]
+fn maybe_inject_inventory_publication_transition(
+    _store: &Store,
+    _point: InventoryPublicationTransitionPoint,
+) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -668,6 +817,10 @@ impl CodexInventoryCursor {
                 if slice.complete {
                     self.phase = CodexInventoryPhase::Validate;
                 }
+                maybe_inject_inventory_publication_transition(
+                    store,
+                    InventoryPublicationTransitionPoint::CodexDiscover,
+                )?;
                 Ok(SourceInventoryStep::Pending(ImportInventorySliceProgress {
                     operations: slice.operations,
                     path_bytes: slice.path_bytes,
@@ -687,6 +840,10 @@ impl CodexInventoryCursor {
                     )?);
                     self.phase = CodexInventoryPhase::Process;
                 }
+                maybe_inject_inventory_publication_transition(
+                    store,
+                    InventoryPublicationTransitionPoint::CodexValidate,
+                )?;
                 Ok(SourceInventoryStep::Pending(ImportInventorySliceProgress {
                     discovered_files: self.paths.metrics().discovered_files,
                     ..ImportInventorySliceProgress::default()
@@ -712,6 +869,10 @@ impl CodexInventoryCursor {
                 if page.complete {
                     self.phase = CodexInventoryPhase::Stale;
                 }
+                maybe_inject_inventory_publication_transition(
+                    store,
+                    InventoryPublicationTransitionPoint::CodexProcess,
+                )?;
                 Ok(SourceInventoryStep::Pending(ImportInventorySliceProgress {
                     discovered_files: self.paths.metrics().discovered_files,
                     ..ImportInventorySliceProgress::default()
@@ -759,6 +920,10 @@ impl CodexInventoryCursor {
                         CodexInventoryPhase::Complete
                     };
                 }
+                maybe_inject_inventory_publication_transition(
+                    store,
+                    InventoryPublicationTransitionPoint::CodexStale,
+                )?;
                 Ok(SourceInventoryStep::Pending(
                     ImportInventorySliceProgress::default(),
                 ))
@@ -776,11 +941,19 @@ impl CodexInventoryCursor {
                 if complete {
                     self.phase = CodexInventoryPhase::Complete;
                 }
+                maybe_inject_inventory_publication_transition(
+                    store,
+                    InventoryPublicationTransitionPoint::CodexResume,
+                )?;
                 Ok(SourceInventoryStep::Pending(
                     ImportInventorySliceProgress::default(),
                 ))
             }
             CodexInventoryPhase::Complete => {
+                maybe_inject_inventory_publication_transition(
+                    store,
+                    InventoryPublicationTransitionPoint::CodexBeforeComplete,
+                )?;
                 let summary = std::mem::take(&mut self.summary);
                 let plan = PlannedImportSource {
                     source: self.source.clone(),
@@ -1076,14 +1249,39 @@ pub(crate) fn source_matches_publication_owner(
     source: &SourceInfo,
     owner: &ProviderFilePublicationInventoryOwner,
 ) -> bool {
-    source.provider == owner.provider
+    let Ok(semantics) = publication_owner_source_semantics(owner) else {
+        return false;
+    };
+    source.provider == semantics.source.provider
+        && source.source_format == semantics.source.source_format
         && persisted_import_identity(&source.path, "source root")
-            .is_ok_and(|source_root| source_root == owner.source_root)
+            .is_ok_and(|source_root| source_root == semantics.source_root)
 }
 
 fn publication_owner_plan(
     owner: ProviderFilePublicationInventoryOwner,
 ) -> Result<PlannedImportSource> {
+    let semantics = publication_owner_source_semantics(&owner)?;
+    Ok(PlannedImportSource {
+        source: semantics.source,
+        stats: SourceStats {
+            files: 1,
+            bytes: owner.file_size_bytes,
+            change_token: None,
+        },
+        preinventory: semantics.preinventory,
+    })
+}
+
+struct PublicationOwnerSourceSemantics {
+    source: SourceInfo,
+    source_root: String,
+    preinventory: SourcePreinventory,
+}
+
+fn publication_owner_source_semantics(
+    owner: &ProviderFilePublicationInventoryOwner,
+) -> Result<PublicationOwnerSourceSemantics> {
     let source_format = match owner.inventory_family {
         ProviderFileInventoryFamily::Catalog if owner.provider == CaptureProvider::Codex => {
             "codex_session_jsonl_tree"
@@ -1095,9 +1293,10 @@ fn publication_owner_plan(
         }
         ProviderFileInventoryFamily::SourceImport => owner.source_format.as_str(),
     };
+    let source_root = owner.source_root.clone();
     let source = provider_source_for_persisted_format(
         owner.provider,
-        PathBuf::from(&owner.source_root),
+        PathBuf::from(&source_root),
         source_format,
     )
     .ok_or_else(|| {
@@ -1115,13 +1314,9 @@ fn publication_owner_plan(
             inventory_generation: owner.inventory_generation,
         },
     };
-    Ok(PlannedImportSource {
+    Ok(PublicationOwnerSourceSemantics {
         source,
-        stats: SourceStats {
-            files: 1,
-            bytes: owner.file_size_bytes,
-            change_token: None,
-        },
+        source_root,
         preinventory,
     })
 }
@@ -1285,19 +1480,34 @@ mod publication_owner_plan_tests {
     fn codex_publication_owner_cursor_does_not_amplify_to_full_tree_inventory() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let owner = publication_owner(
+        let root = temp.path().join("colliding-codex-tree");
+        fs::create_dir_all(&root).unwrap();
+        for index in 0..257 {
+            fs::write(root.join(format!("session-{index:03}.jsonl")), b"{}\n").unwrap();
+        }
+        let source =
+            crate::provider_sources::explicit_path_source(CaptureProvider::Codex, root.clone());
+        let mut owner = publication_owner(
             CaptureProvider::Codex,
             ProviderFileInventoryFamily::Catalog,
             "codex_session_jsonl",
         );
+        owner.source_root = root.to_str().unwrap().to_owned();
+        owner.source_path = root.join("session-000.jsonl").to_str().unwrap().to_owned();
+        let publication_state_marker = store
+            .effective_provider_file_publication_inventory_snapshot()
+            .unwrap()
+            .0;
         let mut cursor = ImportInventoryCursor::new_with_publication_snapshot(
-            Vec::new(),
+            vec![source],
             true,
             true,
-            "publication-snapshot".to_owned(),
+            publication_state_marker,
             Some(owner),
         )
         .unwrap();
+        let pacer = ctx_history_capture::DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = ctx_history_capture::install_disk_io_pacer(pacer.clone());
 
         let page = match cursor.advance(&store).unwrap() {
             ImportInventoryCursorStep::SourceComplete(page) => page,
@@ -1307,9 +1517,12 @@ mod publication_owner_plan_tests {
             ImportInventoryCursorStep::Complete => {
                 panic!("synthetic Codex owner was omitted")
             }
+            ImportInventoryCursorStep::PublicationTransition(transition) => {
+                panic!("unexpected publication transition: {transition:?}")
+            }
         };
         assert_eq!(page.sources.len(), 1);
-        assert_eq!(page.sources[0].source.path, PathBuf::from("/history/root"));
+        assert_eq!(page.sources[0].source.path, root);
         assert_eq!(
             page.sources[0].source.source_format,
             "codex_session_jsonl_tree"
@@ -1317,6 +1530,48 @@ mod publication_owner_plan_tests {
         assert!(matches!(
             cursor.advance(&store).unwrap(),
             ImportInventoryCursorStep::Complete
+        ));
+        assert_eq!(pacer.filesystem_operation_count(), 0);
+        assert!(store
+            .current_catalog_inventory_generation(CaptureProvider::Codex, root.to_str().unwrap(),)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn publication_owner_source_suppression_is_family_and_format_aware() {
+        let owner = publication_owner(
+            CaptureProvider::Codex,
+            ProviderFileInventoryFamily::Catalog,
+            "codex_session_jsonl",
+        );
+        let mut tree = crate::provider_sources::explicit_path_source(
+            CaptureProvider::Codex,
+            PathBuf::from("/history/root"),
+        );
+        assert!(source_matches_publication_owner(&tree, &owner));
+
+        tree.source_format = "codex_session_jsonl";
+        assert!(!source_matches_publication_owner(&tree, &owner));
+
+        let source_import_owner = publication_owner(
+            CaptureProvider::Pi,
+            ProviderFileInventoryFamily::SourceImport,
+            "pi_session_jsonl",
+        );
+        let mut manifested = crate::provider_sources::explicit_path_source(
+            CaptureProvider::Pi,
+            PathBuf::from("/history/root"),
+        );
+        assert!(source_matches_publication_owner(
+            &manifested,
+            &source_import_owner
+        ));
+
+        manifested.source_format = "codex_session_jsonl_tree";
+        assert!(!source_matches_publication_owner(
+            &manifested,
+            &source_import_owner
         ));
     }
 

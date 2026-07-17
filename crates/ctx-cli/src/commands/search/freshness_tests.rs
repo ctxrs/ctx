@@ -11,7 +11,7 @@ mod freshness_tests {
     use ctx_history_core::{canonical_provider_material_source_format, utc_now, CaptureProvider};
     use ctx_history_store::{
         CatalogIndexedStatus, ProviderFileInventoryObservation, ProviderFilePublicationKind,
-        SourceImportFile, SourceImportFileIndexUpdate,
+        ProviderFilePublicationScope, SourceImportFile, SourceImportFileIndexUpdate,
     };
 
     fn write_pi_source(root: &Path, count: usize, label: &str) -> SourceInfo {
@@ -75,6 +75,26 @@ mod freshness_tests {
         )
     }
 
+    fn write_many_codex_sources(root: &Path, count: usize, label: &str) -> SourceInfo {
+        let mut source = None;
+        for index in 0..count {
+            let (candidate, _) = write_codex_source(root, &format!("{label}-{index:03}"));
+            source = Some(candidate);
+        }
+        source.expect("Codex transition fixture must contain at least one session")
+    }
+
+    const PUBLICATION_TRANSITION_POINTS: [(&str, usize, bool); 8] = [
+        ("before synthetic owner page", 0, true),
+        ("after synthetic owner page", 1, true),
+        ("mid Codex discover", 2, false),
+        ("mid Codex validate", 3, false),
+        ("mid Codex process", 4, false),
+        ("mid Codex stale", 5, false),
+        ("mid Codex resume", 6, false),
+        ("before Codex completion", 7, false),
+    ];
+
     fn drain_inventory_after_injected_failure(
         store: &Store,
         source: SourceInfo,
@@ -89,6 +109,9 @@ mod freshness_tests {
                 Ok(ImportInventoryCursorStep::Pending(_)) => {}
                 Ok(ImportInventoryCursorStep::SourceComplete(page)) => pages.push(page),
                 Ok(ImportInventoryCursorStep::Complete) => break,
+                Ok(ImportInventoryCursorStep::PublicationTransition(transition)) => {
+                    panic!("unexpected publication transition: {transition:?}")
+                }
                 Err(error) => {
                     failures += 1;
                     assert!(error
@@ -267,7 +290,10 @@ mod freshness_tests {
             .unwrap()
     }
 
-    fn leave_unmutated_pi_publication(store: &Store, source: &SourceInfo) {
+    fn begin_unmutated_pi_publication(
+        store: &Store,
+        source: &SourceInfo,
+    ) -> ProviderFilePublicationScope {
         let (_, inventory_generation) = finalized_manifest_inventory(store, source);
         let source_root = source.path.to_str().unwrap();
         assert_eq!(
@@ -286,7 +312,7 @@ mod freshness_tests {
             .into_iter()
             .next()
             .unwrap();
-        let scope = store
+        store
             .begin_provider_file_publication(
                 file.provider,
                 ProviderFileInventoryObservation::SourceImport {
@@ -307,8 +333,62 @@ mod freshness_tests {
                 ProviderFilePublicationKind::Replacement,
                 utc_now().timestamp_millis(),
             )
-            .unwrap();
-        drop(scope);
+            .unwrap()
+    }
+
+    fn leave_unmutated_pi_publication(store: &Store, source: &SourceInfo) {
+        drop(begin_unmutated_pi_publication(store, source));
+    }
+
+    fn restore_indexed_manifest_observation(store: &Store, source: &SourceInfo) {
+        let (files, inventory_generation) = finalized_manifest_inventory(store, source);
+        for file in files {
+            assert_eq!(
+                store
+                    .record_source_import_file_result(
+                        file.provider,
+                        SourceImportFileIndexUpdate {
+                            source_root: &file.source_root,
+                            source_path: &file.source_path,
+                            file_size_bytes: file.file_size_bytes,
+                            file_modified_at_ms: file.file_modified_at_ms,
+                            import_revision: file.import_revision,
+                            inventory_generation,
+                            metadata: &file.metadata,
+                            indexed_at_ms: utc_now().timestamp_millis(),
+                        },
+                        CatalogIndexedStatus::Indexed,
+                        None,
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    fn arm_inventory_publication_transition(
+        store: &Store,
+        point: usize,
+        synthetic_owner: bool,
+        owner_a: &SourceInfo,
+        owner_b: SourceInfo,
+    ) {
+        let owner_a_scope = synthetic_owner.then(|| begin_unmutated_pi_publication(store, owner_a));
+        let owner_a = synthetic_owner.then(|| owner_a.clone());
+        ImportInventoryCursor::inject_publication_transition_once(point, move |store| {
+            if let Some(scope) = owner_a_scope {
+                let aborted = store.abort_provider_file_publication(scope)?;
+                assert!(matches!(aborted, std::ops::ControlFlow::Continue(_)));
+                restore_indexed_manifest_observation(
+                    store,
+                    owner_a
+                        .as_ref()
+                        .expect("synthetic owner fixture is missing"),
+                );
+            }
+            leave_unmutated_pi_publication(store, &owner_b);
+            Ok(())
+        });
     }
 
     fn stage_pi_recovery_publication(data_root: &Path, source: &SourceInfo) {
@@ -1246,6 +1326,209 @@ mod freshness_tests {
             .unwrap()
             .has_pending_provider_file_publications()
             .unwrap());
+    }
+
+    #[test]
+    fn direct_inventory_restarts_at_every_publication_transition_boundary() {
+        for (point_name, point, synthetic_owner) in PUBLICATION_TRANSITION_POINTS {
+            let temp = tempfile::tempdir().unwrap();
+            let data_root = temp.path().join(format!("direct-{point}"));
+            let owner_a = write_pi_source(&data_root.join("owner-a"), 1, "owner-a");
+            let owner_b = write_pi_source(&data_root.join("owner-b"), 1, "owner-b");
+            let preceding = write_pi_source(&data_root.join("preceding"), 1, "preceding");
+            let codex = write_many_codex_sources(&data_root.join("codex"), 65, "codex");
+            let baseline = refresh(
+                &data_root,
+                vec![owner_a.clone(), owner_b.clone()],
+                ImportExecutionPolicy::Drain,
+            );
+            assert_eq!(
+                baseline.fresh_units_pending, 0,
+                "{point_name}: {baseline:?}"
+            );
+
+            let store = Store::open(database_path(data_root.clone())).unwrap();
+            arm_inventory_publication_transition(
+                &store,
+                point,
+                synthetic_owner,
+                &owner_a,
+                owner_b.clone(),
+            );
+            let inventory =
+                inventory_import_sources(&store, vec![preceding.clone(), codex.clone()], true)
+                    .unwrap();
+
+            assert!(
+                !ImportInventoryCursor::publication_transition_injection_pending(),
+                "{point_name}: transition boundary was not reached"
+            );
+            assert!(inventory.failures.is_empty(), "{point_name}: {inventory:?}");
+            let planned_paths = inventory
+                .sources
+                .iter()
+                .map(|planned| planned.source.path.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                planned_paths,
+                BTreeSet::from([
+                    owner_b.path.clone(),
+                    preceding.path.clone(),
+                    codex.path.clone()
+                ]),
+                "{point_name}: stale or duplicated inventory page"
+            );
+            assert_eq!(inventory.sources.len(), planned_paths.len(), "{point_name}");
+            assert_eq!(inventory.catalog_sources.len(), 1, "{point_name}");
+            assert_eq!(
+                store
+                    .list_active_catalog_sessions_for_source(
+                        CaptureProvider::Codex,
+                        codex.path.to_str().unwrap(),
+                    )
+                    .unwrap()
+                    .len(),
+                65,
+                "{point_name}: partial Codex catalog visibility"
+            );
+            let (_, publication_owner) = store
+                .effective_provider_file_publication_inventory_snapshot()
+                .unwrap();
+            assert_eq!(
+                publication_owner.unwrap().source_root,
+                owner_b.path.to_str().unwrap(),
+                "{point_name}: inventory did not converge on owner B"
+            );
+            drop(store);
+
+            let drained = refresh(
+                &data_root,
+                vec![preceding.clone(), codex.clone()],
+                ImportExecutionPolicy::Drain,
+            );
+            assert_eq!(drained.fresh_units_pending, 0, "{point_name}: {drained:?}");
+            let store = Store::open(database_path(data_root)).unwrap();
+            assert!(
+                !store.has_pending_provider_file_publications().unwrap(),
+                "{point_name}: direct drain did not converge"
+            );
+            assert_eq!(
+                store
+                    .list_active_catalog_sessions_for_source(
+                        CaptureProvider::Codex,
+                        codex.path.to_str().unwrap(),
+                    )
+                    .unwrap()
+                    .len(),
+                65,
+                "{point_name}: direct drain exposed a partial Codex tree"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_inventory_restarts_at_every_publication_transition_boundary() {
+        for (point_name, point, synthetic_owner) in PUBLICATION_TRANSITION_POINTS {
+            let temp = tempfile::tempdir().unwrap();
+            let data_root = temp.path().join(format!("daemon-{point}"));
+            let owner_a = write_pi_source(&data_root.join("owner-a"), 1, "owner-a");
+            let owner_b = write_pi_source(&data_root.join("owner-b"), 1, "owner-b");
+            let preceding = write_pi_source(&data_root.join("preceding"), 1, "preceding");
+            let codex = write_many_codex_sources(&data_root.join("codex"), 65, "codex");
+            let baseline = refresh(
+                &data_root,
+                vec![owner_a.clone(), owner_b.clone()],
+                ImportExecutionPolicy::Drain,
+            );
+            assert_eq!(
+                baseline.fresh_units_pending, 0,
+                "{point_name}: {baseline:?}"
+            );
+
+            let store = Store::open(database_path(data_root.clone())).unwrap();
+            arm_inventory_publication_transition(
+                &store,
+                point,
+                synthetic_owner,
+                &owner_a,
+                owner_b.clone(),
+            );
+            drop(store);
+            let sources = vec![preceding.clone(), codex.clone()];
+            let mut runtime = SearchRefreshRuntime::default();
+            for _ in 0..256 {
+                let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+                if !ImportInventoryCursor::publication_transition_injection_pending() {
+                    break;
+                }
+            }
+            assert!(
+                !ImportInventoryCursor::publication_transition_injection_pending(),
+                "{point_name}: daemon never reached transition boundary"
+            );
+            assert!(
+                runtime.inventory_progress.is_none(),
+                "{point_name}: daemon retained the stale cursor"
+            );
+            assert!(
+                runtime.cached_work.is_none(),
+                "{point_name}: daemon exposed a stale accumulated page"
+            );
+
+            let mut converged = false;
+            for _ in 0..512 {
+                let totals = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+                let store = Store::open(database_path(data_root.clone())).unwrap();
+                let planned_paths = runtime
+                    .cached_work
+                    .as_ref()
+                    .map(|work| {
+                        work.plan
+                            .sources
+                            .iter()
+                            .map(|planned| planned.source.path.clone())
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                if runtime.inventory_progress.is_none()
+                    && runtime
+                        .cached_work
+                        .as_ref()
+                        .is_some_and(|work| work.publication_owner.is_none())
+                    && planned_paths == BTreeSet::from([preceding.path.clone(), codex.path.clone()])
+                    && totals.fresh_units_pending == 0
+                    && totals.recovery_units_pending == 0
+                    && !store.has_pending_provider_file_publications().unwrap()
+                {
+                    converged = true;
+                    break;
+                }
+            }
+            assert!(converged, "{point_name}: daemon did not converge");
+
+            let work = runtime.cached_work.as_ref().unwrap();
+            let planned_paths = work
+                .plan
+                .sources
+                .iter()
+                .map(|planned| planned.source.path.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(work.plan.sources.len(), planned_paths.len(), "{point_name}");
+            assert!(!planned_paths.contains(&owner_a.path), "{point_name}");
+            assert!(!planned_paths.contains(&owner_b.path), "{point_name}");
+            let store = Store::open(database_path(data_root)).unwrap();
+            assert_eq!(
+                store
+                    .list_active_catalog_sessions_for_source(
+                        CaptureProvider::Codex,
+                        codex.path.to_str().unwrap(),
+                    )
+                    .unwrap()
+                    .len(),
+                65,
+                "{point_name}: daemon exposed a partial Codex tree"
+            );
+        }
     }
 
     #[test]

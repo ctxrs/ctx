@@ -270,45 +270,44 @@ fn refresh_sources_for_search_inner(
             let operation_count = disk_io_pacer
                 .filesystem_operation_count()
                 .saturating_sub(operations_before);
-            let publication_state_after_page = store
-                .effective_provider_file_publication_inventory_snapshot()?
-                .0;
-            if runtime.inventory_publication_state_changed(&publication_state_after_page) {
-                runtime.restart_inventory_after_publication_transition();
-            } else {
-                match inventory_step {
-                    ImportInventoryCursorStep::Pending(slice) => {
-                        runtime.note_inventory_slice(slice, operation_count);
-                    }
-                    ImportInventoryCursorStep::SourceComplete(inventory) => {
-                        let source_bytes = inventory.totals.source_bytes;
-                        let inventoried_paths = inventory
-                            .sources
-                            .iter()
-                            .map(|planned| planned.source.path.clone())
-                            .chain(
-                                inventory
-                                    .failures
-                                    .iter()
-                                    .map(|failure| failure.source.path.clone()),
-                            )
-                            .collect::<BTreeSet<_>>();
-                        let (bound_publication_state, bound_publication_owner) =
-                            runtime.inventory_publication_snapshot().ok_or_else(|| {
-                                anyhow!("inventory page lost its publication snapshot")
-                            })?;
-                        merge_search_inventory_page(
-                            &store,
-                            &source_fingerprint,
-                            bound_publication_state,
-                            bound_publication_owner,
-                            inventoried_paths,
-                            inventory,
-                            &mut runtime.cached_work,
-                        )?;
-                        runtime.note_inventory_source_completed(source_bytes, operation_count);
-                    }
-                    ImportInventoryCursorStep::Complete => runtime.note_inventory_cursor_complete(),
+            match inventory_step {
+                ImportInventoryCursorStep::Pending(slice) => {
+                    runtime.note_inventory_slice(slice, operation_count);
+                }
+                ImportInventoryCursorStep::SourceComplete(inventory) => {
+                    let source_bytes = inventory.totals.source_bytes;
+                    let inventoried_paths = inventory
+                        .sources
+                        .iter()
+                        .map(|planned| planned.source.path.clone())
+                        .chain(
+                            inventory
+                                .failures
+                                .iter()
+                                .map(|failure| failure.source.path.clone()),
+                        )
+                        .collect::<BTreeSet<_>>();
+                    let (bound_publication_state, bound_publication_owner) = runtime
+                        .inventory_publication_snapshot()
+                        .ok_or_else(|| anyhow!("inventory page lost its publication snapshot"))?;
+                    merge_search_inventory_page(
+                        &store,
+                        &source_fingerprint,
+                        bound_publication_state,
+                        bound_publication_owner,
+                        inventoried_paths,
+                        inventory,
+                        &mut runtime.cached_work,
+                    )?;
+                    runtime.note_inventory_source_completed(source_bytes, operation_count);
+                }
+                ImportInventoryCursorStep::Complete => runtime.note_inventory_cursor_complete(),
+                ImportInventoryCursorStep::PublicationTransition(transition) => {
+                    debug_assert_ne!(
+                        transition.expected_state_marker,
+                        transition.current_state_marker
+                    );
+                    runtime.restart_inventory_after_publication_transition();
                 }
             }
             if runtime.inventory_is_complete() {
