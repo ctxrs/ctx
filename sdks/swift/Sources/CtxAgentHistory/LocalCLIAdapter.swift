@@ -62,35 +62,15 @@ public struct ProcessCommandRunner: CommandRunner {
 
     public func run(_ request: CommandRequest) throws -> CommandResult {
         let process = Process()
-        let setsid = Self.setsidPath
-        let launcher = Self.launcherPath(for: request)
-        guard setsid != nil || launcher != nil else {
+        guard let launcher = Self.launcherPath(for: request) else {
             throw CaptureIssue.failure(
                 stream: "process_scope",
                 cause: "local CLI process containment is unavailable"
             ).sdkError(command: [request.command] + request.arguments)
         }
-        let targetArguments = launcher == nil
-            ? request.arguments
-            : [processScopeLauncherArgument, "--", request.command] + request.arguments
-        if let setsid {
-            process.executableURL = URL(fileURLWithPath: setsid)
-            if let launcher {
-                process.arguments = [launcher] + targetArguments
-            } else if request.command.contains("/") {
-                process.arguments = [request.command] + targetArguments
-            } else {
-                process.arguments = ["/usr/bin/env", request.command] + targetArguments
-            }
-        } else if let launcher {
-            process.executableURL = URL(fileURLWithPath: launcher)
-            process.arguments = targetArguments
-        } else {
-            throw CaptureIssue.failure(
-                stream: "process_scope",
-                cause: "local CLI process containment is unavailable"
-            ).sdkError(command: [request.command] + request.arguments)
-        }
+        process.executableURL = URL(fileURLWithPath: launcher)
+        process.arguments = [processScopeLauncherArgument, "--", request.command]
+            + request.arguments
         if let cwd = request.cwd {
             process.currentDirectoryURL = URL(fileURLWithPath: cwd)
         }
@@ -184,13 +164,6 @@ public struct ProcessCommandRunner: CommandRunner {
         )
     }
 
-    private static var setsidPath: String? {
-        for path in ["/usr/bin/setsid", "/bin/setsid"] where FileManager.default.isExecutableFile(atPath: path) {
-            return path
-        }
-        return nil
-    }
-
     private static func launcherPath(for request: CommandRequest) -> String? {
         if let override = request.env[processScopeLauncherEnvironment], !override.isEmpty {
             return override
@@ -264,29 +237,48 @@ private final class LockedCapture: @unchecked Sendable {
     }
 
     func read(from handle: FileHandle) {
-        do {
-            while let chunk = try handle.read(upToCount: localReadBufferBytes), !chunk.isEmpty {
-                lock.lock()
-                let remaining = capBytes - captured.count
-                if chunk.count > remaining {
-                    if remaining > 0 {
-                        captured.append(contentsOf: chunk.prefix(remaining))
-                    }
-                    captureIssue = .limit(stream: stream, capBytes: capBytes)
-                    lock.unlock()
-                    signal.signal()
-                    return
+        var buffer = [UInt8](repeating: 0, count: localReadBufferBytes)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes -> Int in
+                guard let baseAddress = bytes.baseAddress else { return 0 }
+                #if canImport(Darwin)
+                return Darwin.read(handle.fileDescriptor, baseAddress, bytes.count)
+                #elseif canImport(Glibc)
+                return Glibc.read(handle.fileDescriptor, baseAddress, bytes.count)
+                #else
+                return -1
+                #endif
+            }
+            if count == 0 {
+                return
+            }
+            if count < 0 {
+                let readError = errno
+                if readError == EINTR {
+                    continue
                 }
-                captured.append(chunk)
+                lock.lock()
+                if captureIssue == nil {
+                    captureIssue = .failure(stream: stream, cause: "read failed with errno \(readError)")
+                }
                 lock.unlock()
+                signal.signal()
+                return
             }
-        } catch {
+
             lock.lock()
-            if captureIssue == nil {
-                captureIssue = .failure(stream: stream, cause: String(describing: error))
+            let remaining = capBytes - captured.count
+            if count > remaining {
+                if remaining > 0 {
+                    captured.append(contentsOf: buffer.prefix(remaining))
+                }
+                captureIssue = .limit(stream: stream, capBytes: capBytes)
+                lock.unlock()
+                signal.signal()
+                return
             }
+            captured.append(contentsOf: buffer.prefix(count))
             lock.unlock()
-            signal.signal()
         }
     }
 

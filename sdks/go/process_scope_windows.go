@@ -3,23 +3,29 @@
 package ctxagenthistory
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"syscall"
+	"unsafe"
 )
 
 const (
-	createSuspended       = 0x00000004
-	createNewProcessGroup = 0x00000200
-	processSetQuota       = 0x0100
-	processTerminate      = 0x0001
-	processSuspendResume  = 0x0800
+	createSuspended                   = 0x00000004
+	createNewProcessGroup             = 0x00000200
+	processSetQuota                   = 0x0100
+	processTerminate                  = 0x0001
+	processSuspendResume              = 0x0800
+	jobObjectExtendedLimitInformation = 9
+	jobObjectLimitKillOnJobClose      = 0x00002000
 )
 
 var (
 	kernel32                 = syscall.NewLazyDLL("kernel32.dll")
 	ntdll                    = syscall.NewLazyDLL("ntdll.dll")
 	createJobObjectW         = kernel32.NewProc("CreateJobObjectW")
+	setInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
 	assignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
 	terminateJobObject       = kernel32.NewProc("TerminateJobObject")
 	openProcess              = kernel32.NewProc("OpenProcess")
@@ -36,8 +42,27 @@ func newOwnedProcessScope(cmd *exec.Cmd) (*ownedProcessScope, error) {
 	if job == 0 {
 		return nil, fmt.Errorf("create ctx CLI job object: %w", callErr)
 	}
+	limits := make([]byte, extendedJobLimitInformationSize())
+	binary.LittleEndian.PutUint32(limits[16:20], jobObjectLimitKillOnJobClose)
+	configured, _, configureErr := setInformationJobObject.Call(
+		job,
+		jobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&limits[0])),
+		uintptr(len(limits)),
+	)
+	if configured == 0 {
+		closeHandle.Call(job)
+		return nil, fmt.Errorf("configure ctx CLI job object: %w", configureErr)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createSuspended | createNewProcessGroup}
 	return &ownedProcessScope{job: syscall.Handle(job)}, nil
+}
+
+func extendedJobLimitInformationSize() int {
+	if strconv.IntSize == 32 {
+		return 112
+	}
+	return 144
 }
 
 func (scope *ownedProcessScope) AfterStart(cmd *exec.Cmd) error {
@@ -75,6 +100,7 @@ func (scope *ownedProcessScope) Terminate(cmd *exec.Cmd) {
 
 func (scope *ownedProcessScope) Close() {
 	if scope.job != 0 {
+		terminateJobObject.Call(uintptr(scope.job), 0)
 		closeHandle.Call(uintptr(scope.job))
 		scope.job = 0
 	}

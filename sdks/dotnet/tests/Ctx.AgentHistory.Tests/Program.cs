@@ -372,9 +372,7 @@ internal static class Program
     {
         var hasLauncher = !string.IsNullOrWhiteSpace(
             Environment.GetEnvironmentVariable("CTX_SDK_PROCESS_SCOPE_LAUNCHER"));
-        var hasSetsid = !OperatingSystem.IsWindows()
-            && new[] { "/usr/bin/setsid", "/bin/setsid" }.Any(File.Exists);
-        var nativeScope = hasLauncher || hasSetsid;
+        var nativeScope = hasLauncher;
         var executable = Environment.ProcessPath
             ?? throw new InvalidOperationException("test executable path is unavailable");
         LocalCliAdapter Adapter(TimeSpan timeout) => new(new LocalAgentHistoryConfig
@@ -390,18 +388,18 @@ internal static class Program
             {
                 var unavailable = await ThrowsAsync<CtxAgentHistoryException>(() =>
                     Adapter(TimeSpan.FromSeconds(2))
-                        .ExecuteJsonAsync("__ctx_sdk_helper", ["dual"]));
+                        .ExecuteJsonAsync("__ctx_sdk_helper", ["__ctx_sdk_helper", "dual"]));
                 Equal("capture_failure", unavailable.Code);
                 Equal("process_scope", unavailable.Details["stream"]!.GetValue<string>());
                 return;
             }
             _ = await Adapter(TimeSpan.FromSeconds(2))
-                .ExecuteJsonAsync("__ctx_sdk_helper", ["dual"]);
+                .ExecuteJsonAsync("__ctx_sdk_helper", ["__ctx_sdk_helper", "dual"]);
 
             var started = Stopwatch.StartNew();
             var overflow = await ThrowsAsync<CtxAgentHistoryException>(() =>
                 Adapter(TimeSpan.FromSeconds(2))
-                    .ExecuteJsonAsync("__ctx_sdk_helper", ["stderr-first"]));
+                    .ExecuteJsonAsync("__ctx_sdk_helper", ["__ctx_sdk_helper", "stderr-first"]));
             Equal("capture_limit", overflow.Code);
             Equal("stderr", overflow.Details["stream"]!.GetValue<string>());
             True(started.Elapsed < TimeSpan.FromSeconds(2), "stderr-first overflow exceeded bounded teardown");
@@ -412,7 +410,7 @@ internal static class Program
             var inheritedError = await ThrowsAsync<CtxAgentHistoryException>(() =>
                 Adapter(TimeSpan.FromSeconds(5)).ExecuteJsonAsync(
                     "__ctx_sdk_helper",
-                    ["inherit", inheritedAlive, inheritedPid]));
+                    ["__ctx_sdk_helper", "inherit", inheritedAlive, inheritedPid]));
             Equal("capture_failure", inheritedError.Code);
             True(started.Elapsed < TimeSpan.FromSeconds(2), "inherited-pipe teardown exceeded its deadline");
             await Task.Delay(700);
@@ -422,7 +420,7 @@ internal static class Program
             var successPid = Path.Combine(directory, "success.pid");
             _ = await Adapter(TimeSpan.FromSeconds(2)).ExecuteJsonAsync(
                 "__ctx_sdk_helper",
-                ["success-child", successAlive, successPid]);
+                ["__ctx_sdk_helper", "success-child", successAlive, successPid]);
             await Task.Delay(700);
             True(!File.Exists(successAlive), "successful scoped command left a silent child alive");
         }
@@ -655,7 +653,7 @@ internal static class Program
     {
         const string limits = "{\"query_bytes\":8192,\"clauses\":32,\"analyzed_tokens_per_clause\":32,\"candidates_per_positive_seed\":1024,\"candidate_rows\":16384,\"retained_candidate_ids\":8192,\"residual_rows\":8192,\"verification_bytes\":16777216,\"verification_lookup_bytes\":16384,\"hydrated_rows\":256,\"hydration_input_bytes\":8388608,\"hydration_input_bytes_per_event\":65536,\"snippet_input_bytes\":8388608,\"returned_text_bytes\":524288,\"serialized_response_bytes\":2097152,\"results\":200,\"elapsed_ms\":1000}";
         const string consumed = "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
-        return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\",\"resolved\":" + limits + ",\"consumed\":" + consumed + ",\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"retrieval\":{\"requested_mode\":\"hybrid\",\"effective_mode\":\"lexical\",\"semantic_status\":\"unavailable\",\"semantic_weight\":0.25,\"semanticWeight\":0.5,\"semantic_fallback_code\":\"old\",\"semanticFallbackCode\":\"old\",\"semantic_fallback\":\"old\",\"semanticFallback\":\"old\"},\"results\":[]}";
+        return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\",\"resolved\":" + limits + ",\"consumed\":" + consumed + ",\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"retrieval\":{\"requested_mode\":\"hybrid\",\"effective_mode\":\"lexical\",\"semantic_status\":\"unavailable\",\"semantic_weight\":0.25,\"semanticWeight\":0.5,\"semantic_fallback_code\":\"old\",\"semanticFallbackCode\":\"old\",\"semantic_fallback\":\"old\",\"semanticFallback\":\"old\"},\"freshness\":{\"mode\":\"off\",\"status\":\"skipped\"},\"results\":[]}";
     }
 
     private static JsonObject EmptySearchObject() => JsonNode.Parse(EmptySearchJson())!.AsObject();

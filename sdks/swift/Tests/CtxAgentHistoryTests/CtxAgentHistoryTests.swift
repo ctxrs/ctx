@@ -470,9 +470,7 @@ final class CtxAgentHistoryTests: XCTestCase {
            !launcher.isEmpty {
             return true
         }
-        return ["/usr/bin/setsid", "/bin/setsid"].contains {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }
+        return false
     }
 
     func testCamelizedPublicJSONOmitsRawMetadataKeys() throws {

@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	localStdoutCapBytes  = 2 * 1024 * 1024
-	localStderrCapBytes  = 256 * 1024
-	localReadBufferBytes = 64 * 1024
-	localTeardownDelay   = 100 * time.Millisecond
-	localTeardownLimit   = time.Second
+	localStdoutCapBytes   = 2 * 1024 * 1024
+	localStderrCapBytes   = 256 * 1024
+	localReadBufferBytes  = 64 * 1024
+	localTeardownDelay    = 100 * time.Millisecond
+	localTeardownLimit    = time.Second
+	processScopeActiveEnv = "CTX_SDK_PROCESS_SCOPE_ACTIVE=1"
 )
 
 // LocalCLIAdapter executes agent-history-v1 operations through the local ctx binary.
@@ -145,9 +146,8 @@ func (execCommandRunner) Run(ctx context.Context, path string, args []string, en
 		return commandResult{ExitCode: -1, Err: err}
 	}
 	defer scope.Close()
-	if len(env) > 0 {
-		cmd.Env = append(cmd.Environ(), env...)
-	}
+	cmd.Env = append(cmd.Environ(), env...)
+	cmd.Env = append(cmd.Env, processScopeActiveEnv)
 	stdout := newBoundedCaptureWriter("stdout", localStdoutCapBytes)
 	stderr := newBoundedCaptureWriter("stderr", localStderrCapBytes)
 	cmd.Stdout = stdout
@@ -198,6 +198,7 @@ func (execCommandRunner) Run(ctx context.Context, path string, args []string, en
 	if !utf8.Valid(stdout.Bytes()) || !utf8.Valid(stderr.Bytes()) {
 		scope.Terminate(cmd)
 	}
+	scope.Close()
 	return commandResult{
 		Stdout:   stdout.Bytes(),
 		Stderr:   stderr.Bytes(),

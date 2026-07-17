@@ -630,7 +630,7 @@ test("local adapter bounds inherited-pipe teardown", async () => {
       () =>
         adapter.execute([
           "-e",
-          `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setTimeout(()=>{},60000)'],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));`,
+          `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setTimeout(()=>{},60000)'],{stdio:'inherit'});c.unref();fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));`,
         ]),
       (error) => error instanceof CtxParseError && error.code === "capture_failure",
     );
@@ -651,7 +651,7 @@ test("successful local command kills same-scope child with closed pipes", async 
   try {
     const completed = await adapter.execute([
       "-e",
-      `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setTimeout(()=>{},60000)'],{stdio:'ignore'});fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));process.stdout.write('{}');`,
+      `const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setTimeout(()=>{},60000)'],{stdio:'ignore'});c.unref();fs.writeFileSync(${JSON.stringify(pidPath)},String(c.pid));process.stdout.write('{}');`,
     ]);
     assert.equal(completed.stdout, "{}");
     pid = Number(await readFile(pidPath, "utf8"));

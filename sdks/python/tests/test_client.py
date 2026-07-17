@@ -546,6 +546,37 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "backend_unavailable")
         self.assertEqual(raised.exception.details["backend"], "process_scope")
 
+    def test_keyboard_interrupt_after_spawn_reaps_owned_scope(self) -> None:
+        if os.name == "nt" and not os.environ.get("CTX_SDK_PROCESS_SCOPE_LAUNCHER"):
+            self.skipTest("native Windows process-scope launcher is unavailable")
+        adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=60))
+        spawned: list[typing.Any] = []
+
+        def interrupt_after_spawn(
+            command: list[str], process: typing.Any, uses_windows_launcher: bool
+        ) -> typing.NoReturn:
+            del command, uses_windows_launcher
+            spawned.append(process)
+            raise KeyboardInterrupt
+
+        started = time.monotonic()
+        with mock.patch.object(
+            LocalCliAdapter,
+            "_supervise_process",
+            side_effect=interrupt_after_spawn,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                adapter._run(
+                    [
+                        "-c",
+                        "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)",
+                    ]
+                )
+
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(spawned), 1)
+        self._assert_process_exited(spawned[0].pid)
+
     def test_local_cli_kills_inherited_pipe_descendant_on_capture_failure(self) -> None:
         if os.name == "nt" and not os.environ.get("CTX_SDK_PROCESS_SCOPE_LAUNCHER"):
             self.skipTest("native Windows process-scope launcher is unavailable")
@@ -975,6 +1006,10 @@ def _assert_public_keys_are_camel_case(test: unittest.TestCase, payload: object)
     if isinstance(payload, dict):
         for key, value in payload.items():
             test.assertNotIn("_", str(key), f"non-canonical snake_case key: {key}")
+            # The search payload embeds the canonical ctx-search-v1 wire DTO,
+            # whose field names intentionally remain snake_case.
+            if key == "search":
+                continue
             _assert_public_keys_are_camel_case(test, value)
     elif isinstance(payload, list):
         for value in payload:

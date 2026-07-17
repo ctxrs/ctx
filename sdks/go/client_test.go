@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -508,13 +509,13 @@ func TestLocalCLIProcessScopeKillsInheritedHandleDescendant(t *testing.T) {
 	if time.Since(started) >= 2*time.Second {
 		t.Fatalf("inherited-pipe teardown exceeded deadline: %s", time.Since(started))
 	}
-	time.Sleep(700 * time.Millisecond)
+	assertProcessExited(t, pidPath)
 	if _, err := os.Stat(alivePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("owned descendant survived bounded teardown: %v", err)
 	}
 }
 
-func TestLocalCLISuccessReleasesProcessScope(t *testing.T) {
+func TestLocalCLISuccessTerminatesProcessScope(t *testing.T) {
 	if testing.Short() {
 		t.Skip("process-scope lifecycle test")
 	}
@@ -530,26 +531,42 @@ func TestLocalCLISuccessReleasesProcessScope(t *testing.T) {
 	if result.Err != nil || string(result.Stdout) != "{}" {
 		t.Fatalf("successful helper failed: %#v", result)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(alivePath); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("successful command killed its long-lived child")
-		}
-		time.Sleep(10 * time.Millisecond)
+	assertProcessExited(t, pidPath)
+	if _, err := os.Stat(alivePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful command left an owned descendant alive: %v", err)
 	}
+}
+
+func TestLocalCLIProcessScopeSuppressesDaemonAutostart(t *testing.T) {
+	adapter := NewLocalCLIAdapter(
+		WithCLIPath(os.Args[0]),
+		WithEnv([]string{"CTX_GO_SDK_HELPER=1"}),
+	)
+	stdout, err := adapter.Do(
+		context.Background(),
+		Operation{Name: "scope-env", Args: helperProcessArgs("scope-env")},
+	)
+	if err != nil || string(stdout) != "{}" {
+		t.Fatalf("owned command did not receive process-scope marker: stdout=%q err=%v", stdout, err)
+	}
+}
+
+func assertProcessExited(t *testing.T, pidPath string) {
+	t.Helper()
 	rawPID, err := os.ReadFile(pidPath)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read fixture child pid: %v", err)
 	}
 	pid, err := strconv.Atoi(string(rawPID))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse fixture child pid: %v", err)
 	}
-	if process, err := os.FindProcess(pid); err == nil {
-		_ = process.Kill()
+	deadline := time.Now().Add(time.Second)
+	for processAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processAlive(pid) {
+		t.Fatalf("owned descendant %d survived bounded teardown", pid)
 	}
 }
 
@@ -608,6 +625,11 @@ func TestLocalCLIHelperProcess(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		_ = os.WriteFile(args[1], []byte("alive"), 0o600)
 		time.Sleep(time.Minute)
+	case "scope-env":
+		if os.Getenv("CTX_SDK_PROCESS_SCOPE_ACTIVE") != "1" {
+			os.Exit(102)
+		}
+		_, _ = os.Stdout.Write([]byte("{}"))
 	default:
 		os.Exit(101)
 	}
