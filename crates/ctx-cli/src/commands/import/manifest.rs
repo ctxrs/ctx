@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::*;
 use crate::commands::import::catalog::{source_change_token, system_time_ms, SourceChangeEntry};
@@ -545,6 +547,7 @@ fn collect_existing_import_unit_dependency(
     }
 }
 
+#[cfg(test)]
 fn preferred_source_import_paths(
     grouping: ProviderImportUnitGrouping,
     owner: ProviderImportUnitOwner,
@@ -559,6 +562,7 @@ fn preferred_source_import_paths(
     }
 }
 
+#[cfg(test)]
 fn first_import_path_per_directory(
     owner: ProviderImportUnitOwner,
     paths: Vec<PathBuf>,
@@ -588,6 +592,7 @@ fn import_owner_rank(owner: ProviderImportUnitOwner, path: &Path) -> usize {
         .unwrap_or(names.len())
 }
 
+#[cfg(test)]
 fn antigravity_preferred_import_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut by_session: BTreeMap<String, PathBuf> = BTreeMap::new();
     for path in paths {

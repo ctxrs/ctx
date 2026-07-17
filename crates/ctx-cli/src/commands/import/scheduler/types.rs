@@ -42,6 +42,7 @@ impl ImportExecutionPolicy {
 #[derive(Debug)]
 pub(crate) struct ImportPlan {
     pub(crate) sources: Vec<PlannedImportSource>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fresh_units: usize,
     pub(crate) recovery_units: usize,
 }

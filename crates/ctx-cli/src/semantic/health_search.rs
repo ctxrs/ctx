@@ -237,17 +237,6 @@ fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
     Ok(sql)
 }
 
-fn semantic_status_needs_exact_sidecar_stats(
-    searchable_items: usize,
-    dirty_items: usize,
-    stats: SemanticSidecarStats,
-) -> bool {
-    if searchable_items == 0 || dirty_items > 0 {
-        return false;
-    }
-    stats.embedded_items >= searchable_items
-}
-
 #[cfg(ctx_semantic_fastembed)]
 #[derive(Debug, Clone)]
 struct SemanticEmbedPolicy {

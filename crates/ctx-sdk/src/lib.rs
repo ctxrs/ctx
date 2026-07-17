@@ -732,8 +732,7 @@ fn normalize_search(raw: &Value) -> Result<SearchResult, AgentHistoryError> {
         return Err(AgentHistoryError::new(
             AgentHistoryErrorCode::DecodeError,
             format!(
-                "ctx search returned unsupported schema version {:?}; expected {SEARCH_SCHEMA_VERSION}",
-                schema_version
+                "ctx search returned unsupported schema version {schema_version:?}; expected {SEARCH_SCHEMA_VERSION}"
             ),
             false,
         ));
@@ -959,13 +958,12 @@ mod tests {
 set -eu
 printf '%s\n' "$@" > "$CTX_DATA_ROOT/argv.txt"
 if [ "$1" = "search" ]; then
-  printf '%s\n' '{}'
+  printf '%s\n' '{response}'
   exit 0
 fi
 echo "unexpected command: $*" >&2
 exit 2
-"#,
-                response
+"#
             ),
         )
         .unwrap();
@@ -1231,12 +1229,12 @@ if [ "$1" = "status" ]; then
   exit 0
 fi
 if [ "$1" = "search" ]; then
-  printf '%s\n' '{}'
+  printf '%s\n' '{response}'
   exit 0
 fi
 echo "unexpected command: $*" >&2
 exit 2
-"#, response),
+"#),
         )
         .unwrap();
         #[cfg(unix)]

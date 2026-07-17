@@ -90,6 +90,7 @@ fn finish_semantic_search(
 }
 
 impl SemanticVectorStore {
+    #[cfg(test)]
     fn search(&self, query_embedding: &[f32], limit: usize) -> Result<SemanticVectorSearch> {
         self.search_until(
             query_embedding,
@@ -98,6 +99,7 @@ impl SemanticVectorStore {
         )
     }
 
+    #[cfg(test)]
     fn search_until(
         &self,
         query_embedding: &[f32],
@@ -117,6 +119,7 @@ impl SemanticVectorStore {
         self.search_with_event_filter(query_embedding, limit, candidate_row_limit, None, deadline)
     }
 
+    #[cfg(test)]
     fn search_event_ids(
         &self,
         query_embedding: &[f32],
