@@ -511,7 +511,7 @@ fn removed_and_new_manifest_units_are_stale_and_pending() {
 }
 
 #[test]
-fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
+fn removed_manifest_unit_reports_empty_source_after_reobservation() {
     let temp = tempdir();
     let source_path = temp.path().join("sessions");
     fs::create_dir(&source_path).unwrap();
@@ -544,10 +544,12 @@ fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
     assert_eq!(counts.stale, 0);
     assert_eq!(counts.failed, 0);
     assert_eq!(counts.rejected, 0);
-    let (current_files, _) = finalized_source_import_preinventory(&store, &source);
-    assert!(current_files.is_empty());
+    let inventory = inventory_import_sources(&store, vec![source], false).unwrap();
+    assert!(inventory.sources.is_empty());
+    assert_eq!(inventory.failures.len(), 1);
+    assert!(inventory.failures[0].error.contains("no importable"));
     let counts = store.source_import_file_counts().unwrap();
-    assert_eq!(counts.stale, 1);
+    assert_eq!(counts.stale, 0);
     assert_eq!(counts.failed, 0);
     assert_eq!(counts.rejected, 0);
 }
