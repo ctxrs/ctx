@@ -38,6 +38,7 @@ impl Store {
                 .query_row(
                     "SELECT state.projection_version = 2 \
                         AND state.legacy_cleanup_complete = 1 \
+                        AND state.material_projection_version = 3 \
                         AND state.material_scan_complete = 1 \
                         AND (SELECT COUNT(*) = 2 AND COALESCE(MIN(completed), 0) = 1 \
                              FROM import_pending_reason_repairs \
@@ -130,6 +131,11 @@ impl Store {
                     Err(error) => return Err(error),
                 }
             }
+            if self.import_pending_work_is_ready()? {
+                crate::schema::import_pending_work::drop_import_pending_material_owner_invariants(
+                    &self.conn,
+                )?;
+            }
             Ok(())
         })();
         let result = match result {
@@ -165,7 +171,8 @@ impl Store {
             "UPDATE import_pending_work_state \
              SET material_scan_complete = 0 \
              WHERE singleton = 1 AND selection_mode = 'projection' \
-               AND projection_version = 2 AND material_scan_complete = 1 \
+               AND projection_version = 2 AND material_projection_version = 3 \
+               AND material_scan_complete = 1 \
                AND EXISTS (SELECT 1 FROM capture_sources \
                            WHERE rowid > material_cursor_rowid LIMIT 1)",
             [],
@@ -181,6 +188,7 @@ impl Store {
         )?;
         let state_ready = self.conn.query_row(
             "SELECT projection_version = 2 AND legacy_cleanup_complete = 1 \
+                    AND material_projection_version = 3 \
                     AND material_scan_complete = 1 \
              FROM import_pending_work_state WHERE singleton = 1",
             [],
@@ -302,7 +310,7 @@ impl Store {
                     + length(CAST(source_root AS BLOB)) \
                     + length(CAST({tail_column} AS BLOB)) + 128 \
              FROM {table} \
-             WHERE projection_version != 2 AND {keyset_predicate} \
+             WHERE {keyset_predicate} \
              ORDER BY inventory_family, provider, source_root, {tail_column} LIMIT 1"
         );
         let estimated_bytes = self
@@ -348,9 +356,9 @@ impl Store {
             return Ok(None);
         }
         let load_sql = format!(
-            "SELECT inventory_family, provider, source_root, {tail_column} \
+            "SELECT inventory_family, provider, source_root, {tail_column}, projection_version \
              FROM {table} \
-             WHERE projection_version != 2 AND {keyset_predicate} \
+             WHERE {keyset_predicate} \
              ORDER BY inventory_family, provider, source_root, {tail_column} LIMIT 1"
         );
         let row = self.conn.query_row(
@@ -362,28 +370,34 @@ impl Store {
                     provider: row.get(1)?,
                     source_root: row.get(2)?,
                     tail: row.get(3)?,
+                    projection_version: row.get(4)?,
                     estimated_bytes,
                 })
             },
         )?;
-        let delete_sql = format!(
-            "DELETE FROM {table} WHERE projection_version != 2 \
-             AND inventory_family = ?1 AND provider = ?2 \
-             AND source_root = ?3 AND {tail_column} = ?4"
-        );
-        let deleted = self.conn.execute(
-            &delete_sql,
-            params![
-                &row.inventory_family,
-                &row.provider,
-                &row.source_root,
-                &row.tail
-            ],
-        )?;
-        if deleted != 1 {
-            return Err(StoreError::ImportInventorySchemaIncompatible(
-                "pending-work legacy cleanup lost its keyset row",
-            ));
+        if row.projection_version
+            != crate::schema::import_pending_work::IMPORT_PENDING_WORK_PROJECTION_VERSION
+        {
+            let delete_sql = format!(
+                "DELETE FROM {table} WHERE projection_version = ?5 \
+                 AND inventory_family = ?1 AND provider = ?2 \
+                 AND source_root = ?3 AND {tail_column} = ?4"
+            );
+            let deleted = self.conn.execute(
+                &delete_sql,
+                params![
+                    &row.inventory_family,
+                    &row.provider,
+                    &row.source_root,
+                    &row.tail,
+                    row.projection_version,
+                ],
+            )?;
+            if deleted != 1 {
+                return Err(StoreError::ImportInventorySchemaIncompatible(
+                    "pending-work legacy cleanup lost its keyset row",
+                ));
+            }
         }
         self.conn.execute(
             "UPDATE import_pending_work_state \
@@ -504,7 +518,7 @@ impl Store {
                 "INSERT OR IGNORE INTO import_pending_legacy_material_owners (\
                    projection_version, owner_kind, provider, source_format, \
                    owner_source_root, source_path, capture_source_id\
-                 ) VALUES (2, 'root', ?1, ?2, ?3, '', ?4)",
+                 ) VALUES (3, 'root', ?1, ?2, ?3, '', ?4)",
                 params![&source.provider, source_format, source_root, &source.id],
             )?;
         }
@@ -521,7 +535,7 @@ impl Store {
                 "INSERT OR IGNORE INTO import_pending_legacy_material_owners (\
                    projection_version, owner_kind, provider, source_format, \
                    owner_source_root, source_path, capture_source_id\
-                 ) VALUES (2, 'path', ?1, ?2, ?3, ?4, ?5)",
+                 ) VALUES (3, 'path', ?1, ?2, ?3, ?4, ?5)",
                 params![
                     &source.provider,
                     source_format,
@@ -749,7 +763,7 @@ impl Store {
                   SELECT 1
                   FROM import_pending_legacy_material_owners AS owner
                   JOIN capture_sources AS source ON source.id = owner.capture_source_id
-                  WHERE owner.projection_version = 2 AND owner.owner_kind = ?1
+                  WHERE owner.projection_version = 3 AND owner.owner_kind = ?1
                     AND owner.provider = ?2 AND owner.source_format = ?3
                     AND owner.source_path = ?5
                     AND (owner.owner_source_root = ?4 OR owner.owner_source_root = '')

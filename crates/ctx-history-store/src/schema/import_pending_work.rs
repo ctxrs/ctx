@@ -4,6 +4,7 @@ use crate::schema::ddl::{ensure_columns, ColumnSpec};
 use crate::Result;
 
 pub(crate) const IMPORT_PENDING_WORK_PROJECTION_VERSION: i64 = 2;
+pub(crate) const IMPORT_PENDING_MATERIAL_OWNER_VERSION: i64 = 3;
 
 const PENDING_REASON_REPAIR_V2_COLUMNS: &[ColumnSpec] = &[ColumnSpec {
     name: "cursor_rowid",
@@ -51,6 +52,10 @@ const PENDING_WORK_STATE_V2_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "material_scan_complete",
         definition: "material_scan_complete INTEGER NOT NULL DEFAULT 0",
+    },
+    ColumnSpec {
+        name: "material_projection_version",
+        definition: "material_projection_version INTEGER NOT NULL DEFAULT 1",
     },
 ];
 
@@ -614,6 +619,104 @@ BEGIN
 END;
 "#;
 
+const IMPORT_PENDING_MATERIAL_OWNER_TRIGGER_INVARIANTS_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS trg_capture_sources_pending_material_owner_insert
+AFTER INSERT ON capture_sources
+BEGIN
+    INSERT OR IGNORE INTO import_pending_legacy_material_owners (
+        projection_version, owner_kind, provider, source_format,
+        owner_source_root, source_path, capture_source_id
+    )
+    SELECT 3, 'root', NEW.provider, NEW.source_format,
+           NEW.source_root, '', NEW.id
+    WHERE NEW.source_format IS NOT NULL
+      AND NEW.source_root IS NOT NULL AND NEW.source_root != '';
+
+    INSERT OR IGNORE INTO import_pending_legacy_material_owners (
+        projection_version, owner_kind, provider, source_format,
+        owner_source_root, source_path, capture_source_id
+    )
+    SELECT 3, 'path', NEW.provider, NEW.source_format,
+           CASE
+             WHEN NEW.source_root IS NOT NULL
+              AND NEW.source_root != NEW.raw_source_path THEN NEW.source_root
+             ELSE ''
+           END,
+           NEW.raw_source_path, NEW.id
+    WHERE NEW.source_format IS NOT NULL
+      AND NEW.raw_source_path IS NOT NULL AND NEW.raw_source_path != '';
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_capture_sources_pending_material_owner_update_old
+BEFORE UPDATE OF id, provider, source_format, source_root, raw_source_path ON capture_sources
+BEGIN
+    DELETE FROM import_pending_legacy_material_owners
+    WHERE projection_version = 3 AND owner_kind = 'root'
+      AND provider = OLD.provider AND source_format = OLD.source_format
+      AND owner_source_root = OLD.source_root AND source_path = ''
+      AND capture_source_id = OLD.id;
+
+    DELETE FROM import_pending_legacy_material_owners
+    WHERE projection_version = 3 AND owner_kind = 'path'
+      AND provider = OLD.provider AND source_format = OLD.source_format
+      AND owner_source_root = CASE
+            WHEN OLD.source_root IS NOT NULL
+             AND OLD.source_root != OLD.raw_source_path THEN OLD.source_root
+            ELSE ''
+          END
+      AND source_path = OLD.raw_source_path
+      AND capture_source_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_capture_sources_pending_material_owner_update_new
+AFTER UPDATE OF id, provider, source_format, source_root, raw_source_path ON capture_sources
+BEGIN
+    INSERT OR IGNORE INTO import_pending_legacy_material_owners (
+        projection_version, owner_kind, provider, source_format,
+        owner_source_root, source_path, capture_source_id
+    )
+    SELECT 3, 'root', NEW.provider, NEW.source_format,
+           NEW.source_root, '', NEW.id
+    WHERE NEW.source_format IS NOT NULL
+      AND NEW.source_root IS NOT NULL AND NEW.source_root != '';
+
+    INSERT OR IGNORE INTO import_pending_legacy_material_owners (
+        projection_version, owner_kind, provider, source_format,
+        owner_source_root, source_path, capture_source_id
+    )
+    SELECT 3, 'path', NEW.provider, NEW.source_format,
+           CASE
+             WHEN NEW.source_root IS NOT NULL
+              AND NEW.source_root != NEW.raw_source_path THEN NEW.source_root
+             ELSE ''
+           END,
+           NEW.raw_source_path, NEW.id
+    WHERE NEW.source_format IS NOT NULL
+      AND NEW.raw_source_path IS NOT NULL AND NEW.raw_source_path != '';
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_capture_sources_pending_material_owner_delete
+AFTER DELETE ON capture_sources
+BEGIN
+    DELETE FROM import_pending_legacy_material_owners
+    WHERE projection_version = 3 AND owner_kind = 'root'
+      AND provider = OLD.provider AND source_format = OLD.source_format
+      AND owner_source_root = OLD.source_root AND source_path = ''
+      AND capture_source_id = OLD.id;
+
+    DELETE FROM import_pending_legacy_material_owners
+    WHERE projection_version = 3 AND owner_kind = 'path'
+      AND provider = OLD.provider AND source_format = OLD.source_format
+      AND owner_source_root = CASE
+            WHEN OLD.source_root IS NOT NULL
+             AND OLD.source_root != OLD.raw_source_path THEN OLD.source_root
+            ELSE ''
+          END
+      AND source_path = OLD.raw_source_path
+      AND capture_source_id = OLD.id;
+END;
+"#;
+
 const DROP_IMPORT_PENDING_WORK_PROJECTION_TRIGGERS_SQL: &str = r#"
 DROP TRIGGER IF EXISTS trg_catalog_sessions_pending_work_insert;
 DROP TRIGGER IF EXISTS trg_catalog_sessions_pending_work_update_old;
@@ -634,6 +737,13 @@ DROP TRIGGER IF EXISTS trg_source_import_files_pending_count_insert;
 DROP TRIGGER IF EXISTS trg_source_import_files_pending_count_update_old;
 DROP TRIGGER IF EXISTS trg_source_import_files_pending_count_update_new;
 DROP TRIGGER IF EXISTS trg_source_import_files_pending_count_delete;
+"#;
+
+const DROP_IMPORT_PENDING_MATERIAL_OWNER_TRIGGERS_SQL: &str = r#"
+DROP TRIGGER IF EXISTS trg_capture_sources_pending_material_owner_insert;
+DROP TRIGGER IF EXISTS trg_capture_sources_pending_material_owner_update_old;
+DROP TRIGGER IF EXISTS trg_capture_sources_pending_material_owner_update_new;
+DROP TRIGGER IF EXISTS trg_capture_sources_pending_material_owner_delete;
 "#;
 
 pub(crate) fn ensure_import_pending_work_projection_v2(conn: &Connection) -> Result<()> {
@@ -676,6 +786,32 @@ pub(crate) fn ensure_import_pending_work_projection_v2(conn: &Connection) -> Res
             "#,
         )?;
     }
+    let material_version = conn.query_row(
+        "SELECT material_projection_version FROM import_pending_work_state WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if material_version != IMPORT_PENDING_MATERIAL_OWNER_VERSION {
+        conn.execute_batch(
+            r#"
+            UPDATE import_pending_work_state
+            SET material_projection_version = 3,
+                material_cursor_rowid = 0,
+                material_scan_complete = CASE selection_mode
+                  WHEN 'projection' THEN 0 ELSE 1 END
+            WHERE singleton = 1;
+
+            UPDATE import_pending_reason_repairs
+            SET cursor_provider = NULL, cursor_source_root = NULL,
+                cursor_source_path = NULL, cursor_rowid = 0, completed = 0
+            WHERE inventory_family IN ('catalog_sessions', 'source_import_files')
+              AND EXISTS (
+                SELECT 1 FROM import_pending_work_state
+                WHERE singleton = 1 AND selection_mode = 'projection'
+              );
+            "#,
+        )?;
+    }
     Ok(())
 }
 
@@ -689,10 +825,32 @@ pub(crate) fn install_import_pending_work_invariants(conn: &Connection) -> Resul
         conn.execute_batch(DROP_IMPORT_PENDING_WORK_COUNT_TRIGGERS_SQL)?;
         conn.execute_batch(DROP_IMPORT_PENDING_WORK_PROJECTION_TRIGGERS_SQL)?;
         conn.execute_batch(IMPORT_PENDING_WORK_PROJECTION_TRIGGER_INVARIANTS_SQL)?;
+        let repair_pending = conn.query_row(
+            "SELECT NOT (material_projection_version = 3 \
+                     AND material_scan_complete = 1 AND legacy_cleanup_complete = 1 \
+                     AND (SELECT COUNT(*) = 2 AND COALESCE(MIN(completed), 0) = 1 \
+                          FROM import_pending_reason_repairs \
+                          WHERE inventory_family IN (\
+                            'catalog_sessions', 'source_import_files'\
+                          ))) \
+             FROM import_pending_work_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        conn.execute_batch(DROP_IMPORT_PENDING_MATERIAL_OWNER_TRIGGERS_SQL)?;
+        if repair_pending {
+            conn.execute_batch(IMPORT_PENDING_MATERIAL_OWNER_TRIGGER_INVARIANTS_SQL)?;
+        }
     } else {
         conn.execute_batch(DROP_IMPORT_PENDING_WORK_PROJECTION_TRIGGERS_SQL)?;
         conn.execute_batch(DROP_IMPORT_PENDING_WORK_COUNT_TRIGGERS_SQL)?;
         conn.execute_batch(IMPORT_PENDING_WORK_COUNT_TRIGGER_INVARIANTS_SQL)?;
+        conn.execute_batch(DROP_IMPORT_PENDING_MATERIAL_OWNER_TRIGGERS_SQL)?;
     }
+    Ok(())
+}
+
+pub(crate) fn drop_import_pending_material_owner_invariants(conn: &Connection) -> Result<()> {
+    conn.execute_batch(DROP_IMPORT_PENDING_MATERIAL_OWNER_TRIGGERS_SQL)?;
     Ok(())
 }

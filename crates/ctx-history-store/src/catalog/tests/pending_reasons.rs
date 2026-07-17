@@ -1364,3 +1364,274 @@ fn projection_backfill_sparse_legacy_owner_uses_durable_global_cursor() {
         .unwrap();
     assert_eq!(state, (None, 0, 0));
 }
+
+#[test]
+fn projection_legacy_cleanup_advances_across_current_rows_and_reopens() {
+    let temp = tempdir();
+    let path = temp.path().join("projection-cleanup-current-suffix.sqlite");
+    let store = Store::open(&path).unwrap();
+    configure_projection_mode_for_test(&store);
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO import_pending_work (
+              inventory_family, provider, source_root, source_path,
+              work_class, indexed_at_ms, projection_version
+            ) VALUES (
+              'catalog_sessions', 'codex', '/cleanup', '/cleanup/stale.jsonl',
+              'recovery', NULL, 1
+            );
+
+            WITH RECURSIVE rows(value) AS (
+              SELECT 1 UNION ALL SELECT value + 1 FROM rows WHERE value < 129
+            )
+            INSERT INTO import_pending_work (
+              inventory_family, provider, source_root, source_path,
+              work_class, indexed_at_ms, projection_version
+            )
+            SELECT 'source_import_files', 'pi', '/cleanup',
+                   printf('/cleanup/current-%05d.jsonl', value),
+                   'recovery', value, 2
+            FROM rows;
+
+            INSERT INTO import_pending_work_counts (
+              inventory_family, provider, source_root, work_class,
+              pending_count, projection_version
+            ) VALUES
+              ('catalog_sessions', 'codex', '/cleanup', 'recovery', 9, 1),
+              ('source_import_files', 'pi', '/cleanup', 'recovery', 129, 2);
+
+            UPDATE import_pending_work_state
+            SET legacy_cleanup_complete = 0, legacy_cleanup_phase = 'work',
+                legacy_cleanup_inventory_family = '', legacy_cleanup_provider = '',
+                legacy_cleanup_source_root = '', legacy_cleanup_tail = '',
+                material_projection_version = 3, material_scan_complete = 1
+            WHERE singleton = 1;
+            UPDATE import_pending_reason_repairs SET completed = 1;
+            "#,
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = Store::open(&path).unwrap();
+    let mut inserted_interleaved_rows = false;
+    let mut reopened = false;
+    let mut complete = false;
+    for call in 0..320 {
+        let progress = store
+            .repair_import_pending_reasons(1, 4 * 1024, Duration::from_millis(5))
+            .unwrap();
+        assert!(progress.visited_rows <= 1);
+        assert!(progress.processed_bytes <= 4 * 1024);
+
+        if call == 16 {
+            let concurrent = rusqlite::Connection::open(&path).unwrap();
+            concurrent
+                .execute_batch(
+                    r#"
+                    INSERT INTO import_pending_work (
+                      inventory_family, provider, source_root, source_path,
+                      work_class, indexed_at_ms, projection_version
+                    ) VALUES
+                      ('catalog_sessions', 'claude', '/cleanup',
+                       '/cleanup/current-behind.jsonl', 'recovery', NULL, 2),
+                      ('source_import_files', 'zed', '/cleanup',
+                       '/cleanup/current-ahead.jsonl', 'recovery', NULL, 2);
+                    INSERT INTO import_pending_work_counts (
+                      inventory_family, provider, source_root, work_class,
+                      pending_count, projection_version
+                    ) VALUES
+                      ('catalog_sessions', 'claude', '/cleanup', 'recovery', 1, 2),
+                      ('source_import_files', 'zed', '/cleanup', 'recovery', 1, 2);
+                    "#,
+                )
+                .unwrap();
+            inserted_interleaved_rows = true;
+        }
+        if call == 48 {
+            drop(store);
+            store = Store::open(&path).unwrap();
+            reopened = true;
+        }
+        if progress.complete {
+            complete = true;
+            break;
+        }
+    }
+    assert!(inserted_interleaved_rows);
+    assert!(reopened);
+    assert!(complete);
+
+    let (stale_work, stale_counts, current_work, cleanup_complete): (i64, i64, i64, bool) = store
+        .conn
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM import_pending_work WHERE projection_version != 2), \
+               (SELECT COUNT(*) FROM import_pending_work_counts WHERE projection_version != 2), \
+               (SELECT COUNT(*) FROM import_pending_work WHERE projection_version = 2), \
+               legacy_cleanup_complete \
+             FROM import_pending_work_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((stale_work, stale_counts), (0, 0));
+    assert_eq!(current_work, 131);
+    assert!(cleanup_complete);
+}
+
+#[test]
+fn projection_material_snapshot_tracks_updates_deletes_and_reinserts() {
+    let temp = tempdir();
+    let path = temp.path().join("projection-material-mutations.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO source_import_files (
+              provider, source_format, source_root, source_path,
+              file_size_bytes, file_modified_at_ms, observed_at_ms,
+              indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms,
+              indexed_status, indexed_import_revision
+            ) VALUES
+              ('pi', 'pi_session_jsonl', '/owners', '/owners/old-a.jsonl',
+               1, 1, 1, 2, 1, 1, 'indexed', 1),
+              ('pi', 'pi_session_jsonl', '/owners', '/owners/new-a.jsonl',
+               1, 1, 1, 2, 1, 1, 'indexed', 1);
+
+            INSERT INTO capture_sources (
+              id, kind, provider, machine_id, raw_source_path, source_format,
+              source_root, started_at_ms, fidelity
+            ) VALUES
+              ('owner-a', 'provider_import', 'pi', 'fixture',
+               '/owners/old-a.jsonl', 'pi_session_jsonl', '/owners', 1, 'imported'),
+              ('owner-b', 'provider_import', 'pi', 'fixture',
+               '/owners/old-b.jsonl', 'pi_session_jsonl', '/owners', 2, 'imported'),
+              ('owner-c', 'provider_import', 'pi', 'fixture',
+               '/owners/old-c.jsonl', 'pi_session_jsonl', '/owners', 3, 'imported');
+            "#,
+        )
+        .unwrap();
+    let owner_b_rowid: i64 = store
+        .conn
+        .query_row(
+            "SELECT rowid FROM capture_sources WHERE id = 'owner-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    configure_projection_mode_for_test(&store);
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    loop {
+        store
+            .repair_import_pending_reasons(1, 4 * 1024, Duration::from_secs(1))
+            .unwrap();
+        let cursor: i64 = store
+            .conn
+            .query_row(
+                "SELECT material_cursor_rowid FROM import_pending_work_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if cursor >= owner_b_rowid {
+            break;
+        }
+    }
+
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO capture_sources (
+              id, kind, provider, machine_id, raw_source_path, source_format,
+              source_root, started_at_ms, fidelity
+            ) VALUES (
+              'owner-a', 'provider_import', 'pi', 'fixture',
+              '/owners/new-a.jsonl', 'pi_session_jsonl', '/owners', 10, 'imported'
+            ) ON CONFLICT(id) DO UPDATE SET
+              provider = excluded.provider,
+              raw_source_path = excluded.raw_source_path,
+              source_format = excluded.source_format,
+              source_root = excluded.source_root;
+
+            DELETE FROM capture_sources WHERE id = 'owner-b';
+            INSERT INTO capture_sources (
+              id, kind, provider, machine_id, raw_source_path, source_format,
+              source_root, started_at_ms, fidelity
+            ) VALUES (
+              'owner-b', 'provider_import', 'pi', 'fixture',
+              '/owners/new-b.jsonl', 'pi_session_jsonl', '/owners', 11, 'imported'
+            );
+
+            INSERT INTO capture_sources (
+              id, kind, provider, machine_id, raw_source_path, source_format,
+              source_root, started_at_ms, fidelity
+            ) VALUES (
+              'owner-c', 'provider_import', 'pi', 'fixture',
+              '/owners/new-c.jsonl', 'pi_session_jsonl', '/owners', 12, 'imported'
+            ) ON CONFLICT(id) DO UPDATE SET
+              provider = excluded.provider,
+              raw_source_path = excluded.raw_source_path,
+              source_format = excluded.source_format,
+              source_root = excluded.source_root;
+            "#,
+        )
+        .unwrap();
+
+    let mutation_snapshot: (i64, i64) = store
+        .conn
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM import_pending_legacy_material_owners \
+                WHERE projection_version = 3 AND source_path LIKE '/owners/old-%'), \
+               (SELECT COUNT(*) FROM import_pending_legacy_material_owners \
+                WHERE projection_version = 3 AND source_path LIKE '/owners/new-%')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(mutation_snapshot, (0, 3));
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let mut complete = false;
+    for _ in 0..32 {
+        if store
+            .repair_import_pending_reasons(2, 8 * 1024, Duration::from_secs(1))
+            .unwrap()
+            .complete
+        {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete);
+    let reasons: (Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT \
+               (SELECT pending_reason FROM source_import_files \
+                WHERE source_path = '/owners/old-a.jsonl'), \
+               (SELECT pending_reason FROM source_import_files \
+                WHERE source_path = '/owners/new-a.jsonl')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(reasons, (Some("legacy".into()), None));
+    let material_trigger_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' \
+             AND name LIKE 'trg_capture_sources_pending_material_owner_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(material_trigger_count, 0);
+}

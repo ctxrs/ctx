@@ -317,7 +317,9 @@ CREATE TABLE IF NOT EXISTS import_pending_work_state (
     legacy_cleanup_source_root TEXT NOT NULL DEFAULT '',
     legacy_cleanup_tail TEXT NOT NULL DEFAULT '',
     material_cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (material_cursor_rowid >= 0),
-    material_scan_complete INTEGER NOT NULL DEFAULT 1 CHECK (material_scan_complete IN (0, 1))
+    material_scan_complete INTEGER NOT NULL DEFAULT 1 CHECK (material_scan_complete IN (0, 1)),
+    material_projection_version INTEGER NOT NULL DEFAULT 3
+      CHECK (material_projection_version > 0)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS import_pending_legacy_material_owners (
