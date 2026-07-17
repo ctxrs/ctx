@@ -1,3 +1,4 @@
+use ctx_protocol::{SearchClause, SearchQuery};
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -86,7 +87,13 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
     expected_scope: &str,
 ) {
     assert_eq!(packet["schema_version"], 2);
-    assert_eq!(packet["query"], query);
+    let expected_query = SearchQuery::new(vec![SearchClause::all(query)])
+        .canonicalized()
+        .unwrap();
+    assert_eq!(
+        packet["query"],
+        serde_json::to_value(expected_query).unwrap()
+    );
     assert_eq!(packet["filters"]["provider"], provider);
     let results = packet["results"].as_array().unwrap();
     assert_eq!(
