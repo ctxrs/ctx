@@ -21,6 +21,8 @@ pub enum StoreError {
     UnsupportedSchemaVersion(i64),
     #[error("invalid import pending reason: {0}")]
     InvalidImportPendingReason(String),
+    #[error("ctx import inventory schema is incompatible: {0}")]
+    ImportInventorySchemaIncompatible(&'static str),
     #[error("unsafe or ambiguous history store identity")]
     UnsafeStoreIdentity,
     #[error("unsupported session history archive version: {0}")]

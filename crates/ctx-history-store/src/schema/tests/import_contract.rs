@@ -39,6 +39,16 @@ fn real_schema_v45_fixture_migrates_import_state_through_v49() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
+    let before_repair: Option<i64> = store
+        .conn
+        .query_row(
+            "SELECT indexed_import_revision FROM catalog_sessions WHERE source_path = '/missing/v45-indexed.jsonl'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(before_repair, None);
+    while !store.repair_import_pending_reasons(1).unwrap().complete {}
     let indexed: (String, i64, Option<i64>, Option<i64>) = store
         .conn
         .query_row(
@@ -80,29 +90,11 @@ fn real_schema_v45_fixture_migrates_import_state_through_v49() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(
-        generations,
-        vec![
-            (
-                "codex".to_owned(),
-                "/missing/v45".to_owned(),
-                "catalog_sessions".to_owned(),
-                1,
-                1,
-            ),
-            (
-                "claude".to_owned(),
-                "/missing/v45-claude".to_owned(),
-                "source_import_files".to_owned(),
-                1,
-                1,
-            ),
-        ]
-    );
+    assert!(generations.is_empty());
 }
 
 #[test]
-fn schema_v48_grandfathers_rows_through_v49_and_retries_v46_failures_without_source_reads() {
+fn schema_v48_preserves_inventory_tables_and_defers_bounded_legacy_repair() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
     {
@@ -156,6 +148,43 @@ fn schema_v48_grandfathers_rows_through_v49_and_retries_v46_failures_without_sou
             "#,
         )
         .unwrap();
+
+        let root_pages_before: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT name, rootpage FROM sqlite_schema \
+                 WHERE type = 'table' AND name IN ('catalog_sessions', 'source_import_files') \
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        migrate_import_outcomes_to_v48(&conn).unwrap();
+        let root_pages_after: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT name, rootpage FROM sqlite_schema \
+                 WHERE type = 'table' AND name IN ('catalog_sessions', 'source_import_files') \
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(root_pages_after, root_pages_before);
+        let deferred_revisions: (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT \
+                   (SELECT indexed_import_revision FROM catalog_sessions \
+                    WHERE source_path = '/missing/indexed.jsonl'), \
+                   (SELECT indexed_import_revision FROM source_import_files \
+                    WHERE source_path = '/missing/claude/indexed.jsonl')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(deferred_revisions, (None, None));
     }
 
     let store = Store::open(&path).unwrap();
@@ -164,6 +193,30 @@ fn schema_v48_grandfathers_rows_through_v49_and_retries_v46_failures_without_sou
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
+
+    let before_repair: (Option<i64>, Option<i64>) = store
+        .conn
+        .query_row(
+            "SELECT \
+               (SELECT indexed_import_revision FROM catalog_sessions \
+                WHERE source_path = '/missing/indexed.jsonl'), \
+               (SELECT indexed_import_revision FROM source_import_files \
+                WHERE source_path = '/missing/claude/indexed.jsonl')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(before_repair, (None, None));
+    let mut repaired_rows = 0;
+    loop {
+        let progress = store.repair_import_pending_reasons(1).unwrap();
+        assert!(progress.processed_rows <= 1);
+        repaired_rows += progress.classified_rows;
+        if progress.complete {
+            break;
+        }
+    }
+    assert_eq!(repaired_rows, 4);
 
     let catalog_rows = store
         .conn
@@ -254,7 +307,7 @@ fn schema_v48_grandfathers_rows_through_v49_and_retries_v46_failures_without_sou
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(generation_count, 3);
+    assert_eq!(generation_count, 0);
 }
 
 #[test]

@@ -747,29 +747,24 @@ fn migrate_to_v46(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_import_outcomes_to_v48(conn: &Connection) -> Result<()> {
-    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+pub(super) fn migrate_import_outcomes_to_v48(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         if stable_sql_views_exist(conn)? {
             drop_stable_sql_views(conn)?;
         }
-        rebuild_catalog_sessions_provider_check(conn)?;
-        rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(
-            r#"
-            UPDATE catalog_sessions
-            SET indexed_import_revision = import_revision
-            WHERE indexed_status = 'indexed'
-              AND indexed_import_revision IS NULL;
-
-            UPDATE source_import_files
-            SET indexed_import_revision = import_revision
-            WHERE indexed_status = 'indexed'
-              AND indexed_import_revision IS NULL;
-            "#,
+        ensure_columns(
+            conn,
+            "catalog_sessions",
+            CATALOG_SESSION_IMPORT_STATE_COLUMNS,
         )?;
+        ensure_columns(
+            conn,
+            "source_import_files",
+            SOURCE_IMPORT_FILE_STATE_COLUMNS,
+        )?;
+        widen_import_outcome_checks(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 48;")?;
@@ -779,42 +774,66 @@ fn migrate_import_outcomes_to_v48(conn: &Connection) -> Result<()> {
     match migration {
         Ok(()) => {
             conn.execute_batch("COMMIT;")?;
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
             Ok(())
         }
         Err(err) => {
             if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
                 return Err(StoreError::Sql(rollback_err));
             }
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
             Err(err)
         }
     }
+}
+
+fn widen_import_outcome_checks(conn: &Connection) -> Result<()> {
+    const LEGACY_CHECK: &str = "CHECK (indexed_status IN ('pending', 'indexed', 'failed'))";
+    const CURRENT_CHECK: &str = "CHECK (indexed_status IN ('pending', 'indexed', \
+        'completed_with_rejections', 'rejected', 'failed'))";
+
+    conn.execute_batch("PRAGMA writable_schema = ON;")?;
+    let update = (|| -> Result<()> {
+        for table in ["catalog_sessions", "source_import_files"] {
+            let sql: String = conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            if sql.contains(CURRENT_CHECK) {
+                continue;
+            }
+            if sql.matches(LEGACY_CHECK).count() != 1 {
+                return Err(StoreError::ImportInventorySchemaIncompatible(table));
+            }
+            let updated = sql.replacen(LEGACY_CHECK, CURRENT_CHECK, 1);
+            let changed = conn.execute(
+                "UPDATE sqlite_schema SET sql = ?1 WHERE type = 'table' AND name = ?2",
+                (&updated, table),
+            )?;
+            if changed != 1 {
+                return Err(StoreError::ImportInventorySchemaIncompatible(table));
+            }
+        }
+        Ok(())
+    })();
+    let reset = conn.execute_batch("PRAGMA writable_schema = OFF;");
+    match (update, reset) {
+        (Err(error), _) => return Err(error),
+        (Ok(()), Err(error)) => return Err(StoreError::Sql(error)),
+        (Ok(()), Ok(())) => {}
+    }
+    let schema_version: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+    conn.pragma_update(None, "schema_version", schema_version.saturating_add(1))?;
+    Ok(())
 }
 
 fn migrate_inventory_generations_to_v49(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        conn.execute_batch(
-            r#"
-            INSERT OR IGNORE INTO import_inventory_generations
-                (provider, source_root, inventory_family, current_generation)
-            SELECT DISTINCT provider, source_root, 'catalog_sessions', 1
-            FROM catalog_sessions;
-
-            INSERT OR IGNORE INTO import_inventory_generations
-                (provider, source_root, inventory_family, current_generation)
-            SELECT DISTINCT provider, source_root, 'source_import_files', 1
-            FROM source_import_files;
-
-            PRAGMA user_version = 49;
-            "#,
-        )?;
+        // Legacy rows remain visible when no generation row exists. The next
+        // real inventory allocates generation 1 for its concrete source root,
+        // avoiding a foreground DISTINCT scan over the whole catalog here.
+        conn.execute_batch("PRAGMA user_version = 49;")?;
         Ok(())
     })();
 

@@ -84,6 +84,10 @@ impl Store {
 
                 let processed = rows.len();
                 for row in &rows {
+                    if row.grandfather_indexed_revision {
+                        progress.classified_rows +=
+                            self.grandfather_legacy_indexed_revision(family, row)?;
+                    }
                     if row.requires_work {
                         progress.classified_rows +=
                             self.classify_legacy_pending_reason_row(family, row)?;
@@ -138,6 +142,9 @@ impl Store {
                     format!(
                         r#"
                         SELECT provider, source_root, source_path,
+                               indexed_status = 'indexed'
+                                 AND indexed_import_revision IS NULL
+                                 AND import_revision = 1,
                                pending_reason IS NULL AND is_stale = 0 AND (
                                  indexed_status IN ('pending', 'failed')
                                  OR (
@@ -147,7 +154,7 @@ impl Store {
                                      OR indexed_file_modified_at_ms IS NULL
                                      OR indexed_file_size_bytes != file_size_bytes
                                      OR indexed_file_modified_at_ms != file_modified_at_ms
-                                     OR indexed_import_revision IS NULL
+                                     OR (indexed_import_revision IS NULL AND import_revision != 1)
                                      OR indexed_import_revision != import_revision
                                      OR NOT ({material_exists})
                                    )
@@ -171,6 +178,9 @@ impl Store {
                     format!(
                         r#"
                         SELECT provider, source_root, source_path,
+                               indexed_status = 'indexed'
+                                 AND indexed_import_revision IS NULL
+                                 AND import_revision = 1,
                                pending_reason IS NULL AND is_stale = 0 AND (
                                  indexed_status IN ('pending', 'failed')
                                  OR (
@@ -180,7 +190,7 @@ impl Store {
                                      OR indexed_file_modified_at_ms IS NULL
                                      OR indexed_file_size_bytes != file_size_bytes
                                      OR indexed_file_modified_at_ms != file_modified_at_ms
-                                     OR indexed_import_revision IS NULL
+                                     OR (indexed_import_revision IS NULL AND import_revision != 1)
                                      OR indexed_import_revision != import_revision
                                      OR NOT ({material_exists})
                                    )
@@ -215,7 +225,8 @@ impl Store {
                 provider: row.get(0)?,
                 source_root: row.get(1)?,
                 source_path: row.get(2)?,
-                requires_work: row.get(3)?,
+                grandfather_indexed_revision: row.get(3)?,
+                requires_work: row.get(4)?,
             })
         })?;
         collect_rows(rows)
@@ -274,6 +285,33 @@ impl Store {
                 UPDATE source_import_files SET pending_reason = 'legacy'
                 WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
                   AND pending_reason IS NULL
+                "#,
+                params![&row.provider, &row.source_root, &row.source_path],
+            )?,
+        };
+        Ok(changed)
+    }
+
+    fn grandfather_legacy_indexed_revision(
+        &self,
+        family: ImportPendingReasonRepairFamily,
+        row: &ImportPendingReasonRepairRow,
+    ) -> Result<usize> {
+        let changed = match family {
+            ImportPendingReasonRepairFamily::CatalogSessions => self.conn.execute(
+                r#"
+                UPDATE catalog_sessions SET indexed_import_revision = import_revision
+                WHERE source_path = ?1 AND indexed_status = 'indexed'
+                  AND indexed_import_revision IS NULL AND import_revision = 1
+                "#,
+                [&row.source_path],
+            )?,
+            ImportPendingReasonRepairFamily::SourceImportFiles => self.conn.execute(
+                r#"
+                UPDATE source_import_files SET indexed_import_revision = import_revision
+                WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
+                  AND indexed_status = 'indexed'
+                  AND indexed_import_revision IS NULL AND import_revision = 1
                 "#,
                 params![&row.provider, &row.source_root, &row.source_path],
             )?,
