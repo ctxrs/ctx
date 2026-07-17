@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import threading
@@ -633,7 +632,7 @@ def _scoped_launch_command(
     command: list[str], env: dict[str, str]
 ) -> tuple[list[str], bool]:
     launcher = env.get(_PROCESS_SCOPE_LAUNCHER_ENV)
-    executable_name = Path(command[0]).name.lower()
+    executable_name = os.path.basename(command[0]).lower()
     if launcher is None and (
         executable_name in {"ctx", "ctx.exe"}
         or executable_name.startswith(("ctx-", "ctx_"))
