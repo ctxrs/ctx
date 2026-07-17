@@ -505,10 +505,11 @@ class LocalCliAdapter:
 
         if failure is not None:
             cleanup.run()
-        teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
-        for reader in readers:
-            reader.join(max(0.0, teardown_deadline - time.monotonic()))
-        _close_process_pipes(process)
+        else:
+            teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
+            for reader in readers:
+                reader.join(max(0.0, teardown_deadline - time.monotonic()))
+            _close_process_pipes(process)
 
         overflow = stdout_capture.overflow or stderr_capture.overflow
         capture_error = stdout_capture.error or stderr_capture.error
