@@ -4,6 +4,8 @@ module(
 )
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
+bazel_dep(name = "rules_go", version = "0.61.1")
+bazel_dep(name = "gazelle", version = "0.51.3")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 
@@ -22,3 +24,6 @@ crate.from_cargo(
     manifests = ["//:Cargo.toml"],
 )
 use_repo(crate, "crates")
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.host()

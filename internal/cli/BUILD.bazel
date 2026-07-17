@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cli",
+    srcs = [
+        "app.go",
+        "errors.go",
+    ],
+    importpath = "github.com/ctxrs/ctx/internal/cli",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/capture",
+        "//internal/search",
+        "//internal/store",
+    ],
+)
+
+go_test(
+    name = "unit_tests",
+    srcs = ["app_test.go"],
+    embed = [":cli"],
+)
