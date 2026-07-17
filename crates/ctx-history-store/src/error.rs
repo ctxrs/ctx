@@ -53,6 +53,13 @@ pub enum StoreError {
     ImportInventoryCheckpointTrustMismatch { field: &'static str },
     #[error("durable import inventory checkpoint generation is no longer current")]
     ImportInventoryCheckpointGenerationMismatch,
+    #[error(
+        "durable import inventory publication changed from {expected_state_marker} to {current_state_marker}"
+    )]
+    ImportInventoryCheckpointPublicationTransition {
+        expected_state_marker: String,
+        current_state_marker: String,
+    },
     #[error("durable import inventory checkpoint invariant failed: {0}")]
     ImportInventoryCheckpointInvariant(&'static str),
     #[error("durable import inventory checkpoint is incomplete: {0}")]

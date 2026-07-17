@@ -2,6 +2,14 @@ pub const IMPORT_INVENTORY_CHECKPOINT_FORMAT_VERSION: u32 = 1;
 pub const IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES: usize = 1024 * 1024;
 pub const IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS: usize = 1024;
 pub const IMPORT_INVENTORY_CHECKPOINT_MAX_KEYSET_BYTES: usize = 4096;
+pub const IMPORT_INVENTORY_SELECTION_FORMAT_VERSION: u32 = 1;
+pub const IMPORT_INVENTORY_SELECTION_ALGORITHM_VERSION: u32 = 1;
+
+const IMPORT_INVENTORY_SELECTION_MEMBER_DOMAIN: &[u8] = b"ctx-import-inventory-selection-member-v1";
+const IMPORT_INVENTORY_SELECTION_PREFIX_DOMAIN: &[u8] = b"ctx-import-inventory-selection-prefix-v1";
+const IMPORT_INVENTORY_SELECTION_COMMITMENT_DOMAIN: &[u8] =
+    b"ctx-import-inventory-selection-commitment-v1";
+const IMPORT_INVENTORY_EFFECT_PAYLOAD_DOMAIN: &[u8] = b"ctx-import-inventory-effect-payload-v1";
 
 const CHECKPOINT_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -56,6 +64,52 @@ pub struct ImportInventoryCheckpointTrust<'a> {
     pub scratch_identity: &'a [u8],
     pub scratch_lock_identity: &'a [u8],
     pub scratch_database_identity: &'a [u8],
+    pub publication_state_marker: &'a str,
+    pub publication_owner: Option<&'a ProviderFilePublicationInventoryOwner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportInventoryFrozenSelectionCommitment {
+    pub format_version: u32,
+    pub algorithm_version: u32,
+    pub total_count: u64,
+    pub final_keyset: Option<[u8; 32]>,
+    pub final_prefix: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportInventoryEffectMembership {
+    pub commitment_identity: [u8; 32],
+    pub ordinal: u64,
+    pub prior_keyset: Option<[u8; 32]>,
+    pub resulting_keyset: [u8; 32],
+    pub prior_prefix: [u8; 32],
+    pub resulting_prefix: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ImportInventorySelectionCanonicalizationRequest<'a> {
+    pub format_version: u32,
+    pub algorithm_version: u32,
+    pub ordinal: u64,
+    pub capture_journal_identity: &'a [u8; 32],
+    pub native_path: ImportInventoryNativePathIdentity<'a>,
+    pub inventory_family: ProviderFileInventoryFamily,
+    pub provider: CaptureProvider,
+    pub source_format: &'a str,
+    pub source_root: &'a str,
+    pub prior_keyset: Option<&'a [u8; 32]>,
+    pub resulting_keyset: &'a [u8; 32],
+    pub prior_prefix: &'a [u8; 32],
+    pub accounted_bytes: u64,
+    pub effect: ImportInventoryCanonicalEffect<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportInventorySelectionCanonicalization {
+    pub payload_fingerprint: [u8; 32],
+    pub member_digest: [u8; 32],
+    pub resulting_prefix: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +141,7 @@ pub struct ImportInventoryCaptureCheckpoint<'a> {
     pub selection_keyset: Option<&'a [u8]>,
     pub selection_eof: bool,
     pub selection_complete: bool,
+    pub selection_commitment: Option<ImportInventoryFrozenSelectionCommitment>,
     pub replay_count: u64,
     pub next_retry_at_ms: Option<i64>,
     pub last_error: Option<&'a str>,
@@ -129,6 +184,8 @@ pub struct ImportInventoryCheckpointRecovery {
     pub scratch_integrity: Vec<u8>,
     pub scratch_lock_identity: Vec<u8>,
     pub scratch_database_identity: Vec<u8>,
+    pub publication_state_marker: String,
+    pub publication_owner: Option<ProviderFilePublicationInventoryOwner>,
 }
 
 impl ImportInventoryCheckpointRecovery {
@@ -153,6 +210,8 @@ impl ImportInventoryCheckpointRecovery {
             scratch_identity: &self.scratch_identity,
             scratch_lock_identity: &self.scratch_lock_identity,
             scratch_database_identity: &self.scratch_database_identity,
+            publication_state_marker: &self.publication_state_marker,
+            publication_owner: self.publication_owner.as_ref(),
         }
     }
 }
@@ -160,10 +219,9 @@ impl ImportInventoryCheckpointRecovery {
 #[derive(Debug, Clone, Copy)]
 pub struct ImportInventoryPathEffectRequest<'a> {
     pub scratch: ImportInventoryScratchState<'a>,
-    pub capture_journal_identity: &'a [u8],
+    pub capture_journal_identity: &'a [u8; 32],
     pub native_path: ImportInventoryNativePathIdentity<'a>,
-    pub effect_fingerprint: &'a [u8],
-    pub application_keyset: &'a [u8],
+    pub membership: ImportInventoryEffectMembership,
     pub accounted_bytes: u64,
     pub effect: ImportInventoryCanonicalEffect<'a>,
 }
@@ -203,7 +261,7 @@ pub struct ImportInventoryEffectCounters {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImportInventoryPathEffectOutcome {
     Applied(ImportInventoryEffectCounters),
-    AlreadyApplied,
+    AlreadyApplied(ImportInventoryEffectCounters),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,17 +272,65 @@ pub struct ImportInventoryCheckpointCompletionProof<'a> {
     pub applied_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportInventoryCheckpointCleanupProof {
+    pub checkpoint_format_version: u32,
+    pub producer_build_id: Vec<u8>,
+    pub store_schema_version: u32,
+    pub run_id: Vec<u8>,
+    pub inventory_family: ProviderFileInventoryFamily,
+    pub provider: CaptureProvider,
+    pub source_format: String,
+    pub source_root: String,
+    pub source_identity: Vec<u8>,
+    pub source_fingerprint: Vec<u8>,
+    pub root_path: ImportInventoryOwnedPathIdentity,
+    pub inventory_generation: u64,
+    pub scratch_identity: Vec<u8>,
+    pub scratch_integrity: Vec<u8>,
+    pub scratch_lock_identity: Vec<u8>,
+    pub scratch_database_identity: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportInventoryCleanupDisposition {
+    Pending,
+    Complete,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ImportInventoryCleanupAdvance<'a> {
-    pub scratch_identity: &'a [u8],
-    pub scratch_integrity: &'a [u8],
-    pub scratch_lock_identity: &'a [u8],
-    pub scratch_database_identity: &'a [u8],
     pub expected_cleanup_keyset: Option<&'a [u8]>,
-    pub cleanup_keyset: &'a [u8],
+    pub cleanup_keyset: Option<&'a [u8]>,
+    pub visited_rows_delta: u64,
     pub cleaned_rows_delta: u64,
     pub cleaned_bytes_delta: u64,
+    pub disposition: ImportInventoryCleanupDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportInventoryCleanupProgress {
+    pub disposition: ImportInventoryCleanupDisposition,
+    pub cleanup_keyset: Option<Vec<u8>>,
+    pub visited_rows: u64,
+    pub cleaned_rows: u64,
+    pub cleaned_bytes: u64,
+    pub attempt_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ImportInventoryStoreReconciliationBudget {
+    pub max_rows: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportInventoryStoreReconciliationProgress {
     pub complete: bool,
+    pub keyset: Option<i64>,
+    pub visited_rows: u64,
+    pub stale_rows: u64,
+    pub visited_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +354,8 @@ pub struct ImportInventoryCheckpointStatus {
     pub lease_expires_at_ms: Option<i64>,
     pub active_directory: Option<ImportInventoryActiveDirectoryStatus>,
     pub application_keyset: Option<Vec<u8>>,
+    pub application_ordinal: u64,
+    pub application_prefix: [u8; 32],
     pub discovery_complete: bool,
     pub effects_complete: bool,
     pub directory_queue_empty: bool,
@@ -258,6 +366,8 @@ pub struct ImportInventoryCheckpointStatus {
     pub selection_keyset: Option<Vec<u8>>,
     pub selection_eof: bool,
     pub selection_complete: bool,
+    pub selection_commitment: Option<ImportInventoryFrozenSelectionCommitment>,
+    pub selection_commitment_identity: Option<[u8; 32]>,
     pub applied_path_count: u64,
     pub applied_row_count: u64,
     pub applied_bytes: u64,
@@ -268,8 +378,15 @@ pub struct ImportInventoryCheckpointStatus {
     pub abandon_reason: Option<String>,
     pub cleanup_status: String,
     pub cleanup_keyset: Option<Vec<u8>>,
+    pub cleanup_visited_row_count: u64,
     pub cleanup_row_count: u64,
     pub cleanup_bytes: u64,
+    pub cleanup_attempt_count: u64,
+    pub store_reconciliation_complete: bool,
+    pub store_reconciliation_keyset: Option<i64>,
+    pub store_reconciliation_visited_rows: u64,
+    pub store_reconciliation_stale_rows: u64,
+    pub store_reconciliation_visited_bytes: u64,
     pub scratch_identity: Vec<u8>,
     pub scratch_integrity: Vec<u8>,
     pub scratch_lock_identity: Vec<u8>,
@@ -322,11 +439,152 @@ struct CheckpointRow {
     selection_keyset: Option<Vec<u8>>,
     selection_eof: bool,
     selection_complete: bool,
+    selection_commitment: Option<ImportInventoryFrozenSelectionCommitment>,
+    selection_commitment_identity: Option<[u8; 32]>,
+    application_ordinal: u64,
+    application_keyset: Option<Vec<u8>>,
+    application_prefix: [u8; 32],
     run_checkpoint_format_version: u32,
     run_producer_build_id: Vec<u8>,
     run_store_schema_version: u32,
+    run_publication_state_marker: String,
+    run_publication_owner: Option<ProviderFilePublicationInventoryOwner>,
     run_status: String,
     current_generation: Option<u64>,
+    store_reconciliation_complete: bool,
+    store_reconciliation_keyset: i64,
+    store_reconciliation_visited_rows: u64,
+    store_reconciliation_stale_rows: u64,
+    store_reconciliation_visited_bytes: u64,
+}
+
+pub fn import_inventory_selection_initial_prefix(
+    format_version: u32,
+    algorithm_version: u32,
+) -> Result<[u8; 32]> {
+    validate_import_inventory_selection_versions(format_version, algorithm_version)?;
+    let mut digest = Sha256::new();
+    hash_inventory_field(&mut digest, IMPORT_INVENTORY_SELECTION_PREFIX_DOMAIN);
+    hash_inventory_field(&mut digest, &format_version.to_be_bytes());
+    hash_inventory_field(&mut digest, &algorithm_version.to_be_bytes());
+    Ok(digest.finalize().into())
+}
+
+pub fn import_inventory_selection_commitment_identity(
+    commitment: ImportInventoryFrozenSelectionCommitment,
+) -> Result<[u8; 32]> {
+    validate_import_inventory_selection_commitment(commitment)?;
+    let mut digest = Sha256::new();
+    hash_inventory_field(&mut digest, IMPORT_INVENTORY_SELECTION_COMMITMENT_DOMAIN);
+    hash_inventory_field(&mut digest, &commitment.format_version.to_be_bytes());
+    hash_inventory_field(&mut digest, &commitment.algorithm_version.to_be_bytes());
+    hash_inventory_field(&mut digest, &commitment.total_count.to_be_bytes());
+    hash_inventory_optional_field(
+        &mut digest,
+        commitment.final_keyset.as_ref().map(<[u8; 32]>::as_slice),
+    );
+    hash_inventory_field(&mut digest, &commitment.final_prefix);
+    Ok(digest.finalize().into())
+}
+
+pub fn canonical_import_inventory_selection_step(
+    request: ImportInventorySelectionCanonicalizationRequest<'_>,
+) -> Result<ImportInventorySelectionCanonicalization> {
+    validate_import_inventory_selection_versions(
+        request.format_version,
+        request.algorithm_version,
+    )?;
+    validate_native_path(request.native_path)?;
+    if request.native_path.opaque_hash.len() != 32 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection native path hash must be SHA-256",
+        ));
+    }
+    if request.capture_journal_identity != request.resulting_keyset {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection resulting keyset must equal the capture journal identity",
+        ));
+    }
+    if (request.ordinal == 0) != request.prior_keyset.is_none() {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection prior keyset does not match its ordinal",
+        ));
+    }
+    if request.ordinal == 0
+        && *request.prior_prefix
+            != import_inventory_selection_initial_prefix(
+                request.format_version,
+                request.algorithm_version,
+            )?
+    {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection initial prefix is invalid",
+        ));
+    }
+    if request.source_format.is_empty()
+        || request.source_format.len() > 256
+        || request.source_root.is_empty()
+        || request.source_root.len() > 32768
+    {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection canonical source scope is invalid",
+        ));
+    }
+    if request.accounted_bytes > IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES as u64 {
+        return Err(StoreError::ImportInventoryCheckpointPageTooLarge {
+            max_bytes: IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES,
+        });
+    }
+    validate_canonical_effect_payload_size(request.effect)?;
+    validate_canonical_effect_checkpoint_scope(
+        request.inventory_family,
+        request.provider,
+        request.source_format,
+        request.source_root,
+        request.effect,
+    )?;
+    let (effect_kind, source_path) = canonical_effect_identity(request.effect);
+    if source_path.is_empty() || source_path.len() > 32768 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "canonical source path length is invalid",
+        ));
+    }
+    let payload_fingerprint = canonical_import_inventory_effect_fingerprint(request.effect);
+    let mut member = Sha256::new();
+    hash_inventory_field(&mut member, IMPORT_INVENTORY_SELECTION_MEMBER_DOMAIN);
+    hash_inventory_field(&mut member, &request.format_version.to_be_bytes());
+    hash_inventory_field(&mut member, &request.algorithm_version.to_be_bytes());
+    hash_inventory_field(&mut member, &request.ordinal.to_be_bytes());
+    hash_inventory_field(&mut member, request.capture_journal_identity);
+    hash_inventory_field(&mut member, request.native_path.platform_tag.as_bytes());
+    hash_inventory_field(&mut member, request.native_path.encoding_tag.as_bytes());
+    hash_inventory_field(&mut member, request.native_path.opaque_hash);
+    hash_inventory_field(
+        &mut member,
+        checkpoint_inventory_family_str(request.inventory_family).as_bytes(),
+    );
+    hash_inventory_field(&mut member, request.provider.as_str().as_bytes());
+    hash_inventory_field(&mut member, request.source_format.as_bytes());
+    hash_inventory_field(&mut member, request.source_root.as_bytes());
+    hash_inventory_field(&mut member, source_path.as_bytes());
+    hash_inventory_field(&mut member, effect_kind.as_bytes());
+    hash_inventory_field(&mut member, &payload_fingerprint);
+    hash_inventory_field(&mut member, &request.accounted_bytes.to_be_bytes());
+    hash_inventory_optional_field(&mut member, request.prior_keyset.map(<[u8; 32]>::as_slice));
+    hash_inventory_field(&mut member, request.resulting_keyset);
+    let member_digest: [u8; 32] = member.finalize().into();
+
+    let mut prefix = Sha256::new();
+    hash_inventory_field(&mut prefix, IMPORT_INVENTORY_SELECTION_PREFIX_DOMAIN);
+    hash_inventory_field(&mut prefix, &request.format_version.to_be_bytes());
+    hash_inventory_field(&mut prefix, &request.algorithm_version.to_be_bytes());
+    hash_inventory_field(&mut prefix, request.prior_prefix);
+    hash_inventory_field(&mut prefix, &member_digest);
+    Ok(ImportInventorySelectionCanonicalization {
+        payload_fingerprint,
+        member_digest,
+        resulting_prefix: prefix.finalize().into(),
+    })
 }
 
 impl Store {
@@ -350,6 +608,10 @@ impl Store {
         }
         let owner_token = new_checkpoint_owner_token();
         self.with_inventory_checkpoint_transaction(CHECKPOINT_WRITE_TIMEOUT, || {
+            self.validate_current_import_inventory_publication_snapshot(
+                trust.publication_state_marker,
+                trust.publication_owner,
+            )?;
             if self.current_import_inventory_generation_for_checkpoint(
                 trust.provider,
                 trust.source_root,
@@ -379,7 +641,13 @@ impl Store {
                 .conn
                 .query_row(
                     "SELECT checkpoint_format_version, producer_build_id, \
-                            store_schema_version, status \
+                            store_schema_version, status, publication_state_marker, \
+                            publication_owner_present, publication_provider, \
+                            publication_inventory_family, publication_source_format, \
+                            publication_source_root, publication_source_path, \
+                            publication_inventory_generation, publication_file_size_bytes, \
+                            publication_file_modified_at_ms, publication_import_revision, \
+                            publication_metadata_json \
                      FROM import_inventory_runs WHERE run_id = ?1",
                     [trust.run_id],
                     |row| {
@@ -388,18 +656,27 @@ impl Store {
                             row.get::<_, Vec<u8>>(1)?,
                             nonnegative_i64_to_u32(row.get(2)?)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            decode_import_inventory_publication_owner(row, 5)?,
                         ))
                     },
                 )
                 .optional()?;
             match run {
-                Some((format, build, schema, status)) => {
+                Some((format, build, schema, status, publication_marker, publication_owner)) => {
                     if format != trust.checkpoint_format_version
                         || build != trust.producer_build_id
                         || schema != trust.store_schema_version
                     {
                         return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
                             field: "run format or build",
+                        });
+                    }
+                    if publication_marker != trust.publication_state_marker
+                        || publication_owner.as_ref() != trust.publication_owner
+                    {
+                        return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
+                            field: "run publication inventory snapshot",
                         });
                     }
                     if status != "active" {
@@ -412,13 +689,54 @@ impl Store {
                     self.conn.execute(
                         "INSERT INTO import_inventory_runs (\
                            run_id, checkpoint_format_version, producer_build_id, \
-                           store_schema_version, created_at_ms, updated_at_ms\
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                           store_schema_version, publication_state_marker, \
+                           publication_owner_present, publication_provider, \
+                           publication_inventory_family, publication_source_format, \
+                           publication_source_root, publication_source_path, \
+                           publication_inventory_generation, publication_file_size_bytes, \
+                           publication_file_modified_at_ms, publication_import_revision, \
+                           publication_metadata_json, created_at_ms, updated_at_ms\
+                         ) VALUES (\
+                           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
+                           ?12, ?13, ?14, ?15, ?16, ?17, ?17\
+                         )",
                         params![
                             trust.run_id,
                             i64::from(trust.checkpoint_format_version),
                             trust.producer_build_id,
                             i64::from(trust.store_schema_version),
+                            trust.publication_state_marker,
+                            trust.publication_owner.is_some(),
+                            trust.publication_owner.map(|owner| owner.provider.as_str()),
+                            trust.publication_owner.map(|owner| {
+                                checkpoint_inventory_family_str(owner.inventory_family)
+                            }),
+                            trust
+                                .publication_owner
+                                .map(|owner| owner.source_format.as_str()),
+                            trust
+                                .publication_owner
+                                .map(|owner| owner.source_root.as_str()),
+                            trust
+                                .publication_owner
+                                .map(|owner| owner.source_path.as_str()),
+                            trust
+                                .publication_owner
+                                .map(|owner| checkpoint_i64(owner.inventory_generation))
+                                .transpose()?,
+                            trust
+                                .publication_owner
+                                .map(|owner| checkpoint_i64(owner.file_size_bytes))
+                                .transpose()?,
+                            trust
+                                .publication_owner
+                                .map(|owner| owner.file_modified_at_ms),
+                            trust
+                                .publication_owner
+                                .map(|owner| i64::from(owner.import_revision)),
+                            trust
+                                .publication_owner
+                                .and_then(|owner| owner.metadata_json.as_deref()),
                             now_ms,
                         ],
                     )?;
@@ -443,14 +761,18 @@ impl Store {
                   completed_directory_count, planned_path_count, replay_count, next_retry_at_ms,
                   last_error, active_directory_observed_entries, discovered_path_count,
                   attempt_count, scratch_database_identity, selection_keyset,
-                  selection_eof, selection_complete, created_at_ms, updated_at_ms
+                  selection_eof, selection_complete, application_prefix,
+                  selection_format_version, selection_algorithm_version,
+                  selection_total_count, selection_final_keyset,
+                  selection_final_prefix, selection_commitment_identity,
+                  created_at_ms, updated_at_ms
                 ) VALUES (
                   ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                   ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
                   1, ?19, 'awaiting_scratch_adoption', ?20, ?21,
                   ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
                   ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38,
-                  ?39, ?40, ?41, ?42, ?43, ?43
+                  ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?50
                 )
                 "#,
                 params![
@@ -505,6 +827,30 @@ impl Store {
                     capture.selection_keyset,
                     capture.selection_eof,
                     capture.selection_complete,
+                    import_inventory_selection_initial_prefix(
+                        IMPORT_INVENTORY_SELECTION_FORMAT_VERSION,
+                        IMPORT_INVENTORY_SELECTION_ALGORITHM_VERSION,
+                    )?,
+                    capture
+                        .selection_commitment
+                        .map(|commitment| i64::from(commitment.format_version)),
+                    capture
+                        .selection_commitment
+                        .map(|commitment| i64::from(commitment.algorithm_version)),
+                    capture
+                        .selection_commitment
+                        .map(|commitment| checkpoint_i64(commitment.total_count))
+                        .transpose()?,
+                    capture
+                        .selection_commitment
+                        .and_then(|commitment| commitment.final_keyset),
+                    capture
+                        .selection_commitment
+                        .map(|commitment| commitment.final_prefix),
+                    capture
+                        .selection_commitment
+                        .map(import_inventory_selection_commitment_identity)
+                        .transpose()?,
                     now_ms,
                 ],
             )?;
@@ -572,6 +918,18 @@ impl Store {
                     }
                 }
                 if let Some(error) = checkpoint_trust_error(&row, &trust, true) {
+                    self.abandon_import_inventory_checkpoint_inner(
+                        &trust,
+                        now_ms,
+                        &error.to_string(),
+                        false,
+                    )?;
+                    return Ok(CheckpointCommit::Failure(error));
+                }
+                if let Err(error) = self.validate_current_import_inventory_publication_snapshot(
+                    &row.run_publication_state_marker,
+                    row.run_publication_owner.as_ref(),
+                ) {
                     self.abandon_import_inventory_checkpoint_inner(
                         &trust,
                         now_ms,
@@ -663,9 +1021,13 @@ impl Store {
                        active_directory_observed_entries = ?30, \
                        discovered_path_count = ?31, attempt_count = ?32, \
                        scratch_database_identity = ?33, selection_keyset = ?34, \
-                       selection_eof = ?35, selection_complete = ?36, updated_at_ms = ?37 \
+                       selection_eof = ?35, selection_complete = ?36, \
+                       selection_format_version = ?37, selection_algorithm_version = ?38, \
+                       selection_total_count = ?39, selection_final_keyset = ?40, \
+                       selection_final_prefix = ?41, selection_commitment_identity = ?42, \
+                       updated_at_ms = ?43 \
                      WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
-                       AND source_root = ?4 AND owner_epoch = ?38 AND owner_token IS ?39 \
+                       AND source_root = ?4 AND owner_epoch = ?44 AND owner_token IS ?45 \
                        AND status = 'active'",
                     params![
                         trust.run_id,
@@ -712,6 +1074,26 @@ impl Store {
                         capture.selection_keyset,
                         capture.selection_eof,
                         capture.selection_complete,
+                        capture
+                            .selection_commitment
+                            .map(|commitment| i64::from(commitment.format_version)),
+                        capture
+                            .selection_commitment
+                            .map(|commitment| i64::from(commitment.algorithm_version)),
+                        capture
+                            .selection_commitment
+                            .map(|commitment| checkpoint_i64(commitment.total_count))
+                            .transpose()?,
+                        capture
+                            .selection_commitment
+                            .and_then(|commitment| commitment.final_keyset),
+                        capture
+                            .selection_commitment
+                            .map(|commitment| commitment.final_prefix),
+                        capture
+                            .selection_commitment
+                            .map(import_inventory_selection_commitment_identity)
+                            .transpose()?,
                         now_ms,
                         checkpoint_i64(row.owner_epoch)?,
                         row.owner_token.as_deref(),
@@ -786,22 +1168,16 @@ impl Store {
         now_ms: i64,
     ) -> Result<ImportInventoryPathEffectOutcome> {
         validate_native_path(request.native_path)?;
-        validate_hash(request.capture_journal_identity, "capture journal identity")?;
-        validate_opaque_identity(request.effect_fingerprint, "effect fingerprint")?;
-        validate_keyset(request.application_keyset)?;
+        if request.native_path.opaque_hash.len() != 32 {
+            return Err(StoreError::InvalidImportInventoryCheckpoint(
+                "selection native path hash must be SHA-256",
+            ));
+        }
         if request.accounted_bytes > IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES as u64 {
             return Err(StoreError::ImportInventoryCheckpointPageTooLarge {
                 max_bytes: IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES,
             });
         }
-        let (effect_kind, source_path) = canonical_effect_identity(request.effect);
-        validate_canonical_effect_payload_size(request.effect)?;
-        if source_path.is_empty() || source_path.len() > 32768 {
-            return Err(StoreError::InvalidImportInventoryCheckpoint(
-                "canonical source path length is invalid",
-            ));
-        }
-        validate_canonical_effect_scope(lease, request.effect)?;
         self.with_inventory_checkpoint_transaction(CHECKPOINT_WRITE_TIMEOUT, || {
             let row = self.validate_import_inventory_active_authority(
                 lease,
@@ -809,17 +1185,62 @@ impl Store {
                 now_ms,
                 true,
             )?;
+            self.validate_current_import_inventory_publication_snapshot(
+                &row.run_publication_state_marker,
+                row.run_publication_owner.as_ref(),
+            )?;
             if !row.discovery_complete || !row.selection_eof || !row.selection_complete {
                 return Err(StoreError::ImportInventoryCheckpointIncomplete(
                     "capture journal membership is not complete",
                 ));
             }
+            let commitment =
+                row.selection_commitment
+                    .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                        "frozen selection commitment is missing",
+                    ))?;
+            let commitment_identity = row.selection_commitment_identity.ok_or(
+                StoreError::ImportInventoryCheckpointInvariant(
+                    "frozen selection commitment identity is missing",
+                ),
+            )?;
+            if request.membership.commitment_identity != commitment_identity {
+                return Err(StoreError::ImportInventoryCheckpointIdempotenceConflict);
+            }
+            let canonical = canonical_import_inventory_selection_step(
+                ImportInventorySelectionCanonicalizationRequest {
+                    format_version: commitment.format_version,
+                    algorithm_version: commitment.algorithm_version,
+                    ordinal: request.membership.ordinal,
+                    capture_journal_identity: request.capture_journal_identity,
+                    native_path: request.native_path,
+                    inventory_family: lease.inventory_family,
+                    provider: lease.provider,
+                    source_format: &row.source_format,
+                    source_root: &lease.source_root,
+                    prior_keyset: request.membership.prior_keyset.as_ref(),
+                    resulting_keyset: &request.membership.resulting_keyset,
+                    prior_prefix: &request.membership.prior_prefix,
+                    accounted_bytes: request.accounted_bytes,
+                    effect: request.effect,
+                },
+            )?;
+            if canonical.resulting_prefix != request.membership.resulting_prefix {
+                return Err(StoreError::ImportInventoryCheckpointIdempotenceConflict);
+            }
+            let (effect_kind, source_path) = canonical_effect_identity(request.effect);
             let scratch = trusted_scratch(request.scratch)?;
             let existing = self
                 .conn
                 .query_row(
                     "SELECT capture_journal_identity, source_path, effect_kind, \
-                            effect_fingerprint, affected_row_count, affected_bytes \
+                            selection_commitment_identity, selection_ordinal, \
+                            prior_application_keyset, resulting_application_keyset, \
+                            prior_application_prefix, resulting_application_prefix, \
+                            payload_fingerprint, member_digest, affected_row_count, \
+                            affected_bytes, prior_applied_row_count, \
+                            resulting_applied_row_count, prior_applied_bytes, \
+                            resulting_applied_bytes \
                      FROM import_inventory_path_effects \
                      WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                        AND source_root = ?4 AND inventory_generation = ?5 \
@@ -842,21 +1263,84 @@ impl Store {
                             result.get::<_, String>(2)?,
                             result.get::<_, Vec<u8>>(3)?,
                             nonnegative_i64_to_u64(result.get(4)?)?,
-                            nonnegative_i64_to_u64(result.get(5)?)?,
+                            result.get::<_, Option<Vec<u8>>>(5)?,
+                            result.get::<_, Vec<u8>>(6)?,
+                            result.get::<_, Vec<u8>>(7)?,
+                            result.get::<_, Vec<u8>>(8)?,
+                            result.get::<_, Vec<u8>>(9)?,
+                            result.get::<_, Vec<u8>>(10)?,
+                            nonnegative_i64_to_u64(result.get(11)?)?,
+                            nonnegative_i64_to_u64(result.get(12)?)?,
+                            nonnegative_i64_to_u64(result.get(13)?)?,
+                            nonnegative_i64_to_u64(result.get(14)?)?,
+                            nonnegative_i64_to_u64(result.get(15)?)?,
+                            nonnegative_i64_to_u64(result.get(16)?)?,
                         ))
                     },
                 )
                 .optional()?;
-            if let Some((journal, stored_path, stored_kind, fingerprint, _, _)) = existing {
+            if let Some((
+                journal,
+                stored_path,
+                stored_kind,
+                stored_commitment,
+                stored_ordinal,
+                stored_prior_keyset,
+                stored_resulting_keyset,
+                stored_prior_prefix,
+                stored_resulting_prefix,
+                stored_payload_fingerprint,
+                stored_member_digest,
+                affected_rows,
+                affected_bytes,
+                prior_rows,
+                resulting_rows,
+                prior_bytes,
+                resulting_bytes,
+            )) = existing
+            {
                 if journal != request.capture_journal_identity
                     || stored_path != source_path
                     || stored_kind != effect_kind
-                    || fingerprint != request.effect_fingerprint
+                    || stored_commitment != commitment_identity
+                    || stored_ordinal != request.membership.ordinal
+                    || stored_prior_keyset.as_deref()
+                        != request
+                            .membership
+                            .prior_keyset
+                            .as_ref()
+                            .map(<[u8; 32]>::as_slice)
+                    || stored_resulting_keyset != request.membership.resulting_keyset
+                    || stored_prior_prefix != request.membership.prior_prefix
+                    || stored_resulting_prefix != request.membership.resulting_prefix
+                    || stored_payload_fingerprint != canonical.payload_fingerprint
+                    || stored_member_digest != canonical.member_digest
+                    || affected_bytes != request.accounted_bytes
+                    || resulting_rows
+                        != prior_rows.checked_add(affected_rows).ok_or(
+                            StoreError::ImportInventoryCheckpointInvariant(
+                                "stored effect row counter overflow",
+                            ),
+                        )?
+                    || resulting_bytes
+                        != prior_bytes.checked_add(affected_bytes).ok_or(
+                            StoreError::ImportInventoryCheckpointInvariant(
+                                "stored effect byte counter overflow",
+                            ),
+                        )?
+                    || row.application_ordinal <= stored_ordinal
+                    || row.applied_row_count < resulting_rows
+                    || row.applied_bytes < resulting_bytes
                 {
                     return Err(StoreError::ImportInventoryCheckpointIdempotenceConflict);
                 }
                 self.update_checkpoint_after_duplicate_effect(lease, scratch.integrity, now_ms)?;
-                return Ok(ImportInventoryPathEffectOutcome::AlreadyApplied);
+                return Ok(ImportInventoryPathEffectOutcome::AlreadyApplied(
+                    ImportInventoryEffectCounters {
+                        affected_rows,
+                        affected_bytes,
+                    },
+                ));
             }
             let journal_path = self
                 .conn
@@ -865,7 +1349,7 @@ impl Store {
                      FROM import_inventory_path_effects \
                      WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                        AND source_root = ?4 AND inventory_generation = ?5 \
-                       AND capture_journal_identity = ?6",
+                       AND (capture_journal_identity = ?6 OR selection_ordinal = ?7)",
                     params![
                         &lease.run_id,
                         checkpoint_inventory_family_str(lease.inventory_family),
@@ -873,6 +1357,7 @@ impl Store {
                         &lease.source_root,
                         checkpoint_i64(lease.inventory_generation)?,
                         request.capture_journal_identity,
+                        checkpoint_i64(request.membership.ordinal)?,
                     ],
                     |result| {
                         Ok((
@@ -886,23 +1371,58 @@ impl Store {
             if journal_path.is_some() {
                 return Err(StoreError::ImportInventoryCheckpointIdempotenceConflict);
             }
-            if row.applied_path_count >= row.planned_path_count {
+            if row.store_reconciliation_complete {
+                return Err(StoreError::ImportInventoryCheckpointIdempotenceConflict);
+            }
+            if row.application_ordinal != request.membership.ordinal
+                || row.applied_path_count != request.membership.ordinal
+                || row.application_keyset.as_deref()
+                    != request
+                        .membership
+                        .prior_keyset
+                        .as_ref()
+                        .map(<[u8; 32]>::as_slice)
+                || row.application_prefix != request.membership.prior_prefix
+            {
+                return Err(StoreError::ImportInventoryCheckpointIdempotenceConflict);
+            }
+            if row.applied_path_count >= row.planned_path_count
+                || row.application_ordinal >= commitment.total_count
+            {
                 return Err(StoreError::ImportInventoryCheckpointIncomplete(
                     "path effect exceeds capture's committed journal membership",
                 ));
             }
             let affected_rows =
-                self.apply_import_inventory_canonical_effect(lease, request.effect, now_ms)?;
+                self.apply_import_inventory_canonical_effect(lease, &row, request.effect, now_ms)?;
+            let resulting_rows = row.applied_row_count.checked_add(affected_rows).ok_or(
+                StoreError::ImportInventoryCheckpointInvariant(
+                    "checkpoint applied row counter overflow",
+                ),
+            )?;
+            let resulting_bytes = row
+                .applied_bytes
+                .checked_add(request.accounted_bytes)
+                .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                    "checkpoint applied byte counter overflow",
+                ))?;
             self.conn.execute(
                 r#"
                 INSERT INTO import_inventory_path_effects (
                   run_id, inventory_family, provider, source_root, inventory_generation,
                   capture_journal_identity, path_platform_tag, path_encoding_tag,
-                  native_path_hash, source_path, effect_kind, effect_fingerprint,
-                  owner_epoch, affected_row_count, affected_bytes, applied_at_ms
+                  native_path_hash, source_path, effect_kind,
+                  selection_commitment_identity, selection_ordinal,
+                  prior_application_keyset, resulting_application_keyset,
+                  prior_application_prefix, resulting_application_prefix,
+                  payload_fingerprint, member_digest, owner_epoch,
+                  prior_applied_row_count, resulting_applied_row_count,
+                  prior_applied_bytes, resulting_applied_bytes,
+                  affected_row_count, affected_bytes, applied_at_ms
                 ) VALUES (
-                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                  ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+                  ?22, ?23, ?24, ?25, ?26, ?27
                 )
                 "#,
                 params![
@@ -917,8 +1437,19 @@ impl Store {
                     request.native_path.opaque_hash,
                     source_path,
                     effect_kind,
-                    request.effect_fingerprint,
+                    commitment_identity,
+                    checkpoint_i64(request.membership.ordinal)?,
+                    request.membership.prior_keyset,
+                    request.membership.resulting_keyset,
+                    request.membership.prior_prefix,
+                    request.membership.resulting_prefix,
+                    canonical.payload_fingerprint,
+                    canonical.member_digest,
                     checkpoint_i64(lease.owner_epoch)?,
+                    checkpoint_i64(row.applied_row_count)?,
+                    checkpoint_i64(resulting_rows)?,
+                    checkpoint_i64(row.applied_bytes)?,
+                    checkpoint_i64(resulting_bytes)?,
                     checkpoint_i64(affected_rows)?,
                     checkpoint_i64(request.accounted_bytes)?,
                     now_ms,
@@ -926,12 +1457,16 @@ impl Store {
             )?;
             let changed = self.conn.execute(
                 "UPDATE import_inventory_checkpoints SET scratch_integrity = ?8, \
-                     application_keyset = ?9, applied_path_count = applied_path_count + 1, \
-                     applied_row_count = applied_row_count + ?10, \
-                     applied_bytes = applied_bytes + ?11, updated_at_ms = ?12 \
+                     application_ordinal = ?9, application_keyset = ?10, \
+                     application_prefix = ?11, applied_path_count = ?9, \
+                     applied_row_count = ?12, applied_bytes = ?13, updated_at_ms = ?14 \
                  WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                    AND source_root = ?4 AND owner_epoch = ?5 AND owner_token = ?6 \
                    AND owner_state = 'active' AND lease_owner_id = ?7 \
+                   AND selection_commitment_identity = ?15 \
+                   AND application_ordinal = ?16 AND application_keyset IS ?17 \
+                   AND application_prefix = ?18 AND applied_path_count = ?16 \
+                   AND applied_row_count = ?19 AND applied_bytes = ?20 \
                    AND applied_path_count < planned_path_count",
                 params![
                     &lease.run_id,
@@ -942,10 +1477,22 @@ impl Store {
                     &lease.owner_token,
                     &lease.owner_id,
                     scratch.integrity,
-                    request.application_keyset,
-                    checkpoint_i64(affected_rows)?,
-                    checkpoint_i64(request.accounted_bytes)?,
+                    checkpoint_i64(request.membership.ordinal.checked_add(1).ok_or(
+                        StoreError::ImportInventoryCheckpointInvariant(
+                            "selection ordinal overflow",
+                        ),
+                    )?)?,
+                    request.membership.resulting_keyset,
+                    request.membership.resulting_prefix,
+                    checkpoint_i64(resulting_rows)?,
+                    checkpoint_i64(resulting_bytes)?,
                     now_ms,
+                    commitment_identity,
+                    checkpoint_i64(request.membership.ordinal)?,
+                    request.membership.prior_keyset,
+                    request.membership.prior_prefix,
+                    checkpoint_i64(row.applied_row_count)?,
+                    checkpoint_i64(row.applied_bytes)?,
                 ],
             )?;
             if changed != 1 {
@@ -960,13 +1507,239 @@ impl Store {
         })
     }
 
+    pub fn reconcile_import_inventory_store_rows_page(
+        &self,
+        lease: &ImportInventoryCheckpointLease,
+        scratch: ImportInventoryScratchState<'_>,
+        budget: ImportInventoryStoreReconciliationBudget,
+        now_ms: i64,
+    ) -> Result<ImportInventoryStoreReconciliationProgress> {
+        if budget.max_rows == 0
+            || budget.max_rows > IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS
+            || budget.max_bytes == 0
+            || budget.max_bytes > IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES
+        {
+            return Err(StoreError::InvalidImportInventoryCheckpoint(
+                "store reconciliation budget is invalid",
+            ));
+        }
+        self.with_inventory_checkpoint_transaction(CHECKPOINT_WRITE_TIMEOUT, || {
+            let row =
+                self.validate_import_inventory_active_authority(lease, scratch, now_ms, true)?;
+            self.validate_current_import_inventory_publication_snapshot(
+                &row.run_publication_state_marker,
+                row.run_publication_owner.as_ref(),
+            )?;
+            let commitment =
+                row.selection_commitment
+                    .ok_or(StoreError::ImportInventoryCheckpointIncomplete(
+                        "frozen selection commitment is missing",
+                    ))?;
+            if !row.discovery_complete
+                || !row.selection_eof
+                || !row.selection_complete
+                || !row.effects_complete
+                || row.application_ordinal != commitment.total_count
+                || row.application_keyset.as_deref()
+                    != commitment.final_keyset.as_ref().map(<[u8; 32]>::as_slice)
+                || row.application_prefix != commitment.final_prefix
+            {
+                return Err(StoreError::ImportInventoryCheckpointIncomplete(
+                    "capture effects must converge before store reconciliation",
+                ));
+            }
+            if row.store_reconciliation_complete {
+                return Ok(ImportInventoryStoreReconciliationProgress {
+                    complete: true,
+                    keyset: (row.store_reconciliation_keyset != 0)
+                        .then_some(row.store_reconciliation_keyset),
+                    visited_rows: row.store_reconciliation_visited_rows,
+                    stale_rows: row.store_reconciliation_stale_rows,
+                    visited_bytes: row.store_reconciliation_visited_bytes,
+                });
+            }
+            let scan_sql = match lease.inventory_family {
+                ProviderFileInventoryFamily::Catalog => {
+                    "SELECT rowid, length(CAST(source_path AS BLOB)) + \
+                            length(CAST(source_format AS BLOB)) + 64, source_format = ?4 \
+                     FROM catalog_sessions \
+                       INDEXED BY idx_catalog_sessions_provider_source_root_stale \
+                     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
+                       AND rowid > ?3 ORDER BY rowid LIMIT ?5"
+                }
+                ProviderFileInventoryFamily::SourceImport => {
+                    "SELECT rowid, length(CAST(source_path AS BLOB)) + \
+                            length(CAST(source_format AS BLOB)) + 64, source_format = ?4 \
+                     FROM source_import_files \
+                       INDEXED BY idx_source_import_files_provider_source_root_stale \
+                     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
+                       AND rowid > ?3 ORDER BY rowid LIMIT ?5"
+                }
+            };
+            let candidates = self
+                .conn
+                .prepare(scan_sql)?
+                .query_map(
+                    params![
+                        lease.provider.as_str(),
+                        &lease.source_root,
+                        row.store_reconciliation_keyset,
+                        &row.source_format,
+                        checkpoint_i64(budget.max_rows as u64)?,
+                    ],
+                    |candidate| {
+                        Ok((
+                            candidate.get::<_, i64>(0)?,
+                            candidate.get::<_, i64>(1)?,
+                            candidate.get::<_, bool>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut page_rows = 0u64;
+            let mut page_bytes = 0u64;
+            let mut page_stale_rows = 0u64;
+            let mut next_keyset = row.store_reconciliation_keyset;
+            for (candidate_rowid, candidate_bytes, matching_format) in &candidates {
+                let candidate_bytes = nonnegative_i64_to_u64(*candidate_bytes)?;
+                if page_bytes.saturating_add(candidate_bytes) > budget.max_bytes as u64 {
+                    if page_rows == 0 {
+                        return Err(StoreError::ImportInventoryCheckpointNoProgress);
+                    }
+                    break;
+                }
+                let update_sql = match lease.inventory_family {
+                    ProviderFileInventoryFamily::Catalog => {
+                        "UPDATE catalog_sessions AS inventory \
+                         SET is_stale = 1, cataloged_at_ms = ?5 \
+                         WHERE inventory.rowid = ?1 AND inventory.provider = ?2 \
+                           AND inventory.source_format = ?3 AND inventory.source_root = ?4 \
+                           AND inventory.is_stale = 0 AND NOT EXISTS (\
+                             SELECT 1 FROM import_inventory_path_effects AS effect \
+                             WHERE effect.run_id = ?6 AND effect.inventory_family = ?7 \
+                               AND effect.provider = ?2 AND effect.source_root = ?4 \
+                               AND effect.inventory_generation = ?8 \
+                               AND effect.source_path = inventory.source_path\
+                           )"
+                    }
+                    ProviderFileInventoryFamily::SourceImport => {
+                        "UPDATE source_import_files AS inventory \
+                         SET is_stale = 1, observed_at_ms = ?5 \
+                         WHERE inventory.rowid = ?1 AND inventory.provider = ?2 \
+                           AND inventory.source_format = ?3 AND inventory.source_root = ?4 \
+                           AND inventory.is_stale = 0 AND NOT EXISTS (\
+                             SELECT 1 FROM import_inventory_path_effects AS effect \
+                             WHERE effect.run_id = ?6 AND effect.inventory_family = ?7 \
+                               AND effect.provider = ?2 AND effect.source_root = ?4 \
+                               AND effect.inventory_generation = ?8 \
+                               AND effect.source_path = inventory.source_path\
+                           )"
+                    }
+                };
+                if *matching_format {
+                    page_stale_rows = page_stale_rows
+                        .checked_add(self.conn.execute(
+                            update_sql,
+                            params![
+                                candidate_rowid,
+                                lease.provider.as_str(),
+                                &row.source_format,
+                                &lease.source_root,
+                                now_ms,
+                                &lease.run_id,
+                                checkpoint_inventory_family_str(lease.inventory_family),
+                                checkpoint_i64(lease.inventory_generation)?,
+                            ],
+                        )? as u64)
+                        .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                            "store reconciliation stale-row counter overflow",
+                        ))?;
+                }
+                page_rows = page_rows.checked_add(1).ok_or(
+                    StoreError::ImportInventoryCheckpointInvariant(
+                        "store reconciliation visited-row counter overflow",
+                    ),
+                )?;
+                page_bytes = page_bytes.checked_add(candidate_bytes).ok_or(
+                    StoreError::ImportInventoryCheckpointInvariant(
+                        "store reconciliation byte counter overflow",
+                    ),
+                )?;
+                next_keyset = *candidate_rowid;
+            }
+            let complete =
+                page_rows == candidates.len() as u64 && candidates.len() < budget.max_rows;
+            let visited_rows = row
+                .store_reconciliation_visited_rows
+                .checked_add(page_rows)
+                .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                    "store reconciliation visited-row counter overflow",
+                ))?;
+            let stale_rows = row
+                .store_reconciliation_stale_rows
+                .checked_add(page_stale_rows)
+                .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                    "store reconciliation stale-row counter overflow",
+                ))?;
+            let visited_bytes = row
+                .store_reconciliation_visited_bytes
+                .checked_add(page_bytes)
+                .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                    "store reconciliation byte counter overflow",
+                ))?;
+            let trusted = trusted_scratch(scratch)?;
+            let changed = self.conn.execute(
+                "UPDATE import_inventory_checkpoints SET scratch_integrity = ?8, \
+                     store_reconciliation_keyset = ?9, \
+                     store_reconciliation_complete = ?10, \
+                     store_reconciliation_visited_rows = ?11, \
+                     store_reconciliation_stale_rows = ?12, \
+                     store_reconciliation_visited_bytes = ?13, \
+                     phase = CASE WHEN ?10 THEN 'finalization' ELSE 'application' END, \
+                     updated_at_ms = ?14 \
+                 WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
+                   AND source_root = ?4 AND owner_epoch = ?5 AND owner_token = ?6 \
+                   AND lease_owner_id = ?7 AND owner_state = 'active' \
+                   AND store_reconciliation_complete = 0 \
+                   AND store_reconciliation_keyset = ?15",
+                params![
+                    &lease.run_id,
+                    checkpoint_inventory_family_str(lease.inventory_family),
+                    lease.provider.as_str(),
+                    &lease.source_root,
+                    checkpoint_i64(lease.owner_epoch)?,
+                    &lease.owner_token,
+                    &lease.owner_id,
+                    trusted.integrity,
+                    next_keyset,
+                    complete,
+                    checkpoint_i64(visited_rows)?,
+                    checkpoint_i64(stale_rows)?,
+                    checkpoint_i64(visited_bytes)?,
+                    now_ms,
+                    row.store_reconciliation_keyset,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::ImportInventoryCheckpointStaleAuthority);
+            }
+            Ok(ImportInventoryStoreReconciliationProgress {
+                complete,
+                keyset: (next_keyset != 0).then_some(next_keyset),
+                visited_rows,
+                stale_rows,
+                visited_bytes,
+            })
+        })
+    }
+
     pub fn finalize_import_inventory_checkpoint(
         &self,
         lease: &ImportInventoryCheckpointLease,
         trust: ImportInventoryCheckpointTrust<'_>,
         proof: ImportInventoryCheckpointCompletionProof<'_>,
         now_ms: i64,
-    ) -> Result<()> {
+    ) -> Result<ImportInventoryCheckpointCleanupProof> {
         validate_checkpoint_trust(&trust)?;
         validate_capture_checkpoint(proof.capture)?;
         self.with_inventory_checkpoint_transaction(CHECKPOINT_WRITE_TIMEOUT, || {
@@ -979,7 +1752,16 @@ impl Store {
             if let Some(error) = checkpoint_trust_error(&row, &trust, true) {
                 return Err(error);
             }
+            self.validate_current_import_inventory_publication_snapshot(
+                &row.run_publication_state_marker,
+                row.run_publication_owner.as_ref(),
+            )?;
             validate_capture_progress(&row, proof.capture)?;
+            let commitment =
+                row.selection_commitment
+                    .ok_or(StoreError::ImportInventoryCheckpointIncomplete(
+                        "frozen selection commitment is missing",
+                    ))?;
             if !proof.capture.discovery_complete
                 || !proof.capture.selection_eof
                 || !proof.capture.selection_complete
@@ -991,6 +1773,11 @@ impl Store {
                 || row.applied_path_count != proof.applied_path_count
                 || row.applied_row_count != proof.applied_row_count
                 || row.applied_bytes != proof.applied_bytes
+                || row.application_ordinal != commitment.total_count
+                || row.application_keyset.as_deref()
+                    != commitment.final_keyset.as_ref().map(<[u8; 32]>::as_slice)
+                || row.application_prefix != commitment.final_prefix
+                || !row.store_reconciliation_complete
             {
                 return Err(StoreError::ImportInventoryCheckpointIncomplete(
                     "capture completion proof or main-store counters are incomplete",
@@ -1020,7 +1807,10 @@ impl Store {
                    AND lease_owner_id = ?7 AND owner_state = 'active' \
                    AND active_directory_path_hash IS NULL AND discovery_complete = 1 \
                    AND selection_eof = 1 AND selection_complete = 1 \
-                   AND application_complete = 1 AND directory_queue_empty = 1",
+                   AND application_complete = 1 AND directory_queue_empty = 1 \
+                   AND application_ordinal = ?9 AND application_keyset IS ?10 \
+                   AND application_prefix = ?11 AND selection_commitment_identity = ?12 \
+                   AND store_reconciliation_complete = 1",
                 params![
                     &lease.run_id,
                     checkpoint_inventory_family_str(lease.inventory_family),
@@ -1030,6 +1820,10 @@ impl Store {
                     &lease.owner_token,
                     &lease.owner_id,
                     now_ms,
+                    checkpoint_i64(commitment.total_count)?,
+                    commitment.final_keyset,
+                    commitment.final_prefix,
+                    import_inventory_selection_commitment_identity(commitment)?,
                 ],
             )?;
             if changed != 1 {
@@ -1048,7 +1842,15 @@ impl Store {
                     "inventory run stopped before publication",
                 ));
             }
-            Ok(())
+            self.load_import_inventory_checkpoint_cleanup_proof_by_key(
+                &lease.run_id,
+                lease.inventory_family,
+                lease.provider,
+                &lease.source_root,
+            )?
+            .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                "completed checkpoint cleanup proof is unavailable",
+            ))
         })
     }
 
@@ -1113,7 +1915,7 @@ impl Store {
         scratch: ImportInventoryScratchState<'_>,
         reason: &str,
         now_ms: i64,
-    ) -> Result<()> {
+    ) -> Result<ImportInventoryCheckpointCleanupProof> {
         if reason.is_empty() || reason.len() > 4096 {
             return Err(StoreError::InvalidImportInventoryCheckpoint(
                 "abandon reason length is invalid",
@@ -1129,9 +1931,9 @@ impl Store {
                     validate_scratch_owned_by_lease(&row, lease, &trusted)?;
                     (Some(trusted.integrity), false)
                 }
+                Err(StoreError::ImportInventoryCheckpointScratchMissing) => (None, false),
                 Err(
-                    StoreError::ImportInventoryCheckpointScratchMissing
-                    | StoreError::ImportInventoryCheckpointScratchCorrupt
+                    StoreError::ImportInventoryCheckpointScratchCorrupt
                     | StoreError::ImportInventoryCheckpointScratchTampered,
                 ) => (None, true),
                 Err(error) => return Err(error),
@@ -1164,39 +1966,35 @@ impl Store {
             if changed != 1 {
                 return Err(StoreError::ImportInventoryCheckpointStaleAuthority);
             }
-            self.record_import_inventory_run_abandonment(&lease.run_id, reason, now_ms)
+            self.record_import_inventory_run_abandonment(&lease.run_id, reason, now_ms)?;
+            self.load_import_inventory_checkpoint_cleanup_proof_by_key(
+                &lease.run_id,
+                lease.inventory_family,
+                lease.provider,
+                &lease.source_root,
+            )?
+            .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                "abandoned checkpoint cleanup proof is unavailable",
+            ))
         })
     }
 
     pub fn advance_import_inventory_checkpoint_cleanup(
         &self,
-        trust: ImportInventoryCheckpointTrust<'_>,
+        proof: &ImportInventoryCheckpointCleanupProof,
         advance: ImportInventoryCleanupAdvance<'_>,
         now_ms: i64,
-    ) -> Result<()> {
-        validate_checkpoint_trust(&trust)?;
-        validate_opaque_identity(advance.scratch_identity, "cleanup scratch identity")?;
-        validate_integrity(advance.scratch_integrity, "cleanup scratch integrity")?;
-        validate_opaque_identity(
-            advance.scratch_lock_identity,
-            "cleanup scratch lock identity",
-        )?;
-        validate_opaque_identity(
-            advance.scratch_database_identity,
-            "cleanup scratch database identity",
-        )?;
+    ) -> Result<ImportInventoryCleanupProgress> {
+        validate_import_inventory_cleanup_proof(proof)?;
         if let Some(expected_keyset) = advance.expected_cleanup_keyset {
             validate_keyset(expected_keyset)?;
         }
-        validate_keyset(advance.cleanup_keyset)?;
-        if advance.cleaned_rows_delta == 0 && advance.cleaned_bytes_delta == 0 && !advance.complete
+        if let Some(cleanup_keyset) = advance.cleanup_keyset {
+            validate_keyset(cleanup_keyset)?;
+        }
+        if advance.visited_rows_delta > IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS as u64
+            || advance.cleaned_rows_delta > advance.visited_rows_delta
         {
-            return Err(StoreError::ImportInventoryCheckpointNoProgress);
-        }
-        if !advance.complete && advance.expected_cleanup_keyset == Some(advance.cleanup_keyset) {
-            return Err(StoreError::ImportInventoryCheckpointNoProgress);
-        }
-        if advance.cleaned_rows_delta > IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS as u64 {
             return Err(StoreError::ImportInventoryCheckpointPageTooManyRows {
                 max_rows: IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS,
             });
@@ -1208,94 +2006,120 @@ impl Store {
         }
         let committed = self.with_inventory_checkpoint_transaction(
             CHECKPOINT_WRITE_TIMEOUT,
-            || -> Result<CheckpointCommit<()>> {
-                let Some(row) = self.load_import_inventory_checkpoint(&trust)? else {
+            || -> Result<CheckpointCommit<ImportInventoryCleanupProgress>> {
+                let Some(current_proof) = self
+                    .load_import_inventory_checkpoint_cleanup_proof_by_key(
+                        &proof.run_id,
+                        proof.inventory_family,
+                        proof.provider,
+                        &proof.source_root,
+                    )?
+                else {
                     return Ok(CheckpointCommit::Failure(
                         StoreError::ImportInventoryCheckpointNotFound,
                     ));
                 };
-                if let Some(error) = checkpoint_trust_error(&row, &trust, false) {
-                    return Ok(CheckpointCommit::Failure(error));
-                }
-                if !matches!(row.status.as_str(), "abandoned" | "cleaning")
-                    || row.owner_state != "inactive"
-                {
+                if current_proof != *proof {
                     return Ok(CheckpointCommit::Failure(
-                        StoreError::ImportInventoryCheckpointInvariant(
-                            "checkpoint is not safely abandoned for cleanup",
-                        ),
+                        StoreError::ImportInventoryCheckpointCleanupBlocked,
                     ));
                 }
                 let cleanup_state = self.conn.query_row(
-                    "SELECT scratch_integrity, cleanup_keyset, cleanup_status \
+                    "SELECT status, owner_state, cleanup_keyset, cleanup_status, \
+                            cleanup_visited_row_count, cleanup_row_count, cleanup_bytes, \
+                            cleanup_attempt_count \
                      FROM import_inventory_checkpoints \
                      WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                        AND source_root = ?4",
                     params![
-                        trust.run_id,
-                        checkpoint_inventory_family_str(trust.inventory_family),
-                        trust.provider.as_str(),
-                        trust.source_root,
+                        &proof.run_id,
+                        checkpoint_inventory_family_str(proof.inventory_family),
+                        proof.provider.as_str(),
+                        &proof.source_root,
                     ],
                     |row| {
                         Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, Option<Vec<u8>>>(1)?,
-                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<Vec<u8>>>(2)?,
+                            row.get::<_, String>(3)?,
+                            nonnegative_i64_to_u64(row.get(4)?)?,
+                            nonnegative_i64_to_u64(row.get(5)?)?,
+                            nonnegative_i64_to_u64(row.get(6)?)?,
+                            nonnegative_i64_to_u64(row.get(7)?)?,
                         ))
                     },
                 )?;
-                if advance.scratch_identity != row.scratch_identity
-                    || advance.scratch_lock_identity != row.scratch_lock_identity
-                    || advance.scratch_database_identity != row.scratch_database_identity
-                    || advance.scratch_integrity != cleanup_state.0
+                if !matches!(cleanup_state.0.as_str(), "abandoned" | "completed")
+                    || cleanup_state.1 != "inactive"
                 {
-                    self.mark_import_inventory_cleanup_blocked(
-                        &trust,
-                        now_ms,
-                        "scratch identity or integrity changed before cleanup",
-                    )?;
                     return Ok(CheckpointCommit::Failure(
                         StoreError::ImportInventoryCheckpointCleanupBlocked,
                     ));
                 }
-                if cleanup_state.2 == "blocked" {
+                if matches!(cleanup_state.3.as_str(), "blocked" | "complete") {
                     return Ok(CheckpointCommit::Failure(
                         StoreError::ImportInventoryCheckpointCleanupBlocked,
                     ));
                 }
-                if cleanup_state.1.as_deref() != advance.expected_cleanup_keyset {
+                if cleanup_state.2.as_deref() != advance.expected_cleanup_keyset {
                     return Ok(CheckpointCommit::Failure(
                         StoreError::ImportInventoryCheckpointStaleAuthority,
                     ));
                 }
+                let visited_rows = cleanup_state
+                    .4
+                    .checked_add(advance.visited_rows_delta)
+                    .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                        "cleanup visited-row counter overflow",
+                    ))?;
+                let cleaned_rows = cleanup_state
+                    .5
+                    .checked_add(advance.cleaned_rows_delta)
+                    .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                        "cleanup row counter overflow",
+                    ))?;
+                let cleaned_bytes = cleanup_state
+                    .6
+                    .checked_add(advance.cleaned_bytes_delta)
+                    .ok_or(StoreError::ImportInventoryCheckpointInvariant(
+                        "cleanup byte counter overflow",
+                    ))?;
+                let attempt_count = cleanup_state.7.checked_add(1).ok_or(
+                    StoreError::ImportInventoryCheckpointInvariant(
+                        "cleanup attempt counter overflow",
+                    ),
+                )?;
+                let complete = advance.disposition == ImportInventoryCleanupDisposition::Complete;
                 let changed = self.conn.execute(
                     "UPDATE import_inventory_checkpoints SET \
-                     cleanup_keyset = ?9, cleanup_row_count = cleanup_row_count + ?10, \
-                     cleanup_bytes = cleanup_bytes + ?11, \
-                     cleanup_status = CASE WHEN ?12 THEN 'complete' ELSE 'running' END, \
-                     status = CASE WHEN ?12 THEN 'cleaned' ELSE 'cleaning' END, \
-                     phase = CASE WHEN ?12 THEN 'complete' ELSE 'cleanup' END, \
-                     updated_at_ms = ?13 \
+                     cleanup_keyset = ?9, cleanup_visited_row_count = ?10, \
+                     cleanup_row_count = ?11, cleanup_bytes = ?12, \
+                     cleanup_attempt_count = ?13, \
+                     cleanup_status = CASE WHEN ?14 THEN 'complete' ELSE 'running' END, \
+                     phase = CASE WHEN ?14 THEN 'complete' ELSE 'cleanup' END, \
+                     updated_at_ms = ?15 \
                  WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                    AND source_root = ?4 AND scratch_identity = ?5 \
                    AND scratch_integrity = ?6 AND scratch_lock_identity = ?7 \
-                   AND scratch_database_identity = ?8 AND cleanup_keyset IS ?14 \
-                   AND owner_state = 'inactive' \
-                   AND status IN ('abandoned', 'cleaning') AND cleanup_status != 'blocked'",
+                   AND scratch_database_identity = ?8 AND cleanup_keyset IS ?16 \
+                   AND owner_state = 'inactive' AND status IN ('abandoned', 'completed') \
+                   AND cleanup_status IN ('pending', 'running')",
                     params![
-                        trust.run_id,
-                        checkpoint_inventory_family_str(trust.inventory_family),
-                        trust.provider.as_str(),
-                        trust.source_root,
-                        advance.scratch_identity,
-                        advance.scratch_integrity,
-                        advance.scratch_lock_identity,
-                        advance.scratch_database_identity,
+                        &proof.run_id,
+                        checkpoint_inventory_family_str(proof.inventory_family),
+                        proof.provider.as_str(),
+                        &proof.source_root,
+                        &proof.scratch_identity,
+                        &proof.scratch_integrity,
+                        &proof.scratch_lock_identity,
+                        &proof.scratch_database_identity,
                         advance.cleanup_keyset,
-                        checkpoint_i64(advance.cleaned_rows_delta)?,
-                        checkpoint_i64(advance.cleaned_bytes_delta)?,
-                        advance.complete,
+                        checkpoint_i64(visited_rows)?,
+                        checkpoint_i64(cleaned_rows)?,
+                        checkpoint_i64(cleaned_bytes)?,
+                        checkpoint_i64(attempt_count)?,
+                        complete,
                         now_ms,
                         advance.expected_cleanup_keyset,
                     ],
@@ -1305,16 +2129,14 @@ impl Store {
                         StoreError::ImportInventoryCheckpointStaleAuthority,
                     ));
                 }
-                if advance.complete {
-                    self.conn.execute(
-                        "UPDATE import_inventory_runs SET status = CASE \
-                       WHEN NOT EXISTS (SELECT 1 FROM import_inventory_checkpoints \
-                         WHERE run_id = ?1 AND status IN ('active', 'abandoned', 'cleaning')) \
-                       THEN 'cleaned' ELSE status END, updated_at_ms = ?2 WHERE run_id = ?1",
-                        params![trust.run_id, now_ms],
-                    )?;
-                }
-                Ok(CheckpointCommit::Value(()))
+                Ok(CheckpointCommit::Value(ImportInventoryCleanupProgress {
+                    disposition: advance.disposition,
+                    cleanup_keyset: advance.cleanup_keyset.map(<[u8]>::to_vec),
+                    visited_rows,
+                    cleaned_rows,
+                    cleaned_bytes,
+                    attempt_count,
+                }))
             },
         )?;
         finish_checkpoint_commit(committed)
@@ -1345,7 +2167,14 @@ impl Store {
                         cleanup_status, cleanup_keyset, cleanup_row_count, cleanup_bytes, \
                         scratch_identity, scratch_integrity, scratch_lock_identity, \
                         scratch_database_identity, selection_keyset, selection_eof, \
-                        selection_complete \
+                        selection_complete, application_ordinal, application_prefix, \
+                        selection_format_version, selection_algorithm_version, \
+                        selection_total_count, selection_final_keyset, \
+                        selection_final_prefix, selection_commitment_identity, \
+                        cleanup_visited_row_count, cleanup_attempt_count, \
+                        store_reconciliation_complete, store_reconciliation_keyset, \
+                        store_reconciliation_visited_rows, store_reconciliation_stale_rows, \
+                        store_reconciliation_visited_bytes \
                  FROM import_inventory_checkpoints \
                  WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                    AND source_root = ?4",
@@ -1366,6 +2195,8 @@ impl Store {
                         lease_expires_at_ms: row.get(5)?,
                         active_directory,
                         application_keyset: row.get(15)?,
+                        application_ordinal: nonnegative_i64_to_u64(row.get(42)?)?,
+                        application_prefix: decode_import_inventory_hash(row, 43)?,
                         discovery_complete: row.get(16)?,
                         effects_complete: row.get(17)?,
                         directory_queue_empty: row.get(18)?,
@@ -1383,8 +2214,18 @@ impl Store {
                         abandon_reason: row.get(30)?,
                         cleanup_status: row.get(31)?,
                         cleanup_keyset: row.get(32)?,
+                        cleanup_visited_row_count: nonnegative_i64_to_u64(row.get(50)?)?,
                         cleanup_row_count: nonnegative_i64_to_u64(row.get(33)?)?,
                         cleanup_bytes: nonnegative_i64_to_u64(row.get(34)?)?,
+                        cleanup_attempt_count: nonnegative_i64_to_u64(row.get(51)?)?,
+                        store_reconciliation_complete: row.get(52)?,
+                        store_reconciliation_keyset: match row.get::<_, i64>(53)? {
+                            0 => None,
+                            keyset => Some(keyset),
+                        },
+                        store_reconciliation_visited_rows: nonnegative_i64_to_u64(row.get(54)?)?,
+                        store_reconciliation_stale_rows: nonnegative_i64_to_u64(row.get(55)?)?,
+                        store_reconciliation_visited_bytes: nonnegative_i64_to_u64(row.get(56)?)?,
                         scratch_identity: row.get(35)?,
                         scratch_integrity: row.get(36)?,
                         scratch_lock_identity: row.get(37)?,
@@ -1392,6 +2233,12 @@ impl Store {
                         selection_keyset: row.get(39)?,
                         selection_eof: row.get(40)?,
                         selection_complete: row.get(41)?,
+                        selection_commitment: decode_import_inventory_selection_commitment(
+                            row, 44,
+                        )?,
+                        selection_commitment_identity: decode_optional_import_inventory_hash(
+                            row, 49,
+                        )?,
                     })
                 },
             )
@@ -1414,7 +2261,13 @@ impl Store {
                         run.checkpoint_format_version, run.producer_build_id, \
                         run.store_schema_version, checkpoint.scratch_identity, \
                         checkpoint.scratch_integrity, checkpoint.scratch_lock_identity, \
-                        checkpoint.scratch_database_identity \
+                        checkpoint.scratch_database_identity, run.publication_state_marker, \
+                        run.publication_owner_present, run.publication_provider, \
+                        run.publication_inventory_family, run.publication_source_format, \
+                        run.publication_source_root, run.publication_source_path, \
+                        run.publication_inventory_generation, run.publication_file_size_bytes, \
+                        run.publication_file_modified_at_ms, run.publication_import_revision, \
+                        run.publication_metadata_json \
                  FROM import_inventory_generations AS generation \
                  JOIN import_inventory_checkpoints AS checkpoint \
                    ON checkpoint.inventory_family = generation.inventory_family \
@@ -1452,11 +2305,28 @@ impl Store {
                         scratch_integrity: row.get(12)?,
                         scratch_lock_identity: row.get(13)?,
                         scratch_database_identity: row.get(14)?,
+                        publication_state_marker: row.get(15)?,
+                        publication_owner: decode_import_inventory_publication_owner(row, 16)?,
                     })
                 },
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    pub fn import_inventory_checkpoint_cleanup_proof(
+        &self,
+        run_id: &[u8],
+        inventory_family: ProviderFileInventoryFamily,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Option<ImportInventoryCheckpointCleanupProof>> {
+        self.load_import_inventory_checkpoint_cleanup_proof_by_key(
+            run_id,
+            inventory_family,
+            provider,
+            source_root,
+        )
     }
 
     fn update_capture_checkpoint_summary(
@@ -1488,7 +2358,11 @@ impl Store {
                  active_directory_observed_entries = ?28, \
                  discovered_path_count = ?29, attempt_count = ?30, \
                  scratch_database_identity = ?31, selection_keyset = ?32, \
-                 selection_eof = ?33, selection_complete = ?34, updated_at_ms = ?35 \
+                 selection_eof = ?33, selection_complete = ?34, \
+                 selection_format_version = ?35, selection_algorithm_version = ?36, \
+                 selection_total_count = ?37, selection_final_keyset = ?38, \
+                 selection_final_prefix = ?39, selection_commitment_identity = ?40, \
+                 updated_at_ms = ?41 \
              WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
                AND source_root = ?4 AND owner_epoch = ?5 AND owner_token = ?6 \
                AND lease_owner_id = ?7 AND status IN ('active', 'cleaning')",
@@ -1533,6 +2407,26 @@ impl Store {
                 capture.selection_keyset,
                 capture.selection_eof,
                 capture.selection_complete,
+                capture
+                    .selection_commitment
+                    .map(|commitment| i64::from(commitment.format_version)),
+                capture
+                    .selection_commitment
+                    .map(|commitment| i64::from(commitment.algorithm_version)),
+                capture
+                    .selection_commitment
+                    .map(|commitment| checkpoint_i64(commitment.total_count))
+                    .transpose()?,
+                capture
+                    .selection_commitment
+                    .and_then(|commitment| commitment.final_keyset),
+                capture
+                    .selection_commitment
+                    .map(|commitment| commitment.final_prefix),
+                capture
+                    .selection_commitment
+                    .map(import_inventory_selection_commitment_identity)
+                    .transpose()?,
                 now_ms,
             ],
         )?;
@@ -1674,7 +2568,26 @@ impl Store {
                        run.checkpoint_format_version, run.producer_build_id,
                        run.store_schema_version, run.status, generation.current_generation,
                        checkpoint.scratch_database_identity, checkpoint.selection_keyset,
-                       checkpoint.selection_eof, checkpoint.selection_complete
+                       checkpoint.selection_eof, checkpoint.selection_complete,
+                       checkpoint.selection_format_version,
+                       checkpoint.selection_algorithm_version,
+                       checkpoint.selection_total_count, checkpoint.selection_final_keyset,
+                       checkpoint.selection_final_prefix,
+                       checkpoint.selection_commitment_identity,
+                       checkpoint.application_ordinal, checkpoint.application_keyset,
+                       checkpoint.application_prefix, run.publication_state_marker,
+                       run.publication_owner_present, run.publication_provider,
+                       run.publication_inventory_family, run.publication_source_format,
+                       run.publication_source_root, run.publication_source_path,
+                       run.publication_inventory_generation,
+                       run.publication_file_size_bytes,
+                       run.publication_file_modified_at_ms,
+                       run.publication_import_revision, run.publication_metadata_json,
+                       checkpoint.store_reconciliation_complete,
+                       checkpoint.store_reconciliation_keyset,
+                       checkpoint.store_reconciliation_visited_rows,
+                       checkpoint.store_reconciliation_stale_rows,
+                       checkpoint.store_reconciliation_visited_bytes
                 FROM import_inventory_checkpoints AS checkpoint
                 JOIN import_inventory_runs AS run ON run.run_id = checkpoint.run_id
                 LEFT JOIN import_inventory_generations AS generation
@@ -1739,6 +2652,80 @@ impl Store {
                         selection_keyset: row.get(44)?,
                         selection_eof: row.get(45)?,
                         selection_complete: row.get(46)?,
+                        selection_commitment: decode_import_inventory_selection_commitment(
+                            row, 47,
+                        )?,
+                        selection_commitment_identity: decode_optional_import_inventory_hash(
+                            row, 52,
+                        )?,
+                        application_ordinal: nonnegative_i64_to_u64(row.get(53)?)?,
+                        application_keyset: row.get(54)?,
+                        application_prefix: decode_import_inventory_hash(row, 55)?,
+                        run_publication_state_marker: row.get(56)?,
+                        run_publication_owner: decode_import_inventory_publication_owner(row, 57)?,
+                        store_reconciliation_complete: row.get(68)?,
+                        store_reconciliation_keyset: row.get(69)?,
+                        store_reconciliation_visited_rows: nonnegative_i64_to_u64(row.get(70)?)?,
+                        store_reconciliation_stale_rows: nonnegative_i64_to_u64(row.get(71)?)?,
+                        store_reconciliation_visited_bytes: nonnegative_i64_to_u64(row.get(72)?)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    fn load_import_inventory_checkpoint_cleanup_proof_by_key(
+        &self,
+        run_id: &[u8],
+        inventory_family: ProviderFileInventoryFamily,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Option<ImportInventoryCheckpointCleanupProof>> {
+        self.conn
+            .query_row(
+                "SELECT run.checkpoint_format_version, run.producer_build_id, \
+                        run.store_schema_version, checkpoint.run_id, \
+                        checkpoint.source_format, checkpoint.source_identity, \
+                        checkpoint.source_fingerprint, checkpoint.root_platform_tag, \
+                        checkpoint.root_encoding_tag, checkpoint.root_path_hash, \
+                        checkpoint.inventory_generation, checkpoint.scratch_identity, \
+                        checkpoint.scratch_integrity, checkpoint.scratch_lock_identity, \
+                        checkpoint.scratch_database_identity \
+                 FROM import_inventory_checkpoints AS checkpoint \
+                 JOIN import_inventory_runs AS run ON run.run_id = checkpoint.run_id \
+                 WHERE checkpoint.run_id = ?1 AND checkpoint.inventory_family = ?2 \
+                   AND checkpoint.provider = ?3 AND checkpoint.source_root = ?4 \
+                   AND checkpoint.status IN ('abandoned', 'completed') \
+                   AND checkpoint.owner_state = 'inactive'",
+                params![
+                    run_id,
+                    checkpoint_inventory_family_str(inventory_family),
+                    provider.as_str(),
+                    source_root,
+                ],
+                |row| {
+                    Ok(ImportInventoryCheckpointCleanupProof {
+                        checkpoint_format_version: nonnegative_i64_to_u32(row.get(0)?)?,
+                        producer_build_id: row.get(1)?,
+                        store_schema_version: nonnegative_i64_to_u32(row.get(2)?)?,
+                        run_id: row.get(3)?,
+                        inventory_family,
+                        provider,
+                        source_format: row.get(4)?,
+                        source_root: source_root.to_owned(),
+                        source_identity: row.get(5)?,
+                        source_fingerprint: row.get(6)?,
+                        root_path: ImportInventoryOwnedPathIdentity {
+                            platform_tag: row.get(7)?,
+                            encoding_tag: row.get(8)?,
+                            opaque_hash: row.get(9)?,
+                        },
+                        inventory_generation: nonnegative_i64_to_u64(row.get(10)?)?,
+                        scratch_identity: row.get(11)?,
+                        scratch_integrity: row.get(12)?,
+                        scratch_lock_identity: row.get(13)?,
+                        scratch_database_identity: row.get(14)?,
                     })
                 },
             )
@@ -1767,9 +2754,27 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    fn validate_current_import_inventory_publication_snapshot(
+        &self,
+        expected_state_marker: &str,
+        expected_owner: Option<&ProviderFilePublicationInventoryOwner>,
+    ) -> Result<()> {
+        let (current_state_marker, current_owner) =
+            self.effective_provider_file_publication_inventory_snapshot()?;
+        if current_state_marker != expected_state_marker || current_owner.as_ref() != expected_owner
+        {
+            return Err(StoreError::ImportInventoryCheckpointPublicationTransition {
+                expected_state_marker: expected_state_marker.to_owned(),
+                current_state_marker,
+            });
+        }
+        Ok(())
+    }
+
     fn apply_import_inventory_canonical_effect(
         &self,
         lease: &ImportInventoryCheckpointLease,
+        row: &CheckpointRow,
         effect: ImportInventoryCanonicalEffect<'_>,
         now_ms: i64,
     ) -> Result<u64> {
@@ -1787,22 +2792,44 @@ impl Store {
             ImportInventoryCanonicalEffect::CatalogStale {
                 source_path,
                 observed_at_ms,
-            } => self.mark_catalog_inventory_paths_stale(
-                lease.provider,
-                &lease.source_root,
-                &[source_path.to_owned()],
-                observed_at_ms,
-                lease.inventory_generation,
+            } => self.conn.execute(
+                "UPDATE catalog_sessions SET is_stale = 1, cataloged_at_ms = ?6 \
+                 WHERE provider = ?1 AND source_format = ?2 AND source_root = ?3 \
+                   AND source_path = ?4 AND EXISTS (\
+                     SELECT 1 FROM import_inventory_generations \
+                     WHERE provider = ?1 AND source_root = ?3 \
+                       AND inventory_family = 'catalog_sessions' \
+                       AND current_generation = ?5\
+                   )",
+                params![
+                    lease.provider.as_str(),
+                    &row.source_format,
+                    &lease.source_root,
+                    source_path,
+                    checkpoint_i64(lease.inventory_generation)?,
+                    observed_at_ms,
+                ],
             )?,
             ImportInventoryCanonicalEffect::SourceImportStale {
                 source_path,
                 observed_at_ms,
-            } => self.mark_source_import_inventory_paths_stale(
-                lease.provider,
-                &lease.source_root,
-                &[source_path.to_owned()],
-                observed_at_ms,
-                lease.inventory_generation,
+            } => self.conn.execute(
+                "UPDATE source_import_files SET is_stale = 1, observed_at_ms = ?6 \
+                 WHERE provider = ?1 AND source_format = ?2 AND source_root = ?3 \
+                   AND source_path = ?4 AND EXISTS (\
+                     SELECT 1 FROM import_inventory_generations \
+                     WHERE provider = ?1 AND source_root = ?3 \
+                       AND inventory_family = 'source_import_files' \
+                       AND current_generation = ?5\
+                   )",
+                params![
+                    lease.provider.as_str(),
+                    &row.source_format,
+                    &lease.source_root,
+                    source_path,
+                    checkpoint_i64(lease.inventory_generation)?,
+                    observed_at_ms,
+                ],
             )?,
             ImportInventoryCanonicalEffect::CatalogRescan { source_path } => self.conn.execute(
                 "UPDATE catalog_sessions SET pending_reason = CASE \
@@ -1810,6 +2837,7 @@ impl Store {
                      THEN COALESCE(pending_reason, 'legacy') \
                    ELSE COALESCE(pending_reason, 'explicit_rescan') END, cataloged_at_ms = ?5 \
                  WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3 \
+                   AND source_format = ?6 \
                    AND is_stale = 0 AND EXISTS (SELECT 1 FROM import_inventory_generations \
                      WHERE provider = ?1 AND source_root = ?2 \
                        AND inventory_family = 'catalog_sessions' AND current_generation = ?4)",
@@ -1819,6 +2847,7 @@ impl Store {
                     source_path,
                     checkpoint_i64(lease.inventory_generation)?,
                     now_ms,
+                    &row.source_format,
                 ],
             )?,
             ImportInventoryCanonicalEffect::SourceImportRescan { source_path } => {
@@ -1828,6 +2857,7 @@ impl Store {
                      THEN COALESCE(pending_reason, 'legacy') \
                    ELSE COALESCE(pending_reason, 'explicit_rescan') END, observed_at_ms = ?5 \
                  WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3 \
+                   AND source_format = ?6 \
                    AND is_stale = 0 AND EXISTS (SELECT 1 FROM import_inventory_generations \
                      WHERE provider = ?1 AND source_root = ?2 \
                        AND inventory_family = 'source_import_files' AND current_generation = ?4)",
@@ -1837,6 +2867,7 @@ impl Store {
                         source_path,
                         checkpoint_i64(lease.inventory_generation)?,
                         now_ms,
+                        &row.source_format,
                     ],
                 )?
             }
@@ -1898,29 +2929,6 @@ impl Store {
                 "inventory run could not record abandonment",
             ));
         }
-        Ok(())
-    }
-
-    fn mark_import_inventory_cleanup_blocked(
-        &self,
-        trust: &ImportInventoryCheckpointTrust<'_>,
-        now_ms: i64,
-        reason: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE import_inventory_checkpoints SET cleanup_status = 'blocked', \
-                 last_error = ?5, updated_at_ms = ?6 \
-             WHERE run_id = ?1 AND inventory_family = ?2 AND provider = ?3 \
-               AND source_root = ?4 AND status IN ('abandoned', 'cleaning')",
-            params![
-                trust.run_id,
-                checkpoint_inventory_family_str(trust.inventory_family),
-                trust.provider.as_str(),
-                trust.source_root,
-                reason,
-                now_ms,
-            ],
-        )?;
         Ok(())
     }
 
@@ -2016,7 +3024,7 @@ fn validate_checkpoint_trust(trust: &ImportInventoryCheckpointTrust<'_>) -> Resu
             field: "checkpoint format version",
         });
     }
-    if trust.store_schema_version != crate::SCHEMA_VERSION as u32 {
+    if trust.store_schema_version != crate::current_history_store_schema_version() {
         return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
             field: "store schema version",
         });
@@ -2031,7 +3039,89 @@ fn validate_checkpoint_trust(trust: &ImportInventoryCheckpointTrust<'_>) -> Resu
     validate_native_path(trust.root_path)?;
     validate_opaque_identity(trust.scratch_identity, "scratch identity")?;
     validate_opaque_identity(trust.scratch_lock_identity, "scratch lock identity")?;
-    validate_opaque_identity(trust.scratch_database_identity, "scratch database identity")
+    validate_opaque_identity(trust.scratch_database_identity, "scratch database identity")?;
+    if trust.publication_state_marker.len() != 64
+        || !trust
+            .publication_state_marker
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "publication state marker is invalid",
+        ));
+    }
+    if let Some(owner) = trust.publication_owner {
+        if owner.source_format.is_empty()
+            || owner.source_format.len() > 256
+            || owner.source_root.is_empty()
+            || owner.source_root.len() > 32768
+            || owner.source_path.is_empty()
+            || owner.source_path.len() > 32768
+            || owner.inventory_generation == 0
+        {
+            return Err(StoreError::InvalidImportInventoryCheckpoint(
+                "publication inventory owner is invalid",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_import_inventory_cleanup_proof(
+    proof: &ImportInventoryCheckpointCleanupProof,
+) -> Result<()> {
+    if proof.checkpoint_format_version != IMPORT_INVENTORY_CHECKPOINT_FORMAT_VERSION {
+        return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
+            field: "cleanup checkpoint format version",
+        });
+    }
+    if proof.store_schema_version != crate::current_history_store_schema_version() {
+        return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
+            field: "cleanup store schema version",
+        });
+    }
+    if proof.run_id.is_empty() || proof.run_id.len() > 1024 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "cleanup run id length is invalid",
+        ));
+    }
+    if proof.producer_build_id.is_empty() || proof.producer_build_id.len() > 1024 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "cleanup producer build id length is invalid",
+        ));
+    }
+    if proof.source_format.is_empty() || proof.source_format.len() > 256 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "cleanup source format length is invalid",
+        ));
+    }
+    if proof.source_root.is_empty() || proof.source_root.len() > 32768 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "cleanup source root length is invalid",
+        ));
+    }
+    if proof.inventory_generation == 0 {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "cleanup inventory generation must be positive",
+        ));
+    }
+    validate_opaque_identity(&proof.source_identity, "cleanup source identity")?;
+    validate_opaque_identity(&proof.source_fingerprint, "cleanup source fingerprint")?;
+    validate_native_path(ImportInventoryNativePathIdentity {
+        platform_tag: &proof.root_path.platform_tag,
+        encoding_tag: &proof.root_path.encoding_tag,
+        opaque_hash: &proof.root_path.opaque_hash,
+    })?;
+    validate_opaque_identity(&proof.scratch_identity, "cleanup scratch identity")?;
+    validate_integrity(&proof.scratch_integrity, "cleanup scratch integrity")?;
+    validate_opaque_identity(
+        &proof.scratch_lock_identity,
+        "cleanup scratch lock identity",
+    )?;
+    validate_opaque_identity(
+        &proof.scratch_database_identity,
+        "cleanup scratch database identity",
+    )
 }
 
 fn validate_capture_checkpoint(capture: ImportInventoryCaptureCheckpoint<'_>) -> Result<()> {
@@ -2078,6 +3168,19 @@ fn validate_capture_checkpoint_shape(capture: ImportInventoryCaptureCheckpoint<'
     if let Some(selection_keyset) = capture.selection_keyset {
         validate_keyset(selection_keyset)?;
     }
+    if capture.selection_complete != capture.selection_commitment.is_some() {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection commitment does not match completion state",
+        ));
+    }
+    if let Some(commitment) = capture.selection_commitment {
+        validate_import_inventory_selection_commitment(commitment)?;
+        if commitment.total_count != capture.planned_path_count {
+            return Err(StoreError::InvalidImportInventoryCheckpoint(
+                "selection commitment count does not match planned paths",
+            ));
+        }
+    }
     if capture.completed_directory_count > capture.directory_count
         || capture.planned_path_count > capture.discovered_path_count
         || (capture.selection_eof && !capture.discovery_complete)
@@ -2110,6 +3213,7 @@ fn validate_new_capture_checkpoint(capture: ImportInventoryCaptureCheckpoint<'_>
         || capture.selection_keyset.is_some()
         || capture.selection_eof
         || capture.selection_complete
+        || capture.selection_commitment.is_some()
         || capture.discovery_complete
         || capture.effects_complete
     {
@@ -2155,6 +3259,13 @@ fn validate_capture_progress(
         return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
             field: "capture checkpoint regressed",
         });
+    }
+    if let Some(stored) = row.selection_commitment {
+        if capture.selection_commitment != Some(stored) {
+            return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
+                field: "frozen selection commitment changed",
+            });
+        }
     }
     if let Some(owned) = row.active_directory.as_ref() {
         if capture
@@ -2359,6 +3470,10 @@ fn checkpoint_trust_error(
         Some("producer build")
     } else if row.run_store_schema_version != trust.store_schema_version {
         Some("store schema version")
+    } else if row.run_publication_state_marker != trust.publication_state_marker
+        || row.run_publication_owner.as_ref() != trust.publication_owner
+    {
+        Some("publication inventory snapshot")
     } else if row.source_format != trust.source_format {
         Some("source format")
     } else if row.source_identity != trust.source_identity {
@@ -2483,30 +3598,139 @@ fn decode_active_directory(
     }
 }
 
-fn validate_canonical_effect_scope(
-    lease: &ImportInventoryCheckpointLease,
+fn decode_import_inventory_hash(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<[u8; 32]> {
+    row.get::<_, Vec<u8>>(index)?
+        .try_into()
+        .map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
+fn decode_optional_import_inventory_hash(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<[u8; 32]>> {
+    row.get::<_, Option<Vec<u8>>>(index)?
+        .map(|value| value.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
+        .transpose()
+}
+
+fn decode_import_inventory_selection_commitment(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Option<ImportInventoryFrozenSelectionCommitment>> {
+    let format_version = row.get::<_, Option<i64>>(offset)?;
+    let algorithm_version = row.get::<_, Option<i64>>(offset + 1)?;
+    let total_count = row.get::<_, Option<i64>>(offset + 2)?;
+    let final_keyset = decode_optional_import_inventory_hash(row, offset + 3)?;
+    let final_prefix = decode_optional_import_inventory_hash(row, offset + 4)?;
+    match (format_version, algorithm_version, total_count, final_prefix) {
+        (Some(format_version), Some(algorithm_version), Some(total_count), Some(final_prefix)) => {
+            let commitment = ImportInventoryFrozenSelectionCommitment {
+                format_version: nonnegative_i64_to_u32(format_version)?,
+                algorithm_version: nonnegative_i64_to_u32(algorithm_version)?,
+                total_count: nonnegative_i64_to_u64(total_count)?,
+                final_keyset,
+                final_prefix,
+            };
+            validate_import_inventory_selection_commitment(commitment)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(Some(commitment))
+        }
+        (None, None, None, None) if final_keyset.is_none() => Ok(None),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn decode_import_inventory_publication_owner(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Option<ProviderFilePublicationInventoryOwner>> {
+    let present = row.get::<_, bool>(offset)?;
+    let provider = row.get::<_, Option<String>>(offset + 1)?;
+    let inventory_family = row.get::<_, Option<String>>(offset + 2)?;
+    let source_format = row.get::<_, Option<String>>(offset + 3)?;
+    let source_root = row.get::<_, Option<String>>(offset + 4)?;
+    let source_path = row.get::<_, Option<String>>(offset + 5)?;
+    let inventory_generation = row.get::<_, Option<i64>>(offset + 6)?;
+    let file_size_bytes = row.get::<_, Option<i64>>(offset + 7)?;
+    let file_modified_at_ms = row.get::<_, Option<i64>>(offset + 8)?;
+    let import_revision = row.get::<_, Option<i64>>(offset + 9)?;
+    let metadata_json = row.get::<_, Option<String>>(offset + 10)?;
+    if !present {
+        if provider.is_none()
+            && inventory_family.is_none()
+            && source_format.is_none()
+            && source_root.is_none()
+            && source_path.is_none()
+            && inventory_generation.is_none()
+            && file_size_bytes.is_none()
+            && file_modified_at_ms.is_none()
+            && import_revision.is_none()
+            && metadata_json.is_none()
+        {
+            return Ok(None);
+        }
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let provider =
+        CaptureProvider::from_str(provider.as_deref().ok_or(rusqlite::Error::InvalidQuery)?)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let inventory_family = match inventory_family.as_deref() {
+        Some("catalog_sessions") => ProviderFileInventoryFamily::Catalog,
+        Some("source_import_files") => ProviderFileInventoryFamily::SourceImport,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(Some(ProviderFilePublicationInventoryOwner {
+        provider,
+        inventory_family,
+        source_format: source_format.ok_or(rusqlite::Error::InvalidQuery)?,
+        source_root: source_root.ok_or(rusqlite::Error::InvalidQuery)?,
+        source_path: source_path.ok_or(rusqlite::Error::InvalidQuery)?,
+        inventory_generation: nonnegative_i64_to_u64(
+            inventory_generation.ok_or(rusqlite::Error::InvalidQuery)?,
+        )?,
+        file_size_bytes: nonnegative_i64_to_u64(
+            file_size_bytes.ok_or(rusqlite::Error::InvalidQuery)?,
+        )?,
+        file_modified_at_ms: file_modified_at_ms.ok_or(rusqlite::Error::InvalidQuery)?,
+        import_revision: nonnegative_i64_to_u32(
+            import_revision.ok_or(rusqlite::Error::InvalidQuery)?,
+        )?,
+        metadata_json,
+    }))
+}
+
+fn validate_canonical_effect_checkpoint_scope(
+    inventory_family: ProviderFileInventoryFamily,
+    provider: CaptureProvider,
+    source_format: &str,
+    source_root: &str,
     effect: ImportInventoryCanonicalEffect<'_>,
 ) -> Result<()> {
     let valid = match effect {
         ImportInventoryCanonicalEffect::CatalogUpsert(session) => {
-            lease.inventory_family == ProviderFileInventoryFamily::Catalog
-                && session.provider == lease.provider
-                && session.source_root == lease.source_root
+            inventory_family == ProviderFileInventoryFamily::Catalog
+                && session.provider == provider
+                && session.source_format == source_format
+                && session.source_root == source_root
         }
         ImportInventoryCanonicalEffect::SourceImportUpsert(file) => {
-            lease.inventory_family == ProviderFileInventoryFamily::SourceImport
-                && file.provider == lease.provider
-                && file.source_root == lease.source_root
+            inventory_family == ProviderFileInventoryFamily::SourceImport
+                && file.provider == provider
+                && file.source_format == source_format
+                && file.source_root == source_root
         }
         ImportInventoryCanonicalEffect::CatalogStale { .. }
         | ImportInventoryCanonicalEffect::CatalogRescan { .. }
         | ImportInventoryCanonicalEffect::CatalogObservationRejected { .. } => {
-            lease.inventory_family == ProviderFileInventoryFamily::Catalog
+            inventory_family == ProviderFileInventoryFamily::Catalog
         }
         ImportInventoryCanonicalEffect::SourceImportStale { .. }
         | ImportInventoryCanonicalEffect::SourceImportRescan { .. }
         | ImportInventoryCanonicalEffect::SourceImportObservationRejected { .. } => {
-            lease.inventory_family == ProviderFileInventoryFamily::SourceImport
+            inventory_family == ProviderFileInventoryFamily::SourceImport
         }
     };
     if valid {
@@ -2515,6 +3739,171 @@ fn validate_canonical_effect_scope(
         Err(StoreError::ImportInventoryCheckpointTrustMismatch {
             field: "canonical effect scope",
         })
+    }
+}
+
+fn validate_import_inventory_selection_versions(
+    format_version: u32,
+    algorithm_version: u32,
+) -> Result<()> {
+    if format_version != IMPORT_INVENTORY_SELECTION_FORMAT_VERSION {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection commitment format version is unsupported",
+        ));
+    }
+    if algorithm_version != IMPORT_INVENTORY_SELECTION_ALGORITHM_VERSION {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection commitment algorithm version is unsupported",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_import_inventory_selection_commitment(
+    commitment: ImportInventoryFrozenSelectionCommitment,
+) -> Result<()> {
+    validate_import_inventory_selection_versions(
+        commitment.format_version,
+        commitment.algorithm_version,
+    )?;
+    if (commitment.total_count == 0) != commitment.final_keyset.is_none() {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "selection final keyset does not match total count",
+        ));
+    }
+    if commitment.total_count == 0
+        && commitment.final_prefix
+            != import_inventory_selection_initial_prefix(
+                commitment.format_version,
+                commitment.algorithm_version,
+            )?
+    {
+        return Err(StoreError::InvalidImportInventoryCheckpoint(
+            "empty selection commitment prefix is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_inventory_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+fn hash_inventory_optional_field(digest: &mut Sha256, value: Option<&[u8]>) {
+    match value {
+        Some(value) => {
+            hash_inventory_field(digest, &[1]);
+            hash_inventory_field(digest, value);
+        }
+        None => hash_inventory_field(digest, &[0]),
+    }
+}
+
+fn hash_inventory_optional_text(digest: &mut Sha256, value: Option<&str>) {
+    hash_inventory_optional_field(digest, value.map(str::as_bytes));
+}
+
+fn canonical_import_inventory_effect_fingerprint(
+    effect: ImportInventoryCanonicalEffect<'_>,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    hash_inventory_field(&mut digest, IMPORT_INVENTORY_EFFECT_PAYLOAD_DOMAIN);
+    hash_inventory_field(&mut digest, canonical_effect_identity(effect).0.as_bytes());
+    match effect {
+        ImportInventoryCanonicalEffect::CatalogUpsert(session) => {
+            hash_inventory_field(&mut digest, session.provider.as_str().as_bytes());
+            hash_inventory_field(&mut digest, session.source_format.as_bytes());
+            hash_inventory_field(&mut digest, session.source_root.as_bytes());
+            hash_inventory_field(&mut digest, session.source_path.as_bytes());
+            hash_inventory_optional_text(&mut digest, session.external_session_id.as_deref());
+            hash_inventory_optional_text(
+                &mut digest,
+                session.parent_external_session_id.as_deref(),
+            );
+            hash_inventory_field(&mut digest, session.agent_type.as_str().as_bytes());
+            hash_inventory_optional_text(&mut digest, session.role_hint.as_deref());
+            hash_inventory_optional_text(&mut digest, session.external_agent_id.as_deref());
+            hash_inventory_optional_text(&mut digest, session.cwd.as_deref());
+            hash_inventory_optional_field(
+                &mut digest,
+                session
+                    .session_started_at_ms
+                    .as_ref()
+                    .map(|value| value.to_be_bytes())
+                    .as_ref()
+                    .map(<[u8; 8]>::as_slice),
+            );
+            hash_inventory_field(&mut digest, &session.file_size_bytes.to_be_bytes());
+            hash_inventory_field(&mut digest, &session.file_modified_at_ms.to_be_bytes());
+            hash_inventory_field(&mut digest, &session.import_revision.to_be_bytes());
+            hash_inventory_field(&mut digest, &session.cataloged_at_ms.to_be_bytes());
+            hash_inventory_json(&mut digest, &session.metadata);
+        }
+        ImportInventoryCanonicalEffect::SourceImportUpsert(file) => {
+            hash_inventory_field(&mut digest, file.provider.as_str().as_bytes());
+            hash_inventory_field(&mut digest, file.source_format.as_bytes());
+            hash_inventory_field(&mut digest, file.source_root.as_bytes());
+            hash_inventory_field(&mut digest, file.source_path.as_bytes());
+            hash_inventory_field(&mut digest, &file.file_size_bytes.to_be_bytes());
+            hash_inventory_field(&mut digest, &file.file_modified_at_ms.to_be_bytes());
+            hash_inventory_field(&mut digest, &file.import_revision.to_be_bytes());
+            hash_inventory_field(&mut digest, &file.observed_at_ms.to_be_bytes());
+            hash_inventory_json(&mut digest, &file.metadata);
+        }
+        ImportInventoryCanonicalEffect::CatalogStale {
+            source_path,
+            observed_at_ms,
+        }
+        | ImportInventoryCanonicalEffect::SourceImportStale {
+            source_path,
+            observed_at_ms,
+        } => {
+            hash_inventory_field(&mut digest, source_path.as_bytes());
+            hash_inventory_field(&mut digest, &observed_at_ms.to_be_bytes());
+        }
+        ImportInventoryCanonicalEffect::CatalogRescan { source_path }
+        | ImportInventoryCanonicalEffect::SourceImportRescan { source_path }
+        | ImportInventoryCanonicalEffect::CatalogObservationRejected { source_path }
+        | ImportInventoryCanonicalEffect::SourceImportObservationRejected { source_path } => {
+            hash_inventory_field(&mut digest, source_path.as_bytes());
+        }
+    }
+    digest.finalize().into()
+}
+
+fn hash_inventory_json(digest: &mut Sha256, value: &Value) {
+    match value {
+        Value::Null => hash_inventory_field(digest, b"null"),
+        Value::Bool(value) => {
+            hash_inventory_field(digest, b"bool");
+            hash_inventory_field(digest, &[u8::from(*value)]);
+        }
+        Value::Number(value) => {
+            hash_inventory_field(digest, b"number");
+            hash_inventory_field(digest, value.to_string().as_bytes());
+        }
+        Value::String(value) => {
+            hash_inventory_field(digest, b"string");
+            hash_inventory_field(digest, value.as_bytes());
+        }
+        Value::Array(values) => {
+            hash_inventory_field(digest, b"array");
+            hash_inventory_field(digest, &(values.len() as u64).to_be_bytes());
+            for value in values {
+                hash_inventory_json(digest, value);
+            }
+        }
+        Value::Object(values) => {
+            hash_inventory_field(digest, b"object");
+            hash_inventory_field(digest, &(values.len() as u64).to_be_bytes());
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for key in keys {
+                hash_inventory_field(digest, key.as_bytes());
+                hash_inventory_json(digest, &values[key]);
+            }
+        }
     }
 }
 

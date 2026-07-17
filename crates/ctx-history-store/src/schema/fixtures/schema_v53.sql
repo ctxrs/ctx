@@ -1,484 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
-
-use crate::Result;
-
-pub(crate) struct ColumnSpec {
-    pub(crate) name: &'static str,
-    pub(crate) definition: &'static str,
-}
-
-// SQLite validates a newly added CHECK constraint against every existing row.
-// Upgrade migrations use these equivalent application-validated definitions so
-// adding the columns stays a schema-only operation; fresh DDL retains CHECKs.
-pub(crate) const LEGACY_CATALOG_IMPORT_REVISION_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "import_revision",
-        definition: "import_revision INTEGER NOT NULL DEFAULT 1",
-    },
-    ColumnSpec {
-        name: "indexed_import_revision",
-        definition: "indexed_import_revision INTEGER",
-    },
-];
-
-pub(crate) const LEGACY_SOURCE_IMPORT_REVISION_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "import_revision",
-        definition: "import_revision INTEGER NOT NULL DEFAULT 1",
-    },
-    ColumnSpec {
-        name: "indexed_import_revision",
-        definition: "indexed_import_revision INTEGER",
-    },
-];
-
-pub(crate) const HISTORY_RECORD_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "summary",
-        definition: "summary TEXT",
-    },
-    ColumnSpec {
-        name: "status",
-        definition: "status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'active', 'completed', 'abandoned', 'archived'))",
-    },
-    ColumnSpec {
-        name: "primary_vcs_workspace_id",
-        definition: "primary_vcs_workspace_id TEXT REFERENCES vcs_workspaces(id)",
-    },
-    ColumnSpec {
-        name: "started_at_ms",
-        definition: "started_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "last_activity_at_ms",
-        definition: "last_activity_at_ms INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "completed_at_ms",
-        definition: "completed_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "confidence",
-        definition: "confidence TEXT NOT NULL DEFAULT 'unknown' CHECK (confidence IN ('explicit', 'high', 'medium', 'low', 'unknown'))",
-    },
-    ColumnSpec {
-        name: "created_at_ms",
-        definition: "created_at_ms INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "updated_at_ms",
-        definition: "updated_at_ms INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "source_id",
-        definition: "source_id TEXT REFERENCES capture_sources(id)",
-    },
-    ColumnSpec {
-        name: "visibility",
-        definition: "visibility TEXT NOT NULL DEFAULT 'local_only' CHECK (visibility IN ('local_only', 'reportable', 'sync_metadata', 'sync_full'))",
-    },
-    ColumnSpec {
-        name: "fidelity",
-        definition: "fidelity TEXT NOT NULL DEFAULT 'partial' CHECK (fidelity IN ('full', 'partial', 'imported', 'inferred', 'summary_only'))",
-    },
-    ColumnSpec {
-        name: "sync_state",
-        definition: "sync_state TEXT NOT NULL DEFAULT 'local_only' CHECK (sync_state IN ('local_only', 'pending', 'synced', 'failed'))",
-    },
-    ColumnSpec {
-        name: "sync_version",
-        definition: "sync_version INTEGER NOT NULL DEFAULT 0",
-    },
-    ColumnSpec {
-        name: "deleted_at_ms",
-        definition: "deleted_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "metadata_json",
-        definition: "metadata_json TEXT NOT NULL DEFAULT '{}'",
-    },
-];
-
-pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "import_revision",
-        definition: "import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0)",
-    },
-    ColumnSpec {
-        name: "indexed_at_ms",
-        definition: "indexed_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_file_size_bytes",
-        definition: "indexed_file_size_bytes INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_file_modified_at_ms",
-        definition: "indexed_file_modified_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_status",
-        definition: "indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed'))",
-    },
-    ColumnSpec {
-        name: "indexed_error",
-        definition: "indexed_error TEXT",
-    },
-    ColumnSpec {
-        name: "indexed_event_count",
-        definition: "indexed_event_count INTEGER",
-    },
-    ColumnSpec {
-        name: "indexed_import_revision",
-        definition: "indexed_import_revision INTEGER CHECK (indexed_import_revision > 0)",
-    },
-    ColumnSpec {
-        name: "last_imported_at_ms",
-        definition: "last_imported_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "last_imported_file_size_bytes",
-        definition: "last_imported_file_size_bytes INTEGER",
-    },
-    ColumnSpec {
-        name: "last_imported_file_modified_at_ms",
-        definition: "last_imported_file_modified_at_ms INTEGER",
-    },
-    ColumnSpec {
-        name: "last_imported_file_sha256",
-        definition: "last_imported_file_sha256 TEXT",
-    },
-    ColumnSpec {
-        name: "last_imported_event_count",
-        definition: "last_imported_event_count INTEGER",
-    },
-];
-
-pub(crate) const SOURCE_IMPORT_FILE_STATE_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "import_revision",
-        definition: "import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0)",
-    },
-    ColumnSpec {
-        name: "indexed_import_revision",
-        definition: "indexed_import_revision INTEGER CHECK (indexed_import_revision > 0)",
-    },
-];
-
-pub(crate) const CAPTURE_SOURCE_IDENTITY_COLUMNS: &[ColumnSpec] = &[
-    ColumnSpec {
-        name: "source_format",
-        definition: "source_format TEXT",
-    },
-    ColumnSpec {
-        name: "source_root",
-        definition: "source_root TEXT",
-    },
-    ColumnSpec {
-        name: "source_identity",
-        definition: "source_identity TEXT",
-    },
-];
-
-pub(crate) const IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS import_inventory_runs (
-    run_id BLOB PRIMARY KEY NOT NULL CHECK (length(run_id) BETWEEN 1 AND 1024),
-    checkpoint_format_version INTEGER NOT NULL CHECK (checkpoint_format_version > 0),
-    producer_build_id BLOB NOT NULL CHECK (length(producer_build_id) BETWEEN 1 AND 1024),
-    store_schema_version INTEGER NOT NULL CHECK (store_schema_version > 0),
-    publication_state_marker TEXT NOT NULL CHECK (length(publication_state_marker) = 64),
-    publication_owner_present INTEGER NOT NULL
-      CHECK (publication_owner_present IN (0, 1)),
-    publication_provider TEXT,
-    publication_inventory_family TEXT CHECK (
-      publication_inventory_family IS NULL OR
-      publication_inventory_family IN ('catalog_sessions', 'source_import_files')
-    ),
-    publication_source_format TEXT,
-    publication_source_root TEXT,
-    publication_source_path TEXT,
-    publication_inventory_generation INTEGER
-      CHECK (publication_inventory_generation IS NULL OR publication_inventory_generation > 0),
-    publication_file_size_bytes INTEGER
-      CHECK (publication_file_size_bytes IS NULL OR publication_file_size_bytes >= 0),
-    publication_file_modified_at_ms INTEGER,
-    publication_import_revision INTEGER
-      CHECK (publication_import_revision IS NULL OR publication_import_revision >= 0),
-    publication_metadata_json TEXT,
-    status TEXT NOT NULL DEFAULT 'active'
-      CHECK (status IN ('active', 'completed', 'abandoned', 'cleaning', 'cleaned')),
-    source_count INTEGER NOT NULL DEFAULT 0 CHECK (source_count >= 0),
-    completed_source_count INTEGER NOT NULL DEFAULT 0
-      CHECK (completed_source_count BETWEEN 0 AND source_count),
-    abandoned_source_count INTEGER NOT NULL DEFAULT 0
-      CHECK (abandoned_source_count BETWEEN 0 AND source_count),
-    last_error TEXT,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    CHECK (
-      (publication_owner_present = 0
-       AND publication_provider IS NULL
-       AND publication_inventory_family IS NULL
-       AND publication_source_format IS NULL
-       AND publication_source_root IS NULL
-       AND publication_source_path IS NULL
-       AND publication_inventory_generation IS NULL
-       AND publication_file_size_bytes IS NULL
-       AND publication_file_modified_at_ms IS NULL
-       AND publication_import_revision IS NULL
-       AND publication_metadata_json IS NULL)
-      OR (publication_owner_present = 1
-          AND publication_provider IS NOT NULL
-          AND publication_inventory_family IS NOT NULL
-          AND length(publication_source_format) BETWEEN 1 AND 256
-          AND length(publication_source_root) BETWEEN 1 AND 32768
-          AND length(publication_source_path) BETWEEN 1 AND 32768
-          AND publication_inventory_generation IS NOT NULL
-          AND publication_file_size_bytes IS NOT NULL
-          AND publication_file_modified_at_ms IS NOT NULL
-          AND publication_import_revision IS NOT NULL)
-    )
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS import_inventory_checkpoints (
-    run_id BLOB NOT NULL REFERENCES import_inventory_runs(run_id) ON DELETE CASCADE,
-    inventory_family TEXT NOT NULL
-      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
-    provider TEXT NOT NULL,
-    source_format TEXT NOT NULL CHECK (length(source_format) BETWEEN 1 AND 256),
-    source_root TEXT NOT NULL CHECK (length(source_root) BETWEEN 1 AND 32768),
-    source_identity BLOB NOT NULL CHECK (length(source_identity) BETWEEN 1 AND 1024),
-    source_fingerprint BLOB NOT NULL CHECK (length(source_fingerprint) BETWEEN 1 AND 1024),
-    root_platform_tag TEXT NOT NULL CHECK (length(root_platform_tag) BETWEEN 1 AND 32),
-    root_encoding_tag TEXT NOT NULL CHECK (length(root_encoding_tag) BETWEEN 1 AND 32),
-    root_path_hash BLOB NOT NULL CHECK (length(root_path_hash) BETWEEN 16 AND 128),
-    inventory_generation INTEGER NOT NULL CHECK (inventory_generation > 0),
-    scratch_identity BLOB NOT NULL CHECK (length(scratch_identity) BETWEEN 1 AND 1024),
-    scratch_integrity BLOB NOT NULL CHECK (length(scratch_integrity) BETWEEN 16 AND 256),
-    scratch_lock_identity BLOB NOT NULL CHECK (length(scratch_lock_identity) BETWEEN 1 AND 1024),
-    scratch_database_identity BLOB NOT NULL
-      CHECK (length(scratch_database_identity) BETWEEN 1 AND 1024),
-    status TEXT NOT NULL DEFAULT 'active'
-      CHECK (status IN ('active', 'completed', 'abandoned', 'cleaning', 'cleaned')),
-    phase TEXT NOT NULL DEFAULT 'discovery'
-      CHECK (phase IN (
-        'discovery', 'selection', 'application', 'finalization', 'cleanup', 'complete', 'abandoned'
-      )),
-    application_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (application_ordinal >= 0),
-    application_keyset BLOB CHECK (
-      application_keyset IS NULL OR length(application_keyset) = 32
-    ),
-    application_prefix BLOB NOT NULL CHECK (length(application_prefix) = 32),
-    selection_keyset BLOB,
-    selection_eof INTEGER NOT NULL DEFAULT 0 CHECK (selection_eof IN (0, 1)),
-    selection_complete INTEGER NOT NULL DEFAULT 0 CHECK (selection_complete IN (0, 1)),
-    selection_format_version INTEGER CHECK (
-      selection_format_version IS NULL OR selection_format_version > 0
-    ),
-    selection_algorithm_version INTEGER CHECK (
-      selection_algorithm_version IS NULL OR selection_algorithm_version > 0
-    ),
-    selection_total_count INTEGER CHECK (
-      selection_total_count IS NULL OR selection_total_count >= 0
-    ),
-    selection_final_keyset BLOB CHECK (
-      selection_final_keyset IS NULL OR length(selection_final_keyset) = 32
-    ),
-    selection_final_prefix BLOB CHECK (
-      selection_final_prefix IS NULL OR length(selection_final_prefix) = 32
-    ),
-    selection_commitment_identity BLOB CHECK (
-      selection_commitment_identity IS NULL OR length(selection_commitment_identity) = 32
-    ),
-    discovery_complete INTEGER NOT NULL DEFAULT 0 CHECK (discovery_complete IN (0, 1)),
-    application_complete INTEGER NOT NULL DEFAULT 0 CHECK (application_complete IN (0, 1)),
-    directory_queue_empty INTEGER NOT NULL DEFAULT 0 CHECK (directory_queue_empty IN (0, 1)),
-    owner_epoch INTEGER NOT NULL DEFAULT 0 CHECK (owner_epoch >= 0),
-    owner_token BLOB CHECK (owner_token IS NULL OR length(owner_token) BETWEEN 16 AND 64),
-    owner_state TEXT NOT NULL DEFAULT 'inactive'
-      CHECK (owner_state IN ('inactive', 'awaiting_scratch_adoption', 'active')),
-    scratch_owner_epoch INTEGER CHECK (scratch_owner_epoch > 0),
-    scratch_owner_token BLOB
-      CHECK (scratch_owner_token IS NULL OR length(scratch_owner_token) BETWEEN 16 AND 64),
-    lease_owner_id TEXT,
-    lease_expires_at_ms INTEGER,
-    active_directory_platform_tag TEXT,
-    active_directory_encoding_tag TEXT,
-    active_directory_path_hash BLOB,
-    active_directory_identity BLOB,
-    active_directory_fingerprint BLOB,
-    active_directory_attempt_count INTEGER CHECK (active_directory_attempt_count >= 0),
-    active_directory_replay_count INTEGER CHECK (
-      active_directory_replay_count BETWEEN 0 AND active_directory_attempt_count
-    ),
-    active_directory_observed_entries INTEGER
-      CHECK (active_directory_observed_entries >= 0),
-    active_directory_next_retry_at_ms INTEGER,
-    directory_count INTEGER NOT NULL DEFAULT 0 CHECK (directory_count >= 0),
-    completed_directory_count INTEGER NOT NULL DEFAULT 0
-      CHECK (completed_directory_count BETWEEN 0 AND directory_count),
-    discovered_path_count INTEGER NOT NULL DEFAULT 0 CHECK (discovered_path_count >= 0),
-    planned_path_count INTEGER NOT NULL DEFAULT 0 CHECK (planned_path_count >= 0),
-    applied_path_count INTEGER NOT NULL DEFAULT 0
-      CHECK (applied_path_count BETWEEN 0 AND planned_path_count),
-    applied_row_count INTEGER NOT NULL DEFAULT 0 CHECK (applied_row_count >= 0),
-    applied_bytes INTEGER NOT NULL DEFAULT 0 CHECK (applied_bytes >= 0),
-    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    replay_count INTEGER NOT NULL DEFAULT 0
-      CHECK (replay_count BETWEEN 0 AND attempt_count),
-    next_retry_at_ms INTEGER,
-    last_error TEXT,
-    abandon_reason TEXT,
-    store_reconciliation_keyset INTEGER NOT NULL DEFAULT 0
-      CHECK (store_reconciliation_keyset >= 0),
-    store_reconciliation_complete INTEGER NOT NULL DEFAULT 0
-      CHECK (store_reconciliation_complete IN (0, 1)),
-    store_reconciliation_visited_rows INTEGER NOT NULL DEFAULT 0
-      CHECK (store_reconciliation_visited_rows >= 0),
-    store_reconciliation_stale_rows INTEGER NOT NULL DEFAULT 0
-      CHECK (store_reconciliation_stale_rows BETWEEN 0 AND store_reconciliation_visited_rows),
-    store_reconciliation_visited_bytes INTEGER NOT NULL DEFAULT 0
-      CHECK (store_reconciliation_visited_bytes >= 0),
-    cleanup_status TEXT NOT NULL DEFAULT 'pending'
-      CHECK (cleanup_status IN ('pending', 'running', 'complete', 'blocked')),
-    cleanup_keyset BLOB,
-    cleanup_visited_row_count INTEGER NOT NULL DEFAULT 0
-      CHECK (cleanup_visited_row_count >= 0),
-    cleanup_row_count INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_row_count >= 0),
-    cleanup_bytes INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_bytes >= 0),
-    cleanup_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempt_count >= 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (run_id, inventory_family, provider, source_root),
-    UNIQUE (
-      inventory_family, provider, source_identity, inventory_generation
-    ),
-    UNIQUE (
-      inventory_family, provider, source_root, inventory_generation
-    ),
-    FOREIGN KEY (provider, source_root, inventory_family)
-      REFERENCES import_inventory_generations(provider, source_root, inventory_family),
-    CHECK (
-      (owner_state = 'inactive' AND owner_token IS NULL
-       AND lease_owner_id IS NULL AND lease_expires_at_ms IS NULL)
-      OR (owner_state != 'inactive' AND owner_token IS NOT NULL
-          AND length(lease_owner_id) BETWEEN 1 AND 256 AND lease_expires_at_ms IS NOT NULL)
-    ),
-    CHECK (
-      (scratch_owner_epoch IS NULL AND scratch_owner_token IS NULL)
-      OR (scratch_owner_epoch IS NOT NULL AND scratch_owner_token IS NOT NULL)
-    ),
-    CHECK (
-      (active_directory_path_hash IS NULL
-       AND active_directory_platform_tag IS NULL
-       AND active_directory_encoding_tag IS NULL
-       AND active_directory_identity IS NULL
-       AND active_directory_fingerprint IS NULL
-       AND active_directory_attempt_count IS NULL
-       AND active_directory_replay_count IS NULL
-       AND active_directory_observed_entries IS NULL
-       AND active_directory_next_retry_at_ms IS NULL)
-      OR (length(active_directory_path_hash) BETWEEN 16 AND 128
-          AND length(active_directory_platform_tag) BETWEEN 1 AND 32
-          AND length(active_directory_encoding_tag) BETWEEN 1 AND 32
-          AND length(active_directory_identity) BETWEEN 1 AND 1024
-          AND length(active_directory_fingerprint) BETWEEN 1 AND 1024
-          AND active_directory_attempt_count IS NOT NULL
-          AND active_directory_replay_count IS NOT NULL
-          AND active_directory_observed_entries IS NOT NULL)
-    ),
-    CHECK (planned_path_count <= discovered_path_count),
-    CHECK (application_ordinal = applied_path_count),
-    CHECK (selection_eof = 0 OR discovery_complete = 1),
-    CHECK (selection_complete = 0 OR selection_eof = 1),
-    CHECK (application_complete = 0 OR selection_complete = 1),
-    CHECK (
-      (selection_complete = 0
-       AND selection_format_version IS NULL
-       AND selection_algorithm_version IS NULL
-       AND selection_total_count IS NULL
-       AND selection_final_keyset IS NULL
-       AND selection_final_prefix IS NULL
-       AND selection_commitment_identity IS NULL)
-      OR (selection_complete = 1
-          AND selection_format_version IS NOT NULL
-          AND selection_algorithm_version IS NOT NULL
-          AND selection_total_count = planned_path_count
-          AND selection_final_prefix IS NOT NULL
-          AND selection_commitment_identity IS NOT NULL
-          AND ((selection_total_count = 0 AND selection_final_keyset IS NULL)
-               OR (selection_total_count > 0 AND selection_final_keyset IS NOT NULL)))
-    )
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS import_inventory_path_effects (
-    run_id BLOB NOT NULL,
-    inventory_family TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    source_root TEXT NOT NULL,
-    inventory_generation INTEGER NOT NULL CHECK (inventory_generation > 0),
-    capture_journal_identity BLOB NOT NULL
-      CHECK (length(capture_journal_identity) = 32),
-    path_platform_tag TEXT NOT NULL CHECK (length(path_platform_tag) BETWEEN 1 AND 32),
-    path_encoding_tag TEXT NOT NULL CHECK (length(path_encoding_tag) BETWEEN 1 AND 32),
-    native_path_hash BLOB NOT NULL CHECK (length(native_path_hash) = 32),
-    source_path TEXT NOT NULL CHECK (length(source_path) BETWEEN 1 AND 32768),
-    effect_kind TEXT NOT NULL CHECK (effect_kind IN (
-      'catalog_upsert', 'source_upsert', 'catalog_stale',
-      'source_stale', 'catalog_rescan', 'source_rescan',
-      'catalog_rejected', 'source_rejected'
-    )),
-    selection_commitment_identity BLOB NOT NULL
-      CHECK (length(selection_commitment_identity) = 32),
-    selection_ordinal INTEGER NOT NULL CHECK (selection_ordinal >= 0),
-    prior_application_keyset BLOB CHECK (
-      prior_application_keyset IS NULL OR length(prior_application_keyset) = 32
-    ),
-    resulting_application_keyset BLOB NOT NULL
-      CHECK (length(resulting_application_keyset) = 32),
-    prior_application_prefix BLOB NOT NULL
-      CHECK (length(prior_application_prefix) = 32),
-    resulting_application_prefix BLOB NOT NULL
-      CHECK (length(resulting_application_prefix) = 32),
-    payload_fingerprint BLOB NOT NULL CHECK (length(payload_fingerprint) = 32),
-    member_digest BLOB NOT NULL CHECK (length(member_digest) = 32),
-    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
-    prior_applied_row_count INTEGER NOT NULL CHECK (prior_applied_row_count >= 0),
-    resulting_applied_row_count INTEGER NOT NULL CHECK (resulting_applied_row_count >= 0),
-    prior_applied_bytes INTEGER NOT NULL CHECK (prior_applied_bytes >= 0),
-    resulting_applied_bytes INTEGER NOT NULL CHECK (resulting_applied_bytes >= 0),
-    affected_row_count INTEGER NOT NULL DEFAULT 0 CHECK (affected_row_count >= 0),
-    affected_bytes INTEGER NOT NULL DEFAULT 0 CHECK (affected_bytes >= 0),
-    applied_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (
-      run_id, inventory_family, provider, source_root, inventory_generation,
-      path_platform_tag, path_encoding_tag, native_path_hash
-    ),
-    UNIQUE (
-      run_id, inventory_family, provider, source_root, inventory_generation,
-      capture_journal_identity
-    ),
-    UNIQUE (
-      run_id, inventory_family, provider, source_root, inventory_generation,
-      source_path
-    ),
-    UNIQUE (
-      run_id, inventory_family, provider, source_root, inventory_generation,
-      selection_ordinal
-    ),
-    FOREIGN KEY (run_id, inventory_family, provider, source_root)
-      REFERENCES import_inventory_checkpoints(run_id, inventory_family, provider, source_root)
-      ON DELETE CASCADE,
-    CHECK (
-      (selection_ordinal = 0 AND prior_application_keyset IS NULL)
-      OR (selection_ordinal > 0 AND prior_application_keyset IS NOT NULL)
-    ),
-    CHECK (resulting_applied_row_count = prior_applied_row_count + affected_row_count),
-    CHECK (resulting_applied_bytes = prior_applied_bytes + affected_bytes)
-) WITHOUT ROWID;
-"#;
-
-pub(crate) const CREATE_TABLES_SQL: &str = r#"
+-- Exact schema-v53 tables, indexes, and stable views from 220cdd5a.
 CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
@@ -575,64 +95,8 @@ CREATE TABLE IF NOT EXISTS import_pending_reason_repairs (
     cursor_provider TEXT,
     cursor_source_root TEXT,
     cursor_source_path TEXT,
-    cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (cursor_rowid >= 0),
     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
 );
-
-CREATE TABLE IF NOT EXISTS import_pending_work (
-    inventory_family TEXT NOT NULL
-      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
-    provider TEXT NOT NULL,
-    source_root TEXT NOT NULL,
-    source_path TEXT NOT NULL,
-    work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
-    indexed_at_ms INTEGER,
-    projection_version INTEGER NOT NULL DEFAULT 2 CHECK (projection_version > 0),
-    PRIMARY KEY (inventory_family, provider, source_root, source_path)
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS import_pending_work_counts (
-    inventory_family TEXT NOT NULL
-      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
-    provider TEXT NOT NULL,
-    source_root TEXT NOT NULL,
-    work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
-    pending_count INTEGER NOT NULL CHECK (pending_count > 0),
-    projection_version INTEGER NOT NULL DEFAULT 2 CHECK (projection_version > 0),
-    PRIMARY KEY (inventory_family, provider, source_root, work_class)
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS import_pending_work_state (
-    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    selection_mode TEXT NOT NULL CHECK (selection_mode IN ('direct', 'projection')),
-    projection_version INTEGER NOT NULL DEFAULT 2 CHECK (projection_version > 0),
-    legacy_cleanup_complete INTEGER NOT NULL DEFAULT 1
-      CHECK (legacy_cleanup_complete IN (0, 1)),
-    legacy_cleanup_phase TEXT NOT NULL DEFAULT 'work'
-      CHECK (legacy_cleanup_phase IN ('work', 'counts')),
-    legacy_cleanup_inventory_family TEXT NOT NULL DEFAULT '',
-    legacy_cleanup_provider TEXT NOT NULL DEFAULT '',
-    legacy_cleanup_source_root TEXT NOT NULL DEFAULT '',
-    legacy_cleanup_tail TEXT NOT NULL DEFAULT '',
-    material_cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (material_cursor_rowid >= 0),
-    material_scan_complete INTEGER NOT NULL DEFAULT 1 CHECK (material_scan_complete IN (0, 1)),
-    material_projection_version INTEGER NOT NULL DEFAULT 3
-      CHECK (material_projection_version > 0)
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS import_pending_legacy_material_owners (
-    projection_version INTEGER NOT NULL CHECK (projection_version > 0),
-    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('root', 'path')),
-    provider TEXT NOT NULL,
-    source_format TEXT NOT NULL,
-    owner_source_root TEXT NOT NULL,
-    source_path TEXT NOT NULL,
-    capture_source_id TEXT NOT NULL,
-    PRIMARY KEY (
-      projection_version, owner_kind, provider, source_format,
-      owner_source_root, source_path, capture_source_id
-    )
-) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS provider_file_checkpoints (
     provider TEXT NOT NULL,
@@ -696,9 +160,6 @@ CREATE TABLE IF NOT EXISTS provider_file_publications (
         completion_payload_json IS NULL OR
         length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144
     ),
-    inventory_observation_invalidated INTEGER NOT NULL DEFAULT 0
-        CHECK (inventory_observation_invalidated IN (0, 1)),
-    retirement_started INTEGER NOT NULL DEFAULT 0 CHECK (retirement_started IN (0, 1)),
     PRIMARY KEY (provider, material_source_format, material_source_root, source_path)
 );
 
@@ -1109,67 +570,112 @@ CREATE TABLE IF NOT EXISTS audit_log (
     source_id TEXT REFERENCES capture_sources(id),
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
-"#;
+CREATE INDEX IF NOT EXISTS idx_capture_sources_external_session_id ON capture_sources(provider, external_session_id);
+CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_source_identity ON capture_sources(provider, source_format, source_identity);
+CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_material_owner ON capture_sources(provider, source_format, source_root, raw_source_path, external_session_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_file_publications_owner ON provider_file_publications(owner_id);
+CREATE INDEX IF NOT EXISTS idx_provider_file_publications_fence ON provider_file_publications(mutation_started, provider, material_source_format, material_source_root, source_path);
 
-pub(crate) fn ensure_columns(conn: &Connection, table: &str, columns: &[ColumnSpec]) -> Result<()> {
-    for column in columns {
-        if !table_has_column(conn, table, column.name)? {
-            let sql = format!("ALTER TABLE {table} ADD COLUMN {}", column.definition);
-            conn.execute(&sql, [])?;
-        }
-    }
-    Ok(())
-}
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_external_session_id ON catalog_sessions(provider, external_session_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_stale ON catalog_sessions(provider, source_root, is_stale);
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_import ON catalog_sessions(provider, source_root, is_stale, indexed_status);
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_at ON catalog_sessions(session_started_at_ms);
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_cwd ON catalog_sessions(cwd);
+CREATE INDEX IF NOT EXISTS idx_source_import_files_provider_source_root_import ON source_import_files(provider, source_root, is_stale, indexed_status);
+CREATE INDEX IF NOT EXISTS idx_source_import_files_provider_source_root_stale ON source_import_files(provider, source_root, is_stale);
+CREATE INDEX IF NOT EXISTS idx_sessions_provider_external_session_id ON sessions(provider, external_session_id);
 
-pub(crate) fn create_event_search_lookup_table(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS event_search_lookup (
-            event_id TEXT PRIMARY KEY NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-            history_record_id TEXT REFERENCES history_records(id),
-            session_id TEXT REFERENCES sessions(id),
-            role TEXT CHECK (role IS NULL OR role IN ('user', 'assistant', 'system', 'tool', 'unknown')),
-            preview_text TEXT NOT NULL,
-            rank_bucket TEXT NOT NULL
-        );
-        "#,
-    )?;
-    Ok(())
-}
+CREATE INDEX IF NOT EXISTS idx_history_records_primary_vcs_workspace_id ON history_records(primary_vcs_workspace_id);
+CREATE INDEX IF NOT EXISTS idx_history_records_source_id ON history_records(source_id);
+CREATE INDEX IF NOT EXISTS idx_history_records_last_activity_at_ms ON history_records(last_activity_at_ms);
+CREATE INDEX IF NOT EXISTS idx_history_records_created_at ON history_records(created_at DESC);
 
-pub(crate) fn ensure_search_projection_stats_table(conn: &Connection) -> Result<()> {
-    conn.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS search_projection_stats (
-            key TEXT PRIMARY KEY NOT NULL,
-            value INTEGER NOT NULL,
-            updated_at_ms INTEGER NOT NULL
-        )
-        "#,
-        [],
-    )?;
-    Ok(())
-}
+CREATE INDEX IF NOT EXISTS idx_sessions_history_record_id ON sessions(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_root_session_id ON sessions(root_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_capture_source_id ON sessions(capture_source_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_transcript_blob_id ON sessions(transcript_blob_id);
+CREATE INDEX IF NOT EXISTS idx_session_aliases_session_id ON session_aliases(session_id);
 
-pub(crate) fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let sql = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for row in rows {
-        if row? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
+CREATE INDEX IF NOT EXISTS idx_session_edges_from_session_id ON session_edges(from_session_id);
+CREATE INDEX IF NOT EXISTS idx_session_edges_to_session_id ON session_edges(to_session_id);
+CREATE INDEX IF NOT EXISTS idx_session_edges_source_id ON session_edges(source_id);
 
-pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
+CREATE INDEX IF NOT EXISTS idx_runs_history_record_started_at_ms ON runs(history_record_id, started_at_ms);
+CREATE INDEX IF NOT EXISTS idx_runs_history_record_id ON runs(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_runs_session_id ON runs(session_id);
+CREATE INDEX IF NOT EXISTS idx_runs_input_blob_id ON runs(input_blob_id);
+CREATE INDEX IF NOT EXISTS idx_runs_output_blob_id ON runs(output_blob_id);
+CREATE INDEX IF NOT EXISTS idx_runs_source_id ON runs(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
+CREATE INDEX IF NOT EXISTS idx_events_history_record_occurred_at_ms ON events(history_record_id, occurred_at_ms);
+CREATE INDEX IF NOT EXISTS idx_events_session_occurred_at_ms ON events(session_id, occurred_at_ms);
+CREATE INDEX IF NOT EXISTS idx_events_history_record_id ON events(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
+CREATE INDEX IF NOT EXISTS idx_events_role_occurred_seq ON events(event_type, role, occurred_at_ms DESC, seq DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_run_role_occurred_seq ON events(run_id, event_type, role, occurred_at_ms DESC, seq DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_session_run_role_occurred_seq ON events(session_id, run_id, event_type, role, occurred_at_ms DESC, seq DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_capture_source_id ON events(capture_source_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload_blob_id ON events(payload_blob_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe_key ON events(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_event_aliases_event_id ON event_aliases(event_id);
+
+CREATE INDEX IF NOT EXISTS idx_vcs_workspaces_kind_repo_fingerprint ON vcs_workspaces(kind, repo_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_vcs_workspaces_source_id ON vcs_workspaces(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_vcs_changes_vcs_workspace_id ON vcs_changes(vcs_workspace_id);
+CREATE INDEX IF NOT EXISTS idx_vcs_changes_source_id ON vcs_changes(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_history_record_links_history_record_id ON history_record_links(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_history_record_links_source_id ON history_record_links(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_source_id ON artifacts(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_summaries_history_record_id ON summaries(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_session_id ON summaries(session_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_source_id ON summaries(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_files_touched_history_record_id ON files_touched(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_files_touched_run_id ON files_touched(run_id);
+CREATE INDEX IF NOT EXISTS idx_files_touched_event_id ON files_touched(event_id);
+CREATE INDEX IF NOT EXISTS idx_files_touched_vcs_workspace_id ON files_touched(vcs_workspace_id);
+CREATE INDEX IF NOT EXISTS idx_files_touched_source_id ON files_touched(source_id);
+CREATE INDEX IF NOT EXISTS idx_files_touched_path ON files_touched(path);
+CREATE INDEX IF NOT EXISTS idx_files_touched_old_path ON files_touched(old_path);
+
+CREATE INDEX IF NOT EXISTS idx_history_record_tags_tag_id ON history_record_tags(tag_id);
+CREATE INDEX IF NOT EXISTS idx_history_record_tags_source_id ON history_record_tags(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_record_edges_from_record_id ON record_edges(from_record_id);
+CREATE INDEX IF NOT EXISTS idx_record_edges_to_record_id ON record_edges(to_record_id);
+CREATE INDEX IF NOT EXISTS idx_record_edges_source_id ON record_edges(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_sync_state_updated_at_ms ON sync_outbox(sync_state, updated_at_ms);
+CREATE INDEX IF NOT EXISTS idx_local_workspaces_device_id ON local_workspaces(device_id);
+CREATE INDEX IF NOT EXISTS idx_local_workspaces_vcs_workspace_id ON local_workspaces(vcs_workspace_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_source_id ON audit_log(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_reconcile_history_record_links_source_id ON history_record_links(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_files_touched_source_id ON files_touched(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_files_touched_event_id ON files_touched(event_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_files_touched_run_id ON files_touched(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_session_edges_source_id ON session_edges(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_session_edges_from_session_id ON session_edges(from_session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_session_edges_to_session_id ON session_edges(to_session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_summaries_source_id ON summaries(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_events_capture_source_id ON events(capture_source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_events_session_id ON events(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_events_run_id ON events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_runs_source_id ON runs(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_runs_session_id ON runs(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_sessions_capture_source_id ON sessions(capture_source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_vcs_changes_source_id ON vcs_changes(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_artifacts_source_id ON artifacts(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_record_edges_source_id ON record_edges(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_history_records_source_id ON history_records(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_vcs_workspaces_source_id ON vcs_workspaces(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_audit_log_source_id ON audit_log(source_id, id);
+
+PRAGMA user_version = 53;

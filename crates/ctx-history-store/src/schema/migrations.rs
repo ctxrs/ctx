@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 mod v47_provider_session_repair;
 #[cfg(test)]
@@ -1252,25 +1252,6 @@ pub(super) fn migrate_pending_work_projection_to_v57_with_mode(
 }
 
 pub(super) fn ensure_import_inventory_checkpoint_schema_v57(conn: &Connection) -> Result<()> {
-    let table_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN (\
-           'import_inventory_runs', 'import_inventory_checkpoints', \
-           'import_inventory_path_effects'\
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    match table_count {
-        0 => {
-            conn.execute_batch(IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL)?;
-        }
-        3 => {}
-        _ => {
-            return Err(StoreError::ImportInventorySchemaIncompatible(
-                "durable inventory checkpoint tables are incomplete",
-            ));
-        }
-    }
     let mirrored_queue_exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN (\
            'import_inventory_directory_work', \
@@ -1284,42 +1265,43 @@ pub(super) fn ensure_import_inventory_checkpoint_schema_v57(conn: &Connection) -
             "durable inventory directory queue must be owned only by capture scratch",
         ));
     }
-    let checkpoint_columns: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('import_inventory_checkpoints') \
-         WHERE name IN ('owner_state', 'scratch_owner_epoch', 'scratch_owner_token', \
-                        'directory_queue_empty', 'active_directory_identity', \
-                        'active_directory_fingerprint', \
-                        'active_directory_observed_entries', 'discovered_path_count', \
-                        'attempt_count', 'scratch_database_identity', 'selection_keyset', \
-                        'selection_eof', 'selection_complete')",
-        [],
-        |row| row.get(0),
+    if import_inventory_checkpoint_schema_shape_is_current(conn)? {
+        return Ok(());
+    }
+    for table in [
+        "import_inventory_runs",
+        "import_inventory_checkpoints",
+        "import_inventory_path_effects",
+    ] {
+        let object_type = conn
+            .query_row(
+                "SELECT type FROM sqlite_schema WHERE name = ?1",
+                [table],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match object_type.as_deref() {
+            None => {}
+            Some("table") if import_inventory_checkpoint_table_is_empty(conn, table)? => {}
+            Some("table") => {
+                return Err(StoreError::ImportInventorySchemaIncompatible(
+                    "nonempty durable inventory checkpoint schema is incompatible",
+                ));
+            }
+            Some(_) => {
+                return Err(StoreError::ImportInventorySchemaIncompatible(
+                    "durable inventory checkpoint object has incompatible type",
+                ));
+            }
+        }
+    }
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS import_inventory_path_effects; \
+         DROP TABLE IF EXISTS import_inventory_checkpoints; \
+         DROP TABLE IF EXISTS import_inventory_runs;",
     )?;
-    let effect_columns: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('import_inventory_path_effects') \
-         WHERE name = 'capture_journal_identity'",
-        [],
-        |row| row.get(0),
-    )?;
-    let source_identity_key = import_inventory_checkpoint_unique_key_exists(
-        conn,
-        &[
-            "inventory_family",
-            "provider",
-            "source_identity",
-            "inventory_generation",
-        ],
-    )?;
-    let source_root_key = import_inventory_checkpoint_unique_key_exists(
-        conn,
-        &[
-            "inventory_family",
-            "provider",
-            "source_root",
-            "inventory_generation",
-        ],
-    )?;
-    if checkpoint_columns != 13 || effect_columns != 1 || !source_identity_key || !source_root_key {
+    conn.execute_batch(IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL)?;
+    if !import_inventory_checkpoint_schema_shape_is_current(conn)? {
         return Err(StoreError::ImportInventorySchemaIncompatible(
             "durable inventory checkpoint schema shape is incompatible",
         ));
@@ -1327,40 +1309,203 @@ pub(super) fn ensure_import_inventory_checkpoint_schema_v57(conn: &Connection) -
     Ok(())
 }
 
-fn import_inventory_checkpoint_unique_key_exists(
+fn import_inventory_checkpoint_schema_shape_is_current(conn: &Connection) -> Result<bool> {
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL)?;
+    for table in [
+        "import_inventory_runs",
+        "import_inventory_checkpoints",
+        "import_inventory_path_effects",
+    ] {
+        let expected_sql = expected.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, String>(0),
+        )?;
+        let actual_sql = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if actual_sql.as_deref().is_none_or(|actual| {
+            normalize_import_inventory_schema_sql(actual)
+                != normalize_import_inventory_schema_sql(&expected_sql)
+        }) {
+            return Ok(false);
+        }
+    }
+    for (table, origin, columns) in [
+        ("import_inventory_runs", "pk", &["run_id"][..]),
+        (
+            "import_inventory_checkpoints",
+            "pk",
+            &["run_id", "inventory_family", "provider", "source_root"][..],
+        ),
+        (
+            "import_inventory_checkpoints",
+            "u",
+            &[
+                "inventory_family",
+                "provider",
+                "source_identity",
+                "inventory_generation",
+            ][..],
+        ),
+        (
+            "import_inventory_checkpoints",
+            "u",
+            &[
+                "inventory_family",
+                "provider",
+                "source_root",
+                "inventory_generation",
+            ][..],
+        ),
+        (
+            "import_inventory_path_effects",
+            "pk",
+            &[
+                "run_id",
+                "inventory_family",
+                "provider",
+                "source_root",
+                "inventory_generation",
+                "path_platform_tag",
+                "path_encoding_tag",
+                "native_path_hash",
+            ][..],
+        ),
+        (
+            "import_inventory_path_effects",
+            "u",
+            &[
+                "run_id",
+                "inventory_family",
+                "provider",
+                "source_root",
+                "inventory_generation",
+                "capture_journal_identity",
+            ][..],
+        ),
+        (
+            "import_inventory_path_effects",
+            "u",
+            &[
+                "run_id",
+                "inventory_family",
+                "provider",
+                "source_root",
+                "inventory_generation",
+                "source_path",
+            ][..],
+        ),
+        (
+            "import_inventory_path_effects",
+            "u",
+            &[
+                "run_id",
+                "inventory_family",
+                "provider",
+                "source_root",
+                "inventory_generation",
+                "selection_ordinal",
+            ][..],
+        ),
+    ] {
+        if !import_inventory_checkpoint_index_key_exists(conn, table, origin, columns)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn normalize_import_inventory_schema_sql(sql: &str) -> String {
+    sql.replace("IF NOT EXISTS", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn import_inventory_checkpoint_table_is_empty(conn: &Connection, table: &str) -> Result<bool> {
+    let sql = match table {
+        "import_inventory_runs" => "SELECT NOT EXISTS(SELECT 1 FROM import_inventory_runs LIMIT 1)",
+        "import_inventory_checkpoints" => {
+            "SELECT NOT EXISTS(SELECT 1 FROM import_inventory_checkpoints LIMIT 1)"
+        }
+        "import_inventory_path_effects" => {
+            "SELECT NOT EXISTS(SELECT 1 FROM import_inventory_path_effects LIMIT 1)"
+        }
+        _ => {
+            return Err(StoreError::ImportInventorySchemaIncompatible(
+                "unknown durable inventory checkpoint table",
+            ));
+        }
+    };
+    conn.query_row(sql, [], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn import_inventory_checkpoint_index_key_exists(
     conn: &Connection,
+    table: &str,
+    expected_origin: &str,
     expected_columns: &[&str],
 ) -> Result<bool> {
-    let index_names = conn
-        .prepare("PRAGMA index_list(import_inventory_checkpoints)")?
+    let indexes = conn
+        .prepare(&format!("PRAGMA index_list({table})"))?
         .query_map([], |row| {
-            Ok((row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (index_name, unique) in index_names {
-        if !unique {
+    let table_columns = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (index_name, unique, origin, partial) in indexes {
+        if !unique || partial || origin != expected_origin {
             continue;
         }
-        let columns = conn
+        let key_columns = conn
             .prepare(
-                "SELECT name, desc, coll FROM pragma_index_xinfo(?1) \
-                 WHERE key = 1 AND cid >= 0 ORDER BY seqno",
+                "SELECT seqno, cid, name, desc, coll FROM pragma_index_xinfo(?1) \
+                 WHERE key = 1 ORDER BY seqno",
             )?
             .query_map([index_name], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if columns.len() == expected_columns.len()
-            && columns.iter().zip(expected_columns).all(
-                |((actual, descending, collation), expected)| {
-                    actual == expected && !descending && collation.eq_ignore_ascii_case("binary")
-                },
-            )
-        {
+        if key_columns.len() != expected_columns.len() {
+            continue;
+        }
+        let matches = key_columns.iter().enumerate().all(
+            |(position, (seqno, cid, name, descending, collation))| {
+                let expected_name = expected_columns[position];
+                let expected_cid = table_columns
+                    .iter()
+                    .find_map(|(cid, name)| (name == expected_name).then_some(*cid));
+                *seqno == position as i64
+                    && Some(*cid) == expected_cid
+                    && name.as_deref() == Some(expected_name)
+                    && !descending
+                    && collation.as_deref() == Some("BINARY")
+            },
+        );
+        if matches {
             return Ok(true);
         }
     }
