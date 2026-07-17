@@ -424,12 +424,15 @@ fn mcp_show_session_caps_transcript_events() {
 
     let session_id = "018f45d0-0000-7000-8000-000000010001";
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let schema_version = conn
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .unwrap();
     conn.create_scalar_function(
         "ctx_schema_writer_version",
         0,
         rusqlite::functions::FunctionFlags::SQLITE_UTF8
             | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |_| Ok(ctx_history_store::SCHEMA_VERSION),
+        move |_| Ok(schema_version),
     )
     .unwrap();
     conn.execute(
