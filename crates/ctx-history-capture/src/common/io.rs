@@ -62,23 +62,51 @@ pub(crate) enum TraversalFailurePoint {
 
 #[cfg(test)]
 thread_local! {
-    static TRAVERSAL_FAILURE_ONCE: std::cell::Cell<Option<TraversalFailurePoint>> = const {
+    static TRAVERSAL_FAILURE: std::cell::Cell<Option<TraversalFailureInjection>> = const {
         std::cell::Cell::new(None)
     };
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct TraversalFailureInjection {
+    point: TraversalFailurePoint,
+    matches_before_failure: usize,
+}
+
+#[cfg(test)]
 pub(crate) fn inject_traversal_failure_once(point: TraversalFailurePoint) {
-    TRAVERSAL_FAILURE_ONCE.with(|slot| slot.set(Some(point)));
+    inject_traversal_failure_after(point, 0);
+}
+
+#[cfg(test)]
+pub(crate) fn inject_traversal_failure_after(
+    point: TraversalFailurePoint,
+    matches_before_failure: usize,
+) {
+    TRAVERSAL_FAILURE.with(|slot| {
+        slot.set(Some(TraversalFailureInjection {
+            point,
+            matches_before_failure,
+        }));
+    });
 }
 
 #[cfg(test)]
 fn maybe_fail_traversal_step(point: TraversalFailurePoint) -> Result<()> {
-    let fail = TRAVERSAL_FAILURE_ONCE.with(|slot| {
-        if slot.get() == Some(point) {
+    let fail = TRAVERSAL_FAILURE.with(|slot| {
+        let Some(mut injection) = slot.get() else {
+            return false;
+        };
+        if injection.point != point {
+            return false;
+        }
+        if injection.matches_before_failure == 0 {
             slot.set(None);
             true
         } else {
+            injection.matches_before_failure -= 1;
+            slot.set(Some(injection));
             false
         }
     });
