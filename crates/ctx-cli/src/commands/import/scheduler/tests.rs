@@ -44,6 +44,25 @@ mod tests {
     };
     use serde_json::json;
 
+    fn complete_source_inventory(store: &Store, root: &str, generation: u64) {
+        assert!(store
+            .complete_source_import_inventory_generation(CaptureProvider::Pi, root, generation,)
+            .unwrap());
+    }
+
+    fn configured_test_writer(path: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.create_scalar_function(
+            "ctx_schema_writer_version",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |_| Ok(ctx_history_store::SCHEMA_VERSION),
+        )
+        .unwrap();
+        conn
+    }
+
     #[test]
     fn append_observation_metadata_only_allows_change_token_updates() {
         let previous = json!({
@@ -178,10 +197,16 @@ mod tests {
                         None,
                     )
                     .unwrap();
-                store
-                    .schedule_source_import_explicit_rescan(CaptureProvider::Pi, root, generation)
-                    .unwrap();
             }
+        }
+        complete_source_inventory(store, root, generation);
+        if attempted_at_ms.is_none() {
+            assert_eq!(
+                store
+                    .schedule_source_import_explicit_rescan(CaptureProvider::Pi, root, generation,)
+                    .unwrap(),
+                1
+            );
         }
         (
             PlannedImportSource {
@@ -393,6 +418,7 @@ mod tests {
         store
             .upsert_source_import_files(generation, &files)
             .unwrap();
+        complete_source_inventory(&store, root, generation);
         let plan = ImportPlan::build(
             &store,
             vec![PlannedImportSource {
@@ -481,6 +507,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        complete_source_inventory(&store, backlog_root, generation);
         for file in &mut backlog[50..] {
             file.import_revision = 2;
         }
@@ -490,6 +517,7 @@ mod tests {
         store
             .upsert_source_import_files(generation, &backlog)
             .unwrap();
+        complete_source_inventory(&store, backlog_root, generation);
 
         let fresh_root = "/fixture/fresh";
         let fresh = SourceImportFile {
@@ -509,6 +537,7 @@ mod tests {
         store
             .upsert_source_import_files(fresh_generation, std::slice::from_ref(&fresh))
             .unwrap();
+        complete_source_inventory(&store, fresh_root, fresh_generation);
 
         let plan = ImportPlan::build(
             &store,
@@ -554,8 +583,7 @@ mod tests {
         let store = Store::open(&db_path).unwrap();
         let (first, _, _) = recovery_source(&store, "/fixture/first", Some(100));
         let (later, _, _) = recovery_source(&store, "/fixture/later", Some(200));
-        rusqlite::Connection::open(db_path)
-            .unwrap()
+        configured_test_writer(&db_path)
             .execute(
                 "UPDATE source_import_files SET indexed_at_ms = NULL WHERE source_root = ?1",
                 ["/fixture/later"],
@@ -798,6 +826,7 @@ mod tests {
             store
                 .upsert_source_import_files(generation, &files)
                 .unwrap();
+            complete_source_inventory(&store, root, generation);
             sources.push(PlannedImportSource {
                 source,
                 stats: SourceStats::default(),

@@ -44,14 +44,7 @@ fn create_orphaned_pi_publication(
         prior_events.push(event);
     }
 
-    let inventory = inventory_import_sources(&store, vec![source], false).unwrap();
-    let (file, generation) = match &inventory.sources[0].preinventory {
-        SourcePreinventory::SourceImportFiles {
-            files,
-            inventory_generation,
-        } => (files[0].clone(), *inventory_generation),
-        other => panic!("unexpected Pi inventory: {other:?}"),
-    };
+    let (file, generation) = schedule_single_source_import_rescan(&store, &source);
     let material_source_format =
         provider_canonical_material_source_format(file.provider, &file.source_format).unwrap();
     let scope = store
@@ -171,14 +164,7 @@ fn create_orphaned_pi_incremental_publication(data_root: &Path, owner_source_cou
         .expect("Pi fixture must import an event")
         .clone();
 
-    let inventory = inventory_import_sources(&store, vec![source], false).unwrap();
-    let (file, generation) = match &inventory.sources[0].preinventory {
-        SourcePreinventory::SourceImportFiles {
-            files,
-            inventory_generation,
-        } => (files[0].clone(), *inventory_generation),
-        other => panic!("unexpected Pi inventory: {other:?}"),
-    };
+    let (file, generation) = schedule_single_source_import_rescan(&store, &source);
     let material_source_format =
         provider_canonical_material_source_format(file.provider, &file.source_format).unwrap();
     let scope = store

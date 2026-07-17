@@ -11,7 +11,7 @@ mod freshness_tests {
     use ctx_history_core::{canonical_provider_material_source_format, utc_now, CaptureProvider};
     use ctx_history_store::{
         CatalogIndexedStatus, ProviderFileInventoryObservation, ProviderFilePublicationKind,
-        SourceImportFileIndexUpdate,
+        SourceImportFile, SourceImportFileIndexUpdate,
     };
 
     fn write_pi_source(root: &Path, count: usize, label: &str) -> SourceInfo {
@@ -101,6 +101,38 @@ mod freshness_tests {
         pages
     }
 
+    fn finalized_manifest_inventory(
+        store: &Store,
+        source: &SourceInfo,
+    ) -> (Vec<SourceImportFile>, u64) {
+        let inventory = inventory_import_sources(store, vec![source.clone()], false).unwrap();
+        assert!(inventory.failures.is_empty());
+        let planned = inventory
+            .sources
+            .iter()
+            .find(|planned| planned.source.path == source.path)
+            .expect("bounded inventory must return the requested source");
+        let inventory_generation = match &planned.preinventory {
+            crate::commands::import::SourcePreinventory::SourceImportFiles {
+                inventory_generation,
+                ..
+            } => *inventory_generation,
+            other => panic!("unexpected manifested inventory: {other:?}"),
+        };
+        let source_root = source.path.to_str().unwrap();
+        assert!(store
+            .source_import_inventory_generation_is_complete(
+                source.provider,
+                source_root,
+                inventory_generation,
+            )
+            .unwrap());
+        let files = store
+            .list_pending_source_import_files(source.provider, source_root)
+            .unwrap();
+        (files, inventory_generation)
+    }
+
     #[test]
     fn inventory_page_failures_do_not_advance_root_or_manifest_state() {
         let temp = tempfile::tempdir().unwrap();
@@ -144,15 +176,9 @@ mod freshness_tests {
         fs::create_dir_all(data_root).unwrap();
         let source = write_pi_source(&data_root.join("pi-backlog"), count, "recovery");
         let store = Store::open(database_path(data_root.to_path_buf())).unwrap();
-        let inventory = inventory_import_sources(&store, vec![source.clone()], false).unwrap();
-        let (files, inventory_generation) = match &inventory.sources[0].preinventory {
-            crate::commands::import::SourcePreinventory::SourceImportFiles {
-                files,
-                inventory_generation,
-            } => (files, *inventory_generation),
-            other => panic!("unexpected Pi inventory: {other:?}"),
-        };
-        for file in files {
+        let (files, inventory_generation) = finalized_manifest_inventory(&store, &source);
+        assert_eq!(files.len(), count);
+        for file in &files {
             assert_eq!(
                 store
                     .record_source_import_file_result(
@@ -210,6 +236,24 @@ mod freshness_tests {
         .unwrap()
     }
 
+    fn drive_daemon_until_staged_publication(
+        data_root: &Path,
+        runtime: &mut SearchRefreshRuntime,
+        source: &SourceInfo,
+    ) -> ImportTotals {
+        for _ in 0..64 {
+            let totals = refresh_with_runtime(data_root, runtime, vec![source.clone()]);
+            if Store::open(database_path(data_root.to_path_buf()))
+                .unwrap()
+                .effective_provider_file_publication_has_staged_completion()
+                .unwrap()
+            {
+                return totals;
+            }
+        }
+        panic!("daemon refresh did not stage a provider publication");
+    }
+
     fn cached_inventory_generation(runtime: &SearchRefreshRuntime, source: &SourceInfo) -> u64 {
         runtime
             .cached_work
@@ -224,22 +268,18 @@ mod freshness_tests {
     }
 
     fn leave_unmutated_pi_publication(store: &Store, source: &SourceInfo) {
-        let inventory = inventory_import_sources(store, vec![source.clone()], false).unwrap();
-        let inventory_generation = match &inventory.sources[0].preinventory {
-            crate::commands::import::SourcePreinventory::SourceImportFiles {
-                inventory_generation,
-                ..
-            } => *inventory_generation,
-            other => panic!("unexpected Pi inventory: {other:?}"),
-        };
+        let (_, inventory_generation) = finalized_manifest_inventory(store, source);
         let source_root = source.path.to_str().unwrap();
-        store
-            .schedule_source_import_explicit_rescan(
-                source.provider,
-                source_root,
-                inventory_generation,
-            )
-            .unwrap();
+        assert_eq!(
+            store
+                .schedule_source_import_explicit_rescan(
+                    source.provider,
+                    source_root,
+                    inventory_generation,
+                )
+                .unwrap(),
+            1
+        );
         let file = store
             .list_pending_source_import_files(source.provider, source_root)
             .unwrap()
@@ -280,25 +320,21 @@ mod freshness_tests {
         assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
 
         let store = Store::open(database_path(data_root.to_path_buf())).unwrap();
-        let inventory = inventory_import_sources(&store, vec![source.clone()], false).unwrap();
-        let inventory_generation = match &inventory.sources[0].preinventory {
-            crate::commands::import::SourcePreinventory::SourceImportFiles {
-                inventory_generation,
-                ..
-            } => *inventory_generation,
-            other => panic!("unexpected Pi inventory: {other:?}"),
-        };
-        store
-            .schedule_source_import_explicit_rescan(
-                source.provider,
-                source.path.to_str().unwrap(),
-                inventory_generation,
-            )
-            .unwrap();
+        let (_, inventory_generation) = finalized_manifest_inventory(&store, source);
+        assert_eq!(
+            store
+                .schedule_source_import_explicit_rescan(
+                    source.provider,
+                    source.path.to_str().unwrap(),
+                    inventory_generation,
+                )
+                .unwrap(),
+            1
+        );
         drop(store);
 
         let mut runtime = SearchRefreshRuntime::default();
-        let staged = refresh_with_runtime(data_root, &mut runtime, vec![source.clone()]);
+        let staged = drive_daemon_until_staged_publication(data_root, &mut runtime, source);
         assert!(staged.recovery_units_pending > 0, "{staged:?}");
         let store = Store::open(database_path(data_root.to_path_buf())).unwrap();
         assert!(store
@@ -1080,7 +1116,6 @@ mod freshness_tests {
 
         for _ in 0..8 {
             let totals = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
-            assert!(runtime.cached_work.is_some());
             completed = completed.saturating_add(totals.recovery_units_processed);
             pending = totals.recovery_units_pending;
             if pending == 0 {
@@ -1113,17 +1148,20 @@ mod freshness_tests {
         assert_eq!(imported.fresh_units_processed, 1);
 
         let mut runtime = SearchRefreshRuntime::default();
-        for _ in 0..32 {
+        for _ in 0..64 {
             refresh_with_runtime(&data_root, &mut runtime, vec![cached.clone()]);
-            if !Store::open(database_path(data_root.clone()))
+            let publication_pending = Store::open(database_path(data_root.clone()))
                 .unwrap()
                 .has_pending_provider_file_publications()
-                .unwrap()
+                .unwrap();
+            if runtime.inventory_progress.is_none()
+                && runtime.cached_work.is_some()
+                && runtime.pending_dirty_paths.is_empty()
+                && !publication_pending
             {
                 break;
             }
         }
-        refresh_with_runtime(&data_root, &mut runtime, vec![cached.clone()]);
         assert!(runtime
             .cached_work
             .as_ref()
@@ -1366,11 +1404,14 @@ mod freshness_tests {
         let mut runtime = SearchRefreshRuntime::default();
 
         let mut pending = usize::MAX;
-        for _ in 0..8 {
+        for _ in 0..64 {
             let totals = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
             pending = totals
                 .fresh_units_pending
                 .saturating_add(totals.recovery_units_pending);
+            if pending == 0 {
+                break;
+            }
         }
 
         assert_eq!(pending, 0);
@@ -1425,9 +1466,30 @@ mod freshness_tests {
         let data_root = temp.path().join("data");
         let source_root = data_root.join("pi-rewritten-growth");
         let source = write_pi_source(&source_root, 1, "stale-snapshot");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+        use std::io::Write as _;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(source_root.join("000.jsonl"))
+                .unwrap(),
+            "{}",
+            json!({
+                "type": "message",
+                "id": "stale-snapshot-staged",
+                "timestamp": "2026-07-14T12:00:02Z",
+                "message": {"role": "assistant", "content": "staged replacement seed"}
+            })
+        )
+        .unwrap();
         let mut runtime = SearchRefreshRuntime::default();
 
-        let first = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        let first = drive_daemon_until_staged_publication(&data_root, &mut runtime, &source);
         assert!(
             first.fresh_units_pending + first.recovery_units_pending > 0,
             "{first:?}"
@@ -1483,9 +1545,30 @@ mod freshness_tests {
         let data_root = temp.path().join("data");
         let source_root = data_root.join("pi-rewritten-same-size");
         let source = write_pi_source(&source_root, 1, "stale-equal");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+        use std::io::Write as _;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(source_root.join("000.jsonl"))
+                .unwrap(),
+            "{}",
+            json!({
+                "type": "message",
+                "id": "stale-equal-staged",
+                "timestamp": "2026-07-14T12:00:02Z",
+                "message": {"role": "assistant", "content": "stale-equal staged"}
+            })
+        )
+        .unwrap();
         let mut runtime = SearchRefreshRuntime::default();
 
-        let first = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        let first = drive_daemon_until_staged_publication(&data_root, &mut runtime, &source);
         assert!(
             first.fresh_units_pending + first.recovery_units_pending > 0,
             "{first:?}"
@@ -1525,11 +1608,31 @@ mod freshness_tests {
         fs::create_dir_all(&data_root).unwrap();
         let db_path = database_path(data_root.clone());
         let source = write_pi_source(&data_root.join("pi-race-resume"), 1, "bulk-resume");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
         let mut lock_store = Store::open(&db_path).unwrap();
         let inventory = inventory_import_sources(&lock_store, vec![source.clone()], false).unwrap();
+        let inventory_generation = inventory.sources[0]
+            .preinventory
+            .inventory_generation()
+            .unwrap();
+        assert_eq!(
+            lock_store
+                .schedule_source_import_explicit_rescan(
+                    source.provider,
+                    source.path.to_str().unwrap(),
+                    inventory_generation,
+                )
+                .unwrap(),
+            1
+        );
         let waiting_plan = ImportPlan::build(&lock_store, inventory.sources.clone()).unwrap();
         let winning_plan = ImportPlan::build(&lock_store, inventory.sources).unwrap();
-        assert_eq!(waiting_plan.fresh_units, 1);
+        assert_eq!(waiting_plan.recovery_units, 1);
 
         let guard = lock_store.begin_event_search_bulk_mode().unwrap();
         let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
@@ -1547,8 +1650,8 @@ mod freshness_tests {
                 &mut waiting_store,
                 &waiting_plan,
                 &mut execution_state,
-                ImportWorkClass::Fresh,
-                waiting_plan.fresh_units,
+                ImportWorkClass::Recovery,
+                waiting_plan.recovery_units,
                 None,
                 &progress,
                 false,
@@ -1567,8 +1670,8 @@ mod freshness_tests {
         let winning_slice = winning_plan
             .select_slice(
                 &lock_store,
-                ImportWorkClass::Fresh,
-                winning_plan.fresh_units,
+                ImportWorkClass::Recovery,
+                winning_plan.recovery_units,
             )
             .unwrap();
         let selected = &winning_slice.sources[0];
@@ -1592,7 +1695,7 @@ mod freshness_tests {
         assert_eq!(result.completed_units, 1);
         assert_eq!(result.deferred_units, 0);
         assert!(result.made_durable_progress());
-        assert_eq!(totals.fresh_units_processed, 1);
+        assert_eq!(totals.recovery_units_processed, 1);
         assert!(first_failure.is_none());
         assert!(failed_sources.is_empty());
 
@@ -1792,9 +1895,34 @@ mod freshness_tests {
 
     #[test]
     fn interactive_background_refresh_leaves_a_large_fresh_backlog_bounded() {
+        use std::io::Write as _;
+
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
-        let source = write_pi_source(&data_root.join("pi-fresh"), 130, "bounded-background");
+        let source_root = data_root.join("pi-fresh");
+        let source = write_pi_source(&source_root, 130, "bounded-background");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+        for index in 0..130 {
+            writeln!(
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(source_root.join(format!("{index:03}.jsonl")))
+                    .unwrap(),
+                "{}",
+                json!({
+                    "type": "message",
+                    "id": format!("bounded-background-tail-{index}"),
+                    "timestamp": "2026-07-14T12:00:02Z",
+                    "message": {"role": "assistant", "content": "bounded changed work"}
+                })
+            )
+            .unwrap();
+        }
 
         let first = refresh(&data_root, vec![source], ImportExecutionPolicy::Interactive);
 

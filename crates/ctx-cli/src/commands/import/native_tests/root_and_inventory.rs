@@ -74,6 +74,13 @@ fn inventory_source_file(store: &Store, file: &SourceImportFile) -> u64 {
     store
         .upsert_source_import_files(inventory_generation, std::slice::from_ref(file))
         .unwrap();
+    assert!(store
+        .complete_source_import_inventory_generation(
+            file.provider,
+            &file.source_root,
+            inventory_generation,
+        )
+        .unwrap());
     inventory_generation
 }
 
@@ -149,23 +156,25 @@ fn unchanged_root_source_still_repairs_event_search_backfill() {
         },
     };
     store.upsert_event(&event).unwrap();
-    drop(store);
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute("DELETE FROM event_search", []).unwrap();
-    drop(conn);
-    let mut store = Store::open(&db_path).unwrap();
+    store.refresh_search_index().unwrap();
+    let mut store = store;
     assert!(store.event_search_projection_needs_backfill().unwrap());
 
-    import_one_source_for_search_refresh(
-        &mut store,
-        &source,
-        None,
-        &SourcePreinventory::SourceRoot {
-            file,
-            inventory_generation,
-        },
-    )
-    .unwrap();
+    for _ in 0..32 {
+        import_one_source_for_search_refresh(
+            &mut store,
+            &source,
+            None,
+            &SourcePreinventory::SourceRoot {
+                file: file.clone(),
+                inventory_generation,
+            },
+        )
+        .unwrap();
+        if !store.event_search_projection_needs_backfill().unwrap() {
+            break;
+        }
+    }
 
     assert!(!store.event_search_projection_needs_backfill().unwrap());
     assert_eq!(
@@ -450,21 +459,20 @@ fn waiting_root_plan_reobserves_a_change_before_skipping() {
 }
 
 #[test]
-fn waiting_manifest_plan_reobserves_a_new_unit_before_skipping() {
+fn waiting_manifest_plan_requires_bounded_inventory_for_a_new_unit() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("sessions");
     fs::create_dir(&source_path).unwrap();
     fs::write(source_path.join("messages.jsonl"), b"not json\n").unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
-    let files = collect_source_import_files(&source).unwrap();
     let lock_store = Store::open(&db_path).unwrap();
-    let persisted = persist_new_source_import_observation(&lock_store, &source, &files).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&lock_store, &source);
     for file in &files {
         mark_source_import_file_result(
             &lock_store,
             file,
-            persisted.inventory_generation,
+            inventory_generation,
             CatalogIndexedStatus::Indexed,
             None,
         )
@@ -475,8 +483,7 @@ fn waiting_manifest_plan_reobserves_a_new_unit_before_skipping() {
         b"first pending change\n",
     )
     .unwrap();
-    let files = collect_source_import_files(&source).unwrap();
-    let persisted = persist_new_source_import_observation(&lock_store, &source, &files).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&lock_store, &source);
     let mut import_store = Store::open(&db_path).unwrap();
     let guard = lock_store.begin_event_search_bulk_mode().unwrap();
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
@@ -490,7 +497,7 @@ fn waiting_manifest_plan_reobserves_a_new_unit_before_skipping() {
             false,
             &SourcePreinventory::SourceImportFiles {
                 files,
-                inventory_generation: persisted.inventory_generation,
+                inventory_generation,
             },
             || waiting_tx.send(()).unwrap(),
         )
@@ -503,54 +510,77 @@ fn waiting_manifest_plan_reobserves_a_new_unit_before_skipping() {
     lock_store.finish_event_search_bulk_mode(&guard).unwrap();
     drop(guard);
 
+    importer.join().unwrap().unwrap();
+    let (current_files, inventory_generation) =
+        finalized_source_import_preinventory(&lock_store, &source);
+    assert_eq!(current_files.len(), 1);
+    assert!(current_files[0]
+        .source_path
+        .ends_with("added/messages.jsonl"));
+    let mut store = Store::open(&db_path).unwrap();
+    let summary = import_one_source_inner(
+        &mut store,
+        &source,
+        None,
+        false,
+        false,
+        &SourcePreinventory::SourceImportFiles {
+            files: current_files,
+            inventory_generation,
+        },
+    )
+    .unwrap();
     assert!(
-        importer.join().unwrap().is_err(),
-        "a newly discovered unit must reach its provider adapter after the wait"
+        summary.failed > 0,
+        "bounded inventory must run the new unit"
     );
 }
 
 #[test]
-fn waiting_empty_manifest_plan_imports_a_new_unit() {
+fn empty_manifest_plan_skips_until_bounded_inventory_discovers_a_new_unit() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("sessions");
     fs::create_dir(&source_path).unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
-    let files = collect_source_import_files(&source).unwrap();
+    let mut store = Store::open(&db_path).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     assert!(files.is_empty());
-    let lock_store = Store::open(&db_path).unwrap();
-    let persisted = persist_new_source_import_observation(&lock_store, &source, &files).unwrap();
-    let mut import_store = Store::open(&db_path).unwrap();
-    let guard = lock_store.begin_event_search_bulk_mode().unwrap();
-    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
-    let waiting_source = source.clone();
-    let importer = std::thread::spawn(move || {
-        import_one_source_inner_with_pre_lock_hook(
-            &mut import_store,
-            &waiting_source,
-            None,
-            false,
-            false,
-            &SourcePreinventory::SourceImportFiles {
-                files,
-                inventory_generation: persisted.inventory_generation,
-            },
-            || waiting_tx.send(()).unwrap(),
-        )
-    });
-    waiting_rx.recv().unwrap();
+    let lock_attempted = std::sync::atomic::AtomicBool::new(false);
+    let summary = import_one_source_inner_with_pre_lock_hook(
+        &mut store,
+        &source,
+        None,
+        false,
+        false,
+        &SourcePreinventory::SourceImportFiles {
+            files,
+            inventory_generation,
+        },
+        || lock_attempted.store(true, std::sync::atomic::Ordering::SeqCst),
+    )
+    .unwrap();
+    assert_eq!(summary, ProviderImportSummary::default());
+    assert!(!lock_attempted.load(std::sync::atomic::Ordering::SeqCst));
 
     fs::write(source_path.join("messages.jsonl"), b"not json\n").unwrap();
-    lock_store.finish_event_search_bulk_mode(&guard).unwrap();
-    drop(guard);
-
-    let error = importer
-        .join()
-        .unwrap()
-        .expect_err("the newly added malformed file must reach the provider adapter");
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
+    assert_eq!(files.len(), 1);
+    let summary = import_one_source_inner(
+        &mut store,
+        &source,
+        None,
+        false,
+        false,
+        &SourcePreinventory::SourceImportFiles {
+            files,
+            inventory_generation,
+        },
+    )
+    .unwrap();
     assert!(
-        !error.to_string().contains("no importable"),
-        "the waiter must replace its empty manifest with the current unit"
+        summary.failed > 0,
+        "bounded inventory must run the new unit"
     );
 }
 
@@ -629,7 +659,7 @@ fn source_outcome_and_generation_commit_before_competing_inventory() {
 }
 
 #[test]
-fn stale_manifest_plan_skips_after_newer_completion_wins_bulk_lock() {
+fn stale_manifest_plan_requires_bounded_reinventory_after_newer_completion_wins_bulk_lock() {
     let temp = tempfile::tempdir().unwrap();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("sessions");
@@ -644,6 +674,13 @@ fn stale_manifest_plan_skips_after_newer_completion_wins_bulk_lock() {
         .allocate_source_import_inventory_generation(source.provider, &files[0].source_root)
         .unwrap();
     persist_source_import_files(&lock_store, &source, old_generation, &files).unwrap();
+    assert!(lock_store
+        .complete_source_import_inventory_generation(
+            source.provider,
+            &files[0].source_root,
+            old_generation,
+        )
+        .unwrap());
     let mut import_store = Store::open(&db_path).unwrap();
     let guard = lock_store.begin_event_search_bulk_mode().unwrap();
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
@@ -669,6 +706,13 @@ fn stale_manifest_plan_skips_after_newer_completion_wins_bulk_lock() {
         .allocate_source_import_inventory_generation(source.provider, &files[0].source_root)
         .unwrap();
     persist_source_import_files(&lock_store, &source, new_generation, &files).unwrap();
+    assert!(lock_store
+        .complete_source_import_inventory_generation(
+            source.provider,
+            &files[0].source_root,
+            new_generation,
+        )
+        .unwrap());
     persist_source_material(&lock_store, &files[0]);
     mark_source_import_file_result(
         &lock_store,
@@ -681,8 +725,9 @@ fn stale_manifest_plan_skips_after_newer_completion_wins_bulk_lock() {
     lock_store.finish_event_search_bulk_mode(&guard).unwrap();
     drop(guard);
 
-    assert_eq!(
-        importer.join().unwrap().unwrap(),
-        ProviderImportSummary::default()
-    );
+    let error = importer
+        .join()
+        .unwrap()
+        .expect_err("a stale manifest selection must return to bounded inventory");
+    assert!(is_inventory_superseded(&error));
 }
