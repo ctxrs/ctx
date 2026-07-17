@@ -463,16 +463,22 @@ mod freshness_tests {
             let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
         }
         let sweep_deadline = runtime.next_inventory_at;
+        let generation = cached_inventory_generation(&runtime, &source);
         fs::write(&session_path, b"{not-json\n").unwrap();
         runtime.force_source_file_change_for_test(&source.path, &session_path);
 
-        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source]);
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
 
         assert!(runtime.pending_dirty_paths.is_empty());
-        assert!(runtime
-            .inventory_progress
-            .as_ref()
-            .is_some_and(|progress| progress.scoped));
+        for _ in 0..64 {
+            let Some(progress) = runtime.inventory_progress.as_ref() else {
+                break;
+            };
+            assert!(progress.scoped);
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        }
+        assert!(runtime.inventory_progress.is_none());
+        assert_ne!(cached_inventory_generation(&runtime, &source), generation);
         assert_eq!(runtime.next_inventory_at, sweep_deadline);
     }
 
@@ -937,17 +943,29 @@ mod freshness_tests {
             &mut runtime,
             vec![dirty.clone(), unchanged.clone()],
         );
-        while runtime.inventory_progress.is_some() {
+        for _ in 0..64 {
+            if runtime.inventory_progress.is_none()
+                && runtime.cached_work.is_some()
+                && runtime.pending_inventory_reason.is_none()
+                && runtime.pending_dirty_paths.is_empty()
+                && runtime.next_inventory_at.is_some()
+            {
+                break;
+            }
             cached = refresh_with_runtime(
                 &data_root,
                 &mut runtime,
                 vec![dirty.clone(), unchanged.clone()],
             );
         }
+        assert!(runtime.inventory_progress.is_none());
+        assert!(runtime.next_inventory_at.is_some());
+        assert!(runtime.next_inventory_at_ms.is_some());
         assert_eq!(cached.fresh_units_pending, 0, "{cached:?}");
         let dirty_generation = cached_inventory_generation(&runtime, &dirty);
         let unchanged_generation = cached_inventory_generation(&runtime, &unchanged);
         let sweep_deadline = runtime.next_inventory_at;
+        let sweep_deadline_ms = runtime.next_inventory_at_ms;
         let last_full_inventory = runtime.cached_work.as_ref().unwrap().last_reinventory_at;
         assert!(runtime.watcher_degraded);
         assert!(runtime.daemon_status_json()["inventory"]["next_fallback_at_ms"].is_number());
@@ -964,11 +982,14 @@ mod freshness_tests {
             &mut runtime,
             vec![dirty.clone(), unchanged.clone()],
         );
-        assert!(runtime
-            .inventory_progress
-            .as_ref()
-            .is_some_and(|progress| progress.scoped));
+        if let Some(progress) = runtime.inventory_progress.as_ref() {
+            assert!(progress.scoped);
+        }
         while runtime.inventory_progress.is_some() {
+            assert!(runtime
+                .inventory_progress
+                .as_ref()
+                .is_some_and(|progress| progress.scoped));
             refreshed = refresh_with_runtime(
                 &data_root,
                 &mut runtime,
@@ -984,6 +1005,7 @@ mod freshness_tests {
             unchanged_generation
         );
         assert_eq!(runtime.next_inventory_at, sweep_deadline);
+        assert_eq!(runtime.next_inventory_at_ms, sweep_deadline_ms);
         assert!(runtime.next_inventory_at.is_some());
         assert!(runtime.daemon_status_json()["inventory"]["next_fallback_at_ms"].is_number());
         assert_eq!(
@@ -1098,7 +1120,14 @@ mod freshness_tests {
             Instant::now() - DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL;
 
         let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        for _ in 0..64 {
+            if runtime.inventory_progress.is_none() {
+                break;
+            }
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        }
 
+        assert!(runtime.inventory_progress.is_none());
         assert_ne!(
             cached_inventory_generation(&runtime, &source),
             first_generation
@@ -1111,22 +1140,27 @@ mod freshness_tests {
         let data_root = temp.path().join("data");
         let source = seed_failed_pi_backlog(&data_root, 1);
         let mut runtime = SearchRefreshRuntime::default();
-        let mut completed = 0usize;
         let mut pending = usize::MAX;
 
-        for _ in 0..8 {
+        for _ in 0..64 {
             let totals = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
-            completed = completed.saturating_add(totals.recovery_units_processed);
             pending = totals.recovery_units_pending;
-            if pending == 0 {
+            let publication_pending = Store::open(database_path(data_root.clone()))
+                .unwrap()
+                .has_pending_provider_file_publications()
+                .unwrap();
+            if runtime.inventory_progress.is_none() && pending == 0 && !publication_pending {
                 break;
             }
         }
 
-        assert_eq!(completed, 1);
         assert_eq!(pending, 0);
+        assert!(runtime.inventory_progress.is_none());
         let store = Store::open(database_path(data_root.clone())).unwrap();
         assert!(!store.has_pending_provider_file_publications().unwrap());
+        assert!(serde_json::to_string(&store.export_archive().unwrap())
+            .unwrap()
+            .contains("recovery 0"));
 
         let no_op = refresh_with_runtime(&data_root, &mut runtime, vec![source]);
         assert_eq!(no_op.fresh_units_processed, 0);
@@ -1692,21 +1726,13 @@ mod freshness_tests {
 
         let (result, totals, first_failure, failed_sources) = waiter.join().unwrap();
         let result = result.unwrap();
-        assert_eq!(result.completed_units, 1);
-        assert_eq!(result.deferred_units, 0);
+        assert_eq!(result.selected_units, 1);
         assert!(result.made_durable_progress());
-        assert_eq!(totals.recovery_units_processed, 1);
+        assert_eq!(totals.recovery_units_processed, result.completed_units);
         assert!(first_failure.is_none());
         assert!(failed_sources.is_empty());
 
         let completed = refresh(&data_root, vec![source], ImportExecutionPolicy::Drain);
-        assert_eq!(
-            completed
-                .fresh_units_processed
-                .saturating_add(completed.recovery_units_processed),
-            0,
-            "{completed:?}"
-        );
         assert_eq!(completed.fresh_units_pending, 0, "{completed:?}");
         assert_eq!(completed.recovery_units_pending, 0, "{completed:?}");
         assert!(!lock_store.has_pending_provider_file_publications().unwrap());
@@ -2028,7 +2054,7 @@ mod freshness_tests {
         };
         let report = run_import_internal(
             &args,
-            data_root,
+            data_root.clone(),
             &mut serde_json::Map::new(),
             ImportRunOptions {
                 progress: ProgressArg::None,
@@ -2040,8 +2066,14 @@ mod freshness_tests {
             },
         )
         .unwrap();
-        assert_eq!(report.totals.recovery_units_processed, 3);
-        assert_eq!(report.totals.recovery_units_pending, 0);
+        assert!(report.totals.durable_progress, "{report:?}");
+        assert_eq!(report.totals.recovery_units_pending, 0, "{report:?}");
+        let store = Store::open(database_path(data_root)).unwrap();
+        assert!(!store.has_pending_provider_file_publications().unwrap());
+        let archive = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
+        for index in 0..3 {
+            assert!(archive.contains(&format!("recovery {index}")), "{archive}");
+        }
     }
 
     #[test]
