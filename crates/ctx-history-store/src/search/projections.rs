@@ -224,6 +224,7 @@ impl Store {
         self.advance_search_projection_rebuild()
     }
 
+    #[cfg(test)]
     pub(crate) fn rebuild_search_projection(&self) -> Result<EventSearchBulkMaintenanceOutcome> {
         self.refresh_search_index()
     }
