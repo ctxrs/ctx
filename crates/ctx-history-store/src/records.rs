@@ -769,8 +769,7 @@ impl Store {
 }
 
 fn record_search_document_complete_sql() -> String {
-    format!(
-        "length(COALESCE(records.title, '')) <= ?2 \
+    "length(COALESCE(records.title, '')) <= ?2 \
          AND length(COALESCE(records.body, '')) <= ?3 \
          AND length(COALESCE(records.tags_json, '')) <= ?4 \
          AND length(COALESCE(records.kind, '')) <= ?5 \
@@ -780,7 +779,7 @@ fn record_search_document_complete_sql() -> String {
              + length(CAST(COALESCE(records.tags_json, '') AS BLOB)) \
              + length(CAST(COALESCE(records.kind, '') AS BLOB)) \
              + length(CAST(COALESCE(records.workspace, '') AS BLOB)) <= ?7"
-    )
+        .to_owned()
 }
 
 fn run_bounded_record_lookup<T>(
