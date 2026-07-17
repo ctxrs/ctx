@@ -207,8 +207,7 @@
       "required": [
         "query_bytes", "clauses", "analyzed_tokens", "largest_analyzed_tokens_per_clause",
         "largest_positive_seed_candidates", "candidate_rows", "retained_candidate_ids",
-        "residual_rows", "hydrated_rows",
-        "legacy_fallback_rows", "verification_bytes", "largest_verification_lookup_bytes",
+        "residual_rows", "hydrated_rows", "verification_bytes", "largest_verification_lookup_bytes",
         "hydration_input_bytes", "largest_hydration_input_bytes", "snippet_input_bytes",
         "returned_results", "returned_text_bytes", "serialized_response_bytes", "elapsed_ms"
       ],
@@ -222,7 +221,6 @@
         "retained_candidate_ids": { "type": "integer", "minimum": 0 },
         "residual_rows": { "type": "integer", "minimum": 0 },
         "hydrated_rows": { "type": "integer", "minimum": 0 },
-        "legacy_fallback_rows": { "type": "integer", "minimum": 0 },
         "verification_bytes": { "type": "integer", "minimum": 0 },
         "largest_verification_lookup_bytes": { "type": "integer", "minimum": 0 },
         "hydration_input_bytes": { "type": "integer", "minimum": 0 },

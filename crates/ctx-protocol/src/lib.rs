@@ -741,7 +741,6 @@ pub struct SearchExecutionConsumption {
     pub retained_candidate_ids: usize,
     pub residual_rows: usize,
     pub hydrated_rows: usize,
-    pub legacy_fallback_rows: usize,
     pub verification_bytes: usize,
     pub largest_verification_lookup_bytes: usize,
     pub hydration_input_bytes: usize,
