@@ -962,7 +962,7 @@ fn search_packet_query_lexical(
     )?;
     if let Some(provider) = options.filters.provider {
         if !store.has_provider_data(provider)? {
-            let mut packet = empty_search_packet(&render_structured_query(&query), &options);
+            let mut packet = empty_search_packet(&render_structured_query(&query), options);
             packet.query_spec = Some(query.clone());
             packet.query_execution.query_version = SEARCH_QUERY_VERSION.to_owned();
             packet.query_execution.consumed.query_bytes =
@@ -1485,7 +1485,7 @@ fn search_packet_query_lexical(
             continue;
         }
         candidate.score = reciprocal_rank_score as f32 + (candidate.score * 0.000_001);
-        let mut result = candidate_search_result(&candidate, &snippet_query, &options);
+        let mut result = candidate_search_result(&candidate, &snippet_query, options);
         result.timestamp = Some(candidate.record.updated_at);
         ensure_structured_deadline(started, &diagnostics)?;
         record_results.push(result);
