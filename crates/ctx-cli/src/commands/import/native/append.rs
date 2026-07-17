@@ -113,12 +113,13 @@ fn import_append_capable_work(
         } else {
             ProviderFilePublicationKind::Incremental
         };
+        let material_owner = unit.publication_material_owner(material_source_format);
         let observation = unit.observation(utc_now().timestamp_millis(), None);
         let scope = store
             .begin_provider_file_publication(
                 provider,
                 observation,
-                material_source_format,
+                material_owner,
                 kind,
                 utc_now().timestamp_millis(),
             )

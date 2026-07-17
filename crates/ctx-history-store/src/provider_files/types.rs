@@ -149,6 +149,13 @@ impl<'a> ProviderFileInventoryObservation<'a> {
         }
     }
 
+    fn inventory_family_kind(self) -> ProviderFileInventoryFamily {
+        match self {
+            Self::ObservedCatalog { .. } => ProviderFileInventoryFamily::Catalog,
+            Self::SourceImport { .. } => ProviderFileInventoryFamily::SourceImport,
+        }
+    }
+
     fn metadata_json(self) -> Result<Option<String>> {
         match self {
             Self::ObservedCatalog { metadata, .. } => serde_json::to_string(metadata)
@@ -212,6 +219,60 @@ pub struct ProviderFilePublicationRetirementWork {
 pub enum ProviderFileInventoryFamily {
     Catalog,
     SourceImport,
+}
+
+/// Identifies the material owned by one provider-file publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderFilePublicationMaterialOwner<'a> {
+    provider: Option<CaptureProvider>,
+    inventory_family: Option<ProviderFileInventoryFamily>,
+    source_format: &'a str,
+    source_root: Option<&'a str>,
+}
+
+impl<'a> ProviderFilePublicationMaterialOwner<'a> {
+    pub fn catalog_root(
+        provider: CaptureProvider,
+        source_format: &'a str,
+        source_root: &'a str,
+    ) -> Self {
+        Self {
+            provider: Some(provider),
+            inventory_family: Some(ProviderFileInventoryFamily::Catalog),
+            source_format,
+            source_root: Some(source_root),
+        }
+    }
+
+    pub fn source_file(
+        provider: CaptureProvider,
+        source_format: &'a str,
+        source_path: &'a str,
+    ) -> Self {
+        Self {
+            provider: Some(provider),
+            inventory_family: Some(ProviderFileInventoryFamily::SourceImport),
+            source_format,
+            source_root: Some(source_path),
+        }
+    }
+}
+
+impl<'a> From<&'a str> for ProviderFilePublicationMaterialOwner<'a> {
+    fn from(source_format: &'a str) -> Self {
+        Self {
+            provider: None,
+            inventory_family: None,
+            source_format,
+            source_root: None,
+        }
+    }
+}
+
+impl<'a> From<&'a String> for ProviderFilePublicationMaterialOwner<'a> {
+    fn from(source_format: &'a String) -> Self {
+        source_format.as_str().into()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

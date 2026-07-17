@@ -20,3 +20,4 @@ include!("native_tests/append_recovery.rs");
 include!("native_tests/root_and_inventory.rs");
 include!("native_tests/manifest_and_sqlite.rs");
 include!("native_tests/fresh_new.rs");
+include!("native_tests/publication_ownership.rs");
