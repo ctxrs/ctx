@@ -1,6 +1,7 @@
 package ctxagenthistory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -264,6 +265,10 @@ func TestSearchRejectsLegacyStringAndCamelCaseSchemaV2Fields(t *testing.T) {
 		`{"schema_version":2,"query":"ctx","query_execution":{},"results":[]}`,
 		`{"schemaVersion":2,"query":{"version":"ctx-search-v1","any":[{"all":"ctx"}]},"query_execution":{},"results":[]}`,
 		`{"schema_version":2,"query":{"version":"ctx-search-v1","any":[{"all":"ctx"}]},"queryExecution":{},"results":[]}`,
+		`{"schema_version":2,"query_execution":{},"results":[]}`,
+		`{"schema_version":2,"query":null,"results":[]}`,
+		`{"schema_version":2,"query":null,"query_execution":{}}`,
+		`{"schema_version":2,"query":null,"query_execution":{},"results":{}}`,
 	} {
 		client := NewClient(WithTransport(fakeTransport{response: response}))
 		if _, err := client.Search(context.Background(), SearchOptions{Query: &query}); !IsErrorKind(err, ErrorKindDecode) {
@@ -388,6 +393,31 @@ func TestLocalCLIAdapterClassifiesContextTimeout(t *testing.T) {
 	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--json"}})
 	if !IsErrorKind(err, ErrorKindTimeout) {
 		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestLocalCLICaptureLimitIsBoundedAndTyped(t *testing.T) {
+	payload := make([]byte, localStderrCapBytes+1)
+	capture := readBoundedPipe(bytes.NewReader(payload), "stderr", localStderrCapBytes)
+	if capture.Err == nil {
+		t.Fatal("expected capture overflow")
+	}
+	if len(capture.Data) != localStderrCapBytes {
+		t.Fatalf("retained %d bytes, want %d", len(capture.Data), localStderrCapBytes)
+	}
+
+	adapter := NewLocalCLIAdapter(WithCLIPath("ctx"))
+	adapter.runner = fakeRunner{result: commandResult{Stdout: make([]byte, localStdoutCapBytes+1)}}
+	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status"}})
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) || sdkErr.Kind != ErrorKindCaptureLimit {
+		t.Fatalf("expected typed capture-limit error, got %v", err)
+	}
+	if sdkErr.Stream != "stdout" || sdkErr.CapBytes != localStdoutCapBytes {
+		t.Fatalf("unexpected capture diagnostics: %#v", sdkErr)
+	}
+	if sdkErr.Stdout != "" || sdkErr.Stderr != "" {
+		t.Fatal("capture-limit error retained process output")
 	}
 }
 

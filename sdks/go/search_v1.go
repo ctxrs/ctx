@@ -1,6 +1,7 @@
 package ctxagenthistory
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -234,8 +235,37 @@ func (result *SearchResult) UnmarshalJSON(data []byte) error {
 	} else if err := json.Unmarshal(raw, &schemaVersion); err != nil || schemaVersion != SearchSchemaVersion {
 		return fmt.Errorf("ctx search response schema_version must be %d", SearchSchemaVersion)
 	}
-	if raw, ok := fields["query_execution"]; !ok || string(raw) == "null" {
+	if raw, ok := fields["query"]; !ok {
+		return fmt.Errorf("ctx search response query must be present and null or an object")
+	} else {
+		trimmed := bytes.TrimSpace(raw)
+		if !bytes.Equal(trimmed, []byte("null")) && (len(trimmed) == 0 || trimmed[0] != '{') {
+			return fmt.Errorf("ctx search response query must be present and null or an object")
+		}
+	}
+	if raw, ok := fields["query_execution"]; !ok {
 		return fmt.Errorf("ctx search response is missing query_execution")
+	} else {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return fmt.Errorf("ctx search response query_execution must be an object")
+		}
+		var execution map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &execution); err != nil {
+			return fmt.Errorf("ctx search response query_execution must be an object")
+		}
+	}
+	if raw, ok := fields["results"]; !ok {
+		return fmt.Errorf("ctx search response is missing results")
+	} else {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			return fmt.Errorf("ctx search response results must be an array")
+		}
+		var results []json.RawMessage
+		if err := json.Unmarshal(raw, &results); err != nil {
+			return fmt.Errorf("ctx search response results must be an array")
+		}
 	}
 	type searchResultWire SearchResult
 	var wire searchResultWire

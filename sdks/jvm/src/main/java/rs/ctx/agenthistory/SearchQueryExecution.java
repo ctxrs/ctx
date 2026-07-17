@@ -81,7 +81,6 @@ public final class SearchQueryExecution {
         public int verificationBytes() { return integer(raw, "verification_bytes"); }
         public int largestVerificationLookupBytes() { return integer(raw, "largest_verification_lookup_bytes"); }
         public int hydratedRows() { return integer(raw, "hydrated_rows"); }
-        public int legacyFallbackRows() { return integer(raw, "legacy_fallback_rows"); }
         public int hydrationInputBytes() { return integer(raw, "hydration_input_bytes"); }
         public int largestHydrationInputBytes() { return integer(raw, "largest_hydration_input_bytes"); }
         public int snippetInputBytes() { return integer(raw, "snippet_input_bytes"); }
@@ -117,7 +116,7 @@ public final class SearchQueryExecution {
     }
 
     private static final String[] LIMIT_KEYS = {"query_bytes","clauses","analyzed_tokens_per_clause","candidates_per_positive_seed","candidate_rows","retained_candidate_ids","residual_rows","verification_bytes","verification_lookup_bytes","hydrated_rows","hydration_input_bytes","hydration_input_bytes_per_event","snippet_input_bytes","returned_text_bytes","serialized_response_bytes","results","elapsed_ms"};
-    private static final String[] CONSUMED_KEYS = {"query_bytes","clauses","analyzed_tokens","largest_analyzed_tokens_per_clause","largest_positive_seed_candidates","candidate_rows","retained_candidate_ids","residual_rows","verification_bytes","largest_verification_lookup_bytes","hydrated_rows","legacy_fallback_rows","hydration_input_bytes","largest_hydration_input_bytes","snippet_input_bytes","returned_results","returned_text_bytes","serialized_response_bytes","elapsed_ms"};
+    private static final String[] CONSUMED_KEYS = {"query_bytes","clauses","analyzed_tokens","largest_analyzed_tokens_per_clause","largest_positive_seed_candidates","candidate_rows","retained_candidate_ids","residual_rows","verification_bytes","largest_verification_lookup_bytes","hydrated_rows","hydration_input_bytes","largest_hydration_input_bytes","snippet_input_bytes","returned_results","returned_text_bytes","serialized_response_bytes","elapsed_ms"};
     private static final String[] SEMANTIC_KEYS = {"attempted","required","readiness","effective_backend","requested_candidates","eligible_candidates","candidates_supplied","candidates_consumed","candidates_used","coverage","completeness","positive_text_rule_version"};
 
     private static void require(Map<String, Object> raw, String[] keys) { for (String key : keys) if (!raw.containsKey(key)) throw missing(key); }
