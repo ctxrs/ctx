@@ -634,49 +634,6 @@ pub(crate) fn import_codex_session_reader_bounded(
     }
 }
 
-#[cfg(test)]
-mod finalization_tests {
-    use super::*;
-
-    fn sqlite_store_error(code: i32) -> StoreError {
-        StoreError::Sql(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(code),
-            None,
-        ))
-    }
-
-    #[test]
-    fn codex_finalization_defers_only_retryable_pressure() {
-        let retryable = [
-            StoreError::WalCheckpointBusy {
-                log_frames: 2,
-                checkpointed_frames: 1,
-            },
-            StoreError::BulkSearchImportBusy,
-            sqlite_store_error(rusqlite::ffi::SQLITE_BUSY),
-            sqlite_store_error(rusqlite::ffi::SQLITE_LOCKED),
-        ];
-        for error in retryable {
-            let mut summary = ProviderImportSummary::default();
-            apply_codex_event_search_finalization(&mut summary, Err(error)).unwrap();
-            assert_eq!(summary.maintenance_warnings.len(), 1);
-        }
-
-        let fatal = [
-            sqlite_store_error(rusqlite::ffi::SQLITE_FULL),
-            sqlite_store_error(rusqlite::ffi::SQLITE_CORRUPT),
-            StoreError::Io(std::io::Error::other("fatal finalization I/O failure")),
-            StoreError::InvalidBulkSearchGuard,
-        ];
-        for error in fatal {
-            let mut summary = ProviderImportSummary::default();
-            let result = apply_codex_event_search_finalization(&mut summary, Err(error));
-            assert!(matches!(result, Err(CaptureError::Store(_))));
-            assert!(summary.maintenance_warnings.is_empty());
-        }
-    }
-}
-
 pub(crate) enum CodexSessionBoundedImport {
     Imported {
         summary: ProviderImportSummary,
@@ -821,4 +778,47 @@ pub(crate) fn import_codex_provider_event_fast(
     }
     summary.accepted_content_records += 1;
     Ok(summary)
+}
+
+#[cfg(test)]
+mod finalization_tests {
+    use super::*;
+
+    fn sqlite_store_error(code: i32) -> StoreError {
+        StoreError::Sql(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ))
+    }
+
+    #[test]
+    fn codex_finalization_defers_only_retryable_pressure() {
+        let retryable = [
+            StoreError::WalCheckpointBusy {
+                log_frames: 2,
+                checkpointed_frames: 1,
+            },
+            StoreError::BulkSearchImportBusy,
+            sqlite_store_error(rusqlite::ffi::SQLITE_BUSY),
+            sqlite_store_error(rusqlite::ffi::SQLITE_LOCKED),
+        ];
+        for error in retryable {
+            let mut summary = ProviderImportSummary::default();
+            apply_codex_event_search_finalization(&mut summary, Err(error)).unwrap();
+            assert_eq!(summary.maintenance_warnings.len(), 1);
+        }
+
+        let fatal = [
+            sqlite_store_error(rusqlite::ffi::SQLITE_FULL),
+            sqlite_store_error(rusqlite::ffi::SQLITE_CORRUPT),
+            StoreError::Io(std::io::Error::other("fatal finalization I/O failure")),
+            StoreError::InvalidBulkSearchGuard,
+        ];
+        for error in fatal {
+            let mut summary = ProviderImportSummary::default();
+            let result = apply_codex_event_search_finalization(&mut summary, Err(error));
+            assert!(matches!(result, Err(CaptureError::Store(_))));
+            assert!(summary.maintenance_warnings.is_empty());
+        }
+    }
 }

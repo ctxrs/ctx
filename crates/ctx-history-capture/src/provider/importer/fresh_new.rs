@@ -45,6 +45,13 @@ pub(crate) struct FreshNewObservation {
     pub(crate) token: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FreshNewExpectedObservation<'a> {
+    file_size_bytes: u64,
+    file_modified_at_ms: i64,
+    token: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FreshNewCandidateEvidence {
     pub(crate) machine_id: String,
@@ -218,12 +225,15 @@ pub(crate) fn construct_codex_fresh_new_candidate(
         work.has_active_publication,
         work.session.provider == CaptureProvider::Codex
             && work.session.source_format == CODEX_SESSION_SOURCE_FORMAT,
-        work.session.file_size_bytes,
-        work.session.file_modified_at_ms,
-        work.session
-            .metadata
-            .get("file_observation_token_v1")
-            .and_then(serde_json::Value::as_str),
+        FreshNewExpectedObservation {
+            file_size_bytes: work.session.file_size_bytes,
+            file_modified_at_ms: work.session.file_modified_at_ms,
+            token: work
+                .session
+                .metadata
+                .get("file_observation_token_v1")
+                .and_then(serde_json::Value::as_str),
+        },
         &source_path,
         &evidence,
     )?;
@@ -244,12 +254,15 @@ pub(crate) fn construct_pi_fresh_new_candidate(
         work.has_active_publication,
         work.file.provider == CaptureProvider::Pi
             && work.file.source_format == PI_SESSION_SOURCE_FORMAT,
-        work.file.file_size_bytes,
-        work.file.file_modified_at_ms,
-        work.file
-            .metadata
-            .get("change_token_v1")
-            .and_then(serde_json::Value::as_str),
+        FreshNewExpectedObservation {
+            file_size_bytes: work.file.file_size_bytes,
+            file_modified_at_ms: work.file.file_modified_at_ms,
+            token: work
+                .file
+                .metadata
+                .get("change_token_v1")
+                .and_then(serde_json::Value::as_str),
+        },
         &source_path,
         &evidence,
     )?;
@@ -264,9 +277,7 @@ fn validate_candidate_common(
     reason: ImportPendingReason,
     has_active_publication: bool,
     supported_source: bool,
-    file_size_bytes: u64,
-    file_modified_at_ms: i64,
-    expected_observation_token: Option<&str>,
+    expected_observation: FreshNewExpectedObservation<'_>,
     source_path: &str,
     evidence: &FreshNewCandidateEvidence,
 ) -> std::result::Result<(), FreshNewDurableOnly> {
@@ -286,12 +297,12 @@ fn validate_candidate_common(
     if evidence.inventory_generation == 0 {
         return Err(fail(FreshNewDurableOnlyReason::MissingCurrentGeneration));
     }
-    if evidence.observation.token.trim().is_empty() || expected_observation_token.is_none() {
+    if evidence.observation.token.trim().is_empty() || expected_observation.token.is_none() {
         return Err(fail(FreshNewDurableOnlyReason::MissingCurrentObservation));
     }
-    if file_size_bytes != evidence.observation.file_size_bytes
-        || file_modified_at_ms != evidence.observation.file_modified_at_ms
-        || expected_observation_token != Some(evidence.observation.token.as_str())
+    if expected_observation.file_size_bytes != evidence.observation.file_size_bytes
+        || expected_observation.file_modified_at_ms != evidence.observation.file_modified_at_ms
+        || expected_observation.token != Some(evidence.observation.token.as_str())
     {
         return Err(fail(FreshNewDurableOnlyReason::ObservationChanged));
     }
