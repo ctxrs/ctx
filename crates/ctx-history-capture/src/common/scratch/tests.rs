@@ -692,6 +692,43 @@ mod tests {
         assert_eq!(file_mode & 0o077, 0);
     }
 
+    #[test]
+    fn durable_scratch_survives_owner_drop_and_uses_bounded_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        fs::create_dir(&data_root).unwrap();
+        let scratch = DurableCaptureScratch::create(
+            &data_root,
+            "inventory-0123456789abcdef",
+            "durable-path-inventory",
+        )
+        .unwrap();
+        let path = scratch.path().to_path_buf();
+        let identity = scratch.directory_identity().unwrap();
+        let lock_identity = scratch.lock_identity().unwrap();
+        drop(scratch.create_file("inventory.sqlite").unwrap());
+
+        assert_eq!(
+            DurableCaptureScratch::open(&data_root, "inventory-0123456789abcdef")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(scratch);
+        assert!(path.exists());
+
+        let reopened =
+            DurableCaptureScratch::open(&data_root, "inventory-0123456789abcdef").unwrap();
+        assert_eq!(reopened.directory_identity().unwrap(), identity);
+        assert_eq!(reopened.lock_identity().unwrap(), lock_identity);
+        reopened.release().unwrap();
+        assert_eq!(
+            DurableCaptureScratch::cleanup_slice(&data_root, "inventory-0123456789abcdef").unwrap(),
+            DurableScratchCleanupOutcome::Complete
+        );
+        assert!(!path.exists());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn scratch_hard_crash_helper() {
