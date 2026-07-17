@@ -15,7 +15,7 @@ const NEXT_RUN_ID_NAME: &str = ".next-run-id";
 const SWEEP_STATE_NAME: &str = ".sweep-state";
 const LEASE_NAME: &str = "lease";
 const OWNER_NAME: &str = "owner";
-const MAX_SCAVENGE_RUNS: usize = 32;
+const MAX_SCAVENGE_RUNS: usize = 4;
 
 pub(crate) struct CaptureScratchSpace {
     root: PathBuf,
@@ -43,8 +43,10 @@ impl CaptureScratchSpace {
         let path = run_path(&root, run_id);
         create_private_directory(&path)?;
         let lease = create_private_file(&path.join(LEASE_NAME))?;
+        pace_filesystem_path(&path.join(LEASE_NAME));
         FileExt::lock_exclusive(&lease)?;
         let mut owner = create_private_file(&path.join(OWNER_NAME))?;
+        crate::pace_current_disk_io(128);
         writeln!(owner, "pid={}", std::process::id())?;
         writeln!(owner, "run_id={run_id}")?;
         writeln!(owner, "kind={kind}")?;
@@ -63,7 +65,8 @@ impl CaptureScratchSpace {
 
     pub(crate) fn create_file(&self, name: &str) -> Result<File> {
         validate_file_name(name)?;
-        Ok(create_private_file(&self.path.join(name))?)
+        let path = self.path.join(name);
+        Ok(create_private_file(&path)?)
     }
 
     fn cleanup(&mut self) {
@@ -75,6 +78,7 @@ impl CaptureScratchSpace {
             drop(lease);
         }
         if validate_scratch_run_directory(&self.path).is_ok() {
+            pace_filesystem_path(&self.path);
             let _ = fs::remove_dir_all(&self.path);
         }
     }
@@ -180,6 +184,7 @@ fn read_control_file(file: &mut File) -> io::Result<String> {
 }
 
 fn write_control_file(file: &mut File, contents: &str) -> io::Result<()> {
+    crate::pace_current_disk_io(contents.len() as u64);
     file.seek(SeekFrom::Start(0))?;
     file.set_len(0)?;
     file.write_all(contents.as_bytes())?;
@@ -287,6 +292,7 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 validate_scratch_run_contents(&path)?;
+                pace_filesystem_path(&path);
                 fs::remove_dir_all(&path)?;
                 continue;
             }
@@ -297,6 +303,7 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
                 FileExt::unlock(&lease)?;
                 drop(lease);
                 validate_scratch_run_contents(&path)?;
+                pace_filesystem_path(&path);
                 fs::remove_dir_all(&path)?;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -307,9 +314,13 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
 }
 
 fn validate_scratch_run_contents(path: &Path) -> io::Result<()> {
+    pace_filesystem_path(path);
     for entry in fs::read_dir(path)? {
+        pace_filesystem_path(path);
         let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
+        let entry_path = entry.path();
+        pace_filesystem_path(&entry_path);
+        let metadata = fs::symlink_metadata(&entry_path)?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -326,6 +337,7 @@ fn validate_scratch_run_directory(path: &Path) -> io::Result<()> {
 }
 
 fn validate_private_directory(path: &Path) -> io::Result<()> {
+    pace_filesystem_path(path);
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
         return Err(io::Error::new(
@@ -345,6 +357,7 @@ fn validate_private_directory(path: &Path) -> io::Result<()> {
 
 fn open_private_regular_file(path: &Path) -> io::Result<File> {
     let file = open_existing_file_no_follow(path)?;
+    pace_filesystem_path(path);
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
@@ -379,6 +392,7 @@ fn open_existing_directory_no_follow(path: &Path) -> io::Result<File> {
 fn create_private_directory(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
 
+    pace_filesystem_path(path);
     fs::DirBuilder::new().mode(0o700).create(path)
 }
 
@@ -389,6 +403,7 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
         Foundation::LocalFree, Security::SECURITY_ATTRIBUTES, Storage::FileSystem::CreateDirectoryW,
     };
 
+    pace_filesystem_path(path);
     let descriptor = private_windows_security_descriptor(true)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -420,6 +435,7 @@ fn create_private_directory(_path: &Path) -> io::Result<()> {
 fn create_private_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
+    pace_filesystem_path(path);
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -442,6 +458,7 @@ fn create_private_file(path: &Path) -> io::Result<File> {
         },
     };
 
+    pace_filesystem_path(path);
     let descriptor = private_windows_security_descriptor(false)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -486,6 +503,7 @@ fn create_private_file(_path: &Path) -> io::Result<File> {
 fn open_existing_file_no_follow(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
+    pace_filesystem_path(path);
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -498,11 +516,16 @@ fn open_existing_file_no_follow(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
+    pace_filesystem_path(path);
     fs::OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
+}
+
+fn pace_filesystem_path(path: &Path) {
+    crate::disk_io_pacing::pace_current_filesystem_operation(path.as_os_str().len() as u64);
 }
 
 #[cfg(not(any(unix, windows)))]

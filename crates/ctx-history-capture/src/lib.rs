@@ -21,7 +21,8 @@ pub use provider_sources::{
 mod disk_io_pacing;
 #[doc(hidden)]
 pub use disk_io_pacing::{
-    install_disk_io_pacer, pace_current_disk_io, DiskIoPacer, DiskIoPacingGuard,
+    install_disk_io_pacer, pace_current_disk_io, pace_current_filesystem_operation,
+    pace_current_filesystem_operations, DiskIoPacer, DiskIoPacingGuard,
 };
 
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
@@ -113,7 +114,13 @@ pub(crate) mod common {
 }
 pub use common::identity::{compute_payload_hash, stable_capture_uuid};
 pub(crate) use common::identity::{default_machine_id, fnv1a64, sanitize_filename_component};
+#[doc(hidden)]
+pub use common::io::collect_provider_source_files;
 pub use common::io::provider_jsonl_range_has_complete_line;
+#[doc(hidden)]
+pub use common::path_inventory::{
+    BoundedSourcePathInventory, SourcePathInventoryPage, SourcePathInventorySlice,
+};
 #[doc(hidden)]
 pub use provider::sqlite_observation::{
     observe_sqlite_source_generation, SqliteObservedFile, SqliteSourceGeneration,
@@ -161,9 +168,9 @@ pub use provider::api::{
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
 };
 pub use provider::codex::{
-    catalog_codex_session_files, catalog_codex_session_tree, import_codex_history_jsonl,
-    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
-    import_codex_session_tree,
+    catalog_codex_session_files, catalog_codex_session_paths_page, catalog_codex_session_tree,
+    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
+    import_codex_session_paths, import_codex_session_tree,
 };
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, custom_history_jsonl_v1_cursor_stream_with_revision,

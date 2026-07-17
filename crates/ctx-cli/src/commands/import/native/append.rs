@@ -559,23 +559,33 @@ fn queue_current_append_observation(
         AppendInventoryUnit::Catalog {
             source,
             inventory_generation,
-            ..
+            work,
         } => {
-            catalog_codex_session_tree(
+            let summary = ctx_history_capture::catalog_codex_session_paths_page(
+                vec![PathBuf::from(&work.session.source_path)],
                 &source.path,
                 store,
-                CodexSessionCatalogOptions {
+                *inventory_generation,
+                ctx_history_capture::CodexSessionCatalogOptions {
                     source_root: Some(source.path.clone()),
                     observation_generation: Some(*inventory_generation),
-                    ..CodexSessionCatalogOptions::default()
+                    ..ctx_history_capture::CodexSessionCatalogOptions::default()
                 },
             )
             .with_context(|| {
                 format!(
-                    "reobserve Codex sessions after publishing {}",
-                    source.path.display()
+                    "reobserve Codex session after publishing {}",
+                    work.session.source_path
                 )
             })?;
+            if summary.failed_sessions > 0 {
+                return Err(
+                    anyhow::Error::new(CaptureError::InventorySuperseded).context(format!(
+                        "Codex session changed during publication: {}",
+                        work.session.source_path
+                    )),
+                );
+            }
         }
         AppendInventoryUnit::SourceFile { source, work, .. }
             if source_uses_import_file_manifest(source) =>
@@ -590,6 +600,16 @@ fn queue_current_append_observation(
             }
         }
         AppendInventoryUnit::SourceFile { source, .. } if include_source_roots => {
+            ctx_history_capture::pace_current_filesystem_operation(
+                source.path.as_os_str().len() as u64
+            );
+            let metadata = fs::symlink_metadata(&source.path)
+                .with_context(|| format!("stat import source {}", source.path.display()))?;
+            if metadata.file_type().is_dir() {
+                return Err(anyhow::Error::new(CaptureError::InventorySuperseded).context(
+                    "directory source changed during publication and requires bounded inventory",
+                ));
+            }
             let (_, current) = observe_source_root(source)?;
             persist_new_source_import_observation(store, source, std::slice::from_ref(&current))?;
         }

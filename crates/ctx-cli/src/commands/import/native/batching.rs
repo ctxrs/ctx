@@ -10,11 +10,12 @@ fn import_one_source_inner_batched(
         super::catalog::codex_catalog_root_identity(&source.path)?;
     }
     let record = import_record_for_source(source);
-    if let Some(selection) = selection
-        && let Some(outcome) =
+    if let Some(selection) = selection {
+        if let Some(outcome) =
             import_selected_fresh_new_group(store, source, preinventory, selection, &record)?
-    {
-        return Ok(outcome);
+        {
+            return Ok(outcome);
+        }
     }
     let record_id = record.id;
     let record_existed =
@@ -754,6 +755,13 @@ fn persist_reobserved_source_root_result(
     let Some((observed, _)) = preinventory.source_root_observation() else {
         return Ok(None);
     };
+    ctx_history_capture::pace_current_filesystem_operation(source.path.as_os_str().len() as u64);
+    let metadata = fs::symlink_metadata(&source.path)
+        .with_context(|| format!("stat import source {}", source.path.display()))?;
+    if metadata.file_type().is_dir() {
+        return Err(anyhow::Error::new(CaptureError::InventorySuperseded)
+            .context("directory source post-import observation requires bounded inventory"));
+    }
     let (_, current) = observe_source_root(source)?;
     let outcomes = same_source_import_observation(observed, &current)
         .then_some(SourceImportObservationOutcome {

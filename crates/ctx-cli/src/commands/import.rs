@@ -11,18 +11,18 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use ctx_history_capture::{
-    catalog_codex_session_tree, import_antigravity_cli_history,
-    import_append_capable_provider_file, import_astrbot_sqlite, import_auggie_history,
-    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
-    import_codex_fresh_new_batch, import_codex_history_jsonl, import_codex_session_jsonl,
-    import_codex_session_jsonl_tail, import_codex_session_paths, import_continue_cli_sessions,
-    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
-    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
-    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
-    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
-    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
-    import_kiro_sqlite, import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history,
-    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_antigravity_cli_history, import_append_capable_provider_file, import_astrbot_sqlite,
+    import_auggie_history, import_claude_projects_jsonl_tree, import_cline_task_json_history,
+    import_codebuddy_history, import_codex_fresh_new_batch, import_codex_history_jsonl,
+    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
+    import_continue_cli_sessions, import_copilot_cli_session_events, import_crush_sqlite,
+    import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
+    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
+    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
+    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
+    import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history, import_mux_history,
+    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_fresh_new_batch, import_pi_session_jsonl,
     import_qoder_history, import_qwen_code_history, import_roo_task_json_history,
     import_rovodev_history, import_shelley_sqlite, import_tabnine_cli_history, import_trae_history,
@@ -31,13 +31,13 @@ use ctx_history_capture::{
     provider_source_spec, stable_capture_uuid, AntigravityCliImportOptions,
     AstrBotSqliteImportOptions, AuggieImportOptions, CaptureError, CatalogSummary,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgressCallback, ContinueCliImportOptions, CopilotCliImportOptions,
-    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    ForgeCodeSqliteImportOptions, FreshNewImportContext, FreshNewImportOutcome,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    CodexHistoryImportOptions, CodexSessionImportOptions, CodexSessionImportProgressCallback,
+    ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
+    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
+    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions,
+    FreshNewImportContext, FreshNewImportOutcome, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     LingmaSqliteImportOptions, MiMoCodeSqliteImportOptions, MistralVibeImportOptions,
     MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
     OpenHandsImportOptions, PiSessionImportOptions, ProviderAdmittedJsonlAppendCheckpoint,
@@ -96,7 +96,9 @@ use catalog::{
 };
 use explicit::run_explicit_format_import;
 pub(crate) use inventory::{
-    inventory_available_sources, inventory_import_sources, ImportInventory,
+    inventory_available_sources, inventory_dirty_source_path, inventory_import_sources,
+    DirtySourcePathInventoryOutcome, ImportInventory, ImportInventoryCursor,
+    ImportInventoryCursorStep, ImportInventorySliceProgress,
 };
 use native::validate_source_import_supported;
 pub(crate) use native::{
@@ -244,16 +246,32 @@ pub(crate) fn run_import_internal(
     let mut store = Store::open(&db_path)?;
     let mut totals = ImportTotals::default();
     let mut imported_sources = Vec::new();
+    let opening_maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
+    totals.durable_progress |= opening_maintenance.processed_rows > 0;
+    totals.recovery_units_processed = totals
+        .recovery_units_processed
+        .saturating_add(opening_maintenance.processed_rows);
+    totals.recovery_units_pending = usize::from(!opening_maintenance.complete);
 
     if let Some(format) = args.format {
-        return run_explicit_format_import(
+        let mut report = run_explicit_format_import(
             args,
             format,
             db_path,
             store,
             analytics_properties,
             options,
-        );
+        )?;
+        report.totals.durable_progress |= totals.durable_progress;
+        report.totals.recovery_units_processed = report
+            .totals
+            .recovery_units_processed
+            .saturating_add(totals.recovery_units_processed);
+        report.totals.recovery_units_pending = report
+            .totals
+            .recovery_units_pending
+            .saturating_add(totals.recovery_units_pending);
+        return Ok(report);
     }
 
     let requests = import_requests(args)?;
@@ -265,7 +283,10 @@ pub(crate) fn run_import_internal(
     let has_publication_work = has_provider_file_publication_work(&store)?;
     if requests.is_empty() && plugin_requests.is_empty() && !has_publication_work {
         let maintenance = repair_import_maintenance(&store, ImportExecutionPolicy::Drain)?;
-        totals.durable_progress = maintenance.processed_rows > 0;
+        totals.durable_progress |= maintenance.processed_rows > 0;
+        totals.recovery_units_processed = totals
+            .recovery_units_processed
+            .saturating_add(maintenance.processed_rows);
         totals.recovery_units_pending = usize::from(!maintenance.complete);
         if options.allow_empty_sources {
             let mut report = ImportReport::empty(args.resume);

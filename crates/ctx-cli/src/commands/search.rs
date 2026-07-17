@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -27,12 +27,11 @@ use crate::commands::import::{
     error_summary, failed_inventory_pending_counts, import_error_scope,
     import_history_source_plugin, import_selected_source, import_totals_json,
     import_work_progress_done, import_work_progress_message, inventory_import_sources,
-    inventory_import_sources_page,
     one_line_error, publication_recovery_maintenance_warning,
     recover_provider_file_publication_retirement, rejected_source_summary,
     repair_import_maintenance, source_matches_publication_owner, ExecutableImportSlice,
-    ImportExecutionPolicy, ImportFailureScope, ImportPlan, ImportSourceFailure, ImportTotals,
-    SourceStats,
+    ImportExecutionPolicy, ImportFailureScope, ImportInventoryCursor, ImportInventoryCursorStep,
+    ImportInventorySliceProgress, ImportPlan, ImportSourceFailure, ImportTotals, SourceStats,
 };
 use crate::commands::setup::{
     indexed_history_item_count, insert_db_size_bucket, insert_store_analytics_counts,
@@ -45,8 +44,8 @@ use crate::progress::{ProgressArg, ProgressReporter};
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{discovered_sources, home_dir, SourceInfo};
 use crate::search_filters::{
-    normalize_source_identity_filters, search_filters, search_no_results_target,
-    SearchFilterInput, SourceIdentityFilterArgs, SourceIdentityFilters,
+    normalize_source_identity_filters, search_filters, search_no_results_target, SearchFilterInput,
+    SourceIdentityFilterArgs, SourceIdentityFilters,
 };
 use crate::search_query_input::search_query_from_args;
 use crate::search_render::{print_search_result_compact, print_search_result_verbose, SearchDto};

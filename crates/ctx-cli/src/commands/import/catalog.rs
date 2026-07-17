@@ -1,7 +1,7 @@
 use super::*;
 use ctx_history_capture::{
-    observe_ordinary_file, observe_sqlite_source_generation, OrdinaryFileObservation,
-    SqliteObservedFile,
+    observe_ordinary_file, observe_sqlite_source_generation, pace_current_filesystem_operation,
+    BoundedSourcePathInventory, OrdinaryFileObservation, SqliteObservedFile,
 };
 use sha2::{Digest, Sha256};
 
@@ -78,12 +78,11 @@ pub(crate) fn import_incremental_codex_session_tree(
 ) -> Result<super::native::ProviderImportBatchOutcome> {
     let record_id = record.id;
     let source_root = codex_catalog_root_identity(&source.path)?.to_owned();
-    let inventory_generation = match preinventory_generation {
-        Some(generation) => generation,
-        None => {
-            store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?
-        }
-    };
+    let inventory_generation = preinventory_generation.ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "Codex import requires a completed bounded inventory generation",
+        ))
+    })?;
     let mut summary = ProviderImportSummary::default();
     let mut completed_units = 0;
     let mut completed_bytes = 0_u64;
@@ -92,19 +91,10 @@ pub(crate) fn import_incremental_codex_session_tree(
     if let Some(catalog) = preinventory_catalog {
         summary.failed += catalog.failed_sessions;
         summary.failures.extend(catalog.failures.clone());
-    } else {
-        let catalog = catalog_codex_session_tree(
-            &source.path,
-            store,
-            CodexSessionCatalogOptions {
-                source_root: Some(source.path.clone()),
-                observation_generation: Some(inventory_generation),
-                ..CodexSessionCatalogOptions::default()
-            },
-        )
-        .with_context(|| format!("inventory Codex sessions from {}", source.path.display()))?;
-        summary.failed += catalog.failed_sessions;
-        summary.failures.extend(catalog.failures);
+    } else if selection.is_none() {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "Codex import without selected work requires bounded preinventory",
+        )));
     }
 
     if let Some(SelectedImportWork::Catalog(work)) = selection {
@@ -645,6 +635,88 @@ pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool 
 }
 
 pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
+    source_stats_inner(path)
+}
+
+pub(crate) struct BoundedSourceStatsAccumulator {
+    stats: SourceStats,
+    change_token: Sha256,
+}
+
+impl Default for BoundedSourceStatsAccumulator {
+    fn default() -> Self {
+        Self {
+            stats: SourceStats::default(),
+            change_token: Sha256::new(),
+        }
+    }
+}
+
+impl BoundedSourceStatsAccumulator {
+    pub(crate) fn observe_paths(&mut self, root: &Path, paths: &[PathBuf]) -> Result<()> {
+        if paths.len() > 64 {
+            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                "source stats page exceeds its internal path limit",
+            )));
+        }
+        for path in paths {
+            pace_current_filesystem_operation(path.as_os_str().len() as u64);
+            let metadata = match fs::metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("stat import source file {}", path.display()))
+                }
+            };
+            if is_sqlite_sidecar_path(path) {
+                self.stats.files = self.stats.files.saturating_add(1);
+                self.stats.bytes = self.stats.bytes.saturating_add(metadata.len());
+                continue;
+            }
+            if is_sqlite_main_path(path) {
+                self.stats.files = self.stats.files.saturating_add(1);
+                self.stats.bytes = self.stats.bytes.saturating_add(metadata.len());
+                let generation = match observe_sqlite_source_generation(path) {
+                    Ok(generation) => generation,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("observe SQLite import source {}", path.display())
+                        })
+                    }
+                };
+                let mut entries = generation
+                    .files()
+                    .into_iter()
+                    .map(|file| SourceChangeEntry::from_sqlite_observed(root, file))
+                    .collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.path.cmp(&right.path));
+                for entry in &entries {
+                    entry.update_hasher(&mut self.change_token);
+                }
+                continue;
+            }
+            let observation = observe_ordinary_file(path)
+                .with_context(|| format!("observe import source file {}", path.display()))?;
+            self.stats.files = self.stats.files.saturating_add(1);
+            self.stats.bytes = self.stats.bytes.saturating_add(observation.len());
+            SourceChangeEntry::from_observation(root, path, &observation)
+                .update_hasher(&mut self.change_token);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> SourceStats {
+        SourceStats {
+            change_token: Some(self.change_token.finalize().into()),
+            ..self.stats
+        }
+    }
+}
+
+fn source_stats_inner(path: &Path) -> Result<SourceStats> {
+    pace_current_filesystem_operation(path.as_os_str().len() as u64);
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("stat import source {}", path.display()))?;
     let mut stats = SourceStats::default();
@@ -678,69 +750,27 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
         return Ok(SourceStats::default());
     }
 
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)
-            .with_context(|| format!("read import source directory {}", dir.display()))?
-        {
-            let entry = entry
-                .with_context(|| format!("read import source entry under {}", dir.display()))?;
-            let entry_path = entry.path();
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("stat import source entry {}", entry_path.display()))?;
-            if file_type.is_dir() {
-                stack.push(entry_path);
-            } else if file_type.is_file() {
-                let metadata = match entry.metadata() {
-                    Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!("stat import source file {}", entry_path.display())
-                        })
-                    }
-                };
-                if is_sqlite_sidecar_path(&entry_path) {
-                    stats.files += 1;
-                    stats.bytes = stats.bytes.saturating_add(metadata.len());
-                    continue;
-                }
-                if is_sqlite_main_path(&entry_path) {
-                    stats.files += 1;
-                    stats.bytes = stats.bytes.saturating_add(metadata.len());
-                    match observe_sqlite_source_generation(&entry_path) {
-                        Ok(generation) => change_entries.extend(
-                            generation
-                                .files()
-                                .into_iter()
-                                .map(|file| SourceChangeEntry::from_sqlite_observed(path, file)),
-                        ),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(error) => {
-                            return Err(error).with_context(|| {
-                                format!("observe SQLite import source {}", entry_path.display())
-                            })
-                        }
-                    }
-                    continue;
-                }
-                let observation = observe_ordinary_file(&entry_path).with_context(|| {
-                    format!("observe import source file {}", entry_path.display())
-                })?;
-                add_source_observation(
-                    &mut stats,
-                    &mut change_entries,
-                    path,
-                    &entry_path,
-                    &observation,
-                    true,
-                );
-            }
+    let mut paths = BoundedSourcePathInventory::new(path);
+    loop {
+        let slice = paths
+            .advance()
+            .with_context(|| format!("inventory import source files under {}", path.display()))?;
+        if slice.complete {
+            break;
         }
+        std::thread::yield_now();
     }
-    stats.change_token = Some(source_change_token(change_entries));
-    Ok(stats)
+    let mut cursor = None;
+    let mut accumulator = BoundedSourceStatsAccumulator::default();
+    loop {
+        let page = paths.paths_page(cursor.as_deref(), 64)?;
+        accumulator.observe_paths(path, &page.paths)?;
+        cursor = page.next_cursor;
+        if page.complete {
+            return Ok(accumulator.finish());
+        }
+        std::thread::yield_now();
+    }
 }
 
 pub(crate) struct SourceChangeEntry {
@@ -798,6 +828,19 @@ impl SourceChangeEntry {
             sentinel: file.sentinel().to_vec(),
         }
     }
+
+    fn update_hasher(&self, hasher: &mut Sha256) {
+        let path = self.path.as_os_str().as_encoded_bytes();
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path);
+        hasher.update(self.len.to_le_bytes());
+        hasher.update(self.modified_secs.to_le_bytes());
+        hasher.update(self.modified_nanos.to_le_bytes());
+        if !self.sentinel.is_empty() {
+            hasher.update((self.sentinel.len() as u64).to_le_bytes());
+            hasher.update(&self.sentinel);
+        }
+    }
 }
 
 fn is_sqlite_main_path(path: &Path) -> bool {
@@ -839,16 +882,7 @@ pub(crate) fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 3
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let mut hasher = Sha256::new();
     for entry in entries {
-        let path = entry.path.as_os_str().as_encoded_bytes();
-        hasher.update((path.len() as u64).to_le_bytes());
-        hasher.update(path);
-        hasher.update(entry.len.to_le_bytes());
-        hasher.update(entry.modified_secs.to_le_bytes());
-        hasher.update(entry.modified_nanos.to_le_bytes());
-        if !entry.sentinel.is_empty() {
-            hasher.update((entry.sentinel.len() as u64).to_le_bytes());
-            hasher.update(entry.sentinel);
-        }
+        entry.update_hasher(&mut hasher);
     }
     hasher.finalize().into()
 }

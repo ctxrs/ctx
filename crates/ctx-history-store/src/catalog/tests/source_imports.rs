@@ -542,6 +542,30 @@ fn direct_batched_stale_marking_rolls_back_all_rows_on_a_late_error() {
 }
 
 #[test]
+fn source_import_inventory_stale_page_rejects_oversized_input() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let paths = (0..=Store::INVENTORY_PATH_PAGE_LIMIT)
+        .map(|index| format!("/home/user/.claude/projects/{index:03}.jsonl"))
+        .collect::<Vec<_>>();
+
+    let error = store
+        .mark_source_import_inventory_paths_stale(
+            CaptureProvider::Claude,
+            "/home/user/.claude/projects",
+            &paths,
+            1_000,
+            1,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        StoreError::Sql(rusqlite::Error::InvalidQuery)
+    ));
+}
+
+#[test]
 fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -1473,4 +1497,368 @@ fn completed_with_rejections_missing_session_is_pending_for_repair() {
     assert_eq!(counts.pending, 1);
     assert_eq!(counts.indexed, 0);
     assert_eq!(counts.completed_with_rejections, 1);
+}
+
+fn insert_catalog_inventory_page_fixture(store: &Store, source_root: &str, count: usize) -> u64 {
+    let generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    let sessions = (0..count)
+        .map(|index| {
+            catalog_session_for_root(
+                source_root,
+                &format!("{source_root}/{index:05}.jsonl"),
+                &format!("{source_root}-{index}"),
+                timestamp_ms(fixed_time()) + index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    for page in sessions.chunks(Store::INVENTORY_PATH_PAGE_LIMIT) {
+        store.upsert_catalog_sessions(generation, page).unwrap();
+    }
+    generation
+}
+
+fn insert_source_import_page_fixture(store: &Store, source_root: &str, count: usize) -> u64 {
+    let generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, source_root)
+        .unwrap();
+    let files = (0..count)
+        .map(|index| {
+            source_import_file(
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                source_root,
+                &format!("{source_root}/{index:05}.jsonl"),
+                timestamp_ms(fixed_time()) + index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    for page in files.chunks(Store::INVENTORY_PATH_PAGE_LIMIT) {
+        store.upsert_source_import_files(generation, page).unwrap();
+    }
+    generation
+}
+
+fn measured_sql_steps<T>(store: &Store, operation: impl FnOnce() -> T) -> (T, usize) {
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_steps = std::sync::Arc::clone(&steps);
+    store.conn.progress_handler(
+        1,
+        Some(move || {
+            callback_steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        }),
+    );
+    let result = operation();
+    store.conn.progress_handler(0, None::<fn() -> bool>);
+    (result, steps.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+#[test]
+fn catalog_inventory_pages_rescans_and_cleanup_are_index_bounded() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let target_root = "/catalog/target";
+    insert_catalog_inventory_page_fixture(&store, "/catalog/unrelated", 2_048);
+    let generation = insert_catalog_inventory_page_fixture(&store, target_root, 129);
+
+    for (sql, parameter_count) in [
+        (super::CATALOG_ACTIVE_PATH_INVENTORY_PAGE_SQL, 4),
+        (super::CATALOG_EXPLICIT_RESCAN_PAGE_SQL, 4),
+        (super::CATALOG_UNPUBLISHED_DELETE_PAGE_SQL, 3),
+    ] {
+        let mut statement = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let details = if parameter_count == 4 {
+            statement
+                .query_map(
+                    params![CaptureProvider::Codex.as_str(), target_root, 0_i64, 64_i64],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        } else {
+            statement
+                .query_map(
+                    params![CaptureProvider::Codex.as_str(), target_root, 64_i64],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(details
+            .iter()
+            .any(|detail| detail.contains("idx_catalog_sessions_provider_source_root_stale")));
+        assert!(!details.iter().any(|detail| detail.contains("TEMP B-TREE")));
+    }
+
+    let (first_page, first_page_steps) = measured_sql_steps(&store, || {
+        store
+            .list_catalog_inventory_paths_page(
+                CaptureProvider::Codex,
+                target_root,
+                None,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap()
+    });
+    assert_eq!(first_page.len(), Store::INVENTORY_PATH_PAGE_LIMIT);
+    assert!(
+        first_page_steps < 20_000,
+        "page used {first_page_steps} VM steps"
+    );
+    let mut observed = first_page;
+    loop {
+        let cursor = observed.last().map(|(cursor, _)| *cursor);
+        let page = store
+            .list_catalog_inventory_paths_page(
+                CaptureProvider::Codex,
+                target_root,
+                cursor,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap();
+        let complete = page.len() < Store::INVENTORY_PATH_PAGE_LIMIT;
+        observed.extend(page);
+        if complete {
+            break;
+        }
+    }
+    assert_eq!(observed.len(), 129);
+    assert!(observed.windows(2).all(|pair| pair[0].0 < pair[1].0));
+
+    assert!(store
+        .complete_catalog_inventory_generation(CaptureProvider::Codex, target_root, generation)
+        .unwrap());
+    store
+        .conn
+        .execute(
+            "UPDATE catalog_sessions SET indexed_status = 'indexed', pending_reason = NULL \
+             WHERE provider = ?1 AND source_root = ?2",
+            params![CaptureProvider::Codex.as_str(), target_root],
+        )
+        .unwrap();
+    let (first_rescan, first_rescan_steps) = measured_sql_steps(&store, || {
+        store
+            .schedule_catalog_source_explicit_rescan_page(
+                CaptureProvider::Codex,
+                target_root,
+                generation,
+                None,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap()
+    });
+    assert!(
+        first_rescan_steps < 50_000,
+        "rescan page used {first_rescan_steps} VM steps"
+    );
+    let (mut visited, mut changed, mut cursor, mut complete) = first_rescan;
+    assert!(visited <= Store::INVENTORY_PATH_PAGE_LIMIT);
+    while !complete {
+        let (page_visited, page_changed, next_cursor, page_complete) = store
+            .schedule_catalog_source_explicit_rescan_page(
+                CaptureProvider::Codex,
+                target_root,
+                generation,
+                cursor,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap();
+        assert!(page_visited <= Store::INVENTORY_PATH_PAGE_LIMIT);
+        visited += page_visited;
+        changed += page_changed;
+        cursor = next_cursor;
+        complete = page_complete;
+    }
+    assert_eq!(visited, 129);
+    assert_eq!(changed, 129);
+
+    let cleanup_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, target_root)
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE catalog_sessions SET is_stale = rowid % 2 \
+             WHERE provider = ?1 AND source_root = ?2",
+            params![CaptureProvider::Codex.as_str(), target_root],
+        )
+        .unwrap();
+    let (first_cleanup, first_cleanup_steps) = measured_sql_steps(&store, || {
+        store
+            .delete_unpublished_catalog_sessions_batch(
+                CaptureProvider::Codex,
+                target_root,
+                cleanup_generation,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap()
+            .unwrap()
+    });
+    assert!(
+        first_cleanup_steps < 75_000,
+        "cleanup page used {first_cleanup_steps} VM steps"
+    );
+    let mut deleted = first_cleanup.0;
+    assert!(deleted <= Store::INVENTORY_PATH_PAGE_LIMIT);
+    loop {
+        let (page, _) = store
+            .delete_unpublished_catalog_sessions_batch(
+                CaptureProvider::Codex,
+                target_root,
+                cleanup_generation,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(page <= Store::INVENTORY_PATH_PAGE_LIMIT);
+        deleted += page;
+        if page == 0 {
+            break;
+        }
+    }
+    assert_eq!(deleted, 129);
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM catalog_sessions WHERE source_root = ?1",
+                ["/catalog/unrelated"],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+        2_048
+    );
+}
+
+#[test]
+fn source_import_inventory_and_rescan_pages_skip_stale_history_with_baseline_index() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let target_root = "/source/target";
+    insert_source_import_page_fixture(&store, "/source/unrelated", 2_048);
+    let generation = insert_source_import_page_fixture(&store, target_root, 257);
+    store
+        .conn
+        .execute(
+            "UPDATE source_import_files SET is_stale = 1 WHERE rowid IN ( \
+                 SELECT rowid FROM source_import_files \
+                 WHERE provider = ?1 AND source_root = ?2 ORDER BY rowid LIMIT 128 \
+             )",
+            params![CaptureProvider::Claude.as_str(), target_root],
+        )
+        .unwrap();
+    assert!(store
+        .complete_source_import_inventory_generation(
+            CaptureProvider::Claude,
+            target_root,
+            generation,
+        )
+        .unwrap());
+    store
+        .conn
+        .execute(
+            "UPDATE source_import_files SET indexed_status = 'indexed', pending_reason = NULL \
+             WHERE provider = ?1 AND source_root = ?2",
+            params![CaptureProvider::Claude.as_str(), target_root],
+        )
+        .unwrap();
+
+    for sql in [
+        super::SOURCE_IMPORT_ACTIVE_PATH_INVENTORY_PAGE_SQL,
+        super::SOURCE_IMPORT_EXPLICIT_RESCAN_PAGE_SQL,
+    ] {
+        let mut plan = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let details = plan
+            .query_map(
+                params![CaptureProvider::Claude.as_str(), target_root, 0_i64, 64_i64],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(details.iter().any(|detail| {
+            detail.contains("idx_source_import_files_provider_source_root_stale")
+        }));
+        assert!(!details.iter().any(|detail| detail.contains("TEMP B-TREE")));
+    }
+
+    let (first_inventory_page, first_inventory_steps) = measured_sql_steps(&store, || {
+        store
+            .list_source_import_inventory_paths_page(
+                CaptureProvider::Claude,
+                target_root,
+                None,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap()
+    });
+    assert_eq!(first_inventory_page.len(), Store::INVENTORY_PATH_PAGE_LIMIT);
+    assert!(
+        first_inventory_steps < 20_000,
+        "source inventory page used {first_inventory_steps} VM steps"
+    );
+    let mut observed = first_inventory_page;
+    loop {
+        let cursor = observed.last().map(|(cursor, _)| *cursor);
+        let page = store
+            .list_source_import_inventory_paths_page(
+                CaptureProvider::Claude,
+                target_root,
+                cursor,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap();
+        let complete = page.len() < Store::INVENTORY_PATH_PAGE_LIMIT;
+        observed.extend(page);
+        if complete {
+            break;
+        }
+    }
+    assert_eq!(observed.len(), 129);
+
+    let (first_rescan, first_rescan_steps) = measured_sql_steps(&store, || {
+        store
+            .schedule_source_import_explicit_rescan_page(
+                CaptureProvider::Claude,
+                target_root,
+                generation,
+                None,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap()
+    });
+    assert!(
+        first_rescan_steps < 50_000,
+        "source rescan page used {first_rescan_steps} VM steps"
+    );
+    let (mut visited, mut changed, mut cursor, mut complete) = first_rescan;
+    assert!(visited <= Store::INVENTORY_PATH_PAGE_LIMIT);
+    while !complete {
+        let (page_visited, page_changed, next_cursor, page_complete) = store
+            .schedule_source_import_explicit_rescan_page(
+                CaptureProvider::Claude,
+                target_root,
+                generation,
+                cursor,
+                Store::INVENTORY_PATH_PAGE_LIMIT,
+            )
+            .unwrap();
+        assert!(page_visited <= Store::INVENTORY_PATH_PAGE_LIMIT);
+        visited += page_visited;
+        changed += page_changed;
+        cursor = next_cursor;
+        complete = page_complete;
+    }
+    assert_eq!(visited, 129);
+    assert_eq!(changed, 129);
 }

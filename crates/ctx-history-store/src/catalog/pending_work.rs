@@ -1,3 +1,8 @@
+const CATALOG_EXPLICIT_RESCAN_PAGE_SQL: &str = "SELECT rowid \
+     FROM catalog_sessions INDEXED BY idx_catalog_sessions_provider_source_root_stale \
+     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 AND rowid > ?3 \
+     ORDER BY rowid LIMIT ?4";
+
 impl Store {
     pub fn list_pending_catalog_sessions(
         &self,
@@ -506,6 +511,75 @@ impl Store {
                 ],
             )?;
             Ok(legacy.saturating_add(explicit))
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn schedule_catalog_source_explicit_rescan_page(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+        after_rowid: Option<i64>,
+        limit: usize,
+    ) -> Result<(usize, usize, Option<i64>, bool)> {
+        let limit = limit.clamp(1, Self::INVENTORY_PATH_PAGE_LIMIT);
+        with_immediate_transaction(&self.conn, || {
+            if !self.catalog_inventory_generation_is_complete(
+                provider,
+                source_root,
+                inventory_generation,
+            )? {
+                return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+            }
+            let mut statement = self.conn.prepare(CATALOG_EXPLICIT_RESCAN_PAGE_SQL)?;
+            let rowids = collect_rows(statement.query_map(
+                params![
+                    provider.as_str(),
+                    source_root,
+                    after_rowid.unwrap_or(0),
+                    capped_i64(limit as u64),
+                ],
+                |row| row.get::<_, i64>(0),
+            )?)?;
+            let rows_visited = rowids.len();
+            let next_cursor = rowids.last().copied();
+            let complete = rows_visited < limit;
+            if rowids.is_empty() {
+                return Ok((rows_visited, 0, next_cursor, complete));
+            }
+            let placeholders = (4..4 + rowids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE catalog_sessions \
+                 SET pending_reason = CASE \
+                     WHEN indexed_status = 'indexed' THEN 'explicit_rescan' \
+                     ELSE 'legacy' \
+                 END \
+                 WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
+                   AND pending_reason IS NULL \
+                   AND indexed_status IN ('indexed', 'pending', 'failed') \
+                   AND EXISTS ( \
+                       SELECT 1 FROM import_inventory_generations AS inventory \
+                       WHERE inventory.provider = ?1 AND inventory.source_root = ?2 \
+                         AND inventory.inventory_family = 'catalog_sessions' \
+                         AND inventory.current_generation = ?3 \
+                         AND inventory.completed_generation = ?3 \
+                   ) \
+                   AND rowid IN ({placeholders})"
+            );
+            let mut parameters: Vec<rusqlite::types::Value> = vec![
+                provider.as_str().to_owned().into(),
+                source_root.to_owned().into(),
+                capped_i64(inventory_generation).into(),
+            ];
+            parameters.extend(rowids.into_iter().map(Into::into));
+            let rows_changed = self
+                .conn
+                .execute(&sql, rusqlite::params_from_iter(parameters))?;
+            Ok((rows_visited, rows_changed, next_cursor, complete))
         })
     }
 

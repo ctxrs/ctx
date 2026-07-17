@@ -380,9 +380,12 @@ pub(crate) fn catalog_material_visible_predicate(catalog_alias: &str) -> String 
 
 pub(crate) fn source_import_file_material_visible_predicate(file_alias: &str) -> String {
     let effective = effective_provider_file_publication_predicate("publication");
+    let inventory_published =
+        crate::catalog::source_import_inventory_material_published_predicate(file_alias);
     format!(
         r#"
-        NOT EXISTS (
+        ({inventory_published})
+        AND NOT EXISTS (
             SELECT 1 FROM provider_file_publications AS publication
             WHERE publication.inventory_family = '{SOURCE_IMPORT_INVENTORY_FAMILY}'
               AND publication.provider = {file_alias}.provider

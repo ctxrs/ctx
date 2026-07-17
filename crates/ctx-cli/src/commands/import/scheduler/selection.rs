@@ -534,10 +534,10 @@ fn observe_current_preinventory(
                     &candidate.file.source_root,
                 )? == Some(*inventory_generation);
                 if observation_changed && !generation_is_current {
-                    let files = collect_source_import_files(&plan.source)?;
-                    let persisted =
-                        persist_new_source_import_observation(store, &plan.source, &files)?;
-                    (files, persisted.inventory_generation)
+                    return Err(anyhow::Error::new(
+                        ctx_history_capture::CaptureError::InventorySuperseded,
+                    )
+                    .context("manifest source generation requires bounded reinventory"));
                 } else {
                     let mut files = match &selected.preinventory {
                         SourcePreinventory::SourceImportFiles { files, .. } => files.clone(),
@@ -566,6 +566,17 @@ fn observe_current_preinventory(
             files,
             inventory_generation,
         });
+    }
+    ctx_history_capture::pace_current_filesystem_operation(
+        plan.source.path.as_os_str().len() as u64
+    );
+    let metadata = fs::symlink_metadata(&plan.source.path)
+        .with_context(|| format!("stat import source {}", plan.source.path.display()))?;
+    if metadata.file_type().is_dir() {
+        return Err(
+            anyhow::Error::new(ctx_history_capture::CaptureError::InventorySuperseded)
+                .context("directory source revalidation requires bounded inventory"),
+        );
     }
     let (_, file) = observe_source_root(&plan.source)?;
     let persisted =

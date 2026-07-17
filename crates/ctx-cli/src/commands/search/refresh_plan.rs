@@ -181,7 +181,7 @@ fn refresh_sources_for_search_inner(
         .as_deref_mut()
         .map(|runtime| runtime.disk_io_pacer(execution_policy))
         .unwrap_or_else(|| execution_policy.disk_io_pacer());
-    let _disk_io_pacing = ctx_history_capture::install_disk_io_pacer(disk_io_pacer);
+    let _disk_io_pacing = ctx_history_capture::install_disk_io_pacer(disk_io_pacer.clone());
     fs::create_dir_all(data_root)?;
     config::write_default_config(data_root)?;
     let db_path = database_path(data_root.to_path_buf());
@@ -194,9 +194,7 @@ fn refresh_sources_for_search_inner(
         .and_then(|runtime| runtime.watcher_changes(&sources));
     let work = if let Some(runtime) = runtime.as_deref_mut() {
         if let Some(changes) = watcher_changes.as_ref() {
-            runtime
-                .pending_dirty_paths
-                .extend(changes.dirty_paths.iter().cloned());
+            runtime.retain_dirty_paths(&changes.dirty_paths);
         }
         let publication_owner = store.effective_provider_file_publication_inventory_owner()?;
         let publication_pending = publication_owner.is_some();
@@ -216,9 +214,6 @@ fn refresh_sources_for_search_inner(
         {
             runtime.request_inventory(SearchInventoryReason::SourcesChanged);
         }
-        if runtime.cached_work.is_none() && !runtime.pending_dirty_paths.is_empty() {
-            runtime.request_inventory(SearchInventoryReason::SourcesChanged);
-        }
         let force_rebuild = runtime.durable_sources_changed(&source_fingerprint)
             || runtime.cached_work.as_ref().is_some_and(|cached| {
                 cached.source_fingerprint != source_fingerprint
@@ -226,6 +221,17 @@ fn refresh_sources_for_search_inner(
             });
         if force_rebuild {
             runtime.request_inventory(SearchInventoryReason::SourcesChanged);
+        }
+        if runtime.cached_work.is_none()
+            && runtime.inventory_progress.is_none()
+            && !runtime.pending_dirty_paths.is_empty()
+        {
+            runtime.request_inventory(SearchInventoryReason::SourcesChanged);
+        } else if runtime.inventory_progress.is_none()
+            && !runtime.pending_full_inventory
+            && !runtime.pending_dirty_paths.is_empty()
+        {
+            process_dirty_source_paths_page(&store, &sources, runtime)?;
         }
         let inventory_sources = sources
             .iter()
@@ -237,76 +243,65 @@ fn refresh_sources_for_search_inner(
             .cloned()
             .collect::<Vec<_>>();
         let publication_page_count = usize::from(publication_pending);
-        let inventory_source_count = inventory_sources
-            .len()
-            .saturating_add(publication_page_count);
-        if runtime.prepare_inventory(&source_fingerprint, inventory_source_count, force_rebuild) {
-            if let Some(source_index) = runtime.next_inventory_source_index() {
-                let include_publication_owner = publication_pending && source_index == 0;
-                let source_page_index = source_index.saturating_sub(publication_page_count);
-                let inventory_page = if include_publication_owner {
-                    Vec::new()
-                } else {
-                    inventory_sources
-                        .get(source_page_index)
-                        .cloned()
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                };
-                let inventoried_paths = inventory_page
-                    .iter()
-                    .map(|source| source.path.clone())
-                    .collect::<BTreeSet<_>>();
-                let inventory = match inventory_import_sources_page(
-                    &store,
-                    inventory_page,
-                    true,
-                    include_publication_owner,
-                ) {
-                    Ok(inventory) => inventory,
-                    Err(error) => {
-                        runtime.note_inventory_error(error_summary(&error));
-                        return Err(error);
-                    }
-                };
-                let source_bytes = inventory.totals.source_bytes;
-                let operation_count = daemon_search_inventory_operation_count(
-                    inventory.totals.sources,
-                    inventory.totals.source_files,
-                );
-                pace_daemon_search_inventory(source_bytes, operation_count);
-                merge_search_inventory_page(
-                    &store,
-                    &source_fingerprint,
-                    publication_owner.clone(),
-                    inventoried_paths,
-                    inventory,
-                    &mut runtime.cached_work,
-                )?;
-                runtime.note_inventory_source_completed(source_bytes, operation_count);
+        if runtime.prepare_inventory(
+            &store,
+            &inventory_sources,
+            &source_fingerprint,
+            publication_page_count,
+            force_rebuild,
+        )? {
+            let operations_before = disk_io_pacer.filesystem_operation_count();
+            let inventory_step = match runtime.advance_inventory(&store) {
+                Ok(step) => step,
+                Err(error) => {
+                    runtime.note_inventory_error(error_summary(&error));
+                    return Err(error);
+                }
+            };
+            let operation_count = disk_io_pacer
+                .filesystem_operation_count()
+                .saturating_sub(operations_before);
+            match inventory_step {
+                ImportInventoryCursorStep::Pending(slice) => {
+                    runtime.note_inventory_slice(slice, operation_count);
+                }
+                ImportInventoryCursorStep::SourceComplete(inventory) => {
+                    let source_bytes = inventory.totals.source_bytes;
+                    let inventoried_paths = inventory
+                        .sources
+                        .iter()
+                        .map(|planned| planned.source.path.clone())
+                        .chain(
+                            inventory
+                                .failures
+                                .iter()
+                                .map(|failure| failure.source.path.clone()),
+                        )
+                        .collect::<BTreeSet<_>>();
+                    merge_search_inventory_page(
+                        &store,
+                        &source_fingerprint,
+                        publication_owner.clone(),
+                        inventoried_paths,
+                        inventory,
+                        &mut runtime.cached_work,
+                    )?;
+                    runtime.note_inventory_source_completed(source_bytes, operation_count);
+                }
+                ImportInventoryCursorStep::Complete => runtime.note_inventory_cursor_complete(),
             }
             if runtime.inventory_is_complete() {
+                let completed_scoped = runtime
+                    .inventory_progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.scoped);
                 runtime.complete_inventory();
-                if let Some(work) = runtime.cached_work.as_mut() {
-                    work.last_reinventory_at = Instant::now();
-                    work.passes_since_reinventory = 0;
+                if !completed_scoped {
+                    if let Some(work) = runtime.cached_work.as_mut() {
+                        work.last_reinventory_at = Instant::now();
+                        work.passes_since_reinventory = 0;
+                    }
                 }
-            }
-        } else if !runtime.pending_dirty_paths.is_empty() {
-            let pending_dirty_paths = std::mem::take(&mut runtime.pending_dirty_paths);
-            let refresh_result = refresh_dirty_search_sources(
-                &store,
-                &sources,
-                &pending_dirty_paths,
-                runtime
-                    .cached_work
-                    .as_mut()
-                    .expect("daemon refresh cache must be populated"),
-            );
-            if let Err(error) = refresh_result {
-                runtime.pending_dirty_paths.extend(pending_dirty_paths);
-                runtime.invalidate();
-                return Err(error);
             }
         }
         if let Some(work) = runtime.cached_work.as_mut() {
@@ -398,20 +393,75 @@ fn refresh_sources_for_search_inner(
     }
 }
 
-const DAEMON_SEARCH_INVENTORY_OPERATION_BYTES: u64 = 4 * 1024;
+fn process_dirty_source_paths_page(
+    store: &Store,
+    sources: &[SourceInfo],
+    runtime: &mut SearchRefreshRuntime,
+) -> Result<()> {
+    const DIRTY_PATH_PAGE_LIMIT: usize = 64;
 
-fn daemon_search_inventory_operation_count(source_count: usize, source_files: usize) -> u64 {
-    let sources = u64::try_from(source_count).unwrap_or(u64::MAX);
-    let files = u64::try_from(source_files).unwrap_or(u64::MAX);
-    sources.saturating_add(files.saturating_mul(2))
-}
+    let page = runtime
+        .pending_dirty_paths
+        .iter()
+        .take(DIRTY_PATH_PAGE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut affected_sources = BTreeSet::new();
+    let mut updated_plans = BTreeMap::new();
+    let mut directly_observed_roots = BTreeSet::new();
+    for dirty in &page {
+        let Some(source) = sources
+            .iter()
+            .find(|source| source.path == dirty.source_path)
+        else {
+            runtime.request_inventory(SearchInventoryReason::SourcesChanged);
+            continue;
+        };
+        let exact_codex_path = source.provider == ctx_history_core::CaptureProvider::Codex
+            && source.source_format == "codex_session_jsonl_tree";
+        if !exact_codex_path && !directly_observed_roots.insert(source.path.clone()) {
+            continue;
+        }
+        affected_sources.insert(source.path.clone());
+        match crate::commands::import::inventory_dirty_source_path(
+            store,
+            source,
+            &dirty.changed_path,
+        )? {
+            crate::commands::import::DirtySourcePathInventoryOutcome::Applied { updated_plan } => {
+                if let Some(plan) = updated_plan {
+                    updated_plans.insert(source.path.clone(), plan);
+                }
+            }
+            crate::commands::import::DirtySourcePathInventoryOutcome::RequiresSourceInventory => {
+                runtime.request_source_inventory(source.path.clone());
+            }
+        }
+    }
+    for dirty in page {
+        runtime.pending_dirty_paths.remove(&dirty);
+    }
 
-fn pace_daemon_search_inventory(source_bytes: u64, operation_count: u64) {
-    ctx_history_capture::pace_current_disk_io(
-        source_bytes.saturating_add(
-            operation_count.saturating_mul(DAEMON_SEARCH_INVENTORY_OPERATION_BYTES),
-        ),
-    );
+    let Some(work) = runtime.cached_work.as_mut() else {
+        return Ok(());
+    };
+    for planned in &mut work.plan.sources {
+        if let Some(updated) = updated_plans.remove(&planned.source.path) {
+            *planned = updated;
+        }
+    }
+    if affected_sources.is_empty() {
+        return Ok(());
+    }
+    let next_plan = ImportPlan::build(store, work.plan.sources.clone())?;
+    work.execution_state =
+        work.execution_state
+            .rebase_for_plan(&work.plan, &next_plan, &affected_sources);
+    work.plan = next_plan;
+    work.planned_total_bytes = work.plan.sources.iter().fold(0u64, |total, source| {
+        total.saturating_add(source.stats.bytes)
+    });
+    Ok(())
 }
 
 fn merge_search_inventory_page(
@@ -474,52 +524,6 @@ fn merge_search_inventory_page(
         inventoried_source_count,
         planned_total_bytes,
     });
-    Ok(())
-}
-
-fn refresh_dirty_search_sources(
-    store: &Store,
-    sources: &[SourceInfo],
-    dirty_paths: &BTreeSet<PathBuf>,
-    work: &mut SearchRefreshWork,
-) -> Result<()> {
-    let dirty_sources = sources
-        .iter()
-        .filter(|source| dirty_paths.contains(&source.path))
-        .cloned()
-        .collect::<Vec<_>>();
-    if dirty_sources.is_empty() {
-        return Ok(());
-    }
-
-    let inventory = inventory_import_sources(store, dirty_sources, true)?;
-    let operation_count = daemon_search_inventory_operation_count(
-        inventory.totals.sources,
-        inventory.totals.source_files,
-    );
-    pace_daemon_search_inventory(inventory.totals.source_bytes, operation_count);
-    let mut planned_sources = work.plan.sources.clone();
-    planned_sources.retain(|planned| !dirty_paths.contains(&planned.source.path));
-    planned_sources.extend(
-        inventory
-            .sources
-            .into_iter()
-            .filter(|planned| dirty_paths.contains(&planned.source.path)),
-    );
-    let plan = ImportPlan::build(store, planned_sources)?;
-
-    work.inventory_failures
-        .retain(|failure| !dirty_paths.contains(&failure.source.path));
-    work.inventory_failures.extend(inventory.failures);
-    work.failed_inventory_pending =
-        failed_inventory_pending_counts(store, &work.inventory_failures)?;
-    work.planned_total_bytes = plan.sources.iter().fold(0u64, |total, source| {
-        total.saturating_add(source.stats.bytes)
-    });
-    work.execution_state = work
-        .execution_state
-        .rebase_for_plan(&work.plan, &plan, dirty_paths);
-    work.plan = plan;
     Ok(())
 }
 

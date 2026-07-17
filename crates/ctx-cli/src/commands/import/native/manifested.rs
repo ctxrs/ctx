@@ -67,17 +67,14 @@ fn import_manifested_source_with_importer(
         selection,
     } = options;
     let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
-    let collected_files;
-    let mut outcome_generation = preinventory_generation;
+    let outcome_generation = preinventory_generation;
     let files = match preinventoried_files {
         Some(files) => files,
+        None if selection.is_some() => &[],
         None => {
-            collected_files = collect_source_import_files(source).with_context(|| {
-                format!("inventory import files from {}", source.path.display())
-            })?;
-            let persisted = persist_new_source_import_observation(store, source, &collected_files)?;
-            outcome_generation = Some(persisted.inventory_generation);
-            &collected_files
+            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                "manifest import without selected work requires bounded preinventory",
+            )))
         }
     };
     if files.is_empty() && selection.is_none() {
