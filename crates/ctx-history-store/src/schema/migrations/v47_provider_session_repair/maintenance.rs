@@ -139,7 +139,7 @@ impl Store {
                     break;
                 }
                 let byte_budget = max_bytes.saturating_sub(processed_bytes);
-                let step = advance_one_bounded(&self.conn, byte_budget);
+                let step = advance_one_bounded(&self.conn, byte_budget, max_bytes);
                 match step {
                     Ok(Some((charge, step_complete))) => {
                         complete = step_complete;
@@ -165,6 +165,7 @@ impl Store {
 fn advance_one_bounded(
     conn: &Connection,
     byte_budget: usize,
+    max_bytes: usize,
 ) -> Result<Option<(StepCharge, bool)>> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let step = (|| -> Result<(StepCharge, bool)> {
@@ -185,9 +186,16 @@ fn advance_one_bounded(
             }
             Ok(Some((charge, complete)))
         }
-        Ok(_) => {
+        Ok((charge, _)) => {
             conn.execute_batch("ROLLBACK")?;
-            Ok(None)
+            if charge.bytes > max_bytes {
+                Err(StoreError::ProviderSessionRepairUnitTooLarge {
+                    bytes: charge.bytes,
+                    max_bytes,
+                })
+            } else {
+                Ok(None)
+            }
         }
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK");

@@ -102,6 +102,8 @@ pub enum StoreError {
     ProviderFilePublicationOwnerMismatch { provider: String, owner_id: String },
     #[error("provider file replacement row limit {value} is outside 1..={max}")]
     ProviderFileReconciliationLimitOutOfRange { value: usize, max: usize },
+    #[error("provider-session repair unit is {bytes} bytes; bounded maximum is {max_bytes} bytes")]
+    ProviderSessionRepairUnitTooLarge { bytes: usize, max_bytes: usize },
     #[error("provider file replacement reconciliation is not complete")]
     ProviderFileReconciliationIncomplete,
     #[error("provider file publication staging is unavailable")]
