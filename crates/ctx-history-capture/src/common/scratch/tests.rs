@@ -88,7 +88,8 @@ mod tests {
         fs::rename(&target, &moved_target).unwrap();
         fs::rename(&replacement, &target).unwrap();
 
-        let error = remove_anchored_scratch_run(&run, &target).unwrap_err();
+        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
+            .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("changed identity"));
@@ -100,28 +101,198 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scratch_finalization_does_not_report_success_after_final_rmdir_swap() {
+    fn unix_scratch_pre_unlink_failures_restore_the_canonical_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let points = [
+            #[cfg(not(target_os = "freebsd"))]
+            UnixScratchFinalizationFailurePoint::AfterRename,
+            UnixScratchFinalizationFailurePoint::AfterFirstIdentityCheck,
+            UnixScratchFinalizationFailurePoint::AfterSecondIdentityCheck,
+            UnixScratchFinalizationFailurePoint::BeforeUnlink,
+        ];
+
+        for (index, point) in points.into_iter().enumerate() {
+            let target = create_abandoned_run(&root, index as u64);
+            let quarantine = scratch_quarantine_path(&target).unwrap();
+            let run = UnixScratchRun::open(&target).unwrap();
+            let target_lease = run.open_lease().unwrap().unwrap();
+            FileExt::lock_exclusive(&target_lease).unwrap();
+            inject_unix_scratch_finalization_failure_once(point, false);
+
+            let error =
+                remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
+                    .unwrap_err();
+
+            assert!(error.to_string().contains("injected"));
+            run.revalidate(&target).unwrap();
+            assert!(!quarantine.exists());
+            FileExt::unlock(&target_lease).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_scratch_failure_after_unlink_does_not_restore_a_removed_run() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("scratch");
         ensure_private_directory(&root).unwrap();
         let target = create_abandoned_run(&root, 0);
-        let replacement = root.join("empty-replacement");
-        create_private_directory(&replacement).unwrap();
+        let quarantine = scratch_quarantine_path(&target).unwrap();
         let run = UnixScratchRun::open(&target).unwrap();
         let target_lease = run.open_lease().unwrap().unwrap();
         FileExt::lock_exclusive(&target_lease).unwrap();
-        let moved_target = root.join("finalization-original");
-        inject_scratch_finalization_swap_once(moved_target.clone(), replacement);
+        inject_unix_scratch_finalization_failure_once(
+            UnixScratchFinalizationFailurePoint::AfterUnlink,
+            false,
+        );
 
-        let error = remove_anchored_scratch_run(&run, &target).unwrap_err();
+        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
+            .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("did not unlink the anchored run"));
+        assert!(error.to_string().contains("AfterUnlink"));
         assert!(!target.exists());
-        assert!(moved_target.is_dir());
-        assert_eq!(fs::read_dir(&moved_target).unwrap().count(), 0);
+        assert!(!quarantine.exists());
+        assert_eq!(run.directory_link_count().unwrap(), 0);
         FileExt::unlock(&target_lease).unwrap();
+    }
+
+    #[cfg(all(unix, not(target_os = "freebsd")))]
+    #[test]
+    fn unix_scratch_restore_collision_retains_a_reclaimable_quarantine() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        let quarantine = scratch_quarantine_path(&target).unwrap();
+        let run = UnixScratchRun::open(&target).unwrap();
+        let target_lease = run.open_lease().unwrap().unwrap();
+        FileExt::lock_exclusive(&target_lease).unwrap();
+        inject_unix_scratch_finalization_failure_once(
+            UnixScratchFinalizationFailurePoint::AfterRename,
+            true,
+        );
+
+        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("quarantine retained"));
+        assert!(target.is_dir());
+        assert!(quarantine.is_dir());
+        FileExt::unlock(&target_lease).unwrap();
+        drop(target_lease);
+        fs::remove_dir(&target).unwrap();
+
+        let _manager_lock = acquire_manager_lock(&root).unwrap();
+        assert!(cleanup_abandoned_scratch_run(&target).unwrap());
+        assert!(!quarantine.exists());
+    }
+
+    #[cfg(all(unix, not(target_os = "freebsd")))]
+    #[test]
+    fn unix_scratch_atomic_quarantine_rename_never_overwrites_a_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        let quarantine = scratch_quarantine_path(&target).unwrap();
+        create_private_directory(&quarantine).unwrap();
+        fs::write(quarantine.join("sentinel"), b"must survive").unwrap();
+        let run = UnixScratchRun::open(&target).unwrap();
+        let target_lease = run.open_lease().unwrap().unwrap();
+        FileExt::lock_exclusive(&target_lease).unwrap();
+
+        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        run.revalidate(&target).unwrap();
+        assert_eq!(
+            fs::read(quarantine.join("sentinel")).unwrap(),
+            b"must survive"
+        );
+        FileExt::unlock(&target_lease).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owned_drop_removes_the_scratch_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        let scratch = CaptureScratchSpace::create_in(root, "owned-drop").unwrap();
+        let path = scratch.path().to_path_buf();
+
+        drop(scratch);
+
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_abandoned_scavenger_removes_the_scratch_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let path = create_abandoned_run(&root, 0);
+
+        assert!(cleanup_abandoned_scratch_run(&path).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_live_lease_is_not_removed_by_scavenging() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let path = create_abandoned_run(&root, 0);
+        let lease = open_private_regular_file(&path.join(LEASE_NAME)).unwrap();
+        FileExt::lock_exclusive(&lease).unwrap();
+
+        assert!(!cleanup_abandoned_scratch_run(&path).unwrap());
+        assert!(path.exists());
+        FileExt::unlock(&lease).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_scratch_handoff_does_not_delete_a_swapped_live_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        let replacement = create_abandoned_run(&root, 1);
+        fs::write(replacement.join("sentinel"), b"must survive").unwrap();
+        let replacement_lease = open_private_regular_file(&replacement.join(LEASE_NAME)).unwrap();
+        FileExt::lock_exclusive(&replacement_lease).unwrap();
+        let run = WindowsScratchRun::open(&target).unwrap();
+        let target_lease = run.open_lease(&target).unwrap().unwrap();
+        FileExt::lock_exclusive(&target_lease).unwrap();
+        let moved_target = root.join("handoff-original");
+        fs::rename(&target, &moved_target).unwrap();
+        fs::rename(&replacement, &target).unwrap();
+
+        let error = remove_anchored_scratch_run(&run, &target, Some(target_lease)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"must survive");
+        assert!(moved_target.join(OWNER_NAME).exists());
+        FileExt::unlock(&replacement_lease).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finalization_closes_delete_pending_lease_before_directory_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        let mut scratch = CaptureScratchSpace::create_in(root, "delete-pending").unwrap();
+        let path = scratch.path().to_path_buf();
+        let lease = scratch.lease.take().unwrap();
+
+        cleanup_owned_scratch_run(&path, lease).unwrap();
+
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]
