@@ -424,6 +424,14 @@ fn mcp_show_session_caps_transcript_events() {
 
     let session_id = "018f45d0-0000-7000-8000-000000010001";
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    conn.create_scalar_function(
+        "ctx_schema_writer_version",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |_| Ok(ctx_history_store::SCHEMA_VERSION),
+    )
+    .unwrap();
     conn.execute(
         r#"
         INSERT INTO sessions
