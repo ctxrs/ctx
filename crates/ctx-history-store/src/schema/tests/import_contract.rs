@@ -1,3 +1,205 @@
+const FRESH_ONLY_OPTIMIZED_INDEX_NAMES: &[&str] = &[
+    "idx_capture_sources_provider_material_owner",
+    "idx_provider_file_publications_owner",
+    "idx_provider_file_publications_fence",
+    "idx_session_aliases_session_id",
+    "idx_event_aliases_event_id",
+    "idx_reconcile_history_record_links_source_id",
+    "idx_reconcile_files_touched_source_id",
+    "idx_reconcile_files_touched_event_id",
+    "idx_reconcile_files_touched_run_id",
+    "idx_reconcile_session_edges_source_id",
+    "idx_reconcile_session_edges_from_session_id",
+    "idx_reconcile_session_edges_to_session_id",
+    "idx_reconcile_summaries_source_id",
+    "idx_reconcile_events_capture_source_id",
+    "idx_reconcile_events_session_id",
+    "idx_reconcile_events_run_id",
+    "idx_reconcile_runs_source_id",
+    "idx_reconcile_runs_session_id",
+    "idx_reconcile_sessions_capture_source_id",
+    "idx_reconcile_vcs_changes_source_id",
+    "idx_reconcile_artifacts_source_id",
+    "idx_reconcile_record_edges_source_id",
+    "idx_reconcile_history_records_source_id",
+    "idx_reconcile_vcs_workspaces_source_id",
+    "idx_reconcile_audit_log_source_id",
+    "idx_catalog_sessions_pending_fresh_attempt",
+    "idx_catalog_sessions_pending_recovery_attempt",
+    "idx_source_import_files_pending_fresh_attempt",
+    "idx_source_import_files_pending_recovery_attempt",
+    "idx_sessions_unique_capture_source_external_session",
+];
+
+#[test]
+fn fresh_store_installs_all_optimized_indexes() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    for &name in FRESH_ONLY_OPTIMIZED_INDEX_NAMES {
+        let exists: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "fresh store omitted optimized index {name}");
+    }
+    let completed_ledgers: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM import_pending_reason_repairs WHERE completed = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(completed_ledgers, 2);
+}
+
+#[test]
+fn schema_v46_upgrade_preserves_index_rootpages_and_uses_trigger_only_invariant() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let rootpages_before = {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+        conn.execute_batch(INDEXES_SQL).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE INDEX idx_events_seq ON events(seq);
+            INSERT INTO capture_sources
+              (id, kind, provider, machine_id, raw_source_path, source_format,
+               source_root, external_session_id, started_at_ms, fidelity)
+            VALUES
+              ('v46-source', 'provider_import', 'codex', 'machine',
+               '/legacy/session.jsonl', 'codex_session_jsonl', '/legacy',
+               'legacy-session', 1, 'imported');
+            INSERT INTO sessions
+              (id, capture_source_id, provider, external_session_id, agent_type,
+               is_primary, status, fidelity, started_at_ms, created_at_ms, updated_at_ms)
+            VALUES
+              ('v46-session', 'v46-source', 'codex', 'legacy-session', 'primary',
+               1, 'imported', 'imported', 1, 1, 1);
+            INSERT INTO events
+              (id, seq, session_id, event_type, role, occurred_at_ms,
+               capture_source_id, payload_json)
+            VALUES
+              ('v46-event', 1, 'v46-session', 'message', 'user', 1,
+               'v46-source', '{}');
+            INSERT INTO catalog_sessions
+              (source_path, provider, source_format, source_root, agent_type,
+               file_size_bytes, file_modified_at_ms, cataloged_at_ms,
+               indexed_status)
+            VALUES
+              ('/legacy/session.jsonl', 'codex', 'codex_session_jsonl',
+               '/legacy', 'primary', 1, 1, 1, 'indexed');
+            PRAGMA user_version = 46;
+            "#,
+        )
+        .unwrap();
+        conn.prepare(
+            "SELECT name, rootpage FROM sqlite_schema \
+             WHERE type = 'index' AND name LIKE 'idx_%' \
+               AND name <> 'idx_events_seq' ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+
+    let store = Store::open(&path).unwrap();
+    for (name, rootpage_before) in rootpages_before {
+        let rootpage_after: i64 = store
+            .conn
+            .query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [&name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rootpage_after, rootpage_before,
+            "upgrade rebuilt v46 index {name}"
+        );
+    }
+    let retired_events_seq_exists: bool = store
+        .conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'idx_events_seq')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!retired_events_seq_exists);
+
+    for &name in FRESH_ONLY_OPTIMIZED_INDEX_NAMES {
+        let exists: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!exists, "v46 upgrade created optimized index {name}");
+    }
+    let trigger_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' \
+             AND name IN ('trg_sessions_provider_source_identity_insert', \
+                          'trg_sessions_provider_source_identity_update')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigger_count, 2);
+
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO capture_sources
+              (id, kind, provider, machine_id, raw_source_path, source_format,
+               source_root, external_session_id, started_at_ms, fidelity)
+            VALUES
+              ('upgraded-source-a', 'provider_import', 'codex', 'machine',
+               '/upgraded/shared.jsonl', 'codex_session_jsonl', '/upgraded',
+               'upgraded-session', 1, 'imported'),
+              ('upgraded-source-b', 'provider_import', 'codex', 'machine',
+               '/upgraded/shared.jsonl', 'codex_session_jsonl', '/upgraded',
+               'upgraded-session', 1, 'imported');
+            INSERT INTO sessions
+              (id, capture_source_id, provider, external_session_id, agent_type,
+               is_primary, status, fidelity, started_at_ms, created_at_ms, updated_at_ms)
+            VALUES
+              ('upgraded-session-a', 'upgraded-source-a', 'codex',
+               'upgraded-session', 'primary', 1, 'imported', 'imported', 1, 1, 1);
+            "#,
+        )
+        .unwrap();
+    let duplicate = store.conn.execute(
+        r#"
+        INSERT INTO sessions
+          (id, capture_source_id, provider, external_session_id, agent_type,
+           is_primary, status, fidelity, started_at_ms, created_at_ms, updated_at_ms)
+        VALUES
+          ('upgraded-session-b', 'upgraded-source-b', 'codex',
+           'upgraded-session', 'primary', 1, 'imported', 'imported', 1, 1, 1)
+        "#,
+        [],
+    );
+    assert!(duplicate
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate provider session for capture source identity"));
+}
+
 #[test]
 fn real_schema_v45_fixture_migrates_import_state_through_v49() {
     let temp = tempdir();

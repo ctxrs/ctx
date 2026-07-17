@@ -13,7 +13,9 @@ pub(crate) mod writer_fence;
 use rusqlite::Connection;
 
 use crate::connection::configure_connection;
-use crate::schema::indexes::{INDEXES_SQL, PENDING_WORK_INDEXES_SQL};
+use crate::schema::indexes::{
+    BASELINE_INDEXES_SQL, FRESH_STORE_OPTIMIZED_INDEXES_SQL, REPAIR_LEDGER_INITIALIZATION_SQL,
+};
 use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 
 pub(crate) use fts::create_fts_tables_if_supported;
@@ -23,11 +25,26 @@ pub(crate) fn migrate_to_latest(conn: &Connection) -> Result<()> {
     if user_version > SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchemaVersion(user_version));
     }
+    let fresh_empty_store = user_version == 0
+        && conn.query_row(
+            "SELECT NOT EXISTS (\
+               SELECT 1 FROM sqlite_schema \
+               WHERE type = 'table' AND name NOT LIKE 'sqlite_%'\
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
     migrations::run_migrations(conn, user_version)?;
     conn.execute_batch(provider_session_identity::PROVIDER_SESSION_INVARIANTS_SQL)?;
     create_fts_tables_if_supported(conn)?;
-    conn.execute_batch(INDEXES_SQL)?;
-    conn.execute_batch(PENDING_WORK_INDEXES_SQL)?;
+    conn.execute_batch(BASELINE_INDEXES_SQL)?;
+    conn.execute_batch(REPAIR_LEDGER_INITIALIZATION_SQL)?;
+    if fresh_empty_store {
+        conn.execute_batch(FRESH_STORE_OPTIMIZED_INDEXES_SQL)?;
+        conn.execute_batch(
+            provider_session_identity::FRESH_STORE_PROVIDER_SESSION_UNIQUE_INDEX_SQL,
+        )?;
+    }
     Ok(())
 }
 

@@ -2,7 +2,7 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
     match phase {
         CLEANUP_PHASE_LINKS => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM history_record_links INDEXED BY idx_reconcile_history_record_links_source_id
+                SELECT id, 1, id FROM history_record_links INDEXED BY idx_reconcile_history_record_links_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
@@ -66,7 +66,8 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
                     (SELECT run.source_id FROM events AS event JOIN runs AS run ON run.id = event.run_id WHERE event.id = entity.event_id),
                     (SELECT run.source_id FROM runs AS run WHERE run.id = entity.run_id),
                     (SELECT session.capture_source_id FROM runs AS run JOIN sessions AS session ON session.id = run.session_id WHERE run.id = entity.run_id)
-                ) = ?1
+                ) = ?1,
+                entity.id
                 FROM candidate
                 JOIN files_touched AS entity ON entity.id = candidate.id
                 ORDER BY entity.id LIMIT ?3
@@ -101,14 +102,15 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
                     entity.source_id,
                     (SELECT session.capture_source_id FROM sessions AS session WHERE session.id = entity.from_session_id),
                     (SELECT session.capture_source_id FROM sessions AS session WHERE session.id = entity.to_session_id)
-                ) = ?1
+                ) = ?1,
+                entity.id
                 FROM candidate JOIN session_edges AS entity ON entity.id = candidate.id
                 ORDER BY entity.id LIMIT ?3
             "#,
         }),
         CLEANUP_PHASE_SUMMARIES => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM summaries INDEXED BY idx_reconcile_summaries_source_id
+                SELECT id, 1, id FROM summaries INDEXED BY idx_reconcile_summaries_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
@@ -152,7 +154,8 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
                     (SELECT session.capture_source_id FROM sessions AS session WHERE session.id = entity.session_id),
                     (SELECT run_session.capture_source_id FROM runs AS run JOIN sessions AS run_session ON run_session.id = run.session_id WHERE run.id = entity.run_id),
                     (SELECT run.source_id FROM runs AS run WHERE run.id = entity.run_id)
-                ) = ?1
+                ) = ?1,
+                entity.id
                 FROM candidate JOIN events AS entity ON entity.id = candidate.id
                 ORDER BY entity.id LIMIT ?3
             "#,
@@ -177,14 +180,15 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
                 SELECT entity.id, COALESCE(
                     entity.source_id,
                     (SELECT session.capture_source_id FROM sessions AS session WHERE session.id = entity.session_id)
-                ) = ?1
+                ) = ?1,
+                entity.id
                 FROM candidate JOIN runs AS entity ON entity.id = candidate.id
                 ORDER BY entity.id LIMIT ?3
             "#,
         }),
         CLEANUP_PHASE_SESSIONS => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM sessions INDEXED BY idx_reconcile_sessions_capture_source_id
+                SELECT id, 1, id FROM sessions INDEXED BY idx_reconcile_sessions_capture_source_id
                 WHERE capture_source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
@@ -207,7 +211,8 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
                         ORDER BY change.id LIMIT ?3
                     )
                 )
-                SELECT entity.id, COALESCE(entity.source_id, workspace.source_id) = ?1
+                SELECT entity.id, COALESCE(entity.source_id, workspace.source_id) = ?1,
+                       entity.id
                 FROM candidate
                 JOIN vcs_changes AS entity ON entity.id = candidate.id
                 LEFT JOIN vcs_workspaces AS workspace ON workspace.id = entity.vcs_workspace_id
@@ -216,14 +221,14 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
         }),
         CLEANUP_PHASE_ARTIFACTS => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM artifacts INDEXED BY idx_reconcile_artifacts_source_id
+                SELECT id, 1, id FROM artifacts INDEXED BY idx_reconcile_artifacts_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
         }),
         CLEANUP_PHASE_HISTORY_RECORD_TAGS => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT CAST(rowid AS TEXT), 1
+                SELECT CAST(rowid AS TEXT), 1, CAST(rowid AS TEXT)
                 FROM history_record_tags INDEXED BY idx_history_record_tags_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR rowid > CAST(?2 AS INTEGER))
                 ORDER BY rowid LIMIT ?3
@@ -231,32 +236,272 @@ fn reconciliation_phase_spec(phase: i64) -> Option<ReconciliationPhaseSpec> {
         }),
         CLEANUP_PHASE_RECORD_EDGES => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM record_edges INDEXED BY idx_reconcile_record_edges_source_id
+                SELECT id, 1, id FROM record_edges INDEXED BY idx_reconcile_record_edges_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
         }),
         CLEANUP_PHASE_HISTORY_RECORDS => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM history_records INDEXED BY idx_reconcile_history_records_source_id
+                SELECT id, 1, id FROM history_records INDEXED BY idx_reconcile_history_records_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
         }),
         CLEANUP_PHASE_VCS_WORKSPACES => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM vcs_workspaces INDEXED BY idx_reconcile_vcs_workspaces_source_id
+                SELECT id, 1, id FROM vcs_workspaces INDEXED BY idx_reconcile_vcs_workspaces_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
         }),
         CLEANUP_PHASE_AUDIT_LOG => Some(ReconciliationPhaseSpec {
             owner_select_sql: r#"
-                SELECT id, 1 FROM audit_log INDEXED BY idx_reconcile_audit_log_source_id
+                SELECT id, 1, id FROM audit_log INDEXED BY idx_reconcile_audit_log_source_id
                 WHERE source_id = ?1 AND (?2 IS NULL OR id > ?2)
                 ORDER BY id LIMIT ?3
             "#,
         }),
         _ => None,
     }
+}
+
+struct LegacyReconciliationPhaseSpec {
+    direct_owner_select_sql: &'static str,
+    indirect_owner_scan_sql: Option<&'static str>,
+}
+
+fn legacy_reconciliation_phase_spec(phase: i64) -> Option<LegacyReconciliationPhaseSpec> {
+    let spec = match phase {
+        CLEANUP_PHASE_LINKS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM history_record_links AS entity
+                     INDEXED BY idx_history_record_links_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_FILES => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM files_touched AS entity INDEXED BY idx_files_touched_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: Some(
+                r#"
+                SELECT entity.id,
+                       entity.source_id IS NULL AND COALESCE(
+                         (SELECT event.capture_source_id
+                          FROM events AS event WHERE event.id = entity.event_id),
+                         (SELECT session.capture_source_id
+                          FROM events AS event
+                          JOIN sessions AS session ON session.id = event.session_id
+                          WHERE event.id = entity.event_id),
+                         (SELECT run.source_id
+                          FROM events AS event
+                          JOIN runs AS run ON run.id = event.run_id
+                          WHERE event.id = entity.event_id),
+                         (SELECT run.source_id
+                          FROM runs AS run WHERE run.id = entity.run_id),
+                         (SELECT session.capture_source_id
+                          FROM runs AS run
+                          JOIN sessions AS session ON session.id = run.session_id
+                          WHERE run.id = entity.run_id)
+                       ) = ?1,
+                       CAST(entity.rowid AS TEXT)
+                FROM files_touched AS entity
+                WHERE entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            ),
+        },
+        CLEANUP_PHASE_EDGES => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM session_edges AS entity INDEXED BY idx_session_edges_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: Some(
+                r#"
+                SELECT entity.id,
+                       entity.source_id IS NULL AND COALESCE(
+                         (SELECT session.capture_source_id
+                          FROM sessions AS session
+                          WHERE session.id = entity.from_session_id),
+                         (SELECT session.capture_source_id
+                          FROM sessions AS session
+                          WHERE session.id = entity.to_session_id)
+                       ) = ?1,
+                       CAST(entity.rowid AS TEXT)
+                FROM session_edges AS entity
+                WHERE entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            ),
+        },
+        CLEANUP_PHASE_SUMMARIES => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM summaries AS entity INDEXED BY idx_summaries_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_EVENTS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM events AS entity INDEXED BY idx_events_capture_source_id
+                WHERE entity.capture_source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: Some(
+                r#"
+                SELECT entity.id,
+                       entity.capture_source_id IS NULL AND COALESCE(
+                         (SELECT session.capture_source_id
+                          FROM sessions AS session WHERE session.id = entity.session_id),
+                         (SELECT run_session.capture_source_id
+                          FROM runs AS run
+                          JOIN sessions AS run_session ON run_session.id = run.session_id
+                          WHERE run.id = entity.run_id),
+                         (SELECT run.source_id
+                          FROM runs AS run WHERE run.id = entity.run_id)
+                       ) = ?1,
+                       CAST(entity.rowid AS TEXT)
+                FROM events AS entity
+                WHERE entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            ),
+        },
+        CLEANUP_PHASE_RUNS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM runs AS entity INDEXED BY idx_runs_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: Some(
+                r#"
+                SELECT entity.id,
+                       entity.source_id IS NULL AND (
+                         SELECT session.capture_source_id
+                         FROM sessions AS session
+                         WHERE session.id = entity.session_id
+                       ) = ?1,
+                       CAST(entity.rowid AS TEXT)
+                FROM runs AS entity
+                WHERE entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            ),
+        },
+        CLEANUP_PHASE_SESSIONS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM sessions AS entity INDEXED BY idx_sessions_capture_source_id
+                WHERE entity.capture_source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_VCS_CHANGES => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM vcs_changes AS entity INDEXED BY idx_vcs_changes_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: Some(
+                r#"
+                SELECT entity.id,
+                       entity.source_id IS NULL AND (
+                         SELECT workspace.source_id
+                         FROM vcs_workspaces AS workspace
+                         WHERE workspace.id = entity.vcs_workspace_id
+                       ) = ?1,
+                       CAST(entity.rowid AS TEXT)
+                FROM vcs_changes AS entity
+                WHERE entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            ),
+        },
+        CLEANUP_PHASE_ARTIFACTS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM artifacts AS entity INDEXED BY idx_artifacts_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_HISTORY_RECORD_TAGS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT CAST(entity.rowid AS TEXT), 1, CAST(entity.rowid AS TEXT)
+                FROM history_record_tags AS entity
+                     INDEXED BY idx_history_record_tags_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_RECORD_EDGES => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM record_edges AS entity INDEXED BY idx_record_edges_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_HISTORY_RECORDS => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM history_records AS entity INDEXED BY idx_history_records_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_VCS_WORKSPACES => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM vcs_workspaces AS entity INDEXED BY idx_vcs_workspaces_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        CLEANUP_PHASE_AUDIT_LOG => LegacyReconciliationPhaseSpec {
+            direct_owner_select_sql: r#"
+                SELECT entity.id, 1, CAST(entity.rowid AS TEXT)
+                FROM audit_log AS entity INDEXED BY idx_audit_log_source_id
+                WHERE entity.source_id = ?1
+                  AND entity.rowid > COALESCE(?2, -9223372036854775808)
+                ORDER BY entity.rowid LIMIT ?3
+            "#,
+            indirect_owner_scan_sql: None,
+        },
+        _ => return None,
+    };
+    Some(spec)
 }
