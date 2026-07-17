@@ -36,9 +36,13 @@ impl Store {
             ImportPendingWorkSelectionMode::Projection => self
                 .conn
                 .query_row(
-                    "SELECT COUNT(*) = 2 AND COALESCE(MIN(completed), 0) = 1 \
-                 FROM import_pending_reason_repairs \
-                 WHERE inventory_family IN ('catalog_sessions', 'source_import_files')",
+                    "SELECT state.projection_version = 2 \
+                        AND state.legacy_cleanup_complete = 1 \
+                        AND state.material_scan_complete = 1 \
+                        AND (SELECT COUNT(*) = 2 AND COALESCE(MIN(completed), 0) = 1 \
+                             FROM import_pending_reason_repairs \
+                             WHERE inventory_family IN ('catalog_sessions', 'source_import_files')) \
+                     FROM import_pending_work_state AS state WHERE state.singleton = 1",
                     [],
                     |row| row.get(0),
                 )
@@ -86,9 +90,23 @@ impl Store {
         let timeout = max_sqlite_time.max(Duration::from_millis(1));
         let started = std::time::Instant::now();
         let progress_started = started;
+        self.conn.busy_timeout(Duration::ZERO)?;
         self.conn
             .progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
+        let begin = self.conn.execute_batch("BEGIN IMMEDIATE");
+        if let Err(error) = begin {
+            self.conn.progress_handler(0, None::<fn() -> bool>);
+            self.conn.busy_timeout(self.busy_timeout)?;
+            if import_pending_repair_busy(&error) {
+                return Err(StoreError::ImportPendingWorkRepairBusy);
+            }
+            return Err(error.into());
+        }
         let result = (|| -> Result<()> {
+            if self.rearm_uninitialized_legacy_material_scan()? {
+                progress.visited_rows = 1;
+                progress.processed_bytes = 1;
+            }
             while progress.visited_rows < max_rows && progress.processed_bytes < max_bytes {
                 if started.elapsed() >= timeout {
                     break;
@@ -106,12 +124,6 @@ impl Store {
                         progress.classified_rows = progress
                             .classified_rows
                             .saturating_add(step.classified_rows);
-                        let state = self.import_pending_reason_repair_progress()?;
-                        progress.completed_families = state.completed_families;
-                        progress.complete = state.complete;
-                        if progress.complete {
-                            break;
-                        }
                     }
                     Ok(None) => break,
                     Err(error) if import_pending_repair_interrupted(&error) => break,
@@ -120,8 +132,26 @@ impl Store {
             }
             Ok(())
         })();
+        let result = match result {
+            Ok(()) => match self.conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    Err(StoreError::from(error))
+                }
+            },
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        };
         self.conn.progress_handler(0, None::<fn() -> bool>);
+        self.conn.busy_timeout(self.busy_timeout)?;
         result?;
+        progress.committed_transactions = 1;
+        let state = self.import_pending_reason_repair_progress()?;
+        progress.completed_families = state.completed_families;
+        progress.complete = state.complete;
         if !progress.complete && progress.visited_rows == 0 {
             return Err(StoreError::ImportPendingWorkRepairTimedOut {
                 timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -130,15 +160,36 @@ impl Store {
         Ok(progress)
     }
 
+    fn rearm_uninitialized_legacy_material_scan(&self) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE import_pending_work_state \
+             SET material_scan_complete = 0 \
+             WHERE singleton = 1 AND selection_mode = 'projection' \
+               AND projection_version = 2 AND material_scan_complete = 1 \
+               AND EXISTS (SELECT 1 FROM capture_sources \
+                           WHERE rowid > material_cursor_rowid LIMIT 1)",
+            [],
+        )?;
+        Ok(changed == 1)
+    }
+
     fn import_pending_reason_repair_progress(&self) -> Result<ImportPendingReasonRepairProgress> {
         let completed_families = self.conn.query_row(
             "SELECT COUNT(*) FROM import_pending_reason_repairs WHERE completed = 1",
             [],
             |row| row.get(0),
         )?;
+        let state_ready = self.conn.query_row(
+            "SELECT projection_version = 2 AND legacy_cleanup_complete = 1 \
+                    AND material_scan_complete = 1 \
+             FROM import_pending_work_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
         Ok(ImportPendingReasonRepairProgress {
             completed_families,
-            complete: completed_families == ImportPendingReasonRepairFamily::ALL.len(),
+            complete: state_ready
+                && completed_families == ImportPendingReasonRepairFamily::ALL.len(),
             ..ImportPendingReasonRepairProgress::default()
         })
     }
@@ -148,265 +199,435 @@ impl Store {
         byte_budget: usize,
         max_bytes: usize,
     ) -> Result<Option<ImportPendingReasonRepairStep>> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let step = self.advance_import_pending_reason_repair_step_inner();
-        match step {
-            Ok(step) if step.processed_bytes <= byte_budget => {
-                if let Err(error) = self.conn.execute_batch("COMMIT") {
-                    let _ = self.conn.execute_batch("ROLLBACK");
-                    return Err(error.into());
-                }
-                Ok(Some(step))
-            }
-            Ok(step) => {
-                self.conn.execute_batch("ROLLBACK")?;
-                if step.processed_bytes > max_bytes {
-                    Err(StoreError::ImportPendingWorkRepairUnitTooLarge {
-                        bytes: step.processed_bytes,
-                        max_bytes,
-                    })
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
+        if let Some(step) = self.cleanup_legacy_pending_projection(byte_budget, max_bytes)? {
+            return Ok(Some(step));
         }
-    }
-
-    fn advance_import_pending_reason_repair_step_inner(
-        &self,
-    ) -> Result<ImportPendingReasonRepairStep> {
-        let repair = self
-            .conn
-            .query_row(
-                r#"
-            SELECT inventory_family, cursor_provider, cursor_source_root, cursor_source_path
-            FROM import_pending_reason_repairs
-            WHERE completed = 0
-            ORDER BY CASE inventory_family WHEN 'catalog_sessions' THEN 0 ELSE 1 END
-            LIMIT 1
-            "#,
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((family, cursor_provider, cursor_source_root, cursor_source_path)) = repair else {
-            return Ok(ImportPendingReasonRepairStep {
+        if let Some(step) = self.advance_legacy_material_owner_scan(byte_budget, max_bytes)? {
+            return Ok(Some(step));
+        }
+        let Some((family, cursor_rowid)) = self.next_pending_reason_repair_family()? else {
+            return Ok(Some(ImportPendingReasonRepairStep {
                 visited_rows: 1,
                 processed_rows: 0,
                 processed_bytes: 1,
                 classified_rows: 0,
-            });
+            }));
         };
-        let family = ImportPendingReasonRepairFamily::from_str(&family)?;
-        let source_cursor = (family == ImportPendingReasonRepairFamily::SourceImportFiles)
-            .then(|| SourceImportPendingRepairCursor::from_ledger(cursor_source_path.as_deref()));
-        let completed_source_path = match family {
-            ImportPendingReasonRepairFamily::CatalogSessions => cursor_source_path.as_deref(),
-            ImportPendingReasonRepairFamily::SourceImportFiles => source_cursor
-                .as_ref()
-                .and_then(|cursor| cursor.completed_path.as_deref()),
-        };
-        let row = self.next_import_pending_reason_repair_row(
-            family,
-            cursor_provider.as_deref(),
-            cursor_source_root.as_deref(),
-            completed_source_path,
-        )?;
-        let Some(row) = row else {
+        let Some(preflight) =
+            self.next_import_pending_reason_repair_preflight(family, cursor_rowid)?
+        else {
             self.conn.execute(
                 "UPDATE import_pending_reason_repairs SET completed = 1 \
                  WHERE inventory_family = ?1",
                 [family.as_str()],
             )?;
-            return Ok(ImportPendingReasonRepairStep {
+            return Ok(Some(ImportPendingReasonRepairStep {
                 visited_rows: 1,
                 processed_rows: 0,
                 processed_bytes: 1,
                 classified_rows: 0,
-            });
+            }));
         };
-
-        let row_bytes = row.estimated_bytes();
-        let mut processed_bytes = row_bytes;
+        if preflight.estimated_bytes > max_bytes {
+            return Err(StoreError::ImportPendingWorkRepairUnitTooLarge {
+                bytes: preflight.estimated_bytes,
+                max_bytes,
+            });
+        }
+        if preflight.estimated_bytes > byte_budget {
+            return Ok(None);
+        }
+        let row = self.load_import_pending_reason_repair_row(family, preflight.rowid)?;
         let mut requires_work = row.requires_work_without_material();
         if row.requires_material_check() {
-            match family {
+            requires_work = match family {
                 ImportPendingReasonRepairFamily::CatalogSessions => {
-                    requires_work = !self.catalog_repair_material_exists(&row)?;
+                    !self.catalog_repair_material_exists(&row)?
                 }
                 ImportPendingReasonRepairFamily::SourceImportFiles => {
-                    if let Some(material_exists) =
-                        self.source_repair_direct_material_exists(&row)?
-                    {
-                        requires_work = !material_exists;
-                    } else {
-                        let mut cursor = source_cursor.unwrap_or_default();
-                        if !cursor.active_matches(&row) {
-                            cursor.active_provider = Some(row.provider.clone());
-                            cursor.active_source_root = Some(row.source_root.clone());
-                            cursor.active_source_path = Some(row.source_path.clone());
-                            cursor.material_rowid = 0;
-                        }
-                        if let Some(source) =
-                            self.next_legacy_capture_source(cursor.material_rowid)?
-                        {
-                            let source_matches = legacy_capture_source_matches(&source, &row)?;
-                            processed_bytes = row_bytes.saturating_add(source.estimated_bytes);
-                            if source_matches {
-                                requires_work = false;
-                            } else {
-                                cursor.material_rowid = source.rowid;
-                                self.conn.execute(
-                                    "UPDATE import_pending_reason_repairs \
-                                     SET cursor_source_path = ?2 \
-                                     WHERE inventory_family = ?1",
-                                    params![family.as_str(), cursor.encode()?],
-                                )?;
-                                return Ok(ImportPendingReasonRepairStep {
-                                    visited_rows: 1,
-                                    processed_rows: 0,
-                                    processed_bytes,
-                                    classified_rows: 0,
-                                });
-                            }
-                        } else {
-                            requires_work = true;
-                        }
-                    }
+                    !self.source_repair_material_exists(&row)?
                 }
-            }
+            };
         }
-
         let classified_rows = self.resync_import_pending_reason_row(family, &row, requires_work)?;
         self.advance_import_pending_reason_repair_cursor(family, &row)?;
-        Ok(ImportPendingReasonRepairStep {
+        Ok(Some(ImportPendingReasonRepairStep {
             visited_rows: 1,
             processed_rows: 1,
-            processed_bytes,
+            processed_bytes: preflight.estimated_bytes,
             classified_rows,
-        })
+        }))
     }
 
-    fn next_import_pending_reason_repair_row(
+    fn cleanup_legacy_pending_projection(
         &self,
-        family: ImportPendingReasonRepairFamily,
-        cursor_provider: Option<&str>,
-        cursor_source_root: Option<&str>,
-        cursor_source_path: Option<&str>,
-    ) -> Result<Option<ImportPendingReasonRepairRow>> {
-        let (sql, values): (&str, Vec<rusqlite::types::Value>) = match (
-            family,
-            cursor_provider,
-            cursor_source_root,
-            cursor_source_path,
-        ) {
-            (ImportPendingReasonRepairFamily::CatalogSessions, _, _, None) => (
-                r#"
-                SELECT provider, source_format, source_root, source_path,
-                       external_session_id, metadata_json, indexed_status,
-                       indexed_file_size_bytes, indexed_file_modified_at_ms,
-                       file_size_bytes, file_modified_at_ms, import_revision,
-                       indexed_import_revision, is_stale, pending_reason
-                FROM catalog_sessions
-                ORDER BY source_path
-                LIMIT 1
-                "#,
-                Vec::new(),
-            ),
-            (ImportPendingReasonRepairFamily::CatalogSessions, _, _, Some(source_path)) => (
-                r#"
-                SELECT provider, source_format, source_root, source_path,
-                       external_session_id, metadata_json, indexed_status,
-                       indexed_file_size_bytes, indexed_file_modified_at_ms,
-                       file_size_bytes, file_modified_at_ms, import_revision,
-                       indexed_import_revision, is_stale, pending_reason
-                FROM catalog_sessions
-                WHERE source_path > ?1
-                ORDER BY source_path
-                LIMIT 1
-                "#,
-                vec![source_path.to_owned().into()],
-            ),
-            (ImportPendingReasonRepairFamily::SourceImportFiles, None, _, _) => (
-                r#"
-                SELECT provider, source_format, source_root, source_path,
-                       NULL, metadata_json, indexed_status,
-                       indexed_file_size_bytes, indexed_file_modified_at_ms,
-                       file_size_bytes, file_modified_at_ms, import_revision,
-                       indexed_import_revision, is_stale, pending_reason
-                FROM source_import_files
-                ORDER BY provider, source_root, source_path
-                LIMIT 1
-                "#,
-                Vec::new(),
-            ),
-            (
-                ImportPendingReasonRepairFamily::SourceImportFiles,
-                Some(provider),
-                Some(source_root),
-                Some(source_path),
-            ) => (
-                r#"
-                SELECT provider, source_format, source_root, source_path,
-                       NULL, metadata_json, indexed_status,
-                       indexed_file_size_bytes, indexed_file_modified_at_ms,
-                       file_size_bytes, file_modified_at_ms, import_revision,
-                       indexed_import_revision, is_stale, pending_reason
-                FROM source_import_files
-                WHERE (provider, source_root, source_path) > (?1, ?2, ?3)
-                ORDER BY provider, source_root, source_path
-                LIMIT 1
-                "#,
-                vec![
-                    provider.to_owned().into(),
-                    source_root.to_owned().into(),
-                    source_path.to_owned().into(),
-                ],
-            ),
-            (ImportPendingReasonRepairFamily::SourceImportFiles, _, _, _) => {
+        byte_budget: usize,
+        max_bytes: usize,
+    ) -> Result<Option<ImportPendingReasonRepairStep>> {
+        let (cleanup_complete, phase, cursor_family, cursor_provider, cursor_root, cursor_tail) =
+            self.conn.query_row(
+                "SELECT legacy_cleanup_complete, legacy_cleanup_phase, \
+                    legacy_cleanup_inventory_family, legacy_cleanup_provider, \
+                    legacy_cleanup_source_root, legacy_cleanup_tail \
+             FROM import_pending_work_state WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )?;
+        if cleanup_complete {
+            return Ok(None);
+        }
+        let (table, tail_column) = match phase.as_str() {
+            "work" => ("import_pending_work", "source_path"),
+            "counts" => ("import_pending_work_counts", "work_class"),
+            _ => {
                 return Err(StoreError::ImportInventorySchemaIncompatible(
-                    "incomplete source pending-work repair cursor",
+                    "invalid pending-work legacy cleanup phase",
                 ));
             }
         };
-        self.conn
-            .query_row(sql, rusqlite::params_from_iter(values), |row| {
-                let indexed_status = parse_text_enum::<CatalogIndexedStatus>(row.get(6)?)?;
-                let import_revision = row.get::<_, i64>(11)?;
-                let indexed_import_revision = row.get::<_, Option<i64>>(12)?;
-                Ok(ImportPendingReasonRepairRow {
-                    provider: row.get(0)?,
-                    source_format: row.get(1)?,
+        let keyset_predicate =
+            format!("(inventory_family, provider, source_root, {tail_column}) > (?1, ?2, ?3, ?4)");
+        let preflight_sql = format!(
+            "SELECT length(CAST(inventory_family AS BLOB)) \
+                    + length(CAST(provider AS BLOB)) \
+                    + length(CAST(source_root AS BLOB)) \
+                    + length(CAST({tail_column} AS BLOB)) + 128 \
+             FROM {table} \
+             WHERE projection_version != 2 AND {keyset_predicate} \
+             ORDER BY inventory_family, provider, source_root, {tail_column} LIMIT 1"
+        );
+        let estimated_bytes = self
+            .conn
+            .query_row(
+                &preflight_sql,
+                params![&cursor_family, &cursor_provider, &cursor_root, &cursor_tail],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(pending_repair_estimated_bytes);
+        let Some(estimated_bytes) = estimated_bytes else {
+            if phase == "work" {
+                self.conn.execute(
+                    "UPDATE import_pending_work_state \
+                     SET legacy_cleanup_phase = 'counts', \
+                         legacy_cleanup_inventory_family = '', \
+                         legacy_cleanup_provider = '', legacy_cleanup_source_root = '', \
+                         legacy_cleanup_tail = '' WHERE singleton = 1",
+                    [],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE import_pending_work_state SET legacy_cleanup_complete = 1 \
+                     WHERE singleton = 1",
+                    [],
+                )?;
+            }
+            return Ok(Some(ImportPendingReasonRepairStep {
+                visited_rows: 1,
+                processed_rows: 0,
+                processed_bytes: 1,
+                classified_rows: 0,
+            }));
+        };
+        if estimated_bytes > max_bytes {
+            return Err(StoreError::ImportPendingWorkRepairUnitTooLarge {
+                bytes: estimated_bytes,
+                max_bytes,
+            });
+        }
+        if estimated_bytes > byte_budget {
+            return Ok(None);
+        }
+        let load_sql = format!(
+            "SELECT inventory_family, provider, source_root, {tail_column} \
+             FROM {table} \
+             WHERE projection_version != 2 AND {keyset_predicate} \
+             ORDER BY inventory_family, provider, source_root, {tail_column} LIMIT 1"
+        );
+        let row = self.conn.query_row(
+            &load_sql,
+            params![&cursor_family, &cursor_provider, &cursor_root, &cursor_tail],
+            |row| {
+                Ok(LegacyPendingProjectionRow {
+                    inventory_family: row.get(0)?,
+                    provider: row.get(1)?,
                     source_root: row.get(2)?,
-                    source_path: row.get(3)?,
-                    external_session_id: row.get(4)?,
-                    metadata_json: row.get(5)?,
+                    tail: row.get(3)?,
+                    estimated_bytes,
+                })
+            },
+        )?;
+        let delete_sql = format!(
+            "DELETE FROM {table} WHERE projection_version != 2 \
+             AND inventory_family = ?1 AND provider = ?2 \
+             AND source_root = ?3 AND {tail_column} = ?4"
+        );
+        let deleted = self.conn.execute(
+            &delete_sql,
+            params![
+                &row.inventory_family,
+                &row.provider,
+                &row.source_root,
+                &row.tail
+            ],
+        )?;
+        if deleted != 1 {
+            return Err(StoreError::ImportInventorySchemaIncompatible(
+                "pending-work legacy cleanup lost its keyset row",
+            ));
+        }
+        self.conn.execute(
+            "UPDATE import_pending_work_state \
+             SET legacy_cleanup_inventory_family = ?1, legacy_cleanup_provider = ?2, \
+                 legacy_cleanup_source_root = ?3, legacy_cleanup_tail = ?4 \
+             WHERE singleton = 1",
+            params![
+                &row.inventory_family,
+                &row.provider,
+                &row.source_root,
+                &row.tail
+            ],
+        )?;
+        Ok(Some(ImportPendingReasonRepairStep {
+            visited_rows: 1,
+            processed_rows: 1,
+            processed_bytes: row.estimated_bytes,
+            classified_rows: 0,
+        }))
+    }
+
+    fn advance_legacy_material_owner_scan(
+        &self,
+        byte_budget: usize,
+        max_bytes: usize,
+    ) -> Result<Option<ImportPendingReasonRepairStep>> {
+        let (cursor, complete) = self.conn.query_row(
+            "SELECT material_cursor_rowid, material_scan_complete \
+             FROM import_pending_work_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )?;
+        if complete {
+            return Ok(None);
+        }
+        let preflight = self
+            .conn
+            .query_row(
+                r#"
+                SELECT rowid,
+                       length(CAST(id AS BLOB)) + length(CAST(provider AS BLOB))
+                         + COALESCE(length(CAST(source_format AS BLOB)), 0)
+                         + COALESCE(length(CAST(source_identity AS BLOB)), 0)
+                         + COALESCE(length(CAST(source_root AS BLOB)), 0)
+                         + COALESCE(length(CAST(raw_source_path AS BLOB)), 0) + 128
+                FROM capture_sources WHERE rowid > ?1 ORDER BY rowid LIMIT 1
+                "#,
+                [cursor],
+                |row| {
+                    Ok(ImportPendingReasonRepairPreflight {
+                        rowid: row.get(0)?,
+                        estimated_bytes: pending_repair_estimated_bytes(row.get(1)?),
+                    })
+                },
+            )
+            .optional()?;
+        let Some(preflight) = preflight else {
+            self.conn.execute(
+                "UPDATE import_pending_work_state SET material_scan_complete = 1 \
+                 WHERE singleton = 1",
+                [],
+            )?;
+            return Ok(Some(ImportPendingReasonRepairStep {
+                visited_rows: 1,
+                processed_rows: 0,
+                processed_bytes: 1,
+                classified_rows: 0,
+            }));
+        };
+        if preflight.estimated_bytes > max_bytes {
+            return Err(StoreError::ImportPendingWorkRepairUnitTooLarge {
+                bytes: preflight.estimated_bytes,
+                max_bytes,
+            });
+        }
+        if preflight.estimated_bytes > byte_budget {
+            return Ok(None);
+        }
+        let source = self.conn.query_row(
+            "SELECT rowid, id, provider, source_format, source_root, raw_source_path \
+             FROM capture_sources WHERE rowid = ?1",
+            [preflight.rowid],
+            |row| {
+                Ok(LegacyCaptureSourceRow {
+                    rowid: row.get(0)?,
+                    id: row.get(1)?,
+                    provider: row.get(2)?,
+                    source_format: row.get(3)?,
+                    source_root: row.get(4)?,
+                    raw_source_path: row.get(5)?,
+                })
+            },
+        )?;
+        self.project_legacy_material_owner(&source)?;
+        self.conn.execute(
+            "UPDATE import_pending_work_state SET material_cursor_rowid = ?1 \
+             WHERE singleton = 1",
+            [source.rowid],
+        )?;
+        Ok(Some(ImportPendingReasonRepairStep {
+            visited_rows: 1,
+            processed_rows: 1,
+            processed_bytes: preflight.estimated_bytes,
+            classified_rows: 0,
+        }))
+    }
+
+    fn project_legacy_material_owner(&self, source: &LegacyCaptureSourceRow) -> Result<()> {
+        let Some(source_format) = source.source_format.as_deref() else {
+            return Ok(());
+        };
+        if let Some(source_root) = source
+            .source_root
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO import_pending_legacy_material_owners (\
+                   projection_version, owner_kind, provider, source_format, \
+                   owner_source_root, source_path, capture_source_id\
+                 ) VALUES (2, 'root', ?1, ?2, ?3, '', ?4)",
+                params![&source.provider, source_format, source_root, &source.id],
+            )?;
+        }
+        if let Some(raw_path) = source
+            .raw_source_path
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            let owner_root = match source.source_root.as_deref() {
+                Some(root) if root != raw_path => root,
+                _ => "",
+            };
+            self.conn.execute(
+                "INSERT OR IGNORE INTO import_pending_legacy_material_owners (\
+                   projection_version, owner_kind, provider, source_format, \
+                   owner_source_root, source_path, capture_source_id\
+                 ) VALUES (2, 'path', ?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &source.provider,
+                    source_format,
+                    owner_root,
+                    raw_path,
+                    &source.id
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn next_pending_reason_repair_family(
+        &self,
+    ) -> Result<Option<(ImportPendingReasonRepairFamily, i64)>> {
+        self.conn
+            .query_row(
+                "SELECT inventory_family, cursor_rowid FROM import_pending_reason_repairs \
+                 WHERE completed = 0 \
+                 ORDER BY CASE inventory_family WHEN 'catalog_sessions' THEN 0 ELSE 1 END \
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(family, cursor)| {
+                Ok((ImportPendingReasonRepairFamily::from_str(&family)?, cursor))
+            })
+            .transpose()
+    }
+
+    fn next_import_pending_reason_repair_preflight(
+        &self,
+        family: ImportPendingReasonRepairFamily,
+        cursor_rowid: i64,
+    ) -> Result<Option<ImportPendingReasonRepairPreflight>> {
+        let table = family.as_str();
+        let external_session = if family == ImportPendingReasonRepairFamily::CatalogSessions {
+            "COALESCE(length(CAST(external_session_id AS BLOB)), 0) +"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT rowid, length(CAST(provider AS BLOB)) \
+               + length(CAST(source_format AS BLOB)) + length(CAST(source_root AS BLOB)) \
+               + length(CAST(source_path AS BLOB)) + {external_session} \
+                 length(CAST(metadata_json AS BLOB)) + 256 \
+             FROM {table} WHERE rowid > ?1 ORDER BY rowid LIMIT 1"
+        );
+        self.conn
+            .query_row(&sql, [cursor_rowid], |row| {
+                Ok(ImportPendingReasonRepairPreflight {
+                    rowid: row.get(0)?,
+                    estimated_bytes: pending_repair_estimated_bytes(row.get(1)?),
+                })
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn load_import_pending_reason_repair_row(
+        &self,
+        family: ImportPendingReasonRepairFamily,
+        rowid: i64,
+    ) -> Result<ImportPendingReasonRepairRow> {
+        let (table, external_session) = match family {
+            ImportPendingReasonRepairFamily::CatalogSessions => {
+                ("catalog_sessions", "external_session_id")
+            }
+            ImportPendingReasonRepairFamily::SourceImportFiles => ("source_import_files", "NULL"),
+        };
+        let sql = format!(
+            "SELECT rowid, provider, source_format, source_root, source_path, \
+                    {external_session}, metadata_json, indexed_status, \
+                    indexed_file_size_bytes, indexed_file_modified_at_ms, \
+                    file_size_bytes, file_modified_at_ms, import_revision, \
+                    indexed_import_revision, is_stale, pending_reason \
+             FROM {table} WHERE rowid = ?1"
+        );
+        self.conn
+            .query_row(&sql, [rowid], |row| {
+                let indexed_status = parse_text_enum::<CatalogIndexedStatus>(row.get(7)?)?;
+                let import_revision = row.get::<_, i64>(12)?;
+                let indexed_import_revision = row.get::<_, Option<i64>>(13)?;
+                Ok(ImportPendingReasonRepairRow {
+                    rowid: row.get(0)?,
+                    provider: row.get(1)?,
+                    source_format: row.get(2)?,
+                    source_root: row.get(3)?,
+                    source_path: row.get(4)?,
+                    external_session_id: row.get(5)?,
+                    metadata_json: row.get(6)?,
                     indexed_status,
-                    indexed_file_size_bytes: row.get(7)?,
-                    indexed_file_modified_at_ms: row.get(8)?,
-                    file_size_bytes: row.get(9)?,
-                    file_modified_at_ms: row.get(10)?,
+                    indexed_file_size_bytes: row.get(8)?,
+                    indexed_file_modified_at_ms: row.get(9)?,
+                    file_size_bytes: row.get(10)?,
+                    file_modified_at_ms: row.get(11)?,
                     import_revision,
                     indexed_import_revision,
-                    is_stale: row.get(13)?,
-                    pending_reason: row.get(14)?,
+                    is_stale: row.get(14)?,
+                    pending_reason: row.get(15)?,
                     grandfather_indexed_revision: indexed_status == CatalogIndexedStatus::Indexed
                         && indexed_import_revision.is_none()
                         && import_revision == 1,
                 })
             })
-            .optional()
             .map_err(Into::into)
     }
 
@@ -414,7 +635,7 @@ impl Store {
         let Some(external_session_id) = row.external_session_id.as_deref() else {
             return Ok(false);
         };
-        let provider = CaptureProvider::from_str(&row.provider)?;
+        let provider = pending_repair_capture_provider(&row.provider)?;
         let material_source_format = expected_material_source_format(provider, &row.source_format);
         self.conn
             .query_row(
@@ -451,20 +672,50 @@ impl Store {
             .map_err(Into::into)
     }
 
-    fn source_repair_direct_material_exists(
-        &self,
-        row: &ImportPendingReasonRepairRow,
-    ) -> Result<Option<bool>> {
+    fn source_repair_material_exists(&self, row: &ImportPendingReasonRepairRow) -> Result<bool> {
         let metadata: Value = serde_json::from_str(&row.metadata_json)?;
-        if metadata.get("inventory_unit").and_then(Value::as_str) != Some("source_root") {
-            return Ok(None);
-        }
-        let provider = CaptureProvider::from_str(&row.provider)?;
+        let provider = pending_repair_capture_provider(&row.provider)?;
         let source_format = expected_material_source_format(provider, &row.source_format);
-        let source_identity =
-            pending_repair_source_root_identity(&row.provider, source_format, &row.source_root)?;
-        self.conn
-            .query_row(
+        let source_root_unit =
+            metadata.get("inventory_unit").and_then(Value::as_str) == Some("source_root");
+        if self.import_pending_work_selection_mode()? == ImportPendingWorkSelectionMode::Direct {
+            return self
+                .conn
+                .query_row(
+                    r#"
+                    SELECT EXISTS (
+                      SELECT 1
+                      FROM capture_sources
+                           INDEXED BY idx_capture_sources_provider_material_owner
+                      WHERE provider = ?1 AND source_format = ?2
+                        AND (
+                          (?5 AND source_root = ?3)
+                          OR (NOT ?5 AND raw_source_path = ?4 AND (
+                            source_root = ?3 OR source_root = raw_source_path
+                            OR source_root IS NULL
+                          ))
+                        )
+                      LIMIT 1
+                    )
+                    "#,
+                    params![
+                        &row.provider,
+                        source_format,
+                        &row.source_root,
+                        &row.source_path,
+                        source_root_unit
+                    ],
+                    |result| result.get(0),
+                )
+                .map_err(Into::into);
+        }
+        if source_root_unit {
+            let source_identity = pending_repair_source_root_identity(
+                &row.provider,
+                source_format,
+                &row.source_root,
+            )?;
+            let identity_exists = self.conn.query_row(
                 r#"
             SELECT EXISTS (
               SELECT 1
@@ -481,40 +732,39 @@ impl Store {
                     &row.source_root
                 ],
                 |result| result.get(0),
-            )
-            .map(Some)
-            .map_err(Into::into)
-    }
-
-    fn next_legacy_capture_source(
-        &self,
-        after_rowid: i64,
-    ) -> Result<Option<LegacyCaptureSourceRow>> {
+            )?;
+            if identity_exists {
+                return Ok(true);
+            }
+        }
+        let (owner_kind, owner_root, source_path) = if source_root_unit {
+            ("root", row.source_root.as_str(), "")
+        } else {
+            ("path", row.source_root.as_str(), row.source_path.as_str())
+        };
         self.conn
             .query_row(
                 r#"
-            SELECT rowid, provider, source_format, source_root, raw_source_path,
-                   length(provider) + COALESCE(length(source_format), 0)
-                     + COALESCE(length(source_root), 0)
-                     + COALESCE(length(raw_source_path), 0) + 128
-            FROM capture_sources
-            WHERE rowid > ?1
-            ORDER BY rowid
-            LIMIT 1
-            "#,
-                [after_rowid],
-                |source| {
-                    Ok(LegacyCaptureSourceRow {
-                        rowid: source.get(0)?,
-                        provider: source.get(1)?,
-                        source_format: source.get(2)?,
-                        source_root: source.get(3)?,
-                        raw_source_path: source.get(4)?,
-                        estimated_bytes: source.get::<_, usize>(5)?.max(1),
-                    })
-                },
+                SELECT EXISTS (
+                  SELECT 1
+                  FROM import_pending_legacy_material_owners AS owner
+                  JOIN capture_sources AS source ON source.id = owner.capture_source_id
+                  WHERE owner.projection_version = 2 AND owner.owner_kind = ?1
+                    AND owner.provider = ?2 AND owner.source_format = ?3
+                    AND owner.source_path = ?5
+                    AND (owner.owner_source_root = ?4 OR owner.owner_source_root = '')
+                  LIMIT 1
+                )
+                "#,
+                params![
+                    owner_kind,
+                    &row.provider,
+                    source_format,
+                    owner_root,
+                    source_path
+                ],
+                |result| result.get(0),
             )
-            .optional()
             .map_err(Into::into)
     }
 
@@ -577,12 +827,16 @@ impl Store {
                 r#"
                 INSERT INTO import_pending_work (
                   inventory_family, provider, source_root, source_path,
-                  work_class, indexed_at_ms
+                  work_class, indexed_at_ms, projection_version
                 )
-                SELECT 'catalog_sessions', provider, source_root, source_path, ?2, indexed_at_ms
+                SELECT 'catalog_sessions', provider, source_root, source_path, ?2, indexed_at_ms, 2
                 FROM catalog_sessions
                 WHERE source_path = ?1
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (inventory_family, provider, source_root, source_path)
+                DO UPDATE SET work_class = excluded.work_class,
+                              indexed_at_ms = excluded.indexed_at_ms,
+                              projection_version = 2
+                WHERE import_pending_work.projection_version != 2
                 "#,
                 params![&row.source_path, class.as_str()],
             )?,
@@ -590,13 +844,17 @@ impl Store {
                 r#"
                 INSERT INTO import_pending_work (
                   inventory_family, provider, source_root, source_path,
-                  work_class, indexed_at_ms
+                  work_class, indexed_at_ms, projection_version
                 )
                 SELECT 'source_import_files', provider, source_root, source_path,
-                       ?4, indexed_at_ms
+                       ?4, indexed_at_ms, 2
                 FROM source_import_files
                 WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (inventory_family, provider, source_root, source_path)
+                DO UPDATE SET work_class = excluded.work_class,
+                              indexed_at_ms = excluded.indexed_at_ms,
+                              projection_version = 2
+                WHERE import_pending_work.projection_version != 2
                 "#,
                 params![
                     &row.provider,
@@ -610,10 +868,14 @@ impl Store {
             self.conn.execute(
                 r#"
                 INSERT INTO import_pending_work_counts (
-                  inventory_family, provider, source_root, work_class, pending_count
-                ) VALUES (?1, ?2, ?3, ?4, 1)
+                  inventory_family, provider, source_root, work_class,
+                  pending_count, projection_version
+                ) VALUES (?1, ?2, ?3, ?4, 1, 2)
                 ON CONFLICT (inventory_family, provider, source_root, work_class)
-                DO UPDATE SET pending_count = pending_count + 1
+                DO UPDATE SET pending_count = CASE
+                    WHEN projection_version = 2 THEN pending_count + 1
+                    ELSE 1
+                END, projection_version = 2
                 "#,
                 params![
                     family.as_str(),
@@ -631,26 +893,19 @@ impl Store {
         family: ImportPendingReasonRepairFamily,
         row: &ImportPendingReasonRepairRow,
     ) -> Result<()> {
-        let cursor_source_path = match family {
-            ImportPendingReasonRepairFamily::CatalogSessions => row.source_path.clone(),
-            ImportPendingReasonRepairFamily::SourceImportFiles => SourceImportPendingRepairCursor {
-                completed_path: Some(row.source_path.clone()),
-                ..SourceImportPendingRepairCursor::default()
-            }
-            .encode()?,
-        };
         self.conn.execute(
             r#"
             UPDATE import_pending_reason_repairs
             SET cursor_provider = ?2, cursor_source_root = ?3,
-                cursor_source_path = ?4
+                cursor_source_path = ?4, cursor_rowid = ?5
             WHERE inventory_family = ?1
             "#,
             params![
                 family.as_str(),
                 &row.provider,
                 &row.source_root,
-                cursor_source_path,
+                &row.source_path,
+                row.rowid,
             ],
         )?;
         Ok(())
@@ -789,7 +1044,7 @@ impl Store {
               ELSE COALESCE((
                 SELECT pending_count FROM import_pending_work_counts
                 WHERE inventory_family = ?1 AND provider = ?2 AND source_root = ?3
-                  AND work_class = ?4
+                  AND work_class = ?4 AND projection_version = 2
               ), 0)
             END
             "#,
@@ -1176,6 +1431,21 @@ fn import_pending_repair_interrupted(error: &StoreError) -> bool {
     )
 }
 
+fn import_pending_repair_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(sqlite_error, _)
+            if matches!(
+                sqlite_error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+fn pending_repair_estimated_bytes(value: i64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX).max(1)
+}
+
 fn catalog_import_work_ordinary_sql(
     selection_mode: ImportPendingWorkSelectionMode,
     class: ImportWorkClass,
@@ -1230,7 +1500,8 @@ fn catalog_import_work_ordinary_sql(
               AND catalog.source_root = pending.source_root \
              WHERE pending.inventory_family = 'catalog_sessions' \
                AND pending.provider = ?1 AND pending.source_root = ?2 \
-               AND pending.work_class = ?3 AND ({inventory_published}) \
+               AND pending.work_class = ?3 AND pending.projection_version = 2 \
+               AND ({inventory_published}) \
              ORDER BY pending.indexed_at_ms, pending.source_path LIMIT ?4"
         ),
     }
@@ -1273,25 +1544,10 @@ fn pending_repair_fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn legacy_capture_source_matches(
-    source: &LegacyCaptureSourceRow,
-    row: &ImportPendingReasonRepairRow,
-) -> Result<bool> {
-    let provider = CaptureProvider::from_str(&row.provider)?;
-    let expected_source_format = expected_material_source_format(provider, &row.source_format);
-    if source.provider != row.provider
-        || source.source_format.as_deref() != Some(expected_source_format)
-    {
-        return Ok(false);
-    }
-    let metadata: Value = serde_json::from_str(&row.metadata_json)?;
-    if metadata.get("inventory_unit").and_then(Value::as_str) == Some("source_root") {
-        return Ok(source.source_root.as_deref() == Some(&row.source_root));
-    }
-    let raw_source_path = source.raw_source_path.as_deref();
-    let source_root = source.source_root.as_deref();
-    Ok(raw_source_path == Some(&row.source_path)
-        && (source_root == Some(&row.source_root)
-            || source_root == raw_source_path
-            || source_root.is_none()))
+fn pending_repair_capture_provider(value: &str) -> Result<CaptureProvider> {
+    CaptureProvider::from_str(value).map_err(|_| {
+        StoreError::ImportInventorySchemaIncompatible(
+            "pending-work repair encountered an invalid capture provider",
+        )
+    })
 }
