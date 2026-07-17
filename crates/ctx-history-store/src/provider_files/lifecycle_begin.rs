@@ -1,16 +1,16 @@
 impl Store {
-    pub fn begin_provider_file_publication(
+    pub fn begin_provider_file_publication<'a>(
         &self,
         provider: CaptureProvider,
         observation: ProviderFileInventoryObservation<'_>,
-        material_source_format: &str,
+        material_owner: impl Into<ProviderFilePublicationMaterialOwner<'a>>,
         kind: ProviderFilePublicationKind,
         created_at_ms: i64,
     ) -> Result<ProviderFilePublicationScope> {
         self.begin_provider_file_publication_inner(
             provider,
             observation,
-            material_source_format,
+            material_owner,
             kind,
             created_at_ms,
             || {},
@@ -132,19 +132,44 @@ impl Store {
         Ok(Some(scope))
     }
 
-    fn begin_provider_file_publication_inner(
+    fn begin_provider_file_publication_inner<'a>(
         &self,
         provider: CaptureProvider,
         observation: ProviderFileInventoryObservation<'_>,
-        material_source_format: &str,
+        material_owner: impl Into<ProviderFilePublicationMaterialOwner<'a>>,
         kind: ProviderFilePublicationKind,
         created_at_ms: i64,
         before_writer_transaction: impl FnOnce(),
     ) -> Result<ProviderFilePublicationScope> {
         validate_observation_identity(observation)?;
-        if material_source_format.trim().is_empty() {
+        let material_owner = material_owner.into();
+        if material_owner.source_format.trim().is_empty() {
             return Err(StoreError::InvalidProviderFilePublicationScope);
         }
+        let material_source_root = match (
+            material_owner.provider,
+            material_owner.inventory_family,
+            material_owner.source_root,
+        ) {
+            (None, None, None) => observation.source_root(),
+            (Some(owner_provider), Some(inventory_family), Some(source_root)) => {
+                let expected_root = match inventory_family {
+                    ProviderFileInventoryFamily::Catalog => observation.source_root(),
+                    ProviderFileInventoryFamily::SourceImport => observation.source_path(),
+                };
+                if owner_provider != provider
+                    || inventory_family != observation.inventory_family_kind()
+                    || source_root.trim().is_empty()
+                    || source_root != expected_root
+                {
+                    return Err(StoreError::InvalidProviderFilePublicationScope);
+                }
+                source_root
+            }
+            _ => return Err(StoreError::InvalidProviderFilePublicationScope),
+        }
+        .to_owned();
+        let material_source_format = material_owner.source_format.to_owned();
         self.cleanup_abandoned_provider_file_publication()?;
         if self.provider_file_publication.borrow().is_some() {
             return Err(StoreError::InvalidProviderFilePublicationScope);
@@ -153,16 +178,16 @@ impl Store {
         let scope_id = Uuid::new_v4();
         let owner_id = opaque_provider_file_owner_id(
             provider,
-            material_source_format,
-            observation.source_root(),
+            &material_source_format,
+            &material_source_root,
             observation.source_path(),
         );
         let staging_id =
             provider_file_staging_name(self.store_identity.digest(), &owner_id, scope_id);
         let (owner_lock, owner_lock_path) = self.acquire_provider_file_owner_lock(
             provider,
-            material_source_format,
-            observation.source_root(),
+            &material_source_format,
+            &material_source_root,
             observation.source_path(),
         )?;
         before_writer_transaction();
@@ -173,8 +198,8 @@ impl Store {
             inventory_source_format: observation.source_format().to_owned(),
             inventory_source_root: observation.source_root().to_owned(),
             source_path: observation.source_path().to_owned(),
-            material_source_format: material_source_format.to_owned(),
-            material_source_root: observation.source_root().to_owned(),
+            material_source_format: material_source_format.clone(),
+            material_source_root: material_source_root.clone(),
             inventory_family: observation.inventory_family(),
             inventory_generation: observation.inventory_generation(),
             file_size_bytes: observation.file_size_bytes(),
@@ -198,16 +223,16 @@ impl Store {
                 if !self.provider_file_publication_matches_candidate(
                     provider,
                     observation,
-                    material_source_format,
-                    observation.source_root(),
+                    &material_source_format,
+                    &material_source_root,
                 )? {
                     return Err(error);
                 }
             }
             scope.tracks_prior_material = self.provider_file_owner_has_prior_material(
                 provider,
-                material_source_format,
-                observation.source_root(),
+                &material_source_format,
+                &material_source_root,
                 observation.source_path(),
             )?;
             self.publish_provider_file_publication_marker(&mut scope, created_at_ms)?;
@@ -219,8 +244,8 @@ impl Store {
                 owner_id: scope.owner_id.clone(),
                 lifecycle: Arc::clone(&lifecycle),
                 provider,
-                material_source_format: material_source_format.to_owned(),
-                material_source_root: observation.source_root().to_owned(),
+                material_source_format,
+                material_source_root,
                 source_path: observation.source_path().to_owned(),
                 retires_observation: false,
                 _owner_lock_path: owner_lock_path,
