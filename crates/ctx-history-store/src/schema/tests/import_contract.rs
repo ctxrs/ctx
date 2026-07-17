@@ -98,18 +98,20 @@ fn schema_v46_upgrade_preserves_index_rootpages_and_uses_trigger_only_invariant(
             "#,
         )
         .unwrap();
-        conn.prepare(
-            "SELECT name, rootpage FROM sqlite_schema \
+        let rootpages = conn
+            .prepare(
+                "SELECT name, rootpage FROM sqlite_schema \
              WHERE type = 'index' AND name LIKE 'idx_%' \
                AND name <> 'idx_events_seq' ORDER BY name",
-        )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rootpages
     };
 
     let store = Store::open(&path).unwrap();

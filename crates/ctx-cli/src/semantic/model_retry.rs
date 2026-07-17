@@ -1,8 +1,4 @@
-use std::{
-    fmt, fs,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{fmt, fs, path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
