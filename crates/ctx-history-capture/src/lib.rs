@@ -119,7 +119,16 @@ pub use common::io::collect_provider_source_files;
 pub use common::io::provider_jsonl_range_has_complete_line;
 #[doc(hidden)]
 pub use common::path_inventory::{
-    BoundedSourcePathInventory, SourcePathInventoryPage, SourcePathInventorySlice,
+    BoundedSourcePathInventory, DurableSourceInventoryActiveDirectory,
+    DurableSourceInventoryCheckpoint, DurableSourceInventoryCleanupOutcome,
+    DurableSourceInventoryCompletionProof, DurableSourceInventoryDirectoryAuthority,
+    DurableSourceInventoryError, DurableSourceInventoryFailureKind,
+    DurableSourceInventoryJournalEntry, DurableSourceInventoryJournalPage,
+    DurableSourceInventoryMode, DurableSourceInventoryOpenState, DurableSourceInventoryOwner,
+    DurableSourceInventoryPathPage, DurableSourceInventoryPhase, DurableSourceInventoryRequest,
+    DurableSourceInventoryScratch, DurableSourceInventorySlice, DurableSourceInventoryStatus,
+    DurableSourcePathInventory, NativePathEncoding, NativePathIdentity, NativePathPlatform,
+    SourcePathInventoryPage, SourcePathInventorySlice,
 };
 #[doc(hidden)]
 pub use provider::sqlite_observation::{
@@ -166,6 +175,11 @@ pub use provider::api::{
     import_rovodev_history, import_shelley_sqlite, import_tabnine_cli_history, import_trae_history,
     import_warp_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
+};
+#[doc(hidden)]
+pub use provider::codex::catalog::{
+    observe_codex_catalog_journal_page, CodexCatalogJournalObservation,
+    CodexCatalogObservationOutcome, CodexCatalogObservationPage,
 };
 pub use provider::codex::{
     catalog_codex_session_files, catalog_codex_session_paths_page, catalog_codex_session_tree,

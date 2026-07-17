@@ -11,6 +11,7 @@ use fs2::FileExt;
 use crate::{CaptureError, Result};
 
 const SCRATCH_ROOT_NAME: &str = "ctx-history-capture-scratch-v1";
+const DURABLE_SCRATCH_ROOT_NAME: &str = "ctx-history-capture-durable-v1";
 const MANAGER_LOCK_NAME: &str = ".manager.lock";
 const NEXT_RUN_ID_NAME: &str = ".next-run-id";
 const SWEEP_STATE_NAME: &str = ".sweep-state";
@@ -115,6 +116,127 @@ pub(crate) struct CaptureScratchSpace {
     lease: Option<File>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurableScratchCleanupOutcome {
+    Complete,
+    Pending,
+    Busy,
+}
+
+pub(crate) struct DurableCaptureScratch {
+    path: PathBuf,
+    lease: Option<File>,
+}
+
+impl DurableCaptureScratch {
+    pub(crate) fn create(data_root: &Path, name: &str, kind: &'static str) -> io::Result<Self> {
+        validate_file_name(name).map_err(capture_error_to_io)?;
+        validate_kind(kind).map_err(capture_error_to_io)?;
+        let root = durable_scratch_root(data_root)?;
+        let _manager_lock = acquire_manager_lock(&root)?;
+        let path = root.join(name);
+        create_private_directory(&path)?;
+        let lease = create_private_file(&path.join(LEASE_NAME))?;
+        FileExt::lock_exclusive(&lease)?;
+        let mut owner = create_private_file(&path.join(OWNER_NAME))?;
+        crate::pace_current_disk_io(128);
+        writeln!(owner, "pid={}", std::process::id())?;
+        writeln!(owner, "kind={kind}")?;
+        owner.sync_all()?;
+        let scratch = Self {
+            path,
+            lease: Some(lease),
+        };
+        scratch.validate_lease()?;
+        Ok(scratch)
+    }
+
+    pub(crate) fn open(data_root: &Path, name: &str) -> io::Result<Self> {
+        validate_file_name(name).map_err(capture_error_to_io)?;
+        let root = durable_scratch_root(data_root)?;
+        let _manager_lock = acquire_manager_lock(&root)?;
+        let path = root.join(name);
+        validate_private_directory(&path)?;
+        let lease = open_private_regular_file(&path.join(LEASE_NAME))?;
+        FileExt::try_lock_exclusive(&lease)?;
+        let scratch = Self {
+            path,
+            lease: Some(lease),
+        };
+        scratch.validate_lease()?;
+        Ok(scratch)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn create_file(&self, name: &str) -> io::Result<File> {
+        validate_file_name(name).map_err(capture_error_to_io)?;
+        create_private_file(&self.path.join(name))
+    }
+
+    pub(crate) fn directory_identity(&self) -> io::Result<Vec<u8>> {
+        durable_scratch_directory_identity(&self.path)
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn lock_identity(&self) -> io::Result<Vec<u8>> {
+        let lease = self.lease.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable capture scratch lease is not held",
+            )
+        })?;
+        encode_scratch_identity(scratch_handle_identity(lease)?)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn lock_identity(&self) -> io::Result<Vec<u8>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable capture scratch is unsupported on this platform",
+        ))
+    }
+
+    pub(crate) fn release(mut self) -> io::Result<()> {
+        if let Some(lease) = self.lease.take() {
+            FileExt::unlock(&lease)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_slice(
+        data_root: &Path,
+        name: &str,
+    ) -> io::Result<DurableScratchCleanupOutcome> {
+        validate_file_name(name).map_err(capture_error_to_io)?;
+        let root = durable_scratch_root(data_root)?;
+        let _manager_lock = acquire_manager_lock(&root)?;
+        let path = root.join(name);
+        let mut budget = ScratchCleanupBudget::new();
+        match cleanup_abandoned_scratch_run(&path, &mut budget) {
+            Ok(ScratchCleanupOutcome::Complete) => Ok(DurableScratchCleanupOutcome::Complete),
+            Ok(ScratchCleanupOutcome::Pending) => Ok(DurableScratchCleanupOutcome::Pending),
+            Ok(ScratchCleanupOutcome::Busy) => Ok(DurableScratchCleanupOutcome::Busy),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(DurableScratchCleanupOutcome::Complete)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn validate_lease(&self) -> io::Result<()> {
+        let lease = self.lease.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable capture scratch lease is not held",
+            )
+        })?;
+        validate_durable_scratch_lease(&self.path, lease)
+    }
+}
+
 impl CaptureScratchSpace {
     pub(crate) fn create(kind: &'static str) -> Result<Self> {
         Self::create_at_root(default_scratch_root(), kind)
@@ -198,6 +320,24 @@ fn default_scratch_root() -> PathBuf {
     {
         std::env::temp_dir().join(SCRATCH_ROOT_NAME)
     }
+}
+
+fn durable_scratch_root(data_root: &Path) -> io::Result<PathBuf> {
+    pace_filesystem_path(data_root);
+    let metadata = fs::symlink_metadata(data_root)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "capture data root must be a real directory",
+        ));
+    }
+    let root = data_root.join(DURABLE_SCRATCH_ROOT_NAME);
+    ensure_private_directory(&root)?;
+    Ok(root)
+}
+
+fn capture_error_to_io(error: CaptureError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
 }
 
 fn validate_kind(kind: &str) -> Result<()> {
@@ -571,6 +711,91 @@ struct ScratchDirectoryIdentity {
 }
 
 #[cfg(unix)]
+trait ScratchIdentityComponent {
+    fn into_scratch_identity(self) -> io::Result<u64>;
+}
+
+#[cfg(unix)]
+impl ScratchIdentityComponent for u64 {
+    fn into_scratch_identity(self) -> io::Result<u64> {
+        Ok(self)
+    }
+}
+
+#[cfg(unix)]
+impl ScratchIdentityComponent for u32 {
+    fn into_scratch_identity(self) -> io::Result<u64> {
+        Ok(u64::from(self))
+    }
+}
+
+#[cfg(unix)]
+impl ScratchIdentityComponent for i64 {
+    fn into_scratch_identity(self) -> io::Result<u64> {
+        u64::try_from(self).map_err(|_| scratch_directory_changed_error())
+    }
+}
+
+#[cfg(unix)]
+impl ScratchIdentityComponent for i32 {
+    fn into_scratch_identity(self) -> io::Result<u64> {
+        u64::try_from(self).map_err(|_| scratch_directory_changed_error())
+    }
+}
+
+#[cfg(unix)]
+fn validate_durable_scratch_lease(path: &Path, lease: &File) -> io::Result<()> {
+    UnixScratchRun::open(path)?.validate_held_lease(lease)
+}
+
+#[cfg(windows)]
+fn validate_durable_scratch_lease(path: &Path, lease: &File) -> io::Result<()> {
+    WindowsScratchRun::open(path)?.validate_held_lease(path, lease)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_durable_scratch_lease(_path: &Path, _lease: &File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable capture scratch is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn durable_scratch_directory_identity(path: &Path) -> io::Result<Vec<u8>> {
+    encode_scratch_identity(UnixScratchRun::open(path)?.identity)
+}
+
+#[cfg(windows)]
+fn durable_scratch_directory_identity(path: &Path) -> io::Result<Vec<u8>> {
+    encode_scratch_identity(WindowsScratchRun::open(path)?.identity)
+}
+
+#[cfg(unix)]
+fn encode_scratch_identity(identity: ScratchDirectoryIdentity) -> io::Result<Vec<u8>> {
+    let mut encoded = b"unix-dev-inode-v1\0".to_vec();
+    encoded.extend_from_slice(&identity.device.to_be_bytes());
+    encoded.extend_from_slice(&identity.inode.to_be_bytes());
+    Ok(encoded)
+}
+
+#[cfg(windows)]
+fn encode_scratch_identity(identity: ScratchDirectoryIdentity) -> io::Result<Vec<u8>> {
+    let mut encoded = b"windows-file-id-v1\0".to_vec();
+    encoded.extend_from_slice(&identity.volume_serial.to_be_bytes());
+    encoded.extend_from_slice(&identity.file_id);
+    Ok(encoded)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn durable_scratch_directory_identity(_path: &Path) -> io::Result<Vec<u8>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable capture scratch is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
 struct UnixScratchRun {
     parent: File,
     directory: File,
@@ -761,8 +986,8 @@ impl UnixScratchRun {
                 let file = unsafe { File::from_raw_fd(descriptor) };
                 validate_private_file_handle(&file)?;
                 let expected = ScratchDirectoryIdentity {
-                    device: u64::try_from(metadata.st_dev).unwrap_or(u64::MAX),
-                    inode: u64::try_from(metadata.st_ino).unwrap_or(u64::MAX),
+                    device: metadata.st_dev.into_scratch_identity()?,
+                    inode: metadata.st_ino.into_scratch_identity()?,
                 };
                 if scratch_handle_identity(&file)? != expected {
                     return Err(scratch_directory_changed_error());
@@ -818,8 +1043,8 @@ impl UnixScratchRun {
         }
         let metadata = unsafe { metadata.assume_init() };
         let current = ScratchDirectoryIdentity {
-            device: u64::try_from(metadata.st_dev).unwrap_or(u64::MAX),
-            inode: u64::try_from(metadata.st_ino).unwrap_or(u64::MAX),
+            device: metadata.st_dev.into_scratch_identity()?,
+            inode: metadata.st_ino.into_scratch_identity()?,
         };
         if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
             || metadata.st_uid != unsafe { libc::geteuid() }
@@ -1028,8 +1253,8 @@ impl UnixScratchRun {
             return Err(scratch_directory_changed_error());
         }
         Ok(ScratchDirectoryIdentity {
-            device: u64::try_from(metadata.st_dev).unwrap_or(u64::MAX),
-            inode: u64::try_from(metadata.st_ino).unwrap_or(u64::MAX),
+            device: metadata.st_dev.into_scratch_identity()?,
+            inode: metadata.st_ino.into_scratch_identity()?,
         })
     }
 }
