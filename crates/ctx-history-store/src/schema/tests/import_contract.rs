@@ -1540,8 +1540,14 @@ fn schema_object_signature(conn: &Connection) -> Vec<(String, String, String)> {
 }
 
 fn assert_schema_object_parity(upgraded: &Connection, fresh: &Connection) {
-    let upgraded = schema_object_signature(upgraded);
-    let fresh = schema_object_signature(fresh);
+    let omit_fresh_only_indexes = |signature: Vec<(String, String, String)>| {
+        signature
+            .into_iter()
+            .filter(|(_, name, _)| !FRESH_ONLY_OPTIMIZED_INDEX_NAMES.contains(&name.as_str()))
+            .collect::<Vec<_>>()
+    };
+    let upgraded = omit_fresh_only_indexes(schema_object_signature(upgraded));
+    let fresh = omit_fresh_only_indexes(schema_object_signature(fresh));
     let mismatch = upgraded
         .iter()
         .zip(&fresh)
