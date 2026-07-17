@@ -1,4 +1,6 @@
 const PENDING_REASON_REPAIR_BATCH_ROWS: usize = 512;
+const PENDING_REASON_REPAIR_BATCH_BYTES: usize = 512 * 1024;
+const PENDING_REASON_REPAIR_SQLITE_TIME: std::time::Duration = std::time::Duration::from_millis(25);
 const PROVIDER_SESSION_REPAIR_BATCH_ROWS: usize = 128;
 const PROVIDER_SESSION_REPAIR_BATCH_BYTES: usize = 512 * 1024;
 const PROVIDER_SESSION_REPAIR_SQLITE_TIME: std::time::Duration =
@@ -39,8 +41,12 @@ pub(crate) fn repair_import_maintenance(
             continue;
         }
 
-        let progress = store.repair_import_pending_reasons(PENDING_REASON_REPAIR_BATCH_ROWS)?;
-        let mut processed_rows = progress.processed_rows;
+        let progress = store.repair_import_pending_reasons(
+            PENDING_REASON_REPAIR_BATCH_ROWS,
+            PENDING_REASON_REPAIR_BATCH_BYTES,
+            PENDING_REASON_REPAIR_SQLITE_TIME,
+        )?;
+        let mut processed_rows = progress.visited_rows;
         let bulk_complete = if progress.complete
             && !store.has_pending_provider_file_publications()?
             && !store.event_search_bulk_maintenance_outcome()?.is_complete()

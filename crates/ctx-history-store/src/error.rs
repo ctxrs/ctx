@@ -23,6 +23,16 @@ pub enum StoreError {
     InvalidImportPendingReason(String),
     #[error("ctx import inventory schema is incompatible: {0}")]
     ImportInventorySchemaIncompatible(&'static str),
+    #[error("ctx import pending-work projection is awaiting bounded maintenance")]
+    ImportPendingWorkProjectionIncomplete,
+    #[error(
+        "import pending-work repair unit is {bytes} bytes; bounded maximum is {max_bytes} bytes"
+    )]
+    ImportPendingWorkRepairUnitTooLarge { bytes: usize, max_bytes: usize },
+    #[error("ctx import pending-work repair made no progress")]
+    ImportPendingWorkRepairNoProgress,
+    #[error("ctx import pending-work repair made no progress within {timeout_ms}ms")]
+    ImportPendingWorkRepairTimedOut { timeout_ms: u64 },
     #[error("unsafe or ambiguous history store identity")]
     UnsafeStoreIdentity,
     #[error("unsupported session history archive version: {0}")]

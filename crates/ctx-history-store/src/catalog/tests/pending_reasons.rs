@@ -116,7 +116,9 @@ fn pending_reason_repair_is_bounded_resumable_idempotent_and_conservative() {
         )
         .unwrap();
 
-    let first = store.repair_import_pending_reasons(2).unwrap();
+    let first = store
+        .repair_import_pending_reasons(2, 64 * 1024, Duration::from_secs(1))
+        .unwrap();
     assert_eq!(first.processed_rows, 2);
     assert_eq!(first.classified_rows, 1);
     assert!(!first.complete);
@@ -136,9 +138,11 @@ fn pending_reason_repair_is_bounded_resumable_idempotent_and_conservative() {
     let mut processed_rows = first.processed_rows;
     let mut classified_rows = first.classified_rows;
     let mut completed = false;
-    for _ in 0..5 {
-        let progress = store.repair_import_pending_reasons(2).unwrap();
-        assert!(progress.processed_rows <= 2);
+    for _ in 0..64 {
+        let progress = store
+            .repair_import_pending_reasons(2, 64 * 1024, Duration::from_secs(1))
+            .unwrap();
+        assert!(progress.visited_rows <= 2);
         processed_rows += progress.processed_rows;
         classified_rows += progress.classified_rows;
         if progress.complete {
@@ -209,7 +213,9 @@ fn pending_reason_repair_is_bounded_resumable_idempotent_and_conservative() {
         ]
     );
 
-    let idempotent = store.repair_import_pending_reasons(2).unwrap();
+    let idempotent = store
+        .repair_import_pending_reasons(2, 64 * 1024, Duration::from_secs(1))
+        .unwrap();
     assert_eq!(idempotent.processed_rows, 0);
     assert_eq!(idempotent.classified_rows, 0);
     assert_eq!(idempotent.completed_families, 2);
@@ -1074,4 +1080,287 @@ fn pending_work_queries_use_partial_reason_indexes() {
             );
         }
     }
+}
+
+fn configure_projection_mode_for_test(store: &Store) {
+    store
+        .conn
+        .execute_batch(
+            r#"
+            DROP INDEX idx_catalog_sessions_pending_fresh_attempt;
+            DROP INDEX idx_catalog_sessions_pending_recovery_attempt;
+            DROP INDEX idx_source_import_files_pending_fresh_attempt;
+            DROP INDEX idx_source_import_files_pending_recovery_attempt;
+            UPDATE import_pending_work_state SET selection_mode = 'projection' WHERE singleton = 1;
+            DELETE FROM import_pending_work;
+            DELETE FROM import_pending_work_counts;
+            UPDATE import_pending_reason_repairs
+            SET cursor_provider = NULL, cursor_source_root = NULL,
+                cursor_source_path = NULL, completed = 0;
+            "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn projection_backfill_is_bounded_reopenable_and_trigger_concurrent() {
+    let temp = tempdir();
+    let path = temp.path().join("projection-backfill.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            WITH RECURSIVE rows(value) AS (
+              SELECT 1 UNION ALL SELECT value + 1 FROM rows WHERE value < 257
+            )
+            INSERT INTO source_import_files (
+              provider, source_format, source_root, source_path,
+              file_size_bytes, file_modified_at_ms, observed_at_ms,
+              indexed_status, pending_reason
+            )
+            SELECT 'pi', 'pi_session_jsonl', '/projection/direct',
+                   printf('/projection/direct/%05d.jsonl', value),
+                   1, 1, 1, 'pending', NULL
+            FROM rows;
+            "#,
+        )
+        .unwrap();
+    configure_projection_mode_for_test(&store);
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    assert!(matches!(
+        store.source_import_file_work_count(
+            CaptureProvider::Pi,
+            "/projection/direct",
+            ImportWorkClass::Recovery
+        ),
+        Err(StoreError::ImportPendingWorkProjectionIncomplete)
+    ));
+    assert!(matches!(
+        store.list_source_import_file_work(
+            CaptureProvider::Pi,
+            "/projection/direct",
+            ImportWorkClass::Recovery,
+            1
+        ),
+        Err(StoreError::ImportPendingWorkProjectionIncomplete)
+    ));
+
+    let mut calls = 0usize;
+    loop {
+        let progress = store
+            .repair_import_pending_reasons(3, 8 * 1024, Duration::from_secs(1))
+            .unwrap();
+        assert!(progress.visited_rows <= 3);
+        assert!(progress.processed_bytes <= 8 * 1024);
+        assert!(progress.complete || progress.visited_rows > 0);
+        calls += 1;
+        if calls == 8 {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO source_import_files (
+                      provider, source_format, source_root, source_path,
+                      file_size_bytes, file_modified_at_ms, observed_at_ms,
+                      indexed_status, pending_reason
+                    ) VALUES (
+                      'pi', 'pi_session_jsonl', '/projection/direct',
+                      '/projection/direct/00000-concurrent.jsonl',
+                      1, 1, 1, 'pending', 'legacy'
+                    )
+                    "#,
+                    [],
+                )
+                .unwrap();
+        }
+        if calls == 12 {
+            drop(store);
+            break;
+        }
+        assert!(!progress.complete);
+    }
+
+    let store = Store::open(&path).unwrap();
+    let mut completed = false;
+    for _ in 0..128 {
+        let progress = store
+            .repair_import_pending_reasons(3, 8 * 1024, Duration::from_secs(1))
+            .unwrap();
+        assert!(progress.visited_rows <= 3);
+        assert!(progress.processed_bytes <= 8 * 1024);
+        if progress.complete {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed);
+    assert!(store.import_pending_work_is_ready().unwrap());
+
+    let (count, count_steps) = measured_sql_steps(&store, || {
+        store
+            .source_import_file_work_count(
+                CaptureProvider::Pi,
+                "/projection/direct",
+                ImportWorkClass::Recovery,
+            )
+            .unwrap()
+    });
+    assert_eq!(count, 258);
+    assert!(
+        count_steps < 500,
+        "aggregate count used {count_steps} VM steps"
+    );
+    let queue_count: usize = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM import_pending_work \
+             WHERE inventory_family = 'source_import_files' \
+               AND provider = 'pi' AND source_root = '/projection/direct'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(queue_count, 258);
+    let work = store
+        .list_source_import_file_work(
+            CaptureProvider::Pi,
+            "/projection/direct",
+            ImportWorkClass::Recovery,
+            3,
+        )
+        .unwrap();
+    assert_eq!(work.len(), 3);
+    assert_eq!(
+        work[0].file.source_path,
+        "/projection/direct/00000-concurrent.jsonl"
+    );
+
+    for sql in [
+        super::catalog_import_work_ordinary_sql(
+            super::ImportPendingWorkSelectionMode::Projection,
+            ImportWorkClass::Recovery,
+        ),
+        super::source_import_file_work_ordinary_sql(
+            super::ImportPendingWorkSelectionMode::Projection,
+            ImportWorkClass::Recovery,
+        ),
+    ] {
+        let details = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(
+                params![
+                    CaptureProvider::Pi.as_str(),
+                    "/projection/direct",
+                    "recovery",
+                    3
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(details
+            .iter()
+            .any(|detail| detail.contains("idx_import_pending_work_selection")));
+        assert!(details.iter().all(|detail| !detail.contains("TEMP B-TREE")));
+        assert!(details
+            .iter()
+            .all(|detail| !detail.contains("pending_recovery_attempt")));
+    }
+}
+
+#[test]
+fn projection_backfill_sparse_legacy_owner_uses_durable_global_cursor() {
+    let temp = tempdir();
+    let path = temp.path().join("projection-indirect-owner.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO source_import_files (
+              provider, source_format, source_root, source_path,
+              file_size_bytes, file_modified_at_ms, observed_at_ms,
+              indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms,
+              indexed_status, indexed_import_revision, metadata_json, pending_reason
+            ) VALUES (
+              'pi', 'pi_session_jsonl', '/projection/indirect',
+              '/projection/indirect/target.jsonl', 10, 20, 30,
+              40, 10, 20, 'indexed', 1,
+              '{"inventory_unit":"logical_import_unit"}', NULL
+            );
+            WITH RECURSIVE rows(value) AS (
+              SELECT 1 UNION ALL SELECT value + 1 FROM rows WHERE value < 129
+            )
+            INSERT INTO capture_sources (
+              id, kind, provider, machine_id, source_format,
+              started_at_ms, fidelity
+            )
+            SELECT printf('unrelated-%03d', value), 'provider_import', 'unknown',
+                   'fixture', 'unrelated', value, 'imported'
+            FROM rows;
+            INSERT INTO capture_sources (
+              id, kind, provider, machine_id, raw_source_path, source_format,
+              source_root, started_at_ms, fidelity
+            ) VALUES (
+              'legacy-target', 'provider_import', 'pi', 'fixture',
+              '/projection/indirect/target.jsonl', 'pi_session_jsonl',
+              '/projection/indirect', 1000, 'imported'
+            );
+            "#,
+        )
+        .unwrap();
+    configure_projection_mode_for_test(&store);
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let mut total_visited = 0usize;
+    for iteration in 0..160 {
+        let progress = store
+            .repair_import_pending_reasons(1, 4 * 1024, Duration::from_secs(1))
+            .unwrap();
+        assert!(progress.visited_rows <= 1);
+        assert!(progress.processed_bytes <= 4 * 1024);
+        total_visited = total_visited.saturating_add(progress.visited_rows);
+        if iteration == 40 {
+            drop(store);
+            break;
+        }
+        assert!(!progress.complete);
+    }
+
+    let store = Store::open(&path).unwrap();
+    let mut completed = false;
+    for _ in 0..160 {
+        let progress = store
+            .repair_import_pending_reasons(1, 4 * 1024, Duration::from_secs(1))
+            .unwrap();
+        assert!(progress.visited_rows <= 1);
+        assert!(progress.processed_bytes <= 4 * 1024);
+        total_visited = total_visited.saturating_add(progress.visited_rows);
+        if progress.complete {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed);
+    assert!(total_visited >= 129);
+    let state: (Option<String>, usize, usize) = store
+        .conn
+        .query_row(
+            "SELECT pending_reason, \
+               (SELECT COUNT(*) FROM import_pending_work), \
+               (SELECT COUNT(*) FROM import_pending_work_counts) \
+             FROM source_import_files \
+             WHERE source_path = '/projection/indirect/target.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(state, (None, 0, 0));
 }

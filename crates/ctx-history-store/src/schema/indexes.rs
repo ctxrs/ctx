@@ -148,7 +148,7 @@ WHERE is_stale = 0
 /// empty. Do not include this in an invariant executed on every open: rebuilding
 /// a missing copy could otherwise scale with accumulated pending work.
 pub(crate) const IMPORT_PENDING_WORK_SELECTION_INDEX_SQL: &str = r#"
-CREATE INDEX idx_import_pending_work_selection
+CREATE INDEX IF NOT EXISTS idx_import_pending_work_selection
 ON import_pending_work(
     inventory_family, provider, source_root, work_class, indexed_at_ms, source_path
 );

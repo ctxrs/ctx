@@ -40,7 +40,7 @@ mod tests {
     use ctx_history_core::{AgentType, CaptureProvider};
     use ctx_history_store::{
         CatalogIndexedStatus, CatalogSession, ImportPendingReason, SourceImportFile,
-        SourceImportFileIndexUpdate,
+        SourceImportFileIndexUpdate, StoreError,
     };
     use serde_json::json;
 
@@ -719,6 +719,41 @@ mod tests {
         result.stop_admission();
         assert_eq!(result.completed_units, 10);
         assert!(!result.made_durable_progress());
+    }
+
+    #[test]
+    fn projection_repair_gates_plan_counts_and_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("work.sqlite");
+        let store = Store::open(&path).unwrap();
+        let (source, _, _) = recovery_source(&store, "/fixture/projection-gate", Some(10));
+        drop(store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "UPDATE import_pending_work_state SET selection_mode = 'projection'; \
+                 UPDATE import_pending_reason_repairs \
+                 SET cursor_provider = NULL, cursor_source_root = NULL, \
+                     cursor_source_path = NULL, completed = 0;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = Store::open(&path).unwrap();
+
+        let plan = ImportPlan::build(&store, vec![source]).unwrap();
+        assert_eq!(plan.fresh_units, 0);
+        assert_eq!(plan.recovery_units, 0);
+        let count_error = plan.pending_counts(&store).unwrap_err();
+        assert!(matches!(
+            count_error.downcast_ref::<StoreError>(),
+            Some(StoreError::ImportPendingWorkProjectionIncomplete)
+        ));
+        let selection_error = plan
+            .select_slice(&store, ImportWorkClass::Recovery, 1)
+            .unwrap_err();
+        assert!(matches!(
+            selection_error.downcast_ref::<StoreError>(),
+            Some(StoreError::ImportPendingWorkProjectionIncomplete)
+        ));
     }
 
     #[test]

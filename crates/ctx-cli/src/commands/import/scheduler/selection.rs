@@ -629,6 +629,7 @@ fn list_source_work(
 }
 
 fn import_work_counts(store: &Store, sources: &[PlannedImportSource]) -> Result<(usize, usize)> {
+    store.ensure_import_pending_work_ready()?;
     Ok((
         import_work_count(store, sources, ImportWorkClass::Fresh)?,
         import_work_count(store, sources, ImportWorkClass::Recovery)?,
@@ -655,8 +656,8 @@ fn import_work_count(
             SourcePreinventory::CodexSessionCatalog { .. } => {
                 let source_root = super::catalog::codex_catalog_root_identity(&plan.source.path)?;
                 store
-                    .list_catalog_import_work(plan.source.provider, source_root, class, remaining)?
-                    .len()
+                    .catalog_import_work_count(plan.source.provider, source_root, class)?
+                    .min(remaining)
             }
             SourcePreinventory::SourceImportFiles { files, .. } => {
                 let source_root = files
@@ -667,22 +668,12 @@ fn import_work_count(
                         persisted_import_identity(&plan.source.path, "source root")
                     })?;
                 store
-                    .list_source_import_file_work(
-                        plan.source.provider,
-                        source_root,
-                        class,
-                        remaining,
-                    )?
-                    .len()
+                    .source_import_file_work_count(plan.source.provider, source_root, class)?
+                    .min(remaining)
             }
             SourcePreinventory::SourceRoot { file, .. } => store
-                .list_source_import_file_work(
-                    plan.source.provider,
-                    &file.source_root,
-                    class,
-                    remaining,
-                )?
-                .len(),
+                .source_import_file_work_count(plan.source.provider, &file.source_root, class)?
+                .min(remaining),
             SourcePreinventory::None => continue,
         };
         count = count.saturating_add(source_count);
@@ -695,6 +686,9 @@ pub(crate) fn bounded_unplanned_root_work_counts(
     provider: ctx_history_core::CaptureProvider,
     source_root: &str,
 ) -> Result<(usize, usize)> {
+    if !store.import_pending_work_is_ready()? {
+        return Ok((0, 0));
+    }
     Ok((
         bounded_unplanned_root_work_count(store, provider, source_root, ImportWorkClass::Fresh)?,
         bounded_unplanned_root_work_count(store, provider, source_root, ImportWorkClass::Recovery)?,
@@ -707,18 +701,15 @@ fn bounded_unplanned_root_work_count(
     source_root: &str,
     class: ImportWorkClass,
 ) -> Result<usize> {
-    let catalog = store.list_catalog_import_work(
-        provider,
-        source_root,
-        class,
-        IMPORT_PENDING_REPORT_LIMIT,
-    )?;
-    let remaining = IMPORT_PENDING_REPORT_LIMIT.saturating_sub(catalog.len());
-    let source_files =
-        store.list_source_import_file_work(provider, source_root, class, remaining)?;
+    let catalog = store
+        .catalog_import_work_count(provider, source_root, class)?
+        .min(IMPORT_PENDING_REPORT_LIMIT);
+    let remaining = IMPORT_PENDING_REPORT_LIMIT.saturating_sub(catalog);
+    let source_files = store
+        .source_import_file_work_count(provider, source_root, class)?
+        .min(remaining);
     Ok(catalog
-        .len()
-        .saturating_add(source_files.len())
+        .saturating_add(source_files)
         .min(IMPORT_PENDING_REPORT_LIMIT))
 }
 
