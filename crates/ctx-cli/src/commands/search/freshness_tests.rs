@@ -450,24 +450,39 @@ mod freshness_tests {
         let data_root = temp.path().join("data");
         let (source, session_path) =
             write_codex_source(&data_root.join("codex-failed-page"), "failed-page");
+        let (unaffected_source, _) =
+            write_codex_source(&data_root.join("codex-unaffected"), "unaffected");
         let baseline = refresh(
             &data_root,
-            vec![source.clone()],
+            vec![source.clone(), unaffected_source.clone()],
             ImportExecutionPolicy::Drain,
         );
         assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
 
         let mut runtime = SearchRefreshRuntime::default();
-        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        let _ = refresh_with_runtime(
+            &data_root,
+            &mut runtime,
+            vec![source.clone(), unaffected_source.clone()],
+        );
         while runtime.inventory_progress.is_some() {
-            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+            let _ = refresh_with_runtime(
+                &data_root,
+                &mut runtime,
+                vec![source.clone(), unaffected_source.clone()],
+            );
         }
         let sweep_deadline = runtime.next_inventory_at;
         let generation = cached_inventory_generation(&runtime, &source);
+        let unaffected_generation = cached_inventory_generation(&runtime, &unaffected_source);
         fs::write(&session_path, b"{not-json\n").unwrap();
         runtime.force_source_file_change_for_test(&source.path, &session_path);
 
-        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        let _ = refresh_with_runtime(
+            &data_root,
+            &mut runtime,
+            vec![source.clone(), unaffected_source.clone()],
+        );
 
         assert!(runtime.pending_dirty_paths.is_empty());
         for _ in 0..64 {
@@ -475,10 +490,18 @@ mod freshness_tests {
                 break;
             };
             assert!(progress.scoped);
-            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+            let _ = refresh_with_runtime(
+                &data_root,
+                &mut runtime,
+                vec![source.clone(), unaffected_source.clone()],
+            );
         }
         assert!(runtime.inventory_progress.is_none());
         assert_ne!(cached_inventory_generation(&runtime, &source), generation);
+        assert_eq!(
+            cached_inventory_generation(&runtime, &unaffected_source),
+            unaffected_generation
+        );
         assert_eq!(runtime.next_inventory_at, sweep_deadline);
     }
 
@@ -1736,6 +1759,19 @@ mod freshness_tests {
         assert_eq!(completed.fresh_units_pending, 0, "{completed:?}");
         assert_eq!(completed.recovery_units_pending, 0, "{completed:?}");
         assert!(!lock_store.has_pending_provider_file_publications().unwrap());
+        assert!(lock_store
+            .effective_provider_file_publication_inventory_owner()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            lock_store
+                .search_event_hits("bulk-resume 0", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let archive = serde_json::to_string(&lock_store.export_archive().unwrap()).unwrap();
+        assert!(archive.contains("bulk-resume 0"), "{archive}");
     }
 
     #[test]

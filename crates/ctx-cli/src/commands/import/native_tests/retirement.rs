@@ -257,6 +257,43 @@ fn setup_drains_orphaned_mutated_publication_retirement() {
     let temp = tempdir();
     let data_root = temp.path().join("data");
     let source_root = create_orphaned_pi_publication(&data_root, 2, false);
+    let store = Store::open(database_path(data_root.clone())).unwrap();
+    let inventory = inventory_import_sources(
+        &store,
+        vec![explicit_path_source(
+            CaptureProvider::Pi,
+            source_root.clone(),
+        )],
+        false,
+    )
+    .unwrap();
+    assert!(inventory.failures.is_empty());
+    let plan = ImportPlan::build(&store, inventory.sources).unwrap();
+    assert_eq!(plan.fresh_units, 0);
+    assert_eq!(plan.recovery_units, 1);
+    let slice = plan
+        .select_slice(&store, ImportWorkClass::Recovery, plan.recovery_units)
+        .unwrap();
+    assert!(slice.sources.is_empty());
+    assert_eq!(slice.retirements.len(), 1);
+    let retirement = &slice.retirements[0];
+    assert_eq!(retirement.provider, CaptureProvider::Pi);
+    assert_eq!(
+        retirement.material_source_format,
+        ctx_history_capture::PI_SESSION_SOURCE_FORMAT
+    );
+    assert_eq!(
+        retirement.material_source_root,
+        source_root.to_str().unwrap()
+    );
+    assert_eq!(
+        retirement.source_path,
+        source_root.join("session.jsonl").to_str().unwrap()
+    );
+    let expected_recovery_units_processed = slice.units;
+    assert_eq!(expected_recovery_units_processed, 1);
+    drop(store);
+
     let args = ImportArgs {
         provider: Some(NativeProviderArg::Pi),
         path: Some(source_root),
@@ -284,7 +321,10 @@ fn setup_drains_orphaned_mutated_publication_retirement() {
         },
     )
     .unwrap();
-    assert_eq!(report.totals.recovery_units_processed, 3);
+    assert_eq!(
+        report.totals.recovery_units_processed,
+        expected_recovery_units_processed
+    );
     assert_eq!(report.totals.recovery_units_pending, 0);
     let store = Store::open(database_path(data_root)).unwrap();
     assert!(!store.has_pending_provider_file_publications().unwrap());
