@@ -25,12 +25,16 @@ fn semantic_sqlite_vec0_scan_bytes(
         .checked_add(exact_candidates.checked_mul(semantic_exact_vector_bytes())?)
 }
 
-fn semantic_sqlite_vec0_full_scan_ready(stats: SemanticSidecarStats) -> bool {
+fn semantic_sqlite_vec0_full_scan_bytes(stats: SemanticSidecarStats) -> Option<usize> {
     semantic_sqlite_vec0_scan_bytes(
         stats.embedded_chunks,
         stats.embedded_chunks.min(SEMANTIC_SQLITE_VEC0_MAX_K),
     )
-    .is_some_and(|bytes| bytes <= SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES)
+}
+
+fn semantic_sqlite_vec0_full_scan_ready(stats: SemanticSidecarStats) -> bool {
+    semantic_sqlite_vec0_full_scan_bytes(stats)
+        .is_some_and(|bytes| bytes <= SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES)
 }
 
 fn retain_best_semantic_chunk(
@@ -252,9 +256,7 @@ impl SemanticVectorStore {
         let scan_started = Instant::now();
         let exact_candidate_limit =
             semantic_sqlite_vec0_candidate_limit(limit, candidate_row_limit, stats.embedded_chunks);
-        let Some(maximum_vector_bytes) =
-            semantic_sqlite_vec0_scan_bytes(stats.embedded_chunks, exact_candidate_limit)
-        else {
+        let Some(maximum_vector_bytes) = semantic_sqlite_vec0_full_scan_bytes(stats) else {
             return Err(SemanticVectorStorePending::new(
                 "semantic binary retrieval byte budget overflowed",
             )

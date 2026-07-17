@@ -1531,13 +1531,30 @@ mod tests {
         let exact_rerank_bytes = SEMANTIC_SQLITE_VEC0_MAX_K * semantic_exact_vector_bytes();
         let chunk_limit = (SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES - exact_rerank_bytes)
             / SEMANTIC_BINARY_VECTOR_BYTES;
+        let oversized_stats = SemanticSidecarStats {
+            embedded_items: 1,
+            embedded_chunks: chunk_limit.saturating_add(1),
+        };
+        assert!(
+            semantic_sqlite_vec0_scan_bytes(
+                oversized_stats.embedded_chunks,
+                semantic_sqlite_vec0_candidate_limit(
+                    1,
+                    SEMANTIC_SQLITE_VEC0_MAX_K,
+                    oversized_stats.embedded_chunks
+                ),
+            )
+            .is_some_and(|bytes| bytes <= SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES),
+            "a small requested rerank must not weaken the full-scan envelope"
+        );
+        assert!(!semantic_sqlite_vec0_full_scan_ready(oversized_stats));
         store.conn.execute(
             r#"
             UPDATE semantic_index_stats
             SET embedded_chunks = ?2
             WHERE model_key = ?1
             "#,
-            params![semantic_model_key(), chunk_limit.saturating_add(1) as i64],
+            params![semantic_model_key(), oversized_stats.embedded_chunks as i64],
         )?;
         assert!(!semantic_full_corpus_vector_scan_ready(&store)?);
         let error = store
@@ -1549,6 +1566,15 @@ mod tests {
         assert!(error
             .chain()
             .any(|cause| cause.downcast_ref::<SemanticVectorStorePending>().is_some()));
+        let filtered = store.search_event_ids(&test_embedding(1.0, 0.0), &[event_id], 1)?;
+        assert_eq!(
+            filtered.stats.backend,
+            Some(SEMANTIC_VECTOR_BACKEND_SQLITE_VEC)
+        );
+        assert_eq!(
+            filtered.hits.first().map(|hit| hit.event_id),
+            Some(event_id)
+        );
         Ok(())
     }
 
