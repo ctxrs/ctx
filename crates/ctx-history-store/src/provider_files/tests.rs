@@ -17,7 +17,7 @@ use std::{
 };
 
 use super::*;
-use crate::{CatalogSession, SourceImportFile};
+use crate::{CatalogSession, ImportPendingReason, ImportWorkClass, SourceImportFile};
 
 const FORMAT: &str = "claude_projects_jsonl_tree";
 const MATERIAL_FORMAT: &str = "claude_projects_jsonl";
