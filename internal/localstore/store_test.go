@@ -173,6 +173,90 @@ func TestBasicFTSSearch(t *testing.T) {
 	}
 }
 
+func TestReadAPIsUseStableViews(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+
+	source := upsertTestSource(t, ctx, store, "codex:read")
+	gen := beginGeneration(t, ctx, store, source.Key)
+	appendToGeneration(t, ctx, store, source.Key, gen.ID, "ident-a", 0, "", 200, "tail", []Event{
+		{
+			SourceEventID:      "source-1",
+			ProviderSessionID:  "session-read",
+			ProviderEventIndex: 1,
+			Role:               "user",
+			Type:               "message",
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+			Text:               "first read api event",
+		},
+		{
+			SourceEventID:      "source-2",
+			ProviderSessionID:  "session-read",
+			ProviderEventIndex: 2,
+			Role:               "assistant",
+			Type:               "message",
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 1, 0, time.UTC),
+			Text:               "second read api event",
+		},
+	})
+	if err := store.ActivateGeneration(ctx, gen.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript, err := store.ReadSession(ctx, "session-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transcript.Session.CtxSessionID != "codex:read#session:session-read" || len(transcript.Events) != 2 {
+		t.Fatalf("transcript = %+v", transcript)
+	}
+	window, err := store.ReadEvent(ctx, "source-2", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.Event.CtxEventID != "event:2" || len(window.Events) != 2 || window.Events[0].SourceEventID != "source-1" {
+		t.Fatalf("window = %+v", window)
+	}
+	location, err := store.LocateEvent(ctx, "event:2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.CtxSessionID != transcript.Session.CtxSessionID || location.SourcePath == "" {
+		t.Fatalf("location = %+v", location)
+	}
+
+	sqlRows, err := store.QueryReadOnlySQL(ctx, `
+		SELECT ctx_session_id, provider, provider_session_id
+		FROM ctx_sessions
+		WHERE provider_session_id = 'session-read'
+	`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sqlRows.Rows) != 1 || sqlRows.Rows[0][0] != transcript.Session.CtxSessionID {
+		t.Fatalf("sql rows = %+v", sqlRows)
+	}
+}
+
+func TestReadOnlySQLRejectsWritesAndMultipleStatements(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+
+	if _, err := store.QueryReadOnlySQL(ctx, "INSERT INTO meta(key, value) VALUES('x', 'y')", 0); err == nil {
+		t.Fatal("write statement succeeded, want read-only error")
+	}
+	if _, err := store.QueryReadOnlySQL(ctx, "SELECT 1; SELECT 2", 0); err == nil {
+		t.Fatal("multiple statements succeeded, want error")
+	}
+	rows, err := store.QueryReadOnlySQL(ctx, "SELECT 1 AS one", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows.Columns) != 1 || rows.Columns[0] != "one" || len(rows.Rows) != 1 || rows.Rows[0][0] != "1" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
 func newTestStore(t *testing.T, ctx context.Context) *Store {
 	t.Helper()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "work.sqlite"))

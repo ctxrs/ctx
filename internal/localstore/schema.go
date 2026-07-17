@@ -101,4 +101,90 @@ var schemaStatements = []string{
 		updated_at TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(state, available_at, id)`,
+	`CREATE VIEW IF NOT EXISTS ctx_sessions AS
+		SELECT
+			src.source_key || '#session:' || COALESCE(NULLIF(e.provider_session_id, ''), src.source_key) AS ctx_session_id,
+			NULL AS history_record_id,
+			NULL AS parent_ctx_session_id,
+			src.source_key || '#session:' || COALESCE(NULLIF(e.provider_session_id, ''), src.source_key) AS root_ctx_session_id,
+			src.provider AS provider,
+			e.provider_session_id AS provider_session_id,
+			'' AS external_agent_id,
+			'primary' AS agent_type,
+			'' AS role_hint,
+			1 AS is_primary,
+			gen.state AS status,
+			'lossless' AS fidelity,
+			CAST(strftime('%s', MIN(e.occurred_at)) AS INTEGER) * 1000 AS started_at_ms,
+			CAST(strftime('%s', MAX(e.occurred_at)) AS INTEGER) * 1000 AS ended_at_ms,
+			'' AS cwd,
+			src.uri AS source_path,
+			src.source_key AS source_key,
+			gen.id AS generation_id
+		FROM events e
+		JOIN sources src ON src.id = e.source_id AND src.active_generation_id = e.generation_id
+		JOIN source_generations gen ON gen.id = e.generation_id AND gen.state = 'active'
+		GROUP BY src.source_key, src.provider, src.uri, gen.id, gen.state, e.provider_session_id`,
+	`CREATE VIEW IF NOT EXISTS ctx_events AS
+		SELECT
+			'event:' || e.id AS ctx_event_id,
+			src.source_key || '#session:' || COALESCE(NULLIF(e.provider_session_id, ''), src.source_key) AS ctx_session_id,
+			NULL AS history_record_id,
+			src.provider AS provider,
+			e.provider_session_id AS provider_session_id,
+			e.provider_event_index AS event_seq,
+			e.event_type AS event_type,
+			e.role AS role,
+			CAST(strftime('%s', e.occurred_at) AS INTEGER) * 1000 AS occurred_at_ms,
+			CASE WHEN e.metadata_json = '' THEN '{}' ELSE e.metadata_json END AS payload_json,
+			'lossless' AS fidelity,
+			'' AS cwd,
+			src.uri AS source_path,
+			src.source_key AS source_key,
+			e.source_event_id AS source_event_id,
+			e.text AS text
+		FROM events e
+		JOIN sources src ON src.id = e.source_id AND src.active_generation_id = e.generation_id
+		JOIN source_generations gen ON gen.id = e.generation_id AND gen.state = 'active'`,
+	`CREATE VIEW IF NOT EXISTS ctx_files_touched AS
+		SELECT
+			NULL AS ctx_file_touch_id,
+			NULL AS path,
+			NULL AS old_path,
+			NULL AS change_kind,
+			NULL AS line_count_delta,
+			NULL AS confidence,
+			NULL AS ctx_event_id,
+			NULL AS ctx_session_id,
+			NULL AS history_record_id,
+			NULL AS provider,
+			NULL AS provider_session_id,
+			NULL AS created_at_ms,
+			NULL AS updated_at_ms
+		WHERE 0`,
+	`CREATE VIEW IF NOT EXISTS ctx_sources AS
+		SELECT
+			src.provider AS provider,
+			src.source_format AS source_format,
+			src.uri AS source_root,
+			src.uri AS source_path,
+			'' AS provider_session_id,
+			'' AS parent_provider_session_id,
+			'primary' AS agent_type,
+			'' AS role_hint,
+			'' AS cwd,
+			NULL AS session_started_at_ms,
+			src.size_bytes AS file_size_bytes,
+			CAST(strftime('%s', src.updated_at) AS INTEGER) * 1000 AS file_modified_at_ms,
+			CAST(strftime('%s', src.created_at) AS INTEGER) * 1000 AS cataloged_at_ms,
+			CASE WHEN src.active_generation_id IS NULL THEN 'pending' ELSE 'indexed' END AS indexed_status,
+			CAST(strftime('%s', src.updated_at) AS INTEGER) * 1000 AS indexed_at_ms,
+			'' AS indexed_error,
+			(
+				SELECT count(*)
+				FROM events e
+				WHERE e.source_id = src.id AND e.generation_id = src.active_generation_id
+			) AS indexed_event_count,
+			src.source_key AS source_key
+		FROM sources src`,
 }

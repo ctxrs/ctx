@@ -356,6 +356,343 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (a *App) runShow(ctx context.Context, args []string) error {
+	jsonOut, err := jsonFormat(args)
+	if err != nil {
+		return commandError("show", CodeUsage, err.Error(), nil)
+	}
+	kind, id, err := readLookupArgs(args)
+	if err != nil {
+		return commandError("show", CodeUsage, err.Error(), nil)
+	}
+	root, err := a.dataRoot()
+	if err != nil {
+		return err
+	}
+	store, err := openExistingStore(ctx, root, "show")
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	switch kind {
+	case "session":
+		transcript, err := store.ReadSession(ctx, id)
+		if err != nil {
+			return readCommandError("show", err)
+		}
+		if jsonOut {
+			return writeJSON(a.out, envelope("showSession", map[string]any{
+				"session": map[string]any{
+					"session": stableSessionJSON(transcript.Session),
+					"events":  stableEventsJSON(transcript.Events),
+					"source":  sourceLocationJSON(transcript.Session.SourcePath, ""),
+					"mode":    stringFlag(args, "--mode", "lite"),
+					"format":  "json",
+				},
+			}))
+		}
+		fmt.Fprintf(a.out, "%s %s\n", transcript.Session.Provider, transcript.Session.CtxSessionID)
+		for _, event := range transcript.Events {
+			fmt.Fprintf(a.out, "%s %-10s %s\n", event.CtxEventID, event.Role, compactSnippet(event.Text, 120))
+		}
+		return nil
+	case "event":
+		before, err := intFlag(args, "--before", 0)
+		if err != nil {
+			return commandError("show", CodeUsage, err.Error(), nil)
+		}
+		after, err := intFlag(args, "--after", 0)
+		if err != nil {
+			return commandError("show", CodeUsage, err.Error(), nil)
+		}
+		if windowSize, err := intFlag(args, "--window", -1); err != nil {
+			return commandError("show", CodeUsage, err.Error(), nil)
+		} else if windowSize >= 0 {
+			before = windowSize
+			after = windowSize
+		}
+		window, err := store.ReadEvent(ctx, id, before, after)
+		if err != nil {
+			return readCommandError("show", err)
+		}
+		if jsonOut {
+			return writeJSON(a.out, envelope("showEvent", map[string]any{
+				"event": map[string]any{
+					"event":  stableEventJSON(window.Event),
+					"events": stableEventsJSON(window.Events),
+					"source": sourceLocationJSON(window.Event.SourcePath, ""),
+				},
+			}))
+		}
+		for _, event := range window.Events {
+			prefix := " "
+			if event.CtxEventID == window.Event.CtxEventID {
+				prefix = "*"
+			}
+			fmt.Fprintf(a.out, "%s %s %-10s %s\n", prefix, event.CtxEventID, event.Role, compactSnippet(event.Text, 120))
+		}
+		return nil
+	default:
+		return commandError("show", CodeUsage, "expected `session` or `event`", nil)
+	}
+}
+
+func (a *App) runLocate(ctx context.Context, args []string) error {
+	jsonOut, err := jsonFormat(args)
+	if err != nil {
+		return commandError("locate", CodeUsage, err.Error(), nil)
+	}
+	kind, id, err := readLookupArgs(args)
+	if err != nil {
+		return commandError("locate", CodeUsage, err.Error(), nil)
+	}
+	root, err := a.dataRoot()
+	if err != nil {
+		return err
+	}
+	store, err := openExistingStore(ctx, root, "locate")
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	var location localstore.StableLocation
+	var operation string
+	switch kind {
+	case "session":
+		location, err = store.LocateSession(ctx, id)
+		operation = "locateSession"
+	case "event":
+		location, err = store.LocateEvent(ctx, id)
+		operation = "locateEvent"
+	default:
+		return commandError("locate", CodeUsage, "expected `session` or `event`", nil)
+	}
+	if err != nil {
+		return readCommandError("locate", err)
+	}
+	if jsonOut {
+		return writeJSON(a.out, envelope(operation, map[string]any{
+			"location": stableLocationJSON(location),
+		}))
+	}
+	fmt.Fprintf(a.out, "%s\t%s\t%s\n", location.Provider, firstNonEmpty(location.CtxEventID, location.CtxSessionID), location.SourcePath)
+	return nil
+}
+
+func (a *App) runSQL(ctx context.Context, args []string) error {
+	jsonOut, err := jsonFormat(args)
+	if err != nil {
+		return commandError("sql", CodeUsage, err.Error(), nil)
+	}
+	statement := strings.TrimSpace(strings.Join(positionalArgs(args), " "))
+	if statement == "" {
+		return commandError("sql", CodeUsage, "SQL statement is required", nil)
+	}
+	root, err := a.dataRoot()
+	if err != nil {
+		return err
+	}
+	store, err := openExistingStore(ctx, root, "sql")
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	result, err := store.QueryReadOnlySQL(ctx, statement, 0)
+	if err != nil {
+		return commandError("sql", CodeStorage, "run read-only SQL", err)
+	}
+	if jsonOut {
+		return writeJSON(a.out, envelope("sql", map[string]any{
+			"sql": map[string]any{
+				"columns":   result.Columns,
+				"rows":      sqlRowsJSON(result),
+				"truncated": result.Truncated,
+			},
+		}))
+	}
+	fmt.Fprintln(a.out, strings.Join(result.Columns, "\t"))
+	for _, row := range result.Rows {
+		fmt.Fprintln(a.out, strings.Join(row, "\t"))
+	}
+	return nil
+}
+
+func readLookupArgs(args []string) (string, string, error) {
+	positionals := positionalArgs(args)
+	if len(positionals) < 1 {
+		return "", "", fmt.Errorf("expected `session` or `event`")
+	}
+	kind := positionals[0]
+	id := ""
+	if len(positionals) > 1 {
+		id = positionals[1]
+	}
+	if kind == "session" && id == "" {
+		if value, ok, err := flagValue(args, "--provider-session"); err != nil {
+			return "", "", err
+		} else if ok {
+			id = value
+		}
+	}
+	if id == "" {
+		return "", "", fmt.Errorf("%s id is required", kind)
+	}
+	return kind, id, nil
+}
+
+func readCommandError(command string, err error) *Error {
+	if errors.Is(err, localstore.ErrNotFound) {
+		return commandError(command, CodeUsage, "not found", err)
+	}
+	return commandError(command, CodeStorage, "read local store", err)
+}
+
+func jsonFormat(args []string) (bool, error) {
+	if hasFlag(args, "--json") {
+		return true, nil
+	}
+	value, ok, err := flagValue(args, "--format")
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	switch value {
+	case "json":
+		return true, nil
+	case "text", "table":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported format %q", value)
+	}
+}
+
+func intFlag(args []string, name string, fallback int) (int, error) {
+	value, ok, err := flagValue(args, name)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 || parsed > 100 {
+		return 0, fmt.Errorf("%s must be an integer from 0 to 100", name)
+	}
+	return parsed, nil
+}
+
+func stringFlag(args []string, name, fallback string) string {
+	value, ok, err := flagValue(args, name)
+	if err != nil || !ok {
+		return fallback
+	}
+	return value
+}
+
+func envelope(operation string, payload map[string]any) map[string]any {
+	result := map[string]any{
+		"contractVersion": "agent-history-v1",
+		"schemaVersion":   1,
+		"operation":       operation,
+		"backend": map[string]any{
+			"kind": "local",
+		},
+	}
+	for key, value := range payload {
+		result[key] = value
+	}
+	return result
+}
+
+func stableSessionJSON(session localstore.StableSession) map[string]any {
+	return map[string]any{
+		"ctxSessionId":      session.CtxSessionID,
+		"provider":          session.Provider,
+		"providerSessionId": session.ProviderSessionID,
+		"title":             session.ProviderSessionID,
+		"startedAt":         jsonTimeMillis(session.StartedAtMS),
+		"updatedAt":         jsonTimeMillis(session.EndedAtMS),
+		"sourcePath":        session.SourcePath,
+	}
+}
+
+func stableEventsJSON(events []localstore.StableEvent) []map[string]any {
+	result := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		result = append(result, stableEventJSON(event))
+	}
+	return result
+}
+
+func stableEventJSON(event localstore.StableEvent) map[string]any {
+	return map[string]any{
+		"ctxEventId":   event.CtxEventID,
+		"ctxSessionId": event.CtxSessionID,
+		"sequence":     event.EventSeq,
+		"eventType":    event.EventType,
+		"role":         event.Role,
+		"occurredAt":   jsonTimeMillis(event.OccurredAtMS),
+		"source":       event.Provider,
+		"cursor":       event.CtxEventID,
+		"text":         event.Text,
+		"preview":      compactSnippet(event.Text, 220),
+		"citations": []map[string]any{{
+			"ctx_event_id":        event.CtxEventID,
+			"ctx_session_id":      event.CtxSessionID,
+			"provider":            event.Provider,
+			"provider_session_id": event.ProviderSessionID,
+			"source_path":         event.SourcePath,
+		}},
+	}
+}
+
+func stableLocationJSON(location localstore.StableLocation) map[string]any {
+	return map[string]any{
+		"ctxSessionId":      location.CtxSessionID,
+		"ctxEventId":        location.CtxEventID,
+		"provider":          location.Provider,
+		"providerSessionId": location.ProviderSessionID,
+		"source":            sourceLocationJSON(location.SourcePath, location.ResumeCursor),
+		"resume": map[string]any{
+			"cursor": location.ResumeCursor,
+			"path":   location.SourcePath,
+		},
+	}
+}
+
+func sourceLocationJSON(path, cursor string) map[string]any {
+	return map[string]any{
+		"path":   path,
+		"cursor": cursor,
+	}
+}
+
+func sqlRowsJSON(result localstore.SQLRows) []map[string]string {
+	rows := make([]map[string]string, 0, len(result.Rows))
+	for _, values := range result.Rows {
+		row := make(map[string]string, len(result.Columns))
+		for i, column := range result.Columns {
+			if i < len(values) {
+				row[column] = values[i]
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func jsonTimeMillis(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return time.UnixMilli(value).UTC().Format(time.RFC3339Nano)
+}
+
 func importRows(ctx context.Context, store *localstore.Store, rows []sourceRow) (importSummary, error) {
 	summary := importSummary{Sources: len(rows)}
 	for _, row := range rows {

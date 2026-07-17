@@ -225,6 +225,83 @@ func TestSetupImportsDiscoveredCodexAndSearches(t *testing.T) {
 	assertSearchJSONResult(t, searchOut.Bytes(), "codex")
 }
 
+func TestReadCommandsUseImportedStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	dataRoot := t.TempDir()
+	sessionDir := filepath.Join(home, ".codex", "sessions", "2026", "07", "17")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sessionDir, "session.jsonl"), strings.Join([]string{
+		`{"timestamp":"2026-07-17T12:00:00Z","type":"session_meta","payload":{"id":"codex-read-session"}}`,
+		`{"timestamp":"2026-07-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show locate sql needle"}]}}`,
+	}, "\n")+"\n")
+
+	app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"setup", "--no-daemon"}); err != nil {
+		t.Fatalf("setup returned error: %v", err)
+	}
+
+	var searchOut bytes.Buffer
+	app = NewApp(&searchOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"search", "--json", "needle"}); err != nil {
+		t.Fatalf("search returned error: %v", err)
+	}
+	var searchPayload struct {
+		Results []struct {
+			CtxEventID   string `json:"ctx_event_id"`
+			CtxSessionID string `json:"ctx_session_id"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(searchOut.Bytes(), &searchPayload); err != nil {
+		t.Fatalf("search JSON did not parse: %v\n%s", err, searchOut.String())
+	}
+	if len(searchPayload.Results) == 0 {
+		t.Fatalf("expected search result, got %s", searchOut.String())
+	}
+
+	var showOut bytes.Buffer
+	app = NewApp(&showOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"show", "session", searchPayload.Results[0].CtxSessionID, "--mode", "lite", "--format", "json"}); err != nil {
+		t.Fatalf("show session returned error: %v", err)
+	}
+	var showPayload map[string]any
+	if err := json.Unmarshal(showOut.Bytes(), &showPayload); err != nil {
+		t.Fatalf("show JSON did not parse: %v\n%s", err, showOut.String())
+	}
+	if showPayload["contractVersion"] != "agent-history-v1" || showPayload["operation"] != "showSession" {
+		t.Fatalf("unexpected show envelope: %#v", showPayload)
+	}
+
+	var locateOut bytes.Buffer
+	app = NewApp(&locateOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"locate", "event", searchPayload.Results[0].CtxEventID, "--format", "json"}); err != nil {
+		t.Fatalf("locate event returned error: %v", err)
+	}
+	var locatePayload map[string]any
+	if err := json.Unmarshal(locateOut.Bytes(), &locatePayload); err != nil {
+		t.Fatalf("locate JSON did not parse: %v\n%s", err, locateOut.String())
+	}
+	if locatePayload["operation"] != "locateEvent" {
+		t.Fatalf("unexpected locate envelope: %#v", locatePayload)
+	}
+
+	var sqlOut bytes.Buffer
+	app = NewApp(&sqlOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"sql", "SELECT provider, COUNT(*) AS events FROM ctx_events GROUP BY provider", "--format", "json"}); err != nil {
+		t.Fatalf("sql returned error: %v", err)
+	}
+	var sqlPayload map[string]any
+	if err := json.Unmarshal(sqlOut.Bytes(), &sqlPayload); err != nil {
+		t.Fatalf("sql JSON did not parse: %v\n%s", err, sqlOut.String())
+	}
+	if sqlPayload["operation"] != "sql" {
+		t.Fatalf("unexpected sql envelope: %#v", sqlPayload)
+	}
+}
+
 func TestImportExplicitPiPathSearches(t *testing.T) {
 	dataRoot := t.TempDir()
 	path := filepath.Join(t.TempDir(), "pi.jsonl")

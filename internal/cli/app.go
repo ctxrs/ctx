@@ -89,6 +89,12 @@ func (a *App) runCommand(ctx context.Context, spec commandSpec, args []string) e
 		return a.runImport(ctx, args)
 	case "search":
 		return a.runSearch(ctx, args)
+	case "show":
+		return a.runShow(ctx, args)
+	case "locate":
+		return a.runLocate(ctx, args)
+	case "sql":
+		return a.runSQL(ctx, args)
 	default:
 		return &Error{
 			Code:    CodeUnimplemented,
