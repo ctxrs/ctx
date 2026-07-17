@@ -411,13 +411,16 @@ class LocalCliAdapter:
                 cause=exc,
             ) from exc
 
+        cleanup = _ProcessScopeCleanup(process)
         try:
-            return self._supervise_process(command, process, uses_windows_launcher)
-        except BaseException as exc:
-            if isinstance(exc, Exception):
-                raise
-            _terminate_process_scope(process)
-            _close_process_pipes(process)
+            return self._supervise_process(
+                command,
+                process,
+                uses_windows_launcher,
+                cleanup,
+            )
+        except BaseException:
+            cleanup.run()
             raise
 
     def _supervise_process(
@@ -425,6 +428,7 @@ class LocalCliAdapter:
         command: list[str],
         process: subprocess.Popen[bytes],
         uses_windows_launcher: bool,
+        cleanup: _ProcessScopeCleanup,
     ) -> subprocess.CompletedProcess[str]:
         stdout_capture = _BoundedCapture("stdout", _STDOUT_CAP_BYTES)
         stderr_capture = _BoundedCapture("stderr", _STDERR_CAP_BYTES)
@@ -441,10 +445,10 @@ class LocalCliAdapter:
                 daemon=True,
             ),
         ]
-        for reader in readers:
-            reader.start()
-
+        cleanup.register_capture(stop, readers)
         try:
+            for reader in readers:
+                reader.start()
             return self._monitor_process(
                 command,
                 process,
@@ -453,16 +457,10 @@ class LocalCliAdapter:
                 stderr_capture,
                 stop,
                 readers,
+                cleanup,
             )
-        except BaseException as exc:
-            if isinstance(exc, Exception):
-                raise
-            stop.set()
-            _terminate_process_scope(process)
-            _close_process_pipes(process)
-            teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
-            for reader in readers:
-                reader.join(max(0.0, teardown_deadline - time.monotonic()))
+        except BaseException:
+            cleanup.run()
             raise
 
     def _monitor_process(
@@ -474,6 +472,7 @@ class LocalCliAdapter:
         stderr_capture: _BoundedCapture,
         stop: threading.Event,
         readers: list[threading.Thread],
+        cleanup: _ProcessScopeCleanup,
     ) -> subprocess.CompletedProcess[str]:
         deadline = (
             None
@@ -505,8 +504,7 @@ class LocalCliAdapter:
                 stop.set()
 
         if failure is not None:
-            _terminate_process_scope(process)
-            _close_process_pipes(process)
+            cleanup.run()
         teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
         for reader in readers:
             reader.join(max(0.0, teardown_deadline - time.monotonic()))
@@ -549,7 +547,7 @@ class LocalCliAdapter:
             stdout = _decode_process_output_strict(stdout_capture.value())
             stderr = _decode_process_output_strict(stderr_capture.value())
         except UnicodeDecodeError as exc:
-            _terminate_process_scope(process)
+            cleanup.run()
             raise CtxAgentHistoryProtocolError(
                 "ctx returned invalid UTF-8",
                 details={
@@ -559,7 +557,7 @@ class LocalCliAdapter:
             ) from exc
         returncode = process.returncode if process.returncode is not None else -1
         if returncode != 0:
-            _terminate_process_scope(process)
+            cleanup.run()
             raise CtxAgentHistoryCliError(
                 "ctx CLI command failed",
                 command=command,
@@ -567,8 +565,7 @@ class LocalCliAdapter:
                 stderr=stderr,
                 stdout=stdout,
             )
-        if os.name != "nt":
-            _terminate_process_scope(process)
+        cleanup.run()
         return subprocess.CompletedProcess(
             command,
             returncode,
@@ -594,6 +591,41 @@ _PROCESS_SCOPE_LAUNCHER_ARG = "__ctx_sdk_process_scope_v1"
 _PROCESS_SCOPE_LAUNCHER_ENV = "CTX_SDK_PROCESS_SCOPE_LAUNCHER"
 _WINDOWS_DRAIN_FAILURE_EXIT = 252
 _WINDOWS_LAUNCHER_ACK = b"\x06"
+
+
+class _ProcessScopeCleanup:
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self.process = process
+        self.stop: Optional[threading.Event] = None
+        self.readers: list[threading.Thread] = []
+        self.lock = threading.Lock()
+        self.cleaned = False
+
+    def register_capture(
+        self,
+        stop: threading.Event,
+        readers: list[threading.Thread],
+    ) -> None:
+        self.stop = stop
+        self.readers = readers
+
+    def run(self) -> None:
+        with self.lock:
+            if self.cleaned:
+                return
+            self.cleaned = True
+        if self.stop is not None:
+            self.stop.set()
+        _terminate_process_scope(self.process)
+        _close_process_pipes(self.process)
+        teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
+        for reader in self.readers:
+            if reader.ident is None:
+                continue
+            try:
+                reader.join(max(0.0, teardown_deadline - time.monotonic()))
+            except RuntimeError:
+                pass
 
 
 def _scoped_launch_command(
@@ -688,7 +720,10 @@ def _terminate_process_scope(process: subprocess.Popen[bytes]) -> None:
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
-                process.kill()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
     elif _process_group_exists(process.pid):
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -705,11 +740,16 @@ def _terminate_process_scope(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=_TEARDOWN_SECONDS / 2)
     except subprocess.TimeoutExpired:
-        process.kill()
+        try:
+            process.kill()
+        except OSError:
+            pass
         try:
             process.wait(timeout=_TEARDOWN_SECONDS / 2)
-        except subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             pass
+    except OSError:
+        pass
 
 
 def _process_group_exists(pid: int) -> bool:
@@ -729,7 +769,7 @@ def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
         if stream is not None:
             try:
                 stream.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
 
