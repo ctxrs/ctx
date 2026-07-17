@@ -26,20 +26,27 @@ pub use archive::validate_archive_version;
 pub use bulk_search::{install_event_search_maintenance_pacer, EventSearchMaintenancePacingGuard};
 pub use bulk_search::{EventSearchBulkGuard, EventSearchBulkMaintenanceOutcome};
 pub use catalog::{
-    CatalogCounts, CatalogImportWork, CatalogIndexedStatus, CatalogSession,
-    CatalogSourceIndexState, CatalogSourceIndexUpdate, ImportInventoryActiveDirectoryProof,
-    ImportInventoryActiveDirectoryStatus, ImportInventoryCanonicalEffect,
-    ImportInventoryCaptureCheckpoint, ImportInventoryCheckpointAcquisition,
+    canonical_import_inventory_selection_step, import_inventory_selection_commitment_identity,
+    import_inventory_selection_initial_prefix, CatalogCounts, CatalogImportWork,
+    CatalogIndexedStatus, CatalogSession, CatalogSourceIndexState, CatalogSourceIndexUpdate,
+    ImportInventoryActiveDirectoryProof, ImportInventoryActiveDirectoryStatus,
+    ImportInventoryCanonicalEffect, ImportInventoryCaptureCheckpoint,
+    ImportInventoryCheckpointAcquisition, ImportInventoryCheckpointCleanupProof,
     ImportInventoryCheckpointCompletionProof, ImportInventoryCheckpointLease,
     ImportInventoryCheckpointRecovery, ImportInventoryCheckpointStatus,
-    ImportInventoryCheckpointTrust, ImportInventoryCleanupAdvance, ImportInventoryEffectCounters,
-    ImportInventoryNativePathIdentity, ImportInventoryOwnedPathIdentity,
-    ImportInventoryPathEffectOutcome, ImportInventoryPathEffectRequest,
-    ImportInventoryScratchOwner, ImportInventoryScratchState, ImportPendingReason,
-    ImportPendingReasonRepairProgress, ImportWorkClass, IndexedHistoryCounts, SourceImportFile,
-    SourceImportFileCounts, SourceImportFileIndexUpdate, SourceImportFileWork,
+    ImportInventoryCheckpointTrust, ImportInventoryCleanupAdvance,
+    ImportInventoryCleanupDisposition, ImportInventoryCleanupProgress,
+    ImportInventoryEffectCounters, ImportInventoryEffectMembership,
+    ImportInventoryFrozenSelectionCommitment, ImportInventoryNativePathIdentity,
+    ImportInventoryOwnedPathIdentity, ImportInventoryPathEffectOutcome,
+    ImportInventoryPathEffectRequest, ImportInventoryScratchOwner, ImportInventoryScratchState,
+    ImportInventorySelectionCanonicalization, ImportInventorySelectionCanonicalizationRequest,
+    ImportInventoryStoreReconciliationBudget, ImportInventoryStoreReconciliationProgress,
+    ImportPendingReason, ImportPendingReasonRepairProgress, ImportWorkClass, IndexedHistoryCounts,
+    SourceImportFile, SourceImportFileCounts, SourceImportFileIndexUpdate, SourceImportFileWork,
     IMPORT_INVENTORY_CHECKPOINT_FORMAT_VERSION, IMPORT_INVENTORY_CHECKPOINT_MAX_KEYSET_BYTES,
     IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES, IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS,
+    IMPORT_INVENTORY_SELECTION_ALGORITHM_VERSION, IMPORT_INVENTORY_SELECTION_FORMAT_VERSION,
 };
 pub use error::{Result, StoreError};
 pub use files::FileTouchScope;
@@ -87,6 +94,10 @@ use std::{
 use rusqlite::Connection;
 
 pub(crate) const SCHEMA_VERSION: i64 = 57;
+
+pub const fn current_history_store_schema_version() -> u32 {
+    SCHEMA_VERSION as u32
+}
 
 pub struct Store {
     path: PathBuf,

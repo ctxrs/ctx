@@ -4,6 +4,7 @@ use ctx_history_core::{
 };
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, str::FromStr, time::Duration};
 use uuid::Uuid;
 
@@ -11,7 +12,10 @@ use crate::connection::{
     capped_i64, collect_rows, nonnegative_i64_to_u32, nonnegative_i64_to_u64, parse_json,
     parse_text_enum, with_immediate_transaction,
 };
-use crate::{ProviderFileCheckpointKey, ProviderFileInventoryFamily, Result, Store, StoreError};
+use crate::{
+    ProviderFileCheckpointKey, ProviderFileInventoryFamily, ProviderFilePublicationInventoryOwner,
+    Result, Store, StoreError,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogSession {
