@@ -208,6 +208,7 @@ struct ImportPendingReasonRepairRow {
     provider: String,
     source_root: String,
     source_path: String,
+    grandfather_indexed_revision: bool,
     requires_work: bool,
 }
 
