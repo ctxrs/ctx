@@ -1580,9 +1580,20 @@ fn semantic_bootstrap_should_run_first(
     refresh_semantic_document_count_cache(&store)?;
     drop(refresh_permit);
     let report = semantic_worker_report(data_root, Some(&store))?;
-    Ok(report.searchable_items > 0
-        && report.queued_items_estimate > 0
-        && report.model_cache_available)
+    let published_backlog = report.searchable_items > 0 && report.queued_items_estimate > 0;
+    let unpublished_backlog = if report.searchable_items_known {
+        false
+    } else {
+        ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
+        let probe_permit = runtime
+            .semantic_query_priority
+            .begin_document_batch(None)
+            .map_err(|error| anyhow!(error))?;
+        let has_searchable_document = !store.recent_event_embedding_documents(None, 1)?.is_empty();
+        drop(probe_permit);
+        has_searchable_document
+    };
+    Ok(report.model_cache_available && (published_backlog || unpublished_backlog))
 }
 
 fn semantic_report_should_queue_recent_work(report: &SemanticWorkerReport) -> bool {
@@ -2369,6 +2380,13 @@ fn semantic_terminal_maintenance_message(error: &anyhow::Error) -> Option<String
 
 fn semantic_deterministic_sidecar_error(error: &anyhow::Error) -> bool {
     semantic_terminal_maintenance_message(error).is_some()
+        || error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(inner, _))
+                    if inner.code == rusqlite::ErrorCode::DatabaseCorrupt
+            )
+        })
 }
 
 fn semantic_query_error_retryable(error: &anyhow::Error) -> bool {
