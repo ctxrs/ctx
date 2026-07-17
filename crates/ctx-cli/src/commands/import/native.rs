@@ -6,15 +6,16 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use super::catalog::sha256_file_prefix_hex;
 use super::*;
 use crate::commands::import::inventory::observe_source_root;
-use crate::commands::import::manifest::{
-    collect_source_import_files, observe_selected_source_import_file,
-    persist_new_source_import_observation, persist_source_import_observation_with_outcomes,
-    persisted_import_identity, same_source_import_observation, source_uses_import_file_manifest,
-    SourceImportObservationOutcome,
-};
 #[cfg(test)]
 use crate::commands::import::manifest::{
-    persist_source_import_files, persist_source_import_observation_with_outcomes_and_hook,
+    collect_source_import_files, persist_source_import_files,
+    persist_source_import_observation_with_outcomes_and_hook,
+};
+use crate::commands::import::manifest::{
+    observe_selected_source_import_file, persist_new_source_import_observation,
+    persist_source_import_observation_with_outcomes, persisted_import_identity,
+    same_source_import_observation, source_uses_import_file_manifest,
+    SourceImportObservationOutcome,
 };
 use ctx_history_capture::{
     provider_jsonl_checkpoint_matches_file, provider_jsonl_range_has_complete_line,

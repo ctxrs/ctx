@@ -1,12 +1,278 @@
 use std::{
-    fs::{self, File},
+    fs::{self, DirEntry, File, ReadDir},
     io::{self, BufRead, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
 
 use crate::{CaptureError, ProviderImportSummary, Result, MAX_PROVIDER_JSONL_LINE_BYTES};
+
+const TRAVERSAL_SLICE_MAX_OPERATIONS: u64 = 64;
+const TRAVERSAL_SLICE_MAX_PATH_BYTES: u64 = 256 * 1024;
+const TRAVERSAL_SLICE_MAX_ELAPSED: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FilesystemTraversalBudget {
+    pub(crate) max_operations: u64,
+    pub(crate) max_path_bytes: u64,
+    pub(crate) max_elapsed: Duration,
+}
+
+impl Default for FilesystemTraversalBudget {
+    fn default() -> Self {
+        Self {
+            max_operations: TRAVERSAL_SLICE_MAX_OPERATIONS,
+            max_path_bytes: TRAVERSAL_SLICE_MAX_PATH_BYTES,
+            max_elapsed: TRAVERSAL_SLICE_MAX_ELAPSED,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FilesystemTraversalSlice {
+    pub(crate) complete: bool,
+    pub(crate) operations: u64,
+    pub(crate) path_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilesystemTraversalMode {
+    Jsonl,
+    RegularFiles,
+}
+
+struct TraversalFrame {
+    path: PathBuf,
+    entries: ReadDir,
+}
+
+pub(crate) struct FilesystemTraversalCursor {
+    root: PathBuf,
+    mode: FilesystemTraversalMode,
+    parents_validated: bool,
+    initialized: bool,
+    complete: bool,
+    pending_directories: Vec<PathBuf>,
+    pending_entry: Option<DirEntry>,
+    pending_jsonl_file: Option<PathBuf>,
+    frames: Vec<TraversalFrame>,
+}
+
+impl FilesystemTraversalCursor {
+    pub(crate) fn jsonl(root: &Path) -> Self {
+        Self::new(root, FilesystemTraversalMode::Jsonl)
+    }
+
+    pub(crate) fn regular_files(root: &Path) -> Self {
+        Self::new(root, FilesystemTraversalMode::RegularFiles)
+    }
+
+    fn new(root: &Path, mode: FilesystemTraversalMode) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            mode,
+            parents_validated: false,
+            initialized: false,
+            complete: false,
+            pending_directories: Vec::new(),
+            pending_entry: None,
+            pending_jsonl_file: None,
+            frames: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        budget: FilesystemTraversalBudget,
+        visitor: &mut impl FnMut(&Path) -> Result<()>,
+    ) -> Result<FilesystemTraversalSlice> {
+        if self.complete {
+            return Ok(FilesystemTraversalSlice {
+                complete: true,
+                ..FilesystemTraversalSlice::default()
+            });
+        }
+        let mut slice = TraversalSliceBudget::new(budget);
+        if !self.parents_validated {
+            if !slice.reserve_operations(
+                &self.root,
+                provider_parent_validation_operation_count(&self.root),
+            ) {
+                return Ok(slice.finish(false));
+            }
+            ensure_provider_path_parents_are_not_symlinks(&self.root)?;
+            self.parents_validated = true;
+        }
+        if !self.initialized {
+            if !slice.reserve(&self.root) {
+                return Ok(slice.finish(false));
+            }
+            let metadata = fs::symlink_metadata(&self.root)?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path: self.root.clone(),
+                    reason: "symlinked provider transcript roots are rejected",
+                });
+            }
+            self.initialized = true;
+            if file_type.is_file() {
+                if self.mode == FilesystemTraversalMode::Jsonl {
+                    self.pending_jsonl_file = Some(self.root.clone());
+                } else {
+                    visitor(&self.root)?;
+                    self.complete = true;
+                    return Ok(slice.finish(true));
+                }
+            }
+            if !file_type.is_dir() {
+                if self.pending_jsonl_file.is_none() {
+                    self.complete = true;
+                    return Ok(slice.finish(true));
+                }
+            } else {
+                self.pending_directories.push(self.root.clone());
+            }
+        }
+
+        loop {
+            if let Some(path) = self.pending_jsonl_file.take() {
+                if !slice.reserve_operations(&path, secure_open_operation_count(&path)) {
+                    self.pending_jsonl_file = Some(path);
+                    return Ok(slice.finish(false));
+                }
+                ensure_regular_provider_transcript_file(&path)?;
+                visitor(&path)?;
+                if path == self.root
+                    && self.pending_directories.is_empty()
+                    && self.frames.is_empty()
+                {
+                    self.complete = true;
+                    return Ok(slice.finish(true));
+                }
+                continue;
+            }
+
+            if let Some(entry) = self.pending_entry.take() {
+                let path = entry.path();
+                if !slice.reserve(&path) {
+                    self.pending_entry = Some(entry);
+                    return Ok(slice.finish(false));
+                }
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    self.pending_directories.push(path);
+                } else if file_type.is_file() {
+                    if self.mode == FilesystemTraversalMode::RegularFiles {
+                        visitor(&path)?;
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                        self.pending_jsonl_file = Some(path);
+                    }
+                } else if file_type.is_symlink()
+                    && self.mode == FilesystemTraversalMode::Jsonl
+                    && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                {
+                    return Err(CaptureError::InvalidProviderTranscriptPath {
+                        path,
+                        reason: "symlinked provider transcript files are rejected",
+                    });
+                }
+                continue;
+            }
+
+            if let Some(directory) = self.pending_directories.pop() {
+                if !slice.reserve(&directory) {
+                    self.pending_directories.push(directory);
+                    return Ok(slice.finish(false));
+                }
+                let entries = fs::read_dir(&directory)?;
+                self.frames.push(TraversalFrame {
+                    path: directory,
+                    entries,
+                });
+                continue;
+            }
+
+            let Some(frame) = self.frames.last_mut() else {
+                self.complete = true;
+                return Ok(slice.finish(true));
+            };
+            if !slice.reserve(&frame.path) {
+                return Ok(slice.finish(false));
+            }
+            match frame.entries.next() {
+                Some(entry) => self.pending_entry = Some(entry?),
+                None => {
+                    self.frames.pop();
+                }
+            }
+        }
+    }
+}
+
+struct TraversalSliceBudget {
+    budget: FilesystemTraversalBudget,
+    started: Instant,
+    operations: u64,
+    path_bytes: u64,
+}
+
+impl TraversalSliceBudget {
+    fn new(budget: FilesystemTraversalBudget) -> Self {
+        Self {
+            budget,
+            started: Instant::now(),
+            operations: 0,
+            path_bytes: 0,
+        }
+    }
+
+    fn reserve(&mut self, path: &Path) -> bool {
+        self.reserve_operations(path, 1)
+    }
+
+    fn reserve_operations(&mut self, path: &Path, operations: u64) -> bool {
+        let operations = operations.max(1);
+        let path_bytes = (path.as_os_str().len() as u64).saturating_mul(operations);
+        let exhausted = self.operations > 0
+            && (self.operations.saturating_add(operations) > self.budget.max_operations.max(1)
+                || self.path_bytes.saturating_add(path_bytes) > self.budget.max_path_bytes.max(1)
+                || self.started.elapsed() >= self.budget.max_elapsed);
+        if exhausted {
+            return false;
+        }
+        self.operations = self.operations.saturating_add(operations);
+        self.path_bytes = self.path_bytes.saturating_add(path_bytes);
+        crate::disk_io_pacing::pace_current_filesystem_operations(operations, path_bytes);
+        true
+    }
+
+    fn finish(self, complete: bool) -> FilesystemTraversalSlice {
+        FilesystemTraversalSlice {
+            complete,
+            operations: self.operations,
+            path_bytes: self.path_bytes,
+        }
+    }
+}
+
+fn provider_parent_validation_operation_count(path: &Path) -> u64 {
+    u64::try_from(path.components().count().saturating_sub(1)).unwrap_or(u64::MAX)
+}
+
+fn secure_open_operation_count(path: &Path) -> u64 {
+    // Wrapper admission, base/root open, each path component, and final
+    // handle metadata validation all issue filesystem operations.
+    u64::try_from(path.components().count())
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+}
 
 pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     visit_jsonl_paths(root, &mut |path| {
@@ -19,37 +285,30 @@ pub(crate) fn visit_jsonl_paths(
     root: &Path,
     visitor: &mut impl FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    if file_type.is_file() {
-        // Explicit provider files already carry an adapter format. Extension
-        // filtering applies only while discovering children of a directory.
-        ensure_regular_provider_transcript_file(root)?;
-        visitor(root)?;
-        return Ok(());
-    }
-    if !file_type.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            visit_jsonl_paths(&path, visitor)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            ensure_regular_provider_transcript_file(&path)?;
-            visitor(&path)?;
+    let mut cursor = FilesystemTraversalCursor::jsonl(root);
+    loop {
+        let slice = cursor.advance(FilesystemTraversalBudget::default(), visitor)?;
+        if slice.complete {
+            return Ok(());
         }
+        std::thread::yield_now();
     }
-    Ok(())
+}
+
+#[doc(hidden)]
+pub fn collect_provider_source_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut cursor = FilesystemTraversalCursor::regular_files(root);
+    loop {
+        let slice = cursor.advance(FilesystemTraversalBudget::default(), &mut |path| {
+            paths.push(path.to_path_buf());
+            Ok(())
+        })?;
+        if slice.complete {
+            return Ok(paths);
+        }
+        std::thread::yield_now();
+    }
 }
 
 pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()> {
@@ -61,6 +320,7 @@ pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()>
 /// The returned handle is the same handle whose type and link status were
 /// validated, so callers never validate one pathname object and read another.
 pub(crate) fn open_regular_provider_transcript_file(path: &Path) -> Result<File> {
+    crate::disk_io_pacing::pace_current_filesystem_operation(path.as_os_str().len() as u64);
     open_regular_provider_transcript_file_impl(path).map_err(|failure| {
         CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
@@ -113,6 +373,7 @@ fn open_regular_provider_transcript_file_impl(
         return Err(SecureOpenFailure::FinalLinkOrType);
     };
     let base = if path.is_absolute() { b"/\0" } else { b".\0" };
+    crate::disk_io_pacing::pace_current_filesystem_operation(1);
     let base_fd = unsafe {
         libc::open(
             base.as_ptr().cast(),
@@ -129,6 +390,7 @@ fn open_regular_provider_transcript_file_impl(
         PathBuf::from(".")
     };
     for component in parents {
+        crate::disk_io_pacing::pace_current_filesystem_operation(component.len() as u64);
         let component =
             CString::new(component.as_bytes()).map_err(|_| SecureOpenFailure::Parent)?;
         let fd = unsafe {
@@ -145,6 +407,7 @@ fn open_regular_provider_transcript_file_impl(
         opened_path.push(std::ffi::OsStr::from_bytes(component.as_bytes()));
         run_secure_open_test_hook(&opened_path, SecureOpenTestPhase::AfterParentOpen);
     }
+    crate::disk_io_pacing::pace_current_filesystem_operation(file_name.len() as u64);
     let file_name =
         CString::new(file_name.as_bytes()).map_err(|_| SecureOpenFailure::FinalLinkOrType)?;
     let fd = unsafe {
@@ -163,6 +426,7 @@ fn open_regular_provider_transcript_file_impl(
         });
     }
     let file = unsafe { File::from_raw_fd(fd) };
+    crate::disk_io_pacing::pace_current_filesystem_operation(path.as_os_str().len() as u64);
     if !file
         .metadata()
         .map_err(|error| SecureOpenFailure::Io(error.kind()))?
@@ -223,6 +487,7 @@ fn open_regular_provider_transcript_file_impl(
     let mut guards = Vec::with_capacity(parents.len() + 1);
     let mut opened_path = root_path;
     for component in parents {
+        crate::disk_io_pacing::pace_current_filesystem_operation(component.len() as u64);
         let next = open_windows_transcript_component(&directory, component, true)
             .map_err(|_| SecureOpenFailure::Parent)?;
         validate_windows_transcript_component(&next, true)
@@ -232,6 +497,7 @@ fn open_regular_provider_transcript_file_impl(
         opened_path.push(component);
         run_secure_open_test_hook(&opened_path, SecureOpenTestPhase::AfterParentOpen);
     }
+    crate::disk_io_pacing::pace_current_filesystem_operation(file_name.len() as u64);
     let file = open_windows_transcript_component(&directory, file_name, false)
         .map_err(|error| SecureOpenFailure::Io(error.kind()))?;
     validate_windows_transcript_component(&file, false)
@@ -456,6 +722,7 @@ pub(crate) fn ensure_provider_path_parents_are_not_symlinks(path: &Path) -> Resu
         if current.as_os_str().is_empty() {
             continue;
         }
+        crate::disk_io_pacing::pace_current_filesystem_operation(current.as_os_str().len() as u64);
         let Ok(metadata) = fs::symlink_metadata(&current) else {
             continue;
         };
@@ -774,5 +1041,103 @@ mod tests {
         collect_jsonl_paths(temp.path(), &mut paths).expect("collect transcript tree");
 
         assert_eq!(paths, vec![transcript]);
+    }
+
+    #[test]
+    fn traversal_cursor_converges_across_operation_bounded_slices() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nested = temp.path().join("nested");
+        fs::create_dir(&nested).expect("create nested directory");
+        let mut expected = Vec::new();
+        for index in 0..12 {
+            let parent = if index % 2 == 0 {
+                temp.path()
+            } else {
+                nested.as_path()
+            };
+            let path = parent.join(format!("session-{index:02}.jsonl"));
+            fs::write(&path, b"{}\n").expect("write transcript");
+            expected.push(path);
+        }
+
+        let mut cursor = FilesystemTraversalCursor::regular_files(temp.path());
+        let budget = FilesystemTraversalBudget {
+            max_operations: 3,
+            max_path_bytes: u64::MAX,
+            max_elapsed: Duration::from_secs(1),
+        };
+        let mut observed = Vec::new();
+        let mut slices = 0usize;
+        loop {
+            let slice = cursor
+                .advance(budget, &mut |path| {
+                    observed.push(path.to_path_buf());
+                    Ok(())
+                })
+                .expect("advance traversal");
+            slices += 1;
+            assert!(slice.operations <= budget.max_operations);
+            if slice.complete {
+                break;
+            }
+        }
+
+        expected.sort();
+        observed.sort();
+        assert_eq!(observed, expected);
+        assert!(slices > 1);
+    }
+
+    #[test]
+    fn traversal_cursor_bounds_path_bytes_with_one_path_overshoot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for index in 0..4 {
+            fs::write(temp.path().join(format!("session-{index}.jsonl")), b"{}\n")
+                .expect("write transcript");
+        }
+        let mut cursor = FilesystemTraversalCursor::regular_files(temp.path());
+        let budget = FilesystemTraversalBudget {
+            max_operations: u64::MAX,
+            max_path_bytes: 1,
+            max_elapsed: Duration::from_secs(1),
+        };
+        let mut paths = Vec::new();
+        let mut slices = 0usize;
+        loop {
+            let slice = cursor
+                .advance(budget, &mut |path| {
+                    paths.push(path.to_path_buf());
+                    Ok(())
+                })
+                .expect("advance traversal");
+            slices += 1;
+            assert_eq!(slice.operations, 1);
+            if slice.complete {
+                break;
+            }
+        }
+
+        assert_eq!(paths.len(), 4);
+        assert!(slices > paths.len());
+    }
+
+    #[test]
+    fn traversal_multi_operation_admission_charges_the_shared_pacer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nested = temp.path().join("one").join("two");
+        fs::create_dir_all(&nested).expect("create nested directories");
+        let transcript = nested.join("session.jsonl");
+        fs::write(&transcript, b"{}\n").expect("write transcript");
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+        let mut cursor = FilesystemTraversalCursor::jsonl(&transcript);
+
+        let slice = cursor
+            .advance(FilesystemTraversalBudget::default(), &mut |_| Ok(()))
+            .expect("advance explicit transcript traversal");
+
+        assert!(slice.complete);
+        assert!(slice.operations > 2);
+        assert!(pacer.filesystem_operation_count() >= slice.operations);
     }
 }

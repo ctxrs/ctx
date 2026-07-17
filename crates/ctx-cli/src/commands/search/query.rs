@@ -43,7 +43,9 @@ pub(crate) struct SearchRefreshRuntime {
     degraded_inventory_passes: u32,
     pending_inventory_reason: Option<SearchInventoryReason>,
     inventory_progress: Option<SearchInventoryProgress>,
-    pending_dirty_paths: BTreeSet<PathBuf>,
+    pending_dirty_paths: BTreeSet<SearchDirtyPath>,
+    pending_inventory_sources: BTreeSet<PathBuf>,
+    pending_full_inventory: bool,
     inventory_error: Option<String>,
     last_inventory_completed_at_ms: Option<i64>,
     next_inventory_at: Option<Instant>,
@@ -70,6 +72,8 @@ struct SearchRefreshSourceWatcher {
     changes: Arc<Mutex<SearchRefreshSourceChanges>>,
     healthy: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
+    registered_watch_count: usize,
+    directory_source_count: usize,
     _watcher: RecommendedWatcher,
 }
 
@@ -96,7 +100,6 @@ impl SearchInventoryReason {
     }
 }
 
-#[derive(Debug, Clone)]
 struct SearchInventoryProgress {
     source_fingerprint: String,
     reason: SearchInventoryReason,
@@ -105,6 +108,11 @@ struct SearchInventoryProgress {
     total_sources: usize,
     completed_source_bytes: u64,
     completed_directory_entry_stat_operations: u64,
+    completed_path_bytes: u64,
+    active_source_index: Option<usize>,
+    active_discovered_files: usize,
+    scoped: bool,
+    cursor: ImportInventoryCursor,
 }
 
 #[derive(Debug, Clone)]
@@ -115,10 +123,16 @@ struct SearchRefreshWatch {
     recursive: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SearchDirtyPath {
+    source_path: PathBuf,
+    changed_path: PathBuf,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SearchRefreshSourceChanges {
     full_rebuild: bool,
-    dirty_paths: BTreeSet<PathBuf>,
+    dirty_paths: BTreeSet<SearchDirtyPath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +149,8 @@ struct SearchRefreshExecution {
 }
 
 const DAEMON_SEARCH_REFRESH_REINVENTORY_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
+const MAX_SEARCH_REFRESH_ROOT_WATCHES: usize = 64;
+const MAX_PENDING_DIRTY_PATHS: usize = 4_096;
 const DAEMON_SEARCH_REFRESH_RETRY_DELAYS: [StdDuration; 5] = [
     StdDuration::from_secs(30),
     StdDuration::from_secs(60),
@@ -160,6 +176,8 @@ impl Default for SearchRefreshRuntime {
             pending_inventory_reason: None,
             inventory_progress: None,
             pending_dirty_paths: BTreeSet::new(),
+            pending_inventory_sources: BTreeSet::new(),
+            pending_full_inventory: false,
             inventory_error: None,
             last_inventory_completed_at_ms: None,
             next_inventory_at: None,
@@ -294,6 +312,9 @@ impl SearchRefreshRuntime {
                 "total_sources": progress.total_sources,
                 "source_bytes": progress.completed_source_bytes,
                 "directory_entry_stat_operations": progress.completed_directory_entry_stat_operations,
+                "path_bytes": progress.completed_path_bytes,
+                "active_source_index": progress.active_source_index,
+                "active_discovered_files": progress.active_discovered_files,
             })
         });
         json!({
@@ -307,6 +328,11 @@ impl SearchRefreshRuntime {
                     u64::try_from(retry.saturating_duration_since(now).as_millis())
                         .unwrap_or(u64::MAX)
                 }),
+                "coverage": self.source_watcher.as_ref().map(|watcher| {
+                    if watcher.directory_source_count == 0 { "complete" } else { "root_only" }
+                }).unwrap_or("none"),
+                "registered_paths": self.source_watcher.as_ref().map(|watcher| watcher.registered_watch_count).unwrap_or(0),
+                "directory_sources": self.source_watcher.as_ref().map(|watcher| watcher.directory_source_count).unwrap_or(0),
             },
             "inventory": {
                 "state": if self.inventory_progress.is_some() { "in_progress" } else { "idle" },
@@ -376,10 +402,19 @@ impl SearchRefreshRuntime {
         if target_setup_due || retry_due {
             match SearchRefreshSourceWatcher::new(watched_paths) {
                 Ok(watcher) => {
+                    let root_only_coverage = watcher.directory_source_count > 0;
                     self.source_watcher = Some(watcher);
                     self.next_watcher_retry_at = None;
                     self.next_watcher_retry_at_ms = None;
-                    if self.watcher_degraded {
+                    if root_only_coverage {
+                        self.watcher_degraded = true;
+                        self.watcher_recovery_pending = false;
+                        self.watcher_error = Some(
+                            "recursive watcher registration is disabled; directory sources use bounded periodic reconciliation"
+                                .to_owned(),
+                        );
+                        self.watcher_retry_failures = 0;
+                    } else if self.watcher_degraded {
                         self.watcher_recovery_pending = true;
                         self.request_inventory(SearchInventoryReason::WatcherRecovery);
                     }
@@ -428,29 +463,59 @@ impl SearchRefreshRuntime {
 
     fn request_inventory(&mut self, reason: SearchInventoryReason) {
         self.pending_inventory_reason = Some(reason);
+        self.pending_inventory_sources.clear();
+        self.pending_full_inventory = true;
         self.next_inventory_at = None;
         self.next_inventory_at_ms = None;
     }
 
+    fn request_source_inventory(&mut self, source_path: PathBuf) {
+        if self.pending_inventory_reason.is_none() {
+            self.pending_inventory_reason = Some(SearchInventoryReason::SourcesChanged);
+        }
+        if self.pending_inventory_reason == Some(SearchInventoryReason::SourcesChanged)
+            && !self.pending_full_inventory
+        {
+            self.pending_inventory_sources.insert(source_path);
+        }
+    }
+
+    fn retain_dirty_paths(&mut self, dirty_paths: &BTreeSet<SearchDirtyPath>) {
+        for dirty in dirty_paths {
+            if self.pending_dirty_paths.len() >= MAX_PENDING_DIRTY_PATHS
+                && !self.pending_dirty_paths.contains(dirty)
+            {
+                self.pending_dirty_paths.clear();
+                self.request_inventory(SearchInventoryReason::SourcesChanged);
+                return;
+            }
+            self.pending_dirty_paths.insert(dirty.clone());
+        }
+    }
+
     fn prepare_inventory(
         &mut self,
+        store: &Store,
+        sources: &[SourceInfo],
         source_fingerprint: &str,
-        total_sources: usize,
+        publication_page_count: usize,
         force_rebuild: bool,
-    ) -> bool {
-        if self.inventory_progress.as_ref().is_some_and(|progress| {
-            progress.source_fingerprint != source_fingerprint
-                || progress.total_sources != total_sources
-        }) {
+    ) -> Result<bool> {
+        if self
+            .inventory_progress
+            .as_ref()
+            .is_some_and(|progress| progress.source_fingerprint != source_fingerprint)
+        {
             self.inventory_progress = None;
             self.cached_work = None;
             self.request_inventory(SearchInventoryReason::SourcesChanged);
         }
         if self.inventory_progress.is_some() {
-            return true;
+            return Ok(true);
         }
         let now = Instant::now();
-        let reason = self.pending_inventory_reason.take().or_else(|| {
+        let requested_reason = self.pending_inventory_reason;
+        let reason = requested_reason.or_else(|| {
             if force_rebuild {
                 Some(SearchInventoryReason::SourcesChanged)
             } else if self.cached_work.is_none()
@@ -469,12 +534,40 @@ impl SearchRefreshRuntime {
             }
         });
         let Some(reason) = reason else {
-            return false;
+            return Ok(false);
         };
-        self.cached_work = None;
+        let scoped = reason == SearchInventoryReason::SourcesChanged
+            && !self.pending_full_inventory
+            && !self.pending_inventory_sources.is_empty();
+        let inventory_sources = if scoped {
+            sources
+                .iter()
+                .filter(|source| self.pending_inventory_sources.contains(&source.path))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            sources.to_vec()
+        };
+        let total_sources =
+            inventory_sources
+                .len()
+                .saturating_add(if scoped { 0 } else { publication_page_count });
+        let cursor = ImportInventoryCursor::new(store, inventory_sources, true, !scoped)?;
+        if requested_reason.is_some() {
+            self.pending_inventory_reason = None;
+        }
+        self.pending_inventory_sources.clear();
+        self.pending_full_inventory = false;
+        if !scoped {
+            self.cached_work = None;
+            // Watcher changes observed before this pass are covered by the
+            // full inventory. Changes that arrive while it is running remain
+            // queued for a follow-up pass.
+            self.pending_dirty_paths.clear();
+            self.next_inventory_at = None;
+            self.next_inventory_at_ms = None;
+        }
         self.inventory_error = None;
-        self.next_inventory_at = None;
-        self.next_inventory_at_ms = None;
         self.inventory_progress = Some(SearchInventoryProgress {
             source_fingerprint: source_fingerprint.to_owned(),
             reason,
@@ -483,8 +576,13 @@ impl SearchRefreshRuntime {
             total_sources,
             completed_source_bytes: 0,
             completed_directory_entry_stat_operations: 0,
+            completed_path_bytes: 0,
+            active_source_index: None,
+            active_discovered_files: 0,
+            scoped,
+            cursor,
         });
-        true
+        Ok(true)
     }
 
     fn durable_sources_changed(&self, source_fingerprint: &str) -> bool {
@@ -493,11 +591,32 @@ impl SearchRefreshRuntime {
             .is_some_and(|durable| durable != source_fingerprint)
     }
 
-    fn next_inventory_source_index(&self) -> Option<usize> {
-        self.inventory_progress.as_ref().and_then(|progress| {
-            (progress.next_source_index < progress.total_sources)
-                .then_some(progress.next_source_index)
-        })
+    fn advance_inventory(&mut self, store: &Store) -> Result<ImportInventoryCursorStep> {
+        let Some(progress) = self.inventory_progress.as_mut() else {
+            return Err(anyhow!(
+                "inventory advanced without an active inventory pass"
+            ));
+        };
+        progress.active_source_index = (progress.next_source_index < progress.total_sources)
+            .then_some(progress.next_source_index);
+        progress.cursor.advance(store)
+    }
+
+    fn note_inventory_slice(
+        &mut self,
+        slice: ImportInventorySliceProgress,
+        measured_operations: u64,
+    ) {
+        let Some(progress) = self.inventory_progress.as_mut() else {
+            return;
+        };
+        progress.completed_directory_entry_stat_operations = progress
+            .completed_directory_entry_stat_operations
+            .saturating_add(measured_operations.max(slice.operations));
+        progress.completed_path_bytes = progress
+            .completed_path_bytes
+            .saturating_add(slice.path_bytes);
+        progress.active_discovered_files = slice.discovered_files;
     }
 
     fn note_inventory_source_completed(&mut self, source_bytes: u64, operations: u64) {
@@ -510,7 +629,17 @@ impl SearchRefreshRuntime {
         progress.completed_directory_entry_stat_operations = progress
             .completed_directory_entry_stat_operations
             .saturating_add(operations);
+        progress.active_source_index = None;
+        progress.active_discovered_files = 0;
         self.inventory_error = None;
+    }
+
+    fn note_inventory_cursor_complete(&mut self) {
+        if let Some(progress) = self.inventory_progress.as_mut() {
+            progress.next_source_index = progress.total_sources;
+            progress.active_source_index = None;
+            progress.active_discovered_files = 0;
+        }
     }
 
     fn note_inventory_error(&mut self, error: String) {
@@ -530,10 +659,16 @@ impl SearchRefreshRuntime {
             .inventory_progress
             .as_ref()
             .map(|progress| progress.reason);
-        self.durable_source_fingerprint = self
+        let completed_scoped = self
             .inventory_progress
             .as_ref()
-            .map(|progress| progress.source_fingerprint.clone());
+            .is_some_and(|progress| progress.scoped);
+        if !completed_scoped {
+            self.durable_source_fingerprint = self
+                .inventory_progress
+                .as_ref()
+                .map(|progress| progress.source_fingerprint.clone());
+        }
         if self
             .source_watcher
             .as_ref()
@@ -549,6 +684,9 @@ impl SearchRefreshRuntime {
         }
         self.inventory_progress = None;
         self.inventory_error = None;
+        if completed_scoped {
+            return;
+        }
         self.last_inventory_completed_at_ms = Some(now_ms);
         if self.watcher_degraded
             && self.source_watcher.is_some()
@@ -581,7 +719,14 @@ impl SearchRefreshRuntime {
     #[cfg(test)]
     fn force_source_change_for_test(&self, path: &Path) {
         if let Some(watcher) = &self.source_watcher {
-            watcher.mark_path_dirty(path);
+            watcher.mark_path_dirty(path, path);
+        }
+    }
+
+    #[cfg(test)]
+    fn force_source_file_change_for_test(&self, source_path: &Path, changed_path: &Path) {
+        if let Some(watcher) = &self.source_watcher {
+            watcher.mark_path_dirty(source_path, changed_path);
         }
     }
 }
@@ -623,6 +768,7 @@ impl SearchRefreshSourceWatcher {
         let callback_healthy = Arc::clone(&healthy);
         let callback_error = Arc::clone(&error);
         let watches = search_refresh_watch_specs(&watched_paths);
+        let registrations = search_refresh_watch_registrations(&watches)?;
         let callback_watches = watches.clone();
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
@@ -637,23 +783,12 @@ impl SearchRefreshSourceWatcher {
             NotifyConfig::default(),
         )
         .context("create daemon search refresh watcher")?;
-        let mut watch_targets = Vec::<(PathBuf, bool)>::new();
-        for watch in &watches {
-            if let Some((_, recursive)) = watch_targets
-                .iter_mut()
-                .find(|(path, _)| *path == watch.watch_path)
-            {
-                *recursive |= watch.recursive;
-            } else {
-                watch_targets.push((watch.watch_path.clone(), watch.recursive));
-            }
-        }
-        for (watch_path, recursive) in watch_targets {
-            let mode = if recursive {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
+        let directory_source_count = watches.iter().filter(|watch| watch.recursive).count();
+        let registered_watch_count = registrations.len();
+        for (watch_path, mode) in registrations {
+            ctx_history_capture::pace_current_filesystem_operation(
+                watch_path.as_os_str().len() as u64
+            );
             watcher
                 .watch(&watch_path, mode)
                 .with_context(|| format!("watch search refresh source {}", watch_path.display()))?;
@@ -662,6 +797,8 @@ impl SearchRefreshSourceWatcher {
             changes,
             healthy,
             error,
+            registered_watch_count,
+            directory_source_count,
             _watcher: watcher,
         })
     }
@@ -675,12 +812,18 @@ impl SearchRefreshSourceWatcher {
     }
 
     #[cfg(test)]
-    fn mark_path_dirty(&self, path: &Path) {
-        self.changes
+    fn mark_path_dirty(&self, source_path: &Path, changed_path: &Path) {
+        let mut changes = self
+            .changes
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .dirty_paths
-            .insert(path.to_path_buf());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        record_search_refresh_dirty_path(
+            &mut changes,
+            SearchDirtyPath {
+                source_path: source_path.to_path_buf(),
+                changed_path: changed_path.to_path_buf(),
+            },
+        );
     }
 
     fn is_healthy(&self) -> bool {
@@ -741,7 +884,21 @@ fn note_search_refresh_source_event(
         for watch in watches {
             covered |= search_refresh_event_path_is_covered_by_watch(event_path, watch);
             if search_refresh_event_path_matches_watch(event_path, watch) {
-                changes.dirty_paths.insert(watch.source_path.clone());
+                let changed_path = if watch.recursive {
+                    event_path
+                        .strip_prefix(&watch.match_path)
+                        .map(|relative| watch.source_path.join(relative))
+                        .unwrap_or_else(|_| event_path.clone())
+                } else {
+                    event_path.clone()
+                };
+                record_search_refresh_dirty_path(
+                    &mut changes,
+                    SearchDirtyPath {
+                        source_path: watch.source_path.clone(),
+                        changed_path,
+                    },
+                );
             }
         }
         unclassified |= !covered;
@@ -751,18 +908,40 @@ fn note_search_refresh_source_event(
     }
 }
 
+fn record_search_refresh_dirty_path(
+    changes: &mut SearchRefreshSourceChanges,
+    dirty: SearchDirtyPath,
+) {
+    if changes.dirty_paths.len() >= MAX_PENDING_DIRTY_PATHS && !changes.dirty_paths.contains(&dirty)
+    {
+        changes.dirty_paths.clear();
+        changes.full_rebuild = true;
+        return;
+    }
+    if !changes.full_rebuild {
+        changes.dirty_paths.insert(dirty);
+    }
+}
+
 fn search_refresh_watch_specs(paths: &[PathBuf]) -> Vec<SearchRefreshWatch> {
     paths
         .iter()
         .map(|source_path| {
+            ctx_history_capture::pace_current_filesystem_operation(
+                source_path.as_os_str().len() as u64
+            );
             let is_dir = source_path.is_dir();
+            pace_search_refresh_path_resolution(source_path);
             let match_path = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.clone());
             let watch_path = if is_dir {
                 match_path.clone()
             } else {
                 source_path
                     .parent()
-                    .map(|parent| fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()))
+                    .map(|parent| {
+                        pace_search_refresh_path_resolution(parent);
+                        fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf())
+                    })
                     .unwrap_or_else(|| match_path.clone())
             };
             SearchRefreshWatch {
@@ -773,6 +952,36 @@ fn search_refresh_watch_specs(paths: &[PathBuf]) -> Vec<SearchRefreshWatch> {
             }
         })
         .collect()
+}
+
+fn search_refresh_watch_registrations(
+    watches: &[SearchRefreshWatch],
+) -> Result<Vec<(PathBuf, RecursiveMode)>> {
+    let mut watch_targets = BTreeSet::new();
+    for watch in watches {
+        watch_targets.insert(watch.watch_path.clone());
+    }
+    if watch_targets.len() > MAX_SEARCH_REFRESH_ROOT_WATCHES {
+        return Err(anyhow!(
+            "search refresh has {} distinct source roots, exceeding the bounded watcher registration limit of {}; bounded periodic reconciliation remains available",
+            watch_targets.len(),
+            MAX_SEARCH_REFRESH_ROOT_WATCHES
+        ));
+    }
+    Ok(watch_targets
+        .into_iter()
+        .map(|path| (path, RecursiveMode::NonRecursive))
+        .collect())
+}
+
+fn pace_search_refresh_path_resolution(path: &Path) {
+    let operations = u64::try_from(path.components().count())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    ctx_history_capture::pace_current_filesystem_operations(
+        operations,
+        (path.as_os_str().len() as u64).saturating_mul(operations),
+    );
 }
 
 fn search_refresh_event_path_matches_watch(event_path: &Path, watch: &SearchRefreshWatch) -> bool {
@@ -842,27 +1051,30 @@ fn watched_source_paths(sources: &[SourceInfo]) -> Vec<PathBuf> {
 fn watched_source_path_identities(paths: &[PathBuf]) -> Vec<WatchedSourcePathIdentity> {
     paths
         .iter()
-        .map(|path| match fs::metadata(path) {
-            Ok(metadata) => {
-                let stable_id = watched_source_path_stable_id(path, &metadata);
-                WatchedSourcePathIdentity {
-                    exists: true,
-                    is_dir: metadata.is_dir(),
-                    stable_id,
-                    fallback_len: stable_id.is_none().then_some(metadata.len()),
-                    fallback_modified_at: stable_id
-                        .is_none()
-                        .then(|| metadata.modified().ok())
-                        .flatten(),
+        .map(|path| {
+            ctx_history_capture::pace_current_filesystem_operation(path.as_os_str().len() as u64);
+            match fs::metadata(path) {
+                Ok(metadata) => {
+                    let stable_id = watched_source_path_stable_id(path, &metadata);
+                    WatchedSourcePathIdentity {
+                        exists: true,
+                        is_dir: metadata.is_dir(),
+                        stable_id,
+                        fallback_len: stable_id.is_none().then_some(metadata.len()),
+                        fallback_modified_at: stable_id
+                            .is_none()
+                            .then(|| metadata.modified().ok())
+                            .flatten(),
+                    }
                 }
+                Err(_) => WatchedSourcePathIdentity {
+                    exists: false,
+                    is_dir: false,
+                    stable_id: None,
+                    fallback_len: None,
+                    fallback_modified_at: None,
+                },
             }
-            Err(_) => WatchedSourcePathIdentity {
-                exists: false,
-                is_dir: false,
-                stable_id: None,
-                fallback_len: None,
-                fallback_modified_at: None,
-            },
         })
         .collect()
 }
@@ -882,6 +1094,10 @@ fn watched_source_path_stable_id(path: &Path, _metadata: &fs::Metadata) -> Optio
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
+    ctx_history_capture::pace_current_filesystem_operations(
+        2,
+        (path.as_os_str().len() as u64).saturating_mul(2),
+    );
     let file = fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)

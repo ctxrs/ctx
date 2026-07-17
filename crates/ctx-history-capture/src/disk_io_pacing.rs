@@ -10,6 +10,9 @@ use std::{
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const MAX_SLEEP: Duration = Duration::from_millis(25);
+const FILESYSTEM_OPERATION_BYTES: u64 = 16 * 1024;
+const MAX_FILESYSTEM_OPERATIONS_PER_SECOND: u64 = 1_024;
+const FILESYSTEM_OPERATION_BURST: u64 = 64;
 
 type Clock = Arc<dyn Fn() -> Duration + Send + Sync>;
 type Sleeper = Arc<dyn Fn(Duration) + Send + Sync>;
@@ -19,6 +22,8 @@ pub struct DiskIoPacer {
     bytes_per_second: u64,
     burst_bytes: u64,
     burst_nanos: u128,
+    filesystem_operations_per_second: u64,
+    filesystem_operation_burst_nanos: u128,
     state: Arc<Mutex<PacerState>>,
     clock: Clock,
     sleeper: Sleeper,
@@ -27,7 +32,10 @@ pub struct DiskIoPacer {
 struct PacerState {
     last_nanos: u128,
     available_nanos: u128,
+    filesystem_last_nanos: u128,
+    available_filesystem_operation_nanos: u128,
     charged_bytes: u64,
+    filesystem_operations: u64,
 }
 
 impl fmt::Debug for DiskIoPacer {
@@ -36,6 +44,10 @@ impl fmt::Debug for DiskIoPacer {
             .debug_struct("DiskIoPacer")
             .field("bytes_per_second", &self.bytes_per_second)
             .field("burst_bytes", &self.burst_bytes)
+            .field(
+                "filesystem_operations_per_second",
+                &self.filesystem_operations_per_second,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -60,15 +72,25 @@ impl DiskIoPacer {
         let bytes_per_second = bytes_per_second.max(1);
         let burst_bytes = burst_bytes.max(1);
         let burst_nanos = byte_cost_nanos(burst_bytes, bytes_per_second);
+        let filesystem_operations_per_second = bytes_per_second
+            .div_ceil(FILESYSTEM_OPERATION_BYTES)
+            .clamp(1, MAX_FILESYSTEM_OPERATIONS_PER_SECOND);
+        let filesystem_operation_burst_nanos =
+            operation_cost_nanos(FILESYSTEM_OPERATION_BURST, filesystem_operations_per_second);
         let now = clock().as_nanos();
         Self {
             bytes_per_second,
             burst_bytes,
             burst_nanos,
+            filesystem_operations_per_second,
+            filesystem_operation_burst_nanos,
             state: Arc::new(Mutex::new(PacerState {
                 last_nanos: now,
                 available_nanos: burst_nanos,
+                filesystem_last_nanos: now,
+                available_filesystem_operation_nanos: filesystem_operation_burst_nanos,
                 charged_bytes: 0,
+                filesystem_operations: 0,
             })),
             clock,
             sleeper,
@@ -116,6 +138,51 @@ impl DiskIoPacer {
         }
     }
 
+    pub(crate) fn pace_filesystem_operations(&self, operations: u64, path_bytes: u64) {
+        if operations == 0 {
+            return;
+        }
+        let mut remaining_nanos =
+            operation_cost_nanos(operations, self.filesystem_operations_per_second);
+        {
+            let mut state = self.lock_state();
+            state.filesystem_operations = state.filesystem_operations.saturating_add(operations);
+        }
+        while remaining_nanos > 0 {
+            let sleep = {
+                let mut state = self.lock_state();
+                let now = (self.clock)().as_nanos();
+                let replenished = state
+                    .available_filesystem_operation_nanos
+                    .saturating_add(now.saturating_sub(state.filesystem_last_nanos));
+                state.available_filesystem_operation_nanos =
+                    replenished.min(self.filesystem_operation_burst_nanos);
+                state.filesystem_last_nanos = now;
+                let paid = remaining_nanos.min(state.available_filesystem_operation_nanos);
+                state.available_filesystem_operation_nanos -= paid;
+                remaining_nanos -= paid;
+                duration_from_nanos(
+                    remaining_nanos
+                        .min(MAX_SLEEP.as_nanos())
+                        .min(self.filesystem_operation_burst_nanos),
+                )
+            };
+            if !sleep.is_zero() {
+                (self.sleeper)(sleep);
+            }
+        }
+        self.pace(
+            FILESYSTEM_OPERATION_BYTES
+                .saturating_mul(operations)
+                .saturating_add(path_bytes),
+        );
+    }
+
+    #[doc(hidden)]
+    pub fn filesystem_operation_count(&self) -> u64 {
+        self.lock_state().filesystem_operations
+    }
+
     #[cfg(test)]
     pub(crate) fn charged_bytes(&self) -> u64 {
         self.lock_state().charged_bytes
@@ -131,6 +198,10 @@ fn byte_cost_nanos(bytes: u64, bytes_per_second: u64) -> u128 {
         .saturating_mul(NANOS_PER_SECOND)
         .saturating_add(u128::from(bytes_per_second) - 1)
         / u128::from(bytes_per_second)
+}
+
+fn operation_cost_nanos(operations: u64, operations_per_second: u64) -> u128 {
+    byte_cost_nanos(operations, operations_per_second)
 }
 
 fn duration_from_nanos(nanos: u128) -> Duration {
@@ -170,6 +241,19 @@ pub fn pace_current_disk_io(bytes: u64) {
     let pacer = CURRENT_PACER.with(|slot| slot.borrow().clone());
     if let Some(pacer) = pacer {
         pacer.pace(bytes);
+    }
+}
+
+#[doc(hidden)]
+pub fn pace_current_filesystem_operation(path_bytes: u64) {
+    pace_current_filesystem_operations(1, path_bytes);
+}
+
+#[doc(hidden)]
+pub fn pace_current_filesystem_operations(operations: u64, path_bytes: u64) {
+    let pacer = CURRENT_PACER.with(|slot| slot.borrow().clone());
+    if let Some(pacer) = pacer {
+        pacer.pace_filesystem_operations(operations, path_bytes);
     }
 }
 
@@ -301,6 +385,52 @@ mod tests {
 
         assert_eq!(outer.charged_bytes(), 40);
         assert_eq!(inner.charged_bytes(), 20);
+    }
+
+    #[test]
+    fn filesystem_operations_have_an_independent_small_burst() {
+        let (pacer, time) = fake_pacer(FILESYSTEM_OPERATION_BYTES, u64::MAX);
+
+        for _ in 0..=FILESYSTEM_OPERATION_BURST {
+            pacer.pace_filesystem_operations(1, 3);
+        }
+
+        assert_eq!(
+            time.sleeps
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .sum::<Duration>(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            pacer.filesystem_operation_count(),
+            FILESYSTEM_OPERATION_BURST + 1
+        );
+        assert_eq!(
+            pacer.charged_bytes(),
+            (FILESYSTEM_OPERATION_BURST + 1) * (FILESYSTEM_OPERATION_BYTES + 3)
+        );
+    }
+
+    #[test]
+    fn multi_operation_reservation_charges_the_whole_metadata_group() {
+        let (pacer, time) = fake_pacer(FILESYSTEM_OPERATION_BYTES, u64::MAX);
+
+        pacer.pace_filesystem_operations(FILESYSTEM_OPERATION_BURST + 1, 17);
+
+        assert_eq!(
+            pacer.filesystem_operation_count(),
+            FILESYSTEM_OPERATION_BURST + 1
+        );
+        assert_eq!(
+            pacer.charged_bytes(),
+            FILESYSTEM_OPERATION_BYTES
+                .saturating_mul(FILESYSTEM_OPERATION_BURST + 1)
+                .saturating_add(17)
+        );
+        assert!(!time.sleeps.lock().unwrap().is_empty());
     }
 
     #[test]

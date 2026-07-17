@@ -1,6 +1,14 @@
 const SOURCE_IMPORT_PERSIST_BATCH_ROWS: usize = 64;
 const SOURCE_IMPORT_PERSIST_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 const SOURCE_IMPORT_PERSIST_ROW_OVERHEAD_BYTES: u64 = 256;
+const SOURCE_IMPORT_ACTIVE_PATH_INVENTORY_PAGE_SQL: &str = "SELECT rowid, source_path \
+     FROM source_import_files INDEXED BY idx_source_import_files_provider_source_root_stale \
+     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 AND rowid > ?3 \
+     ORDER BY rowid LIMIT ?4";
+const SOURCE_IMPORT_EXPLICIT_RESCAN_PAGE_SQL: &str = "SELECT rowid \
+     FROM source_import_files INDEXED BY idx_source_import_files_provider_source_root_stale \
+     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 AND rowid > ?3 \
+     ORDER BY rowid LIMIT ?4";
 
 fn source_import_persist_row_bytes(file: &SourceImportFile, metadata_json: &str) -> u64 {
     [
@@ -35,6 +43,68 @@ fn source_import_current_path_batch(current_paths: &[String]) -> (usize, u64) {
 }
 
 impl Store {
+    #[doc(hidden)]
+    pub fn list_source_import_inventory_paths_page(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        after_rowid: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
+        let limit = limit.clamp(1, 64);
+        let mut statement = self
+            .conn
+            .prepare(SOURCE_IMPORT_ACTIVE_PATH_INVENTORY_PAGE_SQL)?;
+        collect_rows(statement.query_map(
+            params![
+                provider.as_str(),
+                source_root,
+                after_rowid.unwrap_or(0),
+                capped_i64(limit as u64)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    #[doc(hidden)]
+    pub fn mark_source_import_inventory_paths_stale(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        paths: &[String],
+        observed_at_ms: i64,
+        inventory_generation: u64,
+    ) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        if paths.len() > Self::INVENTORY_PATH_PAGE_LIMIT {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        let placeholders = vec!["?"; paths.len()].join(", ");
+        let sql = format!(
+            "UPDATE source_import_files SET is_stale = 1, observed_at_ms = ?3 \
+             WHERE provider = ?1 AND source_root = ?2 \
+               AND EXISTS (\
+                   SELECT 1 FROM import_inventory_generations AS inventory \
+                   WHERE inventory.provider = ?1 AND inventory.source_root = ?2 \
+                     AND inventory.inventory_family = 'source_import_files' \
+                     AND inventory.current_generation = ?4\
+               ) \
+               AND source_path IN ({placeholders})"
+        );
+        let mut parameters: Vec<rusqlite::types::Value> = vec![
+            provider.as_str().to_owned().into(),
+            source_root.to_owned().into(),
+            observed_at_ms.into(),
+            capped_i64(inventory_generation).into(),
+        ];
+        parameters.extend(paths.iter().cloned().map(Into::into));
+        self.conn
+            .execute(&sql, rusqlite::params_from_iter(parameters))
+            .map_err(StoreError::from)
+    }
+
     fn classify_source_import_pending_reason(
         &self,
         file: &SourceImportFile,
@@ -870,6 +940,75 @@ impl Store {
                 ],
             )?;
             Ok(legacy.saturating_add(explicit))
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn schedule_source_import_explicit_rescan_page(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+        after_rowid: Option<i64>,
+        limit: usize,
+    ) -> Result<(usize, usize, Option<i64>, bool)> {
+        let limit = limit.clamp(1, Self::INVENTORY_PATH_PAGE_LIMIT);
+        with_immediate_transaction(&self.conn, || {
+            if !self.source_import_inventory_generation_is_complete(
+                provider,
+                source_root,
+                inventory_generation,
+            )? {
+                return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+            }
+            let mut statement = self.conn.prepare(SOURCE_IMPORT_EXPLICIT_RESCAN_PAGE_SQL)?;
+            let rowids = collect_rows(statement.query_map(
+                params![
+                    provider.as_str(),
+                    source_root,
+                    after_rowid.unwrap_or(0),
+                    capped_i64(limit as u64),
+                ],
+                |row| row.get::<_, i64>(0),
+            )?)?;
+            let rows_visited = rowids.len();
+            let next_cursor = rowids.last().copied();
+            let complete = rows_visited < limit;
+            if rowids.is_empty() {
+                return Ok((rows_visited, 0, next_cursor, complete));
+            }
+            let placeholders = (4..4 + rowids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE source_import_files \
+                 SET pending_reason = CASE \
+                     WHEN indexed_status = 'indexed' THEN 'explicit_rescan' \
+                     ELSE 'legacy' \
+                 END \
+                 WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
+                   AND pending_reason IS NULL \
+                   AND indexed_status IN ('indexed', 'pending', 'failed') \
+                   AND EXISTS ( \
+                       SELECT 1 FROM import_inventory_generations AS inventory \
+                       WHERE inventory.provider = ?1 AND inventory.source_root = ?2 \
+                         AND inventory.inventory_family = 'source_import_files' \
+                         AND inventory.current_generation = ?3 \
+                         AND inventory.completed_generation = ?3 \
+                   ) \
+                   AND rowid IN ({placeholders})"
+            );
+            let mut parameters: Vec<rusqlite::types::Value> = vec![
+                provider.as_str().to_owned().into(),
+                source_root.to_owned().into(),
+                capped_i64(inventory_generation).into(),
+            ];
+            parameters.extend(rowids.into_iter().map(Into::into));
+            let rows_changed = self
+                .conn
+                .execute(&sql, rusqlite::params_from_iter(parameters))?;
+            Ok((rows_visited, rows_changed, next_cursor, complete))
         })
     }
 

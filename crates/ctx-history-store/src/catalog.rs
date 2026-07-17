@@ -54,6 +54,18 @@ pub struct CatalogSourceIndexState {
     pub last_imported_file_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct CatalogObservationState {
+    pub source_path: String,
+    pub source_format: String,
+    pub file_size_bytes: u64,
+    pub file_modified_at_ms: i64,
+    pub import_revision: u32,
+    pub is_stale: bool,
+    pub observation_token: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceImportFile {
     pub provider: CaptureProvider,
@@ -368,6 +380,21 @@ pub(crate) fn catalog_inventory_material_published_predicate(alias: &str) -> Str
               AND catalog_inventory.source_root = {alias}.source_root
               AND catalog_inventory.inventory_family = 'catalog_sessions'
               AND catalog_inventory.completed_generation = 0
+        )
+        "#
+    )
+}
+
+pub(crate) fn source_import_inventory_material_published_predicate(alias: &str) -> String {
+    format!(
+        r#"
+        NOT EXISTS (
+            SELECT 1
+            FROM import_inventory_generations AS source_inventory
+            WHERE source_inventory.provider = {alias}.provider
+              AND source_inventory.source_root = {alias}.source_root
+              AND source_inventory.inventory_family = 'source_import_files'
+              AND source_inventory.completed_generation = 0
         )
         "#
     )

@@ -36,6 +36,42 @@ mod freshness_tests {
         explicit_path_source(CaptureProvider::Pi, root.to_path_buf())
     }
 
+    fn write_codex_source(root: &Path, label: &str) -> (SourceInfo, PathBuf) {
+        fs::create_dir_all(root).unwrap();
+        let path = root.join(format!("{label}.jsonl"));
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "timestamp": "2026-07-14T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": label,
+                        "timestamp": "2026-07-14T12:00:00Z",
+                        "cwd": "/repo",
+                        "originator": "codex-cli",
+                        "source": "cli"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-07-14T12:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": label}]
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        (
+            explicit_path_source(CaptureProvider::Codex, root.to_path_buf()),
+            path,
+        )
+    }
+
     fn seed_failed_pi_backlog(data_root: &Path, count: usize) -> SourceInfo {
         fs::create_dir_all(data_root).unwrap();
         let source = write_pi_source(&data_root.join("pi-backlog"), count, "recovery");
@@ -216,7 +252,124 @@ mod freshness_tests {
             .watcher_changes(std::slice::from_ref(&source))
             .unwrap();
         assert!(!changed.full_rebuild);
-        assert_eq!(changed.dirty_paths, BTreeSet::from([source.path]));
+        assert_eq!(
+            changed.dirty_paths,
+            BTreeSet::from([SearchDirtyPath {
+                source_path: source.path.clone(),
+                changed_path: source.path,
+            }])
+        );
+    }
+
+    #[test]
+    fn daemon_codex_append_reobserves_one_path_without_tree_inventory() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let (source, session_path) =
+            write_codex_source(&data_root.join("codex-watch"), "bounded-dirty");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+
+        let mut runtime = SearchRefreshRuntime::default();
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        while runtime.inventory_progress.is_some() {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        }
+        let generation = cached_inventory_generation(&runtime, &source);
+        let operations_before = runtime
+            .disk_io_pacer(ImportExecutionPolicy::Daemon)
+            .filesystem_operation_count();
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&session_path)
+                .unwrap(),
+            "{}",
+            json!({
+                "timestamp": "2026-07-14T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "exact dirty path"}]
+                }
+            })
+        )
+        .unwrap();
+        runtime.force_source_file_change_for_test(&source.path, &session_path);
+
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+
+        assert!(runtime.inventory_progress.is_none());
+        assert!(runtime.pending_dirty_paths.is_empty());
+        assert_eq!(cached_inventory_generation(&runtime, &source), generation);
+        let operations = runtime
+            .disk_io_pacer(ImportExecutionPolicy::Daemon)
+            .filesystem_operation_count()
+            .saturating_sub(operations_before);
+        assert!(
+            operations < 64,
+            "exact dirty path used {operations} operations"
+        );
+
+        let (_, created_path) = write_codex_source(&source.path, "bounded-created");
+        runtime.force_source_file_change_for_test(&source.path, &created_path);
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        assert!(runtime.inventory_progress.is_none());
+        assert_eq!(cached_inventory_generation(&runtime, &source), generation);
+
+        fs::remove_file(&session_path).unwrap();
+        runtime.force_source_file_change_for_test(&source.path, &session_path);
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        assert!(runtime.inventory_progress.is_none());
+        assert_eq!(cached_inventory_generation(&runtime, &source), generation);
+        let store = Store::open(database_path(data_root)).unwrap();
+        assert!(store
+            .list_active_catalog_sessions_for_source(
+                CaptureProvider::Codex,
+                source.path.to_str().unwrap(),
+            )
+            .unwrap()
+            .iter()
+            .all(|session| session.source_path != session_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn daemon_failed_codex_exact_page_escalates_to_scoped_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let (source, session_path) =
+            write_codex_source(&data_root.join("codex-failed-page"), "failed-page");
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+
+        let mut runtime = SearchRefreshRuntime::default();
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        while runtime.inventory_progress.is_some() {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+        }
+        let sweep_deadline = runtime.next_inventory_at;
+        fs::write(&session_path, b"{not-json\n").unwrap();
+        runtime.force_source_file_change_for_test(&source.path, &session_path);
+
+        let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source]);
+
+        assert!(runtime.pending_dirty_paths.is_empty());
+        assert!(runtime
+            .inventory_progress
+            .as_ref()
+            .is_some_and(|progress| progress.scoped));
+        assert_eq!(runtime.next_inventory_at, sweep_deadline);
     }
 
     #[test]
@@ -234,6 +387,23 @@ mod freshness_tests {
 
         assert!(changes.into_inner().unwrap().full_rebuild);
         assert!(!healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn daemon_watcher_dirty_path_overflow_escalates_without_retaining_the_corpus() {
+        let mut changes = SearchRefreshSourceChanges::default();
+        for index in 0..=MAX_PENDING_DIRTY_PATHS {
+            record_search_refresh_dirty_path(
+                &mut changes,
+                SearchDirtyPath {
+                    source_path: PathBuf::from("/sessions"),
+                    changed_path: PathBuf::from(format!("/sessions/{index}.jsonl")),
+                },
+            );
+        }
+
+        assert!(changes.full_rebuild);
+        assert!(changes.dirty_paths.is_empty());
     }
 
     #[test]
@@ -290,7 +460,13 @@ mod freshness_tests {
 
         let changes = changes.into_inner().unwrap();
         assert!(!changes.full_rebuild);
-        assert_eq!(changes.dirty_paths, BTreeSet::from([first]));
+        assert_eq!(
+            changes.dirty_paths,
+            BTreeSet::from([SearchDirtyPath {
+                source_path: first.clone(),
+                changed_path: first.join("session.jsonl"),
+            }])
+        );
         assert!(healthy.load(Ordering::Acquire));
     }
 
@@ -316,7 +492,13 @@ mod freshness_tests {
 
         let changes = changes.into_inner().unwrap();
         assert!(!changes.full_rebuild);
-        assert_eq!(changes.dirty_paths, BTreeSet::from([database]));
+        assert_eq!(
+            changes.dirty_paths,
+            BTreeSet::from([SearchDirtyPath {
+                source_path: database,
+                changed_path: temp.path().join("history.sqlite-wal"),
+            }])
+        );
     }
 
     #[test]
@@ -441,6 +623,148 @@ mod freshness_tests {
         assert_ne!(initial, replaced);
     }
 
+    #[test]
+    fn daemon_directory_watcher_registration_is_nonrecursive_and_constant_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("watched-root");
+        fs::create_dir(&root).unwrap();
+        for index in 0..128 {
+            fs::create_dir(root.join(format!("nested-{index}"))).unwrap();
+        }
+        let pacer = ctx_history_capture::DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = ctx_history_capture::install_disk_io_pacer(pacer.clone());
+        let watches = search_refresh_watch_specs(std::slice::from_ref(&root));
+        let registrations = search_refresh_watch_registrations(&watches).unwrap();
+
+        let watcher = SearchRefreshSourceWatcher::new(vec![root]).unwrap();
+
+        assert_eq!(registrations.len(), 1);
+        assert!(registrations
+            .iter()
+            .all(|(_, mode)| *mode == RecursiveMode::NonRecursive));
+        assert_eq!(watcher.registered_watch_count, 1);
+        assert_eq!(watcher.directory_source_count, 1);
+        assert!(pacer.filesystem_operation_count() < 32);
+    }
+
+    #[test]
+    fn daemon_watcher_registration_fails_to_bounded_reconciliation_above_root_limit() {
+        let watches = (0..=MAX_SEARCH_REFRESH_ROOT_WATCHES)
+            .map(|index| SearchRefreshWatch {
+                source_path: PathBuf::from(format!("source-{index}")),
+                match_path: PathBuf::from(format!("source-{index}")),
+                watch_path: PathBuf::from(format!("watch-{index}")),
+                recursive: true,
+            })
+            .collect::<Vec<_>>();
+
+        let error = search_refresh_watch_registrations(&watches).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("bounded watcher registration limit"));
+    }
+
+    #[test]
+    fn daemon_root_only_watcher_reports_degraded_coverage_and_schedules_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let source = write_pi_source(&temp.path().join("history"), 1, "root-only");
+        let mut runtime = SearchRefreshRuntime::default();
+
+        for _ in 0..32 {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+            if runtime.inventory_progress.is_none() && runtime.cached_work.is_some() {
+                break;
+            }
+        }
+
+        let status = runtime.daemon_status_json();
+        assert!(runtime.watcher_degraded);
+        assert!(runtime.next_inventory_at.is_some());
+        assert_eq!(status["watcher"]["state"].as_str(), Some("degraded"));
+        assert_eq!(status["watcher"]["coverage"].as_str(), Some("root_only"));
+        assert_eq!(status["watcher"]["registered_paths"].as_u64(), Some(1));
+        assert!(status["inventory"]["next_fallback_at_ms"].is_number());
+    }
+
+    #[test]
+    fn daemon_root_only_watcher_nested_change_converges_through_bounded_sweep() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let source_root = temp.path().join("history");
+        let (_, session_path) = write_codex_source(&source_root.join("nested"), "nested-sweep");
+        let source = explicit_path_source(CaptureProvider::Codex, source_root);
+        let baseline = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+        let mut runtime = SearchRefreshRuntime::default();
+        for _ in 0..32 {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+            if runtime.inventory_progress.is_none() && runtime.cached_work.is_some() {
+                break;
+            }
+        }
+        assert!(runtime.watcher_degraded);
+
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&session_path)
+                .unwrap(),
+            "{}",
+            json!({
+                "timestamp": "2026-07-14T12:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "nested bounded sweep oracle"}]
+                }
+            })
+        )
+        .unwrap();
+        runtime.next_inventory_at = Some(Instant::now());
+        runtime.next_inventory_at_ms = Some(search_refresh_now_ms());
+
+        let mut found = false;
+        for _ in 0..64 {
+            let _ = refresh_with_runtime(&data_root, &mut runtime, vec![source.clone()]);
+            found = !Store::open(database_path(data_root.clone()))
+                .unwrap()
+                .search_event_hits("nested bounded sweep oracle", 10)
+                .unwrap()
+                .is_empty();
+            if found {
+                break;
+            }
+        }
+
+        assert!(found);
+        assert!(runtime.watcher_degraded);
+    }
+
+    #[test]
+    fn daemon_watcher_identity_probes_charge_the_filesystem_pacer() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let pacer = ctx_history_capture::DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = ctx_history_capture::install_disk_io_pacer(pacer.clone());
+
+        let identities = watched_source_path_identities(&[first, second]);
+
+        assert_eq!(identities.len(), 2);
+        assert!(pacer.filesystem_operation_count() >= 2);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn daemon_watcher_root_identity_ignores_directory_content_changes() {
@@ -519,6 +843,10 @@ mod freshness_tests {
         assert_eq!(cached.fresh_units_pending, 0, "{cached:?}");
         let dirty_generation = cached_inventory_generation(&runtime, &dirty);
         let unchanged_generation = cached_inventory_generation(&runtime, &unchanged);
+        let sweep_deadline = runtime.next_inventory_at;
+        let last_full_inventory = runtime.cached_work.as_ref().unwrap().last_reinventory_at;
+        assert!(runtime.watcher_degraded);
+        assert!(runtime.daemon_status_json()["inventory"]["next_fallback_at_ms"].is_number());
         runtime
             .cached_work
             .as_mut()
@@ -532,8 +860,17 @@ mod freshness_tests {
             &mut runtime,
             vec![dirty.clone(), unchanged.clone()],
         );
-
-        assert!(refreshed.durable_progress, "{refreshed:?}");
+        assert!(runtime
+            .inventory_progress
+            .as_ref()
+            .is_some_and(|progress| progress.scoped));
+        while runtime.inventory_progress.is_some() {
+            refreshed = refresh_with_runtime(
+                &data_root,
+                &mut runtime,
+                vec![dirty.clone(), unchanged.clone()],
+            );
+        }
         assert_ne!(
             cached_inventory_generation(&runtime, &dirty),
             dirty_generation
@@ -542,13 +879,12 @@ mod freshness_tests {
             cached_inventory_generation(&runtime, &unchanged),
             unchanged_generation
         );
+        assert_eq!(runtime.next_inventory_at, sweep_deadline);
+        assert!(runtime.next_inventory_at.is_some());
+        assert!(runtime.daemon_status_json()["inventory"]["next_fallback_at_ms"].is_number());
         assert_eq!(
-            runtime
-                .cached_work
-                .as_ref()
-                .unwrap()
-                .passes_since_reinventory,
-            18
+            runtime.cached_work.as_ref().unwrap().last_reinventory_at,
+            last_full_inventory
         );
         for _ in 0..16 {
             if refreshed.fresh_units_pending == 0 {
@@ -573,49 +909,62 @@ mod freshness_tests {
     }
 
     #[test]
-    fn daemon_preserves_watcher_changes_during_paginated_inventory() {
+    fn daemon_codex_change_during_full_inventory_does_not_schedule_another_full_pass() {
+        use std::io::Write;
+
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
-        let changed = write_pi_source(&data_root.join("pi-first"), 1, "first");
-        let second = write_pi_source(&data_root.join("pi-second"), 1, "second");
-        let third = write_pi_source(&data_root.join("pi-third"), 1, "third");
-        let sources = vec![changed.clone(), second, third];
+        let (changed, session_path) =
+            write_codex_source(&data_root.join("codex-first"), "changed-during-inventory");
+        let (second, _) = write_codex_source(&data_root.join("codex-second"), "second");
+        let sources = vec![changed.clone(), second];
         let baseline = refresh(&data_root, sources.clone(), ImportExecutionPolicy::Drain);
         assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
 
         let mut runtime = SearchRefreshRuntime::default();
         let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
-        let stale_generation = cached_inventory_generation(&runtime, &changed);
         assert!(runtime.inventory_progress.is_some());
 
-        write_pi_source(&changed.path, 2, "changed-during-inventory");
-        runtime.force_source_change_for_test(&changed.path);
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&session_path)
+                .unwrap(),
+            "{}",
+            json!({
+                "timestamp": "2026-07-14T12:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "changed mid inventory"}]
+                }
+            })
+        )
+        .unwrap();
+        runtime.force_source_file_change_for_test(&changed.path, &session_path);
         while runtime.inventory_progress.is_some() {
             let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+            assert!(!runtime.pending_full_inventory);
         }
         assert_eq!(
             runtime.pending_dirty_paths,
-            BTreeSet::from([changed.path.clone()])
+            BTreeSet::from([SearchDirtyPath {
+                source_path: changed.path.clone(),
+                changed_path: session_path.clone(),
+            }])
         );
+        assert!(runtime.pending_inventory_reason.is_none());
+        let published_generation = cached_inventory_generation(&runtime, &changed);
 
-        let mut refreshed = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
+        let _ = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
         assert!(runtime.pending_dirty_paths.is_empty());
-        assert_ne!(
+        assert!(runtime.inventory_progress.is_none());
+        assert!(!runtime.pending_full_inventory);
+        assert_eq!(
             cached_inventory_generation(&runtime, &changed),
-            stale_generation
+            published_generation
         );
-        for _ in 0..16 {
-            if refreshed.fresh_units_pending == 0 {
-                break;
-            }
-            refreshed = refresh_with_runtime(&data_root, &mut runtime, sources.clone());
-        }
-        assert_eq!(refreshed.fresh_units_pending, 0, "{refreshed:?}");
-        let store = Store::open(database_path(data_root)).unwrap();
-        assert!(!store
-            .search_event_hits("changed during inventory 1", 10)
-            .unwrap()
-            .is_empty());
     }
 
     #[test]

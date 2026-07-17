@@ -222,11 +222,19 @@ fn preinventory_is_complete(
             .list_pending_source_import_files(source.provider, &file.source_root)?
             .is_empty()),
         SourcePreinventory::SourceImportFiles { files, .. } => {
-            if files.is_empty() {
+            let source_root = files
+                .first()
+                .map(|file| file.source_root.as_str())
+                .map(Ok)
+                .unwrap_or_else(|| persisted_import_identity(&source.path, "source root"))?;
+            let Some(inventory_generation) = preinventory.inventory_generation() else {
                 return Ok(false);
-            }
-            let source_root = &files[0].source_root;
-            Ok(store
+            };
+            Ok(store.source_import_inventory_generation_is_complete(
+                source.provider,
+                source_root,
+                inventory_generation,
+            )? && store
                 .list_pending_source_import_files(source.provider, source_root)?
                 .is_empty())
         }
@@ -266,6 +274,15 @@ fn revalidate_source_preinventory(
 ) -> Result<RevalidatedSourcePreinventory> {
     match preinventory {
         SourcePreinventory::SourceRoot { .. } => {
+            ctx_history_capture::pace_current_filesystem_operation(
+                source.path.as_os_str().len() as u64
+            );
+            let metadata = fs::symlink_metadata(&source.path)
+                .with_context(|| format!("stat import source {}", source.path.display()))?;
+            if metadata.file_type().is_dir() {
+                return Err(anyhow::Error::new(CaptureError::InventorySuperseded)
+                    .context("directory source revalidation requires bounded inventory"));
+            }
             let (_, current) = observe_source_root(source)?;
             let persisted = persist_new_source_import_observation(
                 store,
@@ -283,82 +300,52 @@ fn revalidate_source_preinventory(
                 ))
             }
         }
-        SourcePreinventory::SourceImportFiles { .. } => {
-            let current = collect_source_import_files(source).with_context(|| {
-                format!("re-inventory import files from {}", source.path.display())
-            })?;
-            let persisted = persist_new_source_import_observation(store, source, &current)?;
-            if current.is_empty() {
-                Ok(RevalidatedSourcePreinventory::Import(
-                    SourcePreinventory::SourceImportFiles {
-                        files: current,
-                        inventory_generation: persisted.inventory_generation,
-                    },
-                ))
-            } else if persisted.pending_files.is_empty() {
+        SourcePreinventory::SourceImportFiles {
+            inventory_generation,
+            ..
+        } => {
+            let source_root = persisted_import_identity(&source.path, "source root")?;
+            if !store.source_import_inventory_generation_is_complete(
+                source.provider,
+                source_root,
+                *inventory_generation,
+            )? {
+                return Err(anyhow::Error::new(CaptureError::InventorySuperseded)
+                    .context("manifest source generation requires bounded reinventory"));
+            }
+            if store
+                .list_pending_source_import_files(source.provider, source_root)?
+                .is_empty()
+            {
                 Ok(RevalidatedSourcePreinventory::Complete)
             } else {
-                Ok(RevalidatedSourcePreinventory::Import(
-                    SourcePreinventory::SourceImportFiles {
-                        files: current,
-                        inventory_generation: persisted.inventory_generation,
-                    },
-                ))
+                Ok(RevalidatedSourcePreinventory::Import(preinventory.clone()))
             }
         }
-        SourcePreinventory::CodexSessionCatalog { .. } => {
-            const MAX_GENERATION_RETRIES: usize = 3;
+        SourcePreinventory::CodexSessionCatalog {
+            summary,
+            inventory_generation,
+        } => {
             let source_root = super::catalog::codex_catalog_root_identity(&source.path)?.to_owned();
-            for _ in 0..MAX_GENERATION_RETRIES {
-                let inventory_generation = store
-                    .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?;
-                let summary = match catalog_codex_session_tree(
-                    &source.path,
-                    store,
-                    CodexSessionCatalogOptions {
-                        source_root: Some(source.path.clone()),
-                        observation_generation: Some(inventory_generation),
-                        ..CodexSessionCatalogOptions::default()
-                    },
-                ) {
-                    Ok(summary) => summary,
-                    Err(CaptureError::InventorySuperseded) => continue,
-                    Err(error) => {
-                        return Err(anyhow::Error::new(error).context(format!(
-                            "re-inventory Codex sessions from {}",
-                            source.path.display()
-                        )))
-                    }
-                };
-                if summary.failed_sessions == 0
-                    && store.catalog_inventory_generation_is_complete_without_pending(
-                        CaptureProvider::Codex,
-                        &source_root,
-                        inventory_generation,
-                    )?
-                {
-                    return Ok(RevalidatedSourcePreinventory::Complete);
-                }
-                if !store.catalog_inventory_generation_is_complete(
+            if !store.catalog_inventory_generation_is_complete(
+                CaptureProvider::Codex,
+                &source_root,
+                *inventory_generation,
+            )? {
+                return Err(anyhow::Error::new(CaptureError::InventorySuperseded)
+                    .context("Codex source generation requires bounded reinventory"));
+            }
+            if summary.failed_sessions == 0
+                && store.catalog_inventory_generation_is_complete_without_pending(
                     CaptureProvider::Codex,
                     &source_root,
-                    inventory_generation,
-                )? {
-                    continue;
-                }
-                return Ok(RevalidatedSourcePreinventory::Import(
-                    SourcePreinventory::CodexSessionCatalog {
-                        summary,
-                        inventory_generation,
-                    },
-                ));
+                    *inventory_generation,
+                )?
+            {
+                Ok(RevalidatedSourcePreinventory::Complete)
+            } else {
+                Ok(RevalidatedSourcePreinventory::Import(preinventory.clone()))
             }
-            Err(
-                anyhow::Error::new(CaptureError::InventorySuperseded).context(format!(
-                    "Codex inventory generation kept changing for {}",
-                    source.path.display()
-                )),
-            )
         }
         SourcePreinventory::None => Ok(RevalidatedSourcePreinventory::Import(preinventory.clone())),
     }

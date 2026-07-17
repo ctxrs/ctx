@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::commands::import::catalog::{source_change_token, system_time_ms, SourceChangeEntry};
+#[cfg(test)]
+use ctx_history_capture::collect_provider_source_files;
 use ctx_history_capture::{
     observe_ordinary_file, observe_sqlite_source_generation, pace_current_disk_io,
-    ProviderImportDependency, ProviderImportUnitGrouping, ProviderImportUnitOwner,
-    ProviderImportUnitSpec,
+    pace_current_filesystem_operation, ProviderImportDependency, ProviderImportUnitGrouping,
+    ProviderImportUnitOwner, ProviderImportUnitSpec,
 };
 
 pub(crate) struct PersistedSourceImportObservation {
@@ -102,6 +104,13 @@ fn persist_source_import_observation_with_outcomes_inner(
                 )));
             }
         }
+        if !store.complete_source_import_inventory_generation(
+            source.provider,
+            source_root,
+            inventory_generation,
+        )? {
+            return Err(anyhow::Error::new(CaptureError::InventorySuperseded));
+        }
         let pending_files = store.list_pending_source_import_files(source.provider, source_root)?;
         Ok(PersistedSourceImportObservation {
             inventory_generation,
@@ -146,6 +155,32 @@ pub(crate) fn persist_source_import_files(
     Ok(())
 }
 
+pub(crate) fn persist_source_import_files_page(
+    store: &Store,
+    inventory_generation: u64,
+    files: &[SourceImportFile],
+) -> Result<()> {
+    if files.len() > 64 {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "source import inventory page exceeds its internal row limit",
+        )));
+    }
+    store.begin_immediate_batch()?;
+    let persisted = store.upsert_source_import_files_with_pacing(
+        inventory_generation,
+        files,
+        pace_current_disk_io,
+    );
+    match persisted {
+        Ok(_) => store.commit_batch()?,
+        Err(error) => {
+            let _ = store.rollback_batch();
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
 fn persist_source_import_files_in_batch(
     store: &Store,
     source: &SourceInfo,
@@ -177,6 +212,7 @@ pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
     source.import_unit.uses_file_manifest()
 }
 
+#[cfg(test)]
 pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<SourceImportFile>> {
     let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
     let units = collect_source_import_units(source)?;
@@ -191,6 +227,61 @@ pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<Sou
         )?);
     }
     Ok(files)
+}
+
+pub(crate) fn manifest_inventory_path_candidate(
+    source: &SourceInfo,
+    path: &Path,
+) -> Option<(Vec<u8>, u64)> {
+    let ProviderImportUnitSpec::PerFile {
+        owner, grouping, ..
+    } = source.import_unit
+    else {
+        return None;
+    };
+    if !import_unit_owner_matches(owner, &source.path, path) {
+        return None;
+    }
+    let (group_key, rank) = match grouping {
+        ProviderImportUnitGrouping::Each => (path.as_os_str().as_encoded_bytes().to_vec(), 0),
+        ProviderImportUnitGrouping::FirstPerDirectory => {
+            let directory = path.parent().unwrap_or(path);
+            (
+                directory.as_os_str().as_encoded_bytes().to_vec(),
+                import_owner_rank(owner, path) as u64,
+            )
+        }
+        ProviderImportUnitGrouping::AntigravitySession => {
+            let rank = u64::from(
+                path.file_name().and_then(|name| name.to_str()) != Some("transcript_full.jsonl"),
+            );
+            (antigravity_session_key_from_path(path).into_bytes(), rank)
+        }
+    };
+    Some((group_key, rank))
+}
+
+pub(crate) fn observe_source_import_paths_page(
+    source: &SourceInfo,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<SourceImportFile>> {
+    if paths.len() > 64 {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "manifest inventory page exceeds its internal path limit",
+        )));
+    }
+    let ProviderImportUnitSpec::PerFile { dependencies, .. } = source.import_unit else {
+        return Ok(Vec::new());
+    };
+    let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
+    let observed_at_ms = utc_now().timestamp_millis();
+    paths
+        .into_iter()
+        .map(|path| {
+            let unit = collected_import_unit(path, dependencies)?;
+            observe_collected_source_import_unit(source, &source_root, &unit, observed_at_ms)
+        })
+        .collect()
 }
 
 pub(crate) fn observe_selected_source_import_file(
@@ -215,6 +306,7 @@ pub(crate) fn observe_selected_source_import_file(
             path.display()
         ));
     }
+    pace_current_filesystem_operation(path.as_os_str().len() as u64);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
@@ -297,6 +389,7 @@ struct CollectedImportUnit {
     sqlite_sidecars: bool,
 }
 
+#[cfg(test)]
 fn collect_source_import_units(source: &SourceInfo) -> Result<Vec<CollectedImportUnit>> {
     let ProviderImportUnitSpec::PerFile {
         owner,
@@ -306,6 +399,7 @@ fn collect_source_import_units(source: &SourceInfo) -> Result<Vec<CollectedImpor
     else {
         return Ok(Vec::new());
     };
+    pace_current_filesystem_operation(source.path.as_os_str().len() as u64);
     let metadata = fs::symlink_metadata(&source.path)
         .with_context(|| format!("stat import source {}", source.path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -327,25 +421,13 @@ fn collect_source_import_units(source: &SourceInfo) -> Result<Vec<CollectedImpor
         return Ok(Vec::new());
     }
 
-    let mut paths = Vec::new();
-    let mut stack = vec![source.path.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)
-            .with_context(|| format!("read import source directory {}", dir.display()))?
-        {
-            let entry = entry
-                .with_context(|| format!("read import source entry under {}", dir.display()))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("stat import source entry {}", path.display()))?;
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() && import_unit_owner_matches(owner, &source.path, &path) {
-                paths.push(path);
-            }
-        }
-    }
+    let mut paths = collect_provider_source_files(&source.path).with_context(|| {
+        format!(
+            "inventory import source files under {}",
+            source.path.display()
+        )
+    })?;
+    paths.retain(|path| import_unit_owner_matches(owner, &source.path, path));
     paths = preferred_source_import_paths(grouping, owner, paths);
     paths.sort();
     paths
@@ -410,6 +492,7 @@ fn collect_import_unit_dependency(
             let mut directory = owner.parent();
             while let Some(candidate_dir) = directory {
                 let candidate = candidate_dir.join(name);
+                pace_current_filesystem_operation(candidate.as_os_str().len() as u64);
                 match fs::symlink_metadata(&candidate) {
                     Ok(metadata) if metadata.file_type().is_file() => {
                         paths.insert(candidate);
@@ -442,6 +525,7 @@ fn collect_existing_import_unit_dependency(
     paths: &mut BTreeSet<PathBuf>,
     absence_watches: &mut BTreeSet<PathBuf>,
 ) -> Result<()> {
+    pace_current_filesystem_operation(path.as_os_str().len() as u64);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => {
             paths.insert(path);
@@ -650,6 +734,7 @@ fn import_unit_fingerprint(
 }
 
 fn absence_watch_change_entry(base: &Path, path: &Path) -> Result<SourceChangeEntry> {
+    pace_current_filesystem_operation(path.as_os_str().len() as u64);
     match fs::symlink_metadata(path) {
         Ok(_) => {
             return Err(std::io::Error::new(
@@ -673,6 +758,7 @@ fn absence_watch_change_entry(base: &Path, path: &Path) -> Result<SourceChangeEn
             path.display()
         )
     })?;
+    pace_current_filesystem_operation(parent.as_os_str().len() as u64);
     let parent_metadata = fs::symlink_metadata(parent).with_context(|| {
         format!(
             "stat optional import dependency parent {}",
@@ -685,6 +771,7 @@ fn absence_watch_change_entry(base: &Path, path: &Path) -> Result<SourceChangeEn
             parent.display()
         ));
     }
+    pace_current_filesystem_operation(path.as_os_str().len() as u64);
     match fs::symlink_metadata(path) {
         Ok(_) => {
             return Err(std::io::Error::new(

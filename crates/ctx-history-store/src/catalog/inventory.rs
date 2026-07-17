@@ -1,4 +1,25 @@
+const CATALOG_ACTIVE_PATH_INVENTORY_PAGE_SQL: &str = "SELECT rowid, source_path \
+     FROM catalog_sessions INDEXED BY idx_catalog_sessions_provider_source_root_stale \
+     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 AND rowid > ?3 \
+     ORDER BY rowid LIMIT ?4";
+
+const CATALOG_UNPUBLISHED_DELETE_PAGE_SQL: &str = r#"
+    SELECT rowid,
+        length(source_path) + length(provider) + length(source_format)
+        + length(source_root) + COALESCE(length(external_session_id), 0)
+        + COALESCE(length(parent_external_session_id), 0)
+        + length(agent_type) + COALESCE(length(role_hint), 0)
+        + COALESCE(length(external_agent_id), 0) + COALESCE(length(cwd), 0)
+        + length(metadata_json) + 256 AS estimated_bytes
+    FROM catalog_sessions INDEXED BY idx_catalog_sessions_provider_source_root_stale
+    WHERE provider = ?1 AND source_root = ?2
+    ORDER BY is_stale, rowid
+    LIMIT ?3
+"#;
+
 impl Store {
+    const INVENTORY_PATH_PAGE_LIMIT: usize = 64;
+
     pub fn allocate_catalog_inventory_generation(
         &self,
         provider: CaptureProvider,
@@ -29,6 +50,107 @@ impl Store {
         source_root: &str,
     ) -> Result<Option<u64>> {
         self.current_import_inventory_generation(provider, source_root, "catalog_sessions")
+    }
+
+    #[doc(hidden)]
+    pub fn list_catalog_observation_states_for_paths(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_paths: &[String],
+    ) -> Result<Vec<CatalogObservationState>> {
+        if source_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        if source_paths.len() > Self::INVENTORY_PATH_PAGE_LIMIT {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        let placeholders = vec!["?"; source_paths.len()].join(", ");
+        let sql = format!(
+            "SELECT source_path, source_format, file_size_bytes, file_modified_at_ms, \
+                    import_revision, is_stale, \
+                    json_extract(metadata_json, '$.file_observation_token_v1') \
+             FROM catalog_sessions \
+             WHERE provider = ?1 AND source_root = ?2 \
+               AND source_path IN ({placeholders}) \
+             ORDER BY source_path"
+        );
+        let parameters = std::iter::once(provider.as_str())
+            .chain(std::iter::once(source_root))
+            .chain(source_paths.iter().map(String::as_str));
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok(CatalogObservationState {
+                source_path: row.get(0)?,
+                source_format: row.get(1)?,
+                file_size_bytes: nonnegative_i64_to_u64(row.get(2)?)?,
+                file_modified_at_ms: row.get(3)?,
+                import_revision: nonnegative_i64_to_u32(row.get(4)?)?,
+                is_stale: row.get(5)?,
+                observation_token: row.get(6)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    #[doc(hidden)]
+    pub fn list_catalog_inventory_paths_page(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        after_rowid: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
+        let limit = limit.clamp(1, Self::INVENTORY_PATH_PAGE_LIMIT);
+        let mut statement = self.conn.prepare(CATALOG_ACTIVE_PATH_INVENTORY_PAGE_SQL)?;
+        collect_rows(statement.query_map(
+            params![
+                provider.as_str(),
+                source_root,
+                after_rowid.unwrap_or(0),
+                capped_i64(limit as u64)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    #[doc(hidden)]
+    pub fn mark_catalog_inventory_paths_stale(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        paths: &[String],
+        cataloged_at_ms: i64,
+        inventory_generation: u64,
+    ) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        if paths.len() > Self::INVENTORY_PATH_PAGE_LIMIT {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        let placeholders = vec!["?"; paths.len()].join(", ");
+        let sql = format!(
+            "UPDATE catalog_sessions SET is_stale = 1, cataloged_at_ms = ?3 \
+             WHERE provider = ?1 AND source_root = ?2 \
+               AND EXISTS (\
+                   SELECT 1 FROM import_inventory_generations AS inventory \
+                   WHERE inventory.provider = ?1 AND inventory.source_root = ?2 \
+                     AND inventory.inventory_family = 'catalog_sessions' \
+                     AND inventory.current_generation = ?4\
+               ) \
+               AND source_path IN ({placeholders})"
+        );
+        let mut parameters: Vec<rusqlite::types::Value> = vec![
+            provider.as_str().to_owned().into(),
+            source_root.to_owned().into(),
+            cataloged_at_ms.into(),
+            capped_i64(inventory_generation).into(),
+        ];
+        parameters.extend(paths.iter().cloned().map(Into::into));
+        self.conn
+            .execute(&sql, rusqlite::params_from_iter(parameters))
+            .map_err(StoreError::from)
     }
 
     fn current_import_inventory_generation(
@@ -146,6 +268,7 @@ impl Store {
         limit: usize,
         pace: impl Fn(u64),
     ) -> Result<Option<(usize, u64)>> {
+        let limit = limit.clamp(1, Self::INVENTORY_PATH_PAGE_LIMIT);
         with_immediate_transaction(&self.conn, || {
             if !self.catalog_inventory_generation_is_unpublished(
                 provider,
@@ -154,47 +277,27 @@ impl Store {
             )? {
                 return Ok(None);
             }
-            let (rows, bytes) = self.conn.query_row(
-                r#"
-                SELECT COUNT(*), COALESCE(SUM(
-                    length(source_path) + length(provider) + length(source_format)
-                    + length(source_root) + COALESCE(length(external_session_id), 0)
-                    + COALESCE(length(parent_external_session_id), 0)
-                    + length(agent_type) + COALESCE(length(role_hint), 0)
-                    + COALESCE(length(external_agent_id), 0) + COALESCE(length(cwd), 0)
-                    + length(metadata_json) + 256
-                ), 0)
-                FROM (
-                    SELECT *
-                    FROM catalog_sessions
-                    WHERE provider = ?1
-                      AND source_root = ?2
-                    ORDER BY source_path
-                    LIMIT ?3
-                )
-                "#,
+            let mut statement = self.conn.prepare(CATALOG_UNPUBLISHED_DELETE_PAGE_SQL)?;
+            let page = collect_rows(statement.query_map(
                 params![provider.as_str(), source_root, capped_i64(limit as u64),],
-                |row| {
-                    Ok((
-                        row.get::<_, usize>(0)?,
-                        nonnegative_i64_to_u64(row.get(1)?)?,
-                    ))
-                },
-            )?;
+                |row| Ok((row.get::<_, i64>(0)?, nonnegative_i64_to_u64(row.get(1)?)?)),
+            )?)?;
+            let rows = page.len();
+            let bytes = page
+                .iter()
+                .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes));
             pace(bytes);
+            if page.is_empty() {
+                return Ok(Some((0, 0)));
+            }
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("DELETE FROM catalog_sessions WHERE rowid IN ({placeholders})");
             let deleted = self.conn.execute(
-                r#"
-                DELETE FROM catalog_sessions
-                WHERE rowid IN (
-                    SELECT rowid
-                    FROM catalog_sessions
-                    WHERE provider = ?1
-                      AND source_root = ?2
-                    ORDER BY source_path
-                    LIMIT ?3
-                )
-                "#,
-                params![provider.as_str(), source_root, capped_i64(limit as u64),],
+                &sql,
+                rusqlite::params_from_iter(page.into_iter().map(|(rowid, _)| rowid)),
             )?;
             debug_assert_eq!(deleted, rows);
             Ok(Some((deleted, bytes)))
@@ -228,6 +331,42 @@ impl Store {
                     provider.as_str(),
                     source_root,
                     "catalog_sessions",
+                    capped_i64(inventory_generation)
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|complete| complete.unwrap_or(false))
+            .map_err(StoreError::from)
+    }
+
+    #[doc(hidden)]
+    pub fn source_import_inventory_generation_is_complete(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        let effective_publication =
+            crate::provider_files::effective_provider_file_publication_predicate("publication");
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT current_generation = ?4 AND completed_generation = ?4\n\
+                         AND NOT EXISTS (\n\
+                            SELECT 1 FROM provider_file_publications AS publication\n\
+                            WHERE publication.provider = ?1\n\
+                              AND publication.inventory_source_root = ?2\n\
+                              AND publication.inventory_family = ?3\n\
+                              AND ({effective_publication})\n\
+                         )\n\
+                     FROM import_inventory_generations\n\
+                     WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3"
+                ),
+                params![
+                    provider.as_str(),
+                    source_root,
+                    "source_import_files",
                     capped_i64(inventory_generation)
                 ],
                 |row| row.get(0),
@@ -314,6 +453,27 @@ impl Store {
         Ok(changed == 1)
     }
 
+    #[doc(hidden)]
+    pub fn complete_source_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_generation: u64,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE import_inventory_generations SET completed_generation = ?4 \
+             WHERE provider = ?1 AND source_root = ?2 \
+               AND inventory_family = ?3 AND current_generation = ?4",
+            params![
+                provider.as_str(),
+                source_root,
+                "source_import_files",
+                capped_i64(inventory_generation),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     fn allocate_import_inventory_generation(
         &self,
         provider: CaptureProvider,
@@ -326,7 +486,8 @@ impl Store {
                 (provider, source_root, inventory_family, current_generation, completed_generation)
             VALUES (?1, ?2, ?3, 1, 0)
             ON CONFLICT(provider, source_root, inventory_family) DO UPDATE SET
-                current_generation = current_generation + 1
+                current_generation = current_generation + 1,
+                completed_generation = 0
             RETURNING current_generation
             "#,
             params![provider.as_str(), source_root, inventory_family],

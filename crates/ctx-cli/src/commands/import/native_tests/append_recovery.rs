@@ -542,7 +542,7 @@ fn provider_finalize_cleanup_warning_maps_to_import_summary_maintenance() {
 }
 
 #[test]
-fn codex_full_rescan_retries_one_superseded_result_generation() {
+fn codex_full_rescan_returns_to_bounded_inventory_when_generation_is_superseded() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("sessions");
@@ -561,28 +561,25 @@ fn codex_full_rescan_retries_one_superseded_result_generation() {
         }
     });
     let mut store = Store::open(&db_path).unwrap();
+    let inventory = inventory_import_sources(&store, vec![source.clone()], true).unwrap();
+    let preinventory = inventory.sources[0].preinventory.clone();
 
-    let summary = import_one_source_inner(
+    let error = import_one_source_inner(
         &mut store,
         &source,
         Some(progress),
         false,
         true,
-        &SourcePreinventory::None,
+        &preinventory,
     )
-    .unwrap();
+    .expect_err("superseded Codex work must return to bounded inventory");
 
     assert!(superseded.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(
-        summary
-            .imported_sessions
-            .saturating_add(summary.skipped_sessions),
-        1
-    );
+    assert!(is_inventory_superseded(&error));
 }
 
 #[test]
-fn codex_supersession_retry_exhaustion_stays_system_scoped() {
+fn codex_supersession_does_not_trigger_hidden_tree_retries() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("sessions");
@@ -602,6 +599,8 @@ fn codex_supersession_retry_exhaustion_stays_system_scoped() {
         }
     });
     let mut store = Store::open(&db_path).unwrap();
+    let inventory = inventory_import_sources(&store, vec![source.clone()], true).unwrap();
+    let preinventory = inventory.sources[0].preinventory.clone();
 
     let error = import_one_source_inner(
         &mut store,
@@ -609,11 +608,11 @@ fn codex_supersession_retry_exhaustion_stays_system_scoped() {
         Some(progress),
         false,
         true,
-        &SourcePreinventory::None,
+        &preinventory,
     )
-    .expect_err("three superseded result generations must exhaust the retry budget");
+    .expect_err("superseded Codex work must return to bounded inventory");
 
-    assert!(superseded.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    assert_eq!(superseded.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(is_inventory_superseded(&error));
     assert_eq!(import_error_scope(&error), ImportFailureScope::System);
 }

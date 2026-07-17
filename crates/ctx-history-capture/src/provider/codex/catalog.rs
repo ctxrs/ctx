@@ -202,6 +202,105 @@ pub fn catalog_codex_session_tree(
     Ok(summary)
 }
 
+#[doc(hidden)]
+pub fn catalog_codex_session_paths_page(
+    paths: Vec<PathBuf>,
+    root: impl AsRef<Path>,
+    store: &Store,
+    inventory_generation: u64,
+    options: CodexSessionCatalogOptions,
+) -> Result<CatalogSummary> {
+    if paths.len() > 64 {
+        return Err(CaptureError::SystemInvariant(
+            "Codex catalog inventory page exceeds its internal path limit",
+        ));
+    }
+    let root = root.as_ref();
+    codex_catalog_root_identity(root)?;
+    let source_root_path = options.source_root.as_deref().unwrap_or(root);
+    let source_root = codex_catalog_root_identity(source_root_path)?.to_owned();
+    if !store.catalog_inventory_generation_is_current(
+        CaptureProvider::Codex,
+        &source_root,
+        inventory_generation,
+    )? {
+        return Err(CaptureError::InventorySuperseded);
+    }
+    validate_codex_catalog_session_paths(&paths)?;
+    let identities = paths
+        .iter()
+        .map(|path| codex_catalog_session_identity(path).map(str::to_owned))
+        .collect::<Result<Vec<_>>>()?;
+    let existing = store
+        .list_catalog_observation_states_for_paths(
+            CaptureProvider::Codex,
+            &source_root,
+            &identities,
+        )?
+        .into_iter()
+        .map(|state| (state.source_path.clone(), state))
+        .collect::<BTreeMap<_, _>>();
+    let import_revision =
+        provider_import_revision(CaptureProvider::Codex, CODEX_SESSION_SOURCE_FORMAT);
+    let cataloged_at_ms = options.cataloged_at.timestamp_millis();
+    let mut summary = CatalogSummary::default();
+    let mut paths_to_parse = Vec::new();
+    for (path, source_path) in paths.into_iter().zip(identities) {
+        let observation = match crate::observe_ordinary_file(&path) {
+            Ok(observation) => observation,
+            Err(error) => {
+                summary.failed_sessions = summary.failed_sessions.saturating_add(1);
+                summary.sample_failure(ProviderImportFailure {
+                    line: 0,
+                    error: format!("{}: {error}", path.display()),
+                });
+                continue;
+            }
+        };
+        summary.source_files = summary.source_files.saturating_add(1);
+        summary.source_bytes = summary.source_bytes.saturating_add(observation.len());
+        let observation_token = observation.token_hex();
+        let cached = existing.get(&source_path).is_some_and(|state| {
+            !state.is_stale
+                && state.source_format == CODEX_SESSION_SOURCE_FORMAT
+                && state.import_revision == import_revision
+                && state.file_size_bytes == observation.len()
+                && state.file_modified_at_ms == system_time_ms(observation.modified_at())
+                && state.observation_token.as_deref() == Some(observation_token.as_str())
+        });
+        if cached {
+            summary.cached_sessions = summary.cached_sessions.saturating_add(1);
+            summary.cataloged_sessions = summary.cataloged_sessions.saturating_add(1);
+        } else {
+            paths_to_parse.push(path);
+        }
+    }
+
+    let (mut parsed_summary, sessions) = catalog_codex_session_paths(
+        paths_to_parse,
+        &source_root,
+        cataloged_at_ms,
+        options.parallelism,
+    )?;
+    parsed_summary.source_files = 0;
+    parsed_summary.source_bytes = 0;
+    summary.merge_from(parsed_summary);
+    summary.cataloged_sessions = summary.cataloged_sessions.saturating_add(sessions.len());
+    if !sessions.is_empty() {
+        store.begin_immediate_batch()?;
+        let persisted =
+            persist_catalog_sessions_paced_in_current_batch(store, inventory_generation, &sessions);
+        match persisted {
+            Ok(()) => store.commit_batch()?,
+            Err(error) => {
+                let _ = store.rollback_batch();
+                return Err(error);
+            }
+        }
+    }
+    Ok(summary)
+}
+
 pub fn catalog_codex_session_files(
     paths: Vec<PathBuf>,
     source_root: impl AsRef<Path>,
