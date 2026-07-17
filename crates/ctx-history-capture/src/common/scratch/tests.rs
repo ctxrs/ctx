@@ -71,6 +71,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn scratch_cleanup_rejects_a_renamed_run_replaced_by_a_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        let scratch = CaptureScratchSpace::create_in(root, "tamper").unwrap();
+        let scratch_path = scratch.path().to_path_buf();
+        for index in 0..(SCRATCH_DELETE_FILES_PER_PAGE + 8) {
+            fs::write(
+                scratch_path.join(format!("payload-{index:03}.bin")),
+                b"private scratch data",
+            )
+            .unwrap();
+        }
+        let moved_path = temp.path().join("moved-run");
+        let replacement_target = temp.path().join("replacement-target");
+        fs::create_dir(&replacement_target).unwrap();
+        let sentinel = replacement_target.join("sentinel");
+        fs::write(&sentinel, b"must survive").unwrap();
+        inject_scratch_cleanup_tamper_once(1, moved_path.clone(), replacement_target.clone());
+
+        let error = remove_private_scratch_run(&scratch_path).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("changed identity"));
+        assert!(fs::read_dir(&moved_path).unwrap().next().is_some());
+        assert!(scratch_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(sentinel).unwrap(), b"must survive");
+        fs::remove_file(&scratch_path).unwrap();
+        fs::rename(&moved_path, &scratch_path).unwrap();
+        drop(scratch);
+        assert!(!scratch_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scavenging_fails_closed_on_a_linked_run_directory() {
         use std::os::unix::fs::symlink;
 

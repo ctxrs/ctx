@@ -44,13 +44,20 @@ enum FilesystemTraversalMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TraversalFailurePoint {
+pub(crate) enum FilesystemTraversalErrorRecovery {
+    RetryRetainedState,
+    RestartRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TraversalFailurePoint {
     ParentValidation,
     RootMetadata,
     SecureFileValidation,
     EntryFileType,
     OpenDirectory,
-    ReadDirectoryEntry,
+    BeforeReadDirectoryEntry,
+    AfterReadDirectoryEntry,
 }
 
 #[cfg(test)]
@@ -61,7 +68,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn inject_traversal_failure_once(point: TraversalFailurePoint) {
+pub(crate) fn inject_traversal_failure_once(point: TraversalFailurePoint) {
     TRAVERSAL_FAILURE_ONCE.with(|slot| slot.set(Some(point)));
 }
 
@@ -140,6 +147,14 @@ impl FilesystemTraversalCursor {
         let root = self.root.clone();
         let mode = self.mode;
         *self = Self::new(&root, mode);
+    }
+
+    pub(crate) fn error_recovery(&self) -> FilesystemTraversalErrorRecovery {
+        if self.poisoned {
+            FilesystemTraversalErrorRecovery::RestartRequired
+        } else {
+            FilesystemTraversalErrorRecovery::RetryRetainedState
+        }
     }
 
     pub(crate) fn advance(
@@ -281,8 +296,15 @@ impl FilesystemTraversalCursor {
             if !slice.reserve(&frame_path) {
                 return Ok(slice.finish(false));
             }
-            maybe_fail_traversal_step(TraversalFailurePoint::ReadDirectoryEntry)?;
-            match frame.entries.next() {
+            maybe_fail_traversal_step(TraversalFailurePoint::BeforeReadDirectoryEntry)?;
+            let next_entry = frame.entries.next();
+            if let Err(error) =
+                maybe_fail_traversal_step(TraversalFailurePoint::AfterReadDirectoryEntry)
+            {
+                self.poisoned = true;
+                return Err(error);
+            }
+            match next_entry {
                 Some(Ok(entry)) => self.pending_entry = Some(entry),
                 Some(Err(error)) => {
                     self.poisoned = true;
@@ -1199,7 +1221,7 @@ mod tests {
             TraversalFailurePoint::ParentValidation,
             TraversalFailurePoint::RootMetadata,
             TraversalFailurePoint::OpenDirectory,
-            TraversalFailurePoint::ReadDirectoryEntry,
+            TraversalFailurePoint::BeforeReadDirectoryEntry,
             TraversalFailurePoint::EntryFileType,
             TraversalFailurePoint::SecureFileValidation,
         ];
@@ -1226,6 +1248,26 @@ mod tests {
 
             assert_eq!(observed, vec![transcript.clone()], "failure at {point:?}");
         }
+    }
+
+    #[test]
+    fn traversal_cursor_requires_restart_after_an_advanced_directory_read_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("session.jsonl"), b"{}\n").expect("write transcript");
+        let mut cursor = FilesystemTraversalCursor::jsonl(temp.path());
+        inject_traversal_failure_once(TraversalFailurePoint::AfterReadDirectoryEntry);
+
+        cursor
+            .advance(FilesystemTraversalBudget::default(), &mut |_| Ok(()))
+            .expect_err("post-advance directory failure must poison the cursor");
+        assert_eq!(
+            cursor.error_recovery(),
+            FilesystemTraversalErrorRecovery::RestartRequired
+        );
+        let resume_error = cursor
+            .advance(FilesystemTraversalBudget::default(), &mut |_| Ok(()))
+            .expect_err("a poisoned cursor must reject resume");
+        assert!(resume_error.to_string().contains("must restart"));
     }
 
     #[test]

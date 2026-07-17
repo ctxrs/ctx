@@ -290,7 +290,6 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
         let lease = match open_private_regular_file(&lease_path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                validate_scratch_run_contents(&path)?;
                 remove_private_scratch_run(&path)?;
                 continue;
             }
@@ -300,7 +299,6 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
             Ok(()) => {
                 FileExt::unlock(&lease)?;
                 drop(lease);
-                validate_scratch_run_contents(&path)?;
                 remove_private_scratch_run(&path)?;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -310,28 +308,274 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
     write_sweep_state(&mut state_file, state)
 }
 
-fn validate_scratch_run_contents(path: &Path) -> io::Result<()> {
-    pace_filesystem_path(path);
-    for entry in fs::read_dir(path)? {
-        pace_filesystem_path(path);
-        let entry = entry?;
-        let entry_path = entry.path();
-        pace_filesystem_path(&entry_path);
-        let metadata = fs::symlink_metadata(&entry_path)?;
-        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "capture scratch run contains a link or non-file entry",
-            ));
+#[cfg(unix)]
+fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
+    let run = UnixScratchRun::open(path)?;
+    loop {
+        maybe_tamper_scratch_cleanup(path)?;
+        if run.remove_page(path)? {
+            return Ok(());
         }
-        validate_private_owner(&metadata)?;
+        std::thread::yield_now();
     }
-    Ok(())
 }
 
+#[cfg(windows)]
 fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
-    validate_scratch_run_directory(path)?;
+    let run = WindowsScratchRun::open(path)?;
     loop {
+        if run.remove_page(path)? {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_private_scratch_run(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private capture scratch is unsupported on this platform",
+    ))
+}
+
+#[cfg(any(unix, windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScratchDirectoryIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial: u64,
+    #[cfg(windows)]
+    file_id: [u8; 16],
+}
+
+#[cfg(unix)]
+struct UnixScratchRun {
+    parent: File,
+    directory: File,
+    name: std::ffi::CString,
+    identity: ScratchDirectoryIdentity,
+}
+
+#[cfg(unix)]
+impl UnixScratchRun {
+    fn open(path: &Path) -> io::Result<Self> {
+        use std::os::unix::{ffi::OsStrExt, io::AsRawFd, io::FromRawFd};
+
+        let parent_path = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch run has no parent directory",
+            )
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch run has no directory name",
+            )
+        })?;
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch run name contains an invalid byte",
+            )
+        })?;
+        let parent = open_existing_directory_no_follow(parent_path)?;
+        validate_private_directory_handle(&parent)?;
+        pace_filesystem_path(path);
+        let descriptor = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let directory = unsafe { File::from_raw_fd(descriptor) };
+        validate_private_directory_handle(&directory)?;
+        let identity = scratch_directory_identity(&directory)?;
+        Ok(Self {
+            parent,
+            directory,
+            name,
+            identity,
+        })
+    }
+
+    fn remove_page(&self, path: &Path) -> io::Result<bool> {
+        use std::os::unix::{ffi::OsStrExt, io::AsRawFd, io::IntoRawFd};
+
+        self.revalidate(path)?;
+        let page_directory = self.open_current_directory(path)?;
+        let page_descriptor = page_directory.into_raw_fd();
+        let stream = unsafe { libc::fdopendir(page_descriptor) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(page_descriptor);
+            }
+            return Err(error);
+        }
+        let stream = UnixDirectoryStream(stream);
+        let mut removed = 0usize;
+        while removed < SCRATCH_DELETE_FILES_PER_PAGE {
+            pace_filesystem_path(path);
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            let entry_path = path.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+            pace_filesystem_path(&entry_path);
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::zeroed();
+            let status = unsafe {
+                libc::fstatat(
+                    page_descriptor,
+                    name.as_ptr(),
+                    metadata.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if status != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let metadata = unsafe { metadata.assume_init() };
+            if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
+                || metadata.st_uid != unsafe { libc::geteuid() }
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "capture scratch run contains a link or non-file entry",
+                ));
+            }
+            crate::pace_current_disk_io(
+                u64::try_from(metadata.st_size)
+                    .unwrap_or(0)
+                    .saturating_add(SCRATCH_DELETE_ROW_OVERHEAD_BYTES),
+            );
+            pace_filesystem_path(&entry_path);
+            if unsafe { libc::unlinkat(page_descriptor, name.as_ptr(), 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            removed += 1;
+        }
+        drop(stream);
+        if removed > 0 {
+            self.revalidate(path)?;
+            return Ok(false);
+        }
+        self.revalidate(path)?;
+        pace_filesystem_path(path);
+        if unsafe {
+            libc::unlinkat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+
+    fn revalidate(&self, path: &Path) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+
+        pace_filesystem_path(path);
+        if scratch_directory_identity(&self.directory)? != self.identity {
+            return Err(scratch_directory_changed_error());
+        }
+        pace_filesystem_path(path);
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::zeroed();
+        let status = unsafe {
+            libc::fstatat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        let current = ScratchDirectoryIdentity {
+            device: u64::try_from(metadata.st_dev).unwrap_or(u64::MAX),
+            inode: u64::try_from(metadata.st_ino).unwrap_or(u64::MAX),
+        };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_uid != unsafe { libc::geteuid() }
+            || current != self.identity
+        {
+            return Err(scratch_directory_changed_error());
+        }
+        Ok(())
+    }
+
+    fn open_current_directory(&self, path: &Path) -> io::Result<File> {
+        use std::os::unix::{io::AsRawFd, io::FromRawFd};
+
+        pace_filesystem_path(path);
+        let descriptor = unsafe {
+            libc::openat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let directory = unsafe { File::from_raw_fd(descriptor) };
+        validate_private_directory_handle(&directory)?;
+        if scratch_directory_identity(&directory)? != self.identity {
+            return Err(scratch_directory_changed_error());
+        }
+        Ok(directory)
+    }
+}
+
+#[cfg(unix)]
+struct UnixDirectoryStream(*mut libc::DIR);
+
+#[cfg(unix)]
+impl Drop for UnixDirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WindowsScratchRun {
+    directory: File,
+    identity: ScratchDirectoryIdentity,
+}
+
+#[cfg(windows)]
+impl WindowsScratchRun {
+    fn open(path: &Path) -> io::Result<Self> {
+        let directory = open_existing_directory_for_cleanup(path)?;
+        validate_private_directory_handle(&directory)?;
+        let identity = scratch_directory_identity(&directory)?;
+        Ok(Self {
+            directory,
+            identity,
+        })
+    }
+
+    fn remove_page(&self, path: &Path) -> io::Result<bool> {
+        self.revalidate(path)?;
         pace_filesystem_path(path);
         let mut entries = fs::read_dir(path)?;
         let mut removed = 0usize;
@@ -342,31 +586,107 @@ fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
             };
             let entry = entry?;
             let entry_path = entry.path();
+            self.revalidate(path)?;
+            let file = open_existing_file_for_cleanup(&entry_path)?;
+            validate_private_file_handle(&file)?;
+            self.revalidate(path)?;
             pace_filesystem_path(&entry_path);
-            let metadata = fs::symlink_metadata(&entry_path)?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "capture scratch run contains a link or non-file entry",
-                ));
-            }
-            validate_private_owner(&metadata)?;
+            let metadata = file.metadata()?;
             crate::pace_current_disk_io(
                 metadata
                     .len()
                     .saturating_add(SCRATCH_DELETE_ROW_OVERHEAD_BYTES),
             );
             pace_filesystem_path(&entry_path);
-            fs::remove_file(&entry_path)?;
+            delete_windows_handle(&file)?;
+            drop(file);
             removed += 1;
         }
         drop(entries);
-        if removed == 0 {
-            pace_filesystem_path(path);
-            return fs::remove_dir(path);
+        if removed > 0 {
+            self.revalidate(path)?;
+            return Ok(false);
         }
-        std::thread::yield_now();
+        self.revalidate(path)?;
+        pace_filesystem_path(path);
+        delete_windows_handle(&self.directory)?;
+        Ok(true)
     }
+
+    fn revalidate(&self, path: &Path) -> io::Result<()> {
+        let current = open_existing_directory_no_follow(path)?;
+        validate_private_directory_handle(&current)?;
+        if scratch_directory_identity(&self.directory)? != self.identity
+            || scratch_directory_identity(&current)? != self.identity
+        {
+            return Err(scratch_directory_changed_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn scratch_directory_changed_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "capture scratch run changed identity during cleanup",
+    )
+}
+
+#[cfg(all(test, unix))]
+struct ScratchCleanupTamper {
+    pages_before_tamper: usize,
+    moved_path: PathBuf,
+    replacement_target: PathBuf,
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static SCRATCH_CLEANUP_TAMPER_ONCE: std::cell::RefCell<Option<ScratchCleanupTamper>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(all(test, unix))]
+fn inject_scratch_cleanup_tamper_once(
+    pages_before_tamper: usize,
+    moved_path: PathBuf,
+    replacement_target: PathBuf,
+) {
+    SCRATCH_CLEANUP_TAMPER_ONCE.with(|slot| {
+        *slot.borrow_mut() = Some(ScratchCleanupTamper {
+            pages_before_tamper,
+            moved_path,
+            replacement_target,
+        });
+    });
+}
+
+#[cfg(all(test, unix))]
+fn maybe_tamper_scratch_cleanup(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let tamper = SCRATCH_CLEANUP_TAMPER_ONCE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(tamper) = slot.as_mut() else {
+            return None;
+        };
+        if tamper.pages_before_tamper > 0 {
+            tamper.pages_before_tamper -= 1;
+            return None;
+        }
+        slot.take()
+    });
+    let Some(tamper) = tamper else {
+        return Ok(());
+    };
+    fs::rename(path, &tamper.moved_path)?;
+    symlink(tamper.replacement_target, path)
+}
+
+#[cfg(all(unix, not(test)))]
+fn maybe_tamper_scratch_cleanup(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn validate_scratch_run_directory(path: &Path) -> io::Result<()> {
@@ -384,17 +704,34 @@ fn validate_private_directory(path: &Path) -> io::Result<()> {
     }
     validate_private_owner(&metadata)?;
     validate_private_directory_permissions(&metadata)?;
-    #[cfg(windows)]
-    {
-        let directory = open_existing_directory_no_follow(path)?;
-        validate_private_windows_handle(&directory, true)?;
-    }
-    Ok(())
+    let directory = open_existing_directory_no_follow(path)?;
+    validate_private_directory_handle(&directory)
 }
 
 fn open_private_regular_file(path: &Path) -> io::Result<File> {
     let file = open_existing_file_no_follow(path)?;
-    pace_filesystem_path(path);
+    validate_private_file_handle(&file)?;
+    Ok(file)
+}
+
+fn validate_private_directory_handle(directory: &File) -> io::Result<()> {
+    crate::pace_current_filesystem_operation(0);
+    let metadata = directory.metadata()?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "capture scratch handle is not a directory",
+        ));
+    }
+    validate_private_owner(&metadata)?;
+    validate_private_directory_permissions(&metadata)?;
+    #[cfg(windows)]
+    validate_private_windows_handle(directory, true)?;
+    Ok(())
+}
+
+fn validate_private_file_handle(file: &File) -> io::Result<()> {
+    crate::pace_current_filesystem_operation(0);
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
@@ -405,8 +742,58 @@ fn open_private_regular_file(path: &Path) -> io::Result<File> {
     validate_private_owner(&metadata)?;
     validate_private_file_permissions(&metadata)?;
     #[cfg(windows)]
-    validate_private_windows_handle(&file, false)?;
-    Ok(file)
+    validate_private_windows_handle(file, false)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn scratch_directory_identity(directory: &File) -> io::Result<ScratchDirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    crate::pace_current_filesystem_operation(0);
+    let metadata = directory.metadata()?;
+    Ok(ScratchDirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn scratch_directory_identity(directory: &File) -> io::Result<ScratchDirectoryIdentity> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+
+    crate::pace_current_filesystem_operation(0);
+    let mut information = MaybeUninit::<FILE_ID_INFO>::zeroed();
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle() as _,
+            FileIdInfo,
+            information.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let information = unsafe { information.assume_init() };
+    Ok(ScratchDirectoryIdentity {
+        volume_serial: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
+    })
+}
+
+#[cfg(unix)]
+fn open_existing_directory_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    pace_filesystem_path(path);
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
 }
 
 #[cfg(windows)]
@@ -417,12 +804,77 @@ fn open_existing_directory_no_follow(path: &Path) -> io::Result<File> {
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
     };
 
+    pace_filesystem_path(path);
     let mut options = fs::OpenOptions::new();
     options
         .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_existing_directory_no_follow(_path: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private capture scratch is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn open_existing_directory_for_cleanup(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+    };
+
+    pace_filesystem_path(path);
+    let mut options = fs::OpenOptions::new();
+    options
+        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn open_existing_file_for_cleanup(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+    };
+
+    pace_filesystem_path(path);
+    let mut options = fs::OpenOptions::new();
+    options
+        .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn delete_windows_handle(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as _,
+            FileDispositionInfo,
+            std::ptr::from_ref(&disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
