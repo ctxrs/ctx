@@ -55,7 +55,7 @@ impl Store {
         let mut statement = self
             .conn
             .prepare(SOURCE_IMPORT_ACTIVE_PATH_INVENTORY_PAGE_SQL)?;
-        collect_rows(statement.query_map(
+        let paths = collect_rows(statement.query_map(
             params![
                 provider.as_str(),
                 source_root,
@@ -63,7 +63,8 @@ impl Store {
                 capped_i64(limit as u64)
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        )?)
+        )?)?;
+        Ok(paths)
     }
 
     #[doc(hidden)]
