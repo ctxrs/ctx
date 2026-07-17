@@ -1,16 +1,16 @@
 impl Store {
-    pub fn begin_provider_file_publication<'a>(
+    pub fn begin_provider_file_publication(
         &self,
         provider: CaptureProvider,
         observation: ProviderFileInventoryObservation<'_>,
-        material_owner: impl Into<ProviderFilePublicationMaterialOwner<'a>>,
+        material_source_format: &str,
         kind: ProviderFilePublicationKind,
         created_at_ms: i64,
     ) -> Result<ProviderFilePublicationScope> {
         self.begin_provider_file_publication_inner(
             provider,
             observation,
-            material_owner,
+            material_source_format,
             kind,
             created_at_ms,
             || {},
@@ -132,44 +132,25 @@ impl Store {
         Ok(Some(scope))
     }
 
-    fn begin_provider_file_publication_inner<'a>(
+    fn begin_provider_file_publication_inner(
         &self,
         provider: CaptureProvider,
         observation: ProviderFileInventoryObservation<'_>,
-        material_owner: impl Into<ProviderFilePublicationMaterialOwner<'a>>,
+        material_source_format: &str,
         kind: ProviderFilePublicationKind,
         created_at_ms: i64,
         before_writer_transaction: impl FnOnce(),
     ) -> Result<ProviderFilePublicationScope> {
         validate_observation_identity(observation)?;
-        let material_owner = material_owner.into();
-        if material_owner.source_format.trim().is_empty() {
+        if material_source_format.trim().is_empty() {
             return Err(StoreError::InvalidProviderFilePublicationScope);
         }
-        let material_source_root = match (
-            material_owner.provider,
-            material_owner.inventory_family,
-            material_owner.source_root,
-        ) {
-            (None, None, None) => observation.source_root(),
-            (Some(owner_provider), Some(inventory_family), Some(source_root)) => {
-                let expected_root = match inventory_family {
-                    ProviderFileInventoryFamily::Catalog => observation.source_root(),
-                    ProviderFileInventoryFamily::SourceImport => observation.source_path(),
-                };
-                if owner_provider != provider
-                    || inventory_family != observation.inventory_family_kind()
-                    || source_root.trim().is_empty()
-                    || source_root != expected_root
-                {
-                    return Err(StoreError::InvalidProviderFilePublicationScope);
-                }
-                source_root
-            }
-            _ => return Err(StoreError::InvalidProviderFilePublicationScope),
+        let material_source_root = match observation {
+            ProviderFileInventoryObservation::ObservedCatalog { .. } => observation.source_root(),
+            ProviderFileInventoryObservation::SourceImport { .. } => observation.source_path(),
         }
         .to_owned();
-        let material_source_format = material_owner.source_format.to_owned();
+        let material_source_format = material_source_format.to_owned();
         self.cleanup_abandoned_provider_file_publication()?;
         if self.provider_file_publication.borrow().is_some() {
             return Err(StoreError::InvalidProviderFilePublicationScope);
