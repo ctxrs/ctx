@@ -1620,7 +1620,7 @@ fn search_packet_query_lexical(
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: display_query,
         query_spec: Some(query),
-        filters: options.filters,
+        filters: options.filters.clone(),
         generated_at: utc_now(),
         results,
         pagination: pagination(None, has_more),
