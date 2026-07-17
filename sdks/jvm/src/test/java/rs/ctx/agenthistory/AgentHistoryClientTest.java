@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class AgentHistoryClientTest {
     public static void main(String[] args) throws Exception {
@@ -28,7 +29,8 @@ public final class AgentHistoryClientTest {
         rejectsOversizedLocalCliCapture();
         exercisesAdversarialLocalCliCapture();
         boundsInheritedPipeTeardown();
-        preservesSuccessfulLongLivedChild();
+        killsSuccessfulSameScopeChild();
+        interruptionCancelsAndReapsLocalCli();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
@@ -370,6 +372,16 @@ public final class AgentHistoryClientTest {
     }
 
     private static void exercisesAdversarialLocalCliCapture() {
+        if (!hasNativeProcessScope()) {
+            try {
+                processAdapter(2_000).execute(new AgentHistoryOperation("status", helperArgs("dual")));
+                throw new AssertionError("expected unavailable process-scope failure");
+            } catch (CtxAgentHistoryException error) {
+                assertEquals("capture_failure", error.code());
+                assertEquals("process_scope", error.details().get("stream"));
+            }
+            return;
+        }
         LocalCliAdapter adapter = processAdapter(2_000);
         String dual = adapter.execute(new AgentHistoryOperation("status", helperArgs("dual")));
         assertEquals(Integer.valueOf(30 * 8192), Integer.valueOf(dual.length()));
@@ -388,7 +400,7 @@ public final class AgentHistoryClientTest {
     }
 
     private static void boundsInheritedPipeTeardown() throws Exception {
-        if (!hasSetsid()) return;
+        if (!hasNativeProcessScope()) return;
         Path directory = Files.createTempDirectory("ctx-jvm-scope-");
         Path alive = directory.resolve("child.alive");
         Path pid = directory.resolve("child.pid");
@@ -410,21 +422,48 @@ public final class AgentHistoryClientTest {
         }
     }
 
-    private static void preservesSuccessfulLongLivedChild() throws Exception {
-        if (!hasSetsid()) return;
+    private static void killsSuccessfulSameScopeChild() throws Exception {
+        if (!hasNativeProcessScope()) return;
         Path directory = Files.createTempDirectory("ctx-jvm-success-");
         Path alive = directory.resolve("child.alive");
         Path pid = directory.resolve("child.pid");
         String output = processAdapter(2_000).execute(new AgentHistoryOperation(
                 "status", helperArgs("success-child", alive.toString(), pid.toString())));
         assertEquals("{}", output);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (!Files.exists(alive) && System.nanoTime() < deadline) Thread.sleep(10);
-        if (!Files.exists(alive)) {
-            throw new AssertionError("successful command terminated its long-lived child");
+        Thread.sleep(700);
+        if (Files.exists(alive)) {
+            throw new AssertionError("successful scoped command left a silent child alive");
         }
-        long childPID = Long.parseLong(new String(Files.readAllBytes(pid), StandardCharsets.UTF_8));
-        ProcessHandle.of(childPID).ifPresent(ProcessHandle::destroyForcibly);
+    }
+
+    private static void interruptionCancelsAndReapsLocalCli() throws Exception {
+        if (!hasNativeProcessScope()) return;
+        Path directory = Files.createTempDirectory("ctx-jvm-interrupt-");
+        Path alive = directory.resolve("child.alive");
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread caller = new Thread(() -> {
+            try {
+                processAdapter(60_000).execute(new AgentHistoryOperation(
+                        "status", helperArgs("linger", alive.toString())));
+                failure.set(new AssertionError("interrupted command unexpectedly succeeded"));
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+        caller.start();
+        Thread.sleep(100);
+        caller.interrupt();
+        caller.join(2_000);
+        if (caller.isAlive()) throw new AssertionError("interrupted command did not return boundedly");
+        Throwable error = failure.get();
+        if (!(error instanceof CtxAgentHistoryException)
+                || !"cancelled".equals(((CtxAgentHistoryException) error).code())) {
+            throw new AssertionError("interruption was not a typed cancellation", error);
+        }
+        Thread.sleep(700);
+        if (Files.exists(alive)) {
+            throw new AssertionError("interrupted command left its owned process alive");
+        }
     }
 
     private static LocalCliAdapter processAdapter(long timeoutMillis) {
@@ -450,15 +489,22 @@ public final class AgentHistoryClientTest {
                 || Files.isExecutable(Paths.get("/bin/setsid"));
     }
 
+    private static boolean hasNativeProcessScope() {
+        String launcher = System.getenv("CTX_SDK_PROCESS_SCOPE_LAUNCHER");
+        return hasSetsid() || (launcher != null && !launcher.isEmpty());
+    }
+
     private static void runProcessHelper(String[] args) throws Exception {
         switch (args[0]) {
             case "dual":
                 byte[] block = new byte[8192];
                 java.util.Arrays.fill(block, (byte) 'x');
-                for (int index = 0; index < 30; index++) {
-                    System.out.write(block);
-                    System.err.write(block);
-                }
+                Thread stdout = new Thread(() -> writeBlocks(System.out, block));
+                Thread stderr = new Thread(() -> writeBlocks(System.err, block));
+                stdout.start();
+                stderr.start();
+                stdout.join();
+                stderr.join();
                 return;
             case "stderr-first":
                 System.err.write(new byte[256 * 1024 + 1]);
@@ -467,20 +513,50 @@ public final class AgentHistoryClientTest {
                 return;
             case "inherit":
             case "success-child":
-                ProcessBuilder child = new ProcessBuilder(
-                        "/bin/sh", "-c", "echo $$ > \"$2\"; trap '' TERM; sleep .5; touch \"$1\"; sleep 60",
-                        "ctx-sdk", args[1], args[2]);
+                ProcessBuilder child;
+                boolean windows = System.getProperty("os.name", "")
+                        .toLowerCase(java.util.Locale.ROOT)
+                        .contains("win");
+                if (windows) {
+                    List<String> childCommand = new java.util.ArrayList<>();
+                    childCommand.add(Paths.get(System.getProperty("java.home"), "bin", "java").toString());
+                    childCommand.addAll(helperArgs("linger", args[1]));
+                    child = new ProcessBuilder(childCommand);
+                } else {
+                    child = new ProcessBuilder(
+                            "/bin/sh", "-c", "echo $$ > \"$2\"; trap '' TERM; sleep .5; touch \"$1\"; sleep 60",
+                            "ctx-sdk", args[1], args[2]);
+                }
                 if ("inherit".equals(args[0])) {
                     child.inheritIO();
                 } else {
                     child.redirectOutput(ProcessBuilder.Redirect.DISCARD);
                     child.redirectError(ProcessBuilder.Redirect.DISCARD);
                 }
-                child.start();
+                Process started = child.start();
+                if (windows) {
+                    Files.write(
+                            Paths.get(args[2]),
+                            Long.toString(started.pid()).getBytes(StandardCharsets.UTF_8));
+                }
                 if ("success-child".equals(args[0])) System.out.print("{}");
+                return;
+            case "linger":
+                Thread.sleep(500);
+                Files.write(Paths.get(args[1]), "alive".getBytes(StandardCharsets.UTF_8));
+                Thread.sleep(60_000);
                 return;
             default:
                 throw new IllegalArgumentException("unknown process helper mode: " + args[0]);
+        }
+    }
+
+    private static void writeBlocks(java.io.OutputStream stream, byte[] block) {
+        try {
+            for (int index = 0; index < 30; index++) stream.write(block);
+            stream.flush();
+        } catch (IOException error) {
+            throw new RuntimeException(error);
         }
     }
 

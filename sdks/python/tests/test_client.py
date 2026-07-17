@@ -25,9 +25,13 @@ from ctx_agent_history import (
     SearchQueryV1,
     serialize_search_query,
 )
-from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
+from ctx_agent_history.errors import (
+    CtxAgentHistoryCliError,
+    CtxAgentHistoryError,
+    CtxAgentHistoryProtocolError,
+)
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
-from ctx_agent_history.transport import LocalCliAdapter
+from ctx_agent_history.transport import LocalCliAdapter, _scoped_launch_command
 from ctx_agent_history.types import AgentHistoryErrorCode
 import dogfood_local
 
@@ -535,8 +539,16 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details["stream"], "stderr")
         self.assertLess(time.monotonic() - started, 2)
 
-    @unittest.skipIf(os.name == "nt", "POSIX process-group lifecycle test")
+    def test_windows_local_cli_fails_closed_without_scope_launcher(self) -> None:
+        with mock.patch("ctx_agent_history.transport.os.name", "nt"):
+            with self.assertRaises(CtxAgentHistoryError) as raised:
+                _scoped_launch_command([sys.executable, "--version"], {})
+        self.assertEqual(raised.exception.code, "backend_unavailable")
+        self.assertEqual(raised.exception.details["backend"], "process_scope")
+
     def test_local_cli_kills_inherited_pipe_descendant_on_capture_failure(self) -> None:
+        if os.name == "nt" and not os.environ.get("CTX_SDK_PROCESS_SCOPE_LAUNCHER"):
+            self.skipTest("native Windows process-scope launcher is unavailable")
         adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=2))
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "child.pid"
@@ -554,33 +566,49 @@ class LocalCliAdapterTests(unittest.TestCase):
             child_pid = int(pid_path.read_text(encoding="utf-8"))
             self._assert_process_exited(child_pid)
 
-    @unittest.skipIf(os.name == "nt", "POSIX detached-daemon lifecycle test")
-    def test_local_cli_success_does_not_kill_detached_child(self) -> None:
+    def test_local_cli_success_kills_same_scope_child_with_closed_pipes(self) -> None:
+        if os.name == "nt" and not os.environ.get("CTX_SDK_PROCESS_SCOPE_LAUNCHER"):
+            self.skipTest("native Windows process-scope launcher is unavailable")
         adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=2))
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "child.pid"
             completed = adapter._run(
                 [
                     "-c",
-                    "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); open(sys.argv[1],'w').write(str(child.pid)); print('{}')",
+                    "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); open(sys.argv[1],'w').write(str(child.pid)); print('{}')",
                     str(pid_path),
                 ]
             )
             self.assertEqual(completed.stdout.strip(), "{}")
             child_pid = int(pid_path.read_text(encoding="utf-8"))
-            os.kill(child_pid, 0)
-            os.kill(child_pid, 9)
             self._assert_process_exited(child_pid)
 
     def _assert_process_exited(self, pid: int) -> None:
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not self._process_exists(pid):
                 return
             time.sleep(0.01)
         self.fail(f"owned process {pid} survived bounded teardown")
+
+    def _process_exists(self, pid: int) -> bool:
+        if os.name != "nt":
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+        import ctypes
+
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
 
     def test_hosted_config_is_placeholder(self) -> None:
         client = AgentHistoryClient.hosted(HostedConfig(base_url="https://example.invalid"))
@@ -688,7 +716,7 @@ class fake_ctx:
 
     def __enter__(self) -> Path:
         self._tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self._tmp.name) / "ctx"
+        self.path = Path(self._tmp.name) / "fake-ctx"
         script = _fake_ctx_script(
             fail=self.fail,
             invalid_json=self.invalid_json,

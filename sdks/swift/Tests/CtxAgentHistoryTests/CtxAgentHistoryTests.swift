@@ -369,6 +369,21 @@ final class CtxAgentHistoryTests: XCTestCase {
             throw XCTSkip("python3 is unavailable for the process-scope fixture")
         }
         let runner = ProcessCommandRunner()
+        guard Self.nativeProcessScopeAvailable else {
+            XCTAssertThrowsError(try runner.run(CommandRequest(
+                command: "/usr/bin/python3",
+                arguments: ["-c", "print('{}')"],
+                timeout: 2
+            ))) { error in
+                let sdkError = error as? CtxAgentHistorySDKError
+                XCTAssertEqual(sdkError?.code, .captureFailure)
+                XCTAssertEqual(
+                    sdkError?.details?.objectValue?["stream"],
+                    .string("process_scope")
+                )
+            }
+            return
+        }
         let dual = try runner.run(CommandRequest(
             command: "/usr/bin/python3",
             arguments: [
@@ -394,6 +409,9 @@ final class CtxAgentHistoryTests: XCTestCase {
     }
 
     func testProcessRunnerBoundsInheritedPipeTeardown() throws {
+        guard Self.nativeProcessScopeAvailable else {
+            throw XCTSkip("native process-scope launcher is unavailable")
+        }
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
             throw XCTSkip("python3 is unavailable for the process-scope fixture")
         }
@@ -420,7 +438,10 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: alive.path))
     }
 
-    func testProcessRunnerSuccessReleasesLongLivedChild() throws {
+    func testProcessRunnerSuccessKillsSameScopeChildWithClosedPipes() throws {
+        guard Self.nativeProcessScopeAvailable else {
+            throw XCTSkip("native process-scope launcher is unavailable")
+        }
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
             throw XCTSkip("python3 is unavailable for the process-scope fixture")
         }
@@ -433,20 +454,24 @@ final class CtxAgentHistoryTests: XCTestCase {
             command: "/usr/bin/python3",
             arguments: [
                 "-c",
-                "import subprocess,sys; c=subprocess.Popen([sys.executable,'-c',\"import time,pathlib,sys; time.sleep(.5); pathlib.Path(sys.argv[1]).write_text('alive'); time.sleep(60)\",sys.argv[1]],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); open(sys.argv[2],'w').write(str(c.pid)); print('{}')",
+                "import subprocess,sys; c=subprocess.Popen([sys.executable,'-c',\"import signal,time,pathlib,sys; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(.5); pathlib.Path(sys.argv[1]).write_text('alive'); time.sleep(60)\",sys.argv[1]],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); open(sys.argv[2],'w').write(str(c.pid)); print('{}')",
                 alive.path,
                 pidFile.path
             ],
             timeout: 2
         ))
         XCTAssertEqual(String(data: result.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), "{}")
-        let deadline = Date().addingTimeInterval(2)
-        while !FileManager.default.fileExists(atPath: alive.path), Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
+        Thread.sleep(forTimeInterval: 0.7)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alive.path))
+    }
+
+    private static var nativeProcessScopeAvailable: Bool {
+        if let launcher = ProcessInfo.processInfo.environment["CTX_SDK_PROCESS_SCOPE_LAUNCHER"],
+           !launcher.isEmpty {
+            return true
         }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: alive.path))
-        if let rawPID = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(rawPID) {
-            _ = kill(pid, SIGKILL)
+        return ["/usr/bin/setsid", "/bin/setsid"].contains {
+            FileManager.default.isExecutableFile(atPath: $0)
         }
     }
 

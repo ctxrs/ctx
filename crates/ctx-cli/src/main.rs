@@ -22,6 +22,7 @@ mod output;
 mod progress;
 mod provider_args;
 mod provider_sources;
+mod sdk_process_scope;
 mod search_filters;
 mod search_query_input;
 mod search_render;
@@ -717,6 +718,9 @@ impl LocateArgs {
 }
 
 fn main() -> Result<()> {
+    if let Some(exit_code) = sdk_process_scope::run_if_requested()? {
+        std::process::exit(exit_code);
+    }
     let started = Instant::now();
     let cli = Cli::parse();
     let action = cli.command.name();

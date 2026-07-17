@@ -10,6 +10,8 @@ private let localStderrCapBytes = 256 * 1024
 private let localReadBufferBytes = 64 * 1024
 private let localDrainGrace: TimeInterval = 0.1
 private let localTeardownLimit: TimeInterval = 1
+private let processScopeLauncherArgument = "__ctx_sdk_process_scope_v1"
+private let processScopeLauncherEnvironment = "CTX_SDK_PROCESS_SCOPE_LAUNCHER"
 
 public struct CommandRequest: Equatable, Sendable {
     public var command: String
@@ -61,19 +63,33 @@ public struct ProcessCommandRunner: CommandRunner {
     public func run(_ request: CommandRequest) throws -> CommandResult {
         let process = Process()
         let setsid = Self.setsidPath
+        let launcher = Self.launcherPath(for: request)
+        guard setsid != nil || launcher != nil else {
+            throw CaptureIssue.failure(
+                stream: "process_scope",
+                cause: "local CLI process containment is unavailable"
+            ).sdkError(command: [request.command] + request.arguments)
+        }
+        let targetArguments = launcher == nil
+            ? request.arguments
+            : [processScopeLauncherArgument, "--", request.command] + request.arguments
         if let setsid {
             process.executableURL = URL(fileURLWithPath: setsid)
-            if request.command.contains("/") {
-                process.arguments = [request.command] + request.arguments
+            if let launcher {
+                process.arguments = [launcher] + targetArguments
+            } else if request.command.contains("/") {
+                process.arguments = [request.command] + targetArguments
             } else {
-                process.arguments = ["/usr/bin/env", request.command] + request.arguments
+                process.arguments = ["/usr/bin/env", request.command] + targetArguments
             }
-        } else if request.command.contains("/") {
-            process.executableURL = URL(fileURLWithPath: request.command)
-            process.arguments = request.arguments
+        } else if let launcher {
+            process.executableURL = URL(fileURLWithPath: launcher)
+            process.arguments = targetArguments
         } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [request.command] + request.arguments
+            throw CaptureIssue.failure(
+                stream: "process_scope",
+                cause: "local CLI process containment is unavailable"
+            ).sdkError(command: [request.command] + request.arguments)
         }
         if let cwd = request.cwd {
             process.currentDirectoryURL = URL(fileURLWithPath: cwd)
@@ -97,11 +113,20 @@ public struct ProcessCommandRunner: CommandRunner {
                 exitCode: -1
             )
         }
-        let processScope = OwnedProcessScope(process: process, ownsProcessGroup: setsid != nil)
+        let processScope = OwnedProcessScope(process: process)
         defer { processScope.close() }
 
-        let stdoutData = LockedCapture(stream: "stdout", capBytes: localStdoutCapBytes)
-        let stderrData = LockedCapture(stream: "stderr", capBytes: localStderrCapBytes)
+        let captureSignal = DispatchSemaphore(value: 0)
+        let stdoutData = LockedCapture(
+            stream: "stdout",
+            capBytes: localStdoutCapBytes,
+            signal: captureSignal
+        )
+        let stderrData = LockedCapture(
+            stream: "stderr",
+            capBytes: localStderrCapBytes,
+            signal: captureSignal
+        )
         let pipeReaders = DispatchGroup()
         pipeReaders.enter()
         DispatchQueue.global(qos: .utility).async {
@@ -130,7 +155,7 @@ public struct ProcessCommandRunner: CommandRunner {
                     exitCode: -1
                 )
             }
-            Thread.sleep(forTimeInterval: 0.005)
+            _ = captureSignal.wait(timeout: .now() + 0.005)
         }
 
         if pipeReaders.wait(timeout: .now() + localDrainGrace) == .timedOut {
@@ -162,6 +187,20 @@ public struct ProcessCommandRunner: CommandRunner {
     private static var setsidPath: String? {
         for path in ["/usr/bin/setsid", "/bin/setsid"] where FileManager.default.isExecutableFile(atPath: path) {
             return path
+        }
+        return nil
+    }
+
+    private static func launcherPath(for request: CommandRequest) -> String? {
+        if let override = request.env[processScopeLauncherEnvironment], !override.isEmpty {
+            return override
+        }
+        if let override = ProcessInfo.processInfo.environment[processScopeLauncherEnvironment], !override.isEmpty {
+            return override
+        }
+        let name = URL(fileURLWithPath: request.command).lastPathComponent.lowercased()
+        if name == "ctx" || name == "ctx.exe" || name.hasPrefix("ctx-") || name.hasPrefix("ctx_") {
+            return request.command
         }
         return nil
     }
@@ -213,12 +252,14 @@ private final class LockedCapture: @unchecked Sendable {
     private let lock = NSLock()
     private let stream: String
     private let capBytes: Int
+    private let signal: DispatchSemaphore
     private var captured: Data
     private var captureIssue: CaptureIssue?
 
-    init(stream: String, capBytes: Int) {
+    init(stream: String, capBytes: Int, signal: DispatchSemaphore) {
         self.stream = stream
         self.capBytes = capBytes
+        self.signal = signal
         captured = Data(capacity: capBytes)
     }
 
@@ -233,6 +274,7 @@ private final class LockedCapture: @unchecked Sendable {
                     }
                     captureIssue = .limit(stream: stream, capBytes: capBytes)
                     lock.unlock()
+                    signal.signal()
                     return
                 }
                 captured.append(chunk)
@@ -244,6 +286,7 @@ private final class LockedCapture: @unchecked Sendable {
                 captureIssue = .failure(stream: stream, cause: String(describing: error))
             }
             lock.unlock()
+            signal.signal()
         }
     }
 
@@ -265,14 +308,12 @@ private final class LockedCapture: @unchecked Sendable {
 private final class OwnedProcessScope {
     private let process: Process
     private let processIdentifier: pid_t
-    private let ownsProcessGroup: Bool
     private let lock = NSLock()
     private var terminated = false
 
-    init(process: Process, ownsProcessGroup: Bool) {
+    init(process: Process) {
         self.process = process
         processIdentifier = process.processIdentifier
-        self.ownsProcessGroup = ownsProcessGroup || setpgid(processIdentifier, processIdentifier) == 0
     }
 
     func terminate() {
@@ -284,14 +325,12 @@ private final class OwnedProcessScope {
         terminated = true
         lock.unlock()
 
-        let signaledGroup = ownsProcessGroup && kill(-processIdentifier, SIGTERM) == 0
+        _ = kill(-processIdentifier, SIGTERM)
         if process.isRunning {
             process.terminate()
         }
-        if signaledGroup {
-            Thread.sleep(forTimeInterval: localDrainGrace)
-            _ = kill(-processIdentifier, SIGKILL)
-        }
+        Thread.sleep(forTimeInterval: localDrainGrace)
+        _ = kill(-processIdentifier, SIGKILL)
         if process.isRunning {
             _ = kill(processIdentifier, SIGKILL)
         }
@@ -302,9 +341,7 @@ private final class OwnedProcessScope {
     }
 
     func close() {
-        lock.lock()
-        terminated = true
-        lock.unlock()
+        terminate()
     }
 }
 

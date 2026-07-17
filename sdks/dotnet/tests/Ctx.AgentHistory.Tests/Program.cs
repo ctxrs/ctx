@@ -1,10 +1,15 @@
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Ctx.AgentHistory;
 
 internal static class Program
 {
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
+        if (args.FirstOrDefault() == "__ctx_sdk_helper")
+        {
+            return await RunProcessHelper(args.Skip(1).ToArray());
+        }
         var tests = new (string Name, Func<Task> Body)[]
         {
             ("wraps status as agent-history-v1", WrapsStatus),
@@ -365,59 +370,49 @@ internal static class Program
 
     private static async Task AdversarialLocalCliCapture()
     {
-        if (OperatingSystem.IsWindows())
+        var hasLauncher = !string.IsNullOrWhiteSpace(
+            Environment.GetEnvironmentVariable("CTX_SDK_PROCESS_SCOPE_LAUNCHER"));
+        var hasSetsid = !OperatingSystem.IsWindows()
+            && new[] { "/usr/bin/setsid", "/bin/setsid" }.Any(File.Exists);
+        var nativeScope = hasLauncher || hasSetsid;
+        var executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("test executable path is unavailable");
+        LocalCliAdapter Adapter(TimeSpan timeout) => new(new LocalAgentHistoryConfig
         {
-            return;
-        }
+            CtxBinary = executable,
+            Timeout = timeout
+        });
         var directory = Path.Combine(Path.GetTempPath(), $"ctx-dotnet-process-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         try
         {
-            async Task<string> Script(string name, string body)
+            if (!nativeScope)
             {
-                var path = Path.Combine(directory, name);
-                await File.WriteAllTextAsync(path, "#!/bin/sh\n" + body);
-                File.SetUnixFileMode(
-                    path,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-                return path;
+                var unavailable = await ThrowsAsync<CtxAgentHistoryException>(() =>
+                    Adapter(TimeSpan.FromSeconds(2))
+                        .ExecuteJsonAsync("__ctx_sdk_helper", ["dual"]));
+                Equal("capture_failure", unavailable.Code);
+                Equal("process_scope", unavailable.Details["stream"]!.GetValue<string>());
+                return;
             }
+            _ = await Adapter(TimeSpan.FromSeconds(2))
+                .ExecuteJsonAsync("__ctx_sdk_helper", ["dual"]);
 
-            var dual = await Script(
-                "dual",
-                "(head -c 245760 /dev/zero | tr '\\000' ' ') &\n(head -c 245760 /dev/zero | tr '\\000' ' ' >&2) &\nwait\nprintf '{}'\n");
-            var dualAdapter = new LocalCliAdapter(new LocalAgentHistoryConfig
-            {
-                CtxBinary = dual,
-                Timeout = TimeSpan.FromSeconds(2)
-            });
-            _ = await dualAdapter.ExecuteJsonAsync("status", []);
-
-            var stderrFirst = await Script(
-                "stderr-first",
-                "head -c 262145 /dev/zero >&2\nsleep 60\n");
             var started = Stopwatch.StartNew();
             var overflow = await ThrowsAsync<CtxAgentHistoryException>(() =>
-                new LocalCliAdapter(new LocalAgentHistoryConfig
-                {
-                    CtxBinary = stderrFirst,
-                    Timeout = TimeSpan.FromSeconds(2)
-                }).ExecuteJsonAsync("status", []));
+                Adapter(TimeSpan.FromSeconds(2))
+                    .ExecuteJsonAsync("__ctx_sdk_helper", ["stderr-first"]));
             Equal("capture_limit", overflow.Code);
             Equal("stderr", overflow.Details["stream"]!.GetValue<string>());
             True(started.Elapsed < TimeSpan.FromSeconds(2), "stderr-first overflow exceeded bounded teardown");
 
             var inheritedAlive = Path.Combine(directory, "inherited.alive");
-            var inherited = await Script(
-                "inherited",
-                $"(trap '' TERM; sleep .5; touch '{inheritedAlive}'; sleep 60) &\nexit 0\n");
+            var inheritedPid = Path.Combine(directory, "inherited.pid");
             started.Restart();
             var inheritedError = await ThrowsAsync<CtxAgentHistoryException>(() =>
-                new LocalCliAdapter(new LocalAgentHistoryConfig
-                {
-                    CtxBinary = inherited,
-                    Timeout = TimeSpan.FromSeconds(5)
-                }).ExecuteJsonAsync("status", []));
+                Adapter(TimeSpan.FromSeconds(5)).ExecuteJsonAsync(
+                    "__ctx_sdk_helper",
+                    ["inherit", inheritedAlive, inheritedPid]));
             Equal("capture_failure", inheritedError.Code);
             True(started.Elapsed < TimeSpan.FromSeconds(2), "inherited-pipe teardown exceeded its deadline");
             await Task.Delay(700);
@@ -425,37 +420,79 @@ internal static class Program
 
             var successAlive = Path.Combine(directory, "success.alive");
             var successPid = Path.Combine(directory, "success.pid");
-            var success = await Script(
-                "success-child",
-                $"(sleep .5; touch '{successAlive}'; sleep 60) >/dev/null 2>&1 &\necho $! > '{successPid}'\nprintf '{{}}'\n");
-            _ = await new LocalCliAdapter(new LocalAgentHistoryConfig
-            {
-                CtxBinary = success,
-                Timeout = TimeSpan.FromSeconds(2)
-            }).ExecuteJsonAsync("status", []);
-            var deadline = Stopwatch.StartNew();
-            while (!File.Exists(successAlive) && deadline.Elapsed < TimeSpan.FromSeconds(2))
-            {
-                await Task.Delay(10);
-            }
-            True(File.Exists(successAlive), "successful command terminated its long-lived child");
-            if (int.TryParse(await File.ReadAllTextAsync(successPid), out var pid))
-            {
-                try
-                {
-                    Process.GetProcessById(pid).Kill(entireProcessTree: true);
-                }
-                catch (ArgumentException)
-                {
-                    // The fixture may already have exited.
-                }
-            }
+            _ = await Adapter(TimeSpan.FromSeconds(2)).ExecuteJsonAsync(
+                "__ctx_sdk_helper",
+                ["success-child", successAlive, successPid]);
+            await Task.Delay(700);
+            True(!File.Exists(successAlive), "successful scoped command left a silent child alive");
         }
         finally
         {
             Directory.Delete(directory, recursive: true);
         }
     }
+
+    private static async Task<int> RunProcessHelper(string[] args)
+    {
+        switch (args[0])
+        {
+            case "dual":
+                var stdout = Console.OpenStandardOutput();
+                var stderr = Console.OpenStandardError();
+                var block = Enumerable.Repeat((byte)' ', 8192).ToArray();
+                await Task.WhenAll(
+                    Task.Run(async () =>
+                    {
+                        for (var index = 0; index < 30; index++) await stdout.WriteAsync(block);
+                    }),
+                    Task.Run(async () =>
+                    {
+                        for (var index = 0; index < 30; index++) await stderr.WriteAsync(block);
+                    }));
+                Console.Write("{}");
+                return 0;
+            case "stderr-first":
+                await Console.OpenStandardError().WriteAsync(new byte[256 * 1024 + 1]);
+                await Task.Delay(TimeSpan.FromMinutes(1));
+                return 0;
+            case "inherit":
+            case "success-child":
+                var child = Process.Start(ChildProcess(args[0] == "success-child", args[1]))
+                    ?? throw new InvalidOperationException("failed to start process fixture child");
+                await File.WriteAllTextAsync(args[2], child.Id.ToString());
+                if (args[0] == "success-child") Console.Write("{}");
+                return 0;
+            case "linger":
+                if (!OperatingSystem.IsWindows()) IgnoreSignal(15, new IntPtr(1));
+                await Task.Delay(500);
+                await File.WriteAllTextAsync(args[1], "alive");
+                await Task.Delay(TimeSpan.FromMinutes(1));
+                return 0;
+            default:
+                return 97;
+        }
+    }
+
+    private static ProcessStartInfo ChildProcess(bool detach, string alivePath)
+    {
+        var executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("test executable path is unavailable");
+        var info = new ProcessStartInfo
+        {
+            FileName = executable,
+            UseShellExecute = false,
+            RedirectStandardInput = detach,
+            RedirectStandardOutput = detach,
+            RedirectStandardError = detach
+        };
+        info.ArgumentList.Add("__ctx_sdk_helper");
+        info.ArgumentList.Add("linger");
+        info.ArgumentList.Add(alivePath);
+        return info;
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "signal")]
+    private static extern IntPtr IgnoreSignal(int signal, IntPtr handler);
 
     private static async Task WrapsShowAndLocate()
     {
