@@ -22,12 +22,17 @@ func Open(ctx context.Context, path string) (*Store, error) {
 }
 
 func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
-	return open(ctx, path, openOptions{readOnly: true})
+	opts := openOptions{readOnly: true}
+	if sidecarsAbsent(path) {
+		opts.immutable = true
+	}
+	return open(ctx, path, opts)
 }
 
 type openOptions struct {
-	write    bool
-	readOnly bool
+	write     bool
+	readOnly  bool
+	immutable bool
 }
 
 func open(ctx context.Context, path string, opts openOptions) (*Store, error) {
@@ -438,7 +443,19 @@ func sqliteDSN(path string, opts openOptions) string {
 	q := u.Query()
 	if opts.readOnly {
 		q.Set("mode", "ro")
+		if opts.immutable {
+			q.Set("immutable", "1")
+		}
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func sidecarsAbsent(path string) bool {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err == nil || !os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
 }

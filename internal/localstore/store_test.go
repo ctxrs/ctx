@@ -322,6 +322,14 @@ func TestOpenReadOnlyDoesNotCreateWALSidecars(t *testing.T) {
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
+	source := upsertTestSource(t, ctx, store, "codex:readonly")
+	gen := beginGeneration(t, ctx, store, source.Key)
+	appendToGeneration(t, ctx, store, source.Key, gen.ID, "ident-a", 0, "", 100, "tail-readonly", []Event{
+		testEvent("readonly-1", "readonly sidecar search needle"),
+	})
+	if err := store.ActivateGeneration(ctx, gen.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +345,13 @@ func TestOpenReadOnlyDoesNotCreateWALSidecars(t *testing.T) {
 	}
 	if _, err := readOnly.QueryReadOnlySQL(ctx, "SELECT count(*) AS events FROM ctx_events", 0); err != nil {
 		t.Fatal(err)
+	}
+	hits, err := readOnly.SearchLexical(ctx, "sidecar", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("read-only search hits = %+v, want one", hits)
 	}
 	if err := readOnly.Close(); err != nil {
 		t.Fatal(err)

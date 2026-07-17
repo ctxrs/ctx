@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ctxrs/ctx/internal/localstore"
+	"github.com/ctxrs/ctx/internal/search"
 )
 
 func TestRootHelpListsPublicCommands(t *testing.T) {
@@ -309,6 +312,101 @@ func TestReadCommandsUseImportedStore(t *testing.T) {
 	}
 }
 
+func TestImportTwiceKeepsStableSearchIDsAndCitations(t *testing.T) {
+	dataRoot := t.TempDir()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeFile(t, path, strings.Join([]string{
+		`{"timestamp":"2026-07-17T12:00:00Z","type":"session_meta","payload":{"id":"stable-session"}}`,
+		`{"timestamp":"2026-07-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"stable citation needle"}]}}`,
+	}, "\n")+"\n")
+
+	var firstImport bytes.Buffer
+	app := NewApp(&firstImport, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"import", "--provider", "codex", "--path", path, "--json"}); err != nil {
+		t.Fatalf("first import returned error: %v\n%s", err, firstImport.String())
+	}
+	firstID, firstCitationID := searchFirstEventAndCitation(t, dataRoot, "stable")
+
+	var secondImport bytes.Buffer
+	app = NewApp(&secondImport, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"import", "--provider", "codex", "--path", path, "--json"}); err != nil {
+		t.Fatalf("second import returned error: %v\n%s", err, secondImport.String())
+	}
+	secondID, secondCitationID := searchFirstEventAndCitation(t, dataRoot, "stable")
+
+	if firstID != secondID || firstCitationID != secondCitationID {
+		t.Fatalf("IDs changed across re-import: first=%s/%s second=%s/%s", firstID, firstCitationID, secondID, secondCitationID)
+	}
+	if !strings.Contains(firstID, "#event:") || strings.HasPrefix(firstID, "event:") {
+		t.Fatalf("event ID is not deterministic source identity: %s", firstID)
+	}
+}
+
+func TestSearchParserConsumesSDKFlagsAndFailsClosed(t *testing.T) {
+	opts, err := parseSearchArgs([]string{
+		"--session", "session-1",
+		"--file=src/main.go",
+		"--workspace", "/repo/work",
+		"--since", "2026-07-01",
+		"--event-type", "response_item:message",
+		"--refresh", "off",
+		"--semantic-weight", "0",
+		"--include-subagents",
+		"--primary-only",
+		"--events",
+		"--include-current-session",
+		"--term", "needle",
+		"plain query",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(opts.Terms, "|") != "plain query|needle" || opts.SessionID != "session-1" || opts.File != "src/main.go" || opts.Workspace != "/repo/work" || opts.EventType != "response_item:message" {
+		t.Fatalf("SDK flags leaked into query or were not parsed: %+v", opts)
+	}
+	if opts.Since == nil || !opts.IncludeSubagents || !opts.PrimaryOnly || !opts.Events || !opts.IncludeCurrentSession {
+		t.Fatalf("boolean/date SDK flags were not parsed: %+v", opts)
+	}
+	if _, err := parseSearchArgs([]string{"--definitely-unsupported", "needle"}); err == nil {
+		t.Fatal("unsupported flag parsed as query text")
+	}
+}
+
+func TestActiveCodexSessionTreeExclusion(t *testing.T) {
+	ctx := context.Background()
+	store := newCLITestStore(t, ctx)
+	addSearchEvent(t, ctx, store, "codex:root", localstore.Event{
+		SourceEventID:      "root-event",
+		ProviderSessionID:  "root-session",
+		RootSessionID:      "root-session",
+		ProviderEventIndex: 1,
+		Role:               "user",
+		Type:               "response_item:message",
+		OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		Text:               "exactroot rootonly sharedneedle",
+	})
+	addSearchEvent(t, ctx, store, "codex:child", localstore.Event{
+		SourceEventID:      "child-event",
+		ProviderSessionID:  "child-session",
+		ParentSessionID:    "root-session",
+		RootSessionID:      "root-session",
+		ProviderEventIndex: 1,
+		Role:               "assistant",
+		Type:               "response_item:message",
+		OccurredAt:         time.Date(2026, 7, 17, 12, 0, 1, 0, time.UTC),
+		Text:               "childonly sharedneedle",
+	})
+
+	t.Setenv("CODEX_THREAD_ID", "root-session")
+	assertSearchCountWithOptions(t, ctx, store, searchOptions{Mode: search.ModeLexical, Limit: 10, Terms: []string{"rootonly"}}, 0)
+	assertSearchCountWithOptions(t, ctx, store, searchOptions{Mode: search.ModeLexical, Limit: 10, Terms: []string{"childonly"}}, 0)
+	assertSearchCountWithOptions(t, ctx, store, searchOptions{Mode: search.ModeLexical, Limit: 10, Terms: []string{"rootonly"}, SessionID: "root-session"}, 1)
+	assertSearchCountWithOptions(t, ctx, store, searchOptions{Mode: search.ModeLexical, Limit: 10, Terms: []string{"sharedneedle"}, IncludeCurrentSession: true}, 2)
+
+	t.Setenv("CODEX_THREAD_ID", "child-session")
+	assertSearchCountWithOptions(t, ctx, store, searchOptions{Mode: search.ModeLexical, Limit: 10, Terms: []string{"rootonly"}}, 0)
+}
+
 func TestImportExplicitPiPathSearches(t *testing.T) {
 	dataRoot := t.TempDir()
 	path := filepath.Join(t.TempDir(), "pi.jsonl")
@@ -394,5 +492,98 @@ func assertSearchJSONResult(t *testing.T, raw []byte, provider string) {
 	}
 	if payload.Results[0].Provider != provider {
 		t.Fatalf("provider = %q, want %q in %#v", payload.Results[0].Provider, provider, payload.Results)
+	}
+}
+
+func searchFirstEventAndCitation(t *testing.T, dataRoot, query string) (string, string) {
+	t.Helper()
+	var out bytes.Buffer
+	app := NewApp(&out, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"search", "--json", query}); err != nil {
+		t.Fatalf("search returned error: %v", err)
+	}
+	var payload struct {
+		Results []struct {
+			CtxEventID string `json:"ctx_event_id"`
+			Citations  []struct {
+				CtxEventID string `json:"ctx_event_id"`
+			} `json:"citations"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("search JSON did not parse: %v\n%s", err, out.String())
+	}
+	if len(payload.Results) == 0 || len(payload.Results[0].Citations) == 0 {
+		t.Fatalf("expected result citation, got %s", out.String())
+	}
+	return payload.Results[0].CtxEventID, payload.Results[0].Citations[0].CtxEventID
+}
+
+func newCLITestStore(t *testing.T, ctx context.Context) *localstore.Store {
+	t.Helper()
+	store, err := localstore.Open(ctx, filepath.Join(t.TempDir(), "work.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := store.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func addSearchEvent(t *testing.T, ctx context.Context, store *localstore.Store, sourceKey string, event localstore.Event) {
+	t.Helper()
+	source, err := store.UpsertSource(ctx, localstore.SourceDescriptor{
+		Key:      sourceKey,
+		Provider: "codex",
+		Format:   "jsonl",
+		URI:      "file:///tmp/" + sourceKey,
+		Identity: "ident-" + sourceKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := store.BeginGeneration(ctx, source.Key, localstore.GenerationOptions{
+		Kind:           localstore.GenerationReplace,
+		SourceIdentity: "ident-" + sourceKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvents(ctx, localstore.AppendRequest{
+		SourceKey:        source.Key,
+		GenerationID:     gen.ID,
+		SourceIdentity:   "ident-" + sourceKey,
+		PreviousSize:     0,
+		PreviousTailHash: "",
+		NewSize:          100,
+		NewTailHash:      "tail-" + sourceKey,
+		PageStartOffset:  0,
+		PageEndOffset:    100,
+		Events:           []localstore.Event{event},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ActivateGeneration(ctx, gen.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSearchCountWithOptions(t *testing.T, ctx context.Context, store *localstore.Store, opts searchOptions, want int) {
+	t.Helper()
+	if opts.Mode == "" {
+		opts.Mode = search.ModeLexical
+	}
+	hits, err := lexicalSearch(ctx, store, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != want {
+		t.Fatalf("hit count = %d, want %d; hits=%+v opts=%+v", len(hits), want, hits, opts)
 	}
 }
