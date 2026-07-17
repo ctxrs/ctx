@@ -19,10 +19,13 @@ const (
 )
 
 type SourceRef struct {
-	ID       string
-	Provider Provider
-	Kind     string
-	Path     string
+	ID       string   `json:"id"`
+	Provider Provider `json:"provider"`
+	Kind     string   `json:"kind"`
+	Path     string   `json:"path,omitempty"`
+	URI      string   `json:"uri,omitempty"`
+	RootURI  string   `json:"rootUri,omitempty"`
+	NativeID string   `json:"nativeId,omitempty"`
 }
 
 type Cursor struct {
@@ -30,20 +33,33 @@ type Cursor struct {
 }
 
 type SourceRevision struct {
-	Source     SourceRef
-	Generation string
-	Identity   string
-	SizeBytes  int64
-	ModifiedAt time.Time
+	Source      SourceRef `json:"source"`
+	Generation  string    `json:"generation,omitempty"`
+	Identity    string    `json:"identity,omitempty"`
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	SizeBytes   int64     `json:"sizeBytes"`
+	ModifiedAt  time.Time `json:"modifiedAt,omitempty"`
+	ContentHash string    `json:"contentHash"`
 }
 
 type CapturedBatch struct {
-	Provider Provider
-	Source   SourceRef
-	Revision SourceRevision
-	Cursor   Cursor
-	Sessions []CapturedSession
-	Events   []CapturedEvent
+	SchemaVersion       int                 `json:"schemaVersion"`
+	ID                  string              `json:"id"`
+	Provider            Provider            `json:"provider"`
+	Source              SourceRef           `json:"source"`
+	SourceFormat        string              `json:"sourceFormat"`
+	Revision            SourceRevision      `json:"revision"`
+	Range               RecordRange         `json:"range"`
+	ContentHash         string              `json:"contentHash"`
+	RecordSchemaVersion int                 `json:"recordSchemaVersion"`
+	Records             []ProviderRecord    `json:"records"`
+	Hints               DeterministicHints  `json:"hints"`
+	Privacy             PrivacyFilterStatus `json:"privacy"`
+	Checkpoint          SourceCheckpoint    `json:"checkpoint"`
+	Cursor              Cursor              `json:"cursor,omitempty"`
+	Sessions            []CapturedSession   `json:"sessions,omitempty"`
+	Events              []CapturedEvent     `json:"events,omitempty"`
 }
 
 type CapturedSession struct {

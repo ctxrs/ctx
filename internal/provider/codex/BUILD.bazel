@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "codex",
+    srcs = ["codex.go"],
+    importpath = "github.com/ctxrs/ctx/internal/provider/codex",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/capture"],
+)
+
+go_test(
+    name = "unit_tests",
+    srcs = ["codex_test.go"],
+    data = ["//:public_test_fixtures"],
+    embed = [":codex"],
+    deps = ["//internal/capture"],
+)

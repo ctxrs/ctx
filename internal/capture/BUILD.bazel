@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "capture",
-    srcs = ["capture.go"],
+    srcs = [
+        "batch.go",
+        "capture.go",
+        "jsonl.go",
+    ],
     importpath = "github.com/ctxrs/ctx/internal/capture",
     visibility = ["//visibility:public"],
 )

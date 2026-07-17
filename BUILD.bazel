@@ -361,6 +361,8 @@ test_suite(
     name = "go_edge",
     tests = [
         "//internal/cli:unit_tests",
+        "//internal/provider/codex:unit_tests",
+        "//internal/provider/pi:unit_tests",
     ],
 )
 

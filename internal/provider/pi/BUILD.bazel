@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pi",
+    srcs = ["pi.go"],
+    importpath = "github.com/ctxrs/ctx/internal/provider/pi",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/capture"],
+)
+
+go_test(
+    name = "unit_tests",
+    srcs = ["pi_test.go"],
+    data = ["//:public_test_fixtures"],
+    embed = [":pi"],
+    deps = ["//internal/capture"],
+)
