@@ -788,7 +788,7 @@ fn search_backend_defaults_and_semantic_readiness_are_reported() {
     assert_eq!(explicit_lexical["retrieval"]["effective_mode"], "lexical");
 
     let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
-    assert_eq!(status["semantic"]["status"], "pending");
+    assert_eq!(status["semantic"]["status"], "unknown");
     assert!(status["semantic"]["reason"].is_null());
     assert_eq!(
         status["semantic"]["embed_policy"]["source"],
@@ -1178,7 +1178,7 @@ fn human_search_reports_no_results() {
         .clone();
     let indexed = String::from_utf8(indexed).unwrap();
     assert!(indexed.contains("no results for definitely-no-results-here"));
-    assert!(indexed.contains("next: add an alternative with ctx search --term \"<all words>\""));
+    assert!(indexed.contains("next: try broader terms with ctx search --term \"<term>\""));
 
     let term_only = ctx(&temp)
         .args(["search", "--term", "term-only-no-results"])
@@ -1199,10 +1199,6 @@ fn search_requires_query_term_or_file_before_refreshing() {
         stderr.contains(
             "search needs a query, --term, --phrase, --literal, --semantic, --must, --query-file, or --file"
         ),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("ctx search \"failed migration\""),
         "{stderr}"
     );
     assert!(

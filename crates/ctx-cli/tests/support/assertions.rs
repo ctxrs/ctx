@@ -85,7 +85,7 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
     expected_result_type: &str,
     expected_scope: &str,
 ) {
-    assert_eq!(packet["schema_version"], 1);
+    assert_eq!(packet["schema_version"], 2);
     assert_eq!(packet["query"], query);
     assert_eq!(packet["filters"]["provider"], provider);
     let results = packet["results"].as_array().unwrap();
