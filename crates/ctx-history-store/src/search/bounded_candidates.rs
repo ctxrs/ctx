@@ -114,7 +114,7 @@ impl EventCandidateScope {
     }
 }
 
-fn normalized_scope_text(value: Option<String>) -> Option<String> {
+pub(super) fn normalized_scope_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())

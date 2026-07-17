@@ -1404,6 +1404,34 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_vec0_respects_the_shared_candidate_row_allocation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let chunks = (0..8)
+            .map(|index| {
+                let event_id = Uuid::new_v4();
+                (
+                    test_chunk(event_id, index + 1, &format!("bounded-{index}")),
+                    test_embedding(1.0 - (index as f32 * 0.05), index as f32 * 0.05),
+                )
+            })
+            .collect::<Vec<_>>();
+        store.upsert_chunk_embeddings(&chunks)?;
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+
+        let search = store.search_until_bounded(
+            &test_embedding(1.0, 0.0),
+            8,
+            3,
+            Instant::now() + StdDuration::from_secs(1),
+        )?;
+
+        assert!(search.stats.events_scored <= 3);
+        assert!(search.hits.len() <= 3);
+        Ok(())
+    }
+
+    #[test]
     fn sqlite_vec0_binary_scan_reports_and_enforces_its_byte_envelope() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
@@ -3058,6 +3086,7 @@ mod query_service_transport_tests {
         let request = query_service_contract::SemanticQueryServiceRequest::new(
             semantic_model_key(),
             readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            10_000,
             vec![query_service_contract::SemanticQueryClauseRequest::new(
                 0,
                 "authentication boundary",
@@ -3085,6 +3114,44 @@ mod query_service_transport_tests {
         assert_eq!(snapshot.waiting_foreground_queries, 0);
         assert_eq!(snapshot.active_foreground_queries, 0);
         assert!(!snapshot.document_batch_active);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_query_deadline_is_required_and_bounded() -> Result<()> {
+        let clause = || {
+            vec![query_service_contract::SemanticQueryClauseRequest::new(
+                0,
+                "shared deadline",
+                10,
+            )]
+        };
+        let zero = query_service_contract::SemanticQueryServiceRequest::new(
+            semantic_model_key(),
+            readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            0,
+            clause(),
+        );
+        assert!(zero.validate_for_model(semantic_model_key()).is_err());
+
+        let excessive = query_service_contract::SemanticQueryServiceRequest::new(
+            semantic_model_key(),
+            readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            query_service_contract::SEMANTIC_QUERY_MAX_EXECUTION_TIMEOUT_MS + 1,
+            clause(),
+        );
+        assert!(excessive.validate_for_model(semantic_model_key()).is_err());
+
+        let token = "0123456789abcdef0123456789abcdef";
+        let mut bounded = query_service_contract::SemanticQueryServiceRequest::new(
+            semantic_model_key(),
+            readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            137,
+            clause(),
+        );
+        bounded.token = token.to_owned();
+        let authenticated = bounded.authenticate_and_validate(token, semantic_model_key())?;
+        assert_eq!(authenticated.execution_timeout_ms(), 137);
         Ok(())
     }
 
@@ -3175,6 +3242,7 @@ mod query_service_transport_tests {
         let mut request = query_service_contract::SemanticQueryServiceRequest::new(
             semantic_model_key(),
             readiness::SemanticRetrievalRequestMode::ExplicitSemantic,
+            10_000,
             vec![query_service_contract::SemanticQueryClauseRequest::new(
                 0,
                 "resident model only",

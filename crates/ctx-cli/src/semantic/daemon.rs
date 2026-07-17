@@ -868,7 +868,9 @@ fn handle_daemon_query_stream_inner<S: std::io::Write>(
             );
         }
     };
-    let deadline = Instant::now() + DAEMON_QUERY_EXECUTION_TIMEOUT;
+    let execution_timeout = StdDuration::from_millis(authenticated.execution_timeout_ms())
+        .min(DAEMON_QUERY_EXECUTION_TIMEOUT);
+    let deadline = Instant::now() + execution_timeout;
     let foreground = match priority.begin_authenticated_query(&authenticated, Some(deadline)) {
         Ok(permit) => permit,
         Err(_) => {
@@ -964,7 +966,12 @@ fn execute_daemon_semantic_query(
     let vector_search = if let Some(event_ids) = filtered {
         vector_store.search_event_ids_until(&query_embedding, event_ids, vector_limit, deadline)?
     } else {
-        vector_store.search_until(&query_embedding, vector_limit, deadline)?
+        vector_store.search_until_bounded(
+            &query_embedding,
+            vector_limit,
+            clause.candidate_row_limit,
+            deadline,
+        )?
     };
     let stats = vector_search.stats.clone();
     let mut hits = vector_search.hits;
@@ -990,10 +997,7 @@ fn execute_daemon_semantic_query(
             readiness::SemanticRetrievalDiagnostics::explicit_success(readiness.state)
         }
     }
-    .with_candidate_state(
-        filtered.map_or(stats.events_scored, Vec::len),
-        query_service_contract::SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS,
-    )
+    .with_candidate_state(stats.events_scored, clause.candidate_row_limit)
     .with_vector_byte_state(
         stats.vector_bytes_read as u64,
         SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES as u64,

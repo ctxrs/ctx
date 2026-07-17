@@ -123,6 +123,84 @@ pub fn search_packet_query(
     search_packet_envelope(store, &envelope, options)
 }
 
+/// A bounded search whose lexical phase has completed but whose optional
+/// semantic branch has not yet been applied. The start time and consumed
+/// limits remain owned by this value so adapters cannot accidentally create a
+/// second execution envelope while obtaining semantic ranks.
+pub struct SearchPacketExecution {
+    envelope: SearchRequestEnvelope,
+    options: PacketOptions,
+    packet: SearchPacket,
+    started: Instant,
+    semantic_required: bool,
+    automatic_rerank_requested: bool,
+    automatic_rerank_text: Option<String>,
+    has_lexical_positive: bool,
+}
+
+impl SearchPacketExecution {
+    /// Candidate identities eligible for automatic semantic reranking. The
+    /// allocation is the remaining share of this execution's candidate ledger,
+    /// never a new semantic-side allowance.
+    pub fn automatic_semantic_candidate_ids(&self) -> Vec<Uuid> {
+        let limit = self.semantic_candidate_limit();
+        let mut seen = BTreeSet::new();
+        self.packet
+            .results
+            .iter()
+            .filter_map(|result| result.event_id)
+            .filter(|event_id| seen.insert(*event_id))
+            .take(limit)
+            .collect()
+    }
+
+    pub fn semantic_candidate_limit(&self) -> usize {
+        semantic_candidate_allocation(
+            &self.packet,
+            self.semantic_required,
+            self.options.filters.file.is_some(),
+        )
+    }
+
+    pub fn semantic_candidate_row_limit(&self) -> usize {
+        self.packet
+            .query_execution
+            .resolved
+            .candidate_rows
+            .saturating_sub(self.packet.query_execution.consumed.candidate_rows)
+    }
+
+    /// Time available to semantic transport and daemon execution while
+    /// retaining a small part of the same deadline for packet finalization.
+    pub fn semantic_time_budget(&self) -> Result<Duration> {
+        let remaining = remaining_structured_time(self.started, &self.packet.query_execution)?;
+        let reserve = Duration::from_millis(100).min(remaining / 4);
+        let semantic = remaining.saturating_sub(reserve);
+        if semantic.is_zero() {
+            return Err(structured_timeout_error(
+                self.started,
+                &self.packet.query_execution,
+            ));
+        }
+        Ok(semantic)
+    }
+
+    pub fn finish(self, store: &Store) -> Result<SearchPacket> {
+        let semantic = self.envelope.semantic.clone();
+        self.finish_with_semantic(store, semantic)
+    }
+
+    pub fn finish_with_semantic(
+        mut self,
+        store: &Store,
+        semantic: Option<ctx_protocol::SearchSemanticInput>,
+    ) -> Result<SearchPacket> {
+        self.envelope.semantic = semantic;
+        self.envelope = self.envelope.canonicalized()?;
+        complete_search_packet_execution(store, self)
+    }
+}
+
 /// Execute one validated shared envelope. Semantic input is already a bounded,
 /// pre-ranked identity list; this path never indexes, downloads, or starts a
 /// semantic backend.
@@ -131,6 +209,17 @@ pub fn search_packet_envelope(
     envelope: &SearchRequestEnvelope,
     options: &PacketOptions,
 ) -> Result<SearchPacket> {
+    begin_search_packet_envelope(store, envelope, options)?.finish(store)
+}
+
+/// Run lexical candidate generation, hard verification, hydration, and snippet
+/// construction exactly once, retaining the shared deadline and budget ledger
+/// for an optional semantic continuation.
+pub fn begin_search_packet_envelope(
+    store: &Store,
+    envelope: &SearchRequestEnvelope,
+    options: &PacketOptions,
+) -> Result<SearchPacketExecution> {
     let started = Instant::now();
     let envelope = envelope.clone().canonicalized()?;
     let options = normalized_options(options);
@@ -145,13 +234,6 @@ pub fn search_packet_envelope(
     let automatic_rerank_requested = !semantic_required
         && envelope.semantic_policy == SearchSemanticPolicy::AutomaticRerank
         && automatic_rerank_text.is_some();
-    let semantic = envelope.semantic.as_ref();
-    let readiness = semantic.map_or(SearchSemanticReadiness::Unavailable, |input| {
-        input.readiness
-    });
-    if semantic_required && readiness != SearchSemanticReadiness::Ready {
-        return Err(crate::query::SearchError::SemanticNotReady { readiness });
-    }
 
     let mut lexical_query = envelope.query.clone();
     lexical_query
@@ -188,6 +270,42 @@ pub fn search_packet_envelope(
     packet.query_execution.requested_result_limit = options.limit;
     packet.query_execution.result_limit = packet.query_execution.resolved.results;
     packet.query_execution.max_result_limit = ctx_protocol::SEARCH_MAX_RESULTS;
+
+    Ok(SearchPacketExecution {
+        envelope,
+        options,
+        packet,
+        started,
+        semantic_required,
+        automatic_rerank_requested,
+        automatic_rerank_text,
+        has_lexical_positive,
+    })
+}
+
+fn complete_search_packet_execution(
+    store: &Store,
+    execution: SearchPacketExecution,
+) -> Result<SearchPacket> {
+    let SearchPacketExecution {
+        envelope,
+        options,
+        mut packet,
+        started,
+        semantic_required,
+        automatic_rerank_requested,
+        automatic_rerank_text,
+        has_lexical_positive,
+    } = execution;
+    let semantic = envelope.semantic.as_ref();
+    let readiness = semantic.map_or(SearchSemanticReadiness::Unavailable, |input| {
+        input.readiness
+    });
+    if semantic_required && readiness != SearchSemanticReadiness::Ready {
+        return Err(crate::query::SearchError::SemanticNotReady { readiness });
+    }
+
+    ensure_structured_deadline(started, &packet.query_execution)?;
     packet.query_execution.semantic.attempted = semantic_required || automatic_rerank_requested;
     packet.query_execution.semantic.required = semantic_required;
     packet.query_execution.semantic.readiness = readiness;
@@ -195,7 +313,9 @@ pub fn search_packet_envelope(
     packet.query_execution.semantic.positive_text_rule_version =
         SEARCH_POSITIVE_TEXT_RULE_VERSION.to_owned();
     let supplied_candidates = semantic.map_or(0, |input| input.candidates.len());
-    packet.query_execution.semantic.requested_candidates = supplied_candidates;
+    packet.query_execution.semantic.requested_candidates = semantic
+        .map_or(0, |input| input.requested_candidates)
+        .max(supplied_candidates);
     packet.query_execution.semantic.candidates_supplied = supplied_candidates;
     packet.query_execution.semantic.coverage.indexed_documents =
         semantic.and_then(|input| input.indexed_documents);
@@ -211,46 +331,22 @@ pub fn search_packet_envelope(
         let Some(input) = semantic else {
             return Err(crate::query::SearchError::SemanticNotReady { readiness });
         };
-        let semantic_allocation = packet
+        let remaining_candidate_rows = packet
             .query_execution
             .resolved
-            .candidates_per_positive_seed
-            .min(
-                packet
-                    .query_execution
-                    .resolved
-                    .candidate_rows
-                    .saturating_sub(packet.query_execution.consumed.candidate_rows),
-            )
-            .min(
-                packet
-                    .query_execution
-                    .resolved
-                    .retained_candidate_ids
-                    .saturating_sub(packet.query_execution.consumed.retained_candidate_ids),
-            );
-        let semantic_allocation = if semantic_required && options.filters.file.is_some() {
-            semantic_allocation
-                .min(
-                    packet
-                        .query_execution
-                        .resolved
-                        .candidate_rows
-                        .saturating_sub(packet.query_execution.consumed.candidate_rows)
-                        .saturating_sub(1)
-                        / 5,
-                )
-                .min(
-                    packet
-                        .query_execution
-                        .resolved
-                        .retained_candidate_ids
-                        .saturating_sub(packet.query_execution.consumed.retained_candidate_ids)
-                        / 2,
-                )
-        } else {
-            semantic_allocation
-        };
+            .candidate_rows
+            .saturating_sub(packet.query_execution.consumed.candidate_rows);
+        if input.candidate_rows_examined > remaining_candidate_rows {
+            return Err(crate::query::SearchError::SemanticCandidateBudgetExceeded {
+                actual: input.candidate_rows_examined,
+                maximum: remaining_candidate_rows,
+            });
+        }
+        let semantic_allocation = semantic_candidate_allocation(
+            &packet,
+            semantic_required,
+            options.filters.file.is_some(),
+        );
         ensure_structured_deadline(started, &packet.query_execution)?;
         let semantic_ids = input
             .candidates
@@ -265,7 +361,7 @@ pub fn search_packet_envelope(
             })
             .collect::<Result<Vec<_>>>()?;
         ensure_structured_deadline(started, &packet.query_execution)?;
-        packet.query_execution.semantic.eligible_candidates = semantic_ids.len();
+        packet.query_execution.semantic.eligible_candidates = input.candidate_rows_examined;
         packet.query_execution.semantic.candidates_consumed = semantic_ids.len();
         packet
             .query_execution
@@ -279,13 +375,17 @@ pub fn search_packet_envelope(
             .query_execution
             .consumed
             .candidate_rows
-            .saturating_add(semantic_ids.len())
+            .saturating_add(input.candidate_rows_examined)
             .min(packet.query_execution.resolved.candidate_rows);
         packet.query_execution.consumed.retained_candidate_ids = packet
             .query_execution
             .consumed
             .retained_candidate_ids
-            .saturating_add(semantic_ids.len())
+            .saturating_add(if semantic_required {
+                semantic_ids.len()
+            } else {
+                0
+            })
             .min(packet.query_execution.resolved.retained_candidate_ids);
         if semantic_required {
             merge_explicit_semantic_candidates(
@@ -403,6 +503,40 @@ pub fn search_packet_envelope(
     }
     finalize_structured_packet(&mut packet, started)?;
     Ok(packet)
+}
+
+fn semantic_candidate_allocation(
+    packet: &SearchPacket,
+    semantic_required: bool,
+    has_file_filter: bool,
+) -> usize {
+    let remaining_candidate_rows = packet
+        .query_execution
+        .resolved
+        .candidate_rows
+        .saturating_sub(packet.query_execution.consumed.candidate_rows);
+    let remaining_retained_ids = packet
+        .query_execution
+        .resolved
+        .retained_candidate_ids
+        .saturating_sub(packet.query_execution.consumed.retained_candidate_ids);
+    let allocation = packet
+        .query_execution
+        .resolved
+        .candidates_per_positive_seed
+        .min(remaining_candidate_rows);
+    let allocation = if semantic_required {
+        allocation.min(remaining_retained_ids)
+    } else {
+        allocation
+    };
+    if semantic_required && has_file_filter {
+        allocation
+            .min(remaining_candidate_rows.saturating_sub(1) / 5)
+            .min(remaining_retained_ids / 2)
+    } else {
+        allocation
+    }
 }
 
 fn has_lexical_positive_branch(query: &SearchQuery, semantic_required: bool) -> bool {
@@ -2155,6 +2289,20 @@ fn fast_event_search_packet(
 #[cfg(test)]
 mod timeout_tests {
     use super::*;
+
+    #[test]
+    fn semantic_candidates_use_only_the_remaining_shared_ledger() {
+        let mut packet =
+            empty_search_packet("bounded semantic allocation", &PacketOptions::default());
+        packet.query_execution.resolved.candidates_per_positive_seed = 64;
+        packet.query_execution.resolved.candidate_rows = 100;
+        packet.query_execution.resolved.retained_candidate_ids = 80;
+        packet.query_execution.consumed.candidate_rows = 60;
+        packet.query_execution.consumed.retained_candidate_ids = 73;
+
+        assert_eq!(semantic_candidate_allocation(&packet, false, false), 40);
+        assert_eq!(semantic_candidate_allocation(&packet, true, true), 3);
+    }
 
     #[test]
     fn timeout_error_preserves_consumed_work_and_marks_budget_exhaustion() {

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use ctx_protocol::{
-    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED, SEARCH_MAX_CLAUSE_BYTES,
+    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED, SEARCH_MAX_CANDIDATE_ROWS, SEARCH_MAX_CLAUSE_BYTES,
     SEARCH_MAX_TOTAL_CLAUSE_BYTES,
 };
 
@@ -18,7 +18,8 @@ use super::readiness::{
     SemanticRetrievalRequestMode,
 };
 
-pub(crate) const SEMANTIC_QUERY_RPC_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SEMANTIC_QUERY_RPC_SCHEMA_VERSION: u32 = 2;
+pub(crate) const SEMANTIC_QUERY_MAX_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const SEMANTIC_QUERY_MAX_CLAUSES: usize = 1;
 pub(crate) const SEMANTIC_QUERY_MAX_TEXT_BYTES_PER_CLAUSE: usize = SEARCH_MAX_CLAUSE_BYTES;
 pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_TEXT_BYTES: usize = SEARCH_MAX_TOTAL_CLAUSE_BYTES;
@@ -26,8 +27,7 @@ pub(crate) const SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS: usize =
     SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
 pub(crate) const SEMANTIC_QUERY_MAX_HITS_PER_CLAUSE: usize =
     SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
-pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_HITS: usize =
-    SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
+pub(crate) const SEMANTIC_QUERY_MAX_TOTAL_HITS: usize = SEARCH_MAX_CANDIDATES_PER_POSITIVE_SEED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +43,7 @@ pub(crate) struct SemanticQueryServiceRequest {
     pub(crate) token: String,
     pub(crate) model_key: String,
     pub(crate) request_mode: SemanticRetrievalRequestMode,
+    pub(crate) execution_timeout_ms: u64,
     pub(crate) clauses: Vec<SemanticQueryClauseRequest>,
 }
 
@@ -55,6 +56,7 @@ impl fmt::Debug for SemanticQueryServiceRequest {
             .field("token", &"<redacted>")
             .field("model_key", &self.model_key)
             .field("request_mode", &self.request_mode)
+            .field("execution_timeout_ms", &self.execution_timeout_ms)
             .field("clauses", &self.clauses)
             .finish()
     }
@@ -64,6 +66,7 @@ impl SemanticQueryServiceRequest {
     pub(crate) fn new(
         model_key: impl Into<String>,
         request_mode: SemanticRetrievalRequestMode,
+        execution_timeout_ms: u64,
         clauses: Vec<SemanticQueryClauseRequest>,
     ) -> Self {
         Self {
@@ -74,6 +77,7 @@ impl SemanticQueryServiceRequest {
             token: String::new(),
             model_key: model_key.into(),
             request_mode,
+            execution_timeout_ms,
             clauses,
         }
     }
@@ -99,6 +103,7 @@ impl SemanticQueryServiceRequest {
         Ok(AuthenticatedSemanticQueryRequest {
             model_key: self.model_key,
             request_mode: self.request_mode,
+            execution_timeout_ms: self.execution_timeout_ms,
             clauses: self.clauses,
         })
     }
@@ -121,6 +126,13 @@ impl SemanticQueryServiceRequest {
                 SemanticQueryFailureCode::ModelMismatch,
                 "semantic query model key mismatch",
             ));
+        }
+        if self.execution_timeout_ms == 0
+            || self.execution_timeout_ms > SEMANTIC_QUERY_MAX_EXECUTION_TIMEOUT_MS
+        {
+            return Err(SemanticQueryContractError::invalid_request(format!(
+                "semantic query execution timeout must be between 1 and {SEMANTIC_QUERY_MAX_EXECUTION_TIMEOUT_MS} milliseconds"
+            )));
         }
         validate_semantic_query_clauses(&self.clauses)?;
         if self.request_mode == SemanticRetrievalRequestMode::AutomaticRerank
@@ -145,6 +157,7 @@ pub(crate) struct SemanticQueryClauseRequest {
     pub(crate) clause_id: u32,
     pub(crate) text: String,
     pub(crate) hit_limit: usize,
+    pub(crate) candidate_row_limit: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) candidate_event_ids: Option<Vec<Uuid>>,
 }
@@ -155,6 +168,7 @@ impl SemanticQueryClauseRequest {
             clause_id,
             text: text.into(),
             hit_limit,
+            candidate_row_limit: hit_limit,
             candidate_event_ids: None,
         }
     }
@@ -163,12 +177,18 @@ impl SemanticQueryClauseRequest {
         self.candidate_event_ids = Some(event_ids);
         self
     }
+
+    pub(crate) fn with_candidate_row_limit(mut self, limit: usize) -> Self {
+        self.candidate_row_limit = limit;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct AuthenticatedSemanticQueryRequest {
     model_key: String,
     request_mode: SemanticRetrievalRequestMode,
+    execution_timeout_ms: u64,
     clauses: Vec<SemanticQueryClauseRequest>,
 }
 
@@ -183,6 +203,10 @@ impl AuthenticatedSemanticQueryRequest {
 
     pub(crate) fn request_mode(&self) -> SemanticRetrievalRequestMode {
         self.request_mode
+    }
+
+    pub(crate) fn execution_timeout_ms(&self) -> u64 {
+        self.execution_timeout_ms
     }
 
     pub(crate) fn into_clauses(self) -> Vec<SemanticQueryClauseRequest> {
@@ -202,6 +226,7 @@ fn validate_semantic_query_clauses(
     let mut clause_ids = HashSet::with_capacity(clauses.len());
     let mut total_text_bytes = 0_usize;
     let mut total_candidate_ids = 0_usize;
+    let mut total_candidate_rows = 0_usize;
     let mut total_hits = 0_usize;
     for clause in clauses {
         if !clause_ids.insert(clause.clause_id) {
@@ -230,7 +255,16 @@ fn validate_semantic_query_clauses(
                 clause.clause_id, SEMANTIC_QUERY_MAX_HITS_PER_CLAUSE
             )));
         }
+        if clause.candidate_row_limit < clause.hit_limit
+            || clause.candidate_row_limit > SEARCH_MAX_CANDIDATE_ROWS
+        {
+            return Err(SemanticQueryContractError::invalid_request(format!(
+                "semantic clause {} candidate row limit must be between its hit limit and {SEARCH_MAX_CANDIDATE_ROWS}",
+                clause.clause_id
+            )));
+        }
         total_hits = total_hits.saturating_add(clause.hit_limit);
+        total_candidate_rows = total_candidate_rows.saturating_add(clause.candidate_row_limit);
         total_candidate_ids = total_candidate_ids.saturating_add(
             clause
                 .candidate_event_ids
@@ -238,6 +272,16 @@ fn validate_semantic_query_clauses(
                 .map(Vec::len)
                 .unwrap_or(0),
         );
+        if clause
+            .candidate_event_ids
+            .as_ref()
+            .is_some_and(|event_ids| event_ids.len() > clause.candidate_row_limit)
+        {
+            return Err(SemanticQueryContractError::invalid_request(format!(
+                "semantic clause {} candidate event set exceeds its candidate row limit",
+                clause.clause_id
+            )));
+        }
     }
 
     if total_text_bytes > SEMANTIC_QUERY_MAX_TOTAL_TEXT_BYTES {
@@ -248,6 +292,11 @@ fn validate_semantic_query_clauses(
     if total_candidate_ids > SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS {
         return Err(SemanticQueryContractError::invalid_request(format!(
             "semantic query exceeds the {SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS} candidate event limit"
+        )));
+    }
+    if total_candidate_rows > SEARCH_MAX_CANDIDATE_ROWS {
+        return Err(SemanticQueryContractError::invalid_request(format!(
+            "semantic query exceeds the {SEARCH_MAX_CANDIDATE_ROWS} candidate row limit"
         )));
     }
     if total_hits > SEMANTIC_QUERY_MAX_TOTAL_HITS {
@@ -348,6 +397,7 @@ impl SemanticQueryServiceResponse {
             let authenticated = AuthenticatedSemanticQueryRequest {
                 model_key: request.model_key.clone(),
                 request_mode: request.request_mode,
+                execution_timeout_ms: request.execution_timeout_ms,
                 clauses: request.clauses.clone(),
             };
             validate_semantic_query_response(&authenticated, &self.clauses)?;

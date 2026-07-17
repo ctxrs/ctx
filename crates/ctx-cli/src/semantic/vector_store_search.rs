@@ -2,12 +2,17 @@ fn semantic_exact_vector_bytes() -> usize {
     SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>())
 }
 
-fn semantic_sqlite_vec0_candidate_limit(limit: usize, embedded_chunks: usize) -> usize {
+fn semantic_sqlite_vec0_candidate_limit(
+    limit: usize,
+    candidate_row_limit: usize,
+    embedded_chunks: usize,
+) -> usize {
     limit
         .max(1)
         .saturating_mul(SEMANTIC_SQLITE_VEC0_OVERFETCH_FACTOR)
         .max(SEMANTIC_SQLITE_VEC0_MIN_CANDIDATES)
         .min(SEMANTIC_SQLITE_VEC0_MAX_K)
+        .min(candidate_row_limit.max(1))
         .min(embedded_chunks.max(1))
 }
 
@@ -99,7 +104,17 @@ impl SemanticVectorStore {
         limit: usize,
         deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
-        self.search_with_event_filter(query_embedding, limit, None, deadline)
+        self.search_until_bounded(query_embedding, limit, SEMANTIC_SQLITE_VEC0_MAX_K, deadline)
+    }
+
+    fn search_until_bounded(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        candidate_row_limit: usize,
+        deadline: Instant,
+    ) -> Result<SemanticVectorSearch> {
+        self.search_with_event_filter(query_embedding, limit, candidate_row_limit, None, deadline)
     }
 
     fn search_event_ids(
@@ -129,13 +144,20 @@ impl SemanticVectorStore {
         if event_ids.is_empty() {
             return Ok(SemanticVectorSearch::default());
         }
-        self.search_with_event_filter(query_embedding, limit, Some(event_ids), deadline)
+        self.search_with_event_filter(
+            query_embedding,
+            limit,
+            event_ids.len(),
+            Some(event_ids),
+            deadline,
+        )
     }
 
     fn search_with_event_filter(
         &self,
         query_embedding: &[f32],
         limit: usize,
+        candidate_row_limit: usize,
         event_ids: Option<&[Uuid]>,
         deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
@@ -149,8 +171,13 @@ impl SemanticVectorStore {
             SEMANTIC_SQL_PROGRESS_OPS,
             Some(move || Instant::now() >= deadline),
         );
-        let result =
-            self.search_with_event_filter_inner(query_embedding, limit, event_ids, deadline);
+        let result = self.search_with_event_filter_inner(
+            query_embedding,
+            limit,
+            candidate_row_limit,
+            event_ids,
+            deadline,
+        );
         self.conn.progress_handler(0, None::<fn() -> bool>);
         let deadline_elapsed = Instant::now() >= deadline;
         match result {
@@ -170,6 +197,7 @@ impl SemanticVectorStore {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        candidate_row_limit: usize,
         event_ids: Option<&[Uuid]>,
         deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
@@ -200,7 +228,13 @@ impl SemanticVectorStore {
             Some(event_ids) => {
                 self.search_sqlite_vec0_event_ids(query_embedding, event_ids, limit, deadline)
             }
-            None => self.search_sqlite_vec0(query_embedding, limit, stats, deadline),
+            None => self.search_sqlite_vec0(
+                query_embedding,
+                limit,
+                candidate_row_limit,
+                stats,
+                deadline,
+            ),
         }
     }
 
@@ -208,12 +242,13 @@ impl SemanticVectorStore {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        candidate_row_limit: usize,
         stats: SemanticSidecarStats,
         deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
         let scan_started = Instant::now();
         let exact_candidate_limit =
-            semantic_sqlite_vec0_candidate_limit(limit, stats.embedded_chunks);
+            semantic_sqlite_vec0_candidate_limit(limit, candidate_row_limit, stats.embedded_chunks);
         let Some(maximum_vector_bytes) =
             semantic_sqlite_vec0_scan_bytes(stats.embedded_chunks, exact_candidate_limit)
         else {
