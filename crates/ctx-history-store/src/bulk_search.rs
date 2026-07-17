@@ -36,6 +36,8 @@ const ALL_FTS_TABLES: [&str; 5] = [
     "event_search_scriptgram",
 ];
 const BULK_MODE_MARKER_KEY: &str = "event_search_bulk_mode_v1";
+const BULK_MODE_MERGE_PENDING: i64 = 1;
+pub(crate) const BULK_MODE_FINAL_CHECKPOINT_PENDING: i64 = 2;
 const BULK_MODE_AUTOMERGE_KEY_PREFIX: &str = "event_search_bulk_mode_v1:automerge:";
 const BULK_MODE_CRISISMERGE_KEY_PREFIX: &str = "event_search_bulk_mode_v1:crisismerge:";
 #[cfg(test)]
@@ -159,6 +161,12 @@ enum PeriodicMergeStepOutcome {
     Fenced,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkModePhase {
+    MergePending,
+    FinalCheckpointPending,
+}
+
 impl Drop for EventSearchBulkGuard {
     fn drop(&mut self) {
         if let Some(lock_conn) = &self.lock_conn {
@@ -174,6 +182,17 @@ impl Store {
     /// Acquire the bulk-import lock and persist merge suppression.
     pub fn begin_event_search_bulk_mode(&self) -> Result<EventSearchBulkGuard> {
         if self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) > 0 {
+            let phase = match bulk_mode_phase(self) {
+                Ok(phase) => phase,
+                Err(error) => {
+                    self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+                    return Err(error);
+                }
+            };
+            if phase == Some(BulkModePhase::FinalCheckpointPending) {
+                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+                return Err(StoreError::BulkSearchImportBusy);
+            }
             return Ok(EventSearchBulkGuard {
                 lock_conn: None,
                 store_path: self.path.clone(),
@@ -196,13 +215,18 @@ impl Store {
             }
         };
         guard.depth_counted = true;
-        if bulk_mode_pending(self)? && self.has_pending_provider_file_publications()? {
+        if bulk_mode_phase(self)? == Some(BulkModePhase::FinalCheckpointPending) {
+            self.finish_event_search_final_checkpoint()?;
+        }
+        if bulk_mode_phase(self)? == Some(BulkModePhase::MergePending)
+            && self.has_pending_provider_file_publications()?
+        {
             return Ok(guard);
         }
         self.begin_immediate_batch()?;
         let result = (|| {
             ensure_search_projection_stats_table(self)?;
-            let pending = bulk_mode_pending(self)?;
+            let pending = bulk_mode_phase(self)? == Some(BulkModePhase::MergePending);
             if !pending {
                 for table in EVENT_SEARCH_FTS_TABLES {
                     if !table_exists(&self.conn, table)? {
@@ -219,7 +243,7 @@ impl Store {
                         fts_config_value(self, table, "crisismerge", FTS_CRISISMERGE_DEFAULT)?,
                     )?;
                 }
-                save_bulk_mode_config(self, BULK_MODE_MARKER_KEY, 1)?;
+                save_bulk_mode_config(self, BULK_MODE_MARKER_KEY, BULK_MODE_MERGE_PENDING)?;
             }
             if pending && self.has_pending_provider_file_publications()? {
                 Ok(())
@@ -261,13 +285,17 @@ impl Store {
         if guard.depth_counted && guard.depth.load(Ordering::SeqCst) != 1 {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
-        if !bulk_mode_pending(self)? {
-            // Marker removal may already have committed before a pinned reader
-            // rejected the final checkpoint. The owning guard must retry that
-            // strict handoff instead of inferring completion from marker state.
-            self.pace_and_checkpoint_wal_truncate_required()?;
-            self.event_search_bulk_batches.store(0, Ordering::SeqCst);
-            return Ok(EventSearchBulkMaintenanceOutcome::Complete);
+        match bulk_mode_phase(self)? {
+            None => {
+                self.event_search_bulk_batches.store(0, Ordering::SeqCst);
+                return Ok(EventSearchBulkMaintenanceOutcome::Complete);
+            }
+            Some(BulkModePhase::FinalCheckpointPending) => {
+                self.finish_event_search_final_checkpoint()?;
+                self.event_search_bulk_batches.store(0, Ordering::SeqCst);
+                return Ok(EventSearchBulkMaintenanceOutcome::Complete);
+            }
+            Some(BulkModePhase::MergePending) => {}
         }
         // A bounded provider publication can intentionally span scheduler
         // passes. Keep merge suppression durable until that publication is
@@ -326,7 +354,7 @@ impl Store {
         )?;
         self.begin_immediate_batch()?;
         let result = (|| {
-            if !bulk_mode_pending(self)? {
+            if bulk_mode_phase(self)? != Some(BulkModePhase::MergePending) {
                 return Ok(PeriodicMergeStepOutcome::Quiescent);
             }
             if self.has_pending_provider_file_publications()? {
@@ -365,7 +393,7 @@ impl Store {
     pub fn event_search_bulk_maintenance_outcome(
         &self,
     ) -> Result<EventSearchBulkMaintenanceOutcome> {
-        Ok(if bulk_mode_pending(self)? {
+        Ok(if bulk_mode_phase(self)?.is_some() {
             EventSearchBulkMaintenanceOutcome::Pending
         } else {
             EventSearchBulkMaintenanceOutcome::Complete
@@ -379,6 +407,9 @@ impl Store {
     /// at the 64 MiB observed-WAL high-water, bounding overshoot to the one group
     /// that was already admitted before the threshold became observable.
     pub fn event_search_bulk_admission_outcome(&self) -> Result<EventSearchBulkMaintenanceOutcome> {
+        if bulk_mode_phase(self)? == Some(BulkModePhase::FinalCheckpointPending) {
+            return Ok(EventSearchBulkMaintenanceOutcome::Pending);
+        }
         Ok(
             if observed_wal_bytes(self)?.unwrap_or_default() >= BULK_SEARCH_WAL_TRUNCATE_MIN_BYTES {
                 EventSearchBulkMaintenanceOutcome::Pending
@@ -403,14 +434,16 @@ impl Store {
         // waiting for this transaction, so an earlier check would be stale.
         self.begin_immediate_batch()?;
         let result = (|| {
-            let pending = bulk_mode_pending(self)?;
-            if pending && !self.has_pending_provider_file_publications()? {
+            let phase = bulk_mode_phase(self)?;
+            if phase == Some(BulkModePhase::MergePending)
+                && !self.has_pending_provider_file_publications()?
+            {
                 suppress_event_search_merges(self)?;
             }
-            Ok(pending)
+            Ok(phase)
         })();
-        let pending = match result {
-            Ok(pending) => pending,
+        let phase = match result {
+            Ok(phase) => phase,
             Err(err) => {
                 let _ = self.rollback_batch();
                 return Err(err);
@@ -420,7 +453,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        if !pending {
+        if phase.is_none() {
             return Ok(());
         }
         // A live importer owns this lock. Leave an unowned stale marker for an
@@ -444,9 +477,9 @@ impl Store {
         if self.has_pending_provider_file_publications()? {
             return Ok(());
         }
-        if bulk_mode_pending(self)? {
+        if bulk_mode_phase(self)?.is_some() {
             self.finish_event_search_bulk_mode(&guard)?;
-            if bulk_mode_pending(self)? {
+            if bulk_mode_phase(self)?.is_some() {
                 return Ok(());
             }
         }
@@ -509,7 +542,7 @@ impl Store {
         )?;
         self.begin_immediate_batch()?;
         let result = (|| {
-            if !bulk_mode_pending(self)? {
+            if bulk_mode_phase(self)? != Some(BulkModePhase::MergePending) {
                 return Ok(true);
             }
             Ok(!merge_event_search_tables_in_transaction(self)?)
@@ -544,13 +577,20 @@ impl Store {
         )?;
         self.begin_immediate_batch()?;
         let result = (|| {
-            if !bulk_mode_pending(self)? {
-                return Ok(true);
+            match bulk_mode_phase(self)? {
+                None => return Ok(true),
+                Some(BulkModePhase::FinalCheckpointPending) => return Ok(true),
+                Some(BulkModePhase::MergePending) => {}
             }
             let changed = merge_event_search_tables_in_transaction(self)?;
             if !changed {
                 restore_event_search_merge_config(self)?;
                 clear_bulk_mode_state(self)?;
+                save_bulk_mode_config(
+                    self,
+                    BULK_MODE_MARKER_KEY,
+                    BULK_MODE_FINAL_CHECKPOINT_PENDING,
+                )?;
             }
             Ok(!changed)
         })();
@@ -569,11 +609,40 @@ impl Store {
         if finished {
             #[cfg(test)]
             run_restore_post_commit_hook(&self.path);
-            self.pace_and_checkpoint_wal_truncate_required()?;
+            self.finish_event_search_final_checkpoint()?;
         } else {
             self.checkpoint_event_search_merge_step(true)?;
         }
         Ok(finished)
+    }
+
+    fn finish_event_search_final_checkpoint(&self) -> Result<()> {
+        if bulk_mode_phase(self)? != Some(BulkModePhase::FinalCheckpointPending) {
+            return Ok(());
+        }
+        // Keep phase 2 durable through the corpus checkpoint. Clearing it is a
+        // tiny follow-up transaction and intentionally does not recurse into a
+        // second required checkpoint.
+        self.pace_and_checkpoint_wal_truncate_required()?;
+        self.begin_immediate_batch()?;
+        let result = (|| {
+            if bulk_mode_phase(self)? == Some(BulkModePhase::FinalCheckpointPending) {
+                self.conn.execute(
+                    "DELETE FROM search_projection_stats WHERE key = ?1",
+                    params![BULK_MODE_MARKER_KEY],
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = self.rollback_batch();
+            return Err(error);
+        }
+        if let Err(error) = self.commit_batch() {
+            let _ = self.rollback_batch();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Changed merge steps checkpoint only at the shared WAL high-water. A
@@ -822,11 +891,16 @@ fn ensure_search_projection_stats_table(store: &Store) -> Result<()> {
     Ok(())
 }
 
-fn bulk_mode_pending(store: &Store) -> Result<bool> {
+fn bulk_mode_phase(store: &Store) -> Result<Option<BulkModePhase>> {
     if !table_exists(&store.conn, "search_projection_stats")? {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(bulk_mode_config(store, BULK_MODE_MARKER_KEY)?.is_some())
+    Ok(
+        bulk_mode_config(store, BULK_MODE_MARKER_KEY)?.map(|value| match value {
+            BULK_MODE_FINAL_CHECKPOINT_PENDING => BulkModePhase::FinalCheckpointPending,
+            _ => BulkModePhase::MergePending,
+        }),
+    )
 }
 
 fn bulk_mode_config(store: &Store, key: &str) -> Result<Option<i64>> {

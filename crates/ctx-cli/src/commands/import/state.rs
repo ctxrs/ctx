@@ -6,6 +6,26 @@ const PROVIDER_SESSION_REPAIR_BATCH_BYTES: usize = 512 * 1024;
 const PROVIDER_SESSION_REPAIR_SQLITE_TIME: std::time::Duration =
     std::time::Duration::from_millis(25);
 
+#[cfg(test)]
+thread_local! {
+    static INJECTED_IMPORT_MAINTENANCE_PROGRESS_STEPS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_import_maintenance_progress_steps(steps: usize) {
+    INJECTED_IMPORT_MAINTENANCE_PROGRESS_STEPS.with(|remaining| remaining.set(steps));
+}
+
+#[cfg(test)]
+fn take_injected_import_maintenance_progress_step() -> bool {
+    INJECTED_IMPORT_MAINTENANCE_PROGRESS_STEPS.with(|remaining| {
+        let steps = remaining.get();
+        remaining.set(steps.saturating_sub(1));
+        steps > 0
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImportMaintenancePendingReason {
     MaintenanceWriter,
@@ -56,6 +76,11 @@ impl ImportMaintenanceStep {
 }
 
 pub(crate) fn repair_import_maintenance(store: &Store) -> Result<ImportMaintenanceStep> {
+    #[cfg(test)]
+    if take_injected_import_maintenance_progress_step() {
+        return Ok(ImportMaintenanceStep::Progress);
+    }
+
     let (provider_session_rows, _, provider_sessions_complete) = match store
         .repair_provider_session_duplicates(
             PROVIDER_SESSION_REPAIR_BATCH_ROWS,

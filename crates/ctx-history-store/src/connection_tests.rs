@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     bulk_search::{
-        set_restore_post_commit_hook, FTS_BULK_CRISISMERGE, FTS_BULK_MAINTENANCE_BATCHES,
+        set_restore_post_commit_hook, BULK_MODE_FINAL_CHECKPOINT_PENDING, FTS_BULK_CRISISMERGE,
+        FTS_BULK_MAINTENANCE_BATCHES,
     },
     EventSearchBulkMaintenanceOutcome, Store, StoreError,
 };
@@ -552,7 +553,10 @@ fn subthreshold_changed_slice_coalesces_its_intermediate_checkpoints() {
         }
     }
     assert_eq!(bulk_mode_marker(&store), None);
-    assert_eq!(wal_bytes(&db_path), 0);
+    assert!(
+        wal_bytes(&db_path) < 64 * 1024,
+        "only the tiny marker-clear transaction should remain after the corpus checkpoint"
+    );
 }
 
 #[test]
@@ -741,10 +745,14 @@ fn pinned_high_water_suspends_admission_without_further_wal_growth() {
 }
 
 #[test]
-fn marker_cleared_checkpoint_failure_is_required_again_on_retry() {
+fn final_checkpoint_phase_survives_reopen_and_refuses_admission() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    for table in ["event_search", "event_search_scriptgram"] {
+        set_fts_config(&store, table, "automerge", 8);
+        set_fts_config(&store, table, "crisismerge", 32);
+    }
     let guard = store.begin_event_search_bulk_mode().unwrap();
     insert_bulk_search_events(&store, "final-handoff", 20, 8);
 
@@ -759,13 +767,13 @@ fn marker_cleared_checkpoint_failure_is_required_again_on_retry() {
             assert_eq!(
                 reader
                     .query_row(
-                        "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'event_search_bulk_mode_v1'",
+                        "SELECT value FROM search_projection_stats WHERE key = 'event_search_bulk_mode_v1'",
                         [],
                         |row| row.get::<_, i64>(0),
                     )
                     .unwrap(),
-                0,
-                "hook ran before marker removal committed"
+                BULK_MODE_FINAL_CHECKPOINT_PENDING,
+                "config restoration did not durably enter final-checkpoint phase"
             );
             *hook_reader.lock().unwrap() = Some(reader);
         }),
@@ -775,20 +783,61 @@ fn marker_cleared_checkpoint_failure_is_required_again_on_retry() {
         store.finish_event_search_bulk_mode(&guard).unwrap_err(),
         StoreError::WalCheckpointBusy { .. }
     ));
-    assert_eq!(bulk_mode_marker(&store), None);
+    assert_eq!(
+        bulk_mode_marker(&store),
+        Some(BULK_MODE_FINAL_CHECKPOINT_PENDING)
+    );
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&store, table, "automerge", 4), 8);
+        assert_eq!(fts_config(&store, table, "crisismerge", 16), 32);
+    }
     assert!(wal_bytes(&db_path) > 0);
+    assert_eq!(
+        store.event_search_bulk_maintenance_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    assert_eq!(
+        store.event_search_bulk_admission_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
 
     assert!(matches!(
         store.finish_event_search_bulk_mode(&guard).unwrap_err(),
         StoreError::WalCheckpointBusy { .. }
     ));
+    drop(guard);
+    drop(store);
+
+    let reopened = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    assert_eq!(
+        bulk_mode_marker(&reopened),
+        Some(BULK_MODE_FINAL_CHECKPOINT_PENDING)
+    );
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&reopened, table, "automerge", 4), 8);
+        assert_eq!(fts_config(&reopened, table, "crisismerge", 16), 32);
+    }
+    assert_eq!(
+        reopened.event_search_bulk_maintenance_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    assert_eq!(
+        reopened.event_search_bulk_admission_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    let begin_error = match reopened.begin_event_search_bulk_mode() {
+        Ok(_) => panic!("final-checkpoint debt admitted a new bulk import"),
+        Err(error) => error,
+    };
+    assert!(matches!(begin_error, StoreError::WalCheckpointBusy { .. }));
 
     let reader = pinned_reader.lock().unwrap().take().unwrap();
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
-    assert!(store
-        .finish_event_search_bulk_mode(&guard)
+    assert!(reopened
+        .advance_event_search_bulk_maintenance()
         .unwrap()
         .is_complete());
-    assert_eq!(wal_bytes(&db_path), 0);
+    assert_eq!(bulk_mode_marker(&reopened), None);
+    assert!(wal_bytes(&db_path) < BULK_SEARCH_WAL_HIGH_WATER_BYTES);
 }

@@ -96,7 +96,9 @@ use catalog::{
     import_record_for_history_source_plugin, import_record_for_source, source_stats,
 };
 use explicit::run_explicit_format_import;
-pub(crate) use fixed_point::{drain_fixed_point_action, DrainFixedPointAction};
+pub(crate) use fixed_point::{
+    drain_fixed_point_action, drain_import_maintenance, DrainFixedPointAction,
+};
 #[cfg(test)]
 pub(crate) use inventory::{inject_inventory_failure_once, InventoryFailurePoint};
 pub(crate) use inventory::{
@@ -252,18 +254,14 @@ pub(crate) fn run_import_internal(
     let mut imported_sources = Vec::new();
     let opening_progress =
         ProgressReporter::new(options.progress, options.json, options.operation, 0);
-    loop {
-        match repair_import_maintenance(&store)? {
-            ImportMaintenanceStep::Complete => break,
-            ImportMaintenanceStep::Progress => totals.durable_progress = true,
-            ImportMaintenanceStep::Pending(reason) => {
-                opening_progress.warning(reason.diagnostic());
-                totals.recovery_units_pending = 1;
-                let mut report = ImportReport::empty(args.resume);
-                report.totals = totals;
-                return Ok(report);
-            }
-        }
+    let opening_maintenance = drain_import_maintenance(&store)?;
+    totals.durable_progress |= opening_maintenance.made_durable_progress;
+    if let Some(reason) = opening_maintenance.pending_reason {
+        opening_progress.warning(reason.diagnostic());
+        totals.recovery_units_pending = 1;
+        let mut report = ImportReport::empty(args.resume);
+        report.totals = totals;
+        return Ok(report);
     }
 
     if let Some(format) = args.format {
@@ -384,9 +382,8 @@ pub(crate) fn run_import_internal(
     let native_import_requested = !plan.sources.is_empty() || plan.recovery_units > 0;
     let reinventory_sources = stable_reinventory_sources(&plan, &inventory_failures);
     let mut native_reports = NativeSourceReports::default();
-    let mut pass_made_durable_progress = false;
+    let mut pass_source_plan_progress = false;
     let mut pass_retryable_blocker = false;
-    let mut installed_mixed_inventory_plan = false;
     loop {
         execution_state.begin_new_pass();
         let fresh_units = plan.pending_count(&store, ImportWorkClass::Fresh)?;
@@ -404,7 +401,7 @@ pub(crate) fn run_import_internal(
             &mut totals,
             &mut native_reports,
         )?;
-        pass_made_durable_progress |= result.made_durable_progress;
+        pass_source_plan_progress |= result.made_durable_progress;
         pass_retryable_blocker |= result.retryable_blocker;
         if !result.result.made_durable_progress() {
             break;
@@ -486,13 +483,10 @@ pub(crate) fn run_import_internal(
 
     let (maintenance_complete, final_checkpoint_allowed) = 'fixed_point: loop {
         execution_state.begin_new_pass();
-        let maintenance = repair_import_maintenance(&store)?;
-        let mut maintenance_complete = maintenance == ImportMaintenanceStep::Complete;
-        let mut maintenance_pending = maintenance.pending_reason();
-        if maintenance.made_durable_progress() {
-            totals.durable_progress = true;
-            pass_made_durable_progress = true;
-        }
+        let maintenance = drain_import_maintenance(&store)?;
+        let mut maintenance_complete = maintenance.is_complete();
+        let mut maintenance_pending = maintenance.pending_reason;
+        totals.durable_progress |= maintenance.made_durable_progress;
 
         if maintenance_complete {
             let recovery_units = plan.pending_count(&store, ImportWorkClass::Recovery)?;
@@ -507,7 +501,7 @@ pub(crate) fn run_import_internal(
                 &mut totals,
                 &mut native_reports,
             )?;
-            pass_made_durable_progress |= recovery.made_durable_progress;
+            pass_source_plan_progress |= recovery.made_durable_progress;
             pass_retryable_blocker |= recovery.retryable_blocker;
 
             execution_state.begin_new_pass();
@@ -523,16 +517,13 @@ pub(crate) fn run_import_internal(
                 &mut totals,
                 &mut native_reports,
             )?;
-            pass_made_durable_progress |= fresh.made_durable_progress;
+            pass_source_plan_progress |= fresh.made_durable_progress;
             pass_retryable_blocker |= fresh.retryable_blocker;
 
-            let trailing = repair_import_maintenance(&store)?;
-            if trailing.made_durable_progress() {
-                totals.durable_progress = true;
-                pass_made_durable_progress = true;
-            }
-            maintenance_complete = trailing == ImportMaintenanceStep::Complete;
-            maintenance_pending = trailing.pending_reason();
+            let trailing = drain_import_maintenance(&store)?;
+            totals.durable_progress |= trailing.made_durable_progress;
+            maintenance_complete = trailing.is_complete();
+            maintenance_pending = trailing.pending_reason;
         }
 
         let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(&store)?;
@@ -541,15 +532,13 @@ pub(crate) fn run_import_internal(
             || !maintenance_complete
             || !inventory_failures.is_empty()
             || has_provider_file_publication_work(&store)?;
-        let inventory_blocked = !inventory_failures.is_empty()
-            && (installed_mixed_inventory_plan || !pass_made_durable_progress);
         let blocker = maintenance_pending
             .map(DrainFixedPointBlocker::Maintenance)
             .or_else(|| {
-                (pass_retryable_blocker || inventory_blocked)
+                (pass_retryable_blocker || !inventory_failures.is_empty())
                     .then_some(DrainFixedPointBlocker::RetryableExternal)
             });
-        match drain_fixed_point_action(has_pending_work, pass_made_durable_progress, blocker)? {
+        match drain_fixed_point_action(has_pending_work, pass_source_plan_progress, blocker)? {
             DrainFixedPointAction::Complete => {
                 break 'fixed_point (maintenance_complete, true);
             }
@@ -581,9 +570,8 @@ pub(crate) fn run_import_internal(
         plan = ImportPlan::build(&store, inventory.sources)?;
         failed_inventory_pending = inventory_failures.pending_counts(&store, &plan)?;
         execution_state = ImportExecutionState::for_plan(&plan);
-        pass_made_durable_progress = false;
-        pass_retryable_blocker = !inventory_failures.is_empty();
-        installed_mixed_inventory_plan = true;
+        pass_source_plan_progress = false;
+        pass_retryable_blocker = false;
     };
 
     let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(&store)?;
