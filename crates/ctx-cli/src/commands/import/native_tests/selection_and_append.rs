@@ -194,6 +194,27 @@ fn fresh_new_batch_defers_atomic_group_when_sibling_disappears() {
     assert_eq!(outcome.summary, ProviderImportSummary::default());
     assert!(outcome.made_durable_progress());
 
+    assert_eq!(
+        store.export_archive().unwrap(),
+        ctx_history_core::SessionHistoryArchive::default()
+    );
+    let catalog_work = match &selected.work {
+        SelectedImportWork::Catalog(work) => work,
+        SelectedImportWork::SourceFiles(_) => panic!("Codex tree must select catalog work"),
+    };
+    assert_eq!(catalog_work.len(), 2);
+    for work in catalog_work {
+        assert!(store
+            .provider_file_checkpoint(ProviderFileCheckpointKey {
+                provider: work.session.provider,
+                source_format: &work.session.source_format,
+                source_root: &work.session.source_root,
+                source_path: &work.session.source_path,
+            })
+            .unwrap()
+            .is_none());
+    }
+
     let inventory = inventory_import_sources(
         &store,
         vec![explicit_path_source(CaptureProvider::Codex, source_path)],
