@@ -299,7 +299,6 @@ export interface SearchExecutionConsumption {
   verification_bytes: number;
   largest_verification_lookup_bytes: number;
   hydrated_rows: number;
-  legacy_fallback_rows: number;
   hydration_input_bytes: number;
   largest_hydration_input_bytes: number;
   snippet_input_bytes: number;

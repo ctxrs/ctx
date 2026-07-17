@@ -64,7 +64,6 @@ function searchExecution() {
       verification_bytes: 4096,
       largest_verification_lookup_bytes: 512,
       hydrated_rows: 5,
-      legacy_fallback_rows: 0,
       hydration_input_bytes: 2048,
       largest_hydration_input_bytes: 800,
       snippet_input_bytes: 1200,
@@ -439,6 +438,19 @@ test("rejects the pre-v2 ambiguous search response", async () => {
     }),
   );
   await assert.rejects(() => aliasOnly.client.search(SEARCH_QUERY), CtxParseError);
+
+  for (const [field, payload] of [
+    ["query", { schema_version: 2, query_execution: {}, results: [] }],
+    ["query_execution", { schema_version: 2, query: null, results: [] }],
+    ["results", { schema_version: 2, query: null, query_execution: {} }],
+    ["results", { schema_version: 2, query: null, query_execution: {}, results: {} }],
+  ]) {
+    const missing = mockClient(() => JSON.stringify(payload));
+    await assert.rejects(
+      () => missing.client.search(SEARCH_QUERY),
+      (error) => error instanceof CtxParseError && error.details.field === field,
+    );
+  }
 });
 
 test("wraps show and locate commands by ctx id and provider session id", async () => {
@@ -532,6 +544,52 @@ test("raises timeout errors from the local adapter", async () => {
     () => adapter.execute(["-e", "setTimeout(() => {}, 1000)"]),
     CtxTimeoutError,
   );
+});
+
+test("local adapter drains both streams and enforces byte caps", async () => {
+  const { LocalCliAdapter } = await import("../src/index.js");
+  const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 2_000 });
+  const completed = await adapter.execute([
+    "-e",
+    "process.stdout.write(Buffer.alloc(200000,97));process.stderr.write(Buffer.alloc(200000,98))",
+  ]);
+  assert.equal(Buffer.byteLength(completed.stdout), 200000);
+  assert.equal(Buffer.byteLength(completed.stderr), 200000);
+
+  for (const [stream, descriptor, size, capBytes] of [
+    ["stdout", "stdout", 2 * 1024 * 1024 + 1, 2 * 1024 * 1024],
+    ["stderr", "stderr", 256 * 1024 + 1, 256 * 1024],
+  ]) {
+    await assert.rejects(
+      () =>
+        adapter.execute([
+          "-e",
+          `process.${descriptor}.write(Buffer.alloc(${size},120))`,
+        ]),
+      (error) =>
+        error instanceof CtxParseError &&
+        error.code === "capture_limit" &&
+        error.details.stream === stream &&
+        error.details.capBytes === capBytes &&
+        !("stdout" in error.details) &&
+        !("stderr" in error.details),
+    );
+  }
+});
+
+test("local adapter bounds inherited-pipe teardown", async () => {
+  const { LocalCliAdapter } = await import("../src/index.js");
+  const adapter = new LocalCliAdapter({ ctxPath: process.execPath, timeoutMs: 5_000 });
+  const started = Date.now();
+  await assert.rejects(
+    () =>
+      adapter.execute([
+        "-e",
+        "require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:'inherit'});",
+      ]),
+    (error) => error instanceof CtxParseError && error.code === "capture_failure",
+  );
+  assert.ok(Date.now() - started < 2_000);
 });
 
 test("hosted client is an explicit placeholder", async () => {

@@ -229,7 +229,6 @@ class SearchExecutionConsumption(TypedDict):
     verification_bytes: int
     largest_verification_lookup_bytes: int
     hydrated_rows: int
-    legacy_fallback_rows: int
     hydration_input_bytes: int
     largest_hydration_input_bytes: int
     snippet_input_bytes: int

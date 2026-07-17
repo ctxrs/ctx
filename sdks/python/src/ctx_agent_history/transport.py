@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import threading
+import time
 from typing import Any, Mapping, Optional, Protocol, Sequence, cast
 
 from .config import HostedConfig, LocalConfig
@@ -383,14 +386,19 @@ class LocalCliAdapter:
         env = os.environ.copy()
         if self.config.env:
             env.update(self.config.env)
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=str(self.config.cwd) if self.config.cwd is not None else None,
                 env=env,
-                capture_output=True,
-                timeout=self.config.timeout,
-                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=os.name != "nt",
+                creationflags=creationflags,
             )
         except OSError as exc:
             raise CtxAgentHistoryCliError(
@@ -400,28 +408,92 @@ class LocalCliAdapter:
                 stderr=str(exc),
                 cause=exc,
             ) from exc
-        except subprocess.TimeoutExpired as exc:
+
+        stdout_capture = _BoundedCapture("stdout", _STDOUT_CAP_BYTES)
+        stderr_capture = _BoundedCapture("stderr", _STDERR_CAP_BYTES)
+        stop = threading.Event()
+        readers = [
+            threading.Thread(
+                target=_drain_process_stream,
+                args=(process.stdout, stdout_capture, stop),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_drain_process_stream,
+                args=(process.stderr, stderr_capture, stop),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
+
+        deadline = (
+            None
+            if self.config.timeout is None
+            else time.monotonic() + max(0.0, self.config.timeout)
+        )
+        failure: Optional[str] = None
+        while process.poll() is None and not stop.wait(_PROCESS_POLL_SECONDS):
+            if deadline is not None and time.monotonic() >= deadline:
+                failure = "timeout"
+                stop.set()
+                break
+        if failure is None and stop.is_set():
+            failure = "capture"
+
+        if failure is None:
+            clean_drain_deadline = time.monotonic() + _CLEAN_DRAIN_SECONDS
+            for reader in readers:
+                reader.join(max(0.0, clean_drain_deadline - time.monotonic()))
+            if any(reader.is_alive() for reader in readers):
+                failure = "capture"
+                stop.set()
+
+        if failure is not None:
+            _terminate_process_scope(process)
+            _close_process_pipes(process)
+        teardown_deadline = time.monotonic() + _TEARDOWN_SECONDS
+        for reader in readers:
+            reader.join(max(0.0, teardown_deadline - time.monotonic()))
+
+        overflow = stdout_capture.overflow or stderr_capture.overflow
+        capture_error = stdout_capture.error or stderr_capture.error
+        if overflow is not None:
+            stream, cap = overflow
+            raise CtxAgentHistoryProtocolError(
+                "ctx CLI output exceeded its capture limit",
+                details={"command": command, "stream": stream, "cap_bytes": cap},
+            )
+        if failure == "timeout":
             raise CtxAgentHistoryTimeoutError(
                 "ctx CLI timed out",
                 details={
                     "command": command,
-                    "stderr": _decode_process_output(exc.stderr),
-                    "stdout": _decode_process_output(exc.stdout),
                     "timeout": self.config.timeout,
                 },
-                cause=exc,
-            ) from exc
-        if completed.returncode != 0:
+            )
+        if capture_error is not None or any(reader.is_alive() for reader in readers):
+            stream, error = capture_error or ("pipe", RuntimeError("reader did not stop"))
+            raise CtxAgentHistoryProtocolError(
+                "ctx CLI output capture failed",
+                details={"command": command, "stream": stream},
+                cause=error,
+            )
+
+        stdout_bytes = stdout_capture.value()
+        stderr_bytes = stderr_capture.value()
+        returncode = process.returncode if process.returncode is not None else -1
+        if returncode != 0:
             raise CtxAgentHistoryCliError(
                 "ctx CLI command failed",
                 command=command,
-                exit_code=completed.returncode,
-                stderr=_decode_process_output(completed.stderr),
-                stdout=_decode_process_output(completed.stdout),
+                exit_code=returncode,
+                stderr=_decode_process_output(stderr_bytes),
+                stdout=_decode_process_output(stdout_bytes),
             )
         try:
-            stdout = _decode_process_output_strict(completed.stdout)
-            stderr = _decode_process_output_strict(completed.stderr)
+            stdout = _decode_process_output_strict(stdout_bytes)
+            stderr = _decode_process_output_strict(stderr_bytes)
         except UnicodeDecodeError as exc:
             raise CtxAgentHistoryProtocolError(
                 "ctx returned invalid UTF-8",
@@ -432,7 +504,7 @@ class LocalCliAdapter:
             ) from exc
         return subprocess.CompletedProcess(
             command,
-            completed.returncode,
+            returncode,
             stdout=stdout,
             stderr=stderr,
         )
@@ -443,6 +515,98 @@ class LocalCliAdapter:
             command.extend(["--data-root", str(self.config.data_root)])
         command.extend(args)
         return command
+
+
+_STDOUT_CAP_BYTES = 2 * 1024 * 1024
+_STDERR_CAP_BYTES = 256 * 1024
+_READ_BUFFER_BYTES = 64 * 1024
+_PROCESS_POLL_SECONDS = 0.01
+_CLEAN_DRAIN_SECONDS = 0.1
+_TEARDOWN_SECONDS = 1.0
+
+
+class _BoundedCapture:
+    def __init__(self, stream: str, cap: int) -> None:
+        self.stream = stream
+        self.cap = cap
+        self.chunks: list[bytes] = []
+        self.size = 0
+        self.overflow: Optional[tuple[str, int]] = None
+        self.error: Optional[tuple[str, BaseException]] = None
+
+    def append(self, chunk: bytes) -> bool:
+        remaining = self.cap - self.size
+        if len(chunk) > remaining:
+            if remaining > 0:
+                self.chunks.append(chunk[:remaining])
+                self.size += remaining
+            self.overflow = (self.stream, self.cap)
+            return False
+        self.chunks.append(chunk)
+        self.size += len(chunk)
+        return True
+
+    def value(self) -> bytes:
+        return b"".join(self.chunks)
+
+
+def _drain_process_stream(
+    stream: Optional[Any], capture: _BoundedCapture, stop: threading.Event
+) -> None:
+    if stream is None:
+        capture.error = (capture.stream, RuntimeError("process pipe is unavailable"))
+        stop.set()
+        return
+    try:
+        while not stop.is_set():
+            chunk = stream.read(_READ_BUFFER_BYTES)
+            if not chunk:
+                return
+            if not capture.append(chunk):
+                stop.set()
+                return
+    except (OSError, ValueError) as exc:
+        if not stop.is_set():
+            capture.error = (capture.stream, exc)
+            stop.set()
+
+
+def _terminate_process_scope(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_TEARDOWN_SECONDS / 2,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+        time.sleep(0.1)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        process.wait(timeout=_TEARDOWN_SECONDS / 2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 class HostedAdapter:
