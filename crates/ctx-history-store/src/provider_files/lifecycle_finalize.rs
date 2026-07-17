@@ -138,12 +138,26 @@ impl Store {
     pub fn effective_provider_file_publication_inventory_owner(
         &self,
     ) -> Result<Option<ProviderFilePublicationInventoryOwner>> {
+        self.effective_provider_file_publication_inventory_snapshot()
+            .map(|(_, owner)| owner)
+    }
+
+    /// Returns an opaque marker and owner from the same effective publication
+    /// row. The marker is stable while the owner-defining publication state is
+    /// unchanged and is intentionally unrelated to inventory checkpoint leases.
+    pub fn effective_provider_file_publication_inventory_snapshot(
+        &self,
+    ) -> Result<(String, Option<ProviderFilePublicationInventoryOwner>)> {
         let global_id = global_provider_file_publication_id_sql();
-        self.conn
+        let publication = self
+            .conn
             .query_row(
                 &format!(
                     r#"
-                    SELECT publication.provider, publication.inventory_family,
+                    SELECT publication.replacement_id, publication.publication_kind,
+                           publication.mutation_started,
+                           publication.inventory_observation_invalidated,
+                           publication.provider, publication.inventory_family,
                            publication.inventory_source_format,
                            publication.inventory_source_root, publication.source_path,
                            publication.inventory_generation, publication.file_size_bytes,
@@ -155,29 +169,48 @@ impl Store {
                 ),
                 [],
                 |row| {
-                    let provider = CaptureProvider::from_str(&row.get::<_, String>(0)?)
+                    let provider = CaptureProvider::from_str(&row.get::<_, String>(4)?)
                         .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                    let inventory_family = match row.get::<_, String>(1)?.as_str() {
+                    let inventory_family = match row.get::<_, String>(5)?.as_str() {
                         CATALOG_INVENTORY_FAMILY => ProviderFileInventoryFamily::Catalog,
                         SOURCE_IMPORT_INVENTORY_FAMILY => ProviderFileInventoryFamily::SourceImport,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };
-                    Ok(ProviderFilePublicationInventoryOwner {
-                        provider,
-                        inventory_family,
-                        source_format: row.get(2)?,
-                        source_root: row.get(3)?,
-                        source_path: row.get(4)?,
-                        inventory_generation: nonnegative_i64_to_u64(row.get(5)?)?,
-                        file_size_bytes: nonnegative_i64_to_u64(row.get(6)?)?,
-                        file_modified_at_ms: row.get(7)?,
-                        import_revision: nonnegative_i64_to_u32(row.get(8)?)?,
-                        metadata_json: row.get(9)?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                        ProviderFilePublicationInventoryOwner {
+                            provider,
+                            inventory_family,
+                            source_format: row.get(6)?,
+                            source_root: row.get(7)?,
+                            source_path: row.get(8)?,
+                            inventory_generation: nonnegative_i64_to_u64(row.get(9)?)?,
+                            file_size_bytes: nonnegative_i64_to_u64(row.get(10)?)?,
+                            file_modified_at_ms: row.get(11)?,
+                            import_revision: nonnegative_i64_to_u32(row.get(12)?)?,
+                            metadata_json: row.get(13)?,
+                        },
+                    ))
                 },
             )
             .optional()
-            .map_err(StoreError::from)
+            .map_err(StoreError::from)?;
+        let Some((replacement_id, publication_kind, mutation_started, invalidated, owner)) =
+            publication
+        else {
+            return Ok((provider_file_publication_inventory_state_marker(None), None));
+        };
+        let marker = provider_file_publication_inventory_state_marker(Some((
+            &replacement_id,
+            &publication_kind,
+            mutation_started,
+            invalidated,
+            &owner,
+        )));
+        Ok((marker, Some(owner)))
     }
 
     pub fn effective_provider_file_publication_has_staged_completion(&self) -> Result<bool> {
@@ -415,4 +448,60 @@ impl Store {
         }
         Ok(work)
     }
+}
+
+fn provider_file_publication_inventory_state_marker(
+    publication: Option<(
+        &str,
+        &str,
+        bool,
+        bool,
+        &ProviderFilePublicationInventoryOwner,
+    )>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-provider-publication-inventory-state-v1");
+    let Some((replacement_id, publication_kind, mutation_started, invalidated, owner)) =
+        publication
+    else {
+        digest.update([0]);
+        return digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+    };
+    digest.update([1]);
+    let mut update_field = |field: &[u8]| {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    };
+    update_field(replacement_id.as_bytes());
+    update_field(publication_kind.as_bytes());
+    update_field(&[u8::from(mutation_started)]);
+    update_field(&[u8::from(invalidated)]);
+    update_field(owner.provider.as_str().as_bytes());
+    update_field(match owner.inventory_family {
+        ProviderFileInventoryFamily::Catalog => CATALOG_INVENTORY_FAMILY.as_bytes(),
+        ProviderFileInventoryFamily::SourceImport => SOURCE_IMPORT_INVENTORY_FAMILY.as_bytes(),
+    });
+    update_field(owner.source_format.as_bytes());
+    update_field(owner.source_root.as_bytes());
+    update_field(owner.source_path.as_bytes());
+    update_field(&owner.inventory_generation.to_be_bytes());
+    update_field(&owner.file_size_bytes.to_be_bytes());
+    update_field(&owner.file_modified_at_ms.to_be_bytes());
+    update_field(&owner.import_revision.to_be_bytes());
+    match owner.metadata_json.as_deref() {
+        Some(metadata_json) => {
+            update_field(&[1]);
+            update_field(metadata_json.as_bytes());
+        }
+        None => update_field(&[0]),
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
