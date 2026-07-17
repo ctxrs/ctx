@@ -110,9 +110,10 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         }
 
         var command = BuildCommand(args);
+        var setsid = OperatingSystem.IsWindows() ? null : FindSetsid();
         var startInfo = new ProcessStartInfo
         {
-            FileName = Config.CtxBinary,
+            FileName = setsid ?? Config.CtxBinary,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
@@ -120,6 +121,10 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         if (!string.IsNullOrWhiteSpace(Config.WorkingDirectory))
         {
             startInfo.WorkingDirectory = Config.WorkingDirectory;
+        }
+        if (setsid is not null)
+        {
+            startInfo.ArgumentList.Add(Config.CtxBinary);
         }
         foreach (var arg in command.Skip(1))
         {
@@ -149,7 +154,7 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         {
             throw new CtxAgentHistoryCliException("failed to execute ctx CLI", command, -1, "", ex.Message, innerException: ex);
         }
-        using var processScope = OwnedProcessScope.Attach(process);
+        using var processScope = OwnedProcessScope.Attach(process, setsid is not null);
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (Config.Timeout is { } timeout)
@@ -168,20 +173,18 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             StderrCapBytes,
             captureCancellation.Token);
         var captureTask = Task.WhenAll(stdoutTask, stderrTask);
+        var captureFailureTask = FirstCaptureFailureAsync(stdoutTask, stderrTask);
         var exitTask = process.WaitForExitAsync();
         var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, linked.Token);
 
-        var completed = await Task.WhenAny(exitTask, captureTask, cancellationSignal).ConfigureAwait(false);
-        if (completed == captureTask)
+        var completed = await Task.WhenAny(exitTask, captureFailureTask, cancellationSignal).ConfigureAwait(false);
+        if (completed == captureFailureTask)
         {
-            try
-            {
-                await captureTask.ConfigureAwait(false);
-            }
-            catch (Exception error)
+            var captureFailure = await captureFailureTask.ConfigureAwait(false);
+            if (captureFailure is not null)
             {
                 await AbortAsync(process, processScope, captureCancellation, captureTask).ConfigureAwait(false);
-                throw CaptureError(error);
+                throw CaptureError(captureFailure);
             }
             completed = await Task.WhenAny(exitTask, cancellationSignal).ConfigureAwait(false);
         }
@@ -220,19 +223,42 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         string errText;
         try
         {
-            outText = StrictUtf8.GetString(await stdoutTask.ConfigureAwait(false));
-            errText = StrictUtf8.GetString(await stderrTask.ConfigureAwait(false));
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
+            outText = StrictUtf8.GetString(stdout.Buffer, 0, stdout.Length);
+            errText = StrictUtf8.GetString(stderr.Buffer, 0, stderr.Length);
         }
         catch (DecoderFallbackException error)
         {
+            processScope.Terminate();
             throw CaptureFailure("utf8", error);
         }
         if (process.ExitCode != 0)
         {
+            processScope.Terminate();
             throw new CtxAgentHistoryCliException("ctx CLI command failed", command, process.ExitCode, outText, errText);
         }
 
         return new CommandResult(command, outText, errText, process.ExitCode);
+    }
+
+    private static async Task<Exception?> FirstCaptureFailureAsync(params Task<CapturedBytes>[] captures)
+    {
+        var pending = captures.ToList();
+        while (pending.Count > 0)
+        {
+            var completed = await Task.WhenAny(pending).ConfigureAwait(false);
+            pending.Remove(completed);
+            try
+            {
+                _ = await completed.ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                return error;
+            }
+        }
+        return null;
     }
 
     private IReadOnlyList<string> BuildCommand(IReadOnlyList<string> args)
@@ -247,13 +273,26 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         return command;
     }
 
-    private static async Task<byte[]> ReadBoundedAsync(
+    private static string? FindSetsid()
+    {
+        foreach (var path in new[] { "/usr/bin/setsid", "/bin/setsid" })
+        {
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    private static async Task<CapturedBytes> ReadBoundedAsync(
         Stream stream,
         string name,
         int capBytes,
         CancellationToken cancellationToken)
     {
-        using var output = new MemoryStream(Math.Min(capBytes, ReadBufferBytes));
+        var output = new byte[capBytes];
+        var captured = 0;
         var buffer = new byte[ReadBufferBytes];
         try
         {
@@ -262,18 +301,19 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
                 var read = await stream.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
                 if (read == 0)
                 {
-                    return output.ToArray();
+                    return new CapturedBytes(output, captured);
                 }
-                var remaining = capBytes - checked((int)output.Length);
+                var remaining = capBytes - captured;
                 if (read > remaining)
                 {
                     if (remaining > 0)
                     {
-                        output.Write(buffer, 0, remaining);
+                        Buffer.BlockCopy(buffer, 0, output, captured, remaining);
                     }
                     throw new CaptureLimitException(name, capBytes);
                 }
-                output.Write(buffer, 0, read);
+                Buffer.BlockCopy(buffer, 0, output, captured, read);
+                captured += read;
             }
         }
         catch (CaptureLimitException)
@@ -343,10 +383,10 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
     private sealed record CommandResult(IReadOnlyList<string> Command, string Stdout, string Stderr, int ExitCode);
 
+    private sealed record CapturedBytes(byte[] Buffer, int Length);
+
     private sealed class OwnedProcessScope : IDisposable
     {
-        private const uint JobObjectExtendedLimitInformationClass = 9;
-        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
         private readonly Process process;
         private readonly int processId;
         private readonly bool ownsUnixProcessGroup;
@@ -361,13 +401,16 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             this.jobHandle = jobHandle;
         }
 
-        public static OwnedProcessScope Attach(Process process)
+        public static OwnedProcessScope Attach(Process process, bool ownsUnixProcessGroup)
         {
             if (OperatingSystem.IsWindows())
             {
                 return new OwnedProcessScope(process, false, CreateWindowsJob(process));
             }
-            return new OwnedProcessScope(process, SetProcessGroup(process.Id, process.Id) == 0, IntPtr.Zero);
+            return new OwnedProcessScope(
+                process,
+                ownsUnixProcessGroup || SetProcessGroup(process.Id, process.Id) == 0,
+                IntPtr.Zero);
         }
 
         public void Terminate()
@@ -385,7 +428,10 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
                     _ = Kill(-processId, 9);
                 }
             }
-            CloseJob();
+            if (jobHandle != IntPtr.Zero)
+            {
+                _ = TerminateJobObject(jobHandle, 1);
+            }
             try
             {
                 if (!process.HasExited)
@@ -401,7 +447,7 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
         public void Dispose()
         {
-            Terminate();
+            CloseJob();
         }
 
         private void CloseJob()
@@ -421,20 +467,9 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             {
                 return IntPtr.Zero;
             }
-            var limits = new JobObjectExtendedLimitInformation
-            {
-                BasicLimitInformation = new JobObjectBasicLimitInformation
-                {
-                    LimitFlags = JobObjectLimitKillOnJobClose
-                }
-            };
-            var size = Marshal.SizeOf<JobObjectExtendedLimitInformation>();
-            var pointer = Marshal.AllocHGlobal(size);
             try
             {
-                Marshal.StructureToPtr(limits, pointer, false);
-                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformationClass, pointer, (uint)size)
-                    || !AssignProcessToJobObject(job, process.Handle))
+                if (!AssignProcessToJobObject(job, process.Handle))
                 {
                     _ = CloseHandle(job);
                     return IntPtr.Zero;
@@ -445,10 +480,6 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
             {
                 _ = CloseHandle(job);
                 return IntPtr.Zero;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(pointer);
             }
         }
 
@@ -463,55 +494,16 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetInformationJobObject(
-            IntPtr job,
-            uint informationClass,
-            IntPtr information,
-            uint informationLength);
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr handle);
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct JobObjectBasicLimitInformation
-        {
-            public long PerProcessUserTimeLimit;
-            public long PerJobUserTimeLimit;
-            public uint LimitFlags;
-            public UIntPtr MinimumWorkingSetSize;
-            public UIntPtr MaximumWorkingSetSize;
-            public uint ActiveProcessLimit;
-            public UIntPtr Affinity;
-            public uint PriorityClass;
-            public uint SchedulingClass;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct IoCounters
-        {
-            public ulong ReadOperationCount;
-            public ulong WriteOperationCount;
-            public ulong OtherOperationCount;
-            public ulong ReadTransferCount;
-            public ulong WriteTransferCount;
-            public ulong OtherTransferCount;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct JobObjectExtendedLimitInformation
-        {
-            public JobObjectBasicLimitInformation BasicLimitInformation;
-            public IoCounters IoInfo;
-            public UIntPtr ProcessMemoryLimit;
-            public UIntPtr JobMemoryLimit;
-            public UIntPtr PeakProcessMemoryUsed;
-            public UIntPtr PeakJobMemoryUsed;
-        }
     }
 
     private sealed class CaptureLimitException(string stream, int capBytes) : IOException

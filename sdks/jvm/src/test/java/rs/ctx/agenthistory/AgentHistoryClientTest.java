@@ -2,13 +2,19 @@ package rs.ctx.agenthistory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public final class AgentHistoryClientTest {
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && "--ctx-sdk-helper".equals(args[0])) {
+            runProcessHelper(java.util.Arrays.copyOfRange(args, 1, args.length));
+            return;
+        }
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
         acceptsCanonicalSearchFixture();
@@ -20,6 +26,9 @@ public final class AgentHistoryClientTest {
         omitsObsoleteRetrievalFields();
         rejectsNonCanonicalSearchResponses();
         rejectsOversizedLocalCliCapture();
+        exercisesAdversarialLocalCliCapture();
+        boundsInheritedPipeTeardown();
+        preservesSuccessfulLongLivedChild();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
@@ -357,6 +366,121 @@ public final class AgentHistoryClientTest {
             assertEquals(Integer.valueOf(stdoutCapBytes), error.details().get("capBytes"));
             assertAbsent(error.details(), "stdout");
             assertAbsent(error.details(), "stderr");
+        }
+    }
+
+    private static void exercisesAdversarialLocalCliCapture() {
+        LocalCliAdapter adapter = processAdapter(2_000);
+        String dual = adapter.execute(new AgentHistoryOperation("status", helperArgs("dual")));
+        assertEquals(Integer.valueOf(30 * 8192), Integer.valueOf(dual.length()));
+
+        long started = System.nanoTime();
+        try {
+            adapter.execute(new AgentHistoryOperation("status", helperArgs("stderr-first")));
+            throw new AssertionError("expected stderr capture limit");
+        } catch (CtxAgentHistoryException error) {
+            assertEquals("capture_limit", error.code());
+            assertEquals("stderr", error.details().get("stream"));
+        }
+        if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= 2_000) {
+            throw new AssertionError("stderr-first overflow exceeded bounded teardown");
+        }
+    }
+
+    private static void boundsInheritedPipeTeardown() throws Exception {
+        if (!hasSetsid()) return;
+        Path directory = Files.createTempDirectory("ctx-jvm-scope-");
+        Path alive = directory.resolve("child.alive");
+        Path pid = directory.resolve("child.pid");
+        long started = System.nanoTime();
+        try {
+            processAdapter(5_000).execute(new AgentHistoryOperation(
+                    "status", helperArgs("inherit", alive.toString(), pid.toString())));
+            throw new AssertionError("expected inherited-pipe failure");
+        } catch (CtxAgentHistoryException error) {
+            assertEquals("capture_failure", error.code());
+            assertEquals("pipe", error.details().get("stream"));
+        }
+        if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= 2_000) {
+            throw new AssertionError("inherited-pipe teardown exceeded its deadline");
+        }
+        Thread.sleep(700);
+        if (Files.exists(alive)) {
+            throw new AssertionError("owned inherited-handle descendant survived teardown");
+        }
+    }
+
+    private static void preservesSuccessfulLongLivedChild() throws Exception {
+        if (!hasSetsid()) return;
+        Path directory = Files.createTempDirectory("ctx-jvm-success-");
+        Path alive = directory.resolve("child.alive");
+        Path pid = directory.resolve("child.pid");
+        String output = processAdapter(2_000).execute(new AgentHistoryOperation(
+                "status", helperArgs("success-child", alive.toString(), pid.toString())));
+        assertEquals("{}", output);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!Files.exists(alive) && System.nanoTime() < deadline) Thread.sleep(10);
+        if (!Files.exists(alive)) {
+            throw new AssertionError("successful command terminated its long-lived child");
+        }
+        long childPID = Long.parseLong(new String(Files.readAllBytes(pid), StandardCharsets.UTF_8));
+        ProcessHandle.of(childPID).ifPresent(ProcessHandle::destroyForcibly);
+    }
+
+    private static LocalCliAdapter processAdapter(long timeoutMillis) {
+        return new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(Paths.get(System.getProperty("java.home"), "bin", "java").toString())
+                .timeoutMillis(timeoutMillis)
+                .build());
+    }
+
+    private static List<String> helperArgs(String mode, String... extra) {
+        List<String> args = new java.util.ArrayList<>();
+        args.add("-cp");
+        args.add(System.getProperty("java.class.path"));
+        args.add(AgentHistoryClientTest.class.getName());
+        args.add("--ctx-sdk-helper");
+        args.add(mode);
+        args.addAll(java.util.Arrays.asList(extra));
+        return args;
+    }
+
+    private static boolean hasSetsid() {
+        return Files.isExecutable(Paths.get("/usr/bin/setsid"))
+                || Files.isExecutable(Paths.get("/bin/setsid"));
+    }
+
+    private static void runProcessHelper(String[] args) throws Exception {
+        switch (args[0]) {
+            case "dual":
+                byte[] block = new byte[8192];
+                java.util.Arrays.fill(block, (byte) 'x');
+                for (int index = 0; index < 30; index++) {
+                    System.out.write(block);
+                    System.err.write(block);
+                }
+                return;
+            case "stderr-first":
+                System.err.write(new byte[256 * 1024 + 1]);
+                System.err.flush();
+                Thread.sleep(60_000);
+                return;
+            case "inherit":
+            case "success-child":
+                ProcessBuilder child = new ProcessBuilder(
+                        "/bin/sh", "-c", "echo $$ > \"$2\"; trap '' TERM; sleep .5; touch \"$1\"; sleep 60",
+                        "ctx-sdk", args[1], args[2]);
+                if ("inherit".equals(args[0])) {
+                    child.inheritIO();
+                } else {
+                    child.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+                    child.redirectError(ProcessBuilder.Redirect.DISCARD);
+                }
+                child.start();
+                if ("success-child".equals(args[0])) System.out.print("{}");
+                return;
+            default:
+                throw new IllegalArgumentException("unknown process helper mode: " + args[0]);
         }
     }
 

@@ -6,6 +6,7 @@ import stat
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 import inspect
 import typing
@@ -464,16 +465,15 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertIsInstance(raised.exception.cause, UnicodeDecodeError)
         self.assertIn("command", raised.exception.details)
 
-    def test_invalid_utf8_stderr_on_failed_cli_preserves_cli_error(self) -> None:
+    def test_invalid_utf8_stderr_on_failed_cli_raises_protocol_error(self) -> None:
         with fake_ctx(invalid_utf8_stderr=True) as cli:
             client = AgentHistoryClient.local(ctx_binary=str(cli))
 
-            with self.assertRaises(CtxAgentHistoryCliError) as raised:
+            with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
                 client.status()
 
-        self.assertEqual(raised.exception.code, "adapter_error")
-        self.assertEqual(raised.exception.exit_code, 42)
-        self.assertIn("\ufffd", raised.exception.stderr)
+        self.assertEqual(raised.exception.code, "decode_error")
+        self.assertEqual(raised.exception.message, "ctx returned invalid UTF-8")
 
     def test_invalid_utf8_ctx_version_returns_none(self) -> None:
         with fake_ctx(invalid_utf8=True) as cli:
@@ -523,6 +523,64 @@ class LocalCliAdapterTests(unittest.TestCase):
                 self.assertEqual(raised.exception.details["cap_bytes"], cap)
                 self.assertNotIn("stdout", raised.exception.details)
                 self.assertNotIn("stderr", raised.exception.details)
+
+        started = time.monotonic()
+        with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+            adapter._run(
+                [
+                    "-c",
+                    "import os,time; os.write(2, b'x'*(256*1024+1)); time.sleep(60)",
+                ]
+            )
+        self.assertEqual(raised.exception.details["stream"], "stderr")
+        self.assertLess(time.monotonic() - started, 2)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group lifecycle test")
+    def test_local_cli_kills_inherited_pipe_descendant_on_capture_failure(self) -> None:
+        adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=2))
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "child.pid"
+            started = time.monotonic()
+            with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                adapter._run(
+                    [
+                        "-c",
+                        "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)'],stdout=sys.stdout,stderr=sys.stderr); open(sys.argv[1],'w').write(str(child.pid))",
+                        str(pid_path),
+                    ]
+                )
+            self.assertEqual(raised.exception.details["stream"], "pipe")
+            self.assertLess(time.monotonic() - started, 2)
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            self._assert_process_exited(child_pid)
+
+    @unittest.skipIf(os.name == "nt", "POSIX detached-daemon lifecycle test")
+    def test_local_cli_success_does_not_kill_detached_child(self) -> None:
+        adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=2))
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "child.pid"
+            completed = adapter._run(
+                [
+                    "-c",
+                    "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); open(sys.argv[1],'w').write(str(child.pid)); print('{}')",
+                    str(pid_path),
+                ]
+            )
+            self.assertEqual(completed.stdout.strip(), "{}")
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            os.kill(child_pid, 0)
+            os.kill(child_pid, 9)
+            self._assert_process_exited(child_pid)
+
+    def _assert_process_exited(self, pid: int) -> None:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+        self.fail(f"owned process {pid} survived bounded teardown")
 
     def test_hosted_config_is_placeholder(self) -> None:
         client = AgentHistoryClient.hosted(HostedConfig(base_url="https://example.invalid"))
