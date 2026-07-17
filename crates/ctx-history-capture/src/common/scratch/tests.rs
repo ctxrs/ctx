@@ -14,6 +14,18 @@ mod tests {
         run
     }
 
+    fn scratch_run_entry_count(root: &Path) -> usize {
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("run-") || name.starts_with(".ctx-cleanup-run-")
+            })
+            .count()
+    }
+
     #[test]
     fn live_scratch_lease_is_not_scavenged() {
         let temp = tempfile::tempdir().unwrap();
@@ -37,12 +49,7 @@ mod tests {
         seed_next_run_id(&root, (MAX_SCAVENGE_RUNS + 8) as u64);
 
         let current = CaptureScratchSpace::create_in(root.clone(), "bounded").unwrap();
-        let runs = fs::read_dir(root)
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
-            .count();
-        assert_eq!(runs, 9);
+        assert_eq!(scratch_run_entry_count(&root), 9);
         assert!(current.path().exists());
     }
 
@@ -177,7 +184,7 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "freebsd")))]
     #[test]
-    fn unix_scratch_restore_collision_retains_a_bounded_empty_quarantine() {
+    fn unix_scratch_restore_collision_is_reclaimed_after_the_collision_clears() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("scratch");
         ensure_private_directory(&root).unwrap();
@@ -213,8 +220,8 @@ mod tests {
             cleanup_abandoned_scratch_run(&target, &mut cleanup_budget).unwrap(),
             ScratchCleanupOutcome::Complete
         );
-        assert!(quarantine.is_dir());
-        assert_eq!(fs::read_dir(&quarantine).unwrap().count(), 0);
+        assert!(!quarantine.exists());
+        assert_eq!(scratch_run_entry_count(&root), 0);
     }
 
     #[cfg(all(unix, not(target_os = "freebsd")))]
@@ -251,40 +258,84 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "freebsd")))]
     #[test]
-    fn unix_scratch_final_boundary_swap_never_deletes_an_unbound_name() {
+    fn unix_private_root_contract_removes_the_verified_empty_quarantine() {
+        use std::os::unix::fs::MetadataExt;
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("scratch");
         ensure_private_directory(&root).unwrap();
         let target = create_abandoned_run(&root, 0);
         let quarantine = scratch_quarantine_path(&target).unwrap();
-        let replacement = create_abandoned_run(&root, 1);
-        fs::write(replacement.join("sentinel"), b"must survive").unwrap();
-        let replacement_lease = open_private_regular_file(&replacement.join(LEASE_NAME)).unwrap();
-        FileExt::lock_exclusive(&replacement_lease).unwrap();
         let run = UnixScratchRun::open(&target).unwrap();
         let target_lease = run.open_lease().unwrap().unwrap();
         FileExt::lock_exclusive(&target_lease).unwrap();
-        let moved_target = root.join("final-boundary-original");
-        inject_unix_scratch_final_boundary_swap_once(moved_target.clone(), replacement);
         let mut budget = ScratchCleanupBudget::new();
 
-        let error = remove_anchored_scratch_run(
-            &run,
-            &target,
-            UnixScratchRunLocation::Canonical,
-            &mut budget,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("quarantine retained"));
-        assert!(moved_target.is_dir());
+        // The checked name-based final rmdir relies on this same-user 0700 root. Symlinks,
+        // non-owned entries, and identity changes before rmdir remain rejected.
+        assert_eq!(fs::metadata(&root).unwrap().mode() & 0o077, 0);
         assert_eq!(
-            fs::read(quarantine.join("sentinel")).unwrap(),
-            b"must survive"
+            remove_anchored_scratch_run(
+                &run,
+                &target,
+                UnixScratchRunLocation::Canonical,
+                &mut budget,
+            )
+            .unwrap(),
+            ScratchCleanupOutcome::Complete
         );
+
         assert!(!target.exists());
+        assert!(!quarantine.exists());
+        assert_eq!(run.directory_link_count().unwrap(), 0);
         FileExt::unlock(&target_lease).unwrap();
-        FileExt::unlock(&replacement_lease).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_file_cleanup_resumes_at_the_same_cursor_and_converges() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = run_path(&root, 0);
+        let quarantine = scratch_quarantine_path(&target).unwrap();
+        create_private_directory(&target).unwrap();
+        let payload_path = target.join("oversized.bin");
+        let payload = create_private_file(&payload_path).unwrap();
+        let truncate_step = 1024_u64;
+        let initial_bytes = truncate_step * 3;
+        payload.set_len(initial_bytes).unwrap();
+        drop(payload);
+        let max_bytes = SCRATCH_DELETE_ROW_OVERHEAD_BYTES + truncate_step;
+
+        let first_budget = ScratchCleanupBudget::with_max_bytes_for_test(max_bytes);
+        scavenge_abandoned_runs_with_budget(&root, 1, first_budget).unwrap();
+
+        assert_eq!(
+            fs::metadata(&payload_path).unwrap().len(),
+            initial_bytes - truncate_step
+        );
+        let mut state_file = open_or_create_private_control_file(&root, SWEEP_STATE_NAME).unwrap();
+        assert_eq!(read_sweep_state(&mut state_file, 2).unwrap().cursor, 0);
+        assert_eq!(scratch_run_entry_count(&root), 1);
+        drop(state_file);
+
+        let mut converged = false;
+        for _ in 0..4 {
+            let budget = ScratchCleanupBudget::with_max_bytes_for_test(max_bytes);
+            scavenge_abandoned_runs_with_budget(&root, 1, budget).unwrap();
+            let mut state_file =
+                open_or_create_private_control_file(&root, SWEEP_STATE_NAME).unwrap();
+            if read_sweep_state(&mut state_file, 2).unwrap().cursor == 2 {
+                converged = true;
+                break;
+            }
+        }
+
+        assert!(converged);
+        assert!(!target.exists());
+        assert!(!quarantine.exists());
+        assert_eq!(scratch_run_entry_count(&root), 0);
     }
 
     #[cfg(unix)]

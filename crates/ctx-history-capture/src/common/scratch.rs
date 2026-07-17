@@ -45,6 +45,7 @@ struct ScratchCleanupBudget {
     pages: usize,
     operations: u64,
     bytes: u64,
+    max_bytes: u64,
 }
 
 impl ScratchCleanupBudget {
@@ -54,6 +55,18 @@ impl ScratchCleanupBudget {
             pages: 0,
             operations: 0,
             bytes: 0,
+            max_bytes: SCRATCH_CLEANUP_MAX_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_max_bytes_for_test(max_bytes: u64) -> Self {
+        Self {
+            started: Instant::now(),
+            pages: 0,
+            operations: 0,
+            bytes: 0,
+            max_bytes,
         }
     }
 
@@ -75,7 +88,7 @@ impl ScratchCleanupBudget {
     }
 
     fn remaining_bytes(&self) -> u64 {
-        SCRATCH_CLEANUP_MAX_BYTES.saturating_sub(self.bytes)
+        self.max_bytes.saturating_sub(self.bytes)
     }
 
     fn reserve_entry(&mut self, bytes: u64) -> bool {
@@ -83,7 +96,7 @@ impl ScratchCleanupBudget {
             .operations
             .saturating_add(SCRATCH_CLEANUP_ENTRY_OPERATIONS)
             > SCRATCH_CLEANUP_MAX_OPERATIONS
-            || self.bytes.saturating_add(bytes) > SCRATCH_CLEANUP_MAX_BYTES
+            || self.bytes.saturating_add(bytes) > self.max_bytes
             || self.started.elapsed() >= SCRATCH_CLEANUP_MAX_ELAPSED
         {
             return false;
@@ -336,6 +349,14 @@ fn write_sweep_state(file: &mut File, state: SweepState) -> io::Result<()> {
 }
 
 fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
+    scavenge_abandoned_runs_with_budget(root, current_run_id, ScratchCleanupBudget::new())
+}
+
+fn scavenge_abandoned_runs_with_budget(
+    root: &Path,
+    current_run_id: u64,
+    mut cleanup_budget: ScratchCleanupBudget,
+) -> io::Result<()> {
     let next_run_id = current_run_id
         .checked_add(1)
         .ok_or_else(|| io::Error::other("capture scratch run ID space is exhausted"))?;
@@ -349,7 +370,6 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
     }
 
     let mut inspected = 0usize;
-    let mut cleanup_budget = ScratchCleanupBudget::new();
     while inspected < MAX_SCAVENGE_RUNS && state.cursor < state.highwater {
         let run_id = state.cursor;
         if run_id == current_run_id {
@@ -675,10 +695,12 @@ impl UnixScratchRun {
         }
         let stream = UnixDirectoryStream(stream);
         let mut removed = 0usize;
+        let mut exhausted = false;
         while removed < SCRATCH_DELETE_FILES_PER_PAGE {
             pace_filesystem_path(path);
             let entry = unsafe { libc::readdir(stream.0) };
             if entry.is_null() {
+                exhausted = true;
                 break;
             }
             let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
@@ -759,7 +781,7 @@ impl UnixScratchRun {
             removed += 1;
         }
         drop(stream);
-        if removed > 0 {
+        if removed > 0 && !exhausted {
             self.revalidate(path)?;
             return Ok(ScratchCleanupPageOutcome::Progress);
         }
@@ -916,9 +938,30 @@ impl UnixScratchRun {
         }
         #[cfg(not(target_os = "freebsd"))]
         {
-            maybe_swap_unix_scratch_at_final_boundary(canonical_path)?;
+            use std::os::unix::io::AsRawFd;
+
+            // The scratch root is same-user 0700 state. We reject links and revalidate the
+            // anchored empty directory immediately before this checked name-based rmdir. A
+            // malicious same-UID process racing names inside that private root is outside the
+            // isolation boundary; the link-count postcondition still detects a lost identity.
+            pace_filesystem_path(canonical_path);
             if self.identity_at(quarantine)? != self.identity {
                 return Err(scratch_directory_changed_error());
+            }
+            if unsafe {
+                libc::unlinkat(
+                    self.parent.as_raw_fd(),
+                    quarantine.as_ptr(),
+                    libc::AT_REMOVEDIR,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if self.directory_link_count()? != 0 {
+                return Err(io::Error::other(
+                    "capture scratch finalization removed an unexpected directory identity",
+                ));
             }
         }
         Ok(true)
@@ -1191,9 +1234,11 @@ impl WindowsScratchRun {
         pace_filesystem_path(path);
         let mut entries = fs::read_dir(path)?;
         let mut removed = 0usize;
+        let mut exhausted = false;
         while removed < SCRATCH_DELETE_FILES_PER_PAGE {
             pace_filesystem_path(path);
             let Some(entry) = entries.next() else {
+                exhausted = true;
                 break;
             };
             let entry = entry?;
@@ -1246,7 +1291,7 @@ impl WindowsScratchRun {
             removed += 1;
         }
         drop(entries);
-        if removed > 0 {
+        if removed > 0 && !exhausted {
             self.revalidate(path)?;
             return Ok(ScratchCleanupPageOutcome::Progress);
         }
@@ -1393,44 +1438,6 @@ fn maybe_fail_unix_scratch_finalization(
     _point: UnixScratchFinalizationFailurePoint,
     _canonical_path: &Path,
 ) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(all(test, unix, not(target_os = "freebsd")))]
-struct UnixScratchFinalBoundarySwap {
-    moved_path: PathBuf,
-    replacement_path: PathBuf,
-}
-
-#[cfg(all(test, unix, not(target_os = "freebsd")))]
-thread_local! {
-    static UNIX_SCRATCH_FINAL_BOUNDARY_SWAP_ONCE: std::cell::RefCell<Option<UnixScratchFinalBoundarySwap>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-#[cfg(all(test, unix, not(target_os = "freebsd")))]
-fn inject_unix_scratch_final_boundary_swap_once(moved_path: PathBuf, replacement_path: PathBuf) {
-    UNIX_SCRATCH_FINAL_BOUNDARY_SWAP_ONCE.with(|slot| {
-        *slot.borrow_mut() = Some(UnixScratchFinalBoundarySwap {
-            moved_path,
-            replacement_path,
-        });
-    });
-}
-
-#[cfg(all(test, unix, not(target_os = "freebsd")))]
-fn maybe_swap_unix_scratch_at_final_boundary(path: &Path) -> io::Result<()> {
-    let swap = UNIX_SCRATCH_FINAL_BOUNDARY_SWAP_ONCE.with(|slot| slot.borrow_mut().take());
-    let Some(swap) = swap else {
-        return Ok(());
-    };
-    fs::rename(path, swap.moved_path)?;
-    fs::rename(swap.replacement_path, path)
-}
-
-#[cfg(all(unix, not(target_os = "freebsd"), not(test)))]
-fn maybe_swap_unix_scratch_at_final_boundary(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
