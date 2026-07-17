@@ -76,9 +76,7 @@ impl CaptureScratchSpace {
             return;
         };
         if let Some(lease) = self.lease.take() {
-            let _ = cleanup_owned_scratch_run(&self.path, &lease);
-            let _ = FileExt::unlock(&lease);
-            drop(lease);
+            let _ = cleanup_owned_scratch_run(&self.path, lease);
         }
     }
 }
@@ -291,21 +289,24 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn cleanup_owned_scratch_run(path: &Path, lease: &File) -> io::Result<()> {
+fn cleanup_owned_scratch_run(path: &Path, lease: File) -> io::Result<()> {
     let run = UnixScratchRun::open(path)?;
-    run.validate_held_lease(lease)?;
-    remove_anchored_scratch_run(&run, path)
+    run.validate_held_lease(&lease)?;
+    let removal = remove_anchored_scratch_run(&run, path, UnixScratchRunLocation::Canonical);
+    let unlock = FileExt::unlock(&lease);
+    removal?;
+    unlock
 }
 
 #[cfg(windows)]
-fn cleanup_owned_scratch_run(path: &Path, lease: &File) -> io::Result<()> {
+fn cleanup_owned_scratch_run(path: &Path, lease: File) -> io::Result<()> {
     let run = WindowsScratchRun::open(path)?;
-    run.validate_held_lease(path, lease)?;
-    remove_anchored_scratch_run(&run, path)
+    run.validate_held_lease(path, &lease)?;
+    remove_anchored_scratch_run(&run, path, Some(lease))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn cleanup_owned_scratch_run(_path: &Path, _lease: &File) -> io::Result<()> {
+fn cleanup_owned_scratch_run(_path: &Path, _lease: File) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "private capture scratch is unsupported on this platform",
@@ -314,14 +315,35 @@ fn cleanup_owned_scratch_run(_path: &Path, _lease: &File) -> io::Result<()> {
 
 #[cfg(unix)]
 fn cleanup_abandoned_scratch_run(path: &Path) -> io::Result<bool> {
+    let quarantine_path = scratch_quarantine_path(path)?;
+    let recovered_quarantine = match cleanup_abandoned_unix_scratch_run(
+        &quarantine_path,
+        UnixScratchRunLocation::Quarantined,
+    ) {
+        Ok(true) => true,
+        Ok(false) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    match cleanup_abandoned_unix_scratch_run(path, UnixScratchRunLocation::Canonical) {
+        Err(error) if recovered_quarantine && error.kind() == io::ErrorKind::NotFound => Ok(true),
+        outcome => outcome,
+    }
+}
+
+#[cfg(unix)]
+fn cleanup_abandoned_unix_scratch_run(
+    path: &Path,
+    location: UnixScratchRunLocation,
+) -> io::Result<bool> {
     let run = UnixScratchRun::open(path)?;
     let Some(lease) = run.open_lease()? else {
-        remove_anchored_scratch_run(&run, path)?;
+        remove_anchored_scratch_run(&run, path, location)?;
         return Ok(true);
     };
     match FileExt::try_lock_exclusive(&lease) {
         Ok(()) => {
-            let removal = remove_anchored_scratch_run(&run, path);
+            let removal = remove_anchored_scratch_run(&run, path, location);
             let unlock = FileExt::unlock(&lease);
             removal?;
             unlock?;
@@ -336,17 +358,11 @@ fn cleanup_abandoned_scratch_run(path: &Path) -> io::Result<bool> {
 fn cleanup_abandoned_scratch_run(path: &Path) -> io::Result<bool> {
     let run = WindowsScratchRun::open(path)?;
     let Some(lease) = run.open_lease(path)? else {
-        remove_anchored_scratch_run(&run, path)?;
+        remove_anchored_scratch_run(&run, path, None)?;
         return Ok(true);
     };
     match FileExt::try_lock_exclusive(&lease) {
-        Ok(()) => {
-            let removal = remove_anchored_scratch_run(&run, path);
-            let unlock = FileExt::unlock(&lease);
-            removal?;
-            unlock?;
-            Ok(true)
-        }
+        Ok(()) => remove_anchored_scratch_run(&run, path, Some(lease)).map(|()| true),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
         Err(error) => Err(error),
     }
@@ -361,9 +377,13 @@ fn cleanup_abandoned_scratch_run(_path: &Path) -> io::Result<bool> {
 }
 
 #[cfg(unix)]
-fn remove_anchored_scratch_run(run: &UnixScratchRun, path: &Path) -> io::Result<()> {
+fn remove_anchored_scratch_run(
+    run: &UnixScratchRun,
+    path: &Path,
+    location: UnixScratchRunLocation,
+) -> io::Result<()> {
     loop {
-        if run.remove_page(path)? {
+        if run.remove_page(path, location)? {
             return Ok(());
         }
         std::thread::yield_now();
@@ -371,13 +391,25 @@ fn remove_anchored_scratch_run(run: &UnixScratchRun, path: &Path) -> io::Result<
 }
 
 #[cfg(windows)]
-fn remove_anchored_scratch_run(run: &WindowsScratchRun, path: &Path) -> io::Result<()> {
+fn remove_anchored_scratch_run(
+    run: &WindowsScratchRun,
+    path: &Path,
+    lease: Option<File>,
+) -> io::Result<()> {
     loop {
-        if run.remove_page(path)? {
-            return Ok(());
+        if run.remove_non_lease_page(path)? {
+            break;
         }
         std::thread::yield_now();
     }
+    run.finalize(path, lease)
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnixScratchRunLocation {
+    Canonical,
+    Quarantined,
 }
 
 #[cfg(any(unix, windows))]
@@ -497,7 +529,7 @@ impl UnixScratchRun {
         Ok(file)
     }
 
-    fn remove_page(&self, path: &Path) -> io::Result<bool> {
+    fn remove_page(&self, path: &Path, location: UnixScratchRunLocation) -> io::Result<bool> {
         use std::os::unix::{ffi::OsStrExt, io::AsRawFd, io::IntoRawFd};
 
         self.revalidate(path)?;
@@ -562,7 +594,10 @@ impl UnixScratchRun {
             self.revalidate(path)?;
             return Ok(false);
         }
-        self.finalize(path)
+        match location {
+            UnixScratchRunLocation::Canonical => self.finalize_canonical(path),
+            UnixScratchRunLocation::Quarantined => self.finalize_quarantined(path, &self.name),
+        }
     }
 
     fn revalidate(&self, path: &Path) -> io::Result<()> {
@@ -622,56 +657,127 @@ impl UnixScratchRun {
         Ok(directory)
     }
 
-    fn finalize(&self, path: &Path) -> io::Result<bool> {
-        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt, io::AsRawFd};
-
-        self.revalidate(path)?;
-        let quarantine =
-            std::ffi::CString::new(format!(".ctx-cleanup-{}", uuid::Uuid::new_v4().simple()))
-                .map_err(|_| io::Error::other("capture scratch quarantine name is invalid"))?;
-        let quarantine_path =
-            path.with_file_name(std::ffi::OsStr::from_bytes(quarantine.as_bytes()));
-        pace_filesystem_path(&quarantine_path);
-        rename_scratch_entry_no_replace(self.parent.as_raw_fd(), &self.name, &quarantine)?;
-        if self.identity_at(&quarantine)? != self.identity {
-            let restore = unsafe {
-                libc::renameat(
-                    self.parent.as_raw_fd(),
-                    quarantine.as_ptr(),
-                    self.parent.as_raw_fd(),
-                    self.name.as_ptr(),
-                )
-            };
-            if restore != 0 {
-                return Err(io::Error::other(format!(
-                    "capture scratch finalization found a substituted run and could not restore it: {}",
-                    io::Error::last_os_error()
-                )));
-            }
-            return Err(scratch_directory_changed_error());
-        }
-        if self.identity_at(&quarantine)? != self.identity {
-            return Err(scratch_directory_changed_error());
-        }
-        maybe_swap_scratch_before_final_unlink(&quarantine_path)?;
-        pace_filesystem_path(&quarantine_path);
-        if unsafe {
-            libc::unlinkat(
-                self.parent.as_raw_fd(),
-                quarantine.as_ptr(),
-                libc::AT_REMOVEDIR,
-            )
-        } != 0
+    fn finalize_canonical(&self, path: &Path) -> io::Result<bool> {
+        #[cfg(target_os = "freebsd")]
         {
-            return Err(io::Error::last_os_error());
+            return self.finalize_quarantined(path, &self.name);
         }
-        crate::pace_current_filesystem_operation(0);
-        if self.directory.metadata()?.nlink() != 0 {
+
+        #[cfg(not(target_os = "freebsd"))]
+        {
+            use std::os::unix::io::AsRawFd;
+
+            self.revalidate(path)?;
+            // A deterministic quarantine keeps interrupted cleanup reachable by the run-ID sweep.
+            let quarantine_path = scratch_quarantine_path(path)?;
+            let quarantine = path_component_cstring(&quarantine_path)?;
+            pace_filesystem_path(&quarantine_path);
+            rename_scratch_entry_no_replace(self.parent.as_raw_fd(), &self.name, &quarantine)?;
+            let finalization = (|| {
+                maybe_fail_unix_scratch_finalization(
+                    UnixScratchFinalizationFailurePoint::AfterRename,
+                    path,
+                )?;
+                self.finalize_quarantined(&quarantine_path, &quarantine)
+            })();
+            let Err(finalization_error) = finalization else {
+                return Ok(true);
+            };
+            match self.directory_link_count() {
+                Ok(0) => return Err(finalization_error),
+                Ok(_) => {}
+                Err(identity_error) => {
+                    return Err(io::Error::other(format!(
+                    "capture scratch finalization failed ({finalization_error}); quarantine retained at {} because anchored identity could not be revalidated ({identity_error})",
+                    quarantine_path.display()
+                )));
+                }
+            }
+            if let Err(restore_error) = self.restore_quarantine(path, &quarantine) {
+                return Err(io::Error::other(format!(
+                "capture scratch finalization failed ({finalization_error}); quarantine retained at {} for bounded cleanup ({restore_error})",
+                quarantine_path.display()
+            )));
+            }
+            Err(finalization_error)
+        }
+    }
+
+    fn finalize_quarantined(
+        &self,
+        canonical_path: &Path,
+        quarantine: &std::ffi::CStr,
+    ) -> io::Result<bool> {
+        if self.identity_at(quarantine)? != self.identity {
+            return Err(scratch_directory_changed_error());
+        }
+        maybe_fail_unix_scratch_finalization(
+            UnixScratchFinalizationFailurePoint::AfterFirstIdentityCheck,
+            canonical_path,
+        )?;
+        if self.identity_at(quarantine)? != self.identity {
+            return Err(scratch_directory_changed_error());
+        }
+        maybe_fail_unix_scratch_finalization(
+            UnixScratchFinalizationFailurePoint::AfterSecondIdentityCheck,
+            canonical_path,
+        )?;
+        maybe_fail_unix_scratch_finalization(
+            UnixScratchFinalizationFailurePoint::BeforeUnlink,
+            canonical_path,
+        )?;
+        self.unlink_anchored_directory(canonical_path, quarantine)?;
+        maybe_fail_unix_scratch_finalization(
+            UnixScratchFinalizationFailurePoint::AfterUnlink,
+            canonical_path,
+        )?;
+        if self.directory_link_count()? != 0 {
             return Err(io::Error::other(
                 "capture scratch finalization did not unlink the anchored run",
             ));
         }
         Ok(true)
+    }
+
+    fn unlink_anchored_directory(&self, path: &Path, name: &std::ffi::CStr) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+
+        pace_filesystem_path(path);
+        #[cfg(target_os = "freebsd")]
+        let status = freebsd_unlink_anchored_directory(
+            self.parent.as_raw_fd(),
+            name,
+            self.directory.as_raw_fd(),
+        )?;
+        #[cfg(not(target_os = "freebsd"))]
+        let status =
+            unsafe { libc::unlinkat(self.parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "freebsd"))]
+    fn restore_quarantine(
+        &self,
+        canonical_path: &Path,
+        quarantine: &std::ffi::CStr,
+    ) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+
+        if self.identity_at(quarantine)? != self.identity {
+            return Err(scratch_directory_changed_error());
+        }
+        rename_scratch_entry_no_replace(self.parent.as_raw_fd(), quarantine, &self.name)?;
+        self.revalidate(canonical_path)
+    }
+
+    fn directory_link_count(&self) -> io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+
+        crate::pace_current_filesystem_operation(0);
+        Ok(self.directory.metadata()?.nlink())
     }
 
     fn identity_at(&self, name: &std::ffi::CStr) -> io::Result<ScratchDirectoryIdentity> {
@@ -715,7 +821,7 @@ impl Drop for UnixDirectoryStream {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "freebsd")))]
 fn rename_scratch_entry_no_replace(
     parent: std::os::unix::io::RawFd,
     source: &std::ffi::CStr,
@@ -728,29 +834,110 @@ fn rename_scratch_entry_no_replace(
             .len()
             .saturating_add(destination.to_bytes().len()) as u64,
     );
-    let mut metadata = std::mem::MaybeUninit::<libc::stat>::zeroed();
-    let destination_status = unsafe {
-        libc::fstatat(
+
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent,
+            source.as_ptr(),
             parent,
             destination.as_ptr(),
-            metadata.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
+            libc::RENAME_NOREPLACE,
+        ) as libc::c_int
+    };
+    #[cfg(target_os = "android")]
+    let status = unsafe {
+        libc::renameat2(
+            parent,
+            source.as_ptr(),
+            parent,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
         )
     };
-    if destination_status == 0 {
+    #[cfg(target_os = "macos")]
+    let status = unsafe {
+        libc::renameatx_np(
+            parent,
+            source.as_ptr(),
+            parent,
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace scratch cleanup is unsupported on this Unix platform",
+        ))
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn freebsd_unlink_anchored_directory(
+    parent: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+    directory: std::os::unix::io::RawFd,
+) -> io::Result<libc::c_int> {
+    // funlinkat appeared in FreeBSD 13. Dynamic lookup keeps older binaries loadable and fail-closed.
+    type FunlinkAt = unsafe extern "C" fn(
+        libc::c_int,
+        *const libc::c_char,
+        libc::c_int,
+        libc::c_int,
+    ) -> libc::c_int;
+
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"funlinkat".as_ptr()) };
+    if symbol.is_null() {
         return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "capture scratch quarantine already exists",
+            io::ErrorKind::Unsupported,
+            "identity-conditional scratch cleanup requires FreeBSD 13 or newer",
         ));
     }
-    let destination_error = io::Error::last_os_error();
-    if destination_error.kind() != io::ErrorKind::NotFound {
-        return Err(destination_error);
-    }
-    if unsafe { libc::renameat(parent, source.as_ptr(), parent, destination.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    let funlinkat = unsafe { std::mem::transmute::<*mut libc::c_void, FunlinkAt>(symbol) };
+    Ok(unsafe { funlinkat(parent, name.as_ptr(), directory, libc::AT_REMOVEDIR) })
+}
+
+#[cfg(unix)]
+fn scratch_quarantine_path(path: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "capture scratch run has no directory name",
+        )
+    })?;
+    let mut quarantine = b".ctx-cleanup-".to_vec();
+    quarantine.extend_from_slice(name.as_bytes());
+    Ok(path.with_file_name(std::ffi::OsString::from_vec(quarantine)))
+}
+
+#[cfg(all(unix, not(target_os = "freebsd")))]
+fn path_component_cstring(path: &Path) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "capture scratch path has no directory name",
+        )
+    })?;
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "capture scratch path contains an invalid byte",
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -799,7 +986,21 @@ impl WindowsScratchRun {
         Ok(())
     }
 
-    fn remove_page(&self, path: &Path) -> io::Result<bool> {
+    fn open_lease_for_cleanup(&self, path: &Path, lease: &File) -> io::Result<File> {
+        self.revalidate(path)?;
+        let cleanup = open_existing_file_for_cleanup(&path.join(LEASE_NAME))?;
+        validate_private_file_handle(&cleanup)?;
+        if scratch_handle_identity(&cleanup)? != scratch_handle_identity(lease)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture scratch lease changed identity before finalization",
+            ));
+        }
+        self.revalidate(path)?;
+        Ok(cleanup)
+    }
+
+    fn remove_non_lease_page(&self, path: &Path) -> io::Result<bool> {
         self.revalidate(path)?;
         pace_filesystem_path(path);
         let mut entries = fs::read_dir(path)?;
@@ -810,6 +1011,9 @@ impl WindowsScratchRun {
                 break;
             };
             let entry = entry?;
+            if entry.file_name() == OsStr::new(LEASE_NAME) {
+                continue;
+            }
             let entry_path = entry.path();
             self.revalidate(path)?;
             let file = open_existing_file_for_cleanup(&entry_path)?;
@@ -832,10 +1036,61 @@ impl WindowsScratchRun {
             self.revalidate(path)?;
             return Ok(false);
         }
+        Ok(true)
+    }
+
+    fn finalize(&self, path: &Path, lease: Option<File>) -> io::Result<()> {
+        self.revalidate(path)?;
+        if let Some(lease) = lease {
+            // Owner leases lack DELETE access, so validate a second handle before releasing it.
+            let cleanup_lease = self.open_lease_for_cleanup(path, &lease)?;
+            self.verify_children(path, true)?;
+
+            FileExt::unlock(&lease)?;
+            drop(lease);
+            let lease_deletion = delete_windows_handle(&cleanup_lease);
+            drop(cleanup_lease);
+            lease_deletion?;
+        }
+
+        self.revalidate(path)?;
+        self.verify_children(path, false)?;
         self.revalidate(path)?;
         pace_filesystem_path(path);
-        delete_windows_handle(&self.directory)?;
-        Ok(true)
+        delete_windows_handle(&self.directory)
+    }
+
+    fn verify_children(&self, path: &Path, expect_lease: bool) -> io::Result<()> {
+        self.revalidate(path)?;
+        pace_filesystem_path(path);
+        let mut entries = fs::read_dir(path)?;
+        let mut saw_lease = false;
+        for _ in 0..2 {
+            pace_filesystem_path(path);
+            let Some(entry) = entries.next() else {
+                self.revalidate(path)?;
+                if expect_lease && !saw_lease {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "capture scratch lease disappeared during finalization",
+                    ));
+                }
+                return Ok(());
+            };
+            let entry = entry?;
+            if expect_lease && !saw_lease && entry.file_name() == OsStr::new(LEASE_NAME) {
+                saw_lease = true;
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::DirectoryNotEmpty,
+                "capture scratch run changed while finalizing cleanup",
+            ));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::DirectoryNotEmpty,
+            "capture scratch run changed while finalizing cleanup",
+        ))
     }
 
     fn revalidate(&self, path: &Path) -> io::Result<()> {
@@ -858,41 +1113,71 @@ fn scratch_directory_changed_error() -> io::Error {
     )
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnixScratchFinalizationFailurePoint {
+    #[cfg(not(target_os = "freebsd"))]
+    AfterRename,
+    AfterFirstIdentityCheck,
+    AfterSecondIdentityCheck,
+    BeforeUnlink,
+    AfterUnlink,
+}
+
 #[cfg(all(test, unix))]
-struct ScratchFinalizationSwap {
-    moved_path: PathBuf,
-    replacement_path: PathBuf,
+struct UnixScratchFinalizationFailure {
+    point: UnixScratchFinalizationFailurePoint,
+    create_restore_collision: bool,
 }
 
 #[cfg(all(test, unix))]
 thread_local! {
-    static SCRATCH_FINALIZATION_SWAP_ONCE: std::cell::RefCell<Option<ScratchFinalizationSwap>> = const {
+    static UNIX_SCRATCH_FINALIZATION_FAILURE_ONCE: std::cell::RefCell<Option<UnixScratchFinalizationFailure>> = const {
         std::cell::RefCell::new(None)
     };
 }
 
 #[cfg(all(test, unix))]
-fn inject_scratch_finalization_swap_once(moved_path: PathBuf, replacement_path: PathBuf) {
-    SCRATCH_FINALIZATION_SWAP_ONCE.with(|slot| {
-        *slot.borrow_mut() = Some(ScratchFinalizationSwap {
-            moved_path,
-            replacement_path,
+fn inject_unix_scratch_finalization_failure_once(
+    point: UnixScratchFinalizationFailurePoint,
+    create_restore_collision: bool,
+) {
+    UNIX_SCRATCH_FINALIZATION_FAILURE_ONCE.with(|slot| {
+        *slot.borrow_mut() = Some(UnixScratchFinalizationFailure {
+            point,
+            create_restore_collision,
         });
     });
 }
 
 #[cfg(all(test, unix))]
-fn maybe_swap_scratch_before_final_unlink(path: &Path) -> io::Result<()> {
-    let swap = SCRATCH_FINALIZATION_SWAP_ONCE.with(|slot| slot.borrow_mut().take());
-    let Some(swap) = swap else {
+fn maybe_fail_unix_scratch_finalization(
+    point: UnixScratchFinalizationFailurePoint,
+    canonical_path: &Path,
+) -> io::Result<()> {
+    let failure = UNIX_SCRATCH_FINALIZATION_FAILURE_ONCE.with(|slot| {
+        if slot.borrow().as_ref().map(|failure| failure.point) == Some(point) {
+            slot.borrow_mut().take()
+        } else {
+            None
+        }
+    });
+    let Some(failure) = failure else {
         return Ok(());
     };
-    fs::rename(path, &swap.moved_path)?;
-    fs::rename(swap.replacement_path, path)
+    if failure.create_restore_collision {
+        create_private_directory(canonical_path)?;
+    }
+    Err(io::Error::other(format!(
+        "injected capture scratch finalization failure at {point:?}"
+    )))
 }
 
 #[cfg(all(unix, not(test)))]
-fn maybe_swap_scratch_before_final_unlink(_path: &Path) -> io::Result<()> {
+fn maybe_fail_unix_scratch_finalization(
+    _point: UnixScratchFinalizationFailurePoint,
+    _canonical_path: &Path,
+) -> io::Result<()> {
     Ok(())
 }
 
