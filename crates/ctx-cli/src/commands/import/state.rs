@@ -1,4 +1,8 @@
 const PENDING_REASON_REPAIR_BATCH_ROWS: usize = 512;
+const PROVIDER_SESSION_REPAIR_BATCH_ROWS: usize = 128;
+const PROVIDER_SESSION_REPAIR_BATCH_BYTES: usize = 512 * 1024;
+const PROVIDER_SESSION_REPAIR_SQLITE_TIME: std::time::Duration =
+    std::time::Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ImportMaintenanceProgress {
@@ -12,6 +16,29 @@ pub(crate) fn repair_import_maintenance(
 ) -> Result<ImportMaintenanceProgress> {
     let mut aggregate = ImportMaintenanceProgress::default();
     loop {
+        let (provider_session_rows, _, provider_sessions_complete) = store
+            .repair_provider_session_duplicates(
+                PROVIDER_SESSION_REPAIR_BATCH_ROWS,
+                PROVIDER_SESSION_REPAIR_BATCH_BYTES,
+                PROVIDER_SESSION_REPAIR_SQLITE_TIME,
+            )?;
+        aggregate.processed_rows = aggregate
+            .processed_rows
+            .saturating_add(provider_session_rows);
+        if !provider_sessions_complete {
+            aggregate.complete = false;
+            if policy != ImportExecutionPolicy::Drain {
+                return Ok(aggregate);
+            }
+            if provider_session_rows == 0 {
+                return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                    "provider-session repair made no progress",
+                )));
+            }
+            std::thread::yield_now();
+            continue;
+        }
+
         let progress = store.repair_import_pending_reasons(PENDING_REASON_REPAIR_BATCH_ROWS)?;
         let mut processed_rows = progress.processed_rows;
         let bulk_complete = if progress.complete
@@ -33,6 +60,7 @@ pub(crate) fn repair_import_maintenance(
                 "import maintenance made no progress",
             )));
         }
+        std::thread::yield_now();
     }
 }
 
