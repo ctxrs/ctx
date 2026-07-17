@@ -7,6 +7,61 @@ fn tempdir() -> tempfile::TempDir {
         .unwrap()
 }
 
+fn finalized_source_import_preinventory(
+    store: &Store,
+    source: &SourceInfo,
+) -> (Vec<SourceImportFile>, u64) {
+    let inventory = inventory_import_sources(store, vec![source.clone()], false).unwrap();
+    assert!(inventory.failures.is_empty());
+    let planned = inventory
+        .sources
+        .iter()
+        .find(|planned| planned.source.path == source.path)
+        .expect("bounded inventory must return the requested source");
+    let inventory_generation = match &planned.preinventory {
+        SourcePreinventory::SourceImportFiles {
+            inventory_generation,
+            ..
+        } => *inventory_generation,
+        other => panic!("unexpected source import inventory: {other:?}"),
+    };
+    let source_root = source.path.to_str().unwrap();
+    assert!(store
+        .source_import_inventory_generation_is_complete(
+            source.provider,
+            source_root,
+            inventory_generation,
+        )
+        .unwrap());
+    let files = store
+        .list_pending_source_import_files(source.provider, source_root)
+        .unwrap();
+    (files, inventory_generation)
+}
+
+fn schedule_single_source_import_rescan(
+    store: &Store,
+    source: &SourceInfo,
+) -> (SourceImportFile, u64) {
+    let (_, inventory_generation) = finalized_source_import_preinventory(store, source);
+    let source_root = source.path.to_str().unwrap();
+    assert_eq!(
+        store
+            .schedule_source_import_explicit_rescan(
+                source.provider,
+                source_root,
+                inventory_generation,
+            )
+            .unwrap(),
+        1
+    );
+    let mut files = store
+        .list_pending_source_import_files(source.provider, source_root)
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    (files.remove(0), inventory_generation)
+}
+
 #[test]
 fn append_completeness_probe_rejects_oversized_unterminated_line_at_limit() {
     let temp = tempdir();
@@ -123,21 +178,30 @@ fn fresh_new_batch_commits_stable_sibling_and_defers_missing_path() {
     fs::remove_file(source_path.join("z-retry.jsonl")).unwrap();
     let source_plan = &plan.sources[selected.source_index];
 
-    let result = import_selected_source(
-        &mut store,
-        &source_plan.source,
-        None,
-        &selected.preinventory,
-        &selected.work,
-    )
-    .unwrap();
-    let outcome = result.outcome;
+    let mut completed = None;
+    for _ in 0..32 {
+        let result = import_selected_source(
+            &mut store,
+            &source_plan.source,
+            None,
+            &selected.preinventory,
+            &selected.work,
+        )
+        .unwrap();
+        assert!(result.remaining_error.is_none());
+        if result.outcome.completed_units == 1 {
+            completed = Some(result.outcome);
+            break;
+        }
+        assert!(result.outcome.deferred_units > 0);
+        assert!(result.outcome.made_durable_progress());
+    }
+    let outcome = completed.expect("stable sibling must finish bounded publication");
 
     assert_eq!(outcome.completed_units, 1);
     assert_eq!(outcome.deferred_units, 1);
     assert!(outcome.summary.imported_events > 0);
     assert!(outcome.made_durable_progress());
-    assert!(result.remaining_error.is_none());
 
     let inventory = inventory_import_sources(
         &store,
@@ -228,16 +292,19 @@ fn run_single_fresh_unit(
     assert_eq!(summary.completed_units, 1);
     assert_eq!(summary.completed_bytes, selected_bytes);
     assert_eq!(summary.deferred_units, 0);
-    if source_file_work {
-        if source_uses_import_file_manifest(&source_plan.source) || selected_fresh_new {
-            assert_eq!(
-                summary.post_import_inventory_generation, pre_import_inventory_generation,
-                "atomic or manifested completion must stay on its selected generation"
-            );
-        } else {
+    if source_file_work || selected_fresh_new {
+        if source_file_work
+            && !source_uses_import_file_manifest(&source_plan.source)
+            && !selected_fresh_new
+        {
             assert!(
                 summary.post_import_inventory_generation > pre_import_inventory_generation,
                 "whole-source completion must return its committed post-import generation"
+            );
+        } else {
+            assert_eq!(
+                summary.post_import_inventory_generation, pre_import_inventory_generation,
+                "atomic or manifested completion must stay on its selected generation"
             );
         }
         assert_eq!(
@@ -264,20 +331,7 @@ fn leave_mutated_pi_publication(store: &mut Store, source: &SourceInfo) -> (Sour
         .into_iter()
         .next()
         .expect("Pi fixture must import an event");
-    let inventory = inventory_import_sources(store, vec![source.clone()], false).unwrap();
-    let (file, generation) = match &inventory.sources[0].preinventory {
-        SourcePreinventory::SourceImportFiles {
-            files,
-            inventory_generation,
-        } => (files[0].clone(), *inventory_generation),
-        other => panic!("unexpected Pi inventory: {other:?}"),
-    };
-    assert_eq!(
-        store
-            .schedule_source_import_explicit_rescan(file.provider, &file.source_root, generation,)
-            .unwrap(),
-        1
-    );
+    let (file, generation) = schedule_single_source_import_rescan(store, source);
     let scope = store
         .begin_provider_file_publication(
             file.provider,

@@ -11,6 +11,7 @@ fn manifested_completion_requires_exact_post_import_observation() {
         .unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         let meta_path = source_path.join("meta.json");
         fs::write(&meta_path, b"[]\n").unwrap();
@@ -26,7 +27,7 @@ fn manifested_completion_requires_exact_post_import_observation() {
     let summary = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -50,21 +51,15 @@ fn manifested_current_result_reports_exact_completion_and_post_import_generation
     fs::write(source_path.join("messages.jsonl"), b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let files = collect_source_import_files(&source).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     assert_eq!(files.len(), 1);
-    let pre_import = persist_new_source_import_observation(&store, &source, &files).unwrap();
     let mut import_file =
         |_store: &mut Store, _pending_source: &SourceInfo| Ok(successful_file_summary());
 
     let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(
-            Some(&files),
-            Some(pre_import.inventory_generation),
-            false,
-            None,
-        ),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -73,7 +68,7 @@ fn manifested_current_result_reports_exact_completion_and_post_import_generation
     assert_eq!(outcome.deferred_units, 0);
     assert_eq!(
         outcome.post_import_inventory_generation,
-        Some(pre_import.inventory_generation)
+        Some(inventory_generation)
     );
     assert!(outcome.post_import_preinventory.is_none());
     assert_eq!(outcome.imported_events, 1);
@@ -91,9 +86,8 @@ fn manifested_130_unit_drain_keeps_one_generation_across_three_slices() {
     }
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let files = collect_source_import_files(&source).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     assert_eq!(files.len(), 130);
-    let persisted = persist_new_source_import_observation(&store, &source, &files).unwrap();
     let plan = ImportPlan::build(
         &store,
         vec![PlannedImportSource {
@@ -101,7 +95,7 @@ fn manifested_130_unit_drain_keeps_one_generation_across_three_slices() {
             stats: SourceStats::default(),
             preinventory: SourcePreinventory::SourceImportFiles {
                 files: files.clone(),
-                inventory_generation: persisted.inventory_generation,
+                inventory_generation,
             },
         }],
     )
@@ -126,7 +120,7 @@ fn manifested_130_unit_drain_keeps_one_generation_across_three_slices() {
             &source,
             ManifestedImportOptions::new(
                 Some(&files),
-                Some(persisted.inventory_generation),
+                Some(inventory_generation),
                 false,
                 Some(&selected.work),
             ),
@@ -135,7 +129,7 @@ fn manifested_130_unit_drain_keeps_one_generation_across_three_slices() {
         .unwrap();
         assert_eq!(
             outcome.post_import_inventory_generation,
-            Some(persisted.inventory_generation)
+            Some(inventory_generation)
         );
         completed += outcome.completed_units;
     }
@@ -232,6 +226,7 @@ fn manifested_system_error_survives_failed_post_observation() {
     fs::write(source_path.join("messages.jsonl"), b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         fs::remove_dir_all(&source_path).unwrap();
         Err(anyhow::Error::new(CaptureError::SystemInvariant(
@@ -242,7 +237,7 @@ fn manifested_system_error_survives_failed_post_observation() {
     let error = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .expect_err("the original system error must abort the manifested import");
@@ -263,6 +258,7 @@ fn manifested_source_error_keeps_its_typed_identity() {
     fs::write(source_path.join("messages.jsonl"), b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         Err(anyhow::Error::new(CaptureError::Sqlite(
             rusqlite::Error::SqliteFailure(
@@ -275,7 +271,7 @@ fn manifested_source_error_keeps_its_typed_identity() {
     let error = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .expect_err("a source adapter failure must remain an error");
@@ -299,6 +295,7 @@ fn manifested_terminal_file_failure_preserves_sibling_success() {
     fs::write(source_path.join("bad.jsonl"), b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::Pi, source_path);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, pending_source: &SourceInfo| {
         if pending_source.path.ends_with("bad.jsonl") {
             return Err(anyhow::Error::new(
@@ -314,7 +311,7 @@ fn manifested_terminal_file_failure_preserves_sibling_success() {
     let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -335,6 +332,7 @@ fn manifested_retryable_file_failure_preserves_original_error_after_sibling_succ
     fs::write(source_path.join("retry.jsonl"), b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::Pi, source_path);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, pending_source: &SourceInfo| {
         if pending_source.path.ends_with("retry.jsonl") {
             return Err(anyhow::Error::new(CaptureError::Io(std::io::Error::new(
@@ -348,7 +346,7 @@ fn manifested_retryable_file_failure_preserves_original_error_after_sibling_succ
     let error = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .expect_err("a retryable manifested file failure must remain retryable");
@@ -383,6 +381,7 @@ fn manifested_sqlite_change_during_import_remains_pending() {
     drop(setup);
     let source = explicit_path_source(CaptureProvider::OpenCode, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut writer = None;
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         let conn = rusqlite::Connection::open(&source_path).unwrap();
@@ -400,7 +399,7 @@ fn manifested_sqlite_change_during_import_remains_pending() {
     let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -429,6 +428,7 @@ fn optional_companion_directory_change_invalidates_the_absence_watch() {
     let initial_modified = fs::metadata(&source_path).unwrap().modified().unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         let companion = source_path.join("meta.json");
         fs::write(&companion, b"temporary companion").unwrap();
@@ -449,7 +449,7 @@ fn optional_companion_directory_change_invalidates_the_absence_watch() {
     let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -476,6 +476,7 @@ fn removed_and_new_manifest_units_are_stale_and_pending() {
     fs::write(&old_path, b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::Pi, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         fs::remove_file(&old_path).unwrap();
         fs::write(&new_path, b"{}\n").unwrap();
@@ -485,7 +486,7 @@ fn removed_and_new_manifest_units_are_stale_and_pending() {
     let outcome = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -497,8 +498,7 @@ fn removed_and_new_manifest_units_are_stale_and_pending() {
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].source_path, old_path.display().to_string());
-    let current_files = collect_source_import_files(&source).unwrap();
-    persist_new_source_import_observation(&store, &source, &current_files).unwrap();
+    let _ = finalized_source_import_preinventory(&store, &source);
     let pending = store
         .list_pending_source_import_files(source.provider, source.path.to_str().unwrap())
         .unwrap();
@@ -519,6 +519,7 @@ fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
     fs::write(&removed_path, b"{}\n").unwrap();
     let source = explicit_path_source(CaptureProvider::Pi, source_path);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
     let mut import_file = |_store: &mut Store, _pending_source: &SourceInfo| {
         fs::remove_file(&removed_path).unwrap();
         Err(anyhow::Error::new(CaptureError::Io(std::io::Error::new(
@@ -530,7 +531,7 @@ fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
     let summary = import_manifested_source_with_importer(
         &mut store,
         &source,
-        ManifestedImportOptions::new(None, None, false, None),
+        ManifestedImportOptions::new(Some(&files), Some(inventory_generation), false, None),
         &mut import_file,
     )
     .unwrap();
@@ -543,9 +544,8 @@ fn removed_manifest_unit_drops_its_source_failure_after_reobservation() {
     assert_eq!(counts.stale, 0);
     assert_eq!(counts.failed, 0);
     assert_eq!(counts.rejected, 0);
-    let current_files = collect_source_import_files(&source).unwrap();
+    let (current_files, _) = finalized_source_import_preinventory(&store, &source);
     assert!(current_files.is_empty());
-    persist_new_source_import_observation(&store, &source, &current_files).unwrap();
     let counts = store.source_import_file_counts().unwrap();
     assert_eq!(counts.stale, 1);
     assert_eq!(counts.failed, 0);
