@@ -17,6 +17,7 @@ type Dependencies struct {
 	Capturer capture.Capturer
 	Searcher search.Engine
 	Version  string
+	DataRoot string
 }
 
 type App struct {
@@ -33,6 +34,10 @@ func NewApp(out, err io.Writer, deps Dependencies) *App {
 }
 
 func (a *App) Run(ctx context.Context, args []string) error {
+	args, err := a.applyGlobalFlags(args)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		a.printRootHelp()
 		return nil
@@ -73,14 +78,49 @@ func (a *App) Run(ctx context.Context, args []string) error {
 }
 
 func (a *App) runCommand(ctx context.Context, spec commandSpec, args []string) error {
-	_ = ctx
-	_ = args
-
-	return &Error{
-		Code:    CodeUnimplemented,
-		Command: spec.name,
-		Message: "not implemented in the Go edge CLI yet; backing interfaces are defined but not wired",
+	switch spec.name {
+	case "setup":
+		return a.runSetup(ctx, args)
+	case "status":
+		return a.runStatus(ctx, args)
+	case "sources":
+		return a.runSources(ctx, args)
+	case "import":
+		return a.runImport(ctx, args)
+	case "search":
+		return a.runSearch(ctx, args)
+	default:
+		return &Error{
+			Code:    CodeUnimplemented,
+			Command: spec.name,
+			Message: "not implemented in the Go edge CLI yet; backing interfaces are defined but not wired",
+		}
 	}
+}
+
+func (a *App) applyGlobalFlags(args []string) ([]string, error) {
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--data-root":
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
+				return nil, &Error{Code: CodeUsage, Message: "missing value for --data-root"}
+			}
+			a.deps.DataRoot = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--data-root="):
+			value := strings.TrimPrefix(arg, "--data-root=")
+			if value == "" {
+				return nil, &Error{Code: CodeUsage, Message: "missing value for --data-root"}
+			}
+			a.deps.DataRoot = value
+		case arg == "--quiet":
+		default:
+			filtered = append(filtered, arg)
+		}
+	}
+	return filtered, nil
 }
 
 func wantsHelp(args []string) bool {
@@ -197,7 +237,7 @@ var commands = map[string]commandSpec{
 	"search": {
 		name:    "search",
 		summary: "Search indexed agent history",
-		usage:   "ctx search [--mode lexical|semantic|hybrid] [--limit <n>] <query>",
+		usage:   "ctx search [--json] [--mode lexical|semantic|hybrid] [--limit <n>] [--provider <name>] [--term <query>] <query>",
 		notes:   []string{"Search mode is explicit; semantic search must not silently fall back to lexical results."},
 	},
 	"show": {
@@ -291,11 +331,11 @@ func validateCommandArgs(spec commandSpec, args []string) error {
 			Message: err.Error(),
 		}
 	}
-	if ok && !supportedProvider(provider) {
+	if ok && spec.name != "sources" && !supportedProvider(provider) {
 		return &Error{
-			Code:    CodeUsage,
+			Code:    CodeUnavailable,
 			Command: spec.name,
-			Message: fmt.Sprintf("unsupported provider %q; supported providers in this Go edge skeleton are codex and pi", provider),
+			Message: fmt.Sprintf("unsupported provider %q in the Go edge runtime; available providers are codex and pi", provider),
 		}
 	}
 	return nil

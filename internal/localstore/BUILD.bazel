@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "localstore",
+    srcs = [
+        "helpers.go",
+        "jobs.go",
+        "schema.go",
+        "store.go",
+        "types.go",
+    ],
+    importpath = "github.com/ctxrs/ctx/internal/localstore",
+    visibility = ["//visibility:public"],
+    deps = ["@org_modernc_sqlite//:sqlite"],
+)
+
+go_test(
+    name = "unit_tests",
+    srcs = ["store_test.go"],
+    embed = [":localstore"],
+)

@@ -5,11 +5,15 @@ go_library(
     srcs = [
         "app.go",
         "errors.go",
+        "runtime.go",
     ],
     importpath = "github.com/ctxrs/ctx/internal/cli",
     visibility = ["//visibility:public"],
     deps = [
         "//internal/capture",
+        "//internal/localstore",
+        "//internal/provider/codex",
+        "//internal/provider/pi",
         "//internal/search",
         "//internal/store",
     ],

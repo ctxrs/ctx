@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -90,9 +93,9 @@ func TestUnknownCommandReturnsUsageError(t *testing.T) {
 }
 
 func TestUnfinishedCommandsReturnTypedErrors(t *testing.T) {
-	for _, name := range commandNames() {
+	for _, name := range []string{"index", "docs", "integrations", "daemon", "doctor", "mcp", "upgrade"} {
 		t.Run(name, func(t *testing.T) {
-			app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{})
+			app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{DataRoot: t.TempDir()})
 			err := app.Run(context.Background(), []string{name})
 			var cliErr *Error
 			if !errors.As(err, &cliErr) {
@@ -118,27 +121,141 @@ func TestCommandInventoryIsStable(t *testing.T) {
 
 func TestJSONFlagDoesNotPrintErrorPayloadToStdout(t *testing.T) {
 	var out, stderr bytes.Buffer
-	app := NewApp(&out, &stderr, Dependencies{})
+	app := NewApp(&out, &stderr, Dependencies{DataRoot: t.TempDir()})
 
-	err := app.Run(context.Background(), []string{"status", "--json"})
+	err := app.Run(context.Background(), []string{"search", "--mode", "semantic", "--json", "anything"})
 	if err == nil {
-		t.Fatal("Run returned nil, want unimplemented error")
+		t.Fatal("Run returned nil, want unavailable error")
 	}
 	if out.Len() != 0 {
 		t.Fatalf("--json error wrote stdout %q, want no stdout", out.String())
 	}
 }
 
+func TestStatusJSONMissingStoreIsReadOnly(t *testing.T) {
+	dataRoot := t.TempDir()
+	var out, stderr bytes.Buffer
+	app := NewApp(&out, &stderr, Dependencies{DataRoot: dataRoot})
+
+	if err := app.Run(context.Background(), []string{"status", "--json"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr, got %q", stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("status JSON did not parse: %v\n%s", err, out.String())
+	}
+	if payload["initialized"] != false || payload["read_only"] != true || payload["local_only"] != true {
+		t.Fatalf("unexpected status payload: %#v", payload)
+	}
+	if _, err := os.Stat(filepath.Join(dataRoot, "work.sqlite")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("status created or touched database, stat err = %v", err)
+	}
+}
+
+func TestSourcesJSONShowsP0AndUnsupportedProvider(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	var out bytes.Buffer
+	app := NewApp(&out, &bytes.Buffer{}, Dependencies{DataRoot: t.TempDir()})
+
+	if err := app.Run(context.Background(), []string{"sources", "--show-missing", "--all", "--json"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	var payload struct {
+		Sources []sourceRow `json:"sources"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("sources JSON did not parse: %v\n%s", err, out.String())
+	}
+	foundCodex := false
+	foundPi := false
+	foundUnsupported := false
+	for _, row := range payload.Sources {
+		if row.Provider == "codex" && strings.Contains(row.Path, ".codex") {
+			foundCodex = true
+		}
+		if row.Provider == "pi" && strings.Contains(row.Path, ".pi") {
+			foundPi = true
+		}
+		if row.Provider == "claude" && row.Status == "unsupported" && !row.Importable {
+			foundUnsupported = true
+		}
+	}
+	if !foundCodex || !foundPi || !foundUnsupported {
+		t.Fatalf("missing expected source rows: %+v", payload.Sources)
+	}
+}
+
+func TestSetupImportsDiscoveredCodexAndSearches(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	dataRoot := t.TempDir()
+	sessionDir := filepath.Join(home, ".codex", "sessions", "2026", "07", "17")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sessionDir, "session.jsonl"), strings.Join([]string{
+		`{"timestamp":"2026-07-17T12:00:00Z","type":"session_meta","payload":{"id":"codex-test-session"}}`,
+		`{"timestamp":"2026-07-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"alpha milestone setup import needle"}]}}`,
+	}, "\n")+"\n")
+
+	var setupOut bytes.Buffer
+	app := NewApp(&setupOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"setup", "--json", "--no-daemon"}); err != nil {
+		t.Fatalf("setup returned error: %v\n%s", err, setupOut.String())
+	}
+	var setupPayload map[string]any
+	if err := json.Unmarshal(setupOut.Bytes(), &setupPayload); err != nil {
+		t.Fatalf("setup JSON did not parse: %v\n%s", err, setupOut.String())
+	}
+	if setupPayload["network_required"] != false || setupPayload["repo_writes"] != false {
+		t.Fatalf("setup payload should be local-only: %#v", setupPayload)
+	}
+
+	var searchOut bytes.Buffer
+	app = NewApp(&searchOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"search", "--json", "--provider", "codex", "needle"}); err != nil {
+		t.Fatalf("search returned error: %v", err)
+	}
+	assertSearchJSONResult(t, searchOut.Bytes(), "codex")
+}
+
+func TestImportExplicitPiPathSearches(t *testing.T) {
+	dataRoot := t.TempDir()
+	path := filepath.Join(t.TempDir(), "pi.jsonl")
+	writeFile(t, path, strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-test-session","timestamp":"2026-07-17T13:00:00Z"}`,
+		`{"type":"message","id":"pi-msg-1","timestamp":"2026-07-17T13:00:01Z","message":{"role":"assistant","content":"beta import path needle"}}`,
+	}, "\n")+"\n")
+
+	var importOut bytes.Buffer
+	app := NewApp(&importOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"import", "--provider", "pi", "--path", path, "--json"}); err != nil {
+		t.Fatalf("import returned error: %v\n%s", err, importOut.String())
+	}
+	var searchOut bytes.Buffer
+	app = NewApp(&searchOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
+	if err := app.Run(context.Background(), []string{"search", "--json", "--term", "beta", "--provider", "pi"}); err != nil {
+		t.Fatalf("search returned error: %v", err)
+	}
+	assertSearchJSONResult(t, searchOut.Bytes(), "pi")
+}
+
 func TestUnsupportedProviderFailsClearly(t *testing.T) {
-	app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{})
+	app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{DataRoot: t.TempDir()})
 
 	err := app.Run(context.Background(), []string{"import", "--provider", "claude"})
 	var cliErr *Error
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("error type = %T, want *Error", err)
 	}
-	if cliErr.Code != CodeUsage {
-		t.Fatalf("error code = %s, want %s", cliErr.Code, CodeUsage)
+	if cliErr.Code != CodeUnavailable {
+		t.Fatalf("error code = %s, want %s", cliErr.Code, CodeUnavailable)
 	}
 	if !strings.Contains(err.Error(), "unsupported provider") || !strings.Contains(err.Error(), "codex and pi") {
 		t.Fatalf("error should name supported providers, got %q", err.Error())
@@ -146,7 +263,7 @@ func TestUnsupportedProviderFailsClearly(t *testing.T) {
 }
 
 func TestMissingProviderValueFailsClearly(t *testing.T) {
-	app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{})
+	app := NewApp(&bytes.Buffer{}, &bytes.Buffer{}, Dependencies{DataRoot: t.TempDir()})
 
 	err := app.Run(context.Background(), []string{"sources", "--provider"})
 	var cliErr *Error
@@ -158,5 +275,31 @@ func TestMissingProviderValueFailsClearly(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "missing value for --provider") {
 		t.Fatalf("error should name missing provider value, got %q", err.Error())
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSearchJSONResult(t *testing.T, raw []byte, provider string) {
+	t.Helper()
+	var payload struct {
+		Results []struct {
+			Provider string `json:"provider"`
+			Snippet  string `json:"snippet"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("search JSON did not parse: %v\n%s", err, string(raw))
+	}
+	if len(payload.Results) == 0 {
+		t.Fatalf("expected at least one search result, got %s", string(raw))
+	}
+	if payload.Results[0].Provider != provider {
+		t.Fatalf("provider = %q, want %q in %#v", payload.Results[0].Provider, provider, payload.Results)
 	}
 }

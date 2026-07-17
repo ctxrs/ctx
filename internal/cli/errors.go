@@ -7,6 +7,8 @@ type ErrorCode string
 const (
 	CodeUsage         ErrorCode = "usage"
 	CodeUnimplemented ErrorCode = "unimplemented"
+	CodeUnavailable   ErrorCode = "unavailable"
+	CodeStorage       ErrorCode = "storage"
 )
 
 type Error struct {
