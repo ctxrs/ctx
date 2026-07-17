@@ -2,8 +2,10 @@
 mod freshness_tests {
     use super::*;
     use crate::commands::import::{
-        inject_inventory_failure_once, run_import_internal, ImportInventory, ImportRunOptions,
-        InventoryFailurePoint,
+        inject_inventory_failure_once, repair_import_maintenance, run_import_internal,
+        ImportFailureType, ImportInventory, ImportInventoryFailures,
+        ImportMaintenancePendingReason, ImportMaintenanceStep, ImportRunOptions,
+        InventoryFailurePoint, NativeSourceReports,
     };
     use crate::provider_args::NativeProviderArg;
     use crate::provider_sources::explicit_path_source;
@@ -1871,6 +1873,148 @@ mod freshness_tests {
     }
 
     #[test]
+    fn drain_processes_healthy_recovery_tail_before_returning_mixed_inventory_failure() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let failing = write_pi_source(&data_root.join("pi-a-failing"), 1, "failing");
+        let recovery_root = data_root.join("pi-z-recovery");
+        let recovery = write_pi_source(&recovery_root, 1, "mixed-recovery");
+        stage_pi_recovery_publication(&data_root, &recovery);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(recovery_root.join("000.jsonl"))
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "type": "message",
+                        "id": "mixed-reinventory-tail",
+                        "timestamp": "2026-07-14T12:00:02Z",
+                        "message": {"role": "assistant", "content": "healthy mixed tail"}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        inject_search_reinventory_hook_once(|| {
+            inject_inventory_failure_once(InventoryFailurePoint::ManifestAfterObservation);
+        });
+
+        let totals = refresh(
+            &data_root,
+            vec![failing, recovery],
+            ImportExecutionPolicy::Drain,
+        );
+
+        assert_eq!(totals.imported_sources, 2, "{totals:?}");
+        assert_eq!(totals.failed_sources, 1, "{totals:?}");
+        assert_eq!(totals.recovery_units_processed, 1, "{totals:?}");
+        assert!(totals.fresh_units_pending > 0, "{totals:?}");
+        let store = Store::open(database_path(data_root)).unwrap();
+        let archive = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
+        assert!(archive.contains("healthy mixed tail"), "{archive}");
+        assert!(!store.has_pending_provider_file_publications().unwrap());
+    }
+
+    #[test]
+    fn native_reports_keep_source_identity_when_publication_owner_disappears() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let owner = write_pi_source(&data_root.join("pi-owner-disappears"), 1, "owner");
+        let second = write_pi_source(&data_root.join("pi-second-source"), 1, "second");
+        let baseline = refresh(
+            &data_root,
+            vec![owner.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(baseline.fresh_units_pending, 0, "{baseline:?}");
+        let store = Store::open(database_path(data_root)).unwrap();
+        leave_unmutated_pi_publication(&store, &owner);
+
+        let mut reports = NativeSourceReports::default();
+        let mut imported = ProviderImportSummary::default();
+        imported.imported_sessions = 1;
+        imported.imported_events = 1;
+        reports.record_outcome(
+            &owner,
+            &imported,
+            SourceStats {
+                files: 1,
+                bytes: 10,
+                change_token: None,
+            },
+            None,
+        );
+        reports.record_outcome(
+            &second,
+            &imported,
+            SourceStats {
+                files: 1,
+                bytes: 20,
+                change_token: None,
+            },
+            None,
+        );
+
+        fs::remove_dir_all(&owner.path).unwrap();
+        let inventory =
+            inventory_import_sources(&store, vec![owner.clone(), second.clone()], false).unwrap();
+        assert_eq!(inventory.failures.len(), 1);
+        assert_eq!(inventory.failures[0].source.path, owner.path);
+        reports.record_inventory_failure(&inventory.failures[0]);
+        let replacement_plan = ImportPlan::build(&store, inventory.sources).unwrap();
+
+        let mut totals = ImportTotals::default();
+        reports.apply_totals(&mut totals);
+        assert_eq!(totals.imported_sources, 2, "{totals:?}");
+        assert_eq!(totals.failed_sources, 1, "{totals:?}");
+        assert_eq!(totals.imported_sessions, 2, "{totals:?}");
+        let mut sources = Vec::new();
+        reports.append_json(&replacement_plan, &mut sources);
+        assert_eq!(sources.len(), 2);
+        let owner_json = sources
+            .iter()
+            .find(|source| source["path"] == json!(owner.path))
+            .unwrap();
+        assert_eq!(owner_json["status"], "completed_with_source_failure");
+        assert!(sources
+            .iter()
+            .any(|source| source["path"] == json!(second.path)));
+    }
+
+    #[test]
+    fn inventory_failures_accumulate_by_identity_disjoint_from_successful_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let successful = write_pi_source(&data_root.join("pi-success"), 1, "success");
+        let retained = write_pi_source(&data_root.join("pi-retained"), 1, "retained");
+        let added = write_pi_source(&data_root.join("pi-added"), 1, "added");
+        let store = Store::open(database_path(data_root)).unwrap();
+        let inventory = inventory_import_sources(&store, vec![successful.clone()], false).unwrap();
+        let plan = ImportPlan::build(&store, inventory.sources).unwrap();
+        let failure = |source: SourceInfo| ImportSourceFailure {
+            source,
+            stats: SourceStats::default(),
+            error: "injected inventory failure".to_owned(),
+            failure_type: ImportFailureType::System,
+            rejected_summary: None,
+        };
+        let mut failures =
+            ImportInventoryFailures::new(vec![failure(successful), failure(retained.clone())]);
+
+        let _ = failures.reconcile(&plan.sources, vec![failure(added.clone())]);
+        let paths = failures
+            .values()
+            .map(|failure| failure.source.path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths, BTreeSet::from([retained.path, added.path]));
+        assert_eq!(failures.pending_counts(&store, &plan).unwrap(), (2, 0));
+    }
+
+    #[test]
     fn rewritten_growing_source_invalidates_staged_snapshot_and_converges() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
@@ -2229,7 +2373,7 @@ mod freshness_tests {
         let source = write_pi_source(&data_root.join("pi-removed"), 1, "removed");
         let source_root = source.path.clone();
         let mut store = Store::open(database_path(data_root)).unwrap();
-        let inventory = inventory_import_sources(&store, vec![source], false).unwrap();
+        let inventory = inventory_import_sources(&store, vec![source.clone()], false).unwrap();
         let plan = ImportPlan::build(&store, inventory.sources).unwrap();
         assert_eq!(plan.fresh_units, 1);
 
@@ -2263,7 +2407,10 @@ mod freshness_tests {
         assert_eq!(totals.failed_sources, 1);
         assert!(first_refresh_failure.is_some());
         assert!(imported_sources.is_empty());
-        assert_eq!(failed_sources, BTreeSet::from([0]));
+        assert_eq!(
+            failed_sources,
+            BTreeSet::from([crate::commands::import::ImportSourceIdentity::new(&source)])
+        );
         let guard = store.begin_event_search_bulk_mode().unwrap();
         store.finish_event_search_bulk_mode(&guard).unwrap();
     }
@@ -2528,9 +2675,93 @@ mod freshness_tests {
     }
 
     #[test]
+    fn pinned_wal_reader_blocks_maintenance_without_admitting_import_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let source = write_pi_source(&data_root.join("pi-pinned-reader"), 1, "pinned");
+        fs::create_dir_all(&data_root).unwrap();
+        let db_path = database_path(data_root.clone());
+        let store = Store::open(&db_path).unwrap();
+        let writer = rusqlite::Connection::open(&db_path).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE maintenance_checkpoint_probe(value INTEGER); \
+                 INSERT INTO maintenance_checkpoint_probe VALUES (1);",
+            )
+            .unwrap();
+        let guard = store.begin_event_search_bulk_mode().unwrap();
+        let reader = rusqlite::Connection::open(&db_path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let observed = reader
+            .query_row(
+                "SELECT COUNT(*) FROM maintenance_checkpoint_probe",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(observed, 1);
+        writer
+            .execute("INSERT INTO maintenance_checkpoint_probe VALUES (2)", [])
+            .unwrap();
+        drop(guard);
+        drop(writer);
+
+        let reason = (0..8)
+            .find_map(|_| match repair_import_maintenance(&store).unwrap() {
+                ImportMaintenanceStep::Complete => {
+                    panic!("pinned checkpoint unexpectedly completed")
+                }
+                ImportMaintenanceStep::Progress => None,
+                ImportMaintenanceStep::Pending(reason) => Some(reason),
+            })
+            .expect("bounded maintenance must report the pinned reader");
+        assert!(matches!(
+            reason,
+            ImportMaintenancePendingReason::WalCheckpoint { .. }
+        ));
+        assert!(reason.diagnostic().contains("WAL reader"));
+        assert_eq!(
+            store.event_search_bulk_maintenance_outcome().unwrap(),
+            ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending
+        );
+        drop(store);
+
+        let blocked = refresh(
+            &data_root,
+            vec![source.clone()],
+            ImportExecutionPolicy::Drain,
+        );
+        assert_eq!(blocked.fresh_units_processed, 0, "{blocked:?}");
+        assert_eq!(blocked.recovery_units_processed, 0, "{blocked:?}");
+        assert!(blocked.fresh_units_pending > 0, "{blocked:?}");
+        assert!(blocked.recovery_units_pending > 0, "{blocked:?}");
+        let store = Store::open(&db_path).unwrap();
+        assert!(store.export_archive().unwrap().events.is_empty());
+        assert_eq!(
+            store.event_search_bulk_maintenance_outcome().unwrap(),
+            ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending
+        );
+        drop(store);
+
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        let converged = refresh(&data_root, vec![source], ImportExecutionPolicy::Drain);
+        assert_eq!(converged.fresh_units_pending, 0, "{converged:?}");
+        assert_eq!(converged.recovery_units_pending, 0, "{converged:?}");
+        let store = Store::open(db_path).unwrap();
+        assert!(serde_json::to_string(&store.export_archive().unwrap())
+            .unwrap()
+            .contains("pinned"));
+        assert!(store
+            .event_search_bulk_maintenance_outcome()
+            .unwrap()
+            .is_complete());
+    }
+
+    #[test]
     fn drain_fixed_point_rejects_pending_work_without_progress_or_blocker() {
         let error =
-            crate::commands::import::drain_fixed_point_action(true, false, false).unwrap_err();
+            crate::commands::import::drain_fixed_point_action(true, false, None).unwrap_err();
         assert!(error.chain().any(|cause| matches!(
             cause.downcast_ref::<ctx_history_capture::CaptureError>(),
             Some(ctx_history_capture::CaptureError::SystemInvariant(
@@ -2538,8 +2769,30 @@ mod freshness_tests {
             ))
         )));
         assert_eq!(
-            crate::commands::import::drain_fixed_point_action(true, false, true).unwrap(),
-            crate::commands::import::DrainFixedPointAction::RetryableBlocked
+            crate::commands::import::drain_fixed_point_action(
+                true,
+                false,
+                Some(crate::commands::import::DrainFixedPointBlocker::RetryableExternal),
+            )
+            .unwrap(),
+            crate::commands::import::DrainFixedPointAction::RetryableBlocked(
+                crate::commands::import::DrainFixedPointBlocker::RetryableExternal
+            )
+        );
+        assert_eq!(
+            crate::commands::import::drain_fixed_point_action(false, true, None).unwrap(),
+            crate::commands::import::DrainFixedPointAction::Reinventory
+        );
+        assert_eq!(
+            crate::commands::import::drain_fixed_point_action(
+                true,
+                true,
+                Some(crate::commands::import::DrainFixedPointBlocker::RetryableExternal),
+            )
+            .unwrap(),
+            crate::commands::import::DrainFixedPointAction::RetryableBlocked(
+                crate::commands::import::DrainFixedPointBlocker::RetryableExternal
+            )
         );
     }
 }

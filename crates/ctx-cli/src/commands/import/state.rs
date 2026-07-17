@@ -6,67 +6,133 @@ const PROVIDER_SESSION_REPAIR_BATCH_BYTES: usize = 512 * 1024;
 const PROVIDER_SESSION_REPAIR_SQLITE_TIME: std::time::Duration =
     std::time::Duration::from_millis(25);
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ImportMaintenanceProgress {
-    pub(crate) processed_rows: usize,
-    pub(crate) complete: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportMaintenancePendingReason {
+    MaintenanceWriter,
+    EventSearchBulkLock,
+    WalCheckpoint {
+        log_frames: i64,
+        checkpointed_frames: i64,
+    },
 }
 
-pub(crate) fn repair_import_maintenance(
-    store: &Store,
-    policy: ImportExecutionPolicy,
-) -> Result<ImportMaintenanceProgress> {
-    let mut aggregate = ImportMaintenanceProgress::default();
-    loop {
-        let (provider_session_rows, _, provider_sessions_complete) = store
-            .repair_provider_session_duplicates(
-                PROVIDER_SESSION_REPAIR_BATCH_ROWS,
-                PROVIDER_SESSION_REPAIR_BATCH_BYTES,
-                PROVIDER_SESSION_REPAIR_SQLITE_TIME,
-            )?;
-        aggregate.processed_rows = aggregate
-            .processed_rows
-            .saturating_add(provider_session_rows);
-        if !provider_sessions_complete {
-            aggregate.complete = false;
-            if policy != ImportExecutionPolicy::Drain {
-                return Ok(aggregate);
+impl ImportMaintenancePendingReason {
+    pub(crate) fn diagnostic(self) -> String {
+        match self {
+            Self::MaintenanceWriter => {
+                "import maintenance is waiting for another database writer".to_owned()
             }
-            if provider_session_rows == 0 {
-                return Err(anyhow::Error::new(CaptureError::SystemInvariant(
-                    "provider-session repair made no progress",
-                )));
+            Self::EventSearchBulkLock => {
+                "search-index maintenance is waiting for another bulk importer".to_owned()
             }
-            std::thread::yield_now();
-            continue;
+            Self::WalCheckpoint {
+                log_frames,
+                checkpointed_frames,
+            } => format!(
+                "search-index maintenance is waiting for a WAL reader ({log_frames} log frames, {checkpointed_frames} checkpointed)"
+            ),
         }
+    }
+}
 
-        let progress = store.repair_import_pending_reasons(
-            PENDING_REASON_REPAIR_BATCH_ROWS,
-            PENDING_REASON_REPAIR_BATCH_BYTES,
-            PENDING_REASON_REPAIR_SQLITE_TIME,
-        )?;
-        let mut processed_rows = progress.visited_rows;
-        let bulk_complete = if progress.complete
-            && !store.has_pending_provider_file_publications()?
-            && !store.event_search_bulk_maintenance_outcome()?.is_complete()
-        {
-            processed_rows = processed_rows.saturating_add(1);
-            store.advance_event_search_bulk_maintenance()?.is_complete()
-        } else {
-            true
-        };
-        aggregate.processed_rows = aggregate.processed_rows.saturating_add(processed_rows);
-        aggregate.complete = progress.complete && bulk_complete;
-        if aggregate.complete || policy != ImportExecutionPolicy::Drain {
-            return Ok(aggregate);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportMaintenanceStep {
+    Complete,
+    Progress,
+    Pending(ImportMaintenancePendingReason),
+}
+
+impl ImportMaintenanceStep {
+    pub(crate) fn made_durable_progress(self) -> bool {
+        self == Self::Progress
+    }
+
+    pub(crate) fn pending_reason(self) -> Option<ImportMaintenancePendingReason> {
+        match self {
+            Self::Pending(reason) => Some(reason),
+            Self::Complete | Self::Progress => None,
         }
-        if processed_rows == 0 {
-            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
-                "import maintenance made no progress",
-            )));
+    }
+}
+
+pub(crate) fn repair_import_maintenance(store: &Store) -> Result<ImportMaintenanceStep> {
+    let (provider_session_rows, _, provider_sessions_complete) = match store
+        .repair_provider_session_duplicates(
+            PROVIDER_SESSION_REPAIR_BATCH_ROWS,
+            PROVIDER_SESSION_REPAIR_BATCH_BYTES,
+            PROVIDER_SESSION_REPAIR_SQLITE_TIME,
+        ) {
+        Ok(progress) => progress,
+        Err(error) if maintenance_writer_blocked(&error) => {
+            return Ok(ImportMaintenanceStep::Pending(
+                ImportMaintenancePendingReason::MaintenanceWriter,
+            ));
         }
-        std::thread::yield_now();
+        Err(error) => return Err(error.into()),
+    };
+    if provider_session_rows > 0 {
+        return Ok(ImportMaintenanceStep::Progress);
+    }
+    if !provider_sessions_complete {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "provider-session repair made no progress",
+        )));
+    }
+
+    let progress = match store.repair_import_pending_reasons(
+        PENDING_REASON_REPAIR_BATCH_ROWS,
+        PENDING_REASON_REPAIR_BATCH_BYTES,
+        PENDING_REASON_REPAIR_SQLITE_TIME,
+    ) {
+        Ok(progress) => progress,
+        Err(error) if maintenance_writer_blocked(&error) => {
+            return Ok(ImportMaintenanceStep::Pending(
+                ImportMaintenancePendingReason::MaintenanceWriter,
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if progress.visited_rows > 0 {
+        return Ok(ImportMaintenanceStep::Progress);
+    }
+    if !progress.complete {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "import pending-reason repair made no progress",
+        )));
+    }
+    if store.has_pending_provider_file_publications()?
+        || store.event_search_bulk_maintenance_outcome()?.is_complete()
+    {
+        return Ok(ImportMaintenanceStep::Complete);
+    }
+
+    match store.advance_event_search_bulk_maintenance() {
+        Ok(EventSearchBulkMaintenanceOutcome::Complete) => Ok(ImportMaintenanceStep::Complete),
+        Ok(EventSearchBulkMaintenanceOutcome::Pending) => Ok(ImportMaintenanceStep::Progress),
+        Err(StoreError::BulkSearchImportBusy) => Ok(ImportMaintenanceStep::Pending(
+            ImportMaintenancePendingReason::EventSearchBulkLock,
+        )),
+        Err(StoreError::WalCheckpointBusy {
+            log_frames,
+            checkpointed_frames,
+        }) => Ok(ImportMaintenanceStep::Pending(
+            ImportMaintenancePendingReason::WalCheckpoint {
+                log_frames,
+                checkpointed_frames,
+            },
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn maintenance_writer_blocked(error: &StoreError) -> bool {
+    match error {
+        StoreError::ImportPendingWorkRepairBusy => true,
+        StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)) => matches!(
+            error.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        ),
+        _ => false,
     }
 }
 
@@ -203,6 +269,12 @@ impl ImportTotals {
         self.failed_sources += 1;
     }
 
+    pub(crate) fn remove_source_failure(&mut self, stats: &SourceStats) {
+        self.source_files = self.source_files.saturating_sub(stats.files);
+        self.source_bytes = self.source_bytes.saturating_sub(stats.bytes);
+        self.failed_sources = self.failed_sources.saturating_sub(1);
+    }
+
     pub(crate) fn add_rejected_source(
         &mut self,
         summary: &ProviderImportSummary,
@@ -219,13 +291,135 @@ impl ImportTotals {
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct NativeSourceReports {
-    sources: BTreeMap<usize, NativeSourceReport>,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ImportSourceIdentity {
+    provider: String,
+    source_format: String,
+    source_path: PathBuf,
+}
+
+impl ImportSourceIdentity {
+    pub(crate) fn new(source: &SourceInfo) -> Self {
+        Self {
+            provider: source.provider.as_str().to_owned(),
+            source_format: source.source_format.to_owned(),
+            source_path: source.path.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct ImportInventoryFailures {
+    failures: BTreeMap<ImportSourceIdentity, ImportSourceFailure>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ImportInventoryFailureChanges {
+    pub(crate) removed: Vec<ImportSourceFailure>,
+    pub(crate) added: Vec<ImportSourceFailure>,
+    pub(crate) newly_failed: Vec<ImportSourceFailure>,
+}
+
+impl ImportInventoryFailures {
+    pub(crate) fn new(failures: Vec<ImportSourceFailure>) -> Self {
+        Self {
+            failures: failures
+                .into_iter()
+                .map(|failure| (ImportSourceIdentity::new(&failure.source), failure))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        successful_sources: &[PlannedImportSource],
+        failures: Vec<ImportSourceFailure>,
+    ) -> ImportInventoryFailureChanges {
+        let mut changes = ImportInventoryFailureChanges::default();
+        for source in successful_sources {
+            if let Some(failure) = self
+                .failures
+                .remove(&ImportSourceIdentity::new(&source.source))
+            {
+                changes.removed.push(failure);
+            }
+        }
+        for failure in failures {
+            let identity = ImportSourceIdentity::new(&failure.source);
+            let was_failed = self.failures.contains_key(&identity);
+            if let Some(previous) = self.failures.insert(identity, failure.clone()) {
+                changes.removed.push(previous);
+            }
+            changes.added.push(failure.clone());
+            if !was_failed {
+                changes.newly_failed.push(failure);
+            }
+        }
+        changes
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &ImportSourceFailure> {
+        self.failures.values()
+    }
+
+    pub(crate) fn pending_counts(
+        &self,
+        store: &Store,
+        plan: &ImportPlan,
+    ) -> Result<(usize, usize)> {
+        let planned = plan
+            .sources
+            .iter()
+            .map(|source| ImportSourceIdentity::new(&source.source))
+            .collect::<BTreeSet<_>>();
+        let mut pending = (0usize, 0usize);
+        for failure in self
+            .failures
+            .iter()
+            .filter(|(identity, _)| !planned.contains(*identity))
+            .map(|(_, failure)| failure)
+        {
+            let counts = failed_inventory_pending_counts(store, std::slice::from_ref(failure))?;
+            if counts == (0, 0) {
+                pending.0 = capped_pending_add(pending.0, 1);
+            } else {
+                pending.0 = capped_pending_add(pending.0, counts.0);
+                pending.1 = capped_pending_add(pending.1, counts.1);
+            }
+        }
+        Ok(pending)
+    }
+}
+
+pub(crate) fn stable_reinventory_sources(
+    plan: &ImportPlan,
+    failures: &ImportInventoryFailures,
+) -> Vec<SourceInfo> {
+    let mut sources = BTreeMap::new();
+    for source in plan.sources.iter().map(|planned| &planned.source) {
+        sources.insert(ImportSourceIdentity::new(source), source.clone());
+    }
+    for failure in failures.values() {
+        sources.insert(
+            ImportSourceIdentity::new(&failure.source),
+            failure.source.clone(),
+        );
+    }
+    sources.into_values().collect()
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NativeSourceReports {
+    sources: BTreeMap<ImportSourceIdentity, NativeSourceReport>,
+}
+
+#[derive(Debug)]
 struct NativeSourceReport {
+    source: SourceInfo,
     summary: ProviderImportSummary,
     stats: SourceStats,
     failure: Option<NativeSourceFailure>,
@@ -240,14 +434,26 @@ struct NativeSourceFailure {
 }
 
 impl NativeSourceReports {
+    fn source_report(&mut self, source: &SourceInfo) -> &mut NativeSourceReport {
+        self.sources
+            .entry(ImportSourceIdentity::new(source))
+            .or_insert_with(|| NativeSourceReport {
+                source: source.clone(),
+                summary: ProviderImportSummary::default(),
+                stats: SourceStats::default(),
+                failure: None,
+                reportable: false,
+            })
+    }
+
     pub(crate) fn record_outcome(
         &mut self,
-        source_index: usize,
+        source: &SourceInfo,
         summary: &ProviderImportSummary,
         completed_stats: SourceStats,
         no_op_stats: Option<SourceStats>,
     ) {
-        let report = self.sources.entry(source_index).or_default();
+        let report = self.source_report(source);
         report.summary.merge_from(summary.clone());
         report.stats.files = report.stats.files.saturating_add(completed_stats.files);
         report.stats.bytes = report.stats.bytes.saturating_add(completed_stats.bytes);
@@ -265,11 +471,11 @@ impl NativeSourceReports {
 
     pub(crate) fn record_failure(
         &mut self,
-        source_index: usize,
+        source: &SourceInfo,
         stats: SourceStats,
         error: &anyhow::Error,
     ) {
-        let report = self.sources.entry(source_index).or_default();
+        let report = self.source_report(source);
         report.stats.files = report.stats.files.saturating_add(stats.files);
         report.stats.bytes = report.stats.bytes.saturating_add(stats.bytes);
         report.stats.change_token = report.stats.change_token.or(stats.change_token);
@@ -282,6 +488,22 @@ impl NativeSourceReports {
             failure_type: import_failure_type(error),
             rejected: rejected_summary.is_some(),
         });
+        report.reportable = true;
+    }
+
+    pub(crate) fn record_inventory_failure(&mut self, failure: &ImportSourceFailure) {
+        let report = self.source_report(&failure.source);
+        if !report.reportable {
+            report.stats = failure.stats;
+        }
+        report.failure = Some(NativeSourceFailure {
+            error: failure.error.clone(),
+            failure_type: failure.failure_type,
+            rejected: failure.rejected_summary.is_some(),
+        });
+        if let Some(summary) = failure.rejected_summary.as_ref() {
+            report.summary.merge_from(summary.clone());
+        }
         report.reportable = true;
     }
 
@@ -311,13 +533,13 @@ impl NativeSourceReports {
         }
     }
 
-    fn append_json(self, plan: &ImportPlan, imported_sources: &mut Vec<Value>) {
-        for (source_index, report) in self
+    pub(crate) fn append_json(self, _plan: &ImportPlan, imported_sources: &mut Vec<Value>) {
+        for report in self
             .sources
-            .into_iter()
-            .filter(|(_, report)| report.reportable)
+            .into_values()
+            .filter(|report| report.reportable)
         {
-            let source = &plan.sources[source_index].source;
+            let source = &report.source;
             let rejected_without_content = report.summary.failed > 0
                 && !provider_summary_has_imported_content(&report.summary);
             let failed_without_content =

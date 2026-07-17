@@ -1,3 +1,33 @@
+use crate::commands::import::{
+    stable_reinventory_sources, DrainFixedPointBlocker, ImportInventoryFailures,
+    ImportMaintenanceStep, ImportSourceIdentity,
+};
+
+#[cfg(test)]
+thread_local! {
+    static SEARCH_REINVENTORY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn inject_search_reinventory_hook_once(hook: impl FnOnce() + 'static) {
+    SEARCH_REINVENTORY_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_search_reinventory_hook() {
+    SEARCH_REINVENTORY_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_search_reinventory_hook() {}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_search_refresh_work(
     data_root: &Path,
@@ -12,10 +42,12 @@ fn execute_search_refresh_work(
     plan: &ImportPlan,
     execution_state: &mut crate::commands::import::ImportExecutionState,
     inventory_failures: Vec<ImportSourceFailure>,
-    failed_inventory_pending: (usize, usize),
+    _failed_inventory_pending: (usize, usize),
     planned_total_bytes: u64,
 ) -> Result<SearchRefreshExecution> {
-    let mut failed_inventory_pending = failed_inventory_pending;
+    let mut inventory_failures = ImportInventoryFailures::new(inventory_failures);
+    inventory_failures.reconcile(&plan.sources, Vec::new());
+    let mut failed_inventory_pending = inventory_failures.pending_counts(store, plan)?;
     let mut totals = ImportTotals::default();
     let mut deferred_units = 0usize;
     let mut completed_units = 0usize;
@@ -34,7 +66,7 @@ fn execute_search_refresh_work(
     totals.fresh_units_pending = failed_inventory_pending.0;
     totals.recovery_units_pending = failed_inventory_pending.1;
     let mut first_refresh_failure = None::<String>;
-    for failure in inventory_failures {
+    for failure in inventory_failures.values() {
         first_refresh_failure.get_or_insert_with(|| failure.error.clone());
         totals.add_source_failure(&failure.stats);
         progress.warning(format!(
@@ -49,15 +81,30 @@ fn execute_search_refresh_work(
     let fresh_slice_limit = execution_policy.fresh_slice_limit();
     let mut drain_pass_made_durable_progress = false;
     let mut drain_pass_retryable_blocker = false;
-    let initial_maintenance = match repair_import_maintenance(store, execution_policy) {
-        Ok(maintenance) => maintenance,
-        Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
-    };
-    totals.durable_progress |= initial_maintenance.processed_rows > 0;
-    drain_pass_made_durable_progress |= initial_maintenance.processed_rows > 0;
-    if !initial_maintenance.complete {
-        totals.fresh_units_pending = failed_inventory_pending.0;
-        totals.recovery_units_pending = failed_inventory_pending.1.saturating_add(1);
+    loop {
+        let initial_maintenance = match repair_import_maintenance(store) {
+            Ok(maintenance) => maintenance,
+            Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
+        };
+        match initial_maintenance {
+            ImportMaintenanceStep::Complete => break,
+            ImportMaintenanceStep::Progress => {
+                totals.durable_progress = true;
+                drain_pass_made_durable_progress = true;
+                if execution_policy == ImportExecutionPolicy::Drain {
+                    continue;
+                }
+            }
+            ImportMaintenanceStep::Pending(reason) => progress.warning(reason.diagnostic()),
+        }
+        let (fresh_units_pending, recovery_units_pending) = match plan.pending_counts(store) {
+            Ok(counts) => counts,
+            Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
+        };
+        totals.fresh_units_pending = fresh_units_pending.saturating_add(failed_inventory_pending.0);
+        totals.recovery_units_pending = recovery_units_pending
+            .saturating_add(failed_inventory_pending.1)
+            .saturating_add(1);
         return Ok(SearchRefreshExecution { totals });
     }
     let mut fresh_units = match plan.pending_count(store, ImportWorkClass::Fresh) {
@@ -69,7 +116,7 @@ fn execute_search_refresh_work(
         if fresh_units == 0 {
             break;
         }
-        let result = match execute_search_refresh_plan_class(
+        match execute_search_refresh_plan_class(
             store,
             plan,
             execution_state,
@@ -186,7 +233,9 @@ fn execute_search_refresh_work(
     }
 
     let recovery_slice_limit = execution_policy.recovery_slice_limit();
-    let (drain_plan, maintenance_complete) = if execution_policy == ImportExecutionPolicy::Drain {
+    let (drain_plan, maintenance_complete, final_checkpoint_allowed) = if execution_policy
+        == ImportExecutionPolicy::Drain
+    {
         match drain_search_refresh_to_fixed_point(
             store,
             plan,
@@ -197,22 +246,25 @@ fn execute_search_refresh_work(
             &mut first_refresh_failure,
             &mut imported_native_sources,
             &mut failed_native_sources,
+            &mut inventory_failures,
             &mut failed_inventory_pending,
-            &mut deferred_units,
             drain_pass_made_durable_progress,
             drain_pass_retryable_blocker,
         ) {
-            Ok((plan, complete)) => (Some(plan), complete),
+            Ok((plan, complete, checkpoint_allowed)) => (Some(plan), complete, checkpoint_allowed),
             Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
         }
     } else {
         execution_state.begin_new_pass();
-        let maintenance = match repair_import_maintenance(store, execution_policy) {
+        let maintenance = match repair_import_maintenance(store) {
             Ok(maintenance) => maintenance,
             Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
         };
-        totals.durable_progress |= maintenance.processed_rows > 0;
-        if !maintenance.complete {
+        totals.durable_progress |= maintenance.made_durable_progress();
+        if maintenance != ImportMaintenanceStep::Complete {
+            if let Some(reason) = maintenance.pending_reason() {
+                progress.warning(reason.diagnostic());
+            }
             let (fresh_units_pending, recovery_units_pending) = match plan.pending_counts(store) {
                 Ok(counts) => counts,
                 Err(error) => {
@@ -230,7 +282,7 @@ fn execute_search_refresh_work(
             Ok(pending) => pending,
             Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
         };
-        let result = match execute_search_refresh_plan_class(
+        let recovery_retryable_blocked = match execute_search_refresh_plan_class(
             store,
             plan,
             execution_state,
@@ -246,18 +298,21 @@ fn execute_search_refresh_work(
             &mut failed_native_sources,
             false,
         ) {
-            Ok(result) => result,
+            Ok(result) => result.retryable_blocker,
             Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
         };
-        deferred_units = deferred_units.saturating_add(result.result.deferred_units);
-        let mut maintenance_complete = maintenance.complete;
-        let trailing_maintenance = match repair_import_maintenance(store, execution_policy) {
+        let mut maintenance_complete = maintenance == ImportMaintenanceStep::Complete;
+        let trailing_maintenance = match repair_import_maintenance(store) {
             Ok(maintenance) => maintenance,
             Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
         };
-        totals.durable_progress |= trailing_maintenance.processed_rows > 0;
-        maintenance_complete &= trailing_maintenance.complete;
-        (None, maintenance_complete)
+        totals.durable_progress |= trailing_maintenance.made_durable_progress();
+        maintenance_complete &= trailing_maintenance == ImportMaintenanceStep::Complete;
+        (
+            None,
+            maintenance_complete,
+            !recovery_retryable_blocked && maintenance_complete,
+        )
     };
     let plan = drain_plan.as_ref().unwrap_or(plan);
 
@@ -309,11 +364,13 @@ fn execute_search_refresh_work(
         .saturating_add(failed_inventory_pending.1)
         .saturating_add(usize::from(!maintenance_complete));
 
-    if let Err(error) = store.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES) {
-        return Err(anyhow::Error::new(SearchRefreshFailure {
-            error: error.into(),
-            totals,
-        }));
+    if maintenance_complete && final_checkpoint_allowed {
+        if let Err(error) = store.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES) {
+            return Err(anyhow::Error::new(SearchRefreshFailure {
+                error: error.into(),
+                totals,
+            }));
+        }
     }
     Ok(SearchRefreshExecution { totals })
 }
@@ -327,91 +384,38 @@ fn drain_search_refresh_to_fixed_point(
     tolerate_source_errors: bool,
     totals: &mut ImportTotals,
     first_refresh_failure: &mut Option<String>,
-    imported_sources: &mut BTreeSet<usize>,
-    failed_sources: &mut BTreeSet<usize>,
+    imported_sources: &mut BTreeSet<ImportSourceIdentity>,
+    failed_sources: &mut BTreeSet<ImportSourceIdentity>,
+    inventory_failures: &mut ImportInventoryFailures,
     failed_inventory_pending: &mut (usize, usize),
-    deferred_units: &mut usize,
     mut pass_made_durable_progress: bool,
     mut pass_retryable_blocker: bool,
-) -> Result<(ImportPlan, bool)> {
-    let reinventory_sources = initial_plan
-        .sources
-        .iter()
-        .map(|planned| planned.source.clone())
-        .collect::<Vec<_>>();
+) -> Result<(ImportPlan, bool, bool)> {
+    let reinventory_sources = stable_reinventory_sources(initial_plan, inventory_failures);
     let mut plan = ImportPlan::build(store, initial_plan.sources.clone())?;
     let mut execution_state = crate::commands::import::ImportExecutionState::for_plan(&plan);
+    let mut installed_mixed_inventory_plan = false;
 
     loop {
-        let opening_maintenance = repair_import_maintenance(store, ImportExecutionPolicy::Drain)?;
-        totals.durable_progress |= opening_maintenance.processed_rows > 0;
-        pass_made_durable_progress |= opening_maintenance.processed_rows > 0;
-
-        loop {
-            execution_state.begin_new_pass();
-            let fresh_units = plan.pending_count(store, ImportWorkClass::Fresh)?;
-            if fresh_units == 0 {
-                break;
-            }
-            let result = execute_search_refresh_plan_class(
-                store,
-                &plan,
-                &mut execution_state,
-                ImportWorkClass::Fresh,
-                fresh_units,
-                None,
-                progress,
-                json_output,
-                tolerate_source_errors,
-                totals,
-                first_refresh_failure,
-                imported_sources,
-                failed_sources,
-                true,
-            )?;
-            *deferred_units = (*deferred_units).saturating_add(result.result.deferred_units);
-            pass_made_durable_progress |= result.made_durable_progress;
-            pass_retryable_blocker |= result.retryable_blocker;
-            if !result.result.made_durable_progress() {
-                break;
-            }
+        execution_state.begin_new_pass();
+        let maintenance = repair_import_maintenance(store)?;
+        let mut maintenance_complete = maintenance == ImportMaintenanceStep::Complete;
+        let mut maintenance_pending = maintenance.pending_reason();
+        if maintenance.made_durable_progress() {
+            totals.durable_progress = true;
+            pass_made_durable_progress = true;
         }
 
-        let mut maintenance_complete = loop {
-            execution_state.begin_new_pass();
-            let maintenance = repair_import_maintenance(store, ImportExecutionPolicy::Drain)?;
-            totals.durable_progress |= maintenance.processed_rows > 0;
-            pass_made_durable_progress |= maintenance.processed_rows > 0;
-            let recovery_units = plan.pending_count(store, ImportWorkClass::Recovery)?;
-            let result = execute_search_refresh_plan_class(
-                store,
-                &plan,
-                &mut execution_state,
-                ImportWorkClass::Recovery,
-                recovery_units,
-                None,
-                progress,
-                json_output,
-                tolerate_source_errors,
-                totals,
-                first_refresh_failure,
-                imported_sources,
-                failed_sources,
-                true,
-            )?;
-            *deferred_units = (*deferred_units).saturating_add(result.result.deferred_units);
-            pass_made_durable_progress |= result.made_durable_progress;
-            pass_retryable_blocker |= result.retryable_blocker;
-
-            let fresh_units = plan.pending_count(store, ImportWorkClass::Fresh)?;
-            if fresh_units > 0 {
+        if maintenance_complete {
+            for class in [ImportWorkClass::Fresh, ImportWorkClass::Recovery] {
                 execution_state.begin_new_pass();
-                let fresh_result = execute_search_refresh_plan_class(
+                let pending_units = plan.pending_count(store, class)?;
+                let result = execute_search_refresh_plan_class(
                     store,
                     &plan,
                     &mut execution_state,
-                    ImportWorkClass::Fresh,
-                    fresh_units,
+                    class,
+                    pending_units,
                     None,
                     progress,
                     json_output,
@@ -422,73 +426,73 @@ fn drain_search_refresh_to_fixed_point(
                     failed_sources,
                     true,
                 )?;
-                *deferred_units =
-                    (*deferred_units).saturating_add(fresh_result.result.deferred_units);
-                pass_made_durable_progress |= fresh_result.made_durable_progress;
-                pass_retryable_blocker |= fresh_result.retryable_blocker;
-                if fresh_result.result.made_durable_progress() {
-                    continue;
-                }
-                let recovery_units_pending =
-                    plan.pending_count(store, ImportWorkClass::Recovery)?;
-                if recovery_units_pending > 0
-                    && (maintenance.processed_rows > 0 || result.result.made_durable_progress())
-                {
-                    continue;
-                }
-                break maintenance.complete;
+                pass_made_durable_progress |= result.made_durable_progress;
+                pass_retryable_blocker |= result.retryable_blocker;
             }
-            let (_, recovery_units_pending) = plan.pending_counts(store)?;
-            if maintenance.complete && recovery_units_pending == 0 {
-                break true;
+
+            let trailing = repair_import_maintenance(store)?;
+            if trailing.made_durable_progress() {
+                totals.durable_progress = true;
+                pass_made_durable_progress = true;
             }
-            if maintenance.processed_rows == 0 && !result.result.made_durable_progress() {
-                break maintenance.complete;
-            }
-        };
-        let trailing_maintenance = repair_import_maintenance(store, ImportExecutionPolicy::Drain)?;
-        totals.durable_progress |= trailing_maintenance.processed_rows > 0;
-        pass_made_durable_progress |= trailing_maintenance.processed_rows > 0;
-        maintenance_complete &= trailing_maintenance.complete;
+            maintenance_complete = trailing == ImportMaintenanceStep::Complete;
+            maintenance_pending = trailing.pending_reason();
+        }
 
         let (fresh_units_pending, recovery_units_pending) = plan.pending_counts(store)?;
         let has_pending_work = fresh_units_pending > 0
             || recovery_units_pending > 0
             || !maintenance_complete
+            || !inventory_failures.is_empty()
             || store.has_pending_provider_file_publications()?
             || store.provider_file_publication_retirement_work_count()? > 0;
+        let inventory_blocked = !inventory_failures.is_empty()
+            && (installed_mixed_inventory_plan || !pass_made_durable_progress);
+        let blocker = maintenance_pending
+            .map(DrainFixedPointBlocker::Maintenance)
+            .or_else(|| {
+                (pass_retryable_blocker || inventory_blocked)
+                    .then_some(DrainFixedPointBlocker::RetryableExternal)
+            });
         match crate::commands::import::drain_fixed_point_action(
             has_pending_work,
             pass_made_durable_progress,
-            pass_retryable_blocker,
+            blocker,
         )? {
-            crate::commands::import::DrainFixedPointAction::Complete
-            | crate::commands::import::DrainFixedPointAction::RetryableBlocked => {
-                return Ok((plan, maintenance_complete));
+            crate::commands::import::DrainFixedPointAction::Complete => {
+                return Ok((plan, maintenance_complete, true));
+            }
+            crate::commands::import::DrainFixedPointAction::RetryableBlocked(blocker) => {
+                progress.warning(blocker.diagnostic());
+                return Ok((plan, maintenance_complete, false));
             }
             crate::commands::import::DrainFixedPointAction::Reinventory => {}
         }
 
+        run_search_reinventory_hook();
         let inventory = inventory_import_sources(store, reinventory_sources.clone(), false)
             .context("re-inventory search refresh sources after import progress")?;
-        if !inventory.failures.is_empty() {
-            *failed_inventory_pending =
-                failed_inventory_pending_counts(store, &inventory.failures)?;
-            for failure in inventory.failures {
-                first_refresh_failure.get_or_insert_with(|| failure.error.clone());
-                totals.add_source_failure(&failure.stats);
-                progress.warning(format!(
-                    "skipped {} during inventory: {}",
-                    failure.source.provider.as_str(),
-                    one_line_error(&failure.error)
-                ));
-            }
-            return Ok((plan, maintenance_complete));
+        let changes = inventory_failures.reconcile(&inventory.sources, inventory.failures);
+        for failure in changes.removed {
+            totals.remove_source_failure(&failure.stats);
+        }
+        for failure in changes.added {
+            totals.add_source_failure(&failure.stats);
+        }
+        for failure in changes.newly_failed {
+            first_refresh_failure.get_or_insert_with(|| failure.error.clone());
+            progress.warning(format!(
+                "skipped {} during inventory: {}",
+                failure.source.provider.as_str(),
+                one_line_error(&failure.error)
+            ));
         }
         plan = ImportPlan::build(store, inventory.sources)?;
+        *failed_inventory_pending = inventory_failures.pending_counts(store, &plan)?;
         execution_state = crate::commands::import::ImportExecutionState::for_plan(&plan);
         pass_made_durable_progress = false;
-        pass_retryable_blocker = false;
+        pass_retryable_blocker = !inventory_failures.is_empty();
+        installed_mixed_inventory_plan = true;
     }
 }
 
@@ -533,8 +537,8 @@ fn execute_search_refresh_plan_class(
     tolerate_source_errors: bool,
     totals: &mut ImportTotals,
     first_refresh_failure: &mut Option<String>,
-    imported_sources: &mut BTreeSet<usize>,
-    failed_sources: &mut BTreeSet<usize>,
+    imported_sources: &mut BTreeSet<ImportSourceIdentity>,
+    failed_sources: &mut BTreeSet<ImportSourceIdentity>,
     drain_retirements: bool,
 ) -> Result<SearchClassExecution> {
     execute_search_refresh_plan_class_tracked(
@@ -564,20 +568,21 @@ struct SearchClassExecution {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn execute_search_refresh_plan_class_with_pre_lock_hook(
     store: &mut Store,
     plan: &ImportPlan,
     execution_state: &mut crate::commands::import::ImportExecutionState,
     class: ImportWorkClass,
-    mut remaining_units: usize,
+    remaining_units: usize,
     max_slices: Option<usize>,
     progress: &ProgressReporter,
     json_output: bool,
     tolerate_source_errors: bool,
     totals: &mut ImportTotals,
     first_refresh_failure: &mut Option<String>,
-    imported_sources: &mut BTreeSet<usize>,
-    failed_sources: &mut BTreeSet<usize>,
+    imported_sources: &mut BTreeSet<ImportSourceIdentity>,
+    failed_sources: &mut BTreeSet<ImportSourceIdentity>,
     drain_retirements: bool,
     before_bulk_lock: impl FnMut(),
 ) -> Result<crate::commands::import::ImportExecutionResult> {
@@ -614,8 +619,8 @@ fn execute_search_refresh_plan_class_tracked(
     tolerate_source_errors: bool,
     totals: &mut ImportTotals,
     first_refresh_failure: &mut Option<String>,
-    imported_sources: &mut BTreeSet<usize>,
-    failed_sources: &mut BTreeSet<usize>,
+    imported_sources: &mut BTreeSet<ImportSourceIdentity>,
+    failed_sources: &mut BTreeSet<ImportSourceIdentity>,
     drain_retirements: bool,
     mut before_bulk_lock: impl FnMut(),
 ) -> Result<SearchClassExecution> {
@@ -667,7 +672,8 @@ fn execute_search_refresh_plan_class_tracked(
             let source_plan = &plan.sources[validation_failure.source_index];
             let error = error_summary(&validation_failure.error);
             first_refresh_failure.get_or_insert_with(|| error.clone());
-            let first_source_result = failed_sources.insert(validation_failure.source_index);
+            let first_source_result =
+                failed_sources.insert(ImportSourceIdentity::new(&source_plan.source));
             add_refresh_source_failure(
                 totals,
                 &validation_failure.stats,
@@ -782,13 +788,15 @@ fn execute_search_refresh_plan_class_tracked(
                     };
                     completed_bytes = completed_bytes.saturating_add(completed_stats.bytes);
                     if outcome_rejected_without_content {
-                        let first_source_result = failed_sources.insert(selected.source_index);
+                        let first_source_result =
+                            failed_sources.insert(ImportSourceIdentity::new(&source_plan.source));
                         totals.add_rejected_source(&outcome.summary, &completed_stats);
                         if !first_source_result {
                             totals.failed_sources = totals.failed_sources.saturating_sub(1);
                         }
                     } else {
-                        let first_source_result = imported_sources.insert(selected.source_index);
+                        let first_source_result =
+                            imported_sources.insert(ImportSourceIdentity::new(&source_plan.source));
                         totals.add(&outcome.summary, &completed_stats);
                         if !first_source_result {
                             totals.imported_sources = totals.imported_sources.saturating_sub(1);
@@ -838,7 +846,8 @@ fn execute_search_refresh_plan_class_tracked(
                         change_token: selected.stats.change_token,
                     };
                     if !outcome_rejected_without_content {
-                        let first_source_result = failed_sources.insert(selected.source_index);
+                        let first_source_result =
+                            failed_sources.insert(ImportSourceIdentity::new(&source_plan.source));
                         add_refresh_source_failure(totals, &failure_stats, &err);
                         if !first_source_result {
                             totals.failed_sources = totals.failed_sources.saturating_sub(1);
@@ -873,7 +882,9 @@ fn execute_search_refresh_plan_class_tracked(
             Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending) => {
                 stop_admission = true;
             }
-            Err(ctx_history_store::StoreError::WalCheckpointBusy { .. }) if stop_admission => {}
+            Err(ctx_history_store::StoreError::WalCheckpointBusy { .. }) => {
+                stop_admission = true;
+            }
             Err(error) => return Err(error).context("finish search refresh bulk mode"),
         }
         match class {
