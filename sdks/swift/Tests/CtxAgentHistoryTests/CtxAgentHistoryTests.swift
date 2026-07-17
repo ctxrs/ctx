@@ -465,6 +465,76 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: alive.path))
     }
 
+    func testProcessRunnerUsesWindowsCaseInsensitiveEnvironment() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ctx = directory.appendingPathComponent("ctx.exe")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: ctx.path,
+            contents: Data()
+        ))
+
+        let request = CommandRequest(
+            command: "not-ctx",
+            arguments: ["status", "--json"],
+            env: [
+                "ctx_sdk_process_scope_launcher": "ctx",
+                "pAtH": directory.path,
+                "PathExt": ".exe"
+            ]
+        )
+        let inherited = [
+            "CTX_SDK_PROCESS_SCOPE_LAUNCHER": "missing",
+            "Path": directory.appendingPathComponent("missing").path,
+            "PATHEXT": ".CMD"
+        ]
+        let merged = ProcessCommandRunner.mergeEnvironment(
+            inherited: inherited,
+            overrides: request.env,
+            caseInsensitiveNames: true
+        )
+        XCTAssertEqual(
+            merged.filter { $0.key.caseInsensitiveCompare("PATH") == .orderedSame }.count,
+            1
+        )
+        XCTAssertEqual(
+            merged.filter { $0.key.caseInsensitiveCompare("PATHEXT") == .orderedSame }.count,
+            1
+        )
+        XCTAssertEqual(
+            merged.filter {
+                $0.key.caseInsensitiveCompare("CTX_SDK_PROCESS_SCOPE_LAUNCHER") == .orderedSame
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            ProcessCommandRunner.environmentValue(
+                "PATH",
+                in: merged,
+                caseInsensitiveNames: true
+            ),
+            directory.path
+        )
+        XCTAssertEqual(
+            ProcessCommandRunner.environmentValue(
+                "PATHEXT",
+                in: merged,
+                caseInsensitiveNames: true
+            ),
+            ".exe"
+        )
+        XCTAssertEqual(
+            ProcessCommandRunner.launcherPath(
+                for: request,
+                inheritedEnvironment: inherited,
+                windowsEnvironment: true
+            ),
+            ctx.path
+        )
+    }
+
+#if !os(Windows)
     func testProcessRunnerResolvesBareCtxFromRequestPath() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -484,32 +554,6 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(
             ProcessCommandRunner.launcherPath(for: request, inheritedEnvironment: [:]),
             ctx.path
-        )
-
-        let windowsCtx = directory.appendingPathComponent("ctx.exe")
-        XCTAssertTrue(FileManager.default.createFile(
-            atPath: windowsCtx.path,
-            contents: Data()
-        ))
-        XCTAssertEqual(chmod(windowsCtx.path, 0o700), 0)
-        XCTAssertEqual(
-            ProcessCommandRunner.resolveExecutable(
-                "ctx",
-                path: directory.path,
-                separator: ";",
-                pathExtensions: [".exe"]
-            ),
-            ctx.path
-        )
-        try FileManager.default.removeItem(at: ctx)
-        XCTAssertEqual(
-            ProcessCommandRunner.resolveExecutable(
-                "ctx",
-                path: directory.path,
-                separator: ";",
-                pathExtensions: [".exe"]
-            ),
-            windowsCtx.path
         )
     }
 
@@ -550,6 +594,7 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(String(data: result.stdout, encoding: .utf8), "{}")
     }
+#endif
 
     private static var nativeProcessScopeAvailable: Bool {
         if let launcher = ProcessInfo.processInfo.environment["CTX_SDK_PROCESS_SCOPE_LAUNCHER"],

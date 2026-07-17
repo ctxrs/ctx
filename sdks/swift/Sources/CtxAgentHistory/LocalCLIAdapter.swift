@@ -62,7 +62,14 @@ public struct ProcessCommandRunner: CommandRunner {
 
     public func run(_ request: CommandRequest) throws -> CommandResult {
         let process = Process()
-        guard let launcher = Self.launcherPath(for: request) else {
+        let environment = Self.mergeEnvironment(
+            inherited: ProcessInfo.processInfo.environment,
+            overrides: request.env
+        )
+        guard let launcher = Self.launcherPath(
+            for: request,
+            mergedEnvironment: environment
+        ) else {
             throw CaptureIssue.failure(
                 stream: "process_scope",
                 cause: "local CLI process containment is unavailable"
@@ -74,7 +81,7 @@ public struct ProcessCommandRunner: CommandRunner {
         if let cwd = request.cwd {
             process.currentDirectoryURL = URL(fileURLWithPath: cwd)
         }
-        process.environment = ProcessInfo.processInfo.environment.merging(request.env) { _, new in new }
+        process.environment = environment
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -166,12 +173,65 @@ public struct ProcessCommandRunner: CommandRunner {
 
     static func launcherPath(
         for request: CommandRequest,
-        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment
+        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        windowsEnvironment: Bool = Self.usesWindowsEnvironment
+    ) -> String? {
+        launcherPath(
+            for: request,
+            mergedEnvironment: mergeEnvironment(
+                inherited: inheritedEnvironment,
+                overrides: request.env,
+                caseInsensitiveNames: windowsEnvironment
+            ),
+            windowsEnvironment: windowsEnvironment
+        )
+    }
+
+    static func mergeEnvironment(
+        inherited: [String: String],
+        overrides: [String: String],
+        caseInsensitiveNames: Bool = Self.usesWindowsEnvironment
+    ) -> [String: String] {
+        guard caseInsensitiveNames else {
+            return inherited.merging(overrides) { _, new in new }
+        }
+        var merged = inherited
+        for (key, value) in overrides {
+            let replacedKeys = merged.keys.filter {
+                $0.caseInsensitiveCompare(key) == .orderedSame
+            }
+            for existingKey in replacedKeys {
+                merged.removeValue(forKey: existingKey)
+            }
+            merged[key] = value
+        }
+        return merged
+    }
+
+    static func environmentValue(
+        _ name: String,
+        in environment: [String: String],
+        caseInsensitiveNames: Bool
+    ) -> String? {
+        if !caseInsensitiveNames {
+            return environment[name]
+        }
+        return environment.first { key, _ in
+            key.caseInsensitiveCompare(name) == .orderedSame
+        }?.value
+    }
+
+    private static func launcherPath(
+        for request: CommandRequest,
+        mergedEnvironment: [String: String],
+        windowsEnvironment: Bool = Self.usesWindowsEnvironment
     ) -> String? {
         let launcher: String?
-        if let override = request.env[processScopeLauncherEnvironment], !override.isEmpty {
-            launcher = override
-        } else if let override = inheritedEnvironment[processScopeLauncherEnvironment], !override.isEmpty {
+        if let override = environmentValue(
+            processScopeLauncherEnvironment,
+            in: mergedEnvironment,
+            caseInsensitiveNames: windowsEnvironment
+        ), !override.isEmpty {
             launcher = override
         } else {
             let name = URL(fileURLWithPath: request.command).lastPathComponent.lowercased()
@@ -181,22 +241,24 @@ public struct ProcessCommandRunner: CommandRunner {
                 : nil
         }
         guard let launcher else { return nil }
-        #if os(Windows)
-        let separator: Character = ";"
-        let pathExtensions = (
-            request.env["PATHEXT"]
-                ?? inheritedEnvironment["PATHEXT"]
-                ?? ".COM;.EXE;.BAT;.CMD"
-        ).split(separator: ";").map(String.init)
-        #else
-        let separator: Character = ":"
-        let pathExtensions: [String] = []
-        #endif
+        let separator: Character = windowsEnvironment ? ";" : ":"
+        let pathExtensions = windowsEnvironment
+            ? (environmentValue(
+                "PATHEXT",
+                in: mergedEnvironment,
+                caseInsensitiveNames: true
+            ) ?? ".COM;.EXE;.BAT;.CMD").split(separator: ";").map(String.init)
+            : []
         return resolveExecutable(
             launcher,
-            path: request.env["PATH"] ?? inheritedEnvironment["PATH"],
+            path: environmentValue(
+                "PATH",
+                in: mergedEnvironment,
+                caseInsensitiveNames: windowsEnvironment
+            ),
             separator: separator,
-            pathExtensions: pathExtensions
+            pathExtensions: pathExtensions,
+            windowsEnvironment: windowsEnvironment
         )
     }
 
@@ -204,7 +266,8 @@ public struct ProcessCommandRunner: CommandRunner {
         _ executable: String,
         path: String?,
         separator: Character,
-        pathExtensions: [String]
+        pathExtensions: [String],
+        windowsEnvironment: Bool = Self.usesWindowsEnvironment
     ) -> String? {
         if executable.contains("/") || executable.contains("\\") {
             return executable
@@ -225,12 +288,22 @@ public struct ProcessCommandRunner: CommandRunner {
                 let candidate = URL(fileURLWithPath: directory)
                     .appendingPathComponent(name)
                     .path
-                if FileManager.default.isExecutableFile(atPath: candidate) {
+                if windowsEnvironment
+                    ? FileManager.default.fileExists(atPath: candidate)
+                    : FileManager.default.isExecutableFile(atPath: candidate) {
                     return candidate
                 }
             }
         }
         return nil
+    }
+
+    static var usesWindowsEnvironment: Bool {
+        #if os(Windows)
+        true
+        #else
+        false
+        #endif
     }
 
     private func abort(
