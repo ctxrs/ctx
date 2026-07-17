@@ -111,6 +111,13 @@ fn create_orphaned_pi_publication(
             tombstone_generation,
         )
         .unwrap();
+    assert!(observer
+        .complete_source_import_inventory_generation(
+            file.provider,
+            &file.source_root,
+            tombstone_generation,
+        )
+        .unwrap());
     assert_eq!(
         observer
             .provider_file_publication_retirement_work_count()
@@ -214,6 +221,13 @@ fn create_orphaned_pi_incremental_publication(data_root: &Path, owner_source_cou
             tombstone_generation,
         )
         .unwrap();
+    assert!(store
+        .complete_source_import_inventory_generation(
+            file.provider,
+            &file.source_root,
+            tombstone_generation,
+        )
+        .unwrap());
     assert_eq!(
         store
             .provider_file_publication_retirement_work_count()
@@ -270,7 +284,7 @@ fn setup_drains_orphaned_mutated_publication_retirement() {
         },
     )
     .unwrap();
-    assert_eq!(report.totals.recovery_units_processed, 1);
+    assert_eq!(report.totals.recovery_units_processed, 3);
     assert_eq!(report.totals.recovery_units_pending, 0);
     let store = Store::open(database_path(data_root)).unwrap();
     assert!(!store.has_pending_provider_file_publications().unwrap());

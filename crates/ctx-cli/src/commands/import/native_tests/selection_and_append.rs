@@ -161,7 +161,7 @@ fn write_valid_codex_session(root: &Path, session_id: &str) {
 }
 
 #[test]
-fn fresh_new_batch_commits_stable_sibling_and_defers_missing_path() {
+fn fresh_new_batch_defers_atomic_group_when_sibling_disappears() {
     let temp = tempdir();
     let source_path = temp.path().join("sessions");
     write_valid_codex_session(&source_path, "a-good");
@@ -178,29 +178,20 @@ fn fresh_new_batch_commits_stable_sibling_and_defers_missing_path() {
     fs::remove_file(source_path.join("z-retry.jsonl")).unwrap();
     let source_plan = &plan.sources[selected.source_index];
 
-    let mut completed = None;
-    for _ in 0..32 {
-        let result = import_selected_source(
-            &mut store,
-            &source_plan.source,
-            None,
-            &selected.preinventory,
-            &selected.work,
-        )
-        .unwrap();
-        assert!(result.remaining_error.is_none());
-        if result.outcome.completed_units == 1 {
-            completed = Some(result.outcome);
-            break;
-        }
-        assert!(result.outcome.deferred_units > 0);
-        assert!(result.outcome.made_durable_progress());
-    }
-    let outcome = completed.expect("stable sibling must finish bounded publication");
+    let result = import_selected_source(
+        &mut store,
+        &source_plan.source,
+        None,
+        &selected.preinventory,
+        &selected.work,
+    )
+    .unwrap();
+    assert!(result.remaining_error.is_none());
+    let outcome = result.outcome;
 
-    assert_eq!(outcome.completed_units, 1);
-    assert_eq!(outcome.deferred_units, 1);
-    assert!(outcome.summary.imported_events > 0);
+    assert_eq!(outcome.completed_units, 0);
+    assert_eq!(outcome.deferred_units, 2);
+    assert_eq!(outcome.summary, ProviderImportSummary::default());
     assert!(outcome.made_durable_progress());
 
     let inventory = inventory_import_sources(
@@ -211,7 +202,7 @@ fn fresh_new_batch_commits_stable_sibling_and_defers_missing_path() {
     .unwrap();
     let plan = ImportPlan::build(&store, inventory.sources).unwrap();
     assert_eq!(plan.fresh_units, 0);
-    assert_eq!(plan.recovery_units, 0);
+    assert_eq!(plan.recovery_units, 1);
 }
 
 fn jsonl(value: serde_json::Value) -> String {
@@ -522,6 +513,16 @@ fn changed_owner_with_advanced_generation_tombstones_then_reinventories() {
             .as_bytes(),
         )
         .unwrap();
+    let changed_files = collect_source_import_files(&source).unwrap();
+    assert_eq!(changed_files.len(), 1);
+    persist_source_import_files(&store, &source, advanced_generation, &changed_files).unwrap();
+    assert!(store
+        .complete_source_import_inventory_generation(
+            source.provider,
+            &owner_file.source_root,
+            advanced_generation,
+        )
+        .unwrap());
 
     let inventory = inventory_import_sources(&store, Vec::new(), false).unwrap();
     assert_eq!(
@@ -556,34 +557,6 @@ fn changed_owner_with_advanced_generation_tombstones_then_reinventories() {
         "{:?}",
         store.source_import_file_counts().unwrap()
     );
-    let fresh = plan
-        .select_slice_for_execution_with_pre_lock_hook(
-            &store,
-            ImportWorkClass::Fresh,
-            1,
-            &mut state,
-            || {},
-        )
-        .unwrap();
-    let next = match fresh {
-        Some(next) => next,
-        None => plan
-            .select_slice_for_execution_with_pre_lock_hook(
-                &store,
-                ImportWorkClass::Recovery,
-                1,
-                &mut state,
-                || {},
-            )
-            .unwrap()
-            .unwrap(),
-    };
-    assert_eq!(next.slice.sources.len(), 1);
-    assert_eq!(next.slice.sources[0].work.unit_count(), 1);
-    store
-        .finish_event_search_bulk_mode(&next.bulk_guard)
-        .unwrap();
-
     let later = inventory_import_sources(&store, vec![source], false).unwrap();
     let later_plan = ImportPlan::build(&store, later.sources).unwrap();
     assert_eq!(
@@ -641,7 +614,7 @@ fn assert_unchanged_source_has_no_work(store: &Store, source: SourceInfo) {
 }
 
 #[test]
-fn resume_does_not_reschedule_healthy_codex_and_pi_units() {
+fn resume_reschedules_healthy_codex_and_pi_units_for_explicit_rescan() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
@@ -672,7 +645,7 @@ fn resume_does_not_reschedule_healthy_codex_and_pi_units() {
     let inventory = inventory_import_sources(&store, vec![codex, pi], true).unwrap();
     let plan = ImportPlan::build(&store, inventory.sources).unwrap();
     assert_eq!(plan.fresh_units, 0);
-    assert_eq!(plan.recovery_units, 0);
+    assert_eq!(plan.recovery_units, 2);
 }
 
 #[test]

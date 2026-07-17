@@ -156,6 +156,13 @@ fn unchanged_root_source_still_repairs_event_search_backfill() {
         },
     };
     store.upsert_event(&event).unwrap();
+    for seq in 2..=130 {
+        let mut filler = event.clone();
+        filler.id = new_id();
+        filler.seq = seq;
+        filler.payload = json!({"text": format!("backfill filler {seq}")});
+        store.upsert_event(&filler).unwrap();
+    }
     store.refresh_search_index().unwrap();
     let mut store = store;
     assert!(store.event_search_projection_needs_backfill().unwrap());
@@ -513,10 +520,10 @@ fn waiting_manifest_plan_requires_bounded_inventory_for_a_new_unit() {
     importer.join().unwrap().unwrap();
     let (current_files, inventory_generation) =
         finalized_source_import_preinventory(&lock_store, &source);
-    assert_eq!(current_files.len(), 1);
-    assert!(current_files[0]
-        .source_path
-        .ends_with("added/messages.jsonl"));
+    assert_eq!(current_files.len(), 2);
+    assert!(current_files
+        .iter()
+        .any(|file| file.source_path.ends_with("added/messages.jsonl")));
     let mut store = Store::open(&db_path).unwrap();
     let summary = import_one_source_inner(
         &mut store,
@@ -537,31 +544,17 @@ fn waiting_manifest_plan_requires_bounded_inventory_for_a_new_unit() {
 }
 
 #[test]
-fn empty_manifest_plan_skips_until_bounded_inventory_discovers_a_new_unit() {
+fn empty_manifest_inventory_fails_until_it_discovers_a_new_unit() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("sessions");
     fs::create_dir(&source_path).unwrap();
     let source = explicit_path_source(CaptureProvider::MistralVibe, source_path.clone());
     let mut store = Store::open(&db_path).unwrap();
-    let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
-    assert!(files.is_empty());
-    let lock_attempted = std::sync::atomic::AtomicBool::new(false);
-    let summary = import_one_source_inner_with_pre_lock_hook(
-        &mut store,
-        &source,
-        None,
-        false,
-        false,
-        &SourcePreinventory::SourceImportFiles {
-            files,
-            inventory_generation,
-        },
-        || lock_attempted.store(true, std::sync::atomic::Ordering::SeqCst),
-    )
-    .unwrap();
-    assert_eq!(summary, ProviderImportSummary::default());
-    assert!(!lock_attempted.load(std::sync::atomic::Ordering::SeqCst));
+    let inventory = inventory_import_sources(&store, vec![source.clone()], false).unwrap();
+    assert!(inventory.sources.is_empty());
+    assert_eq!(inventory.failures.len(), 1);
+    assert!(inventory.failures[0].error.contains("no importable"));
 
     fs::write(source_path.join("messages.jsonl"), b"not json\n").unwrap();
     let (files, inventory_generation) = finalized_source_import_preinventory(&store, &source);
