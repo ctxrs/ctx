@@ -695,8 +695,9 @@ def _drain_process_stream(
         stop.set()
         return
     try:
+        read = getattr(stream, "read1", stream.read)
         while not stop.is_set():
-            chunk = stream.read(_READ_BUFFER_BYTES)
+            chunk = read(_READ_BUFFER_BYTES)
             if not chunk:
                 return
             if not capture.append(chunk):
