@@ -55,6 +55,124 @@ fn fresh_store_installs_all_optimized_indexes() {
         )
         .unwrap();
     assert_eq!(completed_ledgers, 2);
+
+    let projection_index_exists: bool = store
+        .conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'idx_import_pending_work_selection')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(projection_index_exists);
+    let projection_trigger_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' \
+             AND name LIKE 'trg_%_pending_work_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projection_trigger_count, 0);
+    let count_trigger_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' \
+             AND name LIKE 'trg_%_pending_count_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count_trigger_count, 8);
+    let selection_mode: String = store
+        .conn
+        .query_row(
+            "SELECT selection_mode FROM import_pending_work_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selection_mode, "direct");
+
+    store
+        .conn
+        .execute_batch(
+            r#"
+            INSERT INTO catalog_sessions
+              (source_path, provider, source_format, source_root, agent_type,
+               file_size_bytes, file_modified_at_ms, cataloged_at_ms,
+               pending_reason)
+            VALUES
+              ('/fresh/catalog.jsonl', 'codex', 'codex_session_jsonl',
+               '/fresh', 'primary', 10, 1, 1, 'fresh_new');
+            INSERT INTO source_import_files
+              (provider, source_format, source_root, source_path,
+               file_size_bytes, file_modified_at_ms, observed_at_ms,
+               indexed_at_ms, pending_reason)
+            VALUES
+              ('pi', 'pi_session_jsonl', '/fresh', '/fresh/source.jsonl',
+               20, 1, 1, 5, 'recovery_retry');
+            "#,
+        )
+        .unwrap();
+    let pending_work_count: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM import_pending_work", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(pending_work_count, 0);
+    let pending_counts: Vec<(String, String, i64)> = store
+        .conn
+        .prepare(
+            "SELECT inventory_family, work_class, pending_count \
+             FROM import_pending_work_counts ORDER BY inventory_family",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        pending_counts,
+        vec![
+            ("catalog_sessions".into(), "fresh".into(), 1),
+            ("source_import_files".into(), "recovery".into(), 1),
+        ]
+    );
+
+    store
+        .conn
+        .execute_batch(
+            r#"
+            UPDATE catalog_sessions
+            SET pending_reason = 'legacy', indexed_at_ms = 9
+            WHERE source_path = '/fresh/catalog.jsonl';
+            UPDATE source_import_files
+            SET is_stale = 1
+            WHERE provider = 'pi' AND source_root = '/fresh'
+              AND source_path = '/fresh/source.jsonl';
+            "#,
+        )
+        .unwrap();
+    let remaining: (String, i64) = store
+        .conn
+        .query_row(
+            "SELECT work_class, pending_count FROM import_pending_work_counts",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(remaining, ("recovery".into(), 1));
+    let pending_work_count: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM import_pending_work", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(pending_work_count, 0);
 }
 
 #[test]
@@ -150,6 +268,72 @@ fn schema_v46_upgrade_preserves_index_rootpages_and_uses_trigger_only_invariant(
             .unwrap();
         assert!(!exists, "v46 upgrade created optimized index {name}");
     }
+    let projection_state: (i64, i64, i64) = store
+        .conn
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM import_pending_work), \
+               (SELECT COUNT(*) FROM import_pending_work_counts), \
+               (SELECT COUNT(*) FROM import_pending_reason_repairs \
+                WHERE completed = 0)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(projection_state, (0, 0, 2));
+    let selection_mode: String = store
+        .conn
+        .query_row(
+            "SELECT selection_mode FROM import_pending_work_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selection_mode, "projection");
+    let projection_index_exists: bool = store
+        .conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'idx_import_pending_work_selection')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(projection_index_exists);
+    let projection_trigger_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' \
+             AND name LIKE 'trg_%_pending_work_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projection_trigger_count, 8);
+    store
+        .conn
+        .execute(
+            "UPDATE catalog_sessions SET pending_reason = 'legacy' \
+             WHERE source_path = '/legacy/session.jsonl'",
+            [],
+        )
+        .unwrap();
+    let mirrored: (String, String, i64) = store
+        .conn
+        .query_row(
+            "SELECT pending.source_path, pending.work_class, counts.pending_count \
+             FROM import_pending_work AS pending \
+             JOIN import_pending_work_counts AS counts USING (\
+               inventory_family, provider, source_root, work_class\
+             )",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        mirrored,
+        ("/legacy/session.jsonl".into(), "recovery".into(), 1)
+    );
     let trigger_count: i64 = store
         .conn
         .query_row(
@@ -200,6 +384,105 @@ fn schema_v46_upgrade_preserves_index_rootpages_and_uses_trigger_only_invariant(
         .unwrap_err()
         .to_string()
         .contains("duplicate provider session for capture source identity"));
+}
+
+#[test]
+fn v57_migration_creates_empty_projection_without_reading_inventory() {
+    let temp = tempdir();
+    let path = temp.path().join("v57-pending-work.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+    conn.execute_batch(INDEXES_SQL).unwrap();
+    conn.execute_batch(
+        r#"
+        DROP TABLE import_pending_work_state;
+        DROP TABLE import_pending_work_counts;
+        DROP TABLE import_pending_work;
+
+        INSERT INTO catalog_sessions
+          (source_path, provider, source_format, source_root, agent_type,
+           file_size_bytes, file_modified_at_ms, cataloged_at_ms,
+           pending_reason)
+        VALUES
+          ('/legacy/catalog.jsonl', 'codex', 'codex_session_jsonl',
+           '/legacy', 'primary', 10, 1, 1, 'legacy');
+        INSERT INTO source_import_files
+          (provider, source_format, source_root, source_path,
+           file_size_bytes, file_modified_at_ms, observed_at_ms,
+           pending_reason)
+        VALUES
+          ('pi', 'pi_session_jsonl', '/legacy', '/legacy/source.jsonl',
+           20, 1, 1, 'legacy');
+        INSERT INTO import_pending_reason_repairs
+          (inventory_family, cursor_provider, cursor_source_root,
+           cursor_source_path, completed)
+        VALUES
+          ('catalog_sessions', 'codex', '/legacy', '/legacy/catalog.jsonl', 1),
+          ('source_import_files', 'pi', '/legacy', '/legacy/source.jsonl', 1);
+        PRAGMA user_version = 56;
+        "#,
+    )
+    .unwrap();
+    let inventory_rootpages = ["catalog_sessions", "source_import_files"].map(|table| {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    let total_changes_before = conn.total_changes();
+    let forbidden_actions = Arc::new(Mutex::new(Vec::new()));
+    let callback_forbidden_actions = Arc::clone(&forbidden_actions);
+    conn.authorizer(Some(move |context: AuthContext<'_>| {
+        let action = match context.action {
+            AuthAction::Read { table_name, .. }
+                if context.accessor.is_none()
+                    && matches!(table_name, "catalog_sessions" | "source_import_files") =>
+            {
+                Some(format!("read:{table_name}"))
+            }
+            AuthAction::CreateIndex { table_name, .. }
+                if matches!(table_name, "catalog_sessions" | "source_import_files") =>
+            {
+                Some(format!("index:{table_name}"))
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            callback_forbidden_actions.lock().unwrap().push(action);
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }));
+
+    crate::schema::migrations::migrate_pending_work_projection_to_v57(&conn).unwrap();
+    assert!(forbidden_actions.lock().unwrap().is_empty());
+    assert_eq!(conn.total_changes() - total_changes_before, 3);
+    let inventory_rootpages_after = ["catalog_sessions", "source_import_files"].map(|table| {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(inventory_rootpages_after, inventory_rootpages);
+    let state: (i64, i64, String, i64) = conn
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM import_pending_work), \
+               (SELECT COUNT(*) FROM import_pending_work_counts), \
+               (SELECT selection_mode FROM import_pending_work_state WHERE singleton = 1), \
+               (SELECT COUNT(*) FROM import_pending_reason_repairs \
+                WHERE completed = 0 AND cursor_provider IS NULL \
+                  AND cursor_source_root IS NULL AND cursor_source_path IS NULL)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, (0, 0, "projection".into(), 2));
 }
 
 #[test]
