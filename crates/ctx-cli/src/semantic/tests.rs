@@ -1321,6 +1321,63 @@ mod tests {
     }
 
     #[test]
+    fn canonical_write_during_projection_rebuild_cannot_publish_stale_slot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let first_event = Uuid::new_v4();
+        let second_event = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[
+            (
+                test_chunk(first_event, 1, "first"),
+                test_embedding(1.0, 0.0),
+            ),
+            (
+                test_chunk(second_event, 2, "second"),
+                test_embedding(0.0, 1.0),
+            ),
+        ])?;
+        store.set_maintenance_state_i64(MAINTENANCE_PAGE_UNITS_STATE_KEY, 1)?;
+
+        store.run_maintenance_slice()?;
+        store.run_maintenance_slice()?;
+        store.run_maintenance_slice()?;
+        let stale_target_generation = store
+            .maintenance_state_i64(SQLITE_VEC0_BUILD_GENERATION_STATE_KEY)?
+            .expect("projection build generation");
+        assert!(!store.sqlite_vec0_search_ready()?);
+
+        let replacement = test_embedding(0.8, 0.6);
+        store.upsert_chunk_embeddings(&[(
+            test_chunk(first_event, 3, "replacement"),
+            replacement.clone(),
+        )])?;
+        let canonical_generation = store
+            .maintenance_state_i64(CANONICAL_GENERATION_STATE_KEY)?
+            .expect("canonical generation");
+        assert_ne!(canonical_generation, stale_target_generation);
+
+        let after_mutation = store.run_maintenance_slice()?;
+        assert!(!after_mutation.is_ready());
+        assert!(!store.sqlite_vec0_search_ready()?);
+        assert_eq!(
+            store.maintenance_state_i64(SQLITE_VEC0_BUILD_GENERATION_STATE_KEY)?,
+            Some(canonical_generation)
+        );
+
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+        let search = store.search(&replacement, 2)?;
+        assert_eq!(
+            search.hits.first().map(|hit| hit.event_id),
+            Some(first_event)
+        );
+        assert!(!search
+            .hits
+            .iter()
+            .any(|hit| { hit.event_id == first_event && hit.source_text_hash == "first" }));
+        Ok(())
+    }
+
+    #[test]
     fn projection_search_is_model_dimension_and_deadline_bounded() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
