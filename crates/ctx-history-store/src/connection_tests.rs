@@ -8,8 +8,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     bulk_search::{
-        set_restore_post_commit_hook, BULK_MODE_FINAL_CHECKPOINT_PENDING, FTS_BULK_CRISISMERGE,
-        FTS_BULK_MAINTENANCE_BATCHES,
+        event_search_final_checkpoint_debt_path, set_checkpoint_debt_persisted_hook,
+        set_final_checkpoint_post_checkpoint_hook, set_restore_post_commit_hook,
+        FTS_BULK_CRISISMERGE, FTS_BULK_MAINTENANCE_BATCHES,
     },
     EventSearchBulkMaintenanceOutcome, Store, StoreError,
 };
@@ -516,6 +517,22 @@ fn wal_bytes(db_path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+fn assert_private_checkpoint_debt(db_path: &std::path::Path) {
+    let debt_path = event_search_final_checkpoint_debt_path(db_path);
+    assert_eq!(
+        std::fs::read(&debt_path).unwrap(),
+        b"ctx-event-search-final-checkpoint-debt\nversion=1\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(debt_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
 #[test]
 fn subthreshold_changed_slice_coalesces_its_intermediate_checkpoints() {
     let temp = tempdir();
@@ -553,10 +570,7 @@ fn subthreshold_changed_slice_coalesces_its_intermediate_checkpoints() {
         }
     }
     assert_eq!(bulk_mode_marker(&store), None);
-    assert!(
-        wal_bytes(&db_path) < 64 * 1024,
-        "only the tiny marker-clear transaction should remain after the corpus checkpoint"
-    );
+    assert_eq!(wal_bytes(&db_path), 0);
 }
 
 #[test]
@@ -767,14 +781,15 @@ fn final_checkpoint_phase_survives_reopen_and_refuses_admission() {
             assert_eq!(
                 reader
                     .query_row(
-                        "SELECT value FROM search_projection_stats WHERE key = 'event_search_bulk_mode_v1'",
+                        "SELECT COUNT(*) FROM search_projection_stats WHERE key = 'event_search_bulk_mode_v1'",
                         [],
                         |row| row.get::<_, i64>(0),
                     )
                     .unwrap(),
-                BULK_MODE_FINAL_CHECKPOINT_PENDING,
-                "config restoration did not durably enter final-checkpoint phase"
+                0,
+                "main recovery marker remained after config restoration"
             );
+            assert!(event_search_final_checkpoint_debt_path(&hook_db_path).is_file());
             *hook_reader.lock().unwrap() = Some(reader);
         }),
     );
@@ -783,10 +798,8 @@ fn final_checkpoint_phase_survives_reopen_and_refuses_admission() {
         store.finish_event_search_bulk_mode(&guard).unwrap_err(),
         StoreError::WalCheckpointBusy { .. }
     ));
-    assert_eq!(
-        bulk_mode_marker(&store),
-        Some(BULK_MODE_FINAL_CHECKPOINT_PENDING)
-    );
+    assert_eq!(bulk_mode_marker(&store), None);
+    assert_private_checkpoint_debt(&db_path);
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&store, table, "automerge", 4), 8);
         assert_eq!(fts_config(&store, table, "crisismerge", 16), 32);
@@ -809,10 +822,8 @@ fn final_checkpoint_phase_survives_reopen_and_refuses_admission() {
     drop(store);
 
     let reopened = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
-    assert_eq!(
-        bulk_mode_marker(&reopened),
-        Some(BULK_MODE_FINAL_CHECKPOINT_PENDING)
-    );
+    assert_eq!(bulk_mode_marker(&reopened), None);
+    assert!(event_search_final_checkpoint_debt_path(&db_path).is_file());
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&reopened, table, "automerge", 4), 8);
         assert_eq!(fts_config(&reopened, table, "crisismerge", 16), 32);
@@ -829,7 +840,7 @@ fn final_checkpoint_phase_survives_reopen_and_refuses_admission() {
         Ok(_) => panic!("final-checkpoint debt admitted a new bulk import"),
         Err(error) => error,
     };
-    assert!(matches!(begin_error, StoreError::WalCheckpointBusy { .. }));
+    assert!(matches!(begin_error, StoreError::BulkSearchImportBusy));
 
     let reader = pinned_reader.lock().unwrap().take().unwrap();
     reader.execute_batch("ROLLBACK").unwrap();
@@ -839,5 +850,192 @@ fn final_checkpoint_phase_survives_reopen_and_refuses_admission() {
         .unwrap()
         .is_complete());
     assert_eq!(bulk_mode_marker(&reopened), None);
-    assert!(wal_bytes(&db_path) < BULK_SEARCH_WAL_HIGH_WATER_BYTES);
+    assert!(!event_search_final_checkpoint_debt_path(&db_path).exists());
+    assert_eq!(wal_bytes(&db_path), 0);
+}
+
+#[test]
+fn checkpoint_debt_handoff_writer_contention_is_retryable_and_converges() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    for table in ["event_search", "event_search_scriptgram"] {
+        set_fts_config(&store, table, "automerge", 8);
+        set_fts_config(&store, table, "crisismerge", 32);
+    }
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    insert_bulk_search_events(&store, "writer-handoff", 20, 8);
+
+    let blocking_writer = Arc::new(Mutex::new(None));
+    let hook_writer = Arc::clone(&blocking_writer);
+    let hook_db_path = db_path.clone();
+    set_checkpoint_debt_persisted_hook(
+        db_path.clone(),
+        Box::new(move || {
+            let writer = Connection::open(&hook_db_path).unwrap();
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            *hook_writer.lock().unwrap() = Some(writer);
+        }),
+    );
+
+    let mut saw_retryable_contention = false;
+    for _ in 0..32 {
+        match store.finish_event_search_bulk_mode(&guard) {
+            Ok(EventSearchBulkMaintenanceOutcome::Pending) => {}
+            Ok(EventSearchBulkMaintenanceOutcome::Complete) => {
+                panic!("finalization completed before the handoff contention hook ran")
+            }
+            Err(StoreError::BulkSearchImportBusy) => {
+                saw_retryable_contention = true;
+                break;
+            }
+            Err(error) => panic!("unexpected finalization error: {error}"),
+        }
+    }
+    assert!(saw_retryable_contention);
+    assert_eq!(bulk_mode_marker(&store), Some(1));
+    assert!(event_search_final_checkpoint_debt_path(&db_path).is_file());
+    assert_eq!(
+        store.event_search_bulk_admission_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&store, table, "automerge", 4), 0);
+        assert_eq!(
+            fts_config(&store, table, "crisismerge", 16),
+            FTS_BULK_CRISISMERGE
+        );
+    }
+
+    drop(guard);
+    drop(store);
+    let writer = blocking_writer.lock().unwrap().take().unwrap();
+    writer.execute_batch("ROLLBACK").unwrap();
+    drop(writer);
+
+    let reopened = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    assert_eq!(bulk_mode_marker(&reopened), Some(1));
+    assert!(event_search_final_checkpoint_debt_path(&db_path).is_file());
+    assert_eq!(
+        reopened.event_search_bulk_admission_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    assert!(matches!(
+        reopened.begin_event_search_bulk_mode().err().unwrap(),
+        StoreError::BulkSearchImportBusy
+    ));
+
+    let mut maintenance_complete = false;
+    for _ in 0..32 {
+        if reopened
+            .advance_event_search_bulk_maintenance()
+            .unwrap()
+            .is_complete()
+        {
+            maintenance_complete = true;
+            break;
+        }
+    }
+    assert!(maintenance_complete);
+    assert_eq!(bulk_mode_marker(&reopened), None);
+    assert!(!event_search_final_checkpoint_debt_path(&db_path).exists());
+    assert_eq!(wal_bytes(&db_path), 0);
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&reopened, table, "automerge", 4), 8);
+        assert_eq!(fts_config(&reopened, table, "crisismerge", 16), 32);
+    }
+}
+
+#[test]
+fn checkpoint_complete_crash_debt_reopens_pending_and_converges_without_main_write() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    insert_bulk_search_events(&store, "checkpoint-crash", 20, 8);
+    set_final_checkpoint_post_checkpoint_hook(db_path.clone(), Box::new(|| true));
+
+    let mut saw_crash_boundary = false;
+    for _ in 0..32 {
+        match store.finish_event_search_bulk_mode(&guard) {
+            Ok(EventSearchBulkMaintenanceOutcome::Pending) => {}
+            Ok(EventSearchBulkMaintenanceOutcome::Complete) => {
+                panic!("finalization removed debt before the crash hook ran")
+            }
+            Err(StoreError::BulkSearchImportBusy) => {
+                saw_crash_boundary = true;
+                break;
+            }
+            Err(error) => panic!("unexpected finalization error: {error}"),
+        }
+    }
+    assert!(saw_crash_boundary);
+    assert_eq!(bulk_mode_marker(&store), None);
+    assert!(event_search_final_checkpoint_debt_path(&db_path).is_file());
+    assert_eq!(wal_bytes(&db_path), 0);
+    drop(guard);
+    drop(store);
+
+    let reopened = Store::open(&db_path).unwrap();
+    assert!(event_search_final_checkpoint_debt_path(&db_path).is_file());
+    assert_eq!(
+        reopened.event_search_bulk_admission_outcome().unwrap(),
+        EventSearchBulkMaintenanceOutcome::Pending
+    );
+    assert!(reopened
+        .advance_event_search_bulk_maintenance()
+        .unwrap()
+        .is_complete());
+    assert!(!event_search_final_checkpoint_debt_path(&db_path).exists());
+    assert_eq!(wal_bytes(&db_path), 0);
+}
+
+#[test]
+fn unknown_bulk_mode_marker_values_fail_closed() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+
+    for value in [0, -1, 2, i64::MAX] {
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO search_projection_stats (key, value, updated_at_ms)
+                VALUES ('event_search_bulk_mode_v1', ?1, 0)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                "#,
+                [value],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.event_search_bulk_maintenance_outcome().unwrap_err(),
+            StoreError::InvalidBulkSearchPhase(invalid) if invalid == value
+        ));
+    }
+}
+
+#[test]
+fn malformed_checkpoint_debt_fails_closed_on_reopen() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    let debt_path = event_search_final_checkpoint_debt_path(&db_path);
+    std::fs::write(&debt_path, b"future-or-tampered-debt\n").unwrap();
+    crate::object_store::restrict_private_file(&debt_path).unwrap();
+
+    assert!(matches!(
+        store.event_search_bulk_maintenance_outcome().unwrap_err(),
+        StoreError::InvalidBulkSearchCheckpointDebt(_)
+    ));
+    drop(store);
+
+    let error = match Store::open(&db_path) {
+        Ok(_) => panic!("malformed checkpoint debt did not fail closed on reopen"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        StoreError::InvalidBulkSearchCheckpointDebt(_)
+    ));
 }

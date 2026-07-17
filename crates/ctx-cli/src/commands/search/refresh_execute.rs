@@ -657,7 +657,18 @@ fn execute_search_refresh_plan_class_tracked(
             validation_failures,
         } = executable;
         if slice.is_empty() && validation_failures.is_empty() {
-            store.finish_event_search_bulk_mode(&bulk_guard)?;
+            match store.finish_event_search_bulk_mode(&bulk_guard) {
+                Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Complete) => {}
+                Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending)
+                | Err(
+                    ctx_history_store::StoreError::WalCheckpointBusy { .. }
+                    | ctx_history_store::StoreError::BulkSearchImportBusy,
+                ) => {
+                    retryable_blocker = true;
+                    execution_result.stop_admission();
+                }
+                Err(error) => return Err(error).context("finish search refresh bulk mode"),
+            }
             break;
         }
         let validation_units = validation_failures
@@ -891,7 +902,10 @@ fn execute_search_refresh_plan_class_tracked(
             Ok(ctx_history_store::EventSearchBulkMaintenanceOutcome::Pending) => {
                 stop_admission = true;
             }
-            Err(ctx_history_store::StoreError::WalCheckpointBusy { .. }) => {
+            Err(
+                ctx_history_store::StoreError::WalCheckpointBusy { .. }
+                | ctx_history_store::StoreError::BulkSearchImportBusy,
+            ) => {
                 stop_admission = true;
             }
             Err(error) => return Err(error).context("finish search refresh bulk mode"),

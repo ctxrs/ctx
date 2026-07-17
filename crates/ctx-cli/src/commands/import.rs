@@ -763,7 +763,15 @@ fn execute_import_plan_class_for_report_tracked(
             validation_failures,
         } = executable;
         if slice.is_empty() && validation_failures.is_empty() {
-            store.finish_event_search_bulk_mode(&bulk_guard)?;
+            match store.finish_event_search_bulk_mode(&bulk_guard) {
+                Ok(EventSearchBulkMaintenanceOutcome::Complete) => {}
+                Ok(EventSearchBulkMaintenanceOutcome::Pending)
+                | Err(StoreError::WalCheckpointBusy { .. } | StoreError::BulkSearchImportBusy) => {
+                    retryable_blocker = true;
+                    execution_result.stop_admission();
+                }
+                Err(error) => return Err(error.into()),
+            }
             break;
         }
         let validation_units = validation_failures
@@ -972,7 +980,9 @@ fn execute_import_plan_class_for_report_tracked(
         match store.finish_event_search_bulk_mode(&bulk_guard) {
             Ok(EventSearchBulkMaintenanceOutcome::Complete) => {}
             Ok(EventSearchBulkMaintenanceOutcome::Pending) => stop_admission = true,
-            Err(StoreError::WalCheckpointBusy { .. }) => stop_admission = true,
+            Err(StoreError::WalCheckpointBusy { .. } | StoreError::BulkSearchImportBusy) => {
+                stop_admission = true;
+            }
             Err(error) => return Err(error.into()),
         }
         match class {

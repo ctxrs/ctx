@@ -91,6 +91,10 @@ pub enum StoreError {
     BulkSearchImportBusy,
     #[error("bulk search guard belongs to a different ctx index")]
     InvalidBulkSearchGuard,
+    #[error("invalid event-search bulk mode phase: {0}")]
+    InvalidBulkSearchPhase(i64),
+    #[error("invalid event-search final-checkpoint debt: {0}")]
+    InvalidBulkSearchCheckpointDebt(&'static str),
     #[error(
         "ctx search index rebuild is incomplete; run a writable command such as `ctx setup` or `ctx import` to resume it"
     )]
