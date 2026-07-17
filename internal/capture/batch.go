@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -118,6 +119,10 @@ func NewCapturedBatch(input BatchInput) (CapturedBatch, error) {
 	if input.Privacy.PolicyID == "" {
 		input.Privacy = DefaultPrivacyStatus()
 	}
+	hints, sanitizedHints := sanitizeDeterministicHints(input.Hints)
+	if sanitizedHints {
+		input.Privacy.Notes = append(input.Privacy.Notes, "repo_hints_sanitized")
+	}
 	input.Privacy.Applied = true
 	input.Privacy.RecordPolicy = PrivacyPolicyRef{
 		LosslessAfterFiltering: true,
@@ -167,7 +172,7 @@ func NewCapturedBatch(input BatchInput) (CapturedBatch, error) {
 		ContentHash:         contentHash,
 		RecordSchemaVersion: NativeRecordSchemaVersion,
 		Records:             input.Records,
-		Hints:               input.Hints,
+		Hints:               hints,
 		Privacy:             input.Privacy,
 		Checkpoint: SourceCheckpoint{
 			SourceID:       sourceID,
@@ -229,13 +234,13 @@ func DetectRepoHints(path string) DeterministicHints {
 	for {
 		gitPath := filepath.Join(dir, ".git")
 		if _, err := os.Stat(gitPath); err == nil {
-			hints := DeterministicHints{RepoRoot: dir}
+			hints := DeterministicHints{}
 			if rel, err := filepath.Rel(dir, abs); err == nil {
 				hints.RelativePath = filepath.ToSlash(rel)
 			}
 			hints.Commit = readGitHeadCommit(gitPath)
-			hints.RepoRemote = readGitOriginURL(gitPath)
-			return hints
+			sanitized, _ := sanitizeDeterministicHints(hints)
+			return sanitized
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -326,25 +331,44 @@ func readGitHeadCommit(gitPath string) string {
 	return head
 }
 
-func readGitOriginURL(gitPath string) string {
-	config, err := os.ReadFile(filepath.Join(gitDirPath(gitPath), "config"))
-	if err != nil {
+func sanitizeDeterministicHints(hints DeterministicHints) (DeterministicHints, bool) {
+	sanitized := DeterministicHints{}
+	changed := hints.RepoRoot != "" || hints.RepoRemote != ""
+	if commit := sanitizeCommit(hints.Commit); commit != "" {
+		sanitized.Commit = commit
+	} else if hints.Commit != "" {
+		changed = true
+	}
+	if relativePath := sanitizeRelativePath(hints.RelativePath); relativePath != "" {
+		sanitized.RelativePath = relativePath
+	} else if hints.RelativePath != "" {
+		changed = true
+	}
+	return sanitized, changed
+}
+
+func sanitizeCommit(commit string) string {
+	if len(commit) != 40 && len(commit) != 64 {
 		return ""
 	}
-	inOrigin := false
-	for _, line := range strings.Split(string(config), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
-			inOrigin = trimmed == `[remote "origin"]`
+	for _, char := range commit {
+		if (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F') {
 			continue
 		}
-		if inOrigin {
-			if value, ok := strings.CutPrefix(trimmed, "url ="); ok {
-				return strings.TrimSpace(value)
-			}
-		}
+		return ""
 	}
-	return ""
+	return strings.ToLower(commit)
+}
+
+func sanitizeRelativePath(relativePath string) string {
+	if relativePath == "" || strings.ContainsRune(relativePath, 0) {
+		return ""
+	}
+	cleaned := path.Clean(strings.ReplaceAll(relativePath, "\\", "/"))
+	if cleaned == "." || strings.HasPrefix(cleaned, "/") || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, ":") {
+		return ""
+	}
+	return cleaned
 }
 
 func gitDirPath(gitPath string) string {

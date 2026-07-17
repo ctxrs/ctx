@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "capture",
@@ -9,4 +9,10 @@ go_library(
     ],
     importpath = "github.com/ctxrs/ctx/internal/capture",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "unit_tests",
+    srcs = ["jsonl_test.go"],
+    embed = [":capture"],
 )

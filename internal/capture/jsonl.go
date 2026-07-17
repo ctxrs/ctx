@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 )
 
 type CaptureOptions struct {
@@ -20,6 +21,7 @@ type CaptureOptions struct {
 	StartRecord    int64
 	MaxRecords     int
 	PrivacyFilter  PrivacyFilter
+	openFile       func(string) (readSeekStatCloser, error)
 }
 
 type JSONLAdapter struct {
@@ -66,6 +68,13 @@ type AllowAllPrivacyFilter struct {
 	ID string
 }
 
+type readSeekStatCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+	Stat() (os.FileInfo, error)
+}
+
 func (filter AllowAllPrivacyFilter) PolicyID() string {
 	if filter.ID == "" {
 		return DefaultPrivacyPolicyID
@@ -108,15 +117,31 @@ func (adapter JSONLAdapter) CaptureFile(ctx context.Context, path string, option
 		return nil, nil
 	}
 
-	revision, err := FileSourceRevision(path)
-	if err != nil {
-		return nil, err
+	opener := options.openFile
+	if opener == nil {
+		opener = func(path string) (readSeekStatCloser, error) {
+			return os.Open(path)
+		}
 	}
-	file, err := os.Open(path)
+	file, err := opener(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	return adapter.captureOpenFile(ctx, file, path, sourceURI, options, privacy, status)
+}
+
+func (adapter JSONLAdapter) captureOpenFile(ctx context.Context, file readSeekStatCloser, path, sourceURI string, options CaptureOptions, privacy PrivacyFilter, status PrivacyFilterStatus) (*CapturedBatch, error) {
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if options.StartByte < 0 {
+		return nil, errors.New("capture: start byte must be non-negative")
+	}
+	if options.StartByte > stat.Size() {
+		return nil, errors.New("capture: start byte is beyond source size")
+	}
 	if options.StartByte > 0 {
 		if _, err := file.Seek(options.StartByte, io.SeekStart); err != nil {
 			return nil, err
@@ -188,6 +213,16 @@ func (adapter JSONLAdapter) CaptureFile(ctx context.Context, path string, option
 		return nil, nil
 	}
 
+	var revision SourceRevision
+	if options.StartByte > 0 {
+		revision = observedSliceRevision(stat, records[0].ByteStart, records[len(records)-1].ByteEnd, batchContentHash(records))
+	} else {
+		revision, err = FileSourceRevision(path)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	hints := DetectRepoHints(path)
 	if options.RepoHints != nil {
 		hints = *options.RepoHints
@@ -216,6 +251,30 @@ func (adapter JSONLAdapter) CaptureFile(ctx context.Context, path string, option
 		return nil, err
 	}
 	return &batch, nil
+}
+
+func observedSliceRevision(stat os.FileInfo, startByte, endByte int64, contentHash string) SourceRevision {
+	if endByte < startByte {
+		endByte = startByte
+	}
+	sizeBytes := endByte - startByte
+	return SourceRevision{
+		Generation: stableID(
+			"rev",
+			"file_slice",
+			strconv.FormatInt(stat.Size(), 10),
+			strconv.FormatInt(stat.ModTime().UTC().UnixNano(), 10),
+			strconv.FormatInt(startByte, 10),
+			strconv.FormatInt(endByte, 10),
+			contentHash,
+		),
+		Identity:    contentHash,
+		ID:          stableID("rev", "file_slice", strconv.FormatInt(startByte, 10), strconv.FormatInt(endByte, 10), contentHash),
+		Kind:        "file_slice_content",
+		SizeBytes:   sizeBytes,
+		ModifiedAt:  stat.ModTime().UTC(),
+		ContentHash: contentHash,
+	}
 }
 
 func splitJSONLRecord(line []byte) ([]byte, []byte) {
