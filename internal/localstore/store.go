@@ -366,14 +366,16 @@ func (s *Store) SearchLexical(ctx context.Context, query string, limit int) ([]S
 	var hits []SearchHit
 	for rows.Next() {
 		var hit SearchHit
-		var occurred string
+		var occurred sql.NullString
 		if err := rows.Scan(&hit.EventID, &hit.GenerationID, &hit.SourceKey, &hit.Provider,
 			&hit.ProviderSessionID, &hit.ParentSessionID, &hit.RootSessionID,
 			&hit.ProviderEventIndex, &hit.Role, &hit.Type, &occurred, &hit.Text,
 			&hit.SourceEventID, &hit.SourcePath, &hit.Rank); err != nil {
 			return nil, err
 		}
-		hit.OccurredAt = parseTime(occurred)
+		if occurred.Valid {
+			hit.OccurredAt = parseTime(occurred.String)
+		}
 		hits = append(hits, hit)
 	}
 	return hits, rows.Err()
