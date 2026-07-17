@@ -52,12 +52,15 @@ mod tests {
 
     fn configured_test_writer(path: &std::path::Path) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open(path).unwrap();
+        let schema_version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
         conn.create_scalar_function(
             "ctx_schema_writer_version",
             0,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8
                 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-            |_| Ok(ctx_history_store::SCHEMA_VERSION),
+            move |_| Ok(schema_version),
         )
         .unwrap();
         conn
