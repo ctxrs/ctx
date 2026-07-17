@@ -17,6 +17,7 @@ internal static class Program
             ("validates search result limits before transport", ValidatesSearchResultLimits),
             ("decodes schema-v2 search diagnostics", DecodesSearchDiagnostics),
             ("rejects noncanonical schema-v2 responses", RejectsNoncanonicalSearchSchemas),
+            ("bounds local CLI output capture", BoundsLocalCliCapture),
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show and locate commands", WrapsShowAndLocate),
             ("reports versioning metadata", ReportsVersioning),
@@ -327,6 +328,40 @@ internal static class Program
         Equal(0, transport.Calls.Count);
     }
 
+    private static async Task BoundsLocalCliCapture()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        var directory = Path.Combine(Path.GetTempPath(), $"ctx-dotnet-capture-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var script = Path.Combine(directory, "ctx-overflow");
+        try
+        {
+            await File.WriteAllTextAsync(script, "#!/bin/sh\nexec dd if=/dev/zero bs=65536 count=33 2>/dev/null\n");
+            File.SetUnixFileMode(
+                script,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var adapter = new LocalCliAdapter(new LocalAgentHistoryConfig
+            {
+                CtxBinary = script,
+                Timeout = TimeSpan.FromSeconds(5)
+            });
+            var error = await ThrowsAsync<CtxAgentHistoryException>(() =>
+                adapter.ExecuteJsonAsync("status", ["status", "--json"]));
+            Equal("capture_limit", error.Code);
+            Equal("stdout", error.Details["stream"]!.GetValue<string>());
+            Equal(2 * 1024 * 1024, error.Details["capBytes"]!.GetValue<int>());
+            True(!error.Details.ContainsKey("stdout"), "capture error exposed retained stdout");
+            True(!error.Details.ContainsKey("stderr"), "capture error exposed retained stderr");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static async Task WrapsShowAndLocate()
     {
         var transport = new RecordingTransport("""{"schema_version":1,"events":[],"source":{"path":"/tmp/source.jsonl"},"ctx_session_id":"session-1","provider":"codex"}""");
@@ -487,7 +522,7 @@ internal static class Program
     private static string EmptySearchJson()
     {
         const string limits = "{\"query_bytes\":8192,\"clauses\":32,\"analyzed_tokens_per_clause\":32,\"candidates_per_positive_seed\":1024,\"candidate_rows\":16384,\"retained_candidate_ids\":8192,\"residual_rows\":8192,\"verification_bytes\":16777216,\"verification_lookup_bytes\":16384,\"hydrated_rows\":256,\"hydration_input_bytes\":8388608,\"hydration_input_bytes_per_event\":65536,\"snippet_input_bytes\":8388608,\"returned_text_bytes\":524288,\"serialized_response_bytes\":2097152,\"results\":200,\"elapsed_ms\":1000}";
-        const string consumed = "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"legacy_fallback_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
+        const string consumed = "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
         return "{\"schema_version\":2,\"query\":{\"version\":\"ctx-search-v1\",\"any\":[{\"all\":\"agent history\"}]},\"query_execution\":{\"query_version\":\"ctx-search-v1\",\"candidate_strategy\":\"bounded_fts\",\"resolved\":" + limits + ",\"consumed\":" + consumed + ",\"semantic\":{\"attempted\":false,\"required\":false,\"readiness\":\"unavailable\",\"effective_backend\":\"lexical\",\"requested_candidates\":0,\"eligible_candidates\":0,\"candidates_supplied\":0,\"candidates_consumed\":0,\"candidates_used\":0,\"coverage\":{},\"completeness\":\"not_attempted\",\"positive_text_rule_version\":\"ctx-search-positive-text-v1\"},\"rrf_k\":60,\"per_branch_candidate_rows\":0,\"requested_result_limit\":20,\"result_limit\":20,\"max_result_limit\":200,\"clauses_executed\":1,\"verification_dropped\":0,\"filter_verification_dropped\":0,\"candidate_budget_exhausted\":false,\"timed_out\":false,\"truncated\":false},\"retrieval\":{\"requested_mode\":\"hybrid\",\"effective_mode\":\"lexical\",\"semantic_status\":\"unavailable\",\"semantic_weight\":0.25,\"semanticWeight\":0.5,\"semantic_fallback_code\":\"old\",\"semanticFallbackCode\":\"old\",\"semantic_fallback\":\"old\",\"semanticFallback\":\"old\"},\"results\":[]}";
     }
 
@@ -511,15 +546,15 @@ internal static class Program
         }
     }
 
-    private static async Task ThrowsAsync<T>(Func<Task> action) where T : Exception
+    private static async Task<T> ThrowsAsync<T>(Func<Task> action) where T : Exception
     {
         try
         {
             await action();
         }
-        catch (T)
+        catch (T error)
         {
-            return;
+            return error;
         }
         throw new InvalidOperationException($"expected {typeof(T).Name}");
     }
