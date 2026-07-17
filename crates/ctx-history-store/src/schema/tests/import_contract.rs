@@ -321,6 +321,48 @@ fn schema_v48_preserves_inventory_tables_and_defers_bounded_legacy_repair() {
 }
 
 #[test]
+fn migrated_schema_rejects_writers_without_the_connection_capability() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let store = Store::open(&path).unwrap();
+    let stale_connection = Connection::open(&path).unwrap();
+
+    let stale_write = stale_connection.execute(
+        r#"
+        INSERT INTO catalog_sessions (
+          source_path, provider, source_format, source_root, agent_type,
+          file_size_bytes, file_modified_at_ms, cataloged_at_ms
+        ) VALUES (
+          '/stale/writer.jsonl', 'codex', 'codex_session_jsonl', '/stale',
+          'primary', 1, 1, 1
+        )
+        "#,
+        [],
+    );
+    let error = stale_write.unwrap_err().to_string();
+    assert!(
+        error.contains("ctx_schema_writer_version"),
+        "unexpected stale-writer error: {error}"
+    );
+
+    store
+        .conn
+        .execute(
+            r#"
+            INSERT INTO catalog_sessions (
+              source_path, provider, source_format, source_root, agent_type,
+              file_size_bytes, file_modified_at_ms, cataloged_at_ms
+            ) VALUES (
+              '/current/writer.jsonl', 'codex', 'codex_session_jsonl', '/current',
+              'primary', 1, 1, 1
+            )
+            "#,
+            [],
+        )
+        .unwrap();
+}
+
+#[test]
 fn real_schema_v49_fixture_adds_provider_file_contract_tables() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");

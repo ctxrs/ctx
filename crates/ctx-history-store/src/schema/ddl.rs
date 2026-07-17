@@ -7,6 +7,31 @@ pub(crate) struct ColumnSpec {
     pub(crate) definition: &'static str,
 }
 
+// SQLite validates a newly added CHECK constraint against every existing row.
+// Upgrade migrations use these equivalent application-validated definitions so
+// adding the columns stays a schema-only operation; fresh DDL retains CHECKs.
+pub(crate) const LEGACY_CATALOG_IMPORT_REVISION_COLUMNS: &[ColumnSpec] = &[
+    ColumnSpec {
+        name: "import_revision",
+        definition: "import_revision INTEGER NOT NULL DEFAULT 1",
+    },
+    ColumnSpec {
+        name: "indexed_import_revision",
+        definition: "indexed_import_revision INTEGER",
+    },
+];
+
+pub(crate) const LEGACY_SOURCE_IMPORT_REVISION_COLUMNS: &[ColumnSpec] = &[
+    ColumnSpec {
+        name: "import_revision",
+        definition: "import_revision INTEGER NOT NULL DEFAULT 1",
+    },
+    ColumnSpec {
+        name: "indexed_import_revision",
+        definition: "indexed_import_revision INTEGER",
+    },
+];
+
 pub(crate) const HISTORY_RECORD_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "summary",
