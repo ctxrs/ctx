@@ -12,10 +12,13 @@ use crate::schema::ddl::{
 };
 use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
 use crate::schema::import_pending_work::install_import_pending_work_invariants;
-use crate::schema::indexes::IMPORT_PENDING_WORK_SELECTION_INDEX_SQL;
+use crate::schema::indexes::{
+    FRESH_STORE_OPTIMIZED_INDEXES_SQL, IMPORT_PENDING_WORK_SELECTION_INDEX_SQL,
+};
 use crate::schema::provider_session_identity::{
     backfill_capture_source_identity_columns, prepare_provider_session_migrations,
     restore_invariants_after_capture_source_rebuild, suspend_invariants_for_capture_source_rebuild,
+    FRESH_STORE_PROVIDER_SESSION_UNIQUE_INDEX_SQL,
 };
 use crate::schema::rebuild::{
     rebuild_table_from_current_schema, rebuild_v44_current_schema_tables,
@@ -33,7 +36,11 @@ use crate::{Result, StoreError};
 
 use self::v47_provider_session_repair::migrate_to_v47;
 
-pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()> {
+pub(crate) fn run_migrations(
+    conn: &Connection,
+    user_version: i64,
+    fresh_empty_store: bool,
+) -> Result<()> {
     prepare_provider_session_migrations(conn, user_version)?;
     if user_version < 1 {
         migrate_to_v1(conn)?;
@@ -129,7 +136,7 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
         migrate_lightweight_event_index_to_v56(conn)?;
     }
     if user_version < 57 {
-        migrate_pending_work_projection_to_v57(conn)?;
+        migrate_pending_work_projection_to_v57_with_mode(conn, fresh_empty_store)?;
     }
     Ok(())
 }
@@ -1182,6 +1189,13 @@ pub(super) fn migrate_lightweight_event_index_to_v56(conn: &Connection) -> Resul
 }
 
 pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Result<()> {
+    migrate_pending_work_projection_to_v57_with_mode(conn, false)
+}
+
+fn migrate_pending_work_projection_to_v57_with_mode(
+    conn: &Connection,
+    fresh_empty_store: bool,
+) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         // CREATE_TABLES_SQL adds only the empty projection and aggregate tables
@@ -1192,8 +1206,12 @@ pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Resul
         validate_pending_work_selection_index_v57(conn)?;
         conn.execute_batch(
             r#"
-            INSERT OR IGNORE INTO import_pending_work_state (singleton, selection_mode)
-            VALUES (1, 'projection');
+            INSERT OR IGNORE INTO import_pending_work_state (
+              singleton, selection_mode, projection_version, legacy_cleanup_complete,
+              legacy_cleanup_phase, legacy_cleanup_inventory_family,
+              legacy_cleanup_provider, legacy_cleanup_source_root, legacy_cleanup_tail,
+              material_cursor_rowid, material_scan_complete
+            ) VALUES (1, 'projection', 2, 1, 'work', '', '', '', '', 0, 0);
 
             INSERT OR IGNORE INTO import_pending_reason_repairs (inventory_family)
             VALUES ('catalog_sessions'), ('source_import_files');
@@ -1202,12 +1220,22 @@ pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Resul
             SET cursor_provider = NULL,
                 cursor_source_root = NULL,
                 cursor_source_path = NULL,
+                cursor_rowid = 0,
                 completed = 0
             WHERE inventory_family IN ('catalog_sessions', 'source_import_files');
 
             PRAGMA user_version = 57;
             "#,
         )?;
+        if fresh_empty_store {
+            conn.execute_batch(FRESH_STORE_OPTIMIZED_INDEXES_SQL)?;
+            conn.execute_batch(FRESH_STORE_PROVIDER_SESSION_UNIQUE_INDEX_SQL)?;
+            conn.execute(
+                "UPDATE import_pending_work_state \
+                 SET selection_mode = 'direct' WHERE singleton = 1",
+                [],
+            )?;
+        }
         install_import_pending_work_invariants(conn)?;
         Ok(())
     })();
@@ -1249,10 +1277,28 @@ fn validate_pending_work_selection_index_v57(conn: &Connection) -> Result<()> {
             "pending-work selection index has incompatible flags",
         ));
     }
-    let columns = conn
-        .prepare("PRAGMA index_info(idx_import_pending_work_selection)")?
-        .query_map([], |row| row.get::<_, String>(2))?
+    let table_columns = conn
+        .prepare("PRAGMA table_info(import_pending_work)")?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let key_columns = conn
+        .prepare("PRAGMA index_xinfo(idx_import_pending_work_selection)")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, _, _, _, _, key)| *key)
+        .collect::<Vec<_>>();
     let expected_columns = [
         "inventory_family",
         "provider",
@@ -1260,12 +1306,30 @@ fn validate_pending_work_selection_index_v57(conn: &Connection) -> Result<()> {
         "work_class",
         "indexed_at_ms",
         "source_path",
-    ]
-    .map(str::to_owned);
-    if columns.as_slice() != expected_columns.as_slice() {
+    ];
+    if key_columns.len() != expected_columns.len() {
         return Err(StoreError::ImportInventorySchemaIncompatible(
-            "pending-work selection index has incompatible columns",
+            "pending-work selection index has incompatible key count",
         ));
+    }
+    for (position, (seqno, cid, name, descending, collation, _)) in key_columns.iter().enumerate() {
+        let expected_name = expected_columns[position];
+        let expected_cid = table_columns
+            .iter()
+            .find_map(|(cid, name)| (name == expected_name).then_some(*cid))
+            .ok_or(StoreError::ImportInventorySchemaIncompatible(
+                "pending-work selection column is missing",
+            ))?;
+        if *seqno != position as i64
+            || *cid != expected_cid
+            || name.as_deref() != Some(expected_name)
+            || *descending
+            || collation.as_deref() != Some("BINARY")
+        {
+            return Err(StoreError::ImportInventorySchemaIncompatible(
+                "pending-work selection index has incompatible key shape",
+            ));
+        }
     }
     Ok(())
 }

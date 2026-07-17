@@ -13,10 +13,8 @@ pub(crate) mod writer_fence;
 
 use rusqlite::Connection;
 
-use crate::connection::configure_connection;
-use crate::schema::indexes::{
-    BASELINE_INDEXES_SQL, FRESH_STORE_OPTIMIZED_INDEXES_SQL, REPAIR_LEDGER_INITIALIZATION_SQL,
-};
+use crate::connection::{configure_connection, with_immediate_transaction};
+use crate::schema::indexes::{BASELINE_INDEXES_SQL, REPAIR_LEDGER_INITIALIZATION_SQL};
 use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 
 pub(crate) use fts::create_fts_tables_if_supported;
@@ -35,24 +33,18 @@ pub(crate) fn migrate_to_latest(conn: &Connection) -> Result<()> {
             [],
             |row| row.get::<_, bool>(0),
         )?;
-    migrations::run_migrations(conn, user_version)?;
+    migrations::run_migrations(conn, user_version, fresh_empty_store)?;
     conn.execute_batch(provider_session_identity::PROVIDER_SESSION_INVARIANTS_SQL)?;
-    if fresh_empty_store {
-        conn.execute(
-            "UPDATE import_pending_work_state SET selection_mode = 'direct' WHERE singleton = 1",
-            [],
-        )?;
-    }
-    import_pending_work::install_import_pending_work_invariants(conn)?;
+    with_immediate_transaction(conn, || {
+        import_pending_work::ensure_import_pending_work_projection_v2(conn)?;
+        if !fresh_empty_store {
+            import_pending_work::install_import_pending_work_invariants(conn)?;
+        }
+        Ok(())
+    })?;
     create_fts_tables_if_supported(conn)?;
     conn.execute_batch(BASELINE_INDEXES_SQL)?;
     conn.execute_batch(REPAIR_LEDGER_INITIALIZATION_SQL)?;
-    if fresh_empty_store {
-        conn.execute_batch(FRESH_STORE_OPTIMIZED_INDEXES_SQL)?;
-        conn.execute_batch(
-            provider_session_identity::FRESH_STORE_PROVIDER_SESSION_UNIQUE_INDEX_SQL,
-        )?;
-    }
     Ok(())
 }
 

@@ -163,6 +163,7 @@ WHERE completed = 0
   AND cursor_provider IS NULL
   AND cursor_source_root IS NULL
   AND cursor_source_path IS NULL
+  AND cursor_rowid = 0
   AND (
     (inventory_family = 'catalog_sessions'
       AND NOT EXISTS (SELECT 1 FROM catalog_sessions))
@@ -170,6 +171,12 @@ WHERE completed = 0
     (inventory_family = 'source_import_files'
       AND NOT EXISTS (SELECT 1 FROM source_import_files))
   );
+
+UPDATE import_pending_work_state
+SET material_scan_complete = 1
+WHERE singleton = 1
+  AND material_scan_complete = 0
+  AND NOT EXISTS (SELECT 1 FROM source_import_files);
 "#;
 
 pub(crate) const RECONCILIATION_INDEXES_PRESENT_SQL: &str = r#"

@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS import_pending_reason_repairs (
     cursor_provider TEXT,
     cursor_source_root TEXT,
     cursor_source_path TEXT,
+    cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (cursor_rowid >= 0),
     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
 );
 
@@ -288,6 +289,7 @@ CREATE TABLE IF NOT EXISTS import_pending_work (
     source_path TEXT NOT NULL,
     work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
     indexed_at_ms INTEGER,
+    projection_version INTEGER NOT NULL DEFAULT 2 CHECK (projection_version > 0),
     PRIMARY KEY (inventory_family, provider, source_root, source_path)
 ) WITHOUT ROWID;
 
@@ -298,12 +300,38 @@ CREATE TABLE IF NOT EXISTS import_pending_work_counts (
     source_root TEXT NOT NULL,
     work_class TEXT NOT NULL CHECK (work_class IN ('fresh', 'recovery')),
     pending_count INTEGER NOT NULL CHECK (pending_count > 0),
+    projection_version INTEGER NOT NULL DEFAULT 2 CHECK (projection_version > 0),
     PRIMARY KEY (inventory_family, provider, source_root, work_class)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS import_pending_work_state (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    selection_mode TEXT NOT NULL CHECK (selection_mode IN ('direct', 'projection'))
+    selection_mode TEXT NOT NULL CHECK (selection_mode IN ('direct', 'projection')),
+    projection_version INTEGER NOT NULL DEFAULT 2 CHECK (projection_version > 0),
+    legacy_cleanup_complete INTEGER NOT NULL DEFAULT 1
+      CHECK (legacy_cleanup_complete IN (0, 1)),
+    legacy_cleanup_phase TEXT NOT NULL DEFAULT 'work'
+      CHECK (legacy_cleanup_phase IN ('work', 'counts')),
+    legacy_cleanup_inventory_family TEXT NOT NULL DEFAULT '',
+    legacy_cleanup_provider TEXT NOT NULL DEFAULT '',
+    legacy_cleanup_source_root TEXT NOT NULL DEFAULT '',
+    legacy_cleanup_tail TEXT NOT NULL DEFAULT '',
+    material_cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (material_cursor_rowid >= 0),
+    material_scan_complete INTEGER NOT NULL DEFAULT 1 CHECK (material_scan_complete IN (0, 1))
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS import_pending_legacy_material_owners (
+    projection_version INTEGER NOT NULL CHECK (projection_version > 0),
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('root', 'path')),
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL,
+    owner_source_root TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    capture_source_id TEXT NOT NULL,
+    PRIMARY KEY (
+      projection_version, owner_kind, provider, source_format,
+      owner_source_root, source_path, capture_source_id
+    )
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS provider_file_checkpoints (

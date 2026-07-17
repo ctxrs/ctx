@@ -1127,7 +1127,8 @@ fn source_import_file_work_ordinary_sql(
               AND source_file.source_path = pending.source_path \
              WHERE pending.inventory_family = 'source_import_files' \
                AND pending.provider = ?1 AND pending.source_root = ?2 \
-               AND pending.work_class = ?3 AND ({inventory_published}) \
+               AND pending.work_class = ?3 AND pending.projection_version = 2 \
+               AND ({inventory_published}) \
              ORDER BY pending.indexed_at_ms, pending.source_path LIMIT ?4"
         ),
     }

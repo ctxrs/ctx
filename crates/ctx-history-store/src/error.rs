@@ -31,6 +31,8 @@ pub enum StoreError {
     ImportPendingWorkRepairUnitTooLarge { bytes: usize, max_bytes: usize },
     #[error("ctx import pending-work repair made no progress")]
     ImportPendingWorkRepairNoProgress,
+    #[error("ctx import pending-work repair could not acquire the writer without waiting")]
+    ImportPendingWorkRepairBusy,
     #[error("ctx import pending-work repair made no progress within {timeout_ms}ms")]
     ImportPendingWorkRepairTimedOut { timeout_ms: u64 },
     #[error("unsafe or ambiguous history store identity")]

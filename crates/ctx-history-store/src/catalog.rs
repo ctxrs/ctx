@@ -206,6 +206,7 @@ pub struct ImportPendingReasonRepairProgress {
     pub processed_rows: usize,
     pub processed_bytes: usize,
     pub classified_rows: usize,
+    pub committed_transactions: usize,
     pub completed_families: usize,
     pub complete: bool,
 }
@@ -216,7 +217,7 @@ enum ImportPendingWorkSelectionMode {
     Projection,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportPendingReasonRepairFamily {
     CatalogSessions,
     SourceImportFiles,
@@ -245,6 +246,7 @@ impl ImportPendingReasonRepairFamily {
 
 #[derive(Debug)]
 struct ImportPendingReasonRepairRow {
+    rowid: i64,
     provider: String,
     source_format: String,
     source_root: String,
@@ -264,18 +266,6 @@ struct ImportPendingReasonRepairRow {
 }
 
 impl ImportPendingReasonRepairRow {
-    fn estimated_bytes(&self) -> usize {
-        self.provider
-            .len()
-            .saturating_add(self.source_format.len())
-            .saturating_add(self.source_root.len())
-            .saturating_add(self.source_path.len())
-            .saturating_add(self.external_session_id.as_deref().map_or(0, str::len))
-            .saturating_add(self.metadata_json.len())
-            .saturating_add(256)
-            .max(1)
-    }
-
     fn requires_material_check(&self) -> bool {
         let effective_indexed_revision = self.indexed_import_revision.or(self
             .grandfather_indexed_revision
@@ -309,76 +299,10 @@ impl ImportPendingReasonRepairRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SourceImportPendingRepairCursor {
-    completed_path: Option<String>,
-    active_provider: Option<String>,
-    active_source_root: Option<String>,
-    active_source_path: Option<String>,
-    material_rowid: i64,
-}
-
-impl SourceImportPendingRepairCursor {
-    fn from_ledger(value: Option<&str>) -> Self {
-        let Some(value) = value else {
-            return Self::default();
-        };
-        serde_json::from_str::<(
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-        )>(value)
-        .map(
-            |(
-                completed_path,
-                active_provider,
-                active_source_root,
-                active_source_path,
-                material_rowid,
-            )| Self {
-                completed_path,
-                active_provider,
-                active_source_root,
-                active_source_path,
-                material_rowid,
-            },
-        )
-        .unwrap_or_else(|_| Self {
-            completed_path: Some(value.to_owned()),
-            ..Self::default()
-        })
-    }
-
-    fn encode(&self) -> Result<String> {
-        serde_json::to_string(&(
-            &self.completed_path,
-            &self.active_provider,
-            &self.active_source_root,
-            &self.active_source_path,
-            self.material_rowid,
-        ))
-        .map_err(Into::into)
-    }
-
-    fn active_matches(&self, row: &ImportPendingReasonRepairRow) -> bool {
-        self.active_provider.as_deref() == Some(&row.provider)
-            && self.active_source_root.as_deref() == Some(&row.source_root)
-            && self.active_source_path.as_deref() == Some(&row.source_path)
-    }
-}
-
-impl Default for SourceImportPendingRepairCursor {
-    fn default() -> Self {
-        Self {
-            completed_path: None,
-            active_provider: None,
-            active_source_root: None,
-            active_source_path: None,
-            material_rowid: 0,
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct ImportPendingReasonRepairPreflight {
+    rowid: i64,
+    estimated_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -390,13 +314,22 @@ struct ImportPendingReasonRepairStep {
 }
 
 #[derive(Debug)]
+struct LegacyPendingProjectionRow {
+    inventory_family: String,
+    provider: String,
+    source_root: String,
+    tail: String,
+    estimated_bytes: usize,
+}
+
+#[derive(Debug)]
 struct LegacyCaptureSourceRow {
     rowid: i64,
+    id: String,
     provider: String,
     source_format: Option<String>,
     source_root: Option<String>,
     raw_source_path: Option<String>,
-    estimated_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
