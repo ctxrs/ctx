@@ -48,7 +48,14 @@ fn real_schema_v45_fixture_migrates_import_state_through_v49() {
         )
         .unwrap();
     assert_eq!(before_repair, None);
-    while !store.repair_import_pending_reasons(1).unwrap().complete {}
+    let mut repair_complete = false;
+    for _ in 0..8 {
+        if store.repair_import_pending_reasons(1).unwrap().complete {
+            repair_complete = true;
+            break;
+        }
+    }
+    assert!(repair_complete);
     let indexed: (String, i64, Option<i64>, Option<i64>) = store
         .conn
         .query_row(
@@ -208,14 +215,17 @@ fn schema_v48_preserves_inventory_tables_and_defers_bounded_legacy_repair() {
         .unwrap();
     assert_eq!(before_repair, (None, None));
     let mut repaired_rows = 0;
-    loop {
+    let mut repair_complete = false;
+    for _ in 0..8 {
         let progress = store.repair_import_pending_reasons(1).unwrap();
         assert!(progress.processed_rows <= 1);
         repaired_rows += progress.classified_rows;
         if progress.complete {
+            repair_complete = true;
             break;
         }
     }
+    assert!(repair_complete);
     assert_eq!(repaired_rows, 4);
 
     let catalog_rows = store
