@@ -486,14 +486,9 @@ public final class AgentHistoryClientTest {
         return args;
     }
 
-    private static boolean hasSetsid() {
-        return Files.isExecutable(Paths.get("/usr/bin/setsid"))
-                || Files.isExecutable(Paths.get("/bin/setsid"));
-    }
-
     private static boolean hasNativeProcessScope() {
         String launcher = System.getenv("CTX_SDK_PROCESS_SCOPE_LAUNCHER");
-        return hasSetsid() || (launcher != null && !launcher.isEmpty());
+        return launcher != null && !launcher.isEmpty();
     }
 
     private static void runProcessHelper(String[] args) throws Exception {

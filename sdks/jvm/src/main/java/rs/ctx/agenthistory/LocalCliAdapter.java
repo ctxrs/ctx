@@ -420,7 +420,6 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
         private static final class ProcessLaunch {
             private static final String LAUNCHER_ARG = "__ctx_sdk_process_scope_v1";
             private static final String LAUNCHER_ENV = "CTX_SDK_PROCESS_SCOPE_LAUNCHER";
-            private static final String[] SETSID_PATHS = {"/usr/bin/setsid", "/bin/setsid"};
             private final List<String> command;
             private final boolean ownsProcessGroup;
             private final boolean windowsHandshake;
@@ -437,22 +436,15 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
             static ProcessLaunch forRequest(CommandRequest request)
                     throws CaptureFailureException {
                 List<String> command = new ArrayList<>();
-                String setsid = setsidPath();
                 String launcher = launcherPath(request);
-                if ((isWindows() && launcher == null)
-                        || (!isWindows() && setsid == null && launcher == null)) {
+                if (launcher == null) {
                     throw new CaptureFailureException(
                             "process_scope",
                             new IOException("local CLI process containment is unavailable"));
                 }
-                if (setsid != null) {
-                    command.add(setsid);
-                }
-                if (launcher != null) {
-                    command.add(launcher);
-                    command.add(LAUNCHER_ARG);
-                    command.add("--");
-                }
+                command.add(launcher);
+                command.add(LAUNCHER_ARG);
+                command.add("--");
                 command.add(request.command());
                 command.addAll(request.args());
                 boolean windowsHandshake = launcher != null && isWindows();
@@ -480,15 +472,6 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
                         .contains("win");
             }
 
-            private static String setsidPath() {
-                if (isWindows()) {
-                    return null;
-                }
-                for (String path : SETSID_PATHS) {
-                    if (new File(path).canExecute()) return path;
-                }
-                return null;
-            }
         }
     }
 
