@@ -88,8 +88,14 @@ mod tests {
         fs::rename(&target, &moved_target).unwrap();
         fs::rename(&replacement, &target).unwrap();
 
-        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
-            .unwrap_err();
+        let mut budget = ScratchCleanupBudget::new();
+        let error = remove_anchored_scratch_run(
+            &run,
+            &target,
+            UnixScratchRunLocation::Canonical,
+            &mut budget,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("changed identity"));
@@ -121,9 +127,14 @@ mod tests {
             FileExt::lock_exclusive(&target_lease).unwrap();
             inject_unix_scratch_finalization_failure_once(point, false);
 
-            let error =
-                remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
-                    .unwrap_err();
+            let mut budget = ScratchCleanupBudget::new();
+            let error = remove_anchored_scratch_run(
+                &run,
+                &target,
+                UnixScratchRunLocation::Canonical,
+                &mut budget,
+            )
+            .unwrap_err();
 
             assert!(error.to_string().contains("injected"));
             run.revalidate(&target).unwrap();
@@ -132,7 +143,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "freebsd")]
     #[test]
     fn unix_scratch_failure_after_unlink_does_not_restore_a_removed_run() {
         let temp = tempfile::tempdir().unwrap();
@@ -148,8 +159,14 @@ mod tests {
             false,
         );
 
-        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
-            .unwrap_err();
+        let mut budget = ScratchCleanupBudget::new();
+        let error = remove_anchored_scratch_run(
+            &run,
+            &target,
+            UnixScratchRunLocation::Canonical,
+            &mut budget,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("AfterUnlink"));
         assert!(!target.exists());
@@ -160,7 +177,7 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "freebsd")))]
     #[test]
-    fn unix_scratch_restore_collision_retains_a_reclaimable_quarantine() {
+    fn unix_scratch_restore_collision_retains_a_bounded_empty_quarantine() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("scratch");
         ensure_private_directory(&root).unwrap();
@@ -174,8 +191,14 @@ mod tests {
             true,
         );
 
-        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
-            .unwrap_err();
+        let mut budget = ScratchCleanupBudget::new();
+        let error = remove_anchored_scratch_run(
+            &run,
+            &target,
+            UnixScratchRunLocation::Canonical,
+            &mut budget,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("quarantine retained"));
         assert!(target.is_dir());
@@ -185,8 +208,13 @@ mod tests {
         fs::remove_dir(&target).unwrap();
 
         let _manager_lock = acquire_manager_lock(&root).unwrap();
-        assert!(cleanup_abandoned_scratch_run(&target).unwrap());
-        assert!(!quarantine.exists());
+        let mut cleanup_budget = ScratchCleanupBudget::new();
+        assert_eq!(
+            cleanup_abandoned_scratch_run(&target, &mut cleanup_budget).unwrap(),
+            ScratchCleanupOutcome::Complete
+        );
+        assert!(quarantine.is_dir());
+        assert_eq!(fs::read_dir(&quarantine).unwrap().count(), 0);
     }
 
     #[cfg(all(unix, not(target_os = "freebsd")))]
@@ -203,8 +231,14 @@ mod tests {
         let target_lease = run.open_lease().unwrap().unwrap();
         FileExt::lock_exclusive(&target_lease).unwrap();
 
-        let error = remove_anchored_scratch_run(&run, &target, UnixScratchRunLocation::Canonical)
-            .unwrap_err();
+        let mut budget = ScratchCleanupBudget::new();
+        let error = remove_anchored_scratch_run(
+            &run,
+            &target,
+            UnixScratchRunLocation::Canonical,
+            &mut budget,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         run.revalidate(&target).unwrap();
@@ -213,6 +247,96 @@ mod tests {
             b"must survive"
         );
         FileExt::unlock(&target_lease).unwrap();
+    }
+
+    #[cfg(all(unix, not(target_os = "freebsd")))]
+    #[test]
+    fn unix_scratch_final_boundary_swap_never_deletes_an_unbound_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        let quarantine = scratch_quarantine_path(&target).unwrap();
+        let replacement = create_abandoned_run(&root, 1);
+        fs::write(replacement.join("sentinel"), b"must survive").unwrap();
+        let replacement_lease = open_private_regular_file(&replacement.join(LEASE_NAME)).unwrap();
+        FileExt::lock_exclusive(&replacement_lease).unwrap();
+        let run = UnixScratchRun::open(&target).unwrap();
+        let target_lease = run.open_lease().unwrap().unwrap();
+        FileExt::lock_exclusive(&target_lease).unwrap();
+        let moved_target = root.join("final-boundary-original");
+        inject_unix_scratch_final_boundary_swap_once(moved_target.clone(), replacement);
+        let mut budget = ScratchCleanupBudget::new();
+
+        let error = remove_anchored_scratch_run(
+            &run,
+            &target,
+            UnixScratchRunLocation::Canonical,
+            &mut budget,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("quarantine retained"));
+        assert!(moved_target.is_dir());
+        assert_eq!(
+            fs::read(quarantine.join("sentinel")).unwrap(),
+            b"must survive"
+        );
+        assert!(!target.exists());
+        FileExt::unlock(&target_lease).unwrap();
+        FileExt::unlock(&replacement_lease).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn huge_scratch_cleanup_returns_pending_within_one_internal_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        for index in 0..(SCRATCH_DELETE_FILES_PER_PAGE * (SCRATCH_CLEANUP_MAX_PAGES + 2)) {
+            fs::write(target.join(format!("payload-{index:04}")), b"bounded").unwrap();
+        }
+        let run = UnixScratchRun::open(&target).unwrap();
+        let lease = run.open_lease().unwrap().unwrap();
+        FileExt::lock_exclusive(&lease).unwrap();
+        let mut budget = ScratchCleanupBudget::new();
+
+        let outcome = remove_anchored_scratch_run(
+            &run,
+            &target,
+            UnixScratchRunLocation::Canonical,
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, ScratchCleanupOutcome::Pending);
+        assert!(budget.pages <= SCRATCH_CLEANUP_MAX_PAGES);
+        assert!(budget.operations <= SCRATCH_CLEANUP_MAX_OPERATIONS);
+        assert!(budget.bytes <= SCRATCH_CLEANUP_MAX_BYTES);
+        assert!(fs::read_dir(&target).unwrap().next().is_some());
+        FileExt::unlock(&lease).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_scavenging_retains_the_cursor_for_a_pending_huge_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        ensure_private_directory(&root).unwrap();
+        let target = create_abandoned_run(&root, 0);
+        for index in 0..(SCRATCH_DELETE_FILES_PER_PAGE * (SCRATCH_CLEANUP_MAX_PAGES + 2)) {
+            fs::write(target.join(format!("payload-{index:04}")), b"bounded").unwrap();
+        }
+        seed_next_run_id(&root, 1);
+
+        let current = CaptureScratchSpace::create_in(root.clone(), "bounded-revisit").unwrap();
+        let mut state_file = open_or_create_private_control_file(&root, SWEEP_STATE_NAME).unwrap();
+        let state = read_sweep_state(&mut state_file, 2).unwrap();
+
+        assert_eq!(state.cursor, 0);
+        assert!(target.exists());
+        drop(current);
     }
 
     #[cfg(windows)]
@@ -236,7 +360,11 @@ mod tests {
         ensure_private_directory(&root).unwrap();
         let path = create_abandoned_run(&root, 0);
 
-        assert!(cleanup_abandoned_scratch_run(&path).unwrap());
+        let mut budget = ScratchCleanupBudget::new();
+        assert_eq!(
+            cleanup_abandoned_scratch_run(&path, &mut budget).unwrap(),
+            ScratchCleanupOutcome::Complete
+        );
         assert!(!path.exists());
     }
 
@@ -250,14 +378,18 @@ mod tests {
         let lease = open_private_regular_file(&path.join(LEASE_NAME)).unwrap();
         FileExt::lock_exclusive(&lease).unwrap();
 
-        assert!(!cleanup_abandoned_scratch_run(&path).unwrap());
+        let mut budget = ScratchCleanupBudget::new();
+        assert_eq!(
+            cleanup_abandoned_scratch_run(&path, &mut budget).unwrap(),
+            ScratchCleanupOutcome::Busy
+        );
         assert!(path.exists());
         FileExt::unlock(&lease).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_scratch_handoff_does_not_delete_a_swapped_live_run() {
+    fn windows_scratch_child_open_denies_directory_aba() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("scratch");
         ensure_private_directory(&root).unwrap();
@@ -270,14 +402,19 @@ mod tests {
         let target_lease = run.open_lease(&target).unwrap().unwrap();
         FileExt::lock_exclusive(&target_lease).unwrap();
         let moved_target = root.join("handoff-original");
-        fs::rename(&target, &moved_target).unwrap();
-        fs::rename(&replacement, &target).unwrap();
+        inject_windows_scratch_child_aba_once(moved_target.clone(), replacement.clone());
 
-        let error = remove_anchored_scratch_run(&run, &target, Some(target_lease)).unwrap_err();
+        let mut budget = ScratchCleanupBudget::new();
+        let error = remove_anchored_scratch_run(&run, &target, Some(target_lease), &mut budget)
+            .unwrap_err();
 
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"must survive");
-        assert!(moved_target.join(OWNER_NAME).exists());
+        assert!(error.raw_os_error().is_some());
+        assert!(target.join(OWNER_NAME).exists());
+        assert_eq!(
+            fs::read(replacement.join("sentinel")).unwrap(),
+            b"must survive"
+        );
+        assert!(!moved_target.exists());
         FileExt::unlock(&replacement_lease).unwrap();
     }
 
@@ -290,7 +427,11 @@ mod tests {
         let path = scratch.path().to_path_buf();
         let lease = scratch.lease.take().unwrap();
 
-        cleanup_owned_scratch_run(&path, lease).unwrap();
+        let mut budget = ScratchCleanupBudget::new();
+        assert_eq!(
+            cleanup_owned_scratch_run(&path, lease, &mut budget).unwrap(),
+            ScratchCleanupOutcome::Complete
+        );
 
         assert!(!path.exists());
     }
