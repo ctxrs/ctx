@@ -16,6 +16,8 @@ const SWEEP_STATE_NAME: &str = ".sweep-state";
 const LEASE_NAME: &str = "lease";
 const OWNER_NAME: &str = "owner";
 const MAX_SCAVENGE_RUNS: usize = 4;
+const SCRATCH_DELETE_FILES_PER_PAGE: usize = 64;
+const SCRATCH_DELETE_ROW_OVERHEAD_BYTES: u64 = 4 * 1024;
 
 pub(crate) struct CaptureScratchSpace {
     root: PathBuf,
@@ -77,10 +79,7 @@ impl CaptureScratchSpace {
             let _ = FileExt::unlock(&lease);
             drop(lease);
         }
-        if validate_scratch_run_directory(&self.path).is_ok() {
-            pace_filesystem_path(&self.path);
-            let _ = fs::remove_dir_all(&self.path);
-        }
+        let _ = remove_private_scratch_run(&self.path);
     }
 }
 
@@ -292,8 +291,7 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 validate_scratch_run_contents(&path)?;
-                pace_filesystem_path(&path);
-                fs::remove_dir_all(&path)?;
+                remove_private_scratch_run(&path)?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -303,8 +301,7 @@ fn scavenge_abandoned_runs(root: &Path, current_run_id: u64) -> io::Result<()> {
                 FileExt::unlock(&lease)?;
                 drop(lease);
                 validate_scratch_run_contents(&path)?;
-                pace_filesystem_path(&path);
-                fs::remove_dir_all(&path)?;
+                remove_private_scratch_run(&path)?;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
@@ -330,6 +327,46 @@ fn validate_scratch_run_contents(path: &Path) -> io::Result<()> {
         validate_private_owner(&metadata)?;
     }
     Ok(())
+}
+
+fn remove_private_scratch_run(path: &Path) -> io::Result<()> {
+    validate_scratch_run_directory(path)?;
+    loop {
+        pace_filesystem_path(path);
+        let mut entries = fs::read_dir(path)?;
+        let mut removed = 0usize;
+        while removed < SCRATCH_DELETE_FILES_PER_PAGE {
+            pace_filesystem_path(path);
+            let Some(entry) = entries.next() else {
+                break;
+            };
+            let entry = entry?;
+            let entry_path = entry.path();
+            pace_filesystem_path(&entry_path);
+            let metadata = fs::symlink_metadata(&entry_path)?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "capture scratch run contains a link or non-file entry",
+                ));
+            }
+            validate_private_owner(&metadata)?;
+            crate::pace_current_disk_io(
+                metadata
+                    .len()
+                    .saturating_add(SCRATCH_DELETE_ROW_OVERHEAD_BYTES),
+            );
+            pace_filesystem_path(&entry_path);
+            fs::remove_file(&entry_path)?;
+            removed += 1;
+        }
+        drop(entries);
+        if removed == 0 {
+            pace_filesystem_path(path);
+            return fs::remove_dir(path);
+        }
+        std::thread::yield_now();
+    }
 }
 
 fn validate_scratch_run_directory(path: &Path) -> io::Result<()> {

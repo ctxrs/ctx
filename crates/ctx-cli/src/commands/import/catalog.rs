@@ -638,6 +638,7 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
     source_stats_inner(path)
 }
 
+#[derive(Clone)]
 pub(crate) struct BoundedSourceStatsAccumulator {
     stats: SourceStats,
     change_token: Sha256,
