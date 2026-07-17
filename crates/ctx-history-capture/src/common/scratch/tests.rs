@@ -708,12 +708,10 @@ mod tests {
         let lock_identity = scratch.lock_identity().unwrap();
         drop(scratch.create_file("inventory.sqlite").unwrap());
 
-        assert_eq!(
-            DurableCaptureScratch::open(&data_root, "inventory-0123456789abcdef")
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::WouldBlock
-        );
+        match DurableCaptureScratch::open(&data_root, "inventory-0123456789abcdef") {
+            Ok(_) => panic!("a live durable scratch lease must remain exclusive"),
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::WouldBlock),
+        }
         drop(scratch);
         assert!(path.exists());
 
