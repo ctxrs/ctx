@@ -13,6 +13,18 @@ mod tests {
         embedding
     }
 
+    fn test_sha256(value: &str) -> String {
+        format!("{:x}", Sha256::digest(value.as_bytes()))
+    }
+
+    fn test_source_hash(value: &str) -> String {
+        if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            value.to_owned()
+        } else {
+            test_sha256(value)
+        }
+    }
+
     fn test_chunk(event_id: Uuid, seq: u64, source_hash: &str) -> SemanticChunkDocument {
         test_chunk_at(event_id, seq, source_hash, 0, 1)
     }
@@ -170,8 +182,8 @@ mod tests {
             seq,
             chunk_index,
             chunk_count,
-            source_text_hash: source_hash.to_owned(),
-            chunk_text_hash: format!("{source_hash}-chunk-{chunk_index}"),
+            source_text_hash: test_source_hash(source_hash),
+            chunk_text_hash: test_sha256(&format!("{source_hash}-chunk-{chunk_index}")),
             text: String::new(),
             start_char: chunk_index.saturating_mul(10),
             end_char: chunk_index.saturating_mul(10).saturating_add(12),
@@ -1370,10 +1382,9 @@ mod tests {
             search.hits.first().map(|hit| hit.event_id),
             Some(first_event)
         );
-        assert!(!search
-            .hits
-            .iter()
-            .any(|hit| { hit.event_id == first_event && hit.source_text_hash == "first" }));
+        assert!(!search.hits.iter().any(|hit| {
+            hit.event_id == first_event && hit.source_text_hash == test_source_hash("first")
+        }));
         Ok(())
     }
 
@@ -1990,6 +2001,10 @@ mod tests {
             first_plan.contains("idx_semantic_event_summary_prune"),
             "{first_plan}"
         );
+        assert!(
+            !first_plan.contains("SCAN semantic_event_summary"),
+            "{first_plan}"
+        );
         assert!(!first_plan.contains("USE TEMP B-TREE"), "{first_plan}");
         let continuation_plan = {
             let mut stmt = vector_store.conn.prepare(
@@ -2020,7 +2035,7 @@ mod tests {
             "{continuation_plan}"
         );
         assert!(
-            continuation_plan.contains("event_seq<?"),
+            !continuation_plan.contains("SCAN semantic_event_summary"),
             "{continuation_plan}"
         );
         assert!(
