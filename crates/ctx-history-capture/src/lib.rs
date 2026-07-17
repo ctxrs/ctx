@@ -120,15 +120,20 @@ pub use common::io::provider_jsonl_range_has_complete_line;
 #[doc(hidden)]
 pub use common::path_inventory::{
     BoundedSourcePathInventory, DurableSourceInventoryActiveDirectory,
-    DurableSourceInventoryCheckpoint, DurableSourceInventoryCleanupOutcome,
-    DurableSourceInventoryCompletionProof, DurableSourceInventoryDirectoryAuthority,
-    DurableSourceInventoryError, DurableSourceInventoryFailureKind,
-    DurableSourceInventoryJournalEntry, DurableSourceInventoryJournalPage,
+    DurableSourceInventoryCheckpoint, DurableSourceInventoryCleanupAdvance,
+    DurableSourceInventoryCleanupOutcome, DurableSourceInventoryCompletionProof,
+    DurableSourceInventoryDirectoryAuthority, DurableSourceInventoryEffectEntry,
+    DurableSourceInventoryEffectPage, DurableSourceInventoryEffectPlan,
+    DurableSourceInventoryEffectScope, DurableSourceInventoryError,
+    DurableSourceInventoryFailureKind, DurableSourceInventoryJournalEntry,
+    DurableSourceInventoryJournalPage, DurableSourceInventoryMembershipAdvance,
     DurableSourceInventoryMode, DurableSourceInventoryOpenState, DurableSourceInventoryOwner,
     DurableSourceInventoryPathPage, DurableSourceInventoryPhase, DurableSourceInventoryRequest,
-    DurableSourceInventoryScratch, DurableSourceInventorySlice, DurableSourceInventoryStatus,
-    DurableSourcePathInventory, NativePathEncoding, NativePathIdentity, NativePathPlatform,
-    SourcePathInventoryPage, SourcePathInventorySlice,
+    DurableSourceInventoryScratch, DurableSourceInventorySelectionAdvance,
+    DurableSourceInventorySelectionCandidate, DurableSourceInventorySelectionDecision,
+    DurableSourceInventorySlice, DurableSourceInventoryStatus, DurableSourcePathInventory,
+    NativePathEncoding, NativePathIdentity, NativePathPlatform, SourcePathInventoryPage,
+    SourcePathInventorySlice,
 };
 #[doc(hidden)]
 pub use provider::sqlite_observation::{
@@ -179,7 +184,8 @@ pub use provider::api::{
 #[doc(hidden)]
 pub use provider::codex::catalog::{
     observe_codex_catalog_journal_page, CodexCatalogJournalObservation,
-    CodexCatalogObservationOutcome, CodexCatalogObservationPage,
+    CodexCatalogObservationOutcome, CodexCatalogObservationPage, CodexCatalogObservationRequest,
+    CodexCatalogObservationStopReason, CodexCatalogObservationUsage,
 };
 pub use provider::codex::{
     catalog_codex_session_files, catalog_codex_session_paths_page, catalog_codex_session_tree,

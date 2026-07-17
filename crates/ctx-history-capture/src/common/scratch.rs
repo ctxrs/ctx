@@ -46,29 +46,29 @@ struct ScratchCleanupBudget {
     pages: usize,
     operations: u64,
     bytes: u64,
+    entries: u64,
     max_bytes: u64,
 }
 
 impl ScratchCleanupBudget {
     fn new() -> Self {
+        Self::with_max_bytes(SCRATCH_CLEANUP_MAX_BYTES)
+    }
+
+    fn with_max_bytes(max_bytes: u64) -> Self {
         Self {
             started: Instant::now(),
             pages: 0,
             operations: 0,
             bytes: 0,
-            max_bytes: SCRATCH_CLEANUP_MAX_BYTES,
+            entries: 0,
+            max_bytes,
         }
     }
 
     #[cfg(test)]
     fn with_max_bytes_for_test(max_bytes: u64) -> Self {
-        Self {
-            started: Instant::now(),
-            pages: 0,
-            operations: 0,
-            bytes: 0,
-            max_bytes,
-        }
+        Self::with_max_bytes(max_bytes)
     }
 
     fn begin_page(&mut self) -> bool {
@@ -106,6 +106,7 @@ impl ScratchCleanupBudget {
             .operations
             .saturating_add(SCRATCH_CLEANUP_ENTRY_OPERATIONS);
         self.bytes = self.bytes.saturating_add(bytes);
+        self.entries = self.entries.saturating_add(1);
         true
     }
 }
@@ -123,9 +124,17 @@ pub(crate) enum DurableScratchCleanupOutcome {
     Busy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DurableScratchCleanupProgress {
+    pub(crate) outcome: DurableScratchCleanupOutcome,
+    pub(crate) cleaned_entries: u64,
+    pub(crate) cleaned_bytes: u64,
+}
+
 pub(crate) struct DurableCaptureScratch {
     path: PathBuf,
     lease: Option<File>,
+    manager_lock: Option<ManagerLock>,
 }
 
 impl DurableCaptureScratch {
@@ -146,6 +155,7 @@ impl DurableCaptureScratch {
         let scratch = Self {
             path,
             lease: Some(lease),
+            manager_lock: None,
         };
         scratch.validate_lease()?;
         Ok(scratch)
@@ -162,6 +172,7 @@ impl DurableCaptureScratch {
         let scratch = Self {
             path,
             lease: Some(lease),
+            manager_lock: None,
         };
         scratch.validate_lease()?;
         Ok(scratch)
@@ -174,6 +185,12 @@ impl DurableCaptureScratch {
     pub(crate) fn create_file(&self, name: &str) -> io::Result<File> {
         validate_file_name(name).map_err(capture_error_to_io)?;
         create_private_file(&self.path.join(name))
+    }
+
+    pub(crate) fn file_identity(&self, name: &str) -> io::Result<Vec<u8>> {
+        validate_file_name(name).map_err(capture_error_to_io)?;
+        let file = open_private_regular_file(&self.path.join(name))?;
+        encode_scratch_identity(scratch_handle_identity(&file)?)
     }
 
     pub(crate) fn directory_identity(&self) -> io::Result<Vec<u8>> {
@@ -206,24 +223,51 @@ impl DurableCaptureScratch {
         Ok(())
     }
 
-    pub(crate) fn cleanup_slice(
-        data_root: &Path,
-        name: &str,
-    ) -> io::Result<DurableScratchCleanupOutcome> {
+    pub(crate) fn open_for_cleanup(data_root: &Path, name: &str) -> io::Result<Self> {
         validate_file_name(name).map_err(capture_error_to_io)?;
         let root = durable_scratch_root(data_root)?;
-        let _manager_lock = acquire_manager_lock(&root)?;
+        let manager_lock = try_acquire_manager_lock(&root)?;
         let path = root.join(name);
-        let mut budget = ScratchCleanupBudget::new();
-        match cleanup_abandoned_scratch_run(&path, &mut budget) {
-            Ok(ScratchCleanupOutcome::Complete) => Ok(DurableScratchCleanupOutcome::Complete),
-            Ok(ScratchCleanupOutcome::Pending) => Ok(DurableScratchCleanupOutcome::Pending),
-            Ok(ScratchCleanupOutcome::Busy) => Ok(DurableScratchCleanupOutcome::Busy),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Ok(DurableScratchCleanupOutcome::Complete)
-            }
-            Err(error) => Err(error),
+        validate_private_directory(&path)?;
+        let lease = open_private_regular_file(&path.join(LEASE_NAME))?;
+        FileExt::try_lock_exclusive(&lease)?;
+        let scratch = Self {
+            path,
+            lease: Some(lease),
+            manager_lock: Some(manager_lock),
+        };
+        scratch.validate_lease()?;
+        Ok(scratch)
+    }
+
+    pub(crate) fn cleanup_owned_slice(
+        mut self,
+        max_bytes: u64,
+    ) -> io::Result<DurableScratchCleanupProgress> {
+        if self.manager_lock.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable capture scratch cleanup manager lock is not held",
+            ));
         }
+        let lease = self.lease.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable capture scratch lease is not held",
+            )
+        })?;
+        let mut budget = ScratchCleanupBudget::with_max_bytes(max_bytes);
+        let outcome = cleanup_owned_scratch_run(&self.path, lease, &mut budget)?;
+        let outcome = match outcome {
+            ScratchCleanupOutcome::Complete => DurableScratchCleanupOutcome::Complete,
+            ScratchCleanupOutcome::Pending => DurableScratchCleanupOutcome::Pending,
+            ScratchCleanupOutcome::Busy => DurableScratchCleanupOutcome::Busy,
+        };
+        Ok(DurableScratchCleanupProgress {
+            outcome,
+            cleaned_entries: budget.entries,
+            cleaned_bytes: budget.bytes,
+        })
     }
 
     fn validate_lease(&self) -> io::Result<()> {
@@ -386,6 +430,19 @@ fn acquire_manager_lock(root: &Path) -> io::Result<ManagerLock> {
         Err(error) => return Err(error),
     };
     FileExt::lock_exclusive(&file)?;
+    Ok(ManagerLock { file })
+}
+
+fn try_acquire_manager_lock(root: &Path) -> io::Result<ManagerLock> {
+    let path = root.join(MANAGER_LOCK_NAME);
+    let file = match create_private_file(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            open_private_regular_file(&path)?
+        }
+        Err(error) => return Err(error),
+    };
+    FileExt::try_lock_exclusive(&file)?;
     Ok(ManagerLock { file })
 }
 

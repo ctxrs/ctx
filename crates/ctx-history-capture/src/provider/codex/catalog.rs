@@ -1,15 +1,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::BufReader,
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
     thread,
+    time::{Duration, Instant},
 };
 
 use ctx_history_core::{AgentType, CaptureProvider};
-use ctx_history_store::{CatalogSession, Store};
+use ctx_history_store::{
+    CatalogSession, ImportInventoryCanonicalEffect, Store,
+    IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES,
+};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::common::io::{
     collect_jsonl_paths, read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
@@ -31,6 +34,11 @@ const CATALOG_PERSIST_ROW_OVERHEAD_BYTES: u64 = 256;
 const QUIET_CATALOG_MAX_PARALLELISM: usize = 2;
 const INTERACTIVE_CATALOG_MAX_PARALLELISM: usize = 8;
 const DURABLE_CATALOG_OBSERVATION_PAGE: usize = 64;
+const DURABLE_CATALOG_MAX_SOURCE_READ_BYTES: u64 = 16 * 1024 * 1024;
+const DURABLE_CATALOG_MAX_SOURCE_READ_BYTES_PER_ROW: u64 = 2 * 1024 * 1024;
+const DURABLE_CATALOG_MAX_RETAINED_BYTES: u64 = IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES as u64;
+const DURABLE_CATALOG_MAX_SERIALIZED_BYTES: u64 = IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES as u64;
+const DURABLE_CATALOG_MAX_ELAPSED: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub enum CodexCatalogObservationOutcome {
@@ -41,39 +49,117 @@ pub enum CodexCatalogObservationOutcome {
 #[derive(Debug, Clone)]
 pub struct CodexCatalogJournalObservation {
     pub journal: DurableSourceInventoryJournalEntry,
-    pub effect_fingerprint: [u8; 32],
     pub source_files: u64,
     pub source_bytes: u64,
+    pub source_read_bytes: u64,
+    pub retained_bytes: u64,
+    pub serialized_bytes: u64,
     pub outcome: CodexCatalogObservationOutcome,
 }
 
-#[derive(Debug, Clone, Default)]
+impl CodexCatalogJournalObservation {
+    pub fn membership_accounted_bytes(&self) -> u64 {
+        self.serialized_bytes
+    }
+
+    pub fn canonical_effect(&self) -> Result<ImportInventoryCanonicalEffect<'_>> {
+        Ok(match &self.outcome {
+            CodexCatalogObservationOutcome::Cataloged(session) => {
+                ImportInventoryCanonicalEffect::CatalogUpsert(session.as_ref())
+            }
+            CodexCatalogObservationOutcome::Failed(_) => {
+                ImportInventoryCanonicalEffect::CatalogObservationRejected {
+                    source_path: codex_catalog_session_identity(&self.journal.path)?,
+                }
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexCatalogObservationStopReason {
+    Complete,
+    SourceReadBudget,
+    RetainedBudget,
+    SerializedBudget,
+    Elapsed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodexCatalogObservationUsage {
+    pub rows: u64,
+    pub source_read_bytes: u64,
+    pub retained_bytes: u64,
+    pub serialized_bytes: u64,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexCatalogObservationRequest<'a> {
+    pub entries: &'a [DurableSourceInventoryJournalEntry],
+    pub after_journal_identity: Option<[u8; 32]>,
+    pub source_root: &'a str,
+    pub cataloged_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct CodexCatalogObservationPage {
     pub observations: Vec<CodexCatalogJournalObservation>,
     pub summary: CatalogSummary,
+    pub next_keyset: Option<[u8; 32]>,
+    pub complete: bool,
+    pub stop_reason: CodexCatalogObservationStopReason,
+    pub usage: CodexCatalogObservationUsage,
 }
 
 pub fn observe_codex_catalog_journal_page(
-    entries: &[DurableSourceInventoryJournalEntry],
-    source_root: &str,
-    cataloged_at_ms: i64,
+    request: CodexCatalogObservationRequest<'_>,
 ) -> Result<CodexCatalogObservationPage> {
-    if entries.len() > DURABLE_CATALOG_OBSERVATION_PAGE {
+    if request.entries.len() > DURABLE_CATALOG_OBSERVATION_PAGE {
         return Err(CaptureError::SystemInvariant(
             "Codex durable catalog observation page exceeds its row bound",
         ));
     }
     validate_codex_catalog_session_paths(
-        &entries
+        &request
+            .entries
             .iter()
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>(),
     )?;
-    let mut page = CodexCatalogObservationPage {
-        observations: Vec::with_capacity(entries.len()),
-        ..CodexCatalogObservationPage::default()
+    let start_index = match request.after_journal_identity {
+        Some(keyset) => request
+            .entries
+            .iter()
+            .position(|entry| entry.journal_identity == keyset)
+            .map(|index| index.saturating_add(1))
+            .ok_or_else(|| {
+                CaptureError::SystemInvariant(
+                    "Codex durable catalog observation keyset is not in the journal page",
+                )
+            })?,
+        None => 0,
     };
-    for journal in entries {
+    let started = Instant::now();
+    let mut page = CodexCatalogObservationPage {
+        observations: Vec::with_capacity(request.entries.len().saturating_sub(start_index)),
+        summary: CatalogSummary::default(),
+        next_keyset: request.after_journal_identity,
+        complete: false,
+        stop_reason: CodexCatalogObservationStopReason::Complete,
+        usage: CodexCatalogObservationUsage::default(),
+    };
+    for journal in &request.entries[start_index..] {
+        if !page.observations.is_empty() && started.elapsed() >= DURABLE_CATALOG_MAX_ELAPSED {
+            page.stop_reason = CodexCatalogObservationStopReason::Elapsed;
+            break;
+        }
+        let remaining_source_bytes =
+            DURABLE_CATALOG_MAX_SOURCE_READ_BYTES.saturating_sub(page.usage.source_read_bytes);
+        if remaining_source_bytes == 0 {
+            page.stop_reason = CodexCatalogObservationStopReason::SourceReadBudget;
+            break;
+        }
         let (file, observation) = match open_observed_ordinary_file(&journal.path) {
             Ok(observed) => observed,
             Err(error) => {
@@ -81,138 +167,218 @@ pub fn observe_codex_catalog_journal_page(
                     line: 0,
                     error: format!("{}: {error}", journal.path.display()),
                 };
-                page.summary.failed_sessions = page.summary.failed_sessions.saturating_add(1);
-                page.summary.sample_failure(failure.clone());
                 let outcome = CodexCatalogObservationOutcome::Failed(failure);
-                page.observations.push(CodexCatalogJournalObservation {
-                    journal: journal.clone(),
-                    effect_fingerprint: codex_catalog_observation_fingerprint(
-                        journal, 0, 0, &outcome,
-                    )?,
-                    source_files: 0,
-                    source_bytes: 0,
-                    outcome,
-                });
+                let retained = retain_codex_catalog_observation(
+                    &mut page,
+                    CodexCatalogJournalObservation {
+                        journal: journal.clone(),
+                        source_files: 0,
+                        source_bytes: 0,
+                        source_read_bytes: 0,
+                        retained_bytes: 0,
+                        serialized_bytes: 0,
+                        outcome,
+                    },
+                    started,
+                )?;
+                if !retained {
+                    break;
+                }
                 continue;
             }
         };
         let source_bytes = observation.len();
-        page.summary.source_files = page.summary.source_files.saturating_add(1);
-        page.summary.source_bytes = page.summary.source_bytes.saturating_add(source_bytes);
-        match catalog_codex_session_file(
+        let read_limit = remaining_source_bytes.min(DURABLE_CATALOG_MAX_SOURCE_READ_BYTES_PER_ROW);
+        let parsed = catalog_codex_session_file_with_limit(
             &journal.path,
             file,
-            source_root,
+            request.source_root,
             &observation,
-            cataloged_at_ms,
-        ) {
-            Ok(session) => {
-                page.summary.parsed_sessions = page.summary.parsed_sessions.saturating_add(1);
-                page.summary.cataloged_sessions = page.summary.cataloged_sessions.saturating_add(1);
-                let outcome = CodexCatalogObservationOutcome::Cataloged(Box::new(session));
-                page.observations.push(CodexCatalogJournalObservation {
-                    journal: journal.clone(),
-                    effect_fingerprint: codex_catalog_observation_fingerprint(
-                        journal,
-                        1,
-                        source_bytes,
-                        &outcome,
-                    )?,
-                    source_files: 1,
-                    source_bytes,
-                    outcome,
-                });
-            }
-            Err(error) => {
+            request.cataloged_at_ms,
+            read_limit,
+        );
+        let (outcome, source_read_bytes) = match parsed {
+            Ok((session, source_read_bytes)) => (
+                CodexCatalogObservationOutcome::Cataloged(Box::new(session)),
+                source_read_bytes,
+            ),
+            Err((error, source_read_bytes)) => {
                 let failure = ProviderImportFailure {
                     line: 0,
                     error: format!("{}: {error}", journal.path.display()),
                 };
-                page.summary.failed_sessions = page.summary.failed_sessions.saturating_add(1);
-                page.summary.sample_failure(failure.clone());
-                let outcome = CodexCatalogObservationOutcome::Failed(failure);
-                page.observations.push(CodexCatalogJournalObservation {
-                    journal: journal.clone(),
-                    effect_fingerprint: codex_catalog_observation_fingerprint(
-                        journal,
-                        1,
-                        source_bytes,
-                        &outcome,
-                    )?,
-                    source_files: 1,
-                    source_bytes,
-                    outcome,
-                });
+                (
+                    CodexCatalogObservationOutcome::Failed(failure),
+                    source_read_bytes,
+                )
             }
+        };
+        let observation = CodexCatalogJournalObservation {
+            journal: journal.clone(),
+            source_files: 1,
+            source_bytes,
+            source_read_bytes,
+            retained_bytes: 0,
+            serialized_bytes: 0,
+            outcome,
+        };
+        if !retain_codex_catalog_observation(&mut page, observation, started)? {
+            break;
         }
     }
+    page.complete = start_index.saturating_add(page.observations.len()) == request.entries.len();
+    if page.complete {
+        page.stop_reason = CodexCatalogObservationStopReason::Complete;
+    }
+    page.usage.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(page)
 }
 
-fn codex_catalog_observation_fingerprint(
-    journal: &DurableSourceInventoryJournalEntry,
-    source_files: u64,
-    source_bytes: u64,
-    outcome: &CodexCatalogObservationOutcome,
-) -> Result<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-codex-catalog-observation-v1\0");
-    hasher.update(journal.journal_identity);
-    hasher.update(source_files.to_be_bytes());
-    hasher.update(source_bytes.to_be_bytes());
-    match outcome {
+fn retain_codex_catalog_observation(
+    page: &mut CodexCatalogObservationPage,
+    mut observation: CodexCatalogJournalObservation,
+    started: Instant,
+) -> Result<bool> {
+    page.usage.source_read_bytes = page
+        .usage
+        .source_read_bytes
+        .saturating_add(observation.source_read_bytes);
+    let mut retained_bytes = codex_catalog_observation_retained_bytes(&observation)?;
+    let mut serialized_bytes = codex_catalog_observation_serialized_bytes(&observation)?;
+    if retained_bytes > DURABLE_CATALOG_MAX_RETAINED_BYTES
+        || serialized_bytes > DURABLE_CATALOG_MAX_SERIALIZED_BYTES
+    {
+        observation.outcome = CodexCatalogObservationOutcome::Failed(ProviderImportFailure {
+            line: 0,
+            error: "Codex catalog metadata exceeds the bounded observation payload".to_owned(),
+        });
+        retained_bytes = codex_catalog_observation_retained_bytes(&observation)?;
+        serialized_bytes = codex_catalog_observation_serialized_bytes(&observation)?;
+        if retained_bytes > DURABLE_CATALOG_MAX_RETAINED_BYTES
+            || serialized_bytes > DURABLE_CATALOG_MAX_SERIALIZED_BYTES
+        {
+            return Err(CaptureError::InvalidPayload(
+                "Codex catalog observation identity exceeds its payload bound".to_owned(),
+            ));
+        }
+    }
+    if !page.observations.is_empty()
+        && page.usage.retained_bytes.saturating_add(retained_bytes)
+            > DURABLE_CATALOG_MAX_RETAINED_BYTES
+    {
+        page.stop_reason = CodexCatalogObservationStopReason::RetainedBudget;
+        return Ok(false);
+    }
+    if !page.observations.is_empty()
+        && page.usage.serialized_bytes.saturating_add(serialized_bytes)
+            > DURABLE_CATALOG_MAX_SERIALIZED_BYTES
+    {
+        page.stop_reason = CodexCatalogObservationStopReason::SerializedBudget;
+        return Ok(false);
+    }
+    page.usage.retained_bytes = page.usage.retained_bytes.saturating_add(retained_bytes);
+    page.usage.serialized_bytes = page.usage.serialized_bytes.saturating_add(serialized_bytes);
+    observation.retained_bytes = retained_bytes;
+    observation.serialized_bytes = serialized_bytes;
+    let journal_identity = observation.journal.journal_identity;
+    page.observations.push(observation);
+    finish_codex_catalog_observation(page, journal_identity, started)?;
+    Ok(true)
+}
+
+fn finish_codex_catalog_observation(
+    page: &mut CodexCatalogObservationPage,
+    journal_identity: [u8; 32],
+    started: Instant,
+) -> Result<()> {
+    let observation = page
+        .observations
+        .last()
+        .ok_or(CaptureError::SystemInvariant(
+            "Codex catalog observation accounting has no retained row",
+        ))?;
+    page.summary.source_files = page
+        .summary
+        .source_files
+        .saturating_add(observation.source_files);
+    page.summary.source_bytes = page
+        .summary
+        .source_bytes
+        .saturating_add(observation.source_bytes);
+    match &observation.outcome {
+        CodexCatalogObservationOutcome::Cataloged(_) => {
+            page.summary.parsed_sessions = page.summary.parsed_sessions.saturating_add(1);
+            page.summary.cataloged_sessions = page.summary.cataloged_sessions.saturating_add(1);
+        }
+        CodexCatalogObservationOutcome::Failed(failure) => {
+            page.summary.failed_sessions = page.summary.failed_sessions.saturating_add(1);
+            page.summary.sample_failure(failure.clone());
+        }
+    }
+    page.usage.rows = page.usage.rows.saturating_add(1);
+    page.usage.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    page.next_keyset = Some(journal_identity);
+    Ok(())
+}
+
+fn codex_catalog_observation_retained_bytes(
+    observation: &CodexCatalogJournalObservation,
+) -> Result<u64> {
+    let payload_bytes = match &observation.outcome {
         CodexCatalogObservationOutcome::Cataloged(session) => {
-            hasher.update([1]);
+            catalog_session_persist_bytes(session)?
+        }
+        CodexCatalogObservationOutcome::Failed(failure) => {
+            u64::try_from(failure.error.len()).unwrap_or(u64::MAX)
+        }
+    };
+    Ok(payload_bytes
+        .saturating_add(
+            u64::try_from(observation.journal.path.as_os_str().len()).unwrap_or(u64::MAX),
+        )
+        .saturating_add(512))
+}
+
+fn codex_catalog_observation_serialized_bytes(
+    observation: &CodexCatalogJournalObservation,
+) -> Result<u64> {
+    let mut bytes = 512_u64;
+    bytes = bytes.saturating_add(
+        u64::try_from(serde_json::to_vec(&observation.journal.path.to_string_lossy())?.len())
+            .unwrap_or(u64::MAX),
+    );
+    match &observation.outcome {
+        CodexCatalogObservationOutcome::Cataloged(session) => {
             for value in [
-                session.provider.as_str(),
-                session.source_format.as_str(),
-                session.source_root.as_str(),
-                session.source_path.as_str(),
-                session.agent_type.as_str(),
-            ] {
-                hash_catalog_field(&mut hasher, value.as_bytes());
-            }
-            for value in [
+                Some(session.provider.as_str()),
+                Some(session.source_format.as_str()),
+                Some(session.source_root.as_str()),
+                Some(session.source_path.as_str()),
                 session.external_session_id.as_deref(),
                 session.parent_external_session_id.as_deref(),
+                Some(session.agent_type.as_str()),
                 session.role_hint.as_deref(),
                 session.external_agent_id.as_deref(),
                 session.cwd.as_deref(),
-            ] {
-                hash_optional_catalog_field(&mut hasher, value);
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bytes = bytes.saturating_add(
+                    u64::try_from(serde_json::to_vec(value)?.len()).unwrap_or(u64::MAX),
+                );
             }
-            hasher.update(
-                session
-                    .session_started_at_ms
-                    .unwrap_or(i64::MIN)
-                    .to_be_bytes(),
+            bytes = bytes.saturating_add(
+                u64::try_from(serde_json::to_vec(&session.metadata)?.len()).unwrap_or(u64::MAX),
             );
-            hasher.update(session.file_size_bytes.to_be_bytes());
-            hasher.update(session.file_modified_at_ms.to_be_bytes());
-            hasher.update(session.import_revision.to_be_bytes());
-            hash_catalog_field(&mut hasher, &serde_json::to_vec(&session.metadata)?);
         }
         CodexCatalogObservationOutcome::Failed(failure) => {
-            hasher.update([2]);
-            hasher.update((failure.line as u64).to_be_bytes());
+            bytes = bytes.saturating_add(
+                u64::try_from(serde_json::to_vec(&failure.error)?.len()).unwrap_or(u64::MAX),
+            );
         }
     }
-    Ok(hasher.finalize().into())
-}
-
-fn hash_optional_catalog_field(hasher: &mut Sha256, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            hasher.update([1]);
-            hash_catalog_field(hasher, value.as_bytes());
-        }
-        None => hasher.update([0]),
-    }
-}
-
-fn hash_catalog_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update((value.len() as u64).to_be_bytes());
-    hasher.update(value);
+    Ok(bytes)
 }
 
 pub fn catalog_codex_session_tree(
@@ -923,14 +1089,49 @@ pub(crate) fn catalog_codex_session_file(
     observation: &OrdinaryFileObservation,
     cataloged_at_ms: i64,
 ) -> Result<CatalogSession> {
+    catalog_codex_session_file_with_limit(
+        path,
+        file,
+        source_root,
+        observation,
+        cataloged_at_ms,
+        DURABLE_CATALOG_MAX_SOURCE_READ_BYTES,
+    )
+    .map(|(session, _)| session)
+    .map_err(|(error, _)| error)
+}
+
+fn catalog_codex_session_file_with_limit(
+    path: &Path,
+    file: File,
+    source_root: &str,
+    observation: &OrdinaryFileObservation,
+    cataloged_at_ms: i64,
+    read_limit: u64,
+) -> std::result::Result<(CatalogSession, u64), (CaptureError, u64)> {
+    let (session_meta, source_read_bytes) = read_codex_session_meta_from_file(file, read_limit)?;
+    catalog_codex_session_from_meta(
+        path,
+        source_root,
+        observation,
+        cataloged_at_ms,
+        session_meta,
+    )
+    .map(|session| (session, source_read_bytes))
+    .map_err(|error| (error, source_read_bytes))
+}
+
+fn catalog_codex_session_from_meta(
+    path: &Path,
+    source_root: &str,
+    observation: &OrdinaryFileObservation,
+    cataloged_at_ms: i64,
+    session_meta: Option<Value>,
+) -> Result<CatalogSession> {
     let source_path = codex_catalog_session_identity(path)?;
-    let session_meta = read_codex_session_meta_from_file(file)?;
     let payload = session_meta.as_ref().and_then(|value| value.get("payload"));
-    let source = payload
-        .and_then(|payload| payload.get("source"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let parent_external_session_id = codex_parent_session_id(&source);
+    let source = payload.and_then(|payload| payload.get("source"));
+    let parent_external_session_id = source.and_then(codex_parent_session_id);
     let external_session_id = payload
         .and_then(|payload| payload.get("id"))
         .and_then(Value::as_str)
@@ -991,8 +1192,7 @@ pub(crate) fn catalog_codex_session_file(
             "originator": payload.and_then(|payload| payload.get("originator")).and_then(Value::as_str),
             "cli_version": payload.and_then(|payload| payload.get("cli_version")).and_then(Value::as_str),
             "model_provider": payload.and_then(|payload| payload.get("model_provider")).and_then(Value::as_str),
-            "source_kind": codex_source_kind(&source),
-            "source": source,
+            "source_kind": source.and_then(codex_source_kind),
             "catalog_scope": "session_meta",
             "file_observation_token_v1": observation.token_hex(),
         }),
@@ -1022,11 +1222,16 @@ fn validate_codex_catalog_session_paths(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn read_codex_session_meta_from_file(file: File) -> Result<Option<Value>> {
-    let mut reader = BufReader::new(crate::disk_io_pacing::PacedReader::new(file));
+fn read_codex_session_meta_from_file(
+    file: File,
+    read_limit: u64,
+) -> std::result::Result<(Option<Value>, u64), (CaptureError, u64)> {
+    let mut reader = BufReader::new(BoundedCatalogReader::new(file, read_limit));
     let mut line = Vec::new();
     for _ in 0..32 {
-        match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
+        let line_read = read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)
+            .map_err(|error| (error, reader.get_ref().bytes_read()))?;
+        match line_read {
             ProviderJsonlLineRead::Eof => break,
             ProviderJsonlLineRead::Line { .. } => {}
             ProviderJsonlLineRead::Oversized { .. } => continue,
@@ -1038,10 +1243,59 @@ fn read_codex_session_meta_from_file(file: File) -> Result<Option<Value>> {
             continue;
         };
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            return Ok(Some(value));
+            return Ok((Some(value), reader.get_ref().bytes_read()));
         }
     }
-    Ok(None)
+    if reader.get_ref().exhausted() {
+        return Err((
+            CaptureError::InvalidPayload(
+                "Codex session metadata was not found within the bounded source prefix".to_owned(),
+            ),
+            reader.get_ref().bytes_read(),
+        ));
+    }
+    Ok((None, reader.get_ref().bytes_read()))
+}
+
+struct BoundedCatalogReader {
+    file: File,
+    remaining: u64,
+    bytes_read: u64,
+}
+
+impl BoundedCatalogReader {
+    fn new(file: File, read_limit: u64) -> Self {
+        Self {
+            file,
+            remaining: read_limit,
+            bytes_read: 0,
+        }
+    }
+
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+impl Read for BoundedCatalogReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            return Ok(0);
+        }
+        let bounded = buffer
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        crate::pace_current_disk_io(u64::try_from(bounded).unwrap_or(u64::MAX));
+        let read = self.file.read(&mut buffer[..bounded])?;
+        let read = u64::try_from(read).unwrap_or(u64::MAX);
+        self.remaining = self.remaining.saturating_sub(read);
+        self.bytes_read = self.bytes_read.saturating_add(read);
+        usize::try_from(read).map_err(|_| io::Error::other("bounded Codex read overflow"))
+    }
 }
 pub(crate) fn codex_parent_session_id(source: &Value) -> Option<String> {
     source
