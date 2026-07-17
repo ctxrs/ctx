@@ -196,7 +196,8 @@ fn refresh_sources_for_search_inner(
         if let Some(changes) = watcher_changes.as_ref() {
             runtime.retain_dirty_paths(&changes.dirty_paths);
         }
-        let publication_owner = store.effective_provider_file_publication_inventory_owner()?;
+        let (publication_state_marker, publication_owner) =
+            store.effective_provider_file_publication_inventory_snapshot()?;
         let publication_pending = publication_owner.is_some();
         let periodic_reinventory = runtime.inventory_progress.is_none()
             && runtime.cached_work.as_ref().is_some_and(|cached| {
@@ -214,13 +215,22 @@ fn refresh_sources_for_search_inner(
         {
             runtime.request_inventory(SearchInventoryReason::SourcesChanged);
         }
+        let publication_rebuild = runtime
+            .cached_work
+            .as_ref()
+            .is_some_and(|cached| cached.publication_state_marker != publication_state_marker);
         let force_rebuild = runtime.durable_sources_changed(&source_fingerprint)
-            || runtime.cached_work.as_ref().is_some_and(|cached| {
-                cached.source_fingerprint != source_fingerprint
-                    || cached.publication_owner != publication_owner
-            });
+            || runtime
+                .cached_work
+                .as_ref()
+                .is_some_and(|cached| cached.source_fingerprint != source_fingerprint)
+            || publication_rebuild;
         if force_rebuild {
-            runtime.request_inventory(SearchInventoryReason::SourcesChanged);
+            runtime.request_inventory(if publication_rebuild {
+                SearchInventoryReason::PublicationChanged
+            } else {
+                SearchInventoryReason::SourcesChanged
+            });
         }
         if runtime.cached_work.is_none()
             && runtime.inventory_progress.is_none()
@@ -242,12 +252,11 @@ fn refresh_sources_for_search_inner(
             })
             .cloned()
             .collect::<Vec<_>>();
-        let publication_page_count = usize::from(publication_pending);
         if runtime.prepare_inventory(
-            &store,
             &inventory_sources,
             &source_fingerprint,
-            publication_page_count,
+            &publication_state_marker,
+            publication_owner.clone(),
             force_rebuild,
         )? {
             let operations_before = disk_io_pacer.filesystem_operation_count();
@@ -261,34 +270,46 @@ fn refresh_sources_for_search_inner(
             let operation_count = disk_io_pacer
                 .filesystem_operation_count()
                 .saturating_sub(operations_before);
-            match inventory_step {
-                ImportInventoryCursorStep::Pending(slice) => {
-                    runtime.note_inventory_slice(slice, operation_count);
+            let publication_state_after_page = store
+                .effective_provider_file_publication_inventory_snapshot()?
+                .0;
+            if runtime.inventory_publication_state_changed(&publication_state_after_page) {
+                runtime.restart_inventory_after_publication_transition();
+            } else {
+                match inventory_step {
+                    ImportInventoryCursorStep::Pending(slice) => {
+                        runtime.note_inventory_slice(slice, operation_count);
+                    }
+                    ImportInventoryCursorStep::SourceComplete(inventory) => {
+                        let source_bytes = inventory.totals.source_bytes;
+                        let inventoried_paths = inventory
+                            .sources
+                            .iter()
+                            .map(|planned| planned.source.path.clone())
+                            .chain(
+                                inventory
+                                    .failures
+                                    .iter()
+                                    .map(|failure| failure.source.path.clone()),
+                            )
+                            .collect::<BTreeSet<_>>();
+                        let (bound_publication_state, bound_publication_owner) =
+                            runtime.inventory_publication_snapshot().ok_or_else(|| {
+                                anyhow!("inventory page lost its publication snapshot")
+                            })?;
+                        merge_search_inventory_page(
+                            &store,
+                            &source_fingerprint,
+                            bound_publication_state,
+                            bound_publication_owner,
+                            inventoried_paths,
+                            inventory,
+                            &mut runtime.cached_work,
+                        )?;
+                        runtime.note_inventory_source_completed(source_bytes, operation_count);
+                    }
+                    ImportInventoryCursorStep::Complete => runtime.note_inventory_cursor_complete(),
                 }
-                ImportInventoryCursorStep::SourceComplete(inventory) => {
-                    let source_bytes = inventory.totals.source_bytes;
-                    let inventoried_paths = inventory
-                        .sources
-                        .iter()
-                        .map(|planned| planned.source.path.clone())
-                        .chain(
-                            inventory
-                                .failures
-                                .iter()
-                                .map(|failure| failure.source.path.clone()),
-                        )
-                        .collect::<BTreeSet<_>>();
-                    merge_search_inventory_page(
-                        &store,
-                        &source_fingerprint,
-                        publication_owner.clone(),
-                        inventoried_paths,
-                        inventory,
-                        &mut runtime.cached_work,
-                    )?;
-                    runtime.note_inventory_source_completed(source_bytes, operation_count);
-                }
-                ImportInventoryCursorStep::Complete => runtime.note_inventory_cursor_complete(),
             }
             if runtime.inventory_is_complete() {
                 let completed_scoped = runtime
@@ -467,6 +488,7 @@ fn process_dirty_source_paths_page(
 fn merge_search_inventory_page(
     store: &Store,
     source_fingerprint: &str,
+    publication_state_marker: String,
     publication_owner: Option<ProviderFilePublicationInventoryOwner>,
     mut inventoried_paths: BTreeSet<PathBuf>,
     inventory: crate::commands::import::ImportInventory,
@@ -497,6 +519,7 @@ fn merge_search_inventory_page(
                 .rebase_for_plan(&work.plan, &plan, &inventoried_paths);
         work.plan = plan;
         work.source_fingerprint = source_fingerprint.to_owned();
+        work.publication_state_marker = publication_state_marker;
         work.publication_owner = publication_owner;
         work.inventoried_source_count = work
             .plan
@@ -514,6 +537,7 @@ fn merge_search_inventory_page(
     });
     *cached_work = Some(SearchRefreshWork {
         source_fingerprint: source_fingerprint.to_owned(),
+        publication_state_marker,
         publication_owner,
         passes_since_reinventory: 0,
         last_reinventory_at: Instant::now(),

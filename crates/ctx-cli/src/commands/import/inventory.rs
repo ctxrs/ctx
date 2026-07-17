@@ -18,7 +18,7 @@ use ctx_history_store::{
     SourceImportFile, SourceImportFileIndexUpdate, Store,
 };
 
-use crate::commands::import::catalog::{codex_catalog_root_identity, source_stats, system_time_ms};
+use crate::commands::import::catalog::{source_stats, system_time_ms};
 use crate::commands::import::manifest::{
     manifest_inventory_path_candidate, observe_source_import_paths_page,
     persist_new_source_import_observation, persist_source_import_files_page,
@@ -151,12 +151,7 @@ fn inventory_dirty_codex_path(
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let source_path = changed_path.to_str().ok_or_else(|| {
-                anyhow::Error::new(CaptureError::InvalidProviderTranscriptPath {
-                    path: changed_path.to_path_buf(),
-                    reason: "Codex catalog session path is not valid UTF-8",
-                })
-            })?;
+            let source_path = codex_catalog_session_identity(changed_path)?;
             store.mark_catalog_inventory_paths_stale(
                 CaptureProvider::Codex,
                 source_root,
@@ -231,6 +226,8 @@ pub(crate) struct ImportInventoryCursor {
     sources: Vec<SourceInfo>,
     next_source: usize,
     full_rescan: bool,
+    publication_state_marker: String,
+    publication_owner: Option<ProviderFilePublicationInventoryOwner>,
     publication_plan: Option<PlannedImportSource>,
     active: Option<SourceInventoryCursor>,
 }
@@ -242,11 +239,29 @@ impl ImportInventoryCursor {
         full_rescan: bool,
         include_publication_owner: bool,
     ) -> Result<Self> {
-        let publication_plan = match store.effective_provider_file_publication_inventory_owner()? {
+        let (publication_state_marker, publication_owner) =
+            store.effective_provider_file_publication_inventory_snapshot()?;
+        Self::new_with_publication_snapshot(
+            sources,
+            full_rescan,
+            include_publication_owner,
+            publication_state_marker,
+            publication_owner,
+        )
+    }
+
+    pub(crate) fn new_with_publication_snapshot(
+        mut sources: Vec<SourceInfo>,
+        full_rescan: bool,
+        include_publication_owner: bool,
+        publication_state_marker: String,
+        publication_owner: Option<ProviderFilePublicationInventoryOwner>,
+    ) -> Result<Self> {
+        let publication_plan = match publication_owner.as_ref() {
             Some(owner) => {
-                sources.retain(|source| !source_matches_publication_owner(source, &owner));
+                sources.retain(|source| !source_matches_publication_owner(source, owner));
                 include_publication_owner
-                    .then(|| publication_owner_plan(owner))
+                    .then(|| publication_owner_plan(owner.clone()))
                     .transpose()?
             }
             None => None,
@@ -255,9 +270,19 @@ impl ImportInventoryCursor {
             sources,
             next_source: 0,
             full_rescan,
+            publication_state_marker,
+            publication_owner,
             publication_plan,
             active: None,
         })
+    }
+
+    pub(crate) fn publication_state_marker(&self) -> &str {
+        &self.publication_state_marker
+    }
+
+    pub(crate) fn publication_owner(&self) -> Option<&ProviderFilePublicationInventoryOwner> {
+        self.publication_owner.as_ref()
     }
 
     pub(crate) fn advance(&mut self, store: &Store) -> Result<ImportInventoryCursorStep> {
@@ -598,6 +623,7 @@ impl RootInventoryCursor {
 
 enum CodexInventoryPhase {
     Discover,
+    Validate,
     Process,
     Stale,
     Resume,
@@ -609,6 +635,7 @@ struct CodexInventoryCursor {
     full_rescan: bool,
     paths: BoundedSourcePathInventory,
     phase: CodexInventoryPhase,
+    validation_cursor: Option<Vec<u8>>,
     path_cursor: Option<Vec<u8>>,
     stale_cursor: Option<i64>,
     rescan_cursor: Option<i64>,
@@ -624,6 +651,7 @@ impl CodexInventoryCursor {
             full_rescan,
             paths,
             phase: CodexInventoryPhase::Discover,
+            validation_cursor: None,
             path_cursor: None,
             stale_cursor: None,
             rescan_cursor: None,
@@ -633,11 +661,26 @@ impl CodexInventoryCursor {
     }
 
     fn advance(&mut self, store: &Store) -> Result<SourceInventoryStep> {
-        let source_root = persisted_import_identity(&self.source.path, "source root")?.to_owned();
+        let source_root = codex_catalog_root_identity(&self.source.path)?.to_owned();
         match self.phase {
             CodexInventoryPhase::Discover => {
                 let slice = self.paths.advance()?;
                 if slice.complete {
+                    self.phase = CodexInventoryPhase::Validate;
+                }
+                Ok(SourceInventoryStep::Pending(ImportInventorySliceProgress {
+                    operations: slice.operations,
+                    path_bytes: slice.path_bytes,
+                    discovered_files: slice.discovered_files,
+                }))
+            }
+            CodexInventoryPhase::Validate => {
+                let page = self
+                    .paths
+                    .paths_page(self.validation_cursor.as_deref(), 64)?;
+                validate_codex_catalog_session_paths(&page.paths)?;
+                self.validation_cursor = page.next_cursor;
+                if page.complete {
                     self.inventory_generation = Some(store.allocate_catalog_inventory_generation(
                         CaptureProvider::Codex,
                         &source_root,
@@ -645,9 +688,8 @@ impl CodexInventoryCursor {
                     self.phase = CodexInventoryPhase::Process;
                 }
                 Ok(SourceInventoryStep::Pending(ImportInventorySliceProgress {
-                    operations: slice.operations,
-                    path_bytes: slice.path_bytes,
-                    discovered_files: slice.discovered_files,
+                    discovered_files: self.paths.metrics().discovered_files,
+                    ..ImportInventorySliceProgress::default()
                 }))
             }
             CodexInventoryPhase::Process => {
@@ -764,6 +806,31 @@ impl CodexInventoryCursor {
             ))
         })
     }
+}
+
+fn codex_catalog_root_identity(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| {
+        anyhow::Error::new(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Codex catalog source root is not valid UTF-8",
+        })
+    })
+}
+
+fn codex_catalog_session_identity(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| {
+        anyhow::Error::new(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Codex catalog session path is not valid UTF-8",
+        })
+    })
+}
+
+fn validate_codex_catalog_session_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        codex_catalog_session_identity(path)?;
+    }
+    Ok(())
 }
 
 enum ManifestInventoryPhase {
@@ -1017,10 +1084,21 @@ pub(crate) fn source_matches_publication_owner(
 fn publication_owner_plan(
     owner: ProviderFilePublicationInventoryOwner,
 ) -> Result<PlannedImportSource> {
+    let source_format = match owner.inventory_family {
+        ProviderFileInventoryFamily::Catalog if owner.provider == CaptureProvider::Codex => {
+            "codex_session_jsonl_tree"
+        }
+        ProviderFileInventoryFamily::Catalog => {
+            return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                "persisted catalog publication owner is not a Codex source",
+            )))
+        }
+        ProviderFileInventoryFamily::SourceImport => owner.source_format.as_str(),
+    };
     let source = provider_source_for_persisted_format(
         owner.provider,
         PathBuf::from(&owner.source_root),
-        &owner.source_format,
+        source_format,
     )
     .ok_or_else(|| {
         anyhow::Error::new(CaptureError::SystemInvariant(
@@ -1157,4 +1235,187 @@ fn source_root_observation_from_stats(
         }),
     };
     Ok(file)
+}
+
+#[cfg(test)]
+mod publication_owner_plan_tests {
+    use super::*;
+
+    fn publication_owner(
+        provider: CaptureProvider,
+        inventory_family: ProviderFileInventoryFamily,
+        source_format: &str,
+    ) -> ProviderFilePublicationInventoryOwner {
+        ProviderFilePublicationInventoryOwner {
+            provider,
+            inventory_family,
+            source_format: source_format.to_owned(),
+            source_root: "/history/root".to_owned(),
+            source_path: "/history/root/session.jsonl".to_owned(),
+            inventory_generation: 7,
+            file_size_bytes: 41,
+            file_modified_at_ms: 11,
+            import_revision: 2,
+            metadata_json: None,
+        }
+    }
+
+    #[test]
+    fn codex_catalog_owner_recovers_a_tree_source_without_full_tree_preinventory() {
+        let plan = publication_owner_plan(publication_owner(
+            CaptureProvider::Codex,
+            ProviderFileInventoryFamily::Catalog,
+            "codex_session_jsonl",
+        ))
+        .unwrap();
+
+        assert_eq!(plan.source.path, PathBuf::from("/history/root"));
+        assert_eq!(plan.source.source_format, "codex_session_jsonl_tree");
+        assert_eq!(plan.stats.files, 1);
+        assert!(matches!(
+            plan.preinventory,
+            SourcePreinventory::CodexSessionCatalog {
+                inventory_generation: 7,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn codex_publication_owner_cursor_does_not_amplify_to_full_tree_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let owner = publication_owner(
+            CaptureProvider::Codex,
+            ProviderFileInventoryFamily::Catalog,
+            "codex_session_jsonl",
+        );
+        let mut cursor = ImportInventoryCursor::new_with_publication_snapshot(
+            Vec::new(),
+            true,
+            true,
+            "publication-snapshot".to_owned(),
+            Some(owner),
+        )
+        .unwrap();
+
+        let page = match cursor.advance(&store).unwrap() {
+            ImportInventoryCursorStep::SourceComplete(page) => page,
+            ImportInventoryCursorStep::Pending(_) => {
+                panic!("synthetic Codex owner entered tree inventory")
+            }
+            ImportInventoryCursorStep::Complete => {
+                panic!("synthetic Codex owner was omitted")
+            }
+        };
+        assert_eq!(page.sources.len(), 1);
+        assert_eq!(page.sources[0].source.path, PathBuf::from("/history/root"));
+        assert_eq!(
+            page.sources[0].source.source_format,
+            "codex_session_jsonl_tree"
+        );
+        assert!(matches!(
+            cursor.advance(&store).unwrap(),
+            ImportInventoryCursorStep::Complete
+        ));
+    }
+
+    #[test]
+    fn source_import_owner_retains_manifested_per_file_semantics() {
+        let plan = publication_owner_plan(publication_owner(
+            CaptureProvider::Pi,
+            ProviderFileInventoryFamily::SourceImport,
+            "pi_session_jsonl",
+        ))
+        .unwrap();
+
+        assert_eq!(plan.source.path, PathBuf::from("/history/root"));
+        assert_eq!(plan.source.source_format, "pi_session_jsonl");
+        assert!(matches!(
+            plan.preinventory,
+            SourcePreinventory::SourceImportFiles {
+                ref files,
+                inventory_generation: 7,
+            } if files.is_empty()
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_codex_catalog_roots_and_sessions_are_rejected_before_persistence() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        fn assert_invalid_codex_path(
+            error: &anyhow::Error,
+            expected_path: &Path,
+            expected_reason: &'static str,
+        ) {
+            let typed = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<CaptureError>())
+                .unwrap();
+            assert!(matches!(
+                typed,
+                CaptureError::InvalidProviderTranscriptPath { path, reason }
+                    if path == expected_path && *reason == expected_reason
+            ));
+            assert!(!format!("{error:#}").contains('\u{fffd}'));
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let invalid_root = temp
+            .path()
+            .join(OsString::from_vec(b"codex-root-\xff".to_vec()));
+        fs::create_dir_all(&invalid_root).unwrap();
+        let invalid_root_source = crate::provider_sources::explicit_path_source(
+            CaptureProvider::Codex,
+            invalid_root.clone(),
+        );
+        let invalid_root_error =
+            match CodexInventoryCursor::new(invalid_root_source, false).advance(&store) {
+                Err(error) => error,
+                Ok(_) => panic!("non-UTF-8 Codex root passed bounded validation"),
+            };
+        assert_invalid_codex_path(
+            &invalid_root_error,
+            &invalid_root,
+            "Codex catalog source root is not valid UTF-8",
+        );
+        assert_eq!(store.catalog_session_counts().unwrap(), Default::default());
+
+        let valid_root = temp.path().join("codex-valid-root");
+        fs::create_dir_all(&valid_root).unwrap();
+        let invalid_session =
+            valid_root.join(OsString::from_vec(b"codex-session-\xff.jsonl".to_vec()));
+        fs::write(&invalid_session, b"{}\n").unwrap();
+        let valid_root_source = crate::provider_sources::explicit_path_source(
+            CaptureProvider::Codex,
+            valid_root.clone(),
+        );
+        let mut cursor = CodexInventoryCursor::new(valid_root_source, false);
+        let invalid_session_error = loop {
+            match cursor.advance(&store) {
+                Ok(SourceInventoryStep::Pending(_)) => {}
+                Ok(SourceInventoryStep::Complete(_, _, _)) => {
+                    panic!("non-UTF-8 Codex session path passed bounded validation")
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_invalid_codex_path(
+            &invalid_session_error,
+            &invalid_session,
+            "Codex catalog session path is not valid UTF-8",
+        );
+        assert!(store
+            .current_catalog_inventory_generation(
+                CaptureProvider::Codex,
+                valid_root.to_str().unwrap(),
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(store.catalog_session_counts().unwrap(), Default::default());
+    }
 }

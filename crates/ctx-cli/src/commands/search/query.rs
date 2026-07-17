@@ -57,6 +57,7 @@ pub(crate) struct SearchRefreshRuntime {
 
 struct SearchRefreshWork {
     source_fingerprint: String,
+    publication_state_marker: String,
     publication_owner: Option<ProviderFilePublicationInventoryOwner>,
     passes_since_reinventory: usize,
     last_reinventory_at: Instant,
@@ -81,6 +82,7 @@ struct SearchRefreshSourceWatcher {
 enum SearchInventoryReason {
     Startup,
     SourcesChanged,
+    PublicationChanged,
     WatcherLoss,
     WatcherRecovery,
     DegradedFallback,
@@ -92,6 +94,7 @@ impl SearchInventoryReason {
         match self {
             Self::Startup => "startup",
             Self::SourcesChanged => "sources_changed",
+            Self::PublicationChanged => "publication_changed",
             Self::WatcherLoss => "watcher_loss",
             Self::WatcherRecovery => "watcher_recovery",
             Self::DegradedFallback => "degraded_fallback",
@@ -495,12 +498,15 @@ impl SearchRefreshRuntime {
 
     fn prepare_inventory(
         &mut self,
-        store: &Store,
         sources: &[SourceInfo],
         source_fingerprint: &str,
-        publication_page_count: usize,
+        publication_state_marker: &str,
+        publication_owner: Option<ProviderFilePublicationInventoryOwner>,
         force_rebuild: bool,
     ) -> Result<bool> {
+        if self.inventory_publication_state_changed(publication_state_marker) {
+            self.restart_inventory_after_publication_transition();
+        }
         if self
             .inventory_progress
             .as_ref()
@@ -548,11 +554,16 @@ impl SearchRefreshRuntime {
         } else {
             sources.to_vec()
         };
-        let total_sources =
-            inventory_sources
-                .len()
-                .saturating_add(if scoped { 0 } else { publication_page_count });
-        let cursor = ImportInventoryCursor::new(store, inventory_sources, true, !scoped)?;
+        let total_sources = inventory_sources
+            .len()
+            .saturating_add(usize::from(!scoped && publication_owner.is_some()));
+        let cursor = ImportInventoryCursor::new_with_publication_snapshot(
+            inventory_sources,
+            true,
+            !scoped,
+            publication_state_marker.to_owned(),
+            publication_owner,
+        )?;
         if requested_reason.is_some() {
             self.pending_inventory_reason = None;
         }
@@ -583,6 +594,29 @@ impl SearchRefreshRuntime {
             cursor,
         });
         Ok(true)
+    }
+
+    fn inventory_publication_state_changed(&self, publication_state_marker: &str) -> bool {
+        self.inventory_progress.as_ref().is_some_and(|progress| {
+            progress.cursor.publication_state_marker() != publication_state_marker
+        })
+    }
+
+    fn inventory_publication_snapshot(
+        &self,
+    ) -> Option<(String, Option<ProviderFilePublicationInventoryOwner>)> {
+        self.inventory_progress.as_ref().map(|progress| {
+            (
+                progress.cursor.publication_state_marker().to_owned(),
+                progress.cursor.publication_owner().cloned(),
+            )
+        })
+    }
+
+    fn restart_inventory_after_publication_transition(&mut self) {
+        self.inventory_progress = None;
+        self.cached_work = None;
+        self.request_inventory(SearchInventoryReason::PublicationChanged);
     }
 
     fn durable_sources_changed(&self, source_fingerprint: &str) -> bool {
