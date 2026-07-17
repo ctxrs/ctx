@@ -395,6 +395,48 @@ enum SourceInventoryStep {
     Complete(PlannedImportSource, Option<CatalogSummary>, usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InventoryFailurePoint {
+    RootAfterObservation,
+    ManifestAfterObservation,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INVENTORY_FAILURE_ONCE: std::cell::Cell<Option<InventoryFailurePoint>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_inventory_failure_once(point: InventoryFailurePoint) {
+    INVENTORY_FAILURE_ONCE.with(|slot| slot.set(Some(point)));
+}
+
+#[cfg(test)]
+fn maybe_fail_inventory_boundary(point: InventoryFailurePoint) -> Result<()> {
+    let fail = INVENTORY_FAILURE_ONCE.with(|slot| {
+        if slot.get() == Some(point) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+            "injected inventory boundary failure",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline]
+fn maybe_fail_inventory_boundary(_point: InventoryFailurePoint) -> Result<()> {
+    Ok(())
+}
+
 enum SourceInventoryCursor {
     Codex(CodexInventoryCursor),
     Manifest(ManifestInventoryCursor),
@@ -502,10 +544,11 @@ impl RootInventoryCursor {
                     ))
                 })?;
                 let page = paths.paths_page(self.path_cursor.as_deref(), 16)?;
-                self.stats.observe_paths(&self.source.path, &page.paths)?;
-                self.path_cursor = page.next_cursor;
+                let mut staged_stats = self.stats.clone();
+                staged_stats.observe_paths(&self.source.path, &page.paths)?;
+                maybe_fail_inventory_boundary(InventoryFailurePoint::RootAfterObservation)?;
                 if page.complete {
-                    let stats = std::mem::take(&mut self.stats).finish();
+                    let stats = staged_stats.clone().finish();
                     let file = source_root_observation_from_stats(&self.source, stats)?;
                     let persisted = persist_new_source_import_observation(
                         store,
@@ -528,7 +571,12 @@ impl RootInventoryCursor {
                             inventory_generation: persisted.inventory_generation,
                         },
                     });
+                    self.stats = staged_stats;
+                    self.path_cursor = page.next_cursor;
                     self.phase = RootInventoryPhase::Complete;
+                } else {
+                    self.stats = staged_stats;
+                    self.path_cursor = page.next_cursor;
                 }
                 Ok(SourceInventoryStep::Pending(ImportInventorySliceProgress {
                     discovered_files: paths.metrics().discovered_files,
@@ -782,15 +830,16 @@ impl ManifestInventoryCursor {
                     })
                     .collect::<Vec<_>>();
                 self.paths.select_path_candidates(&candidates)?;
-                self.path_cursor = page.next_cursor;
                 if page.complete {
+                    let inventory_generation = store.allocate_source_import_inventory_generation(
+                        self.source.provider,
+                        &source_root,
+                    )?;
                     self.path_cursor = None;
-                    self.inventory_generation =
-                        Some(store.allocate_source_import_inventory_generation(
-                            self.source.provider,
-                            &source_root,
-                        )?);
+                    self.inventory_generation = Some(inventory_generation);
                     self.phase = ManifestInventoryPhase::Process;
+                } else {
+                    self.path_cursor = page.next_cursor;
                 }
                 Ok(SourceInventoryStep::Pending(
                     ImportInventorySliceProgress::default(),
@@ -800,23 +849,32 @@ impl ManifestInventoryCursor {
                 let page = self
                     .paths
                     .selected_paths_page(self.path_cursor.as_deref(), 64)?;
-                if !page.paths.is_empty() {
-                    let files = observe_source_import_paths_page(&self.source, page.paths)?;
-                    self.source_files = self.source_files.saturating_add(files.len());
-                    self.source_bytes = self
-                        .source_bytes
-                        .saturating_add(files.iter().map(|file| file.file_size_bytes).sum::<u64>());
+                let files = if page.paths.is_empty() {
+                    Vec::new()
+                } else {
+                    observe_source_import_paths_page(&self.source, page.paths)?
+                };
+                let page_files = files.len();
+                let page_bytes = files.iter().fold(0_u64, |bytes, file| {
+                    bytes.saturating_add(file.file_size_bytes)
+                });
+                let source_files = self.source_files.saturating_add(page_files);
+                let source_bytes = self.source_bytes.saturating_add(page_bytes);
+                if page.complete && source_files == 0 {
+                    return Err(anyhow::anyhow!(
+                        "no importable {} history files found under {}",
+                        self.source.provider.as_str(),
+                        self.source.path.display()
+                    ));
+                }
+                maybe_fail_inventory_boundary(InventoryFailurePoint::ManifestAfterObservation)?;
+                if !files.is_empty() {
                     persist_source_import_files_page(store, self.generation()?, &files)?;
                 }
+                self.source_files = source_files;
+                self.source_bytes = source_bytes;
                 self.path_cursor = page.next_cursor;
                 if page.complete {
-                    if self.source_files == 0 {
-                        return Err(anyhow::anyhow!(
-                            "no importable {} history files found under {}",
-                            self.source.provider.as_str(),
-                            self.source.path.display()
-                        ));
-                    }
                     self.phase = ManifestInventoryPhase::Stale;
                 }
                 Ok(SourceInventoryStep::Pending(

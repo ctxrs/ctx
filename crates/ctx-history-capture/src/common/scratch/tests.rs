@@ -46,6 +46,29 @@ mod tests {
         assert!(current.path().exists());
     }
 
+    #[test]
+    fn scratch_teardown_is_size_aware_and_operation_paced() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scratch");
+        let scratch = CaptureScratchSpace::create_in(root, "paced-delete").unwrap();
+        let scratch_path = scratch.path().to_path_buf();
+        let payload_bytes = 256 * 1024usize;
+        let mut payload = scratch.create_file("payload.bin").unwrap();
+        payload.write_all(&vec![b'x'; payload_bytes]).unwrap();
+        payload.sync_all().unwrap();
+        drop(payload);
+        let pacer = crate::DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = crate::install_disk_io_pacer(pacer.clone());
+        let bytes_before = pacer.charged_bytes();
+        let operations_before = pacer.filesystem_operation_count();
+
+        drop(scratch);
+
+        assert!(!scratch_path.exists());
+        assert!(pacer.charged_bytes() >= bytes_before.saturating_add(payload_bytes as u64));
+        assert!(pacer.filesystem_operation_count() > operations_before);
+    }
+
     #[cfg(unix)]
     #[test]
     fn scavenging_fails_closed_on_a_linked_run_directory() {

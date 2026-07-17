@@ -95,10 +95,12 @@ use catalog::{
     import_record_for_history_source_plugin, import_record_for_source, source_stats,
 };
 use explicit::run_explicit_format_import;
+#[cfg(test)]
+pub(crate) use inventory::{inject_inventory_failure_once, InventoryFailurePoint};
 pub(crate) use inventory::{
     inventory_available_sources, inventory_dirty_source_path, inventory_import_sources,
-    DirtySourcePathInventoryOutcome, ImportInventory, ImportInventoryCursor,
-    ImportInventoryCursorStep, ImportInventorySliceProgress,
+    source_matches_publication_owner, DirtySourcePathInventoryOutcome, ImportInventory,
+    ImportInventoryCursor, ImportInventoryCursorStep, ImportInventorySliceProgress,
 };
 use native::validate_source_import_supported;
 pub(crate) use native::{

@@ -43,6 +43,53 @@ enum FilesystemTraversalMode {
     RegularFiles,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraversalFailurePoint {
+    ParentValidation,
+    RootMetadata,
+    SecureFileValidation,
+    EntryFileType,
+    OpenDirectory,
+    ReadDirectoryEntry,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRAVERSAL_FAILURE_ONCE: std::cell::Cell<Option<TraversalFailurePoint>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn inject_traversal_failure_once(point: TraversalFailurePoint) {
+    TRAVERSAL_FAILURE_ONCE.with(|slot| slot.set(Some(point)));
+}
+
+#[cfg(test)]
+fn maybe_fail_traversal_step(point: TraversalFailurePoint) -> Result<()> {
+    let fail = TRAVERSAL_FAILURE_ONCE.with(|slot| {
+        if slot.get() == Some(point) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        return Err(io::Error::other(format!(
+            "injected filesystem traversal failure at {point:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline]
+fn maybe_fail_traversal_step(_point: TraversalFailurePoint) -> Result<()> {
+    Ok(())
+}
+
 struct TraversalFrame {
     path: PathBuf,
     entries: ReadDir,
@@ -51,6 +98,7 @@ struct TraversalFrame {
 pub(crate) struct FilesystemTraversalCursor {
     root: PathBuf,
     mode: FilesystemTraversalMode,
+    poisoned: bool,
     parents_validated: bool,
     initialized: bool,
     complete: bool,
@@ -73,6 +121,7 @@ impl FilesystemTraversalCursor {
         Self {
             root: root.to_path_buf(),
             mode,
+            poisoned: false,
             parents_validated: false,
             initialized: false,
             complete: false,
@@ -87,11 +136,22 @@ impl FilesystemTraversalCursor {
         self.complete
     }
 
+    pub(crate) fn restart(&mut self) {
+        let root = self.root.clone();
+        let mode = self.mode;
+        *self = Self::new(&root, mode);
+    }
+
     pub(crate) fn advance(
         &mut self,
         budget: FilesystemTraversalBudget,
         visitor: &mut impl FnMut(&Path) -> Result<()>,
     ) -> Result<FilesystemTraversalSlice> {
+        if self.poisoned {
+            return Err(CaptureError::SystemInvariant(
+                "filesystem traversal must restart after an indeterminate directory read",
+            ));
+        }
         if self.complete {
             return Ok(FilesystemTraversalSlice {
                 complete: true,
@@ -106,6 +166,7 @@ impl FilesystemTraversalCursor {
             ) {
                 return Ok(slice.finish(false));
             }
+            maybe_fail_traversal_step(TraversalFailurePoint::ParentValidation)?;
             ensure_provider_path_parents_are_not_symlinks(&self.root)?;
             self.parents_validated = true;
         }
@@ -113,6 +174,7 @@ impl FilesystemTraversalCursor {
             if !slice.reserve(&self.root) {
                 return Ok(slice.finish(false));
             }
+            maybe_fail_traversal_step(TraversalFailurePoint::RootMetadata)?;
             let metadata = fs::symlink_metadata(&self.root)?;
             let file_type = metadata.file_type();
             if file_type.is_symlink() {
@@ -121,12 +183,12 @@ impl FilesystemTraversalCursor {
                     reason: "symlinked provider transcript roots are rejected",
                 });
             }
-            self.initialized = true;
             if file_type.is_file() {
                 if self.mode == FilesystemTraversalMode::Jsonl {
                     self.pending_jsonl_file = Some(self.root.clone());
                 } else {
                     visitor(&self.root)?;
+                    self.initialized = true;
                     self.complete = true;
                     return Ok(slice.finish(true));
                 }
@@ -139,16 +201,18 @@ impl FilesystemTraversalCursor {
             } else {
                 self.pending_directories.push(self.root.clone());
             }
+            self.initialized = true;
         }
 
         loop {
-            if let Some(path) = self.pending_jsonl_file.take() {
+            if let Some(path) = self.pending_jsonl_file.clone() {
                 if !slice.reserve_operations(&path, secure_open_operation_count(&path)) {
-                    self.pending_jsonl_file = Some(path);
                     return Ok(slice.finish(false));
                 }
+                maybe_fail_traversal_step(TraversalFailurePoint::SecureFileValidation)?;
                 ensure_regular_provider_transcript_file(&path)?;
                 visitor(&path)?;
+                self.pending_jsonl_file = None;
                 if path == self.root
                     && self.pending_directories.is_empty()
                     && self.frames.is_empty()
@@ -159,13 +223,21 @@ impl FilesystemTraversalCursor {
                 continue;
             }
 
-            if let Some(entry) = self.pending_entry.take() {
-                let path = entry.path();
+            if self.pending_entry.is_some() {
+                let path = self.pending_entry.as_ref().map(DirEntry::path).ok_or(
+                    CaptureError::SystemInvariant("filesystem traversal entry disappeared"),
+                )?;
                 if !slice.reserve(&path) {
-                    self.pending_entry = Some(entry);
                     return Ok(slice.finish(false));
                 }
-                let file_type = entry.file_type()?;
+                maybe_fail_traversal_step(TraversalFailurePoint::EntryFileType)?;
+                let file_type = self
+                    .pending_entry
+                    .as_ref()
+                    .ok_or(CaptureError::SystemInvariant(
+                        "filesystem traversal entry disappeared",
+                    ))?
+                    .file_type()?;
                 if file_type.is_dir() {
                     self.pending_directories.push(path);
                 } else if file_type.is_file() {
@@ -183,15 +255,17 @@ impl FilesystemTraversalCursor {
                         reason: "symlinked provider transcript files are rejected",
                     });
                 }
+                self.pending_entry = None;
                 continue;
             }
 
-            if let Some(directory) = self.pending_directories.pop() {
+            if let Some(directory) = self.pending_directories.last().cloned() {
                 if !slice.reserve(&directory) {
-                    self.pending_directories.push(directory);
                     return Ok(slice.finish(false));
                 }
+                maybe_fail_traversal_step(TraversalFailurePoint::OpenDirectory)?;
                 let entries = fs::read_dir(&directory)?;
+                self.pending_directories.pop();
                 self.frames.push(TraversalFrame {
                     path: directory,
                     entries,
@@ -203,11 +277,17 @@ impl FilesystemTraversalCursor {
                 self.complete = true;
                 return Ok(slice.finish(true));
             };
-            if !slice.reserve(&frame.path) {
+            let frame_path = frame.path.clone();
+            if !slice.reserve(&frame_path) {
                 return Ok(slice.finish(false));
             }
+            maybe_fail_traversal_step(TraversalFailurePoint::ReadDirectoryEntry)?;
             match frame.entries.next() {
-                Some(entry) => self.pending_entry = Some(entry?),
+                Some(Ok(entry)) => self.pending_entry = Some(entry),
+                Some(Err(error)) => {
+                    self.poisoned = true;
+                    return Err(error.into());
+                }
                 None => {
                     self.frames.pop();
                 }
@@ -275,10 +355,13 @@ fn secure_open_operation_count(path: &Path) -> u64 {
 }
 
 pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let mut collected = Vec::new();
     visit_jsonl_paths(root, &mut |path| {
-        paths.push(path.to_path_buf());
+        collected.push(path.to_path_buf());
         Ok(())
-    })
+    })?;
+    paths.extend(collected);
+    Ok(())
 }
 
 pub(crate) fn visit_jsonl_paths(
@@ -760,7 +843,8 @@ pub fn provider_jsonl_range_has_complete_line(
     offset: u64,
     observed_size: u64,
 ) -> Result<bool> {
-    let mut file = open_regular_provider_transcript_file(path)?;
+    let file = open_regular_provider_transcript_file(path)?;
+    let mut file = crate::disk_io_pacing::PacedReader::new(file);
     file.seek(SeekFrom::Start(offset))?;
     let mut remaining = observed_size.saturating_sub(offset);
     let mut scanned = 0usize;
@@ -1019,6 +1103,24 @@ mod tests {
     }
 
     #[test]
+    fn append_range_probe_charges_every_bounded_physical_read() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("session.jsonl");
+        let bytes = vec![b'x'; 32 * 1024];
+        fs::write(&transcript, &bytes).expect("write transcript");
+        let pacer = DiskIoPacer::new(u64::MAX, u64::MAX);
+        let _pacing = install_disk_io_pacer(pacer.clone());
+        let charged_before = pacer.charged_bytes();
+
+        assert!(
+            !provider_jsonl_range_has_complete_line(&transcript, 0, bytes.len() as u64,)
+                .expect("scan bounded append range")
+        );
+
+        assert!(pacer.charged_bytes() >= charged_before.saturating_add(bytes.len() as u64));
+    }
+
+    #[test]
     fn explicit_jsonl_file_does_not_require_an_extension() {
         let temp = tempfile::tempdir().expect("tempdir");
         let transcript = temp.path().join("materialized-provider-fixture");
@@ -1086,6 +1188,75 @@ mod tests {
         observed.sort();
         assert_eq!(observed, expected);
         assert!(slices > 1);
+    }
+
+    #[test]
+    fn traversal_cursor_retries_each_fallible_step_without_omitting_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("session.jsonl");
+        fs::write(&transcript, b"{}\n").expect("write transcript");
+        let points = [
+            TraversalFailurePoint::ParentValidation,
+            TraversalFailurePoint::RootMetadata,
+            TraversalFailurePoint::OpenDirectory,
+            TraversalFailurePoint::ReadDirectoryEntry,
+            TraversalFailurePoint::EntryFileType,
+            TraversalFailurePoint::SecureFileValidation,
+        ];
+
+        for point in points {
+            let mut cursor = FilesystemTraversalCursor::jsonl(temp.path());
+            let mut observed = Vec::new();
+            inject_traversal_failure_once(point);
+            cursor
+                .advance(FilesystemTraversalBudget::default(), &mut |path| {
+                    observed.push(path.to_path_buf());
+                    Ok(())
+                })
+                .expect_err("the configured traversal step must fail once");
+
+            while !cursor
+                .advance(FilesystemTraversalBudget::default(), &mut |path| {
+                    observed.push(path.to_path_buf());
+                    Ok(())
+                })
+                .expect("retry traversal")
+                .complete
+            {}
+
+            assert_eq!(observed, vec![transcript.clone()], "failure at {point:?}");
+        }
+    }
+
+    #[test]
+    fn traversal_cursor_retries_a_failed_visitor_before_advancing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("session.jsonl");
+        fs::write(&transcript, b"{}\n").expect("write transcript");
+        let mut cursor = FilesystemTraversalCursor::regular_files(temp.path());
+        let mut fail_once = true;
+        let mut observed = Vec::new();
+
+        cursor
+            .advance(FilesystemTraversalBudget::default(), &mut |path| {
+                if fail_once {
+                    fail_once = false;
+                    return Err(io::Error::other("injected visitor failure").into());
+                }
+                observed.push(path.to_path_buf());
+                Ok(())
+            })
+            .expect_err("visitor must fail once");
+        while !cursor
+            .advance(FilesystemTraversalBudget::default(), &mut |path| {
+                observed.push(path.to_path_buf());
+                Ok(())
+            })
+            .expect("retry visitor")
+            .complete
+        {}
+
+        assert_eq!(observed, vec![transcript]);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod freshness_tests {
     use super::*;
-    use crate::commands::import::{run_import_internal, ImportRunOptions};
+    use crate::commands::import::{
+        inject_inventory_failure_once, run_import_internal, ImportInventory, ImportRunOptions,
+        InventoryFailurePoint,
+    };
     use crate::provider_args::NativeProviderArg;
     use crate::provider_sources::explicit_path_source;
     use crate::ImportArgs;
@@ -70,6 +73,71 @@ mod freshness_tests {
             explicit_path_source(CaptureProvider::Codex, root.to_path_buf()),
             path,
         )
+    }
+
+    fn drain_inventory_after_injected_failure(
+        store: &Store,
+        source: SourceInfo,
+        point: InventoryFailurePoint,
+    ) -> Vec<ImportInventory> {
+        let mut cursor = ImportInventoryCursor::new(store, vec![source], false, false).unwrap();
+        let mut pages = Vec::new();
+        let mut failures = 0usize;
+        inject_inventory_failure_once(point);
+        loop {
+            match cursor.advance(store) {
+                Ok(ImportInventoryCursorStep::Pending(_)) => {}
+                Ok(ImportInventoryCursorStep::SourceComplete(page)) => pages.push(page),
+                Ok(ImportInventoryCursorStep::Complete) => break,
+                Err(error) => {
+                    failures += 1;
+                    assert!(error
+                        .to_string()
+                        .contains("injected inventory boundary failure"));
+                }
+            }
+        }
+        assert_eq!(failures, 1);
+        pages
+    }
+
+    #[test]
+    fn inventory_page_failures_do_not_advance_root_or_manifest_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let root_path = temp.path().join("codebuddy-root");
+        fs::create_dir_all(&root_path).unwrap();
+        for index in 0..33 {
+            fs::write(root_path.join(format!("source-{index:02}.json")), b"{}\n").unwrap();
+        }
+        let root_source = explicit_path_source(CaptureProvider::CodeBuddy, root_path);
+        let root_pages = drain_inventory_after_injected_failure(
+            &store,
+            root_source,
+            InventoryFailurePoint::RootAfterObservation,
+        );
+        assert_eq!(root_pages.len(), 1);
+        assert_eq!(root_pages[0].totals.source_files, 33);
+        assert!(root_pages[0].failures.is_empty());
+
+        let manifest_source = write_pi_source(&temp.path().join("pi-manifest"), 70, "retry");
+        let manifest_root = manifest_source.path.to_str().unwrap().to_owned();
+        let manifest_pages = drain_inventory_after_injected_failure(
+            &store,
+            manifest_source.clone(),
+            InventoryFailurePoint::ManifestAfterObservation,
+        );
+        assert_eq!(manifest_pages.len(), 1);
+        assert_eq!(manifest_pages[0].totals.source_files, 70);
+        assert!(manifest_pages[0].failures.is_empty());
+        assert_eq!(
+            store
+                .list_pending_source_import_files(manifest_source.provider, &manifest_root)
+                .unwrap()
+                .len(),
+            70
+        );
     }
 
     fn seed_failed_pi_backlog(data_root: &Path, count: usize) -> SourceInfo {

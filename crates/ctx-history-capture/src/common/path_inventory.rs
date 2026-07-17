@@ -75,11 +75,17 @@ impl BoundedSourcePathInventory {
         if !self.pending_paths.is_empty() {
             return self.flush_pending_paths();
         }
-        let slice = self.cursor.advance(budget, &mut |path| {
+        let slice = match self.cursor.advance(budget, &mut |path| {
             let encoded = encode_path(path);
             self.pending_paths.push((encoded.clone(), encoded));
             Ok(())
-        })?;
+        }) {
+            Ok(slice) => slice,
+            Err(error) => {
+                self.restart_after_traversal_failure()?;
+                return Err(error);
+            }
+        };
         self.metrics.max_in_memory_batch = self
             .metrics
             .max_in_memory_batch
@@ -114,6 +120,15 @@ impl BoundedSourcePathInventory {
             path_bytes: write_bytes,
             discovered_files: self.metrics.paths,
         })
+    }
+
+    fn restart_after_traversal_failure(&mut self) -> Result<()> {
+        let replacement = PathInventoryStorage::create()?;
+        self.cursor.restart();
+        self.storage = Some(replacement);
+        self.pending_paths.clear();
+        self.metrics = SortedPathInventoryMetrics::default();
+        Ok(())
     }
 
     pub fn paths_page(
