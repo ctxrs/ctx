@@ -18,10 +18,25 @@ type Store struct {
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
+	return open(ctx, path, openOptions{write: true})
+}
+
+func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
+	return open(ctx, path, openOptions{readOnly: true})
+}
+
+type openOptions struct {
+	write    bool
+	readOnly bool
+}
+
+func open(ctx context.Context, path string, opts openOptions) (*Store, error) {
+	if opts.write {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
 	}
-	dsn := sqliteDSN(path)
+	dsn := sqliteDSN(path, opts)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -31,9 +46,26 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+	if _, err := db.ExecContext(ctx, `PRAGMA busy_timeout = 5000`); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if opts.readOnly {
+		if _, err := db.ExecContext(ctx, `PRAGMA query_only = ON`); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	} else {
+		for _, stmt := range []string{
+			`PRAGMA foreign_keys = ON`,
+			`PRAGMA journal_mode = WAL`,
+			`PRAGMA synchronous = NORMAL`,
+		} {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -191,13 +223,15 @@ func (s *Store) AppendEvents(ctx context.Context, req AppendRequest) (AppendResu
 		result, err := tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO events(
 				generation_id, source_id, source_event_id, provider_session_id,
-				provider_event_index, role, event_type, occurred_at, text, metadata_json,
-				source_offset, source_end_offset, created_at
+				parent_provider_session_id, root_provider_session_id, provider_event_index,
+				role, event_type, occurred_at, text, metadata_json, source_offset,
+				source_end_offset, created_at
 			)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, gen.ID, gen.SourceID, event.SourceEventID, event.ProviderSessionID,
-			event.ProviderEventIndex, event.Role, event.Type, formatOptionalTime(event.OccurredAt),
-			event.Text, event.MetadataJSON, event.SourceOffset, event.SourceEndOffset, formatTime(now))
+			event.ParentSessionID, event.RootSessionID, event.ProviderEventIndex,
+			event.Role, event.Type, formatOptionalTime(event.OccurredAt), event.Text,
+			event.MetadataJSON, event.SourceOffset, event.SourceEndOffset, formatTime(now))
 		if err != nil {
 			return AppendResult{}, err
 		}
@@ -308,7 +342,9 @@ func (s *Store) SearchLexical(ctx context.Context, query string, limit int) ([]S
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.generation_id, src.source_key, src.provider, e.provider_session_id,
-			e.provider_event_index, e.role, e.event_type, e.occurred_at, e.text, bm25(event_fts) AS rank
+			e.parent_provider_session_id, e.root_provider_session_id, e.provider_event_index,
+			e.role, e.event_type, e.occurred_at, e.text, e.source_event_id, src.uri,
+			bm25(event_fts) AS rank
 		FROM event_fts
 		JOIN events e ON e.id = event_fts.rowid
 		JOIN sources src ON src.id = e.source_id AND src.active_generation_id = e.generation_id
@@ -327,8 +363,9 @@ func (s *Store) SearchLexical(ctx context.Context, query string, limit int) ([]S
 		var hit SearchHit
 		var occurred string
 		if err := rows.Scan(&hit.EventID, &hit.GenerationID, &hit.SourceKey, &hit.Provider,
-			&hit.ProviderSessionID, &hit.ProviderEventIndex, &hit.Role, &hit.Type,
-			&occurred, &hit.Text, &hit.Rank); err != nil {
+			&hit.ProviderSessionID, &hit.ParentSessionID, &hit.RootSessionID,
+			&hit.ProviderEventIndex, &hit.Role, &hit.Type, &occurred, &hit.Text,
+			&hit.SourceEventID, &hit.SourcePath, &hit.Rank); err != nil {
 			return nil, err
 		}
 		hit.OccurredAt = parseTime(occurred)
@@ -396,13 +433,12 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 	return status, err
 }
 
-func sqliteDSN(path string) string {
+func sqliteDSN(path string, opts openOptions) string {
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
-	q.Set("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "synchronous(NORMAL)")
-	q.Add("_pragma", "foreign_keys(ON)")
+	if opts.readOnly {
+		q.Set("mode", "ro")
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }

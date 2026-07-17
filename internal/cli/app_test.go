@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRootHelpListsPublicCommands(t *testing.T) {
@@ -202,11 +203,14 @@ func TestSetupImportsDiscoveredCodexAndSearches(t *testing.T) {
 	writeFile(t, filepath.Join(sessionDir, "session.jsonl"), strings.Join([]string{
 		`{"timestamp":"2026-07-17T12:00:00Z","type":"session_meta","payload":{"id":"codex-test-session"}}`,
 		`{"timestamp":"2026-07-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"alpha milestone setup import needle"}]}}`,
+		`{"timestamp":"2026-07-17T12:00:02Z","type":"event_msg","payload":{"message":"finished tiny smoke"}}`,
 	}, "\n")+"\n")
 
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	var setupOut bytes.Buffer
 	app := NewApp(&setupOut, &bytes.Buffer{}, Dependencies{DataRoot: dataRoot})
-	if err := app.Run(context.Background(), []string{"setup", "--json", "--no-daemon"}); err != nil {
+	if err := app.Run(ctx, []string{"setup", "--json", "--no-daemon"}); err != nil {
 		t.Fatalf("setup returned error: %v\n%s", err, setupOut.String())
 	}
 	var setupPayload map[string]any
@@ -215,6 +219,9 @@ func TestSetupImportsDiscoveredCodexAndSearches(t *testing.T) {
 	}
 	if setupPayload["network_required"] != false || setupPayload["repo_writes"] != false {
 		t.Fatalf("setup payload should be local-only: %#v", setupPayload)
+	}
+	if size := fileSize(t, filepath.Join(dataRoot, "work.sqlite")); size > 2*1024*1024 {
+		t.Fatalf("tiny setup database size = %d bytes, want <= 2 MiB", size)
 	}
 
 	var searchOut bytes.Buffer
@@ -360,6 +367,15 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
 }
 
 func assertSearchJSONResult(t *testing.T, raw []byte, provider string) {

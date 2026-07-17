@@ -60,6 +60,8 @@ var schemaStatements = []string{
 		source_id INTEGER NOT NULL,
 		source_event_id TEXT NOT NULL,
 		provider_session_id TEXT NOT NULL DEFAULT '',
+		parent_provider_session_id TEXT NOT NULL DEFAULT '',
+		root_provider_session_id TEXT NOT NULL DEFAULT '',
 		provider_event_index INTEGER NOT NULL DEFAULT 0,
 		role TEXT NOT NULL DEFAULT '',
 		event_type TEXT NOT NULL DEFAULT '',
@@ -105,8 +107,11 @@ var schemaStatements = []string{
 		SELECT
 			src.source_key || '#session:' || COALESCE(NULLIF(e.provider_session_id, ''), src.source_key) AS ctx_session_id,
 			NULL AS history_record_id,
-			NULL AS parent_ctx_session_id,
-			src.source_key || '#session:' || COALESCE(NULLIF(e.provider_session_id, ''), src.source_key) AS root_ctx_session_id,
+			CASE
+				WHEN MAX(e.parent_provider_session_id) = '' THEN NULL
+				ELSE src.source_key || '#session:' || MAX(e.parent_provider_session_id)
+			END AS parent_ctx_session_id,
+			src.source_key || '#session:' || COALESCE(NULLIF(MAX(e.root_provider_session_id), ''), NULLIF(e.provider_session_id, ''), src.source_key) AS root_ctx_session_id,
 			src.provider AS provider,
 			e.provider_session_id AS provider_session_id,
 			'' AS external_agent_id,
@@ -127,7 +132,7 @@ var schemaStatements = []string{
 		GROUP BY src.source_key, src.provider, src.uri, gen.id, gen.state, e.provider_session_id`,
 	`CREATE VIEW IF NOT EXISTS ctx_events AS
 		SELECT
-			'event:' || e.id AS ctx_event_id,
+			src.source_key || '#event:' || e.source_event_id AS ctx_event_id,
 			src.source_key || '#session:' || COALESCE(NULLIF(e.provider_session_id, ''), src.source_key) AS ctx_session_id,
 			NULL AS history_record_id,
 			src.provider AS provider,

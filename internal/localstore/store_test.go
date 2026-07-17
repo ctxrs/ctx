@@ -2,9 +2,12 @@ package localstore
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/ctxrs/ctx/internal/capture"
 )
 
 func TestAtomicVisibility(t *testing.T) {
@@ -173,6 +176,57 @@ func TestBasicFTSSearch(t *testing.T) {
 	}
 }
 
+func TestSaveCapturedBatchOwnsRecordProjection(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+
+	batch, err := capture.NewCapturedBatch(capture.BatchInput{
+		Provider:       capture.ProviderCodex,
+		SourceFormat:   "codex_session_jsonl",
+		SourceID:       "source-save-batch",
+		SourcePath:     filepath.Join(t.TempDir(), "session.jsonl"),
+		NativeSourceID: "projected-session",
+		Revision: capture.SourceRevision{
+			ID:          "rev-save-batch",
+			Identity:    "identity-save-batch",
+			ContentHash: "tail-save-batch",
+		},
+		Records: []capture.ProviderRecord{
+			{
+				Ordinal:     0,
+				ByteStart:   0,
+				ByteEnd:     94,
+				Raw:         []byte(`{"timestamp":"2026-07-17T12:00:00Z","type":"session_meta","payload":{"id":"projected-session"}}`),
+				ContentHash: "record-hash-0",
+			},
+			{
+				Ordinal:     1,
+				ByteStart:   95,
+				ByteEnd:     249,
+				Raw:         []byte(`{"timestamp":"2026-07-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"shared localstore ingestion needle"}]}}`),
+				ContentHash: "record-hash-1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := store.SaveCapturedBatch(ctx, batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("inserted events = %d, want 2", count)
+	}
+	hits, err := store.SearchLexical(ctx, "needle", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ProviderSessionID != "projected-session" || hits[0].Text != "shared localstore ingestion needle" {
+		t.Fatalf("hits = %+v", hits)
+	}
+}
+
 func TestReadAPIsUseStableViews(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
@@ -214,10 +268,10 @@ func TestReadAPIsUseStableViews(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if window.Event.CtxEventID != "event:2" || len(window.Events) != 2 || window.Events[0].SourceEventID != "source-1" {
+	if window.Event.CtxEventID != "codex:read#event:source-2" || len(window.Events) != 2 || window.Events[0].SourceEventID != "source-1" {
 		t.Fatalf("window = %+v", window)
 	}
-	location, err := store.LocateEvent(ctx, "event:2")
+	location, err := store.LocateEvent(ctx, "codex:read#event:source-2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,6 +308,43 @@ func TestReadOnlySQLRejectsWritesAndMultipleStatements(t *testing.T) {
 	}
 	if len(rows.Columns) != 1 || rows.Columns[0] != "one" || len(rows.Rows) != 1 || rows.Rows[0][0] != "1" {
 		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestOpenReadOnlyDoesNotCreateWALSidecars(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "work.sqlite")
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Remove(dbPath + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+
+	readOnly, err := OpenReadOnly(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOnly.QueryReadOnlySQL(ctx, "SELECT count(*) AS events FROM ctx_events", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := readOnly.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(dbPath + suffix); !os.IsNotExist(err) {
+			t.Fatalf("read-only open created %s sidecar, stat err = %v", suffix, err)
+		}
 	}
 }
 

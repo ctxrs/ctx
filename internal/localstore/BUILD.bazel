@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adapter.go",
         "helpers.go",
+        "ingest.go",
         "jobs.go",
         "read.go",
         "schema.go",

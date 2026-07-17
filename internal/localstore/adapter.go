@@ -2,9 +2,7 @@ package localstore
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/ctxrs/ctx/internal/capture"
@@ -62,59 +60,8 @@ func (a *Adapter) ListSources(ctx context.Context, filter historystore.SourceFil
 }
 
 func (a *Adapter) SaveBatch(ctx context.Context, batch capture.CapturedBatch) error {
-	if len(batch.Records) == 0 {
-		return capture.ErrNoRecords
-	}
-	source, err := a.store().UpsertSource(ctx, SourceDescriptor{
-		Key:          string(batch.Provider) + ":" + batch.Source.ID,
-		Provider:     string(batch.Provider),
-		Format:       batch.SourceFormat,
-		URI:          batch.Source.URI,
-		Identity:     batch.Revision.Identity,
-		MetadataJSON: batchMetadataJSON(batch),
-	})
-	if err != nil {
-		return err
-	}
-	gen, err := a.store().BeginGeneration(ctx, source.Key, GenerationOptions{
-		Kind:           GenerationReplace,
-		SourceIdentity: batch.Revision.Identity,
-		BaseSizeBytes:  batch.Revision.SizeBytes,
-		BaseTailHash:   batch.Revision.ContentHash,
-	})
-	if err != nil {
-		return err
-	}
-	events := make([]Event, 0, len(batch.Records))
-	for _, record := range batch.Records {
-		events = append(events, Event{
-			SourceEventID:      sourceEventID(record),
-			ProviderSessionID:  providerSessionID(batch, record),
-			ProviderEventIndex: record.Ordinal,
-			Role:               record.Hints["role"],
-			Type:               record.Kind,
-			OccurredAt:         recordOccurredAt(record),
-			Text:               strings.TrimRight(string(record.Raw), "\r\n"),
-			MetadataJSON:       recordMetadataJSON(record),
-			SourceOffset:       record.ByteStart,
-			SourceEndOffset:    record.ByteEnd,
-		})
-	}
-	if _, err := a.store().AppendEvents(ctx, AppendRequest{
-		SourceKey:        source.Key,
-		GenerationID:     gen.ID,
-		SourceIdentity:   batch.Revision.Identity,
-		PreviousSize:     batch.Revision.SizeBytes,
-		PreviousTailHash: batch.Revision.ContentHash,
-		NewSize:          batch.Checkpoint.NextByte,
-		NewTailHash:      batch.Checkpoint.ContentHash,
-		PageStartOffset:  batch.Range.StartByte,
-		PageEndOffset:    batch.Range.EndByte,
-		Events:           events,
-	}); err != nil {
-		return err
-	}
-	return a.store().ActivateGeneration(ctx, gen.ID)
+	_, err := a.store().SaveCapturedBatch(ctx, batch)
+	return err
 }
 
 func (a *Adapter) ShowSession(ctx context.Context, id string) (historystore.Transcript, error) {
@@ -218,66 +165,4 @@ func mapStoreError(err error) error {
 		return historystore.ErrNotFound
 	}
 	return err
-}
-
-func batchMetadataJSON(batch capture.CapturedBatch) string {
-	value := map[string]any{
-		"captured_batch_id": batch.ID,
-		"source_path":       batch.Source.Path,
-		"source_root_uri":   batch.Source.RootURI,
-		"native_source_id":  batch.Source.NativeID,
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return "{}"
-	}
-	return string(encoded)
-}
-
-func recordMetadataJSON(record capture.ProviderRecord) string {
-	value := map[string]any{
-		"content_hash": record.ContentHash,
-		"malformed":    record.Malformed,
-		"parse_error":  record.ParseError,
-		"hints":        record.Hints,
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return "{}"
-	}
-	return string(encoded)
-}
-
-func sourceEventID(record capture.ProviderRecord) string {
-	if record.NativeID != "" {
-		return record.NativeID
-	}
-	if record.ContentHash != "" {
-		return record.ContentHash
-	}
-	return record.Kind
-}
-
-func providerSessionID(batch capture.CapturedBatch, record capture.ProviderRecord) string {
-	if id := record.Hints["provider_session_id"]; id != "" {
-		return id
-	}
-	if id := record.Hints["session_id"]; id != "" {
-		return id
-	}
-	if batch.Source.NativeID != "" {
-		return batch.Source.NativeID
-	}
-	return batch.Source.ID
-}
-
-func recordOccurredAt(record capture.ProviderRecord) time.Time {
-	for _, key := range []string{"timestamp", "occurred_at", "created_at"} {
-		if value := record.Hints[key]; value != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
-				return parsed.UTC()
-			}
-		}
-	}
-	return time.Time{}
 }

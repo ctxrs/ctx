@@ -84,6 +84,8 @@ type Generation struct {
 type Event struct {
 	SourceEventID      string
 	ProviderSessionID  string
+	ParentSessionID    string
+	RootSessionID      string
 	ProviderEventIndex int64
 	Role               string
 	Type               string
@@ -119,11 +121,15 @@ type SearchHit struct {
 	SourceKey          string
 	Provider           string
 	ProviderSessionID  string
+	ParentSessionID    string
+	RootSessionID      string
 	ProviderEventIndex int64
 	Role               string
 	Type               string
 	OccurredAt         time.Time
 	Text               string
+	SourceEventID      string
+	SourcePath         string
 	Rank               float64
 }
 

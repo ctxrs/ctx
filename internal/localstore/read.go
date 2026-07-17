@@ -70,6 +70,58 @@ type SQLRows struct {
 	Truncated bool
 }
 
+func (s *Store) CodexSessionTreeIDs(ctx context.Context, activeID string) (map[string]bool, error) {
+	activeID = strings.TrimSpace(activeID)
+	if activeID == "" {
+		return map[string]bool{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT provider_session_id, parent_provider_session_id, root_provider_session_id
+		FROM events e
+		JOIN sources src ON src.id = e.source_id AND src.active_generation_id = e.generation_id
+		JOIN source_generations gen ON gen.id = e.generation_id AND gen.state = 'active'
+		WHERE src.provider = 'codex'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type relation struct {
+		session string
+		parent  string
+		root    string
+	}
+	var relations []relation
+	for rows.Next() {
+		var item relation
+		if err := rows.Scan(&item.session, &item.parent, &item.root); err != nil {
+			return nil, err
+		}
+		relations = append(relations, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	ids := map[string]bool{activeID: true}
+	changed := true
+	for changed {
+		changed = false
+		for _, item := range relations {
+			if ids[item.session] || ids[item.parent] || ids[item.root] {
+				for _, id := range []string{item.session, item.parent, item.root} {
+					if id != "" && !ids[id] {
+						ids[id] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	return ids, nil
+}
+
 func (s *Store) ReadSession(ctx context.Context, id string) (StableTranscript, error) {
 	session, err := s.readSessionRow(ctx, id)
 	if err != nil {

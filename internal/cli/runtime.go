@@ -53,7 +53,7 @@ func (a *App) runStatus(ctx context.Context, args []string) error {
 	dbPath := databasePath(root)
 	status := localstore.Status{}
 	if _, err := os.Stat(dbPath); err == nil {
-		store, err := localstore.Open(ctx, dbPath)
+		store, err := localstore.OpenReadOnly(ctx, dbPath)
 		if err != nil {
 			return commandError("status", CodeStorage, "open local store", err)
 		}
@@ -257,56 +257,28 @@ func (a *App) runImport(ctx context.Context, args []string) error {
 }
 
 func (a *App) runSearch(ctx context.Context, args []string) error {
-	jsonOut := hasFlag(args, "--json")
-	mode := search.ModeLexical
-	if value, ok, err := flagValueAny(args, "--mode", "--backend"); err != nil {
-		return commandError("search", CodeUsage, err.Error(), nil)
-	} else if ok {
-		mode = search.Mode(value)
-	}
-	if mode == search.ModeSemantic || mode == search.ModeHybrid {
-		return commandError("search", CodeUnavailable, fmt.Sprintf("%s search is unavailable in the Go edge runtime", mode), search.ErrSemanticUnavailable)
-	}
-	if mode != "" && mode != search.ModeLexical {
-		return commandError("search", CodeUsage, fmt.Sprintf("unsupported search mode %q", mode), nil)
-	}
-	limit := 10
-	if value, ok, err := flagValue(args, "--limit"); err != nil {
-		return commandError("search", CodeUsage, err.Error(), nil)
-	} else if ok {
-		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed <= 0 || parsed > 100 {
-			return commandError("search", CodeUsage, "--limit must be an integer from 1 to 100", nil)
-		}
-		limit = parsed
-	}
-	provider, hasProvider, err := flagValue(args, "--provider")
+	opts, err := parseSearchArgs(args)
 	if err != nil {
 		return commandError("search", CodeUsage, err.Error(), nil)
 	}
-	if hasProvider && !supportedProvider(provider) {
-		return commandError("search", CodeUnavailable, fmt.Sprintf("unsupported provider %q in the Go edge runtime", provider), nil)
+	if opts.Mode == search.ModeSemantic || opts.Mode == search.ModeHybrid {
+		return commandError("search", CodeUnavailable, fmt.Sprintf("%s search is unavailable in the Go edge runtime", opts.Mode), search.ErrSemanticUnavailable)
 	}
-	terms, err := repeatedFlagValues(args, "--term")
-	if err != nil {
-		return commandError("search", CodeUsage, err.Error(), nil)
+	if opts.Mode != "" && opts.Mode != search.ModeLexical {
+		return commandError("search", CodeUsage, fmt.Sprintf("unsupported search mode %q", opts.Mode), nil)
 	}
-	query := strings.TrimSpace(strings.Join(positionalArgs(args), " "))
-	searchTerms := make([]string, 0, len(terms)+1)
-	if query != "" {
-		searchTerms = append(searchTerms, query)
+	if opts.HasProvider && !supportedProvider(opts.Provider) {
+		return commandError("search", CodeUnavailable, fmt.Sprintf("unsupported provider %q in the Go edge runtime", opts.Provider), nil)
 	}
-	for _, term := range terms {
-		term = strings.TrimSpace(term)
-		if term == "" {
-			return commandError("search", CodeUsage, "--term must not be empty", nil)
-		}
-		searchTerms = append(searchTerms, term)
+	if opts.Refresh != "" && !refreshDisabled(opts.Refresh) {
+		return commandError("search", CodeUnavailable, "--refresh is not available in the Go edge runtime; pass --refresh off", nil)
 	}
-	if len(searchTerms) == 0 {
+	if opts.SemanticWeight != "" && !zeroFloatString(opts.SemanticWeight) {
+		return commandError("search", CodeUnavailable, "--semantic-weight requires semantic search, which is unavailable in the Go edge runtime", nil)
+	}
+	if len(opts.Terms) == 0 {
 		return commandError("search", CodeUsage, "provide a query or --term", nil)
 	}
-
 	root, err := a.dataRoot()
 	if err != nil {
 		return err
@@ -318,32 +290,36 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	defer store.Close()
 
 	start := time.Now()
-	hits, err := lexicalSearch(ctx, store, searchTerms, provider, hasProvider, !hasFlag(args, "--include-current-session"), limit)
+	hits, err := lexicalSearch(ctx, store, opts)
 	if err != nil {
 		return commandError("search", CodeStorage, "run lexical search", err)
 	}
 	elapsed := time.Since(start)
-	if jsonOut {
+	if opts.JSON {
 		results := make([]map[string]any, 0, len(hits))
 		for i, hit := range hits {
 			results = append(results, searchHitJSON(i+1, hit))
 		}
 		return writeJSON(a.out, map[string]any{
 			"schema_version": schemaVersion,
-			"query":          strings.Join(searchTerms, " OR "),
+			"query":          strings.Join(opts.Terms, " OR "),
 			"filters": map[string]any{
-				"provider":                optionalString(provider, hasProvider),
-				"include_current_session": hasFlag(args, "--include-current-session"),
+				"provider":                optionalString(opts.Provider, opts.HasProvider),
+				"session":                 optionalString(opts.SessionID, opts.SessionID != ""),
+				"file":                    optionalString(opts.File, opts.File != ""),
+				"workspace":               optionalString(opts.Workspace, opts.Workspace != ""),
+				"event_type":              optionalString(opts.EventType, opts.EventType != ""),
+				"include_current_session": opts.IncludeCurrentSession,
 			},
 			"freshness": map[string]any{
 				"mode":   "off",
 				"status": "not_refreshed",
 			},
-			"mode":       mode,
+			"mode":       opts.Mode,
 			"elapsed_ms": elapsed.Milliseconds(),
-			"limit":      limit,
+			"limit":      opts.Limit,
 			"results":    results,
-			"pagination": map[string]any{"truncated": len(hits) == limit},
+			"pagination": map[string]any{"truncated": len(hits) == opts.Limit},
 		})
 	}
 	if len(hits) == 0 {
@@ -711,7 +687,7 @@ func importRows(ctx context.Context, store *localstore.Store, rows []sourceRow) 
 		}
 		importedSource := false
 		for _, batch := range batches {
-			count, err := saveBatch(ctx, store, batch)
+			count, err := store.SaveCapturedBatch(ctx, batch)
 			if err != nil {
 				summary.Errors++
 				return summary, err
@@ -760,220 +736,6 @@ func captureSource(ctx context.Context, row sourceRow) ([]capture.CapturedBatch,
 		return batches, nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", row.Provider)
-	}
-}
-
-func saveBatch(ctx context.Context, store *localstore.Store, batch capture.CapturedBatch) (int, error) {
-	metadata, _ := json.Marshal(map[string]any{
-		"batch_id":       batch.ID,
-		"source_path":    batch.Source.Path,
-		"source_root":    batch.Source.RootURI,
-		"content_hash":   batch.ContentHash,
-		"privacy_policy": batch.Privacy.PolicyID,
-	})
-	source, err := store.UpsertSource(ctx, localstore.SourceDescriptor{
-		Key:          string(batch.Provider) + ":" + batch.Source.ID,
-		Provider:     string(batch.Provider),
-		Format:       batch.SourceFormat,
-		URI:          firstNonEmpty(batch.Source.URI, capture.SourceURI(batch.Source.Path)),
-		Identity:     batch.Revision.Identity,
-		MetadataJSON: string(metadata),
-	})
-	if err != nil {
-		return 0, err
-	}
-	gen, err := store.BeginGeneration(ctx, source.Key, localstore.GenerationOptions{
-		Kind:           localstore.GenerationReplace,
-		SourceIdentity: batch.Revision.Identity,
-	})
-	if err != nil {
-		return 0, err
-	}
-	total := 0
-	prevSize := int64(0)
-	prevTail := ""
-	for start := 0; start < len(batch.Records); start += localstore.MaxAppendEvents {
-		end := start + localstore.MaxAppendEvents
-		if end > len(batch.Records) {
-			end = len(batch.Records)
-		}
-		records := batch.Records[start:end]
-		events := make([]localstore.Event, 0, len(records))
-		for _, record := range records {
-			events = append(events, mapRecordEvent(batch, record))
-		}
-		newSize := records[len(records)-1].ByteEnd
-		newTail := records[len(records)-1].ContentHash
-		if end == len(batch.Records) {
-			newTail = batch.ContentHash
-		}
-		result, err := store.AppendEvents(ctx, localstore.AppendRequest{
-			SourceKey:        source.Key,
-			GenerationID:     gen.ID,
-			SourceIdentity:   batch.Revision.Identity,
-			PreviousSize:     prevSize,
-			PreviousTailHash: prevTail,
-			NewSize:          newSize,
-			NewTailHash:      newTail,
-			PageStartOffset:  records[0].ByteStart,
-			PageEndOffset:    records[len(records)-1].ByteEnd,
-			Events:           events,
-		})
-		if err != nil {
-			return total, err
-		}
-		total += result.InsertedEvents
-		prevSize = newSize
-		prevTail = newTail
-	}
-	if err := store.ActivateGeneration(ctx, gen.ID); err != nil {
-		return total, err
-	}
-	return total, nil
-}
-
-func mapRecordEvent(batch capture.CapturedBatch, record capture.ProviderRecord) localstore.Event {
-	projection := extractRecordProjection(batch, record)
-	metadata, _ := json.Marshal(map[string]any{
-		"batch_id":      batch.ID,
-		"record_hash":   record.ContentHash,
-		"native_id":     record.NativeID,
-		"malformed":     record.Malformed,
-		"parse_error":   record.ParseError,
-		"source_path":   batch.Source.Path,
-		"source_format": batch.SourceFormat,
-	})
-	return localstore.Event{
-		SourceEventID:      sourceEventID(record),
-		ProviderSessionID:  projection.SessionID,
-		ProviderEventIndex: record.Ordinal,
-		Role:               projection.Role,
-		Type:               projection.Type,
-		OccurredAt:         projection.OccurredAt,
-		Text:               projection.Text,
-		MetadataJSON:       string(metadata),
-		SourceOffset:       record.ByteStart,
-		SourceEndOffset:    record.ByteEnd,
-	}
-}
-
-type recordProjection struct {
-	SessionID  string
-	Role       string
-	Type       string
-	OccurredAt time.Time
-	Text       string
-}
-
-func extractRecordProjection(batch capture.CapturedBatch, record capture.ProviderRecord) recordProjection {
-	projection := recordProjection{
-		SessionID: firstNonEmpty(batch.Source.NativeID, batch.Source.ID),
-		Role:      firstNonEmpty(record.Hints["role"], "unknown"),
-		Type:      firstNonEmpty(record.Kind, "record"),
-		Text:      strings.TrimSpace(string(record.Raw)),
-	}
-	var value map[string]any
-	if err := json.Unmarshal(record.Raw, &value); err != nil {
-		return projection
-	}
-	projection.OccurredAt = parseJSONTime(value["timestamp"])
-	switch batch.Provider {
-	case capture.ProviderCodex:
-		applyCodexProjection(&projection, value)
-	case capture.ProviderPi:
-		applyPiProjection(&projection, value)
-	}
-	if projection.Text == "" {
-		encoded, _ := json.Marshal(value)
-		projection.Text = string(encoded)
-	}
-	return projection
-}
-
-func applyCodexProjection(projection *recordProjection, value map[string]any) {
-	if sessionID, _ := value["session_id"].(string); sessionID != "" {
-		projection.SessionID = sessionID
-	}
-	payload, _ := value["payload"].(map[string]any)
-	switch value["type"] {
-	case "session_meta":
-		if id, _ := payload["id"].(string); id != "" {
-			projection.SessionID = id
-		}
-		projection.Role = "system"
-		projection.Text = "session metadata " + compactJSON(payload)
-	case "response_item":
-		itemType, _ := payload["type"].(string)
-		projection.Type = firstNonEmpty("response_item:"+itemType, projection.Type)
-		if role, _ := payload["role"].(string); role != "" {
-			projection.Role = role
-		} else {
-			projection.Role = "assistant"
-		}
-		projection.Text = codexPayloadText(payload)
-	case "event_msg":
-		projection.Role = "system"
-		projection.Text = compactJSON(payload)
-	default:
-		if text, _ := value["text"].(string); text != "" {
-			projection.Text = text
-			projection.Role = "user"
-			projection.Type = "history"
-		}
-	}
-}
-
-func applyPiProjection(projection *recordProjection, value map[string]any) {
-	if id, _ := value["id"].(string); value["type"] == "session" && id != "" {
-		projection.SessionID = id
-		projection.Role = "system"
-		projection.Text = "session metadata " + compactJSON(value)
-		return
-	}
-	message, _ := value["message"].(map[string]any)
-	if role, _ := message["role"].(string); role != "" {
-		projection.Role = role
-	}
-	if text := textFromAny(message["content"]); text != "" {
-		projection.Text = text
-	}
-}
-
-func codexPayloadText(payload map[string]any) string {
-	switch payload["type"] {
-	case "message":
-		return textFromAny(payload["content"])
-	case "function_call":
-		return strings.TrimSpace(fmt.Sprintf("%v %v", payload["name"], payload["arguments"]))
-	case "function_call_output":
-		return fmt.Sprint(payload["output"])
-	default:
-		return compactJSON(payload)
-	}
-}
-
-func textFromAny(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case []any:
-		var parts []string
-		for _, item := range typed {
-			if object, ok := item.(map[string]any); ok {
-				if text, _ := object["text"].(string); text != "" {
-					parts = append(parts, text)
-				} else {
-					parts = append(parts, compactJSON(object))
-				}
-			} else {
-				parts = append(parts, fmt.Sprint(item))
-			}
-		}
-		return strings.Join(parts, "\n")
-	case map[string]any:
-		return compactJSON(typed)
-	default:
-		return ""
 	}
 }
 
@@ -1044,7 +806,239 @@ func explicitSourceRow(provider, path string) sourceRow {
 	}
 }
 
-func lexicalSearch(ctx context.Context, store *localstore.Store, terms []string, provider string, hasProvider bool, excludeActive bool, limit int) ([]localstore.SearchHit, error) {
+type searchOptions struct {
+	JSON                  bool
+	Mode                  search.Mode
+	Limit                 int
+	Provider              string
+	HasProvider           bool
+	Terms                 []string
+	SessionID             string
+	File                  string
+	Workspace             string
+	Since                 *time.Time
+	EventType             string
+	Refresh               string
+	SemanticWeight        string
+	IncludeSubagents      bool
+	PrimaryOnly           bool
+	Events                bool
+	IncludeCurrentSession bool
+}
+
+func parseSearchArgs(args []string) (searchOptions, error) {
+	opts := searchOptions{
+		Mode:  search.ModeLexical,
+		Limit: 10,
+	}
+	var queryParts []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--json":
+			opts.JSON = true
+		case arg == "--include-subagents":
+			opts.IncludeSubagents = true
+		case arg == "--primary-only":
+			opts.PrimaryOnly = true
+		case arg == "--events":
+			opts.Events = true
+		case arg == "--include-current-session":
+			opts.IncludeCurrentSession = true
+		case arg == "--mode" || strings.HasPrefix(arg, "--mode="):
+			value, next, err := searchFlagValue(args, i, "--mode")
+			if err != nil {
+				return opts, err
+			}
+			opts.Mode = search.Mode(value)
+			i = next
+		case arg == "--backend" || strings.HasPrefix(arg, "--backend="):
+			value, next, err := searchFlagValue(args, i, "--backend")
+			if err != nil {
+				return opts, err
+			}
+			opts.Mode = search.Mode(value)
+			i = next
+		case arg == "--limit" || strings.HasPrefix(arg, "--limit="):
+			value, next, err := searchFlagValue(args, i, "--limit")
+			if err != nil {
+				return opts, err
+			}
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 || parsed > 100 {
+				return opts, fmt.Errorf("--limit must be an integer from 1 to 100")
+			}
+			opts.Limit = parsed
+			i = next
+		case arg == "--provider" || strings.HasPrefix(arg, "--provider="):
+			value, next, err := searchFlagValue(args, i, "--provider")
+			if err != nil {
+				return opts, err
+			}
+			opts.Provider = value
+			opts.HasProvider = true
+			i = next
+		case arg == "--term" || strings.HasPrefix(arg, "--term="):
+			value, next, err := searchFlagValue(args, i, "--term")
+			if err != nil {
+				return opts, err
+			}
+			value = strings.TrimSpace(value)
+			if value == "" {
+				return opts, fmt.Errorf("--term must not be empty")
+			}
+			opts.Terms = append(opts.Terms, value)
+			i = next
+		case arg == "--session" || strings.HasPrefix(arg, "--session="):
+			value, next, err := searchFlagValue(args, i, "--session")
+			if err != nil {
+				return opts, err
+			}
+			opts.SessionID = value
+			i = next
+		case arg == "--file" || strings.HasPrefix(arg, "--file="):
+			value, next, err := searchFlagValue(args, i, "--file")
+			if err != nil {
+				return opts, err
+			}
+			opts.File = value
+			i = next
+		case arg == "--workspace" || strings.HasPrefix(arg, "--workspace="):
+			value, next, err := searchFlagValue(args, i, "--workspace")
+			if err != nil {
+				return opts, err
+			}
+			opts.Workspace = value
+			i = next
+		case arg == "--since" || strings.HasPrefix(arg, "--since="):
+			value, next, err := searchFlagValue(args, i, "--since")
+			if err != nil {
+				return opts, err
+			}
+			since, err := parseSince(value)
+			if err != nil {
+				return opts, err
+			}
+			opts.Since = &since
+			i = next
+		case arg == "--event-type" || strings.HasPrefix(arg, "--event-type="):
+			value, next, err := searchFlagValue(args, i, "--event-type")
+			if err != nil {
+				return opts, err
+			}
+			opts.EventType = value
+			i = next
+		case arg == "--refresh" || strings.HasPrefix(arg, "--refresh="):
+			value, next, err := optionalSearchFlagValue(args, i, "--refresh", "auto")
+			if err != nil {
+				return opts, err
+			}
+			opts.Refresh = value
+			i = next
+		case arg == "--semantic-weight" || strings.HasPrefix(arg, "--semantic-weight="):
+			value, next, err := searchFlagValue(args, i, "--semantic-weight")
+			if err != nil {
+				return opts, err
+			}
+			opts.SemanticWeight = value
+			i = next
+		case strings.HasPrefix(arg, "-"):
+			return opts, fmt.Errorf("unsupported search flag %s", arg)
+		default:
+			queryParts = append(queryParts, arg)
+		}
+	}
+	if query := strings.TrimSpace(strings.Join(queryParts, " ")); query != "" {
+		opts.Terms = append([]string{query}, opts.Terms...)
+	}
+	return opts, nil
+}
+
+func searchFlagValue(args []string, index int, name string) (string, int, error) {
+	prefix := name + "="
+	arg := args[index]
+	if strings.HasPrefix(arg, prefix) {
+		value := strings.TrimPrefix(arg, prefix)
+		if value == "" {
+			return "", index, fmt.Errorf("missing value for %s", name)
+		}
+		return value, index, nil
+	}
+	if index+1 >= len(args) || args[index+1] == "" || strings.HasPrefix(args[index+1], "-") {
+		return "", index, fmt.Errorf("missing value for %s", name)
+	}
+	return args[index+1], index + 1, nil
+}
+
+func optionalSearchFlagValue(args []string, index int, name, fallback string) (string, int, error) {
+	prefix := name + "="
+	arg := args[index]
+	if strings.HasPrefix(arg, prefix) {
+		value := strings.TrimPrefix(arg, prefix)
+		if value == "" {
+			return "", index, fmt.Errorf("missing value for %s", name)
+		}
+		return value, index, nil
+	}
+	if index+1 >= len(args) || args[index+1] == "" || strings.HasPrefix(args[index+1], "-") {
+		return fallback, index, nil
+	}
+	return args[index+1], index + 1, nil
+}
+
+func parseSince(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	if strings.HasSuffix(value, "d") || strings.HasSuffix(value, "w") {
+		multiplier := 24 * time.Hour
+		number := strings.TrimSuffix(value, "d")
+		if strings.HasSuffix(value, "w") {
+			multiplier = 7 * 24 * time.Hour
+			number = strings.TrimSuffix(value, "w")
+		}
+		count, err := strconv.Atoi(number)
+		if err == nil && count >= 0 {
+			return time.Now().UTC().Add(-time.Duration(count) * multiplier), nil
+		}
+	}
+	if duration, err := time.ParseDuration(value); err == nil {
+		return time.Now().UTC().Add(-duration), nil
+	}
+	return time.Time{}, fmt.Errorf("--since must be RFC3339, YYYY-MM-DD, or a duration like 24h/7d")
+}
+
+func refreshDisabled(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "off", "false", "0", "never", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+func zeroFloatString(value string) bool {
+	parsed, err := strconv.ParseFloat(value, 64)
+	return err == nil && parsed == 0
+}
+
+func matchesPathFilter(path, filter string) bool {
+	path = filepath.Clean(path)
+	filter = filepath.Clean(filter)
+	return path == filter || strings.Contains(path, filter)
+}
+
+func excludesActiveCodexTree(hit localstore.SearchHit, activeTree map[string]bool) bool {
+	if hit.Provider != "codex" || len(activeTree) == 0 {
+		return false
+	}
+	return activeTree[hit.ProviderSessionID] || activeTree[hit.ParentSessionID] || activeTree[hit.RootSessionID]
+}
+
+func lexicalSearch(ctx context.Context, store *localstore.Store, opts searchOptions) ([]localstore.SearchHit, error) {
 	type keyedHit struct {
 		hit localstore.SearchHit
 		key string
@@ -1052,16 +1046,42 @@ func lexicalSearch(ctx context.Context, store *localstore.Store, terms []string,
 	seen := map[string]bool{}
 	var merged []keyedHit
 	activeID := os.Getenv("CODEX_THREAD_ID")
-	for _, term := range terms {
-		hits, err := store.SearchLexical(ctx, term, limit*20)
+	activeTree := map[string]bool{}
+	if activeID != "" && !opts.IncludeCurrentSession && opts.SessionID == "" {
+		ids, err := store.CodexSessionTreeIDs(ctx, activeID)
+		if err != nil {
+			return nil, err
+		}
+		activeTree = ids
+	}
+	for _, term := range opts.Terms {
+		hits, err := store.SearchLexical(ctx, term, opts.Limit*20)
 		if err != nil {
 			return nil, err
 		}
 		for _, hit := range hits {
-			if hasProvider && hit.Provider != provider {
+			if opts.HasProvider && hit.Provider != opts.Provider {
 				continue
 			}
-			if excludeActive && activeID != "" && hit.Provider == "codex" && hit.ProviderSessionID == activeID {
+			if opts.SessionID != "" && hit.ProviderSessionID != opts.SessionID && sessionID(hit) != opts.SessionID {
+				continue
+			}
+			if opts.File != "" && !matchesPathFilter(hit.SourcePath, opts.File) {
+				continue
+			}
+			if opts.Workspace != "" && !matchesPathFilter(hit.SourcePath, opts.Workspace) {
+				continue
+			}
+			if opts.Since != nil && (hit.OccurredAt.IsZero() || hit.OccurredAt.Before(*opts.Since)) {
+				continue
+			}
+			if opts.EventType != "" && hit.Type != opts.EventType {
+				continue
+			}
+			if opts.PrimaryOnly && hit.ParentSessionID != "" {
+				continue
+			}
+			if excludesActiveCodexTree(hit, activeTree) {
 				continue
 			}
 			key := eventID(hit)
@@ -1084,8 +1104,8 @@ func lexicalSearch(ctx context.Context, store *localstore.Store, terms []string,
 		}
 		return merged[i].key < merged[j].key
 	})
-	if len(merged) > limit {
-		merged = merged[:limit]
+	if len(merged) > opts.Limit {
+		merged = merged[:opts.Limit]
 	}
 	results := make([]localstore.SearchHit, len(merged))
 	for i, item := range merged {
@@ -1124,7 +1144,10 @@ func searchHitJSON(rank int, hit localstore.SearchHit) map[string]any {
 }
 
 func eventID(hit localstore.SearchHit) string {
-	return "event:" + strconv.FormatInt(hit.EventID, 10)
+	if hit.SourceEventID == "" {
+		return hit.SourceKey + "#event:" + strconv.FormatInt(hit.EventID, 10)
+	}
+	return hit.SourceKey + "#event:" + hit.SourceEventID
 }
 
 func sessionID(hit localstore.SearchHit) string {
@@ -1142,7 +1165,7 @@ func openExistingStore(ctx context.Context, dataRoot, command string) (*localsto
 		}
 		return nil, commandError(command, CodeStorage, "check local store", err)
 	}
-	store, err := localstore.Open(ctx, dbPath)
+	store, err := localstore.OpenReadOnly(ctx, dbPath)
 	if err != nil {
 		return nil, commandError(command, CodeStorage, "open local store", err)
 	}
@@ -1215,21 +1238,6 @@ func setupMode(catalogOnly bool) string {
 	return "import"
 }
 
-func sourceEventID(record capture.ProviderRecord) string {
-	if record.NativeID != "" {
-		return fmt.Sprintf("%012d:%s", record.Ordinal, record.NativeID)
-	}
-	return fmt.Sprintf("%012d:%s", record.Ordinal, record.ContentHash)
-}
-
-func compactJSON(value any) string {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Sprint(value)
-	}
-	return string(encoded)
-}
-
 func compactSnippet(value string, limit int) string {
 	value = strings.Join(strings.Fields(value), " ")
 	if len(value) <= limit {
@@ -1239,23 +1247,6 @@ func compactSnippet(value string, limit int) string {
 		return value[:limit]
 	}
 	return value[:limit-1] + "..."
-}
-
-func parseJSONTime(value any) time.Time {
-	switch typed := value.(type) {
-	case string:
-		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-			if parsed, err := time.Parse(layout, typed); err == nil {
-				return parsed.UTC()
-			}
-		}
-	case float64:
-		if typed > 1_000_000_000_000 {
-			return time.UnixMilli(int64(typed)).UTC()
-		}
-		return time.Unix(int64(typed), 0).UTC()
-	}
-	return time.Time{}
 }
 
 func formatJSONTime(value time.Time) any {
