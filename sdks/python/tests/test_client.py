@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from ctx_agent_history import (
     API_VERSION,
     HostedConfig,
+    LocalConfig,
     HostedTransportNotImplementedError,
     AgentHistoryClient,
     SearchQueryV1,
@@ -78,7 +79,6 @@ def search_execution() -> dict[str, object]:
             "verification_bytes": 4096,
             "largest_verification_lookup_bytes": 512,
             "hydrated_rows": 5,
-            "legacy_fallback_rows": 0,
             "hydration_input_bytes": 2048,
             "largest_hydration_input_bytes": 800,
             "snippet_input_bytes": 1200,
@@ -388,6 +388,25 @@ class LocalCliAdapterTests(unittest.TestCase):
         with self.assertRaises(CtxAgentHistoryProtocolError):
             client.search(SEARCH_QUERY)
 
+        for payload, field in (
+            ({"schema_version": 2, "query_execution": {}, "results": []}, "query"),
+            ({"schema_version": 2, "query": None, "results": []}, "query_execution"),
+            ({"schema_version": 2, "query": None, "query_execution": {}}, "results"),
+            (
+                {
+                    "schema_version": 2,
+                    "query": None,
+                    "query_execution": {},
+                    "results": {},
+                },
+                "results",
+            ),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                    AgentHistoryClient(RecordingSearchAdapter(payload)).search(SEARCH_QUERY)
+                self.assertEqual(raised.exception.details["field"], field)
+
         client = AgentHistoryClient(
             RecordingSearchAdapter(
                 {
@@ -476,6 +495,34 @@ class LocalCliAdapterTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "timeout")
         self.assertTrue(raised.exception.retryable)
+
+    def test_local_cli_capture_is_concurrent_and_bounded(self) -> None:
+        adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=2))
+        completed = adapter._run(
+            [
+                "-c",
+                "import os,threading; a=threading.Thread(target=lambda:os.write(1,b'a'*200000)); b=threading.Thread(target=lambda:os.write(2,b'b'*200000)); a.start(); b.start(); a.join(); b.join()",
+            ]
+        )
+        self.assertEqual(len(completed.stdout), 200000)
+        self.assertEqual(len(completed.stderr), 200000)
+
+        for stream, descriptor, size, cap in (
+            ("stdout", 1, 2 * 1024 * 1024 + 1, 2 * 1024 * 1024),
+            ("stderr", 2, 256 * 1024 + 1, 256 * 1024),
+        ):
+            with self.subTest(stream=stream):
+                with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                    adapter._run(
+                        [
+                            "-c",
+                            f"import os; os.write({descriptor}, b'x'*{size})",
+                        ]
+                    )
+                self.assertEqual(raised.exception.details["stream"], stream)
+                self.assertEqual(raised.exception.details["cap_bytes"], cap)
+                self.assertNotIn("stdout", raised.exception.details)
+                self.assertNotIn("stderr", raised.exception.details)
 
     def test_hosted_config_is_placeholder(self) -> None:
         client = AgentHistoryClient.hosted(HostedConfig(base_url="https://example.invalid"))
@@ -721,7 +768,6 @@ def _fake_ctx_script(
                             "verification_bytes": 4096,
                             "largest_verification_lookup_bytes": 512,
                             "hydrated_rows": 3,
-                            "legacy_fallback_rows": 0,
                             "hydration_input_bytes": 2048,
                             "largest_hydration_input_bytes": 800,
                             "snippet_input_bytes": 1200,

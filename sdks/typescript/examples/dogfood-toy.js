@@ -117,7 +117,6 @@ function mockResponse(args) {
           verification_bytes: 16,
           largest_verification_lookup_bytes: 16,
           hydrated_rows: 1,
-          legacy_fallback_rows: 0,
           hydration_input_bytes: 32,
           largest_hydration_input_bytes: 32,
           snippet_input_bytes: 32,

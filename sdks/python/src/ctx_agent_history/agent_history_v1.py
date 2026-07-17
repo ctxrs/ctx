@@ -104,7 +104,12 @@ def normalize_search(raw: Mapping[str, Any]) -> SearchResult:
             "ctx search returned an unsupported schema version",
             details={"expectedSchemaVersion": 2, "actualSchemaVersion": schema_version},
         )
-    raw_query = raw.get("query")
+    if "query" not in raw:
+        raise CtxAgentHistoryProtocolError(
+            "ctx search response is missing its canonical query field",
+            details={"field": "query"},
+        )
+    raw_query = raw["query"]
     if raw_query is None:
         query = None
     elif not isinstance(raw_query, Mapping):
@@ -127,6 +132,12 @@ def normalize_search(raw: Mapping[str, Any]) -> SearchResult:
             "ctx search response is missing query execution diagnostics",
             details={"field": "query_execution"},
         )
+    raw_results = raw.get("results")
+    if not isinstance(raw_results, list):
+        raise CtxAgentHistoryProtocolError(
+            "ctx search response is missing its result array",
+            details={"field": "results"},
+        )
     return cast(
         SearchResult,
         _drop_none(
@@ -138,7 +149,7 @@ def normalize_search(raw: Mapping[str, Any]) -> SearchResult:
                 "freshness": _camelize_public(raw.get("freshness", {})),
                 "retrieval": _camelize_public(raw.get("retrieval")),
                 "generatedAt": raw.get("generated_at", raw.get("generatedAt")),
-                "results": [_camelize_public(result) for result in raw.get("results", [])],
+                "results": [_camelize_public(result) for result in raw_results],
                 "pagination": _camelize_public(raw.get("pagination", {})),
                 "truncation": _camelize_public(raw.get("truncation", {})),
             }

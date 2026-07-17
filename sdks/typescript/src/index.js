@@ -16,6 +16,10 @@ const SEARCH_QUERY_FIELDS = new Set(["version", "any", "must", "must_not"]);
 const SEARCH_LEXICAL_MATCHERS = new Set(["all", "phrase", "literal"]);
 const SEARCH_ANY_MATCHERS = new Set([...SEARCH_LEXICAL_MATCHERS, "semantic"]);
 const SEARCH_ALPHANUMERIC = /^[\p{Alphabetic}\p{Number}]$/u;
+const LOCAL_STDOUT_CAP_BYTES = 2 * 1024 * 1024;
+const LOCAL_STDERR_CAP_BYTES = 256 * 1024;
+const LOCAL_DRAIN_GRACE_MS = 100;
+const LOCAL_TEARDOWN_MS = 1_000;
 
 export class CtxError extends Error {
   constructor(message, options = {}) {
@@ -698,7 +702,12 @@ function normalizeSearchResponse(raw) {
       details: { expectedSchemaVersion: 2, actualSchemaVersion: schemaVersion },
     });
   }
-  if (raw.query !== null && raw.query !== undefined && !isObject(raw.query)) {
+  if (!isObject(raw) || !Object.hasOwn(raw, "query")) {
+    throw new CtxParseError("ctx search response is missing its canonical query field", {
+      details: { field: "query" },
+    });
+  }
+  if (raw.query !== null && !isObject(raw.query)) {
     throw new CtxParseError("ctx search response contains a non-object canonical query", {
       details: { field: "query" },
     });
@@ -718,6 +727,11 @@ function normalizeSearchResponse(raw) {
   if (!isObject(queryExecution)) {
     throw new CtxParseError("ctx search response is missing query execution diagnostics", {
       details: { field: "query_execution" },
+    });
+  }
+  if (!Object.hasOwn(raw, "results") || !Array.isArray(raw.results)) {
+    throw new CtxParseError("ctx search response is missing its result array", {
+      details: { field: "results" },
     });
   }
   const { schema_version, query: _query, query_execution, ...legacyFields } = raw;
@@ -823,59 +837,141 @@ function spawnCommand(command, args, options) {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
+    let drainTimer;
     const timeout = setTimeout(() => {
-      settled = "timeout";
-      child.kill("SIGTERM");
-    }, options.timeoutMs);
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", (cause) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      reject(
-        new CtxCliError(`failed to start ${command}`, {
-          command,
-          args,
-          exitCode: undefined,
-          stdout,
-          stderr,
-          cause,
+      fail(
+        new CtxTimeoutError(`ctx command timed out after ${options.timeoutMs}ms`, {
+          details: { command, args, timeoutMs: options.timeoutMs },
         }),
       );
-    });
-    child.on("close", (exitCode, signal) => {
-      if (settled === true) {
-        return;
-      }
-      if (settled === "timeout") {
-        settled = true;
-        clearTimeout(timeout);
-        reject(
-          new CtxTimeoutError(`ctx command timed out after ${options.timeoutMs}ms`, {
-            details: { command, args, exitCode, signal, stdout, stderr, timeoutMs: options.timeoutMs },
+    }, options.timeoutMs);
+
+    const capture = (stream, chunk) => {
+      if (settled) return;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const cap = stream === "stdout" ? LOCAL_STDOUT_CAP_BYTES : LOCAL_STDERR_CAP_BYTES;
+      const consumed = stream === "stdout" ? stdoutBytes : stderrBytes;
+      const remaining = cap - consumed;
+      if (bytes.length > remaining) {
+        if (remaining > 0) {
+          (stream === "stdout" ? stdoutChunks : stderrChunks).push(bytes.subarray(0, remaining));
+        }
+        fail(
+          new CtxParseError("ctx CLI output exceeded its capture limit", {
+            code: "capture_limit",
+            details: { command, args, stream, capBytes: cap },
           }),
         );
         return;
       }
+      (stream === "stdout" ? stdoutChunks : stderrChunks).push(bytes);
+      if (stream === "stdout") stdoutBytes += bytes.length;
+      else stderrBytes += bytes.length;
+    };
+
+    const fail = (error) => {
+      if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      clearTimeout(drainTimer);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      void terminateProcessScope(child).finally(() => reject(error));
+    };
+
+    child.stdout.on("data", (chunk) => capture("stdout", chunk));
+    child.stderr.on("data", (chunk) => capture("stderr", chunk));
+    child.on("error", (cause) => {
+      fail(
+        new CtxCliError(`failed to start ${command}`, {
+          command,
+          args,
+          exitCode: undefined,
+          cause,
+        }),
+      );
+    });
+    child.on("exit", () => {
+      if (settled) return;
+      drainTimer = setTimeout(() => {
+        fail(
+          new CtxParseError("ctx CLI output pipes did not close with the process", {
+            code: "capture_failure",
+            details: { command, args, stream: "pipe" },
+          }),
+        );
+      }, LOCAL_DRAIN_GRACE_MS);
+    });
+    child.on("close", (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(drainTimer);
+      let stdout;
+      let stderr;
+      try {
+        const decoder = new TextDecoder("utf-8", { fatal: true });
+        stdout = decoder.decode(Buffer.concat(stdoutChunks, stdoutBytes));
+        stderr = decoder.decode(Buffer.concat(stderrChunks, stderrBytes));
+      } catch (cause) {
+        reject(
+          new CtxParseError("ctx returned invalid UTF-8", {
+            details: { command, args },
+            cause,
+          }),
+        );
+        return;
+      }
       resolve({ command, args, exitCode, signal, stdout, stderr });
     });
   });
+}
+
+async function terminateProcessScope(child) {
+  const pid = child.pid;
+  if (pid) {
+    if (process.platform === "win32") {
+      await new Promise((resolve) => {
+        const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        const deadline = setTimeout(() => {
+          killer.kill();
+          resolve();
+        }, LOCAL_TEARDOWN_MS / 2);
+        killer.on("error", () => {
+          clearTimeout(deadline);
+          resolve();
+        });
+        killer.on("close", () => {
+          clearTimeout(deadline);
+          resolve();
+        });
+      });
+    } else {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, LOCAL_DRAIN_GRACE_MS));
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {}
+    }
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, LOCAL_DRAIN_GRACE_MS));
 }
 
 function parseCtxVersion(raw) {
