@@ -10,9 +10,10 @@ use ctx_history_core::utc_now;
 use std::{
     cell::Cell,
     ffi::OsString,
-    fs,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     marker::PhantomData,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -20,6 +21,7 @@ use std::{
     },
     time::Duration,
 };
+use uuid::Uuid;
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
@@ -37,7 +39,6 @@ const ALL_FTS_TABLES: [&str; 5] = [
 ];
 const BULK_MODE_MARKER_KEY: &str = "event_search_bulk_mode_v1";
 const BULK_MODE_MERGE_PENDING: i64 = 1;
-pub(crate) const BULK_MODE_FINAL_CHECKPOINT_PENDING: i64 = 2;
 const BULK_MODE_AUTOMERGE_KEY_PREFIX: &str = "event_search_bulk_mode_v1:automerge:";
 const BULK_MODE_CRISISMERGE_KEY_PREFIX: &str = "event_search_bulk_mode_v1:crisismerge:";
 #[cfg(test)]
@@ -61,6 +62,8 @@ pub(crate) const FTS_BULK_MAINTENANCE_BATCHES: usize = 256;
 // putting a hard ceiling on large or resumed merge backlogs.
 const EVENT_SEARCH_MERGE_PASSES_PER_CALL: usize = 2;
 const BULK_LOCK_SUFFIX: &str = ".event-search-bulk.lock.sqlite";
+const FINAL_CHECKPOINT_DEBT_SUFFIX: &str = ".event-search-final-checkpoint-debt";
+const FINAL_CHECKPOINT_DEBT_CONTENT: &[u8] = b"ctx-event-search-final-checkpoint-debt\nversion=1\n";
 
 thread_local! {
     static EVENT_SEARCH_MAINTENANCE_PACER: Cell<Option<fn(u64)>> = const { Cell::new(None) };
@@ -70,8 +73,24 @@ thread_local! {
 type RestorePostCommitHook = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(test)]
+type CheckpointDebtPersistedHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+type FinalCheckpointPostCheckpointHook = Box<dyn FnOnce() -> bool + Send + 'static>;
+
+#[cfg(test)]
 static RESTORE_POST_COMMIT_HOOK: std::sync::Mutex<Option<(PathBuf, RestorePostCommitHook)>> =
     std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static CHECKPOINT_DEBT_PERSISTED_HOOK: std::sync::Mutex<
+    Option<(PathBuf, CheckpointDebtPersistedHook)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static FINAL_CHECKPOINT_POST_CHECKPOINT_HOOK: std::sync::Mutex<
+    Option<(PathBuf, FinalCheckpointPostCheckpointHook)>,
+> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 pub(crate) fn set_restore_post_commit_hook(store_path: PathBuf, hook: RestorePostCommitHook) {
@@ -79,6 +98,32 @@ pub(crate) fn set_restore_post_commit_hook(store_path: PathBuf, hook: RestorePos
     assert!(
         pending.is_none(),
         "restore post-commit hook already installed"
+    );
+    *pending = Some((store_path, hook));
+}
+
+#[cfg(test)]
+pub(crate) fn set_checkpoint_debt_persisted_hook(
+    store_path: PathBuf,
+    hook: CheckpointDebtPersistedHook,
+) {
+    let mut pending = CHECKPOINT_DEBT_PERSISTED_HOOK.lock().unwrap();
+    assert!(
+        pending.is_none(),
+        "checkpoint debt persisted hook already installed"
+    );
+    *pending = Some((store_path, hook));
+}
+
+#[cfg(test)]
+pub(crate) fn set_final_checkpoint_post_checkpoint_hook(
+    store_path: PathBuf,
+    hook: FinalCheckpointPostCheckpointHook,
+) {
+    let mut pending = FINAL_CHECKPOINT_POST_CHECKPOINT_HOOK.lock().unwrap();
+    assert!(
+        pending.is_none(),
+        "final checkpoint post-checkpoint hook already installed"
     );
     *pending = Some((store_path, hook));
 }
@@ -97,6 +142,36 @@ fn run_restore_post_commit_hook(store_path: &std::path::Path) {
     if let Some(hook) = hook {
         hook();
     }
+}
+
+#[cfg(test)]
+fn run_checkpoint_debt_persisted_hook(store_path: &Path) {
+    let hook = {
+        let mut pending = CHECKPOINT_DEBT_PERSISTED_HOOK.lock().unwrap();
+        match pending.as_ref() {
+            Some((expected_path, _)) if expected_path == store_path => {
+                pending.take().map(|(_, hook)| hook)
+            }
+            _ => None,
+        }
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn run_final_checkpoint_post_checkpoint_hook(store_path: &Path) -> bool {
+    let hook = {
+        let mut pending = FINAL_CHECKPOINT_POST_CHECKPOINT_HOOK.lock().unwrap();
+        match pending.as_ref() {
+            Some((expected_path, _)) if expected_path == store_path => {
+                pending.take().map(|(_, hook)| hook)
+            }
+            _ => None,
+        }
+    };
+    hook.is_some_and(|hook| hook())
 }
 
 /// Restores the previous thread-local event-search maintenance pacer on drop.
@@ -182,14 +257,19 @@ impl Store {
     /// Acquire the bulk-import lock and persist merge suppression.
     pub fn begin_event_search_bulk_mode(&self) -> Result<EventSearchBulkGuard> {
         if self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) > 0 {
-            let phase = match bulk_mode_phase(self) {
-                Ok(phase) => phase,
+            if let Err(error) = bulk_mode_phase(self) {
+                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+                return Err(error);
+            }
+            let checkpoint_debt_pending = final_checkpoint_debt_pending(&self.path);
+            let checkpoint_debt_pending = match checkpoint_debt_pending {
+                Ok(pending) => pending,
                 Err(error) => {
                     self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
                     return Err(error);
                 }
             };
-            if phase == Some(BulkModePhase::FinalCheckpointPending) {
+            if checkpoint_debt_pending {
                 self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
                 return Err(StoreError::BulkSearchImportBusy);
             }
@@ -215,8 +295,9 @@ impl Store {
             }
         };
         guard.depth_counted = true;
-        if bulk_mode_phase(self)? == Some(BulkModePhase::FinalCheckpointPending) {
-            self.finish_event_search_final_checkpoint()?;
+        let _ = bulk_mode_phase(self)?;
+        if final_checkpoint_debt_pending(&self.path)? {
+            return Err(StoreError::BulkSearchImportBusy);
         }
         if bulk_mode_phase(self)? == Some(BulkModePhase::MergePending)
             && self.has_pending_provider_file_publications()?
@@ -407,7 +488,8 @@ impl Store {
     /// at the 64 MiB observed-WAL high-water, bounding overshoot to the one group
     /// that was already admitted before the threshold became observable.
     pub fn event_search_bulk_admission_outcome(&self) -> Result<EventSearchBulkMaintenanceOutcome> {
-        if bulk_mode_phase(self)? == Some(BulkModePhase::FinalCheckpointPending) {
+        let _ = bulk_mode_phase(self)?;
+        if final_checkpoint_debt_pending(&self.path)? {
             return Ok(EventSearchBulkMaintenanceOutcome::Pending);
         }
         Ok(
@@ -429,32 +511,37 @@ impl Store {
     }
 
     pub(crate) fn recover_event_search_bulk_mode(&self) -> Result<()> {
-        // Check and reassert under one writer lock. A guarded importer may
-        // restore settings and clear the marker while another connection is
-        // waiting for this transaction, so an earlier check would be stale.
-        self.begin_immediate_batch()?;
-        let result = (|| {
-            let phase = bulk_mode_phase(self)?;
-            if phase == Some(BulkModePhase::MergePending)
-                && !self.has_pending_provider_file_publications()?
-            {
-                suppress_event_search_merges(self)?;
-            }
-            Ok(phase)
-        })();
-        let phase = match result {
-            Ok(phase) => phase,
-            Err(err) => {
+        let phase = bulk_mode_phase(self)?;
+        if phase.is_none() {
+            return Ok(());
+        }
+        if phase == Some(BulkModePhase::MergePending) {
+            // Recheck and reassert under one writer lock. A guarded importer
+            // may finish while this connection is waiting for the transaction.
+            self.begin_immediate_batch()?;
+            let result = (|| {
+                let phase = bulk_mode_phase(self)?;
+                if phase == Some(BulkModePhase::MergePending)
+                    && !self.has_pending_provider_file_publications()?
+                {
+                    suppress_event_search_merges(self)?;
+                }
+                Ok(phase)
+            })();
+            let current_phase = match result {
+                Ok(phase) => phase,
+                Err(err) => {
+                    let _ = self.rollback_batch();
+                    return Err(err);
+                }
+            };
+            if let Err(err) = self.commit_batch() {
                 let _ = self.rollback_batch();
                 return Err(err);
             }
-        };
-        if let Err(err) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(err);
-        }
-        if phase.is_none() {
-            return Ok(());
+            if current_phase.is_none() {
+                return Ok(());
+            }
         }
         // A live importer owns this lock. Leave an unowned stale marker for an
         // import or daemon path with an installed pacer; arbitrary writable
@@ -570,12 +657,22 @@ impl Store {
     /// If the final config-only checkpoint is pinned, the preceding potentially
     /// large merge WAL has already been truncated successfully.
     fn restore_event_search_bulk_mode_if_quiescent(&self) -> Result<bool> {
-        let pacing = begin_fts_maintenance_pacing(
+        persist_final_checkpoint_debt(&self.path)?;
+        #[cfg(test)]
+        run_checkpoint_debt_persisted_hook(&self.path);
+        self.begin_immediate_batch()
+            .map_err(finalization_retryable_error)?;
+        let pacing = match begin_fts_maintenance_pacing(
             self,
             EVENT_SEARCH_FTS_TABLES.len(),
             FTS_MERGE_PAGE_BUDGET,
-        )?;
-        self.begin_immediate_batch()?;
+        ) {
+            Ok(pacing) => pacing,
+            Err(error) => {
+                let _ = self.rollback_batch();
+                return Err(error);
+            }
+        };
         let result = (|| {
             match bulk_mode_phase(self)? {
                 None => return Ok(true),
@@ -586,11 +683,6 @@ impl Store {
             if !changed {
                 restore_event_search_merge_config(self)?;
                 clear_bulk_mode_state(self)?;
-                save_bulk_mode_config(
-                    self,
-                    BULK_MODE_MARKER_KEY,
-                    BULK_MODE_FINAL_CHECKPOINT_PENDING,
-                )?;
             }
             Ok(!changed)
         })();
@@ -603,7 +695,7 @@ impl Store {
         };
         if let Err(err) = self.commit_batch() {
             let _ = self.rollback_batch();
-            return Err(err);
+            return Err(finalization_retryable_error(err));
         }
         pace_observed_fts_wal_growth(self, pacing)?;
         if finished {
@@ -620,28 +712,14 @@ impl Store {
         if bulk_mode_phase(self)? != Some(BulkModePhase::FinalCheckpointPending) {
             return Ok(());
         }
-        // Keep phase 2 durable through the corpus checkpoint. Clearing it is a
-        // tiny follow-up transaction and intentionally does not recurse into a
-        // second required checkpoint.
+        // The sidecar remains durable through the strict corpus checkpoint.
+        // Removing it is the last write; no main-database WAL follows.
         self.pace_and_checkpoint_wal_truncate_required()?;
-        self.begin_immediate_batch()?;
-        let result = (|| {
-            if bulk_mode_phase(self)? == Some(BulkModePhase::FinalCheckpointPending) {
-                self.conn.execute(
-                    "DELETE FROM search_projection_stats WHERE key = ?1",
-                    params![BULK_MODE_MARKER_KEY],
-                )?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let _ = self.rollback_batch();
-            return Err(error);
+        #[cfg(test)]
+        if run_final_checkpoint_post_checkpoint_hook(&self.path) {
+            return Err(StoreError::BulkSearchImportBusy);
         }
-        if let Err(error) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(error);
-        }
+        remove_final_checkpoint_debt(&self.path)?;
         Ok(())
     }
 
@@ -818,6 +896,252 @@ fn merge_event_search_tables_in_transaction(store: &Store) -> Result<bool> {
     Ok(changed)
 }
 
+pub(crate) fn event_search_final_checkpoint_debt_path(store_path: &Path) -> PathBuf {
+    let mut value = OsString::from(store_path.as_os_str());
+    value.push(FINAL_CHECKPOINT_DEBT_SUFFIX);
+    PathBuf::from(value)
+}
+
+fn final_checkpoint_debt_temp_path(store_path: &Path) -> PathBuf {
+    let mut value = OsString::from(store_path.as_os_str());
+    value.push(format!(
+        "{FINAL_CHECKPOINT_DEBT_SUFFIX}.{}.{}.tmp",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ));
+    PathBuf::from(value)
+}
+
+fn final_checkpoint_debt_pending(store_path: &Path) -> Result<bool> {
+    let path = event_search_final_checkpoint_debt_path(store_path);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(StoreError::InvalidBulkSearchCheckpointDebt(
+                "marker is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(checkpoint_debt_io_error(error)),
+    }
+
+    let file = open_final_checkpoint_debt(&path).map_err(checkpoint_debt_io_error)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(StoreError::InvalidBulkSearchCheckpointDebt(
+            "marker is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(StoreError::InvalidBulkSearchCheckpointDebt(
+                "marker ownership or permissions are not private",
+            ));
+        }
+    }
+    if metadata.len() != FINAL_CHECKPOINT_DEBT_CONTENT.len() as u64 {
+        return Err(StoreError::InvalidBulkSearchCheckpointDebt(
+            "marker length does not match version 1",
+        ));
+    }
+
+    let mut content = Vec::with_capacity(FINAL_CHECKPOINT_DEBT_CONTENT.len() + 1);
+    file.take((FINAL_CHECKPOINT_DEBT_CONTENT.len() + 1) as u64)
+        .read_to_end(&mut content)?;
+    if content != FINAL_CHECKPOINT_DEBT_CONTENT {
+        return Err(StoreError::InvalidBulkSearchCheckpointDebt(
+            "marker content does not match version 1",
+        ));
+    }
+    Ok(true)
+}
+
+fn persist_final_checkpoint_debt(store_path: &Path) -> Result<()> {
+    if final_checkpoint_debt_pending(store_path)? {
+        return Ok(());
+    }
+
+    let path = event_search_final_checkpoint_debt_path(store_path);
+    let temp_path = final_checkpoint_debt_temp_path(store_path);
+    let result = (|| {
+        let mut file = match create_private_final_checkpoint_debt(&temp_path) {
+            Ok(file) => file,
+            Err(error) => return Err(checkpoint_debt_io_error(error)),
+        };
+        restrict_private_file(&temp_path)?;
+        file.write_all(FINAL_CHECKPOINT_DEBT_CONTENT)?;
+        file.sync_all()?;
+        drop(file);
+        durable_install_final_checkpoint_debt(&temp_path, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remove_final_checkpoint_debt(store_path: &Path) -> Result<()> {
+    if !final_checkpoint_debt_pending(store_path)? {
+        return Ok(());
+    }
+    let path = event_search_final_checkpoint_debt_path(store_path);
+    match fs::remove_file(&path) {
+        Ok(()) => sync_parent_directory(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(checkpoint_debt_io_error(error)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remove_final_checkpoint_debt(store_path: &Path) -> Result<()> {
+    if !final_checkpoint_debt_pending(store_path)? {
+        return Ok(());
+    }
+    let path = event_search_final_checkpoint_debt_path(store_path);
+    let tombstone = final_checkpoint_debt_temp_path(store_path);
+    durable_install_final_checkpoint_debt(&path, &tombstone)?;
+    let _ = fs::remove_file(tombstone);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn durable_install_final_checkpoint_debt(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination).map_err(checkpoint_debt_io_error)?;
+    sync_parent_directory(destination)
+}
+
+#[cfg(target_os = "windows")]
+fn durable_install_final_checkpoint_debt(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(checkpoint_debt_io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn durable_install_final_checkpoint_debt(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination).map_err(checkpoint_debt_io_error)
+}
+
+#[cfg(unix)]
+fn create_private_final_checkpoint_debt(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(target_os = "windows")]
+fn create_private_final_checkpoint_debt(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn create_private_final_checkpoint_debt(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().create_new(true).write(true).open(path)
+}
+
+#[cfg(unix)]
+fn open_final_checkpoint_debt(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(target_os = "windows")]
+fn open_final_checkpoint_debt(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn open_final_checkpoint_debt(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or(StoreError::InvalidBulkSearchCheckpointDebt(
+            "marker path has no parent directory",
+        ))?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn checkpoint_debt_io_error(error: std::io::Error) -> StoreError {
+    if checkpoint_debt_io_is_retryable(&error) {
+        StoreError::BulkSearchImportBusy
+    } else {
+        StoreError::Io(error)
+    }
+}
+
+fn checkpoint_debt_io_is_retryable(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock
+    ) {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    if matches!(error.raw_os_error(), Some(32) | Some(33)) {
+        return true;
+    }
+    false
+}
+
 fn event_search_bulk_lock_path(store_path: &std::path::Path) -> PathBuf {
     let mut value = OsString::from(store_path.as_os_str());
     value.push(BULK_LOCK_SUFFIX);
@@ -830,6 +1154,13 @@ fn sqlite_is_busy(err: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(failure, _)
             if matches!(failure.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
     )
+}
+
+fn finalization_retryable_error(error: StoreError) -> StoreError {
+    match &error {
+        StoreError::Sql(error) if sqlite_is_busy(error) => StoreError::BulkSearchImportBusy,
+        _ => error,
+    }
 }
 
 fn suppress_event_search_merges(store: &Store) -> Result<()> {
@@ -892,15 +1223,18 @@ fn ensure_search_projection_stats_table(store: &Store) -> Result<()> {
 }
 
 fn bulk_mode_phase(store: &Store) -> Result<Option<BulkModePhase>> {
-    if !table_exists(&store.conn, "search_projection_stats")? {
-        return Ok(None);
+    let marker = if table_exists(&store.conn, "search_projection_stats")? {
+        bulk_mode_config(store, BULK_MODE_MARKER_KEY)?
+    } else {
+        None
+    };
+    let checkpoint_debt_pending = final_checkpoint_debt_pending(&store.path)?;
+    match marker {
+        Some(BULK_MODE_MERGE_PENDING) => Ok(Some(BulkModePhase::MergePending)),
+        Some(value) => Err(StoreError::InvalidBulkSearchPhase(value)),
+        None if checkpoint_debt_pending => Ok(Some(BulkModePhase::FinalCheckpointPending)),
+        None => Ok(None),
     }
-    Ok(
-        bulk_mode_config(store, BULK_MODE_MARKER_KEY)?.map(|value| match value {
-            BULK_MODE_FINAL_CHECKPOINT_PENDING => BulkModePhase::FinalCheckpointPending,
-            _ => BulkModePhase::MergePending,
-        }),
-    )
 }
 
 fn bulk_mode_config(store: &Store, key: &str) -> Result<Option<i64>> {
@@ -1081,6 +1415,19 @@ mod tests {
             observed_wal_growth_supplement_bytes(nominal_bytes, wal_bytes_after, wal_bytes_before),
             0
         );
+    }
+
+    #[test]
+    fn checkpoint_debt_file_contention_is_retryable() {
+        assert!(matches!(
+            checkpoint_debt_io_error(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
+            StoreError::BulkSearchImportBusy
+        ));
+        #[cfg(target_os = "windows")]
+        assert!(matches!(
+            checkpoint_debt_io_error(std::io::Error::from_raw_os_error(32)),
+            StoreError::BulkSearchImportBusy
+        ));
     }
 
     #[test]
