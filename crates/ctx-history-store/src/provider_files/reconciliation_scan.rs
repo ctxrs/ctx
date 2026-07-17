@@ -1,3 +1,19 @@
+const RECONCILIATION_SCAN_MAX_BYTES: usize = 1024 * 1024;
+const RECONCILIATION_SCAN_QUERY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
+const LEGACY_DIRECT_CURSOR_PREFIX: &str = "legacy-direct-rowid:";
+const LEGACY_INDIRECT_CURSOR_PREFIX: &str = "legacy-indirect-rowid:";
+
+enum LegacyReconciliationCursor {
+    Direct(Option<i64>),
+    Indirect(Option<i64>),
+}
+
+struct ReconciliationQueryRows {
+    candidates: Vec<(String, bool, String)>,
+    exhausted: bool,
+}
+
 impl Store {
     fn reconcile_phase_batch(
         &self,
@@ -308,8 +324,6 @@ impl Store {
         entity_cursor: Option<&str>,
         limit: usize,
     ) -> Result<ReconciliationScan> {
-        let spec = reconciliation_phase_spec(phase)
-            .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
         let current_source = match source_cursor {
             Some(source_id) => self
                 .conn
@@ -344,6 +358,39 @@ impl Store {
                 owned_entity_ids: Vec::new(),
             });
         };
+        let optimized_indexes_present = self.conn.query_row(
+            crate::schema::indexes::RECONCILIATION_INDEXES_PRESENT_SQL,
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if optimized_indexes_present {
+            return self.optimized_reconciliation_batch_rows(
+                replacement_id,
+                phase,
+                &current_source,
+                entity_cursor,
+                limit,
+            );
+        }
+        self.legacy_reconciliation_batch_rows(
+            replacement_id,
+            phase,
+            &current_source,
+            entity_cursor,
+            limit,
+        )
+    }
+
+    fn optimized_reconciliation_batch_rows(
+        &self,
+        replacement_id: &str,
+        phase: i64,
+        current_source: &str,
+        entity_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ReconciliationScan> {
+        let spec = reconciliation_phase_spec(phase)
+            .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
         let sqlite_limit = i64::try_from(limit.checked_add(1).ok_or(
             StoreError::ProviderFileReconciliationLimitOutOfRange {
                 value: limit,
@@ -354,12 +401,16 @@ impl Store {
             value: limit,
             max: PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
         })?;
-        let mut stmt = self.conn.prepare(spec.owner_select_sql)?;
-        let rows = stmt.query_map(
-            params![&current_source, entity_cursor, sqlite_limit],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        let cursor = entity_cursor
+            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
+            .unwrap_or(rusqlite::types::Value::Null);
+        let query = self.query_reconciliation_rows(
+            spec.owner_select_sql,
+            current_source,
+            cursor,
+            sqlite_limit,
         )?;
-        let mut candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut candidates = query.candidates;
         #[cfg(test)]
         {
             self.provider_file_reconciliation_queries.set(
@@ -373,40 +424,268 @@ impl Store {
                     .saturating_add(candidates.len()),
             );
         }
-        let source_complete = candidates.len() <= limit;
+        let source_complete = query.exhausted && candidates.len() <= limit;
         if !source_complete {
-            candidates.pop();
+            candidates.truncate(limit);
         }
-        let visited = candidates.len().max(1).min(limit);
-        let last_candidate = candidates.last().map(|(id, _)| id.clone());
+        // Charge the remaining slice for this owner query so the outer phase
+        // loop cannot multiply the per-query byte and time envelopes.
+        let visited = limit;
+        let last_candidate = candidates.last().map(|(_, _, cursor)| cursor.clone());
         let owned_entity_ids = candidates
             .into_iter()
-            .filter_map(|(id, owned)| owned.then_some(id))
+            .filter_map(|(id, owned, _)| owned.then_some(id))
             .collect::<Vec<_>>();
         let (next_source, next_entity) = if source_complete {
-            let next = self
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT source_id FROM {STAGING_PRIOR_SOURCES_TABLE} \
-                         WHERE replacement_id = ?1 AND source_id > ?2 \
-                         ORDER BY source_id LIMIT 1"
-                    ),
-                    params![replacement_id, &current_source],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
+            let next = self.next_reconciliation_source(replacement_id, current_source)?;
             (next, None)
         } else {
-            (Some(current_source.clone()), last_candidate)
+            (Some(current_source.to_owned()), last_candidate)
         };
         Ok(ReconciliationScan {
             visited,
             phase_complete: next_source.is_none(),
-            batch_source_id: Some(current_source),
+            batch_source_id: Some(current_source.to_owned()),
             source_cursor: next_source,
             entity_cursor: next_entity,
             owned_entity_ids,
         })
+    }
+
+    fn legacy_reconciliation_batch_rows(
+        &self,
+        replacement_id: &str,
+        phase: i64,
+        current_source: &str,
+        entity_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ReconciliationScan> {
+        let spec = legacy_reconciliation_phase_spec(phase)
+            .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
+        let cursor = parse_legacy_reconciliation_cursor(entity_cursor)?;
+        let (sql, rowid_cursor, indirect) = match cursor {
+            LegacyReconciliationCursor::Direct(rowid) => {
+                (spec.direct_owner_select_sql, rowid, false)
+            }
+            LegacyReconciliationCursor::Indirect(rowid) => (
+                spec.indirect_owner_scan_sql
+                    .ok_or(StoreError::InvalidProviderFilePublicationScope)?,
+                rowid,
+                true,
+            ),
+        };
+        let sqlite_limit = i64::try_from(limit.checked_add(1).ok_or(
+            StoreError::ProviderFileReconciliationLimitOutOfRange {
+                value: limit,
+                max: PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+            },
+        )?)
+        .map_err(|_| StoreError::ProviderFileReconciliationLimitOutOfRange {
+            value: limit,
+            max: PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+        })?;
+        let cursor_value = rowid_cursor
+            .map(rusqlite::types::Value::Integer)
+            .unwrap_or(rusqlite::types::Value::Null);
+        let query =
+            self.query_reconciliation_rows(sql, current_source, cursor_value, sqlite_limit)?;
+        let mut candidates = query.candidates;
+        #[cfg(test)]
+        {
+            self.provider_file_reconciliation_queries.set(
+                self.provider_file_reconciliation_queries
+                    .get()
+                    .saturating_add(1),
+            );
+            self.provider_file_reconciliation_candidates.set(
+                self.provider_file_reconciliation_candidates
+                    .get()
+                    .saturating_add(candidates.len()),
+            );
+        }
+        let stage_complete = query.exhausted && candidates.len() <= limit;
+        if !stage_complete {
+            candidates.truncate(limit);
+        }
+        // Charge the remaining slice for this owner query so the outer phase
+        // loop cannot multiply the per-query byte and time envelopes.
+        let visited = limit;
+        let last_rowid = candidates
+            .last()
+            .map(|(_, _, cursor)| parse_legacy_rowid(cursor))
+            .transpose()?;
+        let owned_entity_ids = candidates
+            .into_iter()
+            .filter_map(|(id, owned, _)| owned.then_some(id))
+            .collect::<Vec<_>>();
+
+        if !stage_complete {
+            let rowid = last_rowid.ok_or(StoreError::ProviderFileReconciliationInconsistent {
+                entity: "legacy reconciliation cursor",
+            })?;
+            return Ok(ReconciliationScan {
+                visited,
+                phase_complete: false,
+                batch_source_id: Some(current_source.to_owned()),
+                source_cursor: Some(current_source.to_owned()),
+                entity_cursor: Some(format_legacy_reconciliation_cursor(indirect, Some(rowid))),
+                owned_entity_ids,
+            });
+        }
+
+        if !indirect && spec.indirect_owner_scan_sql.is_some() {
+            return Ok(ReconciliationScan {
+                visited,
+                phase_complete: false,
+                batch_source_id: Some(current_source.to_owned()),
+                source_cursor: Some(current_source.to_owned()),
+                entity_cursor: Some(format_legacy_reconciliation_cursor(true, None)),
+                owned_entity_ids,
+            });
+        }
+
+        let next_source = self.next_reconciliation_source(replacement_id, current_source)?;
+        Ok(ReconciliationScan {
+            visited,
+            phase_complete: next_source.is_none(),
+            batch_source_id: Some(current_source.to_owned()),
+            source_cursor: next_source,
+            entity_cursor: None,
+            owned_entity_ids,
+        })
+    }
+
+    fn next_reconciliation_source(
+        &self,
+        replacement_id: &str,
+        current_source: &str,
+    ) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT source_id FROM {STAGING_PRIOR_SOURCES_TABLE} \
+                     WHERE replacement_id = ?1 AND source_id > ?2 \
+                     ORDER BY source_id LIMIT 1"
+                ),
+                params![replacement_id, current_source],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    fn query_reconciliation_rows(
+        &self,
+        sql: &str,
+        source_id: &str,
+        cursor: rusqlite::types::Value,
+        sqlite_limit: i64,
+    ) -> Result<ReconciliationQueryRows> {
+        let started = std::time::Instant::now();
+        self.conn.progress_handler(
+            1_000,
+            Some(move || started.elapsed() >= RECONCILIATION_SCAN_QUERY_TIMEOUT),
+        );
+        let mut candidates = Vec::new();
+        let mut bytes = 0usize;
+        let mut exhausted = true;
+        let query_result = (|| -> Result<()> {
+            let mut stmt = self.conn.prepare(sql)?;
+            let mut rows = stmt.query(params![source_id, cursor, sqlite_limit])?;
+            while let Some(row) = rows.next()? {
+                let id = row.get::<_, String>(0)?;
+                let owned = row.get::<_, bool>(1)?;
+                let row_cursor = row.get::<_, String>(2)?;
+                let row_bytes = id
+                    .len()
+                    .checked_add(row_cursor.len())
+                    .and_then(|bytes| bytes.checked_add(source_id.len()))
+                    .and_then(|bytes| bytes.checked_add(36))
+                    .ok_or(StoreError::ProviderFileReconciliationInconsistent {
+                        entity: "reconciliation scan byte count",
+                    })?;
+                if row_bytes > RECONCILIATION_SCAN_MAX_BYTES {
+                    return Err(StoreError::ProviderFileReconciliationInconsistent {
+                        entity: "reconciliation entity exceeds scan byte limit",
+                    });
+                }
+                if bytes.saturating_add(row_bytes) > RECONCILIATION_SCAN_MAX_BYTES {
+                    exhausted = false;
+                    break;
+                }
+                bytes += row_bytes;
+                candidates.push((id, owned, row_cursor));
+            }
+            Ok(())
+        })();
+        self.conn.progress_handler(0, None::<fn() -> bool>);
+        match query_result {
+            Ok(()) => Ok(ReconciliationQueryRows {
+                candidates,
+                exhausted,
+            }),
+            Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+                if error.code == rusqlite::ErrorCode::OperationInterrupted
+                    && started.elapsed() >= RECONCILIATION_SCAN_QUERY_TIMEOUT =>
+            {
+                if candidates.is_empty() {
+                    return Err(StoreError::ProviderFileReconciliationInconsistent {
+                        entity: "reconciliation scan made no progress before deadline",
+                    });
+                }
+                Ok(ReconciliationQueryRows {
+                    candidates,
+                    exhausted: false,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn parse_legacy_reconciliation_cursor(cursor: Option<&str>) -> Result<LegacyReconciliationCursor> {
+    let Some(cursor) = cursor else {
+        return Ok(LegacyReconciliationCursor::Direct(None));
+    };
+    if let Some(rowid) = cursor.strip_prefix(LEGACY_DIRECT_CURSOR_PREFIX) {
+        return Ok(LegacyReconciliationCursor::Direct(
+            parse_optional_legacy_rowid(rowid)?,
+        ));
+    }
+    if let Some(rowid) = cursor.strip_prefix(LEGACY_INDIRECT_CURSOR_PREFIX) {
+        return Ok(LegacyReconciliationCursor::Indirect(
+            parse_optional_legacy_rowid(rowid)?,
+        ));
+    }
+    Err(StoreError::ProviderFileReconciliationInconsistent {
+        entity: "legacy reconciliation cursor",
+    })
+}
+
+fn parse_optional_legacy_rowid(rowid: &str) -> Result<Option<i64>> {
+    if rowid.is_empty() {
+        Ok(None)
+    } else {
+        parse_legacy_rowid(rowid).map(Some)
+    }
+}
+
+fn parse_legacy_rowid(rowid: &str) -> Result<i64> {
+    rowid
+        .parse::<i64>()
+        .map_err(|_| StoreError::ProviderFileReconciliationInconsistent {
+            entity: "legacy reconciliation rowid cursor",
+        })
+}
+
+fn format_legacy_reconciliation_cursor(indirect: bool, rowid: Option<i64>) -> String {
+    let prefix = if indirect {
+        LEGACY_INDIRECT_CURSOR_PREFIX
+    } else {
+        LEGACY_DIRECT_CURSOR_PREFIX
+    };
+    match rowid {
+        Some(rowid) => format!("{prefix}{rowid}"),
+        None => prefix.to_owned(),
     }
 }

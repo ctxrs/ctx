@@ -3,13 +3,17 @@ use rusqlite::Connection;
 use crate::schema::ddl::table_exists;
 use crate::Result;
 
-pub(crate) const PROVIDER_SESSION_INVARIANTS_SQL: &str = r#"
+/// Optional accelerator for empty stores. Upgraded stores rely on the triggers
+/// below so enforcing new writes never requires a foreground corpus index.
+pub(crate) const FRESH_STORE_PROVIDER_SESSION_UNIQUE_INDEX_SQL: &str = r#"
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_unique_capture_source_external_session
 ON sessions(capture_source_id, provider, external_session_id)
 WHERE capture_source_id IS NOT NULL
   AND external_session_id IS NOT NULL
   AND deleted_at_ms IS NULL;
+"#;
 
+pub(crate) const PROVIDER_SESSION_INVARIANTS_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS trg_sessions_provider_source_identity_insert
 BEFORE INSERT ON sessions
 WHEN NEW.capture_source_id IS NOT NULL
@@ -148,5 +152,7 @@ mod tests {
         conn.execute_batch(crate::schema::ddl::CREATE_TABLES_SQL)
             .unwrap();
         conn.execute_batch(PROVIDER_SESSION_INVARIANTS_SQL).unwrap();
+        conn.execute_batch(FRESH_STORE_PROVIDER_SESSION_UNIQUE_INDEX_SQL)
+            .unwrap();
     }
 }
