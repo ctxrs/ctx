@@ -62,7 +62,7 @@ public sealed record SearchExecutionConsumption
         CandidateRows = R(json, "candidate_rows"); RetainedCandidateIds = R(json, "retained_candidate_ids");
         ResidualRows = R(json, "residual_rows"); VerificationBytes = R(json, "verification_bytes");
         LargestVerificationLookupBytes = R(json, "largest_verification_lookup_bytes");
-        HydratedRows = R(json, "hydrated_rows"); LegacyFallbackRows = R(json, "legacy_fallback_rows");
+        HydratedRows = R(json, "hydrated_rows");
         HydrationInputBytes = R(json, "hydration_input_bytes");
         LargestHydrationInputBytes = R(json, "largest_hydration_input_bytes");
         SnippetInputBytes = R(json, "snippet_input_bytes"); ReturnedResults = R(json, "returned_results");
@@ -74,7 +74,7 @@ public sealed record SearchExecutionConsumption
     public int LargestAnalyzedTokensPerClause { get; } public int LargestPositiveSeedCandidates { get; }
     public int CandidateRows { get; } public int RetainedCandidateIds { get; } public int ResidualRows { get; }
     public int VerificationBytes { get; } public int LargestVerificationLookupBytes { get; }
-    public int HydratedRows { get; } public int LegacyFallbackRows { get; } public int HydrationInputBytes { get; }
+    public int HydratedRows { get; } public int HydrationInputBytes { get; }
     public int LargestHydrationInputBytes { get; } public int SnippetInputBytes { get; }
     public int ReturnedResults { get; } public int ReturnedTextBytes { get; } public int SerializedResponseBytes { get; }
     public long ElapsedMs { get; }

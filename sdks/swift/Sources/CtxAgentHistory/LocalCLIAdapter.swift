@@ -1,4 +1,11 @@
 import Foundation
+import Darwin
+
+private let localStdoutCapBytes = 2 * 1024 * 1024
+private let localStderrCapBytes = 256 * 1024
+private let localReadBufferBytes = 64 * 1024
+private let localDrainGrace: TimeInterval = 0.1
+private let localTeardownLimit: TimeInterval = 1
 
 public struct CommandRequest: Equatable, Sendable {
     public var command: String
@@ -78,30 +85,31 @@ public struct ProcessCommandRunner: CommandRunner {
                 exitCode: -1
             )
         }
+        let processScope = OwnedProcessScope(process: process)
+        defer { processScope.terminate() }
 
-        let stdoutData = LockedData()
-        let stderrData = LockedData()
+        let stdoutData = LockedCapture(stream: "stdout", capBytes: localStdoutCapBytes)
+        let stderrData = LockedCapture(stream: "stderr", capBytes: localStderrCapBytes)
         let pipeReaders = DispatchGroup()
         pipeReaders.enter()
         DispatchQueue.global(qos: .utility).async {
-            stdoutData.store(stdout.fileHandleForReading.readDataToEndOfFile())
+            stdoutData.read(from: stdout.fileHandleForReading)
             pipeReaders.leave()
         }
         pipeReaders.enter()
         DispatchQueue.global(qos: .utility).async {
-            stderrData.store(stderr.fileHandleForReading.readDataToEndOfFile())
+            stderrData.read(from: stderr.fileHandleForReading)
             pipeReaders.leave()
         }
 
-        if let timeout = request.timeout {
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.01)
+        let deadline = request.timeout.map { Date().addingTimeInterval(max(0, $0)) }
+        while process.isRunning {
+            if let issue = stdoutData.issue() ?? stderrData.issue() {
+                abort(processScope, stdout, stderr, pipeReaders)
+                throw issue.sdkError(command: [request.command] + request.arguments)
             }
-            if process.isRunning {
-                process.terminate()
-                process.waitUntilExit()
-                pipeReaders.wait()
+            if let deadline, Date() >= deadline {
+                abort(processScope, stdout, stderr, pipeReaders)
                 throw CtxAgentHistorySDKError(
                     code: .timeout,
                     message: "ctx CLI timed out",
@@ -110,33 +118,156 @@ public struct ProcessCommandRunner: CommandRunner {
                     exitCode: -1
                 )
             }
+            Thread.sleep(forTimeInterval: 0.005)
         }
 
-        process.waitUntilExit()
-        pipeReaders.wait()
+        if pipeReaders.wait(timeout: .now() + localDrainGrace) == .timedOut {
+            abort(processScope, stdout, stderr, pipeReaders)
+            throw CaptureIssue.failure(stream: "pipe", cause: "a descendant retained a CLI output pipe")
+                .sdkError(command: [request.command] + request.arguments)
+        }
+        if let issue = stdoutData.issue() ?? stderrData.issue() {
+            throw issue.sdkError(command: [request.command] + request.arguments)
+        }
         return CommandResult(
-            stdout: stdoutData.load(),
-            stderr: stderrData.load(),
+            stdout: stdoutData.data(),
+            stderr: stderrData.data(),
             exitCode: process.terminationStatus
         )
     }
+
+    private func abort(
+        _ scope: OwnedProcessScope,
+        _ stdout: Pipe,
+        _ stderr: Pipe,
+        _ readers: DispatchGroup
+    ) {
+        scope.terminate()
+        try? stdout.fileHandleForReading.close()
+        try? stderr.fileHandleForReading.close()
+        _ = readers.wait(timeout: .now() + localTeardownLimit)
+    }
 }
 
-private final class LockedData: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
+private enum CaptureIssue {
+    case limit(stream: String, capBytes: Int)
+    case failure(stream: String, cause: String)
 
-    func store(_ newValue: Data) {
-        lock.lock()
-        data = newValue
-        lock.unlock()
+    func sdkError(command: [String]) -> CtxAgentHistorySDKError {
+        switch self {
+        case let .limit(stream, capBytes):
+            return CtxAgentHistorySDKError(
+                code: .captureLimit,
+                message: "ctx CLI \(stream) exceeded its capture limit",
+                details: .object([
+                    "stream": .string(stream),
+                    "capBytes": .number(Double(capBytes))
+                ]),
+                command: command,
+                exitCode: -1
+            )
+        case let .failure(stream, cause):
+            return CtxAgentHistorySDKError(
+                code: .captureFailure,
+                message: "ctx CLI output capture failed",
+                details: .object(["stream": .string(stream)]),
+                cause: cause,
+                command: command,
+                exitCode: -1
+            )
+        }
+    }
+}
+
+private final class LockedCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let stream: String
+    private let capBytes: Int
+    private var captured = Data()
+    private var captureIssue: CaptureIssue?
+
+    init(stream: String, capBytes: Int) {
+        self.stream = stream
+        self.capBytes = capBytes
     }
 
-    func load() -> Data {
+    func read(from handle: FileHandle) {
+        do {
+            while let chunk = try handle.read(upToCount: localReadBufferBytes), !chunk.isEmpty {
+                lock.lock()
+                let remaining = capBytes - captured.count
+                if chunk.count > remaining {
+                    if remaining > 0 {
+                        captured.append(contentsOf: chunk.prefix(remaining))
+                    }
+                    captureIssue = .limit(stream: stream, capBytes: capBytes)
+                    lock.unlock()
+                    return
+                }
+                captured.append(chunk)
+                lock.unlock()
+            }
+        } catch {
+            lock.lock()
+            if captureIssue == nil {
+                captureIssue = .failure(stream: stream, cause: String(describing: error))
+            }
+            lock.unlock()
+        }
+    }
+
+    func data() -> Data {
         lock.lock()
-        let value = data
+        let value = captured
         lock.unlock()
         return value
+    }
+
+    func issue() -> CaptureIssue? {
+        lock.lock()
+        let value = captureIssue
+        lock.unlock()
+        return value
+    }
+}
+
+private final class OwnedProcessScope {
+    private let process: Process
+    private let processIdentifier: pid_t
+    private let ownsProcessGroup: Bool
+    private let lock = NSLock()
+    private var terminated = false
+
+    init(process: Process) {
+        self.process = process
+        processIdentifier = process.processIdentifier
+        ownsProcessGroup = setpgid(processIdentifier, processIdentifier) == 0
+    }
+
+    func terminate() {
+        lock.lock()
+        if terminated {
+            lock.unlock()
+            return
+        }
+        terminated = true
+        lock.unlock()
+
+        let signaledGroup = ownsProcessGroup && kill(-processIdentifier, SIGTERM) == 0
+        if process.isRunning {
+            process.terminate()
+        }
+        if signaledGroup {
+            Thread.sleep(forTimeInterval: localDrainGrace)
+            _ = kill(-processIdentifier, SIGKILL)
+        }
+        if process.isRunning {
+            _ = kill(processIdentifier, SIGKILL)
+        }
+        let deadline = Date().addingTimeInterval(localTeardownLimit)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
     }
 }
 
@@ -173,14 +304,17 @@ public struct LocalCLIAdapter: Sendable {
             throw CtxAgentHistorySDKError(code: .invalidRequest, message: "local ctx CLI path is empty")
         }
         let finalArguments = argv(arguments)
-        let result = try runner.run(
-            CommandRequest(
-                command: ctxPath,
-                arguments: finalArguments,
-                cwd: cwd,
-                env: env,
-                timeout: timeout
-            )
+        let result = try validated(
+            runner.run(
+                CommandRequest(
+                    command: ctxPath,
+                    arguments: finalArguments,
+                    cwd: cwd,
+                    env: env,
+                    timeout: timeout
+                )
+            ),
+            arguments: finalArguments
         )
         if result.exitCode != 0 {
             throw commandError(result: result, arguments: finalArguments)
@@ -201,8 +335,9 @@ public struct LocalCLIAdapter: Sendable {
     }
 
     public func versionString() throws -> String {
-        let result = try runner.run(
-            CommandRequest(command: ctxPath, arguments: ["--version"], cwd: cwd, env: env, timeout: timeout)
+        let result = try validated(
+            runner.run(CommandRequest(command: ctxPath, arguments: ["--version"], cwd: cwd, env: env, timeout: timeout)),
+            arguments: ["--version"]
         )
         if result.exitCode != 0 {
             throw commandError(result: result, arguments: ["--version"])
@@ -237,6 +372,23 @@ public struct LocalCLIAdapter: Sendable {
             stdout: stdout,
             stderr: stderr
         )
+    }
+
+    private func validated(_ result: CommandResult, arguments: [String]) throws -> CommandResult {
+        for (stream, data, capBytes) in [
+            ("stdout", result.stdout, localStdoutCapBytes),
+            ("stderr", result.stderr, localStderrCapBytes)
+        ] {
+            if data.count > capBytes {
+                throw CaptureIssue.limit(stream: stream, capBytes: capBytes)
+                    .sdkError(command: [ctxPath] + arguments)
+            }
+            if String(data: data, encoding: .utf8) == nil {
+                throw CaptureIssue.failure(stream: stream, cause: "output was not valid UTF-8")
+                    .sdkError(command: [ctxPath] + arguments)
+            }
+        }
+        return result
     }
 }
 

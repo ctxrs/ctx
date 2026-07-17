@@ -9,6 +9,8 @@ public enum AgentHistoryErrorCode: String, Sendable {
     case cancelled
     case notSupported = "not_supported"
     case adapterError = "adapter_error"
+    case captureLimit = "capture_limit"
+    case captureFailure = "capture_failure"
     case decodeError = "decode_error"
     case unknown
 }
