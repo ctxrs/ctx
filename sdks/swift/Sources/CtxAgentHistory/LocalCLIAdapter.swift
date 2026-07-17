@@ -164,16 +164,49 @@ public struct ProcessCommandRunner: CommandRunner {
         )
     }
 
-    private static func launcherPath(for request: CommandRequest) -> String? {
+    static func launcherPath(
+        for request: CommandRequest,
+        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        let launcher: String?
         if let override = request.env[processScopeLauncherEnvironment], !override.isEmpty {
-            return override
+            launcher = override
+        } else if let override = inheritedEnvironment[processScopeLauncherEnvironment], !override.isEmpty {
+            launcher = override
+        } else {
+            let name = URL(fileURLWithPath: request.command).lastPathComponent.lowercased()
+            launcher = name == "ctx" || name == "ctx.exe"
+                || name.hasPrefix("ctx-") || name.hasPrefix("ctx_")
+                ? request.command
+                : nil
         }
-        if let override = ProcessInfo.processInfo.environment[processScopeLauncherEnvironment], !override.isEmpty {
-            return override
+        guard let launcher else { return nil }
+        return resolveExecutable(
+            launcher,
+            path: request.env["PATH"] ?? inheritedEnvironment["PATH"]
+        )
+    }
+
+    private static func resolveExecutable(_ executable: String, path: String?) -> String? {
+        if executable.contains("/") || executable.contains("\\") {
+            return executable
         }
-        let name = URL(fileURLWithPath: request.command).lastPathComponent.lowercased()
-        if name == "ctx" || name == "ctx.exe" || name.hasPrefix("ctx-") || name.hasPrefix("ctx_") {
-            return request.command
+        #if os(Windows)
+        let separator: Character = ";"
+        #else
+        let separator: Character = ":"
+        #endif
+        for entry in (path ?? "").split(
+            separator: separator,
+            omittingEmptySubsequences: false
+        ) {
+            let directory = entry.isEmpty ? "." : String(entry)
+            let candidate = URL(fileURLWithPath: directory)
+                .appendingPathComponent(executable)
+                .path
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
         }
         return nil
     }

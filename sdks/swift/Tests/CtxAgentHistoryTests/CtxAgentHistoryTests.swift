@@ -465,6 +465,28 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: alive.path))
     }
 
+    func testProcessRunnerResolvesBareCtxFromRequestPath() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ctx = directory.appendingPathComponent("ctx")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: ctx.path,
+            contents: Data("#!/bin/sh\nexit 0\n".utf8)
+        ))
+        XCTAssertEqual(chmod(ctx.path, 0o700), 0)
+
+        let request = CommandRequest(
+            command: "ctx",
+            arguments: ["status", "--json"],
+            env: ["PATH": directory.path]
+        )
+        XCTAssertEqual(
+            ProcessCommandRunner.launcherPath(for: request, inheritedEnvironment: [:]),
+            ctx.path
+        )
+    }
+
     private static var nativeProcessScopeAvailable: Bool {
         if let launcher = ProcessInfo.processInfo.environment["CTX_SDK_PROCESS_SCOPE_LAUNCHER"],
            !launcher.isEmpty {

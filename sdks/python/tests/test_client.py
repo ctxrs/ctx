@@ -553,9 +553,12 @@ class LocalCliAdapterTests(unittest.TestCase):
         spawned: list[typing.Any] = []
 
         def interrupt_after_spawn(
-            command: list[str], process: typing.Any, uses_windows_launcher: bool
+            command: list[str],
+            process: typing.Any,
+            uses_windows_launcher: bool,
+            cleanup: typing.Any,
         ) -> typing.NoReturn:
-            del command, uses_windows_launcher
+            del command, uses_windows_launcher, cleanup
             spawned.append(process)
             raise KeyboardInterrupt
 
@@ -566,6 +569,40 @@ class LocalCliAdapterTests(unittest.TestCase):
             side_effect=interrupt_after_spawn,
         ):
             with self.assertRaises(KeyboardInterrupt):
+                adapter._run(
+                    [
+                        "-c",
+                        "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)",
+                    ]
+                )
+
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(spawned), 1)
+        self._assert_process_exited(spawned[0].pid)
+
+    def test_supervision_exception_after_spawn_reaps_owned_scope(self) -> None:
+        if os.name == "nt" and not os.environ.get("CTX_SDK_PROCESS_SCOPE_LAUNCHER"):
+            self.skipTest("native Windows process-scope launcher is unavailable")
+        adapter = LocalCliAdapter(LocalConfig(ctx_binary=sys.executable, timeout=60))
+        spawned: list[typing.Any] = []
+
+        def fail_after_spawn(
+            command: list[str],
+            process: typing.Any,
+            uses_windows_launcher: bool,
+            cleanup: typing.Any,
+        ) -> typing.NoReturn:
+            del command, uses_windows_launcher, cleanup
+            spawned.append(process)
+            raise RuntimeError("injected supervision failure")
+
+        started = time.monotonic()
+        with mock.patch.object(
+            LocalCliAdapter,
+            "_supervise_process",
+            side_effect=fail_after_spawn,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected supervision failure"):
                 adapter._run(
                     [
                         "-c",
