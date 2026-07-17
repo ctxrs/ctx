@@ -180,6 +180,178 @@ pub(crate) const CAPTURE_SOURCE_IDENTITY_COLUMNS: &[ColumnSpec] = &[
     },
 ];
 
+pub(crate) const IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS import_inventory_runs (
+    run_id BLOB PRIMARY KEY NOT NULL CHECK (length(run_id) BETWEEN 1 AND 1024),
+    checkpoint_format_version INTEGER NOT NULL CHECK (checkpoint_format_version > 0),
+    producer_build_id BLOB NOT NULL CHECK (length(producer_build_id) BETWEEN 1 AND 1024),
+    store_schema_version INTEGER NOT NULL CHECK (store_schema_version > 0),
+    status TEXT NOT NULL DEFAULT 'active'
+      CHECK (status IN ('active', 'completed', 'abandoned', 'cleaning', 'cleaned')),
+    source_count INTEGER NOT NULL DEFAULT 0 CHECK (source_count >= 0),
+    completed_source_count INTEGER NOT NULL DEFAULT 0
+      CHECK (completed_source_count BETWEEN 0 AND source_count),
+    abandoned_source_count INTEGER NOT NULL DEFAULT 0
+      CHECK (abandoned_source_count BETWEEN 0 AND source_count),
+    last_error TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS import_inventory_checkpoints (
+    run_id BLOB NOT NULL REFERENCES import_inventory_runs(run_id) ON DELETE CASCADE,
+    inventory_family TEXT NOT NULL
+      CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL CHECK (length(source_format) BETWEEN 1 AND 256),
+    source_root TEXT NOT NULL CHECK (length(source_root) BETWEEN 1 AND 32768),
+    source_identity BLOB NOT NULL CHECK (length(source_identity) BETWEEN 1 AND 1024),
+    source_fingerprint BLOB NOT NULL CHECK (length(source_fingerprint) BETWEEN 1 AND 1024),
+    root_platform_tag TEXT NOT NULL CHECK (length(root_platform_tag) BETWEEN 1 AND 32),
+    root_encoding_tag TEXT NOT NULL CHECK (length(root_encoding_tag) BETWEEN 1 AND 32),
+    root_path_hash BLOB NOT NULL CHECK (length(root_path_hash) BETWEEN 16 AND 128),
+    inventory_generation INTEGER NOT NULL CHECK (inventory_generation > 0),
+    scratch_identity BLOB NOT NULL CHECK (length(scratch_identity) BETWEEN 1 AND 1024),
+    scratch_integrity BLOB NOT NULL CHECK (length(scratch_integrity) BETWEEN 16 AND 256),
+    scratch_lock_identity BLOB NOT NULL CHECK (length(scratch_lock_identity) BETWEEN 1 AND 1024),
+    scratch_database_identity BLOB NOT NULL
+      CHECK (length(scratch_database_identity) BETWEEN 1 AND 1024),
+    status TEXT NOT NULL DEFAULT 'active'
+      CHECK (status IN ('active', 'completed', 'abandoned', 'cleaning', 'cleaned')),
+    phase TEXT NOT NULL DEFAULT 'discovery'
+      CHECK (phase IN (
+        'discovery', 'selection', 'application', 'finalization', 'cleanup', 'complete', 'abandoned'
+      )),
+    application_keyset BLOB,
+    selection_keyset BLOB,
+    selection_eof INTEGER NOT NULL DEFAULT 0 CHECK (selection_eof IN (0, 1)),
+    selection_complete INTEGER NOT NULL DEFAULT 0 CHECK (selection_complete IN (0, 1)),
+    discovery_complete INTEGER NOT NULL DEFAULT 0 CHECK (discovery_complete IN (0, 1)),
+    application_complete INTEGER NOT NULL DEFAULT 0 CHECK (application_complete IN (0, 1)),
+    directory_queue_empty INTEGER NOT NULL DEFAULT 0 CHECK (directory_queue_empty IN (0, 1)),
+    owner_epoch INTEGER NOT NULL DEFAULT 0 CHECK (owner_epoch >= 0),
+    owner_token BLOB CHECK (owner_token IS NULL OR length(owner_token) BETWEEN 16 AND 64),
+    owner_state TEXT NOT NULL DEFAULT 'inactive'
+      CHECK (owner_state IN ('inactive', 'awaiting_scratch_adoption', 'active')),
+    scratch_owner_epoch INTEGER CHECK (scratch_owner_epoch > 0),
+    scratch_owner_token BLOB
+      CHECK (scratch_owner_token IS NULL OR length(scratch_owner_token) BETWEEN 16 AND 64),
+    lease_owner_id TEXT,
+    lease_expires_at_ms INTEGER,
+    active_directory_platform_tag TEXT,
+    active_directory_encoding_tag TEXT,
+    active_directory_path_hash BLOB,
+    active_directory_identity BLOB,
+    active_directory_fingerprint BLOB,
+    active_directory_attempt_count INTEGER CHECK (active_directory_attempt_count >= 0),
+    active_directory_replay_count INTEGER CHECK (
+      active_directory_replay_count BETWEEN 0 AND active_directory_attempt_count
+    ),
+    active_directory_observed_entries INTEGER
+      CHECK (active_directory_observed_entries >= 0),
+    active_directory_next_retry_at_ms INTEGER,
+    directory_count INTEGER NOT NULL DEFAULT 0 CHECK (directory_count >= 0),
+    completed_directory_count INTEGER NOT NULL DEFAULT 0
+      CHECK (completed_directory_count BETWEEN 0 AND directory_count),
+    discovered_path_count INTEGER NOT NULL DEFAULT 0 CHECK (discovered_path_count >= 0),
+    planned_path_count INTEGER NOT NULL DEFAULT 0 CHECK (planned_path_count >= 0),
+    applied_path_count INTEGER NOT NULL DEFAULT 0
+      CHECK (applied_path_count BETWEEN 0 AND planned_path_count),
+    applied_row_count INTEGER NOT NULL DEFAULT 0 CHECK (applied_row_count >= 0),
+    applied_bytes INTEGER NOT NULL DEFAULT 0 CHECK (applied_bytes >= 0),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    replay_count INTEGER NOT NULL DEFAULT 0
+      CHECK (replay_count BETWEEN 0 AND attempt_count),
+    next_retry_at_ms INTEGER,
+    last_error TEXT,
+    abandon_reason TEXT,
+    cleanup_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (cleanup_status IN ('pending', 'running', 'complete', 'blocked')),
+    cleanup_keyset BLOB,
+    cleanup_row_count INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_row_count >= 0),
+    cleanup_bytes INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_bytes >= 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (run_id, inventory_family, provider, source_root),
+    UNIQUE (
+      inventory_family, provider, source_identity, inventory_generation
+    ),
+    UNIQUE (
+      inventory_family, provider, source_root, inventory_generation
+    ),
+    FOREIGN KEY (provider, source_root, inventory_family)
+      REFERENCES import_inventory_generations(provider, source_root, inventory_family),
+    CHECK (
+      (owner_state = 'inactive' AND owner_token IS NULL
+       AND lease_owner_id IS NULL AND lease_expires_at_ms IS NULL)
+      OR (owner_state != 'inactive' AND owner_token IS NOT NULL
+          AND length(lease_owner_id) BETWEEN 1 AND 256 AND lease_expires_at_ms IS NOT NULL)
+    ),
+    CHECK (
+      (scratch_owner_epoch IS NULL AND scratch_owner_token IS NULL)
+      OR (scratch_owner_epoch IS NOT NULL AND scratch_owner_token IS NOT NULL)
+    ),
+    CHECK (
+      (active_directory_path_hash IS NULL
+       AND active_directory_platform_tag IS NULL
+       AND active_directory_encoding_tag IS NULL
+       AND active_directory_identity IS NULL
+       AND active_directory_fingerprint IS NULL
+       AND active_directory_attempt_count IS NULL
+       AND active_directory_replay_count IS NULL
+       AND active_directory_observed_entries IS NULL
+       AND active_directory_next_retry_at_ms IS NULL)
+      OR (length(active_directory_path_hash) BETWEEN 16 AND 128
+          AND length(active_directory_platform_tag) BETWEEN 1 AND 32
+          AND length(active_directory_encoding_tag) BETWEEN 1 AND 32
+          AND length(active_directory_identity) BETWEEN 1 AND 1024
+          AND length(active_directory_fingerprint) BETWEEN 1 AND 1024
+          AND active_directory_attempt_count IS NOT NULL
+          AND active_directory_replay_count IS NOT NULL
+          AND active_directory_observed_entries IS NOT NULL)
+    ),
+    CHECK (planned_path_count <= discovered_path_count),
+    CHECK (selection_eof = 0 OR discovery_complete = 1),
+    CHECK (selection_complete = 0 OR selection_eof = 1),
+    CHECK (application_complete = 0 OR selection_complete = 1)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS import_inventory_path_effects (
+    run_id BLOB NOT NULL,
+    inventory_family TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    source_root TEXT NOT NULL,
+    inventory_generation INTEGER NOT NULL CHECK (inventory_generation > 0),
+    capture_journal_identity BLOB NOT NULL
+      CHECK (length(capture_journal_identity) BETWEEN 16 AND 128),
+    path_platform_tag TEXT NOT NULL CHECK (length(path_platform_tag) BETWEEN 1 AND 32),
+    path_encoding_tag TEXT NOT NULL CHECK (length(path_encoding_tag) BETWEEN 1 AND 32),
+    native_path_hash BLOB NOT NULL CHECK (length(native_path_hash) BETWEEN 16 AND 128),
+    source_path TEXT NOT NULL CHECK (length(source_path) BETWEEN 1 AND 32768),
+    effect_kind TEXT NOT NULL CHECK (effect_kind IN (
+      'catalog_upsert', 'source_upsert', 'catalog_stale',
+      'source_stale', 'catalog_rescan', 'source_rescan',
+      'catalog_rejected', 'source_rejected'
+    )),
+    effect_fingerprint BLOB NOT NULL CHECK (length(effect_fingerprint) BETWEEN 1 AND 1024),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    affected_row_count INTEGER NOT NULL DEFAULT 0 CHECK (affected_row_count >= 0),
+    affected_bytes INTEGER NOT NULL DEFAULT 0 CHECK (affected_bytes >= 0),
+    applied_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (
+      run_id, inventory_family, provider, source_root, inventory_generation,
+      path_platform_tag, path_encoding_tag, native_path_hash
+    ),
+    UNIQUE (
+      run_id, inventory_family, provider, source_root, inventory_generation,
+      capture_journal_identity
+    ),
+    FOREIGN KEY (run_id, inventory_family, provider, source_root)
+      REFERENCES import_inventory_checkpoints(run_id, inventory_family, provider, source_root)
+      ON DELETE CASCADE
+) WITHOUT ROWID;
+"#;
+
 pub(crate) const CREATE_TABLES_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,

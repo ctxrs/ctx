@@ -218,3 +218,4 @@ include!("tests/pending_reasons.rs");
 include!("tests/catalog_imports.rs");
 include!("tests/source_imports.rs");
 include!("tests/queries.rs");
+include!("tests/inventory_checkpoints.rs");

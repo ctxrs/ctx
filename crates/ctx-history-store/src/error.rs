@@ -35,6 +35,40 @@ pub enum StoreError {
     ImportPendingWorkRepairBusy,
     #[error("ctx import pending-work repair made no progress within {timeout_ms}ms")]
     ImportPendingWorkRepairTimedOut { timeout_ms: u64 },
+    #[error("invalid durable import inventory checkpoint: {0}")]
+    InvalidImportInventoryCheckpoint(&'static str),
+    #[error("durable import inventory checkpoint was not found")]
+    ImportInventoryCheckpointNotFound,
+    #[error("durable import inventory checkpoint is leased by {owner_id}")]
+    ImportInventoryCheckpointBusy { owner_id: String },
+    #[error("durable import inventory checkpoint owner epoch or token is stale")]
+    ImportInventoryCheckpointStaleAuthority,
+    #[error("durable import inventory checkpoint scratch state is missing")]
+    ImportInventoryCheckpointScratchMissing,
+    #[error("durable import inventory checkpoint scratch state is corrupt")]
+    ImportInventoryCheckpointScratchCorrupt,
+    #[error("durable import inventory checkpoint scratch state was tampered with")]
+    ImportInventoryCheckpointScratchTampered,
+    #[error("durable import inventory checkpoint trust mismatch: {field}")]
+    ImportInventoryCheckpointTrustMismatch { field: &'static str },
+    #[error("durable import inventory checkpoint generation is no longer current")]
+    ImportInventoryCheckpointGenerationMismatch,
+    #[error("durable import inventory checkpoint invariant failed: {0}")]
+    ImportInventoryCheckpointInvariant(&'static str),
+    #[error("durable import inventory checkpoint is incomplete: {0}")]
+    ImportInventoryCheckpointIncomplete(&'static str),
+    #[error("durable import inventory path effect conflicts with a committed effect")]
+    ImportInventoryCheckpointIdempotenceConflict,
+    #[error("durable import inventory cleanup is blocked by untrusted scratch state")]
+    ImportInventoryCheckpointCleanupBlocked,
+    #[error("durable import inventory page exceeds its {max_bytes}-byte bound")]
+    ImportInventoryCheckpointPageTooLarge { max_bytes: usize },
+    #[error("durable import inventory page exceeds its {max_rows}-row bound")]
+    ImportInventoryCheckpointPageTooManyRows { max_rows: usize },
+    #[error("durable import inventory maintenance made no progress")]
+    ImportInventoryCheckpointNoProgress,
+    #[error("durable import inventory maintenance could not acquire the writer without waiting")]
+    ImportInventoryCheckpointWriterBusy,
     #[error("unsafe or ambiguous history store identity")]
     UnsafeStoreIdentity,
     #[error("unsupported session history archive version: {0}")]

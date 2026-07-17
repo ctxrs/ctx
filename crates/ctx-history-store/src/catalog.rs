@@ -442,6 +442,7 @@ impl FromStr for CatalogIndexedStatus {
 }
 
 include!("catalog/inventory.rs");
+include!("catalog/inventory_checkpoints.rs");
 include!("catalog/inventory_pacing.rs");
 include!("catalog/pending_work.rs");
 include!("catalog/source_imports.rs");

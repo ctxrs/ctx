@@ -1809,3 +1809,4 @@ fn schema_v46_adds_mimocode_provider_checks() {
 }
 
 include!("tests/import_contract.rs");
+include!("tests/inventory_checkpoints.rs");

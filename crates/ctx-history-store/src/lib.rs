@@ -27,9 +27,19 @@ pub use bulk_search::{install_event_search_maintenance_pacer, EventSearchMainten
 pub use bulk_search::{EventSearchBulkGuard, EventSearchBulkMaintenanceOutcome};
 pub use catalog::{
     CatalogCounts, CatalogImportWork, CatalogIndexedStatus, CatalogSession,
-    CatalogSourceIndexState, CatalogSourceIndexUpdate, ImportPendingReason,
+    CatalogSourceIndexState, CatalogSourceIndexUpdate, ImportInventoryActiveDirectoryProof,
+    ImportInventoryActiveDirectoryStatus, ImportInventoryCanonicalEffect,
+    ImportInventoryCaptureCheckpoint, ImportInventoryCheckpointAcquisition,
+    ImportInventoryCheckpointCompletionProof, ImportInventoryCheckpointLease,
+    ImportInventoryCheckpointRecovery, ImportInventoryCheckpointStatus,
+    ImportInventoryCheckpointTrust, ImportInventoryCleanupAdvance, ImportInventoryEffectCounters,
+    ImportInventoryNativePathIdentity, ImportInventoryOwnedPathIdentity,
+    ImportInventoryPathEffectOutcome, ImportInventoryPathEffectRequest,
+    ImportInventoryScratchOwner, ImportInventoryScratchState, ImportPendingReason,
     ImportPendingReasonRepairProgress, ImportWorkClass, IndexedHistoryCounts, SourceImportFile,
     SourceImportFileCounts, SourceImportFileIndexUpdate, SourceImportFileWork,
+    IMPORT_INVENTORY_CHECKPOINT_FORMAT_VERSION, IMPORT_INVENTORY_CHECKPOINT_MAX_KEYSET_BYTES,
+    IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_BYTES, IMPORT_INVENTORY_CHECKPOINT_MAX_PAGE_ROWS,
 };
 pub use error::{Result, StoreError};
 pub use files::FileTouchScope;

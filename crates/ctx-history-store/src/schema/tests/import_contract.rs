@@ -1788,11 +1788,23 @@ fn v53_migration_adds_bounded_completion_without_row_or_index_churn() {
         "#,
     )
     .unwrap();
-    let schema_objects = [
-        "provider_file_publications",
+    let schema_objects = ["provider_file_publications"];
+    let fresh_only_indexes = [
         "idx_provider_file_publications_owner",
         "idx_provider_file_publications_fence",
     ];
+    for name in fresh_only_indexes {
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "v52 upgrade fixture unexpectedly installed fresh-only index {name}"
+        );
+    }
     let rootpages_before = schema_objects.map(|name| {
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema WHERE name = ?1",
@@ -1867,6 +1879,18 @@ fn v53_migration_adds_bounded_completion_without_row_or_index_churn() {
         .unwrap()
     });
     assert_eq!(rootpages_after, rootpages_before);
+    for name in fresh_only_indexes {
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "v53 migration installed fresh-only index {name}"
+        );
+    }
     let observed = observed.lock().unwrap();
     assert!(observed
         .iter()
