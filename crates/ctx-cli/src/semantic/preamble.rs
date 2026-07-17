@@ -878,6 +878,7 @@ fn register_sqlite_vec_auto_extension() -> bool {
     false
 }
 
+#[derive(Debug)]
 struct SemanticVectorHit {
     event_id: Uuid,
     similarity: f32,
@@ -895,7 +896,7 @@ struct SemanticVectorSearchStats {
     events_scored: usize,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SemanticVectorSearch {
     hits: Vec<SemanticVectorHit>,
     stats: SemanticVectorSearchStats,
