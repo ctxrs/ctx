@@ -486,6 +486,46 @@ fn v57_migration_creates_empty_projection_without_reading_inventory() {
 }
 
 #[test]
+fn v57_migration_reuses_a_preexisting_compatible_selection_index() {
+    let temp = tempdir();
+    let path = temp.path().join("v57-compatible-selection-index.sqlite");
+    let store = Store::open(&path).unwrap();
+    let rootpage_before: i64 = store
+        .conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'idx_import_pending_work_selection'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .conn
+        .execute_batch("PRAGMA user_version = 56")
+        .unwrap();
+
+    crate::schema::migrations::migrate_pending_work_projection_to_v57(&store.conn).unwrap();
+
+    let rootpage_after: i64 = store
+        .conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'idx_import_pending_work_selection'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rootpage_after, rootpage_before);
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        57
+    );
+}
+
+#[test]
 fn real_schema_v45_fixture_migrates_import_state_through_v49() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
@@ -536,8 +576,12 @@ fn real_schema_v45_fixture_migrates_import_state_through_v49() {
         .unwrap();
     assert_eq!(before_repair, None);
     let mut repair_complete = false;
-    for _ in 0..8 {
-        if store.repair_import_pending_reasons(1).unwrap().complete {
+    for _ in 0..64 {
+        if store
+            .repair_import_pending_reasons(1, 64 * 1024, std::time::Duration::from_secs(1))
+            .unwrap()
+            .complete
+        {
             repair_complete = true;
             break;
         }
@@ -703,8 +747,10 @@ fn schema_v48_preserves_inventory_tables_and_defers_bounded_legacy_repair() {
     assert_eq!(before_repair, (None, None));
     let mut repaired_rows = 0;
     let mut repair_complete = false;
-    for _ in 0..8 {
-        let progress = store.repair_import_pending_reasons(1).unwrap();
+    for _ in 0..64 {
+        let progress = store
+            .repair_import_pending_reasons(1, 64 * 1024, std::time::Duration::from_secs(1))
+            .unwrap();
         assert!(progress.processed_rows <= 1);
         repaired_rows += progress.classified_rows;
         if progress.complete {

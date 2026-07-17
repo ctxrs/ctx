@@ -4,7 +4,8 @@ use ctx_history_core::{
 };
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
-use std::{fmt::Write as _, str::FromStr};
+use std::{fmt::Write as _, str::FromStr, time::Duration};
+use uuid::Uuid;
 
 use crate::connection::{
     capped_i64, collect_rows, nonnegative_i64_to_u32, nonnegative_i64_to_u64, parse_json,
@@ -172,6 +173,15 @@ pub enum ImportWorkClass {
     Recovery,
 }
 
+impl ImportWorkClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogImportWork {
     pub session: CatalogSession,
@@ -192,10 +202,18 @@ pub struct SourceImportFileWork {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImportPendingReasonRepairProgress {
+    pub visited_rows: usize,
     pub processed_rows: usize,
+    pub processed_bytes: usize,
     pub classified_rows: usize,
     pub completed_families: usize,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportPendingWorkSelectionMode {
+    Direct,
+    Projection,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,15 +231,172 @@ impl ImportPendingReasonRepairFamily {
             Self::SourceImportFiles => "source_import_files",
         }
     }
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "catalog_sessions" => Ok(Self::CatalogSessions),
+            "source_import_files" => Ok(Self::SourceImportFiles),
+            _ => Err(StoreError::ImportInventorySchemaIncompatible(
+                "unknown pending-reason repair family",
+            )),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct ImportPendingReasonRepairRow {
     provider: String,
+    source_format: String,
     source_root: String,
     source_path: String,
+    external_session_id: Option<String>,
+    metadata_json: String,
+    indexed_status: CatalogIndexedStatus,
+    indexed_file_size_bytes: Option<i64>,
+    indexed_file_modified_at_ms: Option<i64>,
+    file_size_bytes: i64,
+    file_modified_at_ms: i64,
+    import_revision: i64,
+    indexed_import_revision: Option<i64>,
+    is_stale: bool,
+    pending_reason: Option<String>,
     grandfather_indexed_revision: bool,
-    requires_work: bool,
+}
+
+impl ImportPendingReasonRepairRow {
+    fn estimated_bytes(&self) -> usize {
+        self.provider
+            .len()
+            .saturating_add(self.source_format.len())
+            .saturating_add(self.source_root.len())
+            .saturating_add(self.source_path.len())
+            .saturating_add(self.external_session_id.as_deref().map_or(0, str::len))
+            .saturating_add(self.metadata_json.len())
+            .saturating_add(256)
+            .max(1)
+    }
+
+    fn requires_material_check(&self) -> bool {
+        let effective_indexed_revision = self.indexed_import_revision.or(self
+            .grandfather_indexed_revision
+            .then_some(self.import_revision));
+        self.pending_reason.is_none()
+            && !self.is_stale
+            && matches!(
+                self.indexed_status,
+                CatalogIndexedStatus::Indexed | CatalogIndexedStatus::CompletedWithRejections
+            )
+            && self.indexed_file_size_bytes == Some(self.file_size_bytes)
+            && self.indexed_file_modified_at_ms == Some(self.file_modified_at_ms)
+            && effective_indexed_revision == Some(self.import_revision)
+    }
+
+    fn requires_work_without_material(&self) -> bool {
+        let effective_indexed_revision = self.indexed_import_revision.or(self
+            .grandfather_indexed_revision
+            .then_some(self.import_revision));
+        self.pending_reason.is_none()
+            && !self.is_stale
+            && (matches!(
+                self.indexed_status,
+                CatalogIndexedStatus::Pending | CatalogIndexedStatus::Failed
+            ) || (matches!(
+                self.indexed_status,
+                CatalogIndexedStatus::Indexed | CatalogIndexedStatus::CompletedWithRejections
+            ) && (self.indexed_file_size_bytes != Some(self.file_size_bytes)
+                || self.indexed_file_modified_at_ms != Some(self.file_modified_at_ms)
+                || effective_indexed_revision != Some(self.import_revision))))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceImportPendingRepairCursor {
+    completed_path: Option<String>,
+    active_provider: Option<String>,
+    active_source_root: Option<String>,
+    active_source_path: Option<String>,
+    material_rowid: i64,
+}
+
+impl SourceImportPendingRepairCursor {
+    fn from_ledger(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::default();
+        };
+        serde_json::from_str::<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        )>(value)
+        .map(
+            |(
+                completed_path,
+                active_provider,
+                active_source_root,
+                active_source_path,
+                material_rowid,
+            )| Self {
+                completed_path,
+                active_provider,
+                active_source_root,
+                active_source_path,
+                material_rowid,
+            },
+        )
+        .unwrap_or_else(|_| Self {
+            completed_path: Some(value.to_owned()),
+            ..Self::default()
+        })
+    }
+
+    fn encode(&self) -> Result<String> {
+        serde_json::to_string(&(
+            &self.completed_path,
+            &self.active_provider,
+            &self.active_source_root,
+            &self.active_source_path,
+            self.material_rowid,
+        ))
+        .map_err(Into::into)
+    }
+
+    fn active_matches(&self, row: &ImportPendingReasonRepairRow) -> bool {
+        self.active_provider.as_deref() == Some(&row.provider)
+            && self.active_source_root.as_deref() == Some(&row.source_root)
+            && self.active_source_path.as_deref() == Some(&row.source_path)
+    }
+}
+
+impl Default for SourceImportPendingRepairCursor {
+    fn default() -> Self {
+        Self {
+            completed_path: None,
+            active_provider: None,
+            active_source_root: None,
+            active_source_path: None,
+            material_rowid: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ImportPendingReasonRepairStep {
+    visited_rows: usize,
+    processed_rows: usize,
+    processed_bytes: usize,
+    classified_rows: usize,
+}
+
+#[derive(Debug)]
+struct LegacyCaptureSourceRow {
+    rowid: i64,
+    provider: String,
+    source_format: Option<String>,
+    source_root: Option<String>,
+    raw_source_path: Option<String>,
+    estimated_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -515,10 +690,6 @@ fn import_work_class_predicate(alias: &str, class: ImportWorkClass) -> String {
         }
     };
     format!("{alias}.pending_reason IN ({reasons})")
-}
-
-fn import_work_order(alias: &str, _class: ImportWorkClass) -> String {
-    format!("{alias}.indexed_at_ms, {alias}.source_path")
 }
 
 fn expected_material_source_format(

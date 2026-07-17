@@ -1,6 +1,10 @@
 impl ImportPlan {
     pub(crate) fn build(store: &Store, sources: Vec<PlannedImportSource>) -> Result<Self> {
-        let (fresh_units, recovery_units) = import_work_counts(store, &sources)?;
+        let (fresh_units, recovery_units) = if store.import_pending_work_is_ready()? {
+            import_work_counts(store, &sources)?
+        } else {
+            (0, 0)
+        };
         Ok(Self {
             sources,
             fresh_units: execution_budget(fresh_units),
@@ -85,6 +89,7 @@ impl ImportPlan {
         state: &ImportExecutionState,
         eligible_sources: Option<&BTreeSet<usize>>,
     ) -> Result<ImportSlice> {
+        store.ensure_import_pending_work_ready()?;
         let ordinary_slice_limit = IMPORT_SLICE_MAX_UNITS.min(max_units);
         if ordinary_slice_limit == 0 {
             return Ok(ImportSlice::empty());

@@ -771,10 +771,13 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        self.ensure_import_pending_work_ready()?;
+        let selection_mode = self.import_pending_work_selection_mode()?;
         let predicate = import_work_class_predicate("source_file", class);
+        let inventory_published =
+            source_import_inventory_material_published_predicate("source_file");
         let active_publication =
             crate::provider_files::source_file_candidate_is_global_publication("source_file");
-        let order = import_work_order("source_file", class);
         let active_path = self
             .effective_provider_file_publication_inventory_owner()?
             .filter(|owner| {
@@ -807,7 +810,8 @@ impl Store {
                        indexed_at_ms, 1 AS has_active_publication
                 FROM source_import_files AS source_file
                 WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
-                  AND is_stale = 0 AND {predicate} AND ({active_publication})
+                  AND is_stale = 0 AND {predicate} AND ({inventory_published})
+                  AND ({active_publication})
                 LIMIT 1
                 "#
             ))?;
@@ -824,41 +828,27 @@ impl Store {
             return Ok(work);
         }
         let ordinary_limit = limit.saturating_add(usize::from(!work.is_empty()));
-        let mut stmt = self.conn.prepare(&format!(
-            r#"
-            SELECT provider, source_format, source_root, source_path,
-                   file_size_bytes, file_modified_at_ms, import_revision,
-                   observed_at_ms, metadata_json, pending_reason,
-                   CASE
-                     WHEN pending_reason = 'fresh_append' THEN MAX(
-                       file_size_bytes - COALESCE((
-                         SELECT checkpoint.committed_byte_offset
-                         FROM provider_file_checkpoints AS checkpoint
-                         WHERE checkpoint.provider = source_file.provider
-                           AND checkpoint.source_format = source_file.source_format
-                           AND checkpoint.source_root = source_file.source_root
-                           AND checkpoint.source_path = source_file.source_path
-                       ), 0),
-                       0
-                     )
-                     ELSE file_size_bytes
-                   END,
-                   indexed_at_ms, 0 AS has_active_publication
-            FROM source_import_files AS source_file
-            WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0
-              AND {predicate}
-            ORDER BY {order}
-            LIMIT ?3
-            "#
-        ))?;
-        let rows = stmt.query_map(
-            params![
-                provider.as_str(),
-                source_root,
-                capped_i64(ordinary_limit as u64)
-            ],
-            source_import_file_work_from_row,
-        )?;
+        let ordinary_sql = source_import_file_work_ordinary_sql(selection_mode, class);
+        let mut stmt = self.conn.prepare(&ordinary_sql)?;
+        let rows = match selection_mode {
+            ImportPendingWorkSelectionMode::Direct => stmt.query_map(
+                params![
+                    provider.as_str(),
+                    source_root,
+                    capped_i64(ordinary_limit as u64)
+                ],
+                source_import_file_work_from_row,
+            )?,
+            ImportPendingWorkSelectionMode::Projection => stmt.query_map(
+                params![
+                    provider.as_str(),
+                    source_root,
+                    class.as_str(),
+                    capped_i64(ordinary_limit as u64)
+                ],
+                source_import_file_work_from_row,
+            )?,
+        };
         let ordinary = collect_rows(rows)?;
         let remaining = limit.saturating_sub(work.len());
         work.extend(
@@ -880,18 +870,7 @@ impl Store {
         source_root: &str,
         class: ImportWorkClass,
     ) -> Result<usize> {
-        let predicate = import_work_class_predicate("source_file", class);
-        self.conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM source_import_files AS source_file \
-                     WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 \
-                       AND {predicate}"
-                ),
-                params![provider.as_str(), source_root],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
+        self.import_pending_work_count("source_import_files", provider, source_root, class)
     }
 
     pub fn schedule_source_import_explicit_rescan(
@@ -1093,5 +1072,63 @@ impl Store {
             ],
         )?;
         Ok(changed)
+    }
+}
+
+fn source_import_file_work_ordinary_sql(
+    selection_mode: ImportPendingWorkSelectionMode,
+    class: ImportWorkClass,
+) -> String {
+    let select = r#"
+        SELECT source_file.provider, source_file.source_format, source_file.source_root,
+               source_file.source_path, source_file.file_size_bytes,
+               source_file.file_modified_at_ms, source_file.import_revision,
+               source_file.observed_at_ms, source_file.metadata_json,
+               source_file.pending_reason,
+               CASE
+                 WHEN source_file.pending_reason = 'fresh_append' THEN MAX(
+                   source_file.file_size_bytes - COALESCE((
+                     SELECT checkpoint.committed_byte_offset
+                     FROM provider_file_checkpoints AS checkpoint
+                     WHERE checkpoint.provider = source_file.provider
+                       AND checkpoint.source_format = source_file.source_format
+                       AND checkpoint.source_root = source_file.source_root
+                       AND checkpoint.source_path = source_file.source_path
+                   ), 0),
+                   0
+                 )
+                 ELSE source_file.file_size_bytes
+               END,
+               source_file.indexed_at_ms, 0 AS has_active_publication
+    "#;
+    let inventory_published = source_import_inventory_material_published_predicate("source_file");
+    match selection_mode {
+        ImportPendingWorkSelectionMode::Direct => {
+            let predicate = import_work_class_predicate("source_file", class);
+            let index = match class {
+                ImportWorkClass::Fresh => "idx_source_import_files_pending_fresh_attempt",
+                ImportWorkClass::Recovery => "idx_source_import_files_pending_recovery_attempt",
+            };
+            format!(
+                "{select} FROM source_import_files AS source_file INDEXED BY {index} \
+                 WHERE source_file.provider = ?1 AND source_file.source_root = ?2 \
+                   AND source_file.is_stale = 0 AND {predicate} \
+                   AND ({inventory_published}) \
+                 ORDER BY source_file.indexed_at_ms, source_file.source_path LIMIT ?3"
+            )
+        }
+        ImportPendingWorkSelectionMode::Projection => format!(
+            "{select} \
+             FROM import_pending_work AS pending \
+                  INDEXED BY idx_import_pending_work_selection \
+             CROSS JOIN source_import_files AS source_file \
+               ON source_file.provider = pending.provider \
+              AND source_file.source_root = pending.source_root \
+              AND source_file.source_path = pending.source_path \
+             WHERE pending.inventory_family = 'source_import_files' \
+               AND pending.provider = ?1 AND pending.source_root = ?2 \
+               AND pending.work_class = ?3 AND ({inventory_published}) \
+             ORDER BY pending.indexed_at_ms, pending.source_path LIMIT ?4"
+        ),
     }
 }

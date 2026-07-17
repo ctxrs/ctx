@@ -52,18 +52,14 @@ fn execute_search_refresh_work(
     };
     totals.durable_progress |= initial_maintenance.processed_rows > 0;
     if !initial_maintenance.complete {
-        let (fresh_units_pending, recovery_units_pending) =
-            match reported_pending_counts(store, plan) {
-                Ok(counts) => counts,
-                Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
-            };
-        totals.fresh_units_pending = fresh_units_pending.saturating_add(failed_inventory_pending.0);
-        totals.recovery_units_pending = recovery_units_pending
-            .saturating_add(failed_inventory_pending.1)
-            .saturating_add(1);
+        totals.fresh_units_pending = failed_inventory_pending.0;
+        totals.recovery_units_pending = failed_inventory_pending.1.saturating_add(1);
         return Ok(SearchRefreshExecution { totals });
     }
-    let mut fresh_units = plan.fresh_units;
+    let mut fresh_units = match plan.pending_count(store, ImportWorkClass::Fresh) {
+        Ok(pending) => pending,
+        Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
+    };
     loop {
         execution_state.begin_new_pass();
         if fresh_units == 0 {
@@ -361,6 +357,9 @@ fn all_refresh_sources_failed(source_count: usize, totals: &ImportTotals) -> boo
 }
 
 fn reported_pending_counts(store: &Store, plan: &ImportPlan) -> Result<(usize, usize)> {
+    if !store.import_pending_work_is_ready()? {
+        return Ok((0, 1));
+    }
     let (fresh, mut recovery) = plan.pending_counts(store)?;
     if fresh == 0 && recovery == 0 && store.has_pending_provider_file_publications()? {
         recovery = 1;

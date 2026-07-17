@@ -1189,6 +1189,7 @@ pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Resul
         // created empty, before triggers can mirror any new inventory writes.
         conn.execute_batch(CREATE_TABLES_SQL)?;
         conn.execute_batch(IMPORT_PENDING_WORK_SELECTION_INDEX_SQL)?;
+        validate_pending_work_selection_index_v57(conn)?;
         conn.execute_batch(
             r#"
             INSERT OR IGNORE INTO import_pending_work_state (singleton, selection_mode)
@@ -1223,6 +1224,50 @@ pub(super) fn migrate_pending_work_projection_to_v57(conn: &Connection) -> Resul
             Err(err)
         }
     }
+}
+
+fn validate_pending_work_selection_index_v57(conn: &Connection) -> Result<()> {
+    let index_shape = conn
+        .prepare("PRAGMA index_list(import_pending_work)")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|(name, _, _)| name == "idx_import_pending_work_selection");
+    let Some((_, unique, partial)) = index_shape else {
+        return Err(StoreError::ImportInventorySchemaIncompatible(
+            "pending-work selection index is missing",
+        ));
+    };
+    if unique || partial {
+        return Err(StoreError::ImportInventorySchemaIncompatible(
+            "pending-work selection index has incompatible flags",
+        ));
+    }
+    let columns = conn
+        .prepare("PRAGMA index_info(idx_import_pending_work_selection)")?
+        .query_map([], |row| row.get::<_, String>(2))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let expected_columns = [
+        "inventory_family",
+        "provider",
+        "source_root",
+        "work_class",
+        "indexed_at_ms",
+        "source_path",
+    ]
+    .map(str::to_owned);
+    if columns.as_slice() != expected_columns.as_slice() {
+        return Err(StoreError::ImportInventorySchemaIncompatible(
+            "pending-work selection index has incompatible columns",
+        ));
+    }
+    Ok(())
 }
 
 fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
