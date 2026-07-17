@@ -135,7 +135,7 @@ fn execute_search_refresh_work(
         if fresh_units == 0 {
             break;
         }
-        match execute_search_refresh_plan_class(
+        let result = match execute_search_refresh_plan_class(
             store,
             plan,
             execution_state,

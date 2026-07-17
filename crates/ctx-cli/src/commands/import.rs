@@ -98,6 +98,7 @@ use catalog::{
 use explicit::run_explicit_format_import;
 pub(crate) use fixed_point::{
     drain_fixed_point_action, drain_import_maintenance, DrainFixedPointAction,
+    DrainFixedPointBlocker,
 };
 #[cfg(test)]
 pub(crate) use inventory::{inject_inventory_failure_once, InventoryFailurePoint};
