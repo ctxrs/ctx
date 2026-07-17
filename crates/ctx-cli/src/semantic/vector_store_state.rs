@@ -556,6 +556,7 @@ impl SemanticVectorStore {
         Ok(hashes)
     }
 
+    #[cfg(test)]
     fn upsert_chunk_embeddings(
         &mut self,
         items: &[(SemanticChunkDocument, Vec<f32>)],
@@ -865,6 +866,7 @@ impl SemanticVectorStore {
         Ok(self.finish_write_pacing(pacing))
     }
 
+    #[cfg(test)]
     fn prune_ineligible_events(&mut self, store: &Store) -> Result<SemanticPruneOutcome> {
         ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
         self.prune_ineligible_events_precharged(store)
@@ -1085,6 +1087,7 @@ impl SemanticVectorStore {
         Ok((Some((canonical_generation, slot)), sidecar_events))
     }
 
+    #[cfg(test)]
     fn delete_embedding_chunks_for_event_ids(&mut self, event_ids: &[Uuid]) -> Result<usize> {
         ctx_history_capture::pace_current_disk_io(SEMANTIC_SIDECAR_MAINTENANCE_LOGICAL_BYTES);
         let (deleted_chunks, supplemental_bytes) =
@@ -1093,6 +1096,7 @@ impl SemanticVectorStore {
         Ok(deleted_chunks)
     }
 
+    #[cfg(test)]
     fn delete_embedding_chunks_for_event_ids_precharged(
         &mut self,
         event_ids: &[Uuid],

@@ -662,6 +662,7 @@ impl SemanticVectorStore {
         Ok(meta_rows.max(0) as usize == stats.embedded_chunks)
     }
 
+    #[cfg(test)]
     fn run_maintenance_slice(&mut self) -> Result<SemanticSidecarMaintenanceOutcome> {
         let nominal_bytes = self.maintenance_precharge_bytes()?;
         ctx_history_capture::pace_current_disk_io(nominal_bytes);

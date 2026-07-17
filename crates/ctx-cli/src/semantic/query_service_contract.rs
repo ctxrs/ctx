@@ -216,10 +216,6 @@ impl AuthenticatedSemanticQueryRequest {
     pub(crate) fn execution_timeout_ms(&self) -> u64 {
         self.execution_timeout_ms
     }
-
-    pub(crate) fn into_clauses(self) -> Vec<SemanticQueryClauseRequest> {
-        self.clauses
-    }
 }
 
 fn validate_semantic_query_clauses(

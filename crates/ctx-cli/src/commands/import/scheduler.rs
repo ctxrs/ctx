@@ -16,8 +16,6 @@ use ctx_history_store::{
 };
 
 use super::inventory::observe_source_root;
-#[cfg(test)]
-use super::manifest::collect_source_import_files;
 use super::manifest::{
     observe_selected_source_import_file, persist_new_source_import_observation,
     persisted_import_identity, same_source_import_observation, source_uses_import_file_manifest,
