@@ -485,6 +485,70 @@ final class CtxAgentHistoryTests: XCTestCase {
             ProcessCommandRunner.launcherPath(for: request, inheritedEnvironment: [:]),
             ctx.path
         )
+
+        let windowsCtx = directory.appendingPathComponent("ctx.exe")
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: windowsCtx.path,
+            contents: Data()
+        ))
+        XCTAssertEqual(chmod(windowsCtx.path, 0o700), 0)
+        XCTAssertEqual(
+            ProcessCommandRunner.resolveExecutable(
+                "ctx",
+                path: directory.path,
+                separator: ";",
+                pathExtensions: [".exe"]
+            ),
+            ctx.path
+        )
+        try FileManager.default.removeItem(at: ctx)
+        XCTAssertEqual(
+            ProcessCommandRunner.resolveExecutable(
+                "ctx",
+                path: directory.path,
+                separator: ";",
+                pathExtensions: [".exe"]
+            ),
+            windowsCtx.path
+        )
+    }
+
+    func testProcessRunnerLaunchesBareCtxFromRequestPath() throws {
+        guard ProcessInfo.processInfo.environment["CTX_SDK_PROCESS_SCOPE_LAUNCHER"] == nil else {
+            throw XCTSkip("inherited launcher override masks bare-ctx PATH resolution")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ctx = directory.appendingPathComponent("ctx")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "__ctx_sdk_process_scope_v1" ]; then
+          shift
+          [ "$1" = "--" ] || exit 97
+          shift
+          target=$1
+          shift
+          export CTX_SDK_PROCESS_SCOPE_ACTIVE=1
+          if [ "$target" = "ctx" ]; then exec "$0" "$@"; fi
+          exec "$target" "$@"
+        fi
+        printf '{}'
+        """
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: ctx.path,
+            contents: Data(script.utf8)
+        ))
+        XCTAssertEqual(chmod(ctx.path, 0o700), 0)
+
+        let result = try ProcessCommandRunner().run(CommandRequest(
+            command: "ctx",
+            arguments: ["status", "--json"],
+            env: ["PATH": directory.path],
+            timeout: 2
+        ))
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(String(data: result.stdout, encoding: .utf8), "{}")
     }
 
     private static var nativeProcessScopeAvailable: Bool {

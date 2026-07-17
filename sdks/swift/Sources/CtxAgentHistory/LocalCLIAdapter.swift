@@ -181,31 +181,53 @@ public struct ProcessCommandRunner: CommandRunner {
                 : nil
         }
         guard let launcher else { return nil }
+        #if os(Windows)
+        let separator: Character = ";"
+        let pathExtensions = (
+            request.env["PATHEXT"]
+                ?? inheritedEnvironment["PATHEXT"]
+                ?? ".COM;.EXE;.BAT;.CMD"
+        ).split(separator: ";").map(String.init)
+        #else
+        let separator: Character = ":"
+        let pathExtensions: [String] = []
+        #endif
         return resolveExecutable(
             launcher,
-            path: request.env["PATH"] ?? inheritedEnvironment["PATH"]
+            path: request.env["PATH"] ?? inheritedEnvironment["PATH"],
+            separator: separator,
+            pathExtensions: pathExtensions
         )
     }
 
-    private static func resolveExecutable(_ executable: String, path: String?) -> String? {
+    static func resolveExecutable(
+        _ executable: String,
+        path: String?,
+        separator: Character,
+        pathExtensions: [String]
+    ) -> String? {
         if executable.contains("/") || executable.contains("\\") {
             return executable
         }
-        #if os(Windows)
-        let separator: Character = ";"
-        #else
-        let separator: Character = ":"
-        #endif
+        var names = [executable]
+        if URL(fileURLWithPath: executable).pathExtension.isEmpty {
+            names.append(contentsOf: pathExtensions.compactMap { pathExtension in
+                guard !pathExtension.isEmpty else { return nil }
+                return executable + (pathExtension.hasPrefix(".") ? pathExtension : "." + pathExtension)
+            })
+        }
         for entry in (path ?? "").split(
             separator: separator,
             omittingEmptySubsequences: false
         ) {
             let directory = entry.isEmpty ? "." : String(entry)
-            let candidate = URL(fileURLWithPath: directory)
-                .appendingPathComponent(executable)
-                .path
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
+            for name in names {
+                let candidate = URL(fileURLWithPath: directory)
+                    .appendingPathComponent(name)
+                    .path
+                if FileManager.default.isExecutableFile(atPath: candidate) {
+                    return candidate
+                }
             }
         }
         return nil
