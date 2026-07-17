@@ -373,28 +373,6 @@ impl AppendInventoryUnit<'_> {
         }
     }
 
-    fn publication_material_owner<'a>(
-        &'a self,
-        material_source_format: &'a str,
-    ) -> ctx_history_store::ProviderFilePublicationMaterialOwner<'a> {
-        match self {
-            Self::Catalog { .. } => {
-                ctx_history_store::ProviderFilePublicationMaterialOwner::catalog_root(
-                    self.provider(),
-                    material_source_format,
-                    self.material_source_root(),
-                )
-            }
-            Self::SourceFile { .. } => {
-                ctx_history_store::ProviderFilePublicationMaterialOwner::source_file(
-                    self.provider(),
-                    material_source_format,
-                    self.material_source_root(),
-                )
-            }
-        }
-    }
-
     fn import_revision(&self) -> u32 {
         match self {
             Self::Catalog { work, .. } => work.session.import_revision,
