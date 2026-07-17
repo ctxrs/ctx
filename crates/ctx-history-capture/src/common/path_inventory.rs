@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::common::io::{FilesystemTraversalBudget, FilesystemTraversalCursor};
+use crate::common::io::{
+    FilesystemTraversalBudget, FilesystemTraversalCursor, FilesystemTraversalErrorRecovery,
+};
 use crate::common::scratch::CaptureScratchSpace;
 use crate::Result;
 
@@ -82,7 +84,10 @@ impl BoundedSourcePathInventory {
         }) {
             Ok(slice) => slice,
             Err(error) => {
-                self.restart_after_traversal_failure()?;
+                if self.cursor.error_recovery() == FilesystemTraversalErrorRecovery::RestartRequired
+                {
+                    self.restart_after_traversal_failure()?;
+                }
                 return Err(error);
             }
         };
@@ -586,6 +591,76 @@ mod tests {
         assert_eq!(page.paths.len(), 17);
         assert!(page.paths.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(inventory.pending_paths.is_empty());
+    }
+
+    #[test]
+    fn bounded_inventory_restarts_after_an_indeterminate_directory_read() {
+        use crate::common::io::{inject_traversal_failure_once, TraversalFailurePoint};
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut expected = Vec::new();
+        for index in 0..17 {
+            let path = temp.path().join(format!("path-{index:04}.jsonl"));
+            fs::write(&path, "{}\n").unwrap();
+            expected.push(path);
+        }
+        expected.sort();
+        let mut inventory = BoundedSourcePathInventory::new_jsonl(temp.path());
+        assert!(!inventory.advance().unwrap().complete);
+        let first_scratch = inventory
+            .storage
+            .as_ref()
+            .unwrap()
+            ._scratch
+            .path()
+            .to_path_buf();
+        inject_traversal_failure_once(TraversalFailurePoint::AfterReadDirectoryEntry);
+
+        assert!(inventory.advance().is_err());
+        let restarted_scratch = inventory
+            .storage
+            .as_ref()
+            .unwrap()
+            ._scratch
+            .path()
+            .to_path_buf();
+        assert_ne!(restarted_scratch, first_scratch);
+        while !inventory.advance().unwrap().complete {}
+
+        let page = inventory.paths_page(None, PATH_INSERT_BATCH).unwrap();
+        assert!(page.complete);
+        assert_eq!(page.paths, expected);
+        assert_eq!(inventory.metrics().discovered_files, 17);
+    }
+
+    #[test]
+    fn bounded_inventory_retains_scratch_for_a_retryable_traversal_error() {
+        use crate::common::io::{inject_traversal_failure_once, TraversalFailurePoint};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("path.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let mut inventory = BoundedSourcePathInventory::new_jsonl(temp.path());
+        assert!(!inventory.advance().unwrap().complete);
+        let first_scratch = inventory
+            .storage
+            .as_ref()
+            .unwrap()
+            ._scratch
+            .path()
+            .to_path_buf();
+        inject_traversal_failure_once(TraversalFailurePoint::BeforeReadDirectoryEntry);
+
+        assert!(inventory.advance().is_err());
+        assert_eq!(
+            inventory.storage.as_ref().unwrap()._scratch.path(),
+            first_scratch
+        );
+        while !inventory.advance().unwrap().complete {}
+        assert_eq!(
+            inventory.paths_page(None, PATH_INSERT_BATCH).unwrap().paths,
+            vec![path]
+        );
     }
 
     #[test]
