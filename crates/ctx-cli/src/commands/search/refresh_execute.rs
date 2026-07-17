@@ -46,6 +46,23 @@ fn execute_search_refresh_work(
     let mut imported_native_sources = BTreeSet::new();
     let mut failed_native_sources = BTreeSet::new();
     let fresh_slice_limit = execution_policy.fresh_slice_limit();
+    let initial_maintenance = match repair_import_maintenance(store, execution_policy) {
+        Ok(maintenance) => maintenance,
+        Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
+    };
+    totals.durable_progress |= initial_maintenance.processed_rows > 0;
+    if !initial_maintenance.complete {
+        let (fresh_units_pending, recovery_units_pending) =
+            match reported_pending_counts(store, plan) {
+                Ok(counts) => counts,
+                Err(error) => return Err(refresh_failure_with_totals(error, store, plan, totals)),
+            };
+        totals.fresh_units_pending = fresh_units_pending.saturating_add(failed_inventory_pending.0);
+        totals.recovery_units_pending = recovery_units_pending
+            .saturating_add(failed_inventory_pending.1)
+            .saturating_add(1);
+        return Ok(SearchRefreshExecution { totals });
+    }
     let mut fresh_units = plan.fresh_units;
     loop {
         execution_state.begin_new_pass();
