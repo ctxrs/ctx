@@ -342,7 +342,7 @@ impl Store {
         validate_capture_checkpoint(capture)?;
         validate_new_capture_checkpoint(capture)?;
         let scratch = trusted_scratch(capture.scratch)?;
-        validate_stable_scratch(&trust, scratch)?;
+        validate_stable_scratch(&trust, &scratch)?;
         if scratch.owner.is_some() {
             return Err(StoreError::ImportInventoryCheckpointTrustMismatch {
                 field: "new scratch owner",
@@ -601,7 +601,7 @@ impl Store {
                         return Ok(CheckpointCommit::Failure(error));
                     }
                 };
-                if let Err(error) = validate_scratch_for_acquisition(&row, scratch) {
+                if let Err(error) = validate_scratch_for_acquisition(&row, &scratch) {
                     self.abandon_import_inventory_checkpoint_inner(
                         &trust,
                         now_ms,
@@ -610,7 +610,7 @@ impl Store {
                     )?;
                     return Ok(CheckpointCommit::Failure(error));
                 }
-                if let Err(error) = validate_active_directory_scratch(capture, scratch) {
+                if let Err(error) = validate_active_directory_scratch(capture, &scratch) {
                     self.abandon_import_inventory_checkpoint_inner(
                         &trust,
                         now_ms,
@@ -754,7 +754,7 @@ impl Store {
                 ));
             }
             let scratch = trusted_scratch(capture.scratch)?;
-            validate_scratch_owned_by_lease(&row, lease, scratch)?;
+            validate_scratch_owned_by_lease(&row, lease, &scratch)?;
             validate_capture_progress(&row, capture)?;
             self.update_capture_checkpoint_summary(lease, &row, capture, "active", now_ms)
         })
@@ -1126,7 +1126,7 @@ impl Store {
             }
             let (scratch_integrity, cleanup_blocked) = match trusted_scratch(scratch) {
                 Ok(trusted) => {
-                    validate_scratch_owned_by_lease(&row, lease, trusted)?;
+                    validate_scratch_owned_by_lease(&row, lease, &trusted)?;
                     (Some(trusted.integrity), false)
                 }
                 Err(
@@ -1589,7 +1589,7 @@ impl Store {
             ));
         }
         let trusted = trusted_scratch(scratch)?;
-        validate_scratch_owned_by_lease(&row, lease, trusted)?;
+        validate_scratch_owned_by_lease(&row, lease, &trusted)?;
         if require_current_generation && row.current_generation != Some(lease.inventory_generation)
         {
             return Err(StoreError::ImportInventoryCheckpointGenerationMismatch);
@@ -2047,7 +2047,7 @@ fn validate_capture_checkpoint(capture: ImportInventoryCaptureCheckpoint<'_>) ->
             ));
         }
     }
-    validate_active_directory_scratch(capture, scratch)?;
+    validate_active_directory_scratch(capture, &scratch)?;
     validate_capture_checkpoint_shape(capture)
 }
 
@@ -2122,7 +2122,7 @@ fn validate_new_capture_checkpoint(capture: ImportInventoryCaptureCheckpoint<'_>
 
 fn validate_active_directory_scratch(
     capture: ImportInventoryCaptureCheckpoint<'_>,
-    scratch: TrustedScratch<'_>,
+    scratch: &TrustedScratch<'_>,
 ) -> Result<()> {
     if let Some(active) = capture.active_directory {
         if active.scratch_identity != scratch.identity
@@ -2267,7 +2267,7 @@ fn trusted_scratch(scratch: ImportInventoryScratchState<'_>) -> Result<TrustedSc
 
 fn validate_stable_scratch(
     trust: &ImportInventoryCheckpointTrust<'_>,
-    scratch: TrustedScratch<'_>,
+    scratch: &TrustedScratch<'_>,
 ) -> Result<()> {
     if scratch.identity != trust.scratch_identity
         || scratch.lock_identity != trust.scratch_lock_identity
@@ -2280,7 +2280,7 @@ fn validate_stable_scratch(
 
 fn validate_scratch_for_acquisition(
     row: &CheckpointRow,
-    scratch: TrustedScratch<'_>,
+    scratch: &TrustedScratch<'_>,
 ) -> Result<()> {
     if scratch.identity != row.scratch_identity
         || scratch.lock_identity != row.scratch_lock_identity
@@ -2316,7 +2316,7 @@ fn validate_scratch_for_acquisition(
 fn validate_scratch_owned_by_lease(
     row: &CheckpointRow,
     lease: &ImportInventoryCheckpointLease,
-    scratch: TrustedScratch<'_>,
+    scratch: &TrustedScratch<'_>,
 ) -> Result<()> {
     if scratch.identity != row.scratch_identity
         || scratch.lock_identity != row.scratch_lock_identity
