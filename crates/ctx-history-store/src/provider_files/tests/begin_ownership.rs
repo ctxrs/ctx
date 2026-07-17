@@ -297,3 +297,91 @@ fn pi_file_owner_isolates_incremental_and_recovered_replacement_lifecycles() {
         Some(replacement_checkpoint)
     );
 }
+
+#[test]
+fn catalog_owner_persists_root_without_widening_the_session_fence() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let catalog_a = catalog_file(20, 100);
+    let mut catalog_b = catalog_file(20, 100);
+    catalog_b.source_path = PATH_B.to_owned();
+    catalog_b.external_session_id = Some("catalog-b".to_owned());
+    catalog_b.metadata = json!({"file_observation_token_v1": "catalog-b-token"});
+    let generation = store
+        .allocate_catalog_inventory_generation(catalog_a.provider, &catalog_a.source_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(generation, &[catalog_a.clone(), catalog_b])
+        .unwrap();
+
+    let source_a = Uuid::from_u128(410_101);
+    let source_b = Uuid::from_u128(410_102);
+    let event_a = Uuid::from_u128(410_103);
+    let event_b = Uuid::from_u128(410_104);
+    let rejected_event_b = Uuid::from_u128(410_105);
+    insert_capture_source(&store, source_a, PATH_A, "catalog-a");
+    insert_capture_source(&store, source_b, PATH_B, "catalog-b");
+    store
+        .upsert_event(&event_fixture(
+            event_a,
+            1,
+            source_a,
+            "catalog-a-event".to_owned(),
+            "catalog A material",
+        ))
+        .unwrap();
+    let sibling = event_fixture(
+        event_b,
+        2,
+        source_b,
+        "catalog-b-event".to_owned(),
+        "catalog B material",
+    );
+    store.upsert_event(&sibling).unwrap();
+
+    let scope = store
+        .begin_provider_file_publication(
+            catalog_a.provider,
+            catalog_observation(&catalog_a, generation, 110),
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            105,
+        )
+        .unwrap();
+    assert!(scope.tracks_prior_material());
+    let owner: (String, String) = store
+        .conn
+        .query_row(
+            "SELECT material_source_root, source_path FROM provider_file_publications \
+             WHERE replacement_id = ?1",
+            params![scope.scope_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(owner.0, catalog_a.source_root);
+    assert_eq!(owner.1, catalog_a.source_path);
+    assert_ne!(owner.0, owner.1);
+
+    prepare_all(&store, &scope, 1);
+    assert!(store.get_capture_source(source_a).is_err());
+    assert!(store.get_event(event_a).is_err());
+    assert_eq!(store.get_event(event_b).unwrap(), sibling);
+    let rejected_sibling = event_fixture(
+        rejected_event_b,
+        3,
+        source_b,
+        "catalog-b-rejected".to_owned(),
+        "catalog B must remain outside A's fence",
+    );
+    assert!(matches!(
+        store
+            .with_provider_file_publication_writes(&scope, |store| {
+                store.upsert_event(&rejected_sibling)
+            })
+            .unwrap_err(),
+        StoreError::ProviderFilePublicationOwnerMismatch { .. }
+    ));
+    assert!(!row_exists(&store, "events", rejected_event_b));
+    assert_eq!(store.get_event(event_b).unwrap(), sibling);
+    let _ = store.abort_provider_file_publication(scope).unwrap();
+}
