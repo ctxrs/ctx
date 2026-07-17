@@ -410,29 +410,14 @@ fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
 }
 
-fn semantic_rust_full_scan_chunk_limit() -> usize {
-    let bytes_per_vector = SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>());
-    let byte_limited_chunks = SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
-        .checked_div(bytes_per_vector)
-        .unwrap_or(SEMANTIC_FULL_SCAN_MAX_CHUNKS);
-    SEMANTIC_FULL_SCAN_MAX_CHUNKS.min(byte_limited_chunks)
-}
-
 fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) -> Result<bool> {
-    if vector_store.sqlite_vec0_search_ready()? {
-        return Ok(true);
+    if !vector_store.sqlite_vec0_search_ready()? {
+        return Ok(false);
     }
     let Some(stats) = vector_store.cached_stats()? else {
         return Ok(false);
     };
-    Ok(
-        stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit()
-            && stats
-                .embedded_chunks
-                .saturating_mul(SEMANTIC_DIMENSIONS)
-                .saturating_mul(std::mem::size_of::<f32>())
-                <= SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES,
-    )
+    Ok(semantic_sqlite_vec0_full_scan_ready(stats))
 }
 
 fn semantic_chunks_for_document(

@@ -115,7 +115,7 @@ impl SemanticVectorStore {
                 .filter(|slot| matches!(slot, 0 | 1));
         if canonical_generation <= 0
             || Self::maintenance_state_i64_in_transaction(tx, SQLITE_VEC0_READY_STATE_KEY)?
-                != Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+                != Some(SEMANTIC_SQLITE_VEC0_PROJECTION_VERSION)
             || Self::maintenance_state_i64_in_transaction(tx, SQLITE_VEC0_GENERATION_STATE_KEY)?
                 != Some(canonical_generation)
             || active_slot.is_none()
@@ -691,7 +691,7 @@ impl SemanticVectorStore {
             };
             let mut vec0_stmt = if projection_trusted {
                 Some(tx.prepare(&format!(
-                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot, model_key) VALUES (?1, ?2, ?3, ?4)"
+                    "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, embedding_coarse, slot, model_key) VALUES (?1, ?2, vec_quantize_binary(?2), ?3, ?4)"
                 ))?)
             } else {
                 None

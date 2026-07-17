@@ -1,11 +1,87 @@
-fn semantic_streaming_scan_chunk_limit() -> usize {
-    SEMANTIC_SQLITE_VEC0_MAX_K.min(ctx_protocol::SEARCH_MAX_CANDIDATE_ROWS)
+fn semantic_exact_vector_bytes() -> usize {
+    SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>())
 }
 
-fn semantic_streaming_scan_vector_byte_limit() -> usize {
-    semantic_streaming_scan_chunk_limit()
-        .saturating_mul(SEMANTIC_DIMENSIONS)
-        .saturating_mul(std::mem::size_of::<f32>())
+fn semantic_sqlite_vec0_candidate_limit(limit: usize, embedded_chunks: usize) -> usize {
+    limit
+        .max(1)
+        .saturating_mul(SEMANTIC_SQLITE_VEC0_OVERFETCH_FACTOR)
+        .max(SEMANTIC_SQLITE_VEC0_MIN_CANDIDATES)
+        .min(SEMANTIC_SQLITE_VEC0_MAX_K)
+        .min(embedded_chunks.max(1))
+}
+
+fn semantic_sqlite_vec0_scan_bytes(
+    embedded_chunks: usize,
+    exact_candidates: usize,
+) -> Option<usize> {
+    embedded_chunks
+        .checked_mul(SEMANTIC_BINARY_VECTOR_BYTES)?
+        .checked_add(exact_candidates.checked_mul(semantic_exact_vector_bytes())?)
+}
+
+fn semantic_sqlite_vec0_full_scan_ready(stats: SemanticSidecarStats) -> bool {
+    semantic_sqlite_vec0_scan_bytes(
+        stats.embedded_chunks,
+        stats.embedded_chunks.min(SEMANTIC_SQLITE_VEC0_MAX_K),
+    )
+    .is_some_and(|bytes| bytes <= SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES)
+}
+
+fn retain_best_semantic_chunk(
+    best_by_event: &mut HashMap<Uuid, SemanticVectorHit>,
+    query_embedding: &[f32],
+    event_id: Uuid,
+    source_text_hash: String,
+    start_char: usize,
+    end_char: usize,
+    embedding: &[u8],
+) -> Result<()> {
+    let Some(similarity) = dot_product_f32_blob(query_embedding, embedding)? else {
+        return Ok(());
+    };
+    let candidate = SemanticVectorHit {
+        event_id,
+        similarity,
+        source_text_hash,
+        start_char,
+        end_char,
+    };
+    match best_by_event.get_mut(&event_id) {
+        Some(existing) if similarity > existing.similarity => *existing = candidate,
+        None => {
+            best_by_event.insert(event_id, candidate);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn finish_semantic_search(
+    best_by_event: HashMap<Uuid, SemanticVectorHit>,
+    limit: usize,
+    scan_started: Instant,
+    chunks_scanned: usize,
+    vector_bytes_read: usize,
+) -> SemanticVectorSearch {
+    let events_scored = best_by_event.len();
+    let mut hits = best_by_event.into_values().collect::<Vec<_>>();
+    let limit = limit.max(1);
+    if hits.len() > limit {
+        hits.select_nth_unstable_by(limit - 1, compare_semantic_hits_desc);
+        hits.truncate(limit);
+    }
+    hits.sort_by(compare_semantic_hits_desc);
+    SemanticVectorSearch {
+        hits,
+        stats: SemanticVectorSearchStats {
+            backend: Some(SEMANTIC_VECTOR_BACKEND_SQLITE_VEC),
+            scan_ms: scan_started.elapsed().as_millis() as u64,
+            chunks_scanned,
+            vector_bytes_read,
+            events_scored,
+        },
+    }
 }
 
 impl SemanticVectorStore {
@@ -97,6 +173,12 @@ impl SemanticVectorStore {
         event_ids: Option<&[Uuid]>,
         deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
+        if query_embedding.len() != SEMANTIC_DIMENSIONS {
+            return Err(anyhow!(
+                "semantic query embedding has {} dimensions; expected {SEMANTIC_DIMENSIONS}",
+                query_embedding.len()
+            ));
+        }
         if event_ids.is_some_and(|ids| {
             ids.len() > query_service_contract::SEMANTIC_QUERY_MAX_CANDIDATE_EVENT_IDS
         }) {
@@ -108,151 +190,18 @@ impl SemanticVectorStore {
         let stats = self
             .cached_stats()?
             .ok_or_else(|| SemanticVectorStorePending::new("cached stats are untrusted"))?;
-        if event_ids.is_none() && self.sqlite_vec0_search_ready()? {
-            return self.search_sqlite_vec0(query_embedding, limit, stats, deadline);
-        }
-        if event_ids.is_none()
-            && (stats.embedded_chunks > semantic_rust_full_scan_chunk_limit()
-                || stats
-                    .embedded_chunks
-                    .saturating_mul(SEMANTIC_DIMENSIONS)
-                    .saturating_mul(std::mem::size_of::<f32>())
-                    > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES)
-        {
+        if !self.sqlite_vec0_search_ready()? {
             return Err(SemanticVectorStorePending::new(
-                "trusted corpus exceeds the bounded blob fallback",
+                "trusted semantic vector projection is not ready",
             )
             .into());
         }
-
-        let scan_started = Instant::now();
-        if Instant::now() >= deadline {
-            return Err(SemanticVectorStorePending::new(
-                "semantic vector retrieval deadline elapsed before blob scan",
-            )
-            .into());
-        }
-        if !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
-            return Ok(SemanticVectorSearch {
-                hits: Vec::new(),
-                stats: SemanticVectorSearchStats {
-                    backend: Some(SEMANTIC_VECTOR_BACKEND_RUST),
-                    scan_ms: scan_started.elapsed().as_millis() as u64,
-                    ..SemanticVectorSearchStats::default()
-                },
-            });
-        }
-        let mut sql = r#"
-            SELECT event_id, source_text_sha256, start_char, end_char, embedding_f32
-            FROM event_embedding_chunks
-            WHERE model_key = ? AND dimensions = ?
-            "#
-        .to_owned();
-        let chunk_cap = semantic_rust_full_scan_chunk_limit();
-        let mut query_params = vec![
-            SqlValue::from(semantic_model_key().to_owned()),
-            SqlValue::from(SEMANTIC_DIMENSIONS as i64),
-        ];
-        if let Some(event_ids) = event_ids {
-            let placeholders = (0..event_ids.len())
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            sql.push_str(" AND event_id IN (");
-            sql.push_str(&placeholders);
-            sql.push(')');
-            query_params.extend(
-                event_ids
-                    .iter()
-                    .map(|event_id| SqlValue::from(event_id.to_string())),
-            );
-            sql.push_str(" ORDER BY rowid LIMIT ?");
-            query_params.push(SqlValue::from(chunk_cap.saturating_add(1) as i64));
-        } else {
-            sql.push_str(" ORDER BY rowid LIMIT ?");
-            query_params.push(SqlValue::from(chunk_cap.saturating_add(1) as i64));
-        }
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query(params_from_iter(query_params))?;
-        let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
-        let limit = limit.max(1);
-        let mut chunks_scanned = 0_usize;
-        let mut vector_bytes_read = 0_usize;
-        while let Some(row) = rows.next()? {
-            if Instant::now() >= deadline {
-                return Err(SemanticVectorStorePending::new(
-                    "semantic vector retrieval deadline elapsed during blob scan",
-                )
-                .into());
+        match event_ids {
+            Some(event_ids) => {
+                self.search_sqlite_vec0_event_ids(query_embedding, event_ids, limit, deadline)
             }
-            let event_id = Uuid::parse_str(&row.get::<_, String>(0)?)
-                .context("invalid event id in semantic vector store")?;
-            let source_text_hash = row.get::<_, String>(1)?;
-            let start_char = row.get::<_, i64>(2)?.max(0) as usize;
-            let end_char = row.get::<_, i64>(3)?.max(0) as usize;
-            let blob: Vec<u8> = row.get(4)?;
-            chunks_scanned = chunks_scanned.saturating_add(1);
-            vector_bytes_read = vector_bytes_read.saturating_add(blob.len());
-            if chunks_scanned > chunk_cap
-                || vector_bytes_read > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
-                || (event_ids.is_none() && chunks_scanned > stats.embedded_chunks)
-            {
-                return Err(SemanticVectorStorePending::new(
-                    "semantic blob retrieval exceeded its trusted row or byte bound",
-                )
-                .into());
-            }
-            let Some(similarity) = dot_product_f32_blob(query_embedding, &blob)? else {
-                continue;
-            };
-            match best_by_event.get_mut(&event_id) {
-                Some(existing) if similarity > existing.similarity => {
-                    *existing = SemanticVectorHit {
-                        event_id,
-                        similarity,
-                        source_text_hash,
-                        start_char,
-                        end_char,
-                    };
-                }
-                None => {
-                    best_by_event.insert(
-                        event_id,
-                        SemanticVectorHit {
-                            event_id,
-                            similarity,
-                            source_text_hash,
-                            start_char,
-                            end_char,
-                        },
-                    );
-                }
-                _ => {}
-            }
+            None => self.search_sqlite_vec0(query_embedding, limit, stats, deadline),
         }
-        if event_ids.is_none() && chunks_scanned != stats.embedded_chunks {
-            return Err(SemanticVectorStorePending::new(
-                "canonical rows drifted from trusted stats",
-            )
-            .into());
-        }
-        let events_scored = best_by_event.len();
-        let mut top = best_by_event.into_values().collect::<Vec<_>>();
-        if top.len() > limit {
-            top.select_nth_unstable_by(limit - 1, compare_semantic_hits_desc);
-            top.truncate(limit);
-        }
-        top.sort_by(compare_semantic_hits_desc);
-        Ok(SemanticVectorSearch {
-            hits: top,
-            stats: SemanticVectorSearchStats {
-                backend: Some(SEMANTIC_VECTOR_BACKEND_RUST),
-                scan_ms: scan_started.elapsed().as_millis() as u64,
-                chunks_scanned,
-                vector_bytes_read,
-                events_scored,
-            },
-        })
     }
 
     fn search_sqlite_vec0(
@@ -263,17 +212,19 @@ impl SemanticVectorStore {
         deadline: Instant,
     ) -> Result<SemanticVectorSearch> {
         let scan_started = Instant::now();
-        let streaming_chunk_limit = semantic_streaming_scan_chunk_limit();
-        let streaming_vector_byte_limit = semantic_streaming_scan_vector_byte_limit();
-        let corpus_vector_bytes = stats
-            .embedded_chunks
-            .saturating_mul(SEMANTIC_DIMENSIONS)
-            .saturating_mul(std::mem::size_of::<f32>());
-        if stats.embedded_chunks > streaming_chunk_limit
-            || corpus_vector_bytes > streaming_vector_byte_limit
-        {
+        let exact_candidate_limit =
+            semantic_sqlite_vec0_candidate_limit(limit, stats.embedded_chunks);
+        let Some(maximum_vector_bytes) =
+            semantic_sqlite_vec0_scan_bytes(stats.embedded_chunks, exact_candidate_limit)
+        else {
             return Err(SemanticVectorStorePending::new(
-                "trusted corpus exceeds the bounded sqlite vec0 streaming scan",
+                "semantic binary retrieval byte budget overflowed",
+            )
+            .into());
+        };
+        if maximum_vector_bytes > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES {
+            return Err(SemanticVectorStorePending::new(
+                "trusted corpus exceeds the bounded sqlite vec0 binary scan",
             )
             .into());
         }
@@ -281,93 +232,197 @@ impl SemanticVectorStore {
         let slot = self
             .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
             .ok_or_else(|| SemanticVectorStorePending::new("projection slot is missing"))?;
-        let limit = limit.clamp(1, streaming_chunk_limit);
-        let k = stats.embedded_chunks.max(1);
         if Instant::now() >= deadline {
             return Err(SemanticVectorStorePending::new(
                 "semantic vector retrieval deadline elapsed before sqlite vec0 scan",
             )
             .into());
         }
-        let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
-        let mut rows_returned = 0_usize;
-        let mut stmt = self.conn.prepare(
+        let sql = format!(
             r#"
-            SELECT m.event_id, m.source_text_sha256, m.start_char, m.end_char, v.distance
-            FROM event_embedding_vec0_v2 AS v
-            JOIN event_embedding_vec0_meta_v2 AS m ON m.rowid = v.rowid
-            WHERE v.slot = ?1
-              AND v.model_key = ?2
-              AND v.embedding MATCH ?3
-              AND v.k = ?4
-              AND m.slot = ?1
-              AND m.model_key = ?2
-            ORDER BY v.distance
-            "#,
-        )?;
-        let mut rows = stmt.query(params![slot, semantic_model_key(), &query_blob, k as i64])?;
+            WITH coarse_matches AS (
+                SELECT rowid, embedding
+                FROM {SQLITE_VEC0_TABLE}
+                WHERE slot = ?1
+                  AND model_key = ?2
+                  AND embedding_coarse MATCH vec_quantize_binary(?3)
+                  AND k = ?4
+                ORDER BY distance
+            )
+            SELECT CASE WHEN length(m.event_id) = 36 THEN m.event_id END,
+                   CASE WHEN length(m.source_text_sha256) = 64
+                        THEN m.source_text_sha256 END,
+                   m.start_char, m.end_char,
+                   c.embedding
+            FROM coarse_matches AS c
+            JOIN {SQLITE_VEC0_META_TABLE} AS m ON m.rowid = c.rowid
+            WHERE m.slot = ?1 AND m.model_key = ?2
+            "#
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![
+            slot,
+            semantic_model_key(),
+            &query_blob,
+            exact_candidate_limit as i64
+        ])?;
+        let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
+        let mut exact_rows = 0_usize;
+        let mut exact_vector_bytes = 0_usize;
         while let Some(row) = rows.next()? {
-            rows_returned = rows_returned.saturating_add(1);
-            if rows_returned > stats.embedded_chunks || rows_returned > streaming_chunk_limit {
+            if Instant::now() >= deadline {
                 return Err(SemanticVectorStorePending::new(
-                    "sqlite vec0 returned candidates beyond its trusted corpus bound",
+                    "semantic vector retrieval deadline elapsed during exact rerank",
                 )
                 .into());
             }
-            let event_id = Uuid::parse_str(&row.get::<_, String>(0)?)
+            exact_rows = exact_rows.saturating_add(1);
+            if exact_rows > exact_candidate_limit {
+                return Err(SemanticVectorStorePending::new(
+                    "sqlite vec0 returned candidates beyond its exact rerank bound",
+                )
+                .into());
+            }
+            let event_id_text = row.get::<_, Option<String>>(0)?.ok_or_else(|| {
+                SemanticVectorStorePending::new("semantic vec0 event identity is malformed")
+            })?;
+            let event_id = Uuid::parse_str(&event_id_text)
                 .context("invalid event id in semantic vec0 store")?;
-            let source_text_hash = row.get::<_, String>(1)?;
+            let source_text_hash = row.get::<_, Option<String>>(1)?.ok_or_else(|| {
+                SemanticVectorStorePending::new("semantic vec0 source hash is malformed")
+            })?;
             let start_char = row.get::<_, i64>(2)?.max(0) as usize;
             let end_char = row.get::<_, i64>(3)?.max(0) as usize;
-            let distance = row.get::<_, f64>(4)? as f32;
-            let similarity = (1.0 - distance).clamp(-1.0, 1.0);
-            match best_by_event.get_mut(&event_id) {
-                Some(existing) if similarity > existing.similarity => {
-                    *existing = SemanticVectorHit {
-                        event_id,
-                        similarity,
-                        source_text_hash,
-                        start_char,
-                        end_char,
-                    };
-                }
-                None => {
-                    best_by_event.insert(
-                        event_id,
-                        SemanticVectorHit {
-                            event_id,
-                            similarity,
-                            source_text_hash,
-                            start_char,
-                            end_char,
-                        },
-                    );
-                }
-                _ => {}
+            let embedding = row.get::<_, Vec<u8>>(4)?;
+            exact_vector_bytes = exact_vector_bytes.saturating_add(embedding.len());
+            if embedding.len() != semantic_exact_vector_bytes()
+                || stats
+                    .embedded_chunks
+                    .saturating_mul(SEMANTIC_BINARY_VECTOR_BYTES)
+                    .saturating_add(exact_vector_bytes)
+                    > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
+            {
+                return Err(SemanticVectorStorePending::new(
+                    "sqlite vec0 exact rerank exceeded its trusted byte bound",
+                )
+                .into());
             }
+            retain_best_semantic_chunk(
+                &mut best_by_event,
+                query_embedding,
+                event_id,
+                source_text_hash,
+                start_char,
+                end_char,
+                &embedding,
+            )?;
         }
-        if rows_returned != stats.embedded_chunks || best_by_event.len() != stats.embedded_items {
-            return Err(SemanticVectorStorePending::new(
-                "sqlite vec0 candidates drifted from trusted current-model stats",
-            )
-            .into());
+        Ok(finish_semantic_search(
+            best_by_event,
+            limit,
+            scan_started,
+            stats.embedded_chunks,
+            stats
+                .embedded_chunks
+                .saturating_mul(SEMANTIC_BINARY_VECTOR_BYTES)
+                .saturating_add(exact_vector_bytes),
+        ))
+    }
+
+    fn search_sqlite_vec0_event_ids(
+        &self,
+        query_embedding: &[f32],
+        event_ids: &[Uuid],
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<SemanticVectorSearch> {
+        let scan_started = Instant::now();
+        let slot = self
+            .maintenance_state_i64(SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
+            .ok_or_else(|| SemanticVectorStorePending::new("projection slot is missing"))?;
+        let placeholders = (0..event_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            r#"
+            SELECT CASE WHEN length(m.event_id) = 36 THEN m.event_id END,
+                   CASE WHEN length(m.source_text_sha256) = 64
+                        THEN m.source_text_sha256 END,
+                   m.start_char, m.end_char,
+                   v.embedding
+            FROM {SQLITE_VEC0_META_TABLE} AS m INDEXED BY {SQLITE_VEC0_EVENT_INDEX}
+            CROSS JOIN {SQLITE_VEC0_TABLE} AS v
+            WHERE m.slot = ? AND m.model_key = ?
+              AND v.slot = ? AND v.model_key = ?
+              AND v.rowid = m.rowid
+              AND m.event_id IN ({placeholders})
+            ORDER BY m.rowid
+            LIMIT ?
+            "#
+        );
+        let mut query_params = vec![
+            SqlValue::from(slot),
+            SqlValue::from(semantic_model_key().to_owned()),
+            SqlValue::from(slot),
+            SqlValue::from(semantic_model_key().to_owned()),
+        ];
+        query_params.extend(
+            event_ids
+                .iter()
+                .map(|event_id| SqlValue::from(event_id.to_string())),
+        );
+        query_params.push(SqlValue::from(
+            SEMANTIC_SQLITE_VEC0_MAX_K.saturating_add(1) as i64
+        ));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(query_params))?;
+        let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
+        let mut exact_rows = 0_usize;
+        let mut exact_vector_bytes = 0_usize;
+        while let Some(row) = rows.next()? {
+            if Instant::now() >= deadline {
+                return Err(SemanticVectorStorePending::new(
+                    "semantic vector retrieval deadline elapsed during filtered rerank",
+                )
+                .into());
+            }
+            exact_rows = exact_rows.saturating_add(1);
+            let embedding = row.get::<_, Vec<u8>>(4)?;
+            exact_vector_bytes = exact_vector_bytes.saturating_add(embedding.len());
+            if exact_rows > SEMANTIC_SQLITE_VEC0_MAX_K
+                || embedding.len() != semantic_exact_vector_bytes()
+                || exact_vector_bytes > SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
+            {
+                return Err(SemanticVectorStorePending::new(
+                    "filtered semantic rerank exceeded its trusted row or byte bound",
+                )
+                .into());
+            }
+            let event_id_text = row.get::<_, Option<String>>(0)?.ok_or_else(|| {
+                SemanticVectorStorePending::new("semantic vec0 event identity is malformed")
+            })?;
+            let event_id = Uuid::parse_str(&event_id_text)
+                .context("invalid event id in semantic vec0 store")?;
+            let source_text_hash = row.get::<_, Option<String>>(1)?.ok_or_else(|| {
+                SemanticVectorStorePending::new("semantic vec0 source hash is malformed")
+            })?;
+            retain_best_semantic_chunk(
+                &mut best_by_event,
+                query_embedding,
+                event_id,
+                source_text_hash,
+                row.get::<_, i64>(2)?.max(0) as usize,
+                row.get::<_, i64>(3)?.max(0) as usize,
+                &embedding,
+            )?;
         }
-        let events_scored = best_by_event.len();
-        let mut hits = best_by_event.into_values().collect::<Vec<_>>();
-        if hits.len() > limit {
-            hits.select_nth_unstable_by(limit - 1, compare_semantic_hits_desc);
-            hits.truncate(limit);
-        }
-        hits.sort_by(compare_semantic_hits_desc);
-        Ok(SemanticVectorSearch {
-            hits,
-            stats: SemanticVectorSearchStats {
-                backend: Some(SEMANTIC_VECTOR_BACKEND_SQLITE_VEC),
-                scan_ms: scan_started.elapsed().as_millis() as u64,
-                chunks_scanned: stats.embedded_chunks,
-                vector_bytes_read: corpus_vector_bytes,
-                events_scored,
-            },
-        })
+        Ok(finish_semantic_search(
+            best_by_event,
+            limit,
+            scan_started,
+            exact_rows,
+            exact_vector_bytes,
+        ))
     }
 }

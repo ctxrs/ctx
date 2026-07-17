@@ -7,16 +7,16 @@ const STATS_BUILD_CLEARED_STATE_KEY: &str = "stats_build_cleared";
 const STATS_BUILD_CURSOR_STATE_KEY: &str = "stats_build_rowid_after";
 const STATS_BUILD_ITEMS_STATE_KEY: &str = "stats_build_items";
 const STATS_BUILD_CHUNKS_STATE_KEY: &str = "stats_build_chunks";
-const SQLITE_VEC0_READY_STATE_KEY: &str = "sqlite_vec0_ready_version";
-const SQLITE_VEC0_GENERATION_STATE_KEY: &str = "sqlite_vec0_generation";
-const SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY: &str = "sqlite_vec0_active_slot";
-const SQLITE_VEC0_BUILD_GENERATION_STATE_KEY: &str = "sqlite_vec0_build_generation";
-const SQLITE_VEC0_BUILD_SLOT_STATE_KEY: &str = "sqlite_vec0_build_slot";
-const SQLITE_VEC0_BUILD_CLEARED_STATE_KEY: &str = "sqlite_vec0_build_cleared";
-const SQLITE_VEC0_BUILD_CURSOR_STATE_KEY: &str = "sqlite_vec0_build_rowid_after";
-const SQLITE_VEC0_VALIDATE_GENERATION_STATE_KEY: &str = "sqlite_vec0_validate_generation";
-const SQLITE_VEC0_VALIDATE_PHASE_STATE_KEY: &str = "sqlite_vec0_validate_phase";
-const SQLITE_VEC0_VALIDATE_CURSOR_STATE_KEY: &str = "sqlite_vec0_validate_rowid_after";
+const SQLITE_VEC0_READY_STATE_KEY: &str = "sqlite_vec0_v3_ready_version";
+const SQLITE_VEC0_GENERATION_STATE_KEY: &str = "sqlite_vec0_v3_generation";
+const SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY: &str = "sqlite_vec0_v3_active_slot";
+const SQLITE_VEC0_BUILD_GENERATION_STATE_KEY: &str = "sqlite_vec0_v3_build_generation";
+const SQLITE_VEC0_BUILD_SLOT_STATE_KEY: &str = "sqlite_vec0_v3_build_slot";
+const SQLITE_VEC0_BUILD_CLEARED_STATE_KEY: &str = "sqlite_vec0_v3_build_cleared";
+const SQLITE_VEC0_BUILD_CURSOR_STATE_KEY: &str = "sqlite_vec0_v3_build_rowid_after";
+const SQLITE_VEC0_VALIDATE_GENERATION_STATE_KEY: &str = "sqlite_vec0_v3_validate_generation";
+const SQLITE_VEC0_VALIDATE_PHASE_STATE_KEY: &str = "sqlite_vec0_v3_validate_phase";
+const SQLITE_VEC0_VALIDATE_CURSOR_STATE_KEY: &str = "sqlite_vec0_v3_validate_rowid_after";
 const MAINTENANCE_PAGE_UNITS_STATE_KEY: &str = "maintenance_page_units";
 const PLAINTEXT_SANITIZED_GLOBAL_STATE_KEY: &str = "global:plaintext_sanitized_version";
 const PLAINTEXT_SANITIZE_CURSOR_VERSION_GLOBAL_STATE_KEY: &str =
@@ -26,12 +26,11 @@ const TERMINAL_MAINTENANCE_FINGERPRINT_GLOBAL_STATE_KEY: &str =
     "global:terminal_maintenance_fingerprint";
 const TERMINAL_MAINTENANCE_REASON_GLOBAL_STATE_KEY: &str = "global:terminal_maintenance_reason";
 const PLAINTEXT_SANITIZED_STATE_VERSION: i64 = 2;
-const SQLITE_VEC0_TABLE: &str = "event_embedding_vec0_v2";
-const SQLITE_VEC0_META_TABLE: &str = "event_embedding_vec0_meta_v2";
-const SQLITE_VEC0_CANONICAL_INDEX: &str = "idx_event_embedding_vec0_v2_slot_canonical";
-const SQLITE_VEC0_EVENT_INDEX: &str = "idx_event_embedding_vec0_v2_slot_event";
-const SQLITE_VEC0_WORK_INDEX: &str = "idx_event_embedding_vec0_v2_slot_model_rowid";
-const CANONICAL_MODEL_DIMENSIONS_INDEX: &str = "idx_event_embedding_chunks_model_dimensions_rowid";
+const SQLITE_VEC0_TABLE: &str = "event_embedding_vec0_v3";
+const SQLITE_VEC0_META_TABLE: &str = "event_embedding_vec0_meta_v3";
+const SQLITE_VEC0_CANONICAL_INDEX: &str = "idx_event_embedding_vec0_v3_slot_canonical";
+const SQLITE_VEC0_EVENT_INDEX: &str = "idx_event_embedding_vec0_v3_slot_event";
+const SQLITE_VEC0_WORK_INDEX: &str = "idx_event_embedding_vec0_v3_slot_model_rowid";
 
 #[derive(Debug, PartialEq, Eq)]
 struct SqliteColumnShape {
@@ -123,17 +122,6 @@ impl SemanticVectorStore {
         )? {
             return Err(anyhow!(
                 "semantic vector store event_embedding_chunks schema is incomplete"
-            ));
-        }
-        if !Self::sqlite_index_matches(
-            &self.conn,
-            "event_embedding_chunks",
-            CANONICAL_MODEL_DIMENSIONS_INDEX,
-            false,
-            &["model_key", "dimensions", "rowid"],
-        )? {
-            return Err(anyhow!(
-                "semantic vector store is missing its canonical model/dimensions index"
             ));
         }
         Ok(())
@@ -248,17 +236,6 @@ impl SemanticVectorStore {
         }
         if !canonical_table_existed {
             self.create_canonical_indexes()?;
-        } else if !Self::sqlite_index_matches(
-            &self.conn,
-            "event_embedding_chunks",
-            CANONICAL_MODEL_DIMENSIONS_INDEX,
-            false,
-            &["model_key", "dimensions", "rowid"],
-        )? {
-            return Err(SemanticVectorStoreTerminal::new(
-                "semantic canonical model/dimensions index is missing or incompatible",
-            )
-            .into());
         }
         if !summary_table_existed {
             self.conn.execute(
@@ -305,8 +282,6 @@ impl SemanticVectorStore {
                 ON event_embedding_chunks(model_key, session_id);
             CREATE INDEX idx_event_embedding_chunks_model_event
                 ON event_embedding_chunks(model_key, event_id);
-            CREATE INDEX idx_event_embedding_chunks_model_dimensions_rowid
-                ON event_embedding_chunks(model_key, dimensions, rowid);
             CREATE INDEX idx_semantic_dirty_events_model_priority
                 ON semantic_dirty_events(model_key, priority_seq, queued_at_ms);
             "#,
@@ -406,7 +381,7 @@ impl SemanticVectorStore {
         if meta_existed && vec_existed {
             if !Self::sqlite_vec0_schema_compatible_on_connection(&tx)? {
                 return Err(SemanticVectorStoreTerminal::new(
-                    "semantic vec0 v2 schema is incompatible; maintenance cannot publish it",
+                    "semantic vec0 v3 schema is incompatible; maintenance cannot publish it",
                 )
                 .into());
             }
@@ -415,7 +390,7 @@ impl SemanticVectorStore {
         }
         if meta_existed || vec_existed {
             return Err(SemanticVectorStoreTerminal::new(
-                "semantic vec0 v2 schema is partial; maintenance will not drop or rebuild it",
+                "semantic vec0 v3 schema is partial; maintenance will not drop or rebuild it",
             )
             .into());
         }
@@ -444,6 +419,7 @@ impl SemanticVectorStore {
             CREATE VIRTUAL TABLE {SQLITE_VEC0_TABLE}
             USING vec0(
                 embedding float[{SEMANTIC_DIMENSIONS}] distance_metric=cosine,
+                embedding_coarse bit[{SEMANTIC_DIMENSIONS}],
                 slot INTEGER PARTITION KEY,
                 model_key TEXT PARTITION KEY
             );
@@ -451,7 +427,7 @@ impl SemanticVectorStore {
         ))?;
         if !Self::sqlite_vec0_schema_compatible_on_connection(&tx)? {
             return Err(SemanticVectorStoreTerminal::new(
-                "semantic vec0 v2 schema failed compatibility validation",
+                "semantic vec0 v3 schema failed compatibility validation",
             )
             .into());
         }
@@ -509,6 +485,7 @@ impl SemanticVectorStore {
         let expected_vec0_columns = vec![
             Self::sqlite_column_shape("rowid", "", false, 0, 0),
             Self::sqlite_column_shape("embedding", "", false, 0, 0),
+            Self::sqlite_column_shape("embedding_coarse", "", false, 0, 0),
             Self::sqlite_column_shape("slot", "", false, 0, 0),
             Self::sqlite_column_shape("model_key", "", false, 0, 0),
             Self::sqlite_column_shape("distance", "", false, 0, 1),
@@ -525,6 +502,7 @@ impl SemanticVectorStore {
             CREATE VIRTUAL TABLE {SQLITE_VEC0_TABLE}
             USING vec0(
                 embedding float[{SEMANTIC_DIMENSIONS}] distance_metric=cosine,
+                embedding_coarse bit[{SEMANTIC_DIMENSIONS}],
                 slot INTEGER PARTITION KEY,
                 model_key TEXT PARTITION KEY
             )
@@ -646,7 +624,7 @@ impl SemanticVectorStore {
         };
         if canonical_generation <= 0
             || self.maintenance_state_i64(SQLITE_VEC0_READY_STATE_KEY)?
-                != Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+                != Some(SEMANTIC_SQLITE_VEC0_PROJECTION_VERSION)
             || self.maintenance_state_i64(SQLITE_VEC0_GENERATION_STATE_KEY)?
                 != Some(canonical_generation)
             || !matches!(
@@ -845,7 +823,7 @@ impl SemanticVectorStore {
         let legacy_page = self.terminal_legacy_page_fingerprint()?;
         let plaintext_page = self.terminal_plaintext_page_fingerprint(cursor)?;
         Ok(format!(
-            "schema={user_version}:{schema_cookie};model={:?};generation={canonical_generation};sanitize={sanitize_version}:{cursor_version}:{cursor};legacy={legacy_page};plaintext={plaintext_page};stats={stats_cursor}:{stats_page};projection={projection_cursor}:{projection_page};validation={validation_cursor}:{validation_page}",
+            "schema={user_version}:{schema_cookie};projection_format={SEMANTIC_SQLITE_VEC0_PROJECTION_VERSION};model={:?};generation={canonical_generation};sanitize={sanitize_version}:{cursor_version}:{cursor};legacy={legacy_page};plaintext={plaintext_page};stats={stats_cursor}:{stats_page};projection={projection_cursor}:{projection_page};validation={validation_cursor}:{validation_page}",
             model_tuple
         ))
     }
@@ -1413,7 +1391,7 @@ impl SemanticVectorStore {
             Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_ACTIVE_SLOT_STATE_KEY)?
                 .filter(|slot| matches!(slot, 0 | 1));
         if Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
-            == Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+            == Some(SEMANTIC_SQLITE_VEC0_PROJECTION_VERSION)
             && Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_GENERATION_STATE_KEY)?
                 == Some(canonical_generation)
             && active_slot.is_some()
@@ -1533,7 +1511,7 @@ impl SemanticVectorStore {
                 Self::set_maintenance_state_i64_in_transaction(
                     &tx,
                     SQLITE_VEC0_READY_STATE_KEY,
-                    SEMANTIC_SIDECAR_TRUST_VERSION,
+                    SEMANTIC_SQLITE_VEC0_PROJECTION_VERSION,
                 )?;
                 Self::set_maintenance_state_i64_in_transaction(
                     &tx,
@@ -1567,7 +1545,7 @@ impl SemanticVectorStore {
             "#
         ))?;
         let mut vec_stmt = tx.prepare(&format!(
-            "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, slot, model_key) VALUES (?1, ?2, ?3, ?4)"
+            "INSERT INTO {SQLITE_VEC0_TABLE}(rowid, embedding, embedding_coarse, slot, model_key) VALUES (?1, ?2, vec_quantize_binary(?2), ?3, ?4)"
         ))?;
         for (
             rowid,
@@ -1626,7 +1604,7 @@ impl SemanticVectorStore {
             let projection_rowid = tx.last_insert_rowid();
             vec_stmt.execute(params![
                 projection_rowid,
-                embedding,
+                &embedding,
                 target_slot,
                 semantic_model_key()
             ])?;
@@ -1658,7 +1636,7 @@ impl SemanticVectorStore {
                 .filter(|slot| matches!(slot, 0 | 1));
         let projection_ready = canonical_generation > 0
             && Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_READY_STATE_KEY)?
-                == Some(SEMANTIC_SIDECAR_TRUST_VERSION)
+                == Some(SEMANTIC_SQLITE_VEC0_PROJECTION_VERSION)
             && Self::maintenance_state_i64_in_transaction(&tx, SQLITE_VEC0_GENERATION_STATE_KEY)?
                 == Some(canonical_generation)
             && active_slot.is_some()
@@ -1799,13 +1777,21 @@ impl SemanticVectorStore {
                                    length(v.embedding),
                                    CASE WHEN length(v.embedding) = ?4
                                         THEN v.embedding ELSE NULL END,
+                                   length(v.embedding_coarse),
+                                   v.embedding_coarse = vec_quantize_binary(?5),
                                    v.slot, v.model_key
                             FROM {SQLITE_VEC0_META_TABLE} AS m
                             JOIN {SQLITE_VEC0_TABLE} AS v ON v.rowid = m.rowid
                             WHERE m.slot = ?1 AND m.model_key = ?2 AND m.canonical_rowid = ?3
                             "#
                         ),
-                        params![active_slot, semantic_model_key(), rowid, expected_bytes],
+                        params![
+                            active_slot,
+                            semantic_model_key(),
+                            rowid,
+                            expected_bytes,
+                            &embedding
+                        ],
                         |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
@@ -1819,7 +1805,9 @@ impl SemanticVectorStore {
                                 row.get::<_, i64>(8)?,
                                 row.get::<_, Option<Vec<u8>>>(9)?,
                                 row.get::<_, i64>(10)?,
-                                row.get::<_, String>(11)?,
+                                row.get::<_, i64>(11)? == 1,
+                                row.get::<_, i64>(12)?,
+                                row.get::<_, String>(13)?,
                             ))
                         },
                     )
@@ -1836,6 +1824,8 @@ impl SemanticVectorStore {
                         projected_end_char,
                         projected_bytes,
                         projected_embedding,
+                        projected_coarse_bytes,
+                        projected_coarse_matches,
                         projected_slot,
                         projected_model_key,
                     )| {
@@ -1849,6 +1839,8 @@ impl SemanticVectorStore {
                             && projected_end_char == end_char
                             && projected_bytes == expected_bytes
                             && projected_embedding.as_deref() == Some(embedding.as_slice())
+                            && projected_coarse_bytes == SEMANTIC_BINARY_VECTOR_BYTES as i64
+                            && projected_coarse_matches
                             && projected_slot == active_slot
                             && projected_model_key == semantic_model_key()
                     },
