@@ -7,8 +7,8 @@ mod v47_provider_session_repair_tests;
 use crate::schema::ddl::{
     ensure_columns, table_exists, table_has_column, CAPTURE_SOURCE_IDENTITY_COLUMNS,
     CATALOG_SESSION_IMPORT_STATE_COLUMNS, CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
-    LEGACY_CATALOG_IMPORT_REVISION_COLUMNS, LEGACY_SOURCE_IMPORT_REVISION_COLUMNS,
-    SOURCE_IMPORT_FILE_STATE_COLUMNS,
+    IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL, LEGACY_CATALOG_IMPORT_REVISION_COLUMNS,
+    LEGACY_SOURCE_IMPORT_REVISION_COLUMNS, SOURCE_IMPORT_FILE_STATE_COLUMNS,
 };
 use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
 use crate::schema::import_pending_work::install_import_pending_work_invariants;
@@ -1198,6 +1198,7 @@ pub(super) fn migrate_pending_work_projection_to_v57_with_mode(
         // on an existing store. The sole projection index is therefore also
         // created empty, before triggers can mirror any new inventory writes.
         conn.execute_batch(CREATE_TABLES_SQL)?;
+        ensure_import_inventory_checkpoint_schema_v57(conn)?;
         conn.execute_batch(IMPORT_PENDING_WORK_SELECTION_INDEX_SQL)?;
         validate_pending_work_selection_index_v57(conn)?;
         conn.execute_batch(
@@ -1248,6 +1249,122 @@ pub(super) fn migrate_pending_work_projection_to_v57_with_mode(
             Err(err)
         }
     }
+}
+
+pub(super) fn ensure_import_inventory_checkpoint_schema_v57(conn: &Connection) -> Result<()> {
+    let table_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN (\
+           'import_inventory_runs', 'import_inventory_checkpoints', \
+           'import_inventory_path_effects'\
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    match table_count {
+        0 => {
+            conn.execute_batch(IMPORT_INVENTORY_CHECKPOINT_TABLES_SQL)?;
+        }
+        3 => {}
+        _ => {
+            return Err(StoreError::ImportInventorySchemaIncompatible(
+                "durable inventory checkpoint tables are incomplete",
+            ));
+        }
+    }
+    let mirrored_queue_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN (\
+           'import_inventory_directory_work', \
+           'idx_import_inventory_directory_queue_selection'\
+         ))",
+        [],
+        |row| row.get(0),
+    )?;
+    if mirrored_queue_exists {
+        return Err(StoreError::ImportInventorySchemaIncompatible(
+            "durable inventory directory queue must be owned only by capture scratch",
+        ));
+    }
+    let checkpoint_columns: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('import_inventory_checkpoints') \
+         WHERE name IN ('owner_state', 'scratch_owner_epoch', 'scratch_owner_token', \
+                        'directory_queue_empty', 'active_directory_identity', \
+                        'active_directory_fingerprint', \
+                        'active_directory_observed_entries', 'discovered_path_count', \
+                        'attempt_count', 'scratch_database_identity', 'selection_keyset', \
+                        'selection_eof', 'selection_complete')",
+        [],
+        |row| row.get(0),
+    )?;
+    let effect_columns: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('import_inventory_path_effects') \
+         WHERE name = 'capture_journal_identity'",
+        [],
+        |row| row.get(0),
+    )?;
+    let source_identity_key = import_inventory_checkpoint_unique_key_exists(
+        conn,
+        &[
+            "inventory_family",
+            "provider",
+            "source_identity",
+            "inventory_generation",
+        ],
+    )?;
+    let source_root_key = import_inventory_checkpoint_unique_key_exists(
+        conn,
+        &[
+            "inventory_family",
+            "provider",
+            "source_root",
+            "inventory_generation",
+        ],
+    )?;
+    if checkpoint_columns != 13 || effect_columns != 1 || !source_identity_key || !source_root_key {
+        return Err(StoreError::ImportInventorySchemaIncompatible(
+            "durable inventory checkpoint schema shape is incompatible",
+        ));
+    }
+    Ok(())
+}
+
+fn import_inventory_checkpoint_unique_key_exists(
+    conn: &Connection,
+    expected_columns: &[&str],
+) -> Result<bool> {
+    let index_names = conn
+        .prepare("PRAGMA index_list(import_inventory_checkpoints)")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (index_name, unique) in index_names {
+        if !unique {
+            continue;
+        }
+        let columns = conn
+            .prepare(
+                "SELECT name, desc, coll FROM pragma_index_xinfo(?1) \
+                 WHERE key = 1 AND cid >= 0 ORDER BY seqno",
+            )?
+            .query_map([index_name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if columns.len() == expected_columns.len()
+            && columns.iter().zip(expected_columns).all(
+                |((actual, descending, collation), expected)| {
+                    actual == expected && !descending && collation.eq_ignore_ascii_case("binary")
+                },
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_pending_work_selection_index_v57(conn: &Connection) -> Result<()> {

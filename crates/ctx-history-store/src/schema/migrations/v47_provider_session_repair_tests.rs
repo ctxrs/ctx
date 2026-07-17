@@ -325,7 +325,9 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO history_records (id, title) VALUES (?1, 'repair links')",
+            "INSERT INTO history_records (id, title, created_at, updated_at) \
+             VALUES (?1, 'repair links', '1970-01-01T00:00:00Z', \
+                     '1970-01-01T00:00:00Z')",
             [history_record_id.to_string()],
         )
         .unwrap();

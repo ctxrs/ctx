@@ -36,6 +36,7 @@ pub(crate) fn migrate_to_latest(conn: &Connection) -> Result<()> {
     migrations::run_migrations(conn, user_version, fresh_empty_store)?;
     conn.execute_batch(provider_session_identity::PROVIDER_SESSION_INVARIANTS_SQL)?;
     with_immediate_transaction(conn, || {
+        migrations::ensure_import_inventory_checkpoint_schema_v57(conn)?;
         import_pending_work::ensure_import_pending_work_projection_v2(conn)?;
         if !fresh_empty_store {
             import_pending_work::install_import_pending_work_invariants(conn)?;
