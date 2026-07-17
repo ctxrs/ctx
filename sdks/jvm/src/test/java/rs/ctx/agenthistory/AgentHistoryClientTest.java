@@ -19,6 +19,7 @@ public final class AgentHistoryClientTest {
         validatesExplicitSearchLimits();
         omitsObsoleteRetrievalFields();
         rejectsNonCanonicalSearchResponses();
+        rejectsOversizedLocalCliCapture();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
@@ -328,13 +329,34 @@ public final class AgentHistoryClientTest {
                 "{\"schema_version\":1," + canonicalQuery + ",\"query_execution\":{}}",
                 "{\"schema_version\":2,\"query\":\"agent history\",\"query_execution\":{}}",
                 "{\"schemaVersion\":2," + canonicalQuery + ",\"query_execution\":{}}",
-                "{\"schema_version\":2," + canonicalQuery + ",\"queryExecution\":{}}"
+                "{\"schema_version\":2," + canonicalQuery + ",\"queryExecution\":{}}",
+                "{\"schema_version\":2,\"query_execution\":{},\"results\":[]}",
+                "{\"schema_version\":2,\"query\":null,\"results\":[]}",
+                "{\"schema_version\":2,\"query\":null,\"query_execution\":{}}",
+                "{\"schema_version\":2,\"query\":null,\"query_execution\":{},\"results\":{}}"
         };
         for (String response : invalid) {
             AgentHistoryClient client = AgentHistoryClient.withTransport(
                     new FakeTransport("local-cli", response));
             assertProtocol(() -> client.search(AgentHistoryOptions.search()
                     .query(SearchQuery.all("agent history"))));
+        }
+    }
+
+    private static void rejectsOversizedLocalCliCapture() {
+        int stdoutCapBytes = 2 * 1024 * 1024;
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .runner(request -> new CommandResult("x".repeat(stdoutCapBytes + 1), "", 0))
+                .build());
+        try {
+            adapter.execute(new AgentHistoryOperation("status", java.util.Collections.singletonList("status")));
+            throw new AssertionError("expected capture-limit error");
+        } catch (CtxAgentHistoryException error) {
+            assertEquals("capture_limit", error.code());
+            assertEquals("stdout", error.details().get("stream"));
+            assertEquals(Integer.valueOf(stdoutCapBytes), error.details().get("capBytes"));
+            assertAbsent(error.details(), "stdout");
+            assertAbsent(error.details(), "stderr");
         }
     }
 
@@ -399,7 +421,7 @@ public final class AgentHistoryClientTest {
     }
 
     private static String consumedJson() {
-        return "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"legacy_fallback_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
+        return "{\"query_bytes\":13,\"clauses\":1,\"analyzed_tokens\":2,\"largest_analyzed_tokens_per_clause\":2,\"largest_positive_seed_candidates\":0,\"candidate_rows\":0,\"retained_candidate_ids\":0,\"residual_rows\":0,\"verification_bytes\":0,\"largest_verification_lookup_bytes\":0,\"hydrated_rows\":0,\"hydration_input_bytes\":0,\"largest_hydration_input_bytes\":0,\"snippet_input_bytes\":0,\"returned_results\":0,\"returned_text_bytes\":0,\"serialized_response_bytes\":0,\"elapsed_ms\":1}";
     }
 
     private static void assertContains(List<String> values, String fragment) {

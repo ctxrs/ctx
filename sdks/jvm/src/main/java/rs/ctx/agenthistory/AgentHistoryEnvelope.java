@@ -176,6 +176,10 @@ public class AgentHistoryEnvelope {
             details.put("expectedSchemaVersion", Integer.valueOf(2)); details.put("actualSchemaVersion", schema);
             throw new CtxAgentHistoryException.Protocol("ctx search returned an unsupported schema version", details, null);
         }
+        if (!raw.containsKey("query")) {
+            Map<String,Object> details = new LinkedHashMap<>(); details.put("field", "query");
+            throw new CtxAgentHistoryException.Protocol("ctx search response is missing its canonical query field", details, null);
+        }
         Object rawQuery = raw.get("query");
         SearchQuery query = null;
         if (rawQuery != null) {
@@ -195,6 +199,10 @@ public class AgentHistoryEnvelope {
         if (execution == null) {
             Map<String,Object> details = new LinkedHashMap<>(); details.put("field", "query_execution");
             throw new CtxAgentHistoryException.Protocol("ctx search response is missing query execution diagnostics", details, null);
+        }
+        if (!raw.containsKey("results") || !(raw.get("results") instanceof List)) {
+            Map<String,Object> details = new LinkedHashMap<>(); details.put("field", "results");
+            throw new CtxAgentHistoryException.Protocol("ctx search response is missing its result array", details, null);
         }
         Map<String,Object> search = new LinkedHashMap<>(AgentHistoryValue.camelizeObject(raw));
         search.remove("schemaVersion"); search.remove("queryExecution");

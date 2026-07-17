@@ -9,18 +9,20 @@ import (
 type ErrorKind string
 
 const (
-	ErrorKindInvalidArgument       ErrorKind = "invalid_request"
-	ErrorKindNotFound              ErrorKind = "not_found"
-	ErrorKindNotInitialized        ErrorKind = "not_initialized"
-	ErrorKindCommandFailed         ErrorKind = "adapter_error"
-	ErrorKindDecode                ErrorKind = "decode_error"
-	ErrorKindTimeout               ErrorKind = "timeout"
-	ErrorKindCancelled             ErrorKind = "cancelled"
-	ErrorKindUnavailable           ErrorKind = "backend_unavailable"
-	ErrorKindHostedNotImplemented  ErrorKind = "not_supported"
-	ErrorKindUnknown               ErrorKind = "unknown"
-	ErrorKindUnsupportedSchema     ErrorKind = "unsupported_schema"
-	ErrorKindTransportUnavailable  ErrorKind = "transport_unavailable"
+	ErrorKindInvalidArgument      ErrorKind = "invalid_request"
+	ErrorKindNotFound             ErrorKind = "not_found"
+	ErrorKindNotInitialized       ErrorKind = "not_initialized"
+	ErrorKindCommandFailed        ErrorKind = "adapter_error"
+	ErrorKindDecode               ErrorKind = "decode_error"
+	ErrorKindCaptureLimit         ErrorKind = "capture_limit"
+	ErrorKindCaptureFailure       ErrorKind = "capture_failure"
+	ErrorKindTimeout              ErrorKind = "timeout"
+	ErrorKindCancelled            ErrorKind = "cancelled"
+	ErrorKindUnavailable          ErrorKind = "backend_unavailable"
+	ErrorKindHostedNotImplemented ErrorKind = "not_supported"
+	ErrorKindUnknown              ErrorKind = "unknown"
+	ErrorKindUnsupportedSchema    ErrorKind = "unsupported_schema"
+	ErrorKindTransportUnavailable ErrorKind = "transport_unavailable"
 )
 
 // Error is the structured error returned by the SDK.
@@ -31,6 +33,8 @@ type Error struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
+	Stream   string
+	CapBytes int
 	Err      error
 }
 
@@ -88,6 +92,28 @@ func commandError(command []string, exitCode int, stdout, stderr string, err err
 		ExitCode: exitCode,
 		Stdout:   stdout,
 		Stderr:   stderr,
+		Err:      err,
+	}
+}
+
+func captureLimitSDKError(command []string, stream string, capBytes int) *Error {
+	return &Error{
+		Kind:     ErrorKindCaptureLimit,
+		Message:  fmt.Sprintf("ctx CLI %s exceeded its %d-byte capture limit", stream, capBytes),
+		Command:  append([]string(nil), command...),
+		ExitCode: -1,
+		Stream:   stream,
+		CapBytes: capBytes,
+	}
+}
+
+func captureFailureSDKError(command []string, stream string, err error) *Error {
+	return &Error{
+		Kind:     ErrorKindCaptureFailure,
+		Message:  fmt.Sprintf("ctx CLI %s capture failed", stream),
+		Command:  append([]string(nil), command...),
+		ExitCode: -1,
+		Stream:   stream,
 		Err:      err,
 	}
 }

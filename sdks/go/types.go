@@ -289,7 +289,6 @@ type SearchExecutionConsumption struct {
 	RetainedCandidateIDs           int   `json:"retained_candidate_ids"`
 	ResidualRows                   int   `json:"residual_rows"`
 	HydratedRows                   int   `json:"hydrated_rows"`
-	LegacyFallbackRows             int   `json:"legacy_fallback_rows"`
 	VerificationBytes              int   `json:"verification_bytes"`
 	LargestVerificationLookupBytes int   `json:"largest_verification_lookup_bytes"`
 	HydrationInputBytes            int   `json:"hydration_input_bytes"`
