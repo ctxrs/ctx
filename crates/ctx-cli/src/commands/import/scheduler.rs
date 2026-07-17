@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -15,10 +16,11 @@ use ctx_history_store::{
 };
 
 use super::inventory::observe_source_root;
+#[cfg(test)]
+use super::manifest::collect_source_import_files;
 use super::manifest::{
-    collect_source_import_files, observe_selected_source_import_file,
-    persist_new_source_import_observation, persisted_import_identity,
-    same_source_import_observation, source_uses_import_file_manifest,
+    observe_selected_source_import_file, persist_new_source_import_observation,
+    persisted_import_identity, same_source_import_observation, source_uses_import_file_manifest,
 };
 use super::{
     import_error_scope, import_failure_type, provider_publication_blocks_attempt,
