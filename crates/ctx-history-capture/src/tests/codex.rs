@@ -1325,6 +1325,82 @@ fn codex_session_tail_keeps_valid_append_when_another_row_is_rejected() {
 }
 
 #[test]
+fn codex_session_tail_preserves_configured_source_root() {
+    for fast_event_inserts in [true, false] {
+        let temp = tempdir();
+        let source_root = temp.path().join("sessions");
+        let path = source_root.join("2026/07/20/session.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let session_id = format!("codex-tail-source-root-{fast_event_inserts}");
+        let initial = [
+            jsonl_line(json!({
+                "timestamp": "2026-07-20T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "timestamp": "2026-07-20T12:00:00Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-20T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "initial event"}]
+                }
+            })),
+        ]
+        .concat();
+        fs::write(&path, &initial).unwrap();
+        let tail_start = initial.len() as u64;
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let options = CodexSessionImportOptions {
+            source_path: Some(source_root.clone()),
+            imported_at: "2026-07-20T12:30:00Z".parse().unwrap(),
+            fast_event_inserts,
+            ..CodexSessionImportOptions::default()
+        };
+        import_codex_session_jsonl(&path, &mut store, options.clone()).unwrap();
+
+        fs::write(
+            &path,
+            [
+                initial,
+                jsonl_line(json!({
+                    "timestamp": "2026-07-20T12:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "appended event"}]
+                    }
+                })),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        import_codex_session_jsonl_tail(&path, tail_start, &mut store, options).unwrap();
+
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Codex, &session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.descriptor.raw_source_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            source.descriptor.source_root.as_deref(),
+            Some(source_root.to_string_lossy().as_ref())
+        );
+    }
+}
+
+#[test]
 fn codex_session_tail_skips_oversized_required_header_without_failure() {
     let temp = tempdir();
     let path = temp.path().join("tail-oversized-header-codex.jsonl");

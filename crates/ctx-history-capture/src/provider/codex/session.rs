@@ -413,16 +413,12 @@ pub fn import_codex_session_jsonl(
     if options.fast_event_inserts {
         return import_codex_session_paths_fast(vec![path.to_path_buf()], store, options, 0);
     }
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
     let normalization = CodexSessionJsonlAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
+            source_path: Some(path.to_path_buf()),
+            source_root: options.source_path,
             imported_at: options.imported_at,
         },
     )?;
@@ -480,7 +476,7 @@ fn import_codex_session_jsonl_tail_bounded(
     let context = ProviderAdapterContext {
         machine_id: options.machine_id.clone(),
         source_path: Some(path.to_path_buf()),
-        source_root: None,
+        source_root: options.source_path.clone(),
         imported_at: options.imported_at,
     };
     let import_options = NormalizedProviderImportOptions {
