@@ -7,13 +7,11 @@ use std::{
 use clap::ValueEnum;
 use serde_json::json;
 
+use crate::commands::import::{source_error_reason, SourceStats};
+use crate::provider_sources::SourceInfo;
 use ctx_history_capture::{
     CodexSessionImportProgress, CodexSessionImportProgressCallback, ProviderImportSummary,
 };
-use ctx_history_core::CaptureProvider;
-
-use crate::commands::import::{source_error_reason, SourceStats};
-use crate::provider_sources::SourceInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressArg {
@@ -210,7 +208,7 @@ impl ProgressReporter {
         source: &SourceInfo,
         source_offset_bytes: u64,
     ) -> Option<CodexSessionImportProgressCallback> {
-        if !self.is_enabled() || source.provider != CaptureProvider::Codex {
+        if !self.is_enabled() {
             return None;
         }
         let reporter = self.clone();
@@ -229,7 +227,7 @@ impl ProgressReporter {
                 // the whole `ctx import` operation. Only the command-level
                 // finalizer may close the terminal progress line.
                 done: false,
-                force: !progress.done,
+                force: false,
             });
         }))
     }
@@ -240,7 +238,7 @@ impl ProgressReporter {
         source_index: usize,
         source_states: Arc<Mutex<Vec<SourceProgressSnapshot>>>,
     ) -> Option<CodexSessionImportProgressCallback> {
-        if !self.is_enabled() || source.provider != CaptureProvider::Codex {
+        if !self.is_enabled() {
             return None;
         }
         let reporter = self.clone();
@@ -269,7 +267,7 @@ impl ProgressReporter {
                 // A source can finish while other sources are still running;
                 // do not print a completed overall bar for it.
                 done: false,
-                force: !progress.done,
+                force: false,
             });
         }))
     }

@@ -736,6 +736,10 @@ pub(crate) fn import_manifested_source(
         return Ok(ProviderImportSummary::default());
     }
 
+    let total_files = pending.len();
+    let total_bytes = pending.iter().map(|file| file.file_size_bytes).sum::<u64>();
+    let mut completed_files = 0usize;
+    let mut completed_bytes = 0u64;
     let mut summary = ProviderImportSummary::default();
     for pending_file in pending {
         let path = PathBuf::from(&pending_file.source_path);
@@ -787,6 +791,23 @@ pub(crate) fn import_manifested_source(
                     .failures
                     .push(ProviderImportFailure { line: 0, error });
             }
+        }
+        completed_files = completed_files.saturating_add(1);
+        completed_bytes = completed_bytes.saturating_add(pending_file.file_size_bytes);
+        if let Some(callback) = progress.as_ref() {
+            callback(CodexSessionImportProgress {
+                source_path: Some(source.path.clone()),
+                total_files,
+                total_bytes,
+                completed_files,
+                completed_bytes,
+                imported_sessions: summary.imported_sessions,
+                imported_events: summary.imported_events,
+                imported_edges: summary.imported_edges,
+                skipped: summary.skipped,
+                failed: summary.failed,
+                done: false,
+            });
         }
     }
     let _ = record_id;
