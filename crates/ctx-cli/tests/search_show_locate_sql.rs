@@ -560,6 +560,33 @@ fn fresh_home_search_mvp_flow() {
     let doctor_progress = String::from_utf8(doctor_progress).unwrap();
     assert!(doctor_progress.contains(r#""operation":"doctor""#));
     assert!(doctor_progress.contains(r#""phase":"checking""#));
+
+    // Verify pagination footer appears when results exceed the limit.
+    // Importing a second session gives us two FTS5 matches for "history";
+    // requesting only 1 result triggers has_more=true.
+    let pi_fixture = provider_history_fixture("pi-session.jsonl");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pi",
+        "--path",
+        &pi_fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    let paginated = ctx(&temp)
+        .args(["search", "history", "--limit", "1", "--refresh", "off"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let paginated = String::from_utf8(paginated).unwrap();
+    assert!(
+        paginated.contains("More results available."),
+        "expected pagination footer in: {paginated}"
+    );
 }
 
 #[test]

@@ -200,6 +200,13 @@ pub(crate) fn result_type_for_id(store: &Store, item_id: Uuid) -> String {
     "indexed_item".to_owned()
 }
 
+pub(crate) fn print_search_pagination_footer(packet: &ctx_history_search::SearchPacket) {
+    if packet.pagination.has_more {
+        println!();
+        println!("More results available.");
+    }
+}
+
 pub(crate) fn print_search_result_compact(
     index: usize,
     result: &ctx_history_search::SearchPacketResult,

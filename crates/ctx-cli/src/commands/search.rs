@@ -39,7 +39,10 @@ use crate::search_filters::{
     search_has_intent, search_no_results_target, SearchFilterInput, SearchIntentInput,
     SourceIdentityFilterArgs, SourceIdentityFilters,
 };
-use crate::search_render::{print_search_result_compact, print_search_result_verbose, SearchDto};
+use crate::search_render::{
+    print_search_pagination_footer, print_search_result_compact, print_search_result_verbose,
+    SearchDto,
+};
 use crate::semantic::search_packet_with_backend;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::shell_quote_arg;
@@ -359,6 +362,7 @@ pub(crate) fn run_search(
                 print_search_result_compact(index + 1, result);
             }
         }
+        print_search_pagination_footer(&packet);
     }
     analytics::insert_duration(
         analytics_properties,
