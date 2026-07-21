@@ -46,7 +46,7 @@ pub(crate) struct SkillInstallArgs {
         help = "Install into the current project instead of global agent dirs"
     )]
     project: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long, help = "Overwrite locally modified bundled skill files")]
     force: bool,
@@ -63,7 +63,7 @@ pub(crate) struct SkillStatusArgs {
         help = "Check the current project's skill dirs instead of global dirs"
     )]
     project: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
 }
 

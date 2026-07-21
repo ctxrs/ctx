@@ -26,7 +26,7 @@ pub enum DocsCommand {
 
 #[derive(Debug, Args)]
 pub struct DocsListArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
 }
 
@@ -35,7 +35,7 @@ pub struct DocsSearchArgs {
     pub query: String,
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
 }
 
@@ -44,7 +44,7 @@ pub struct DocsShowArgs {
     pub id: String,
     #[arg(long, value_enum, default_value_t = DocsFormat::Markdown)]
     pub format: DocsFormat,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[arg(long)]
     pub out: Option<PathBuf>,

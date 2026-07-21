@@ -137,7 +137,7 @@ struct SetupArgs {
     no_daemon: bool,
     #[arg(long, help = "Wait for foreground lexical indexing before returning")]
     wait: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
     progress: ProgressArg,
@@ -145,13 +145,13 @@ struct SetupArgs {
 
 #[derive(Debug, Args, Clone)]
 struct JsonArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
 struct SourcesArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(
         long,
@@ -168,7 +168,7 @@ struct SourcesArgs {
 
 #[derive(Debug, Args, Clone)]
 struct DoctorArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
     progress: ProgressArg,
@@ -210,7 +210,7 @@ struct ImportArgs {
     resume: bool,
     #[arg(long, help = "Do not start daemon maintenance after import")]
     no_daemon: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
     progress: ProgressArg,
@@ -252,7 +252,7 @@ struct ShowSessionArgs {
     mode: TranscriptMode,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long)]
     out: Option<PathBuf>,
@@ -270,7 +270,7 @@ struct ShowEventArgs {
     window: Option<usize>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
 }
 
@@ -299,7 +299,7 @@ struct LocateSessionArgs {
     provider_session: Option<String>,
     #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
     format: LocateFormat,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
 }
 
@@ -309,7 +309,7 @@ struct LocateEventArgs {
     id: String,
     #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
     format: LocateFormat,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
 }
 

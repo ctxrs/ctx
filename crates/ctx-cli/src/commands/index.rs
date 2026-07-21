@@ -46,13 +46,13 @@ enum IndexCommand {
 
 #[derive(Debug, Args)]
 struct IndexStatusArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 struct IndexWatchArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long, default_value_t = 2, value_parser = parse_positive_seconds)]
     interval_seconds: u64,
@@ -60,7 +60,7 @@ struct IndexWatchArgs {
 
 #[derive(Debug, Args)]
 struct IndexWaitArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     json: bool,
     #[arg(long, help = "Wait for lexical SQLite indexing")]
     lexical: bool,

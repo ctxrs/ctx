@@ -34,7 +34,7 @@ pub(crate) struct McpInstallArgs {
         help = "Install into the current project's MCP config when supported"
     )]
     pub(crate) project: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub(crate) json: bool,
     #[arg(
         long,
@@ -57,7 +57,7 @@ pub(crate) struct McpStatusArgs {
     pub(crate) all_agents: bool,
     #[arg(long, help = "Inspect the current project's MCP config when supported")]
     pub(crate) project: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub(crate) json: bool,
 }
 

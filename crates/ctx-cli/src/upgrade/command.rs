@@ -39,7 +39,7 @@ pub struct UpgradeArgs {
     pub channel: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[arg(long, hide = true)]
     pub background: bool,
@@ -61,13 +61,13 @@ pub enum UpgradeCommand {
 pub struct UpgradeCheckArgs {
     #[arg(long)]
     pub channel: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct UpgradeStatusArgs {
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
 }
 

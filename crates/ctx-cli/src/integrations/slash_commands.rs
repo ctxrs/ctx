@@ -50,7 +50,7 @@ pub(crate) struct SlashCommandInstallArgs {
         help = "Install into the current project instead of global agent dirs"
     )]
     project: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub(crate) json: bool,
     #[arg(long, help = "Overwrite locally modified ctx-managed command files")]
     force: bool,
