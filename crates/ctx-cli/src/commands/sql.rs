@@ -73,6 +73,12 @@ pub(crate) fn read_sql_input(args: &SqlArgs) -> Result<String> {
         }
         (Some(sql), None) => Ok(sql.clone()),
         (None, Some(path)) => {
+            if !path
+                .try_exists()
+                .with_context(|| format!("check SQL file {}", path.display()))?
+            {
+                return Err(anyhow!("SQL file does not exist: {}", path.display()));
+            }
             let file = fs::File::open(path)
                 .with_context(|| format!("read SQL from {}", path.display()))?;
             read_sql_limited(file, max_sql_bytes, &path.display().to_string())
