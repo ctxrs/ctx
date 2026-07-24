@@ -1,6 +1,8 @@
 # Limitations
 
-ctx is production-scoped to local history indexing and search retrieval.
+ctx is production-scoped to local history indexing and search retrieval. The
+separate `ctx turso` command is an experimental remote libSQL exporter and
+projection, not a remote-primary backend.
 These limitations are intentional unless another document says a capability has
 shipped.
 
@@ -52,6 +54,22 @@ shipped.
 - The ctx macOS CLI targets macOS 13, but ONNX Runtime 1.27 follows its upstream
   macOS 14 minimum. On macOS 13, daemon-backed lexical search remains available
   while semantic search is unavailable.
+- `ctx turso search` is a remote, ASCII case-insensitive substring search. It does
+  not currently use Turso FTS, semantic retrieval, ctx's local ranking, or
+  artifact bodies; very large remote projections need a dedicated indexed
+  search follow-up before they should replace local lexical-search performance.
+
+## Remote Projection Semantics
+
+- `ctx turso push` uploads existing local events but does not perform a direct
+  remote provider import. A temporary/local ctx index remains necessary to seed
+  the projection.
+- Event UUID plus provider dedupe keys make repeated pushes and most separately
+  captured histories idempotent across Macs. Histories without a provider
+  dedupe key are unioned by event UUID only.
+- Turso/libSQL is the first remote protocol target. Arbitrary hosted SQLite
+  files and providers that do not implement the libSQL remote protocol are not
+  supported.
 
 ## Retrieval Semantics
 

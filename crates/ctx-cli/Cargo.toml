@@ -35,6 +35,8 @@ ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-search = { path = "../ctx-history-search" }
 ctx-history-store = { path = "../ctx-history-store" }
+libsql.workspace = true
+tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 flate2 = "1"

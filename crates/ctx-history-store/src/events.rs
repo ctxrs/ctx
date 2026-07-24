@@ -328,6 +328,26 @@ impl Store {
         collect_rows(rows)
     }
 
+    /// Reads a stable, bounded page for remote export without loading an
+    /// entire history corpus into memory.
+    pub fn list_events_page_after(
+        &self,
+        after_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let sql = match after_id {
+            Some(_) => event_select_sql("WHERE id > ?1 ORDER BY id LIMIT ?2"),
+            None => event_select_sql("ORDER BY id LIMIT ?1"),
+        };
+        let mut stmt = self.conn.prepare(sql.as_str())?;
+        let rows = match after_id {
+            Some(id) => stmt.query_map(params![id.to_string(), limit], event_from_row)?,
+            None => stmt.query_map(params![limit], event_from_row)?,
+        };
+        collect_rows(rows)
+    }
+
     pub fn max_events_per_history_record(&self) -> Result<i64> {
         let max_events = self.conn.query_row(
             r#"

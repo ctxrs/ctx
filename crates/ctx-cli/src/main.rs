@@ -39,7 +39,7 @@ use commands::sql::{parse_sql_timeout, raw_sql_result_json};
 use commands::{
     doctor::run_doctor, import::run_import, index::run_index, locate::run_locate,
     search::run_search, setup::run_setup, show::run_show, sources::run_sources, sql::run_sql,
-    status::run_status,
+    status::run_status, turso::run_turso,
 };
 use config::AppConfig;
 use ctx_history_core::{default_data_root, CaptureProvider};
@@ -111,6 +111,8 @@ enum CommandRoot {
     Search(SearchArgs),
     #[command(about = "Run read-only SQL against the local ctx index")]
     Sql(SqlArgs),
+    #[command(about = "Sync and search ctx history through a remote libSQL database")]
+    Turso(commands::turso::TursoArgs),
     #[command(about = "Read embedded ctx documentation")]
     Docs(docs::DocsArgs),
     #[command(about = "Install or inspect ctx integrations")]
@@ -574,6 +576,7 @@ impl CommandRoot {
             Self::Locate(_) => "locate",
             Self::Search(_) => "search",
             Self::Sql(_) => "sql",
+            Self::Turso(_) => "turso",
             Self::Docs(_) => "docs",
             Self::Integrations(_) => "integrations",
             Self::Mcp(_) => "mcp",
@@ -585,7 +588,9 @@ impl CommandRoot {
 
     fn sends_analytics(&self) -> bool {
         match self {
-            Self::Status(_) | Self::Index(_) | Self::Sql(_) | Self::Mcp(_) => false,
+            Self::Status(_) | Self::Index(_) | Self::Sql(_) | Self::Turso(_) | Self::Mcp(_) => {
+                false
+            }
             Self::Daemon(args) => !matches!(&args.command, DaemonCommand::Status(_)),
             _ => true,
         }
@@ -602,6 +607,7 @@ impl CommandRoot {
             Self::Locate(args) => args.json_output(),
             Self::Search(args) => args.json,
             Self::Sql(args) => args.json_output(),
+            Self::Turso(args) => args.json_output(),
             Self::Docs(args) => args.json_output(),
             Self::Integrations(args) => args.json_output(),
             Self::Mcp(_) => false,
@@ -624,6 +630,7 @@ impl CommandRoot {
                 | Self::Docs(_)
                 | Self::Mcp(_)
                 | Self::Sql(_)
+                | Self::Turso(_)
                 | Self::Upgrade(_)
                 | Self::Daemon(_)
         )
@@ -712,6 +719,7 @@ fn main() -> Result<()> {
             run_search(args, data_root.clone(), &mut analytics_properties, &config)
         }
         CommandRoot::Sql(args) => run_sql(args, data_root.clone()),
+        CommandRoot::Turso(args) => run_turso(args, data_root.clone()),
         CommandRoot::Docs(args) => docs::run(args),
         CommandRoot::Integrations(args) => integrations::run(args, &mut analytics_properties),
         CommandRoot::Mcp(args) => mcp::run(args, data_root.clone()),
@@ -772,6 +780,7 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
         | CommandRoot::Index(_)
         | CommandRoot::Sources(_)
         | CommandRoot::Sql(_)
+        | CommandRoot::Turso(_)
         | CommandRoot::Doctor(_) => {}
         CommandRoot::Import(args) => {
             analytics::insert_bool(&mut properties, "resume", args.resume);

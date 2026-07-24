@@ -20,6 +20,40 @@ top-level `status`. `CTX_QUIET=1` provides the same default for scripts and
 installer wrappers. JSON output, errors, and command results from commands such
 as `search`, `show`, `sources`, and `docs` are not suppressed.
 
+## Remote libSQL / Turso (experimental)
+
+`ctx turso` stores a portable event projection in a remote libSQL-compatible
+database. It is intended for sharing a history projection across machines; it
+does not alter the normal local `ctx` commands.
+
+```bash
+export CTX_TURSO_DATABASE_URL='libsql://your-database.turso.io'
+export CTX_TURSO_AUTH_TOKEN='...'
+
+ctx turso init
+ctx turso push --batch-size 100
+ctx turso search 'deployment' --provider codex
+ctx turso status
+```
+
+- Credentials are read only from `CTX_TURSO_DATABASE_URL` and
+  `CTX_TURSO_AUTH_TOKEN`. Do not put an auth token in a command argument, a
+  config file, or a repository.
+- `push` reads an existing local `work.sqlite` and uploads events in bounded,
+  idempotent batches. It exports only records explicitly marked `sync_full` by
+  default; use `--include-local-only` to make exporting ordinary local history
+  an intentional action. Event UUID and provider dedupe keys make replaying a
+  push and independently uploading matching history from a second Mac safe.
+- Each Mac needs a stable `CTX_TURSO_DEVICE_ID` unless its existing ctx store
+  already has a local device identity. The remote per-device cursor means later
+  pushes only scan new events.
+- `turso search` is a portable, ASCII case-insensitive substring search over
+  the uploaded JSON payload. It is intentionally separate from `ctx search` and
+  does not provide local semantic search, artifact bodies, raw SQL, or MCP.
+- A local ctx index is needed only for the initial import/push path. Direct
+  provider-to-remote capture is not implemented yet, so this is a remote
+  projection/exporter rather than the requested remote-primary backend.
+
 ## Setup And Health
 
 ```bash

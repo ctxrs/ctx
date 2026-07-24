@@ -27,6 +27,7 @@ clap_mangen = "0.2"
 directories = "5.0"
 ed25519-dalek = "2.1"
 libc = "0.2"
+libsql = { version = "0.10.0-pre.4", default-features = false, features = ["remote", "tls"] }
 predicates = "3.1"
 proptest = "1"
 regex = "1.10"
@@ -39,6 +40,7 @@ sha2 = "0.10"
 tempfile = "3.10"
 thiserror = "1.0"
 tar = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 url = "2.5"
 uuid = { version = "1.10", features = ["serde", "v4", "v7"] }
 xz2 = "0.1"
