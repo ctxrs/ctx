@@ -27,6 +27,7 @@ impl TursoArgs {
         match &self.command {
             TursoCommand::Init(args) => args.json,
             TursoCommand::Push(args) => args.json,
+            TursoCommand::Import(args) => args.json,
             TursoCommand::Search(args) => args.json,
             TursoCommand::Status(args) => args.json,
         }
@@ -39,6 +40,10 @@ enum TursoCommand {
     Init(TursoInitArgs),
     #[command(about = "Export an existing local ctx index to Turso")]
     Push(TursoPushArgs),
+    #[command(
+        about = "Import all discovered provider histories directly into Turso without a local SQLite file"
+    )]
+    Import(TursoImportArgs),
     #[command(about = "Search history stored in Turso")]
     Search(TursoSearchArgs),
     #[command(about = "Show Turso ctx projection status")]
@@ -67,6 +72,19 @@ struct TursoPushArgs {
         help = "Also export local-only events; required unless events are marked sync_full"
     )]
     include_local_only: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct TursoImportArgs {
+    #[arg(
+        long,
+        default_value_t = DEFAULT_PUSH_BATCH_SIZE,
+        value_parser = parse_push_batch_size,
+        help = "Number of events per remote transaction (1-250)"
+    )]
+    batch_size: usize,
     #[arg(long)]
     json: bool,
 }
@@ -113,20 +131,64 @@ impl TursoConfig {
     }
 }
 
+#[derive(Debug)]
+struct TursoPushReport {
+    uploaded_events: u64,
+    skipped_events: usize,
+    scanned_events: usize,
+    batches: usize,
+}
+
 pub(crate) fn run_turso(args: TursoArgs, data_root: PathBuf) -> Result<()> {
     match args.command {
         TursoCommand::Init(args) => run_async(init(args.json)),
         TursoCommand::Push(args) => {
             let db_path = database_path(data_root);
             let store = open_existing_store_read_only(&db_path, "ctx turso push")?;
-            run_async(push(store, args))
+            let json_output = args.json;
+            let report = run_async(push(store, args))?;
+            print_push_report(&report, json_output)
         }
+        TursoCommand::Import(args) => run_turso_import(args),
         TursoCommand::Search(args) => run_async(search(args)),
         TursoCommand::Status(args) => run_async(status(args.json)),
     }
 }
 
-fn run_async(operation: impl std::future::Future<Output = Result<()>>) -> Result<()> {
+fn run_turso_import(args: TursoImportArgs) -> Result<()> {
+    let (store, totals) = crate::commands::import::import_all_providers_in_memory()?;
+    let report = run_async(push(
+        store,
+        TursoPushArgs {
+            batch_size: args.batch_size,
+            limit: None,
+            include_local_only: true,
+            json: args.json,
+        },
+    ))?;
+    if args.json {
+        print_json(json!({
+            "ephemeral_store": true,
+            "providers_imported": totals.imported_sources,
+            "events_materialized": totals.imported_events,
+            "source_failures": totals.failed_sources,
+            "uploaded_events": report.uploaded_events,
+            "skipped_events": report.skipped_events,
+            "scanned_events": report.scanned_events,
+            "batches": report.batches,
+            "idempotent": true,
+            "remote_projection": true,
+        }))
+    } else {
+        println!("ephemeral_store: true");
+        println!("providers_imported: {}", totals.imported_sources);
+        println!("events_materialized: {}", totals.imported_events);
+        println!("source_failures: {}", totals.failed_sources);
+        print_push_report(&report, false)
+    }
+}
+
+fn run_async<T>(operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
     Runtime::new()
         .context("create async runtime for Turso")?
         .block_on(operation)
@@ -191,15 +253,6 @@ async fn ensure_schema(conn: &libsql::Connection) -> Result<()> {
     )
     .await
     .context("create Turso dedupe index")?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ctx_turso_upload_cursors (\
-            device_id TEXT PRIMARY KEY,\
-            last_event_id TEXT NOT NULL\
-        )",
-        (),
-    )
-    .await
-    .context("create Turso upload cursor table")?;
     Ok(())
 }
 
@@ -222,14 +275,21 @@ async fn ensure_dedupe_key_column(conn: &libsql::Connection) -> Result<()> {
     Ok(())
 }
 
-async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
+async fn push(store: Store, args: TursoPushArgs) -> Result<TursoPushReport> {
     let conn = connect().await?;
     ensure_schema(&conn).await?;
-    let device_id = export_device_id(&store)?;
-    let session_providers = store
+    let session_identities = store
         .list_sessions()?
         .into_iter()
-        .map(|session| (session.id, session.provider.as_str().to_owned()))
+        .map(|session| {
+            (
+                session.id,
+                (
+                    session.provider.as_str().to_owned(),
+                    session.external_session_id,
+                ),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let capture_source_providers = store
         .list_capture_sources()?
@@ -237,7 +297,7 @@ async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
         .map(|source| (source.id, source.descriptor.provider.as_str().to_owned()))
         .collect::<std::collections::HashMap<_, _>>();
 
-    let mut after_id = upload_cursor(&conn, &device_id).await?;
+    let mut after_id = None;
     let mut uploaded = 0u64;
     let mut skipped = 0usize;
     let mut scanned = 0usize;
@@ -270,7 +330,7 @@ async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
                 serde_json::to_string(&event.payload).context("serialize event payload")?;
             let provider = event
                 .session_id
-                .and_then(|id| session_providers.get(&id))
+                .and_then(|id| session_identities.get(&id).map(|identity| &identity.0))
                 .or_else(|| {
                     event
                         .capture_source_id
@@ -278,6 +338,7 @@ async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
                 })
                 .map(String::as_str)
                 .unwrap_or("unknown");
+            let dedupe_key = remote_dedupe_key(event, &session_identities);
             uploaded += transaction
                 .execute(
                     "INSERT OR IGNORE INTO ctx_turso_events \
@@ -290,7 +351,7 @@ async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
                         event.role.map(|role| role.as_str().to_owned()),
                         event.event_type.as_str(),
                         event.occurred_at.timestamp_millis(),
-                        event.dedupe_key.as_deref(),
+                        dedupe_key.as_deref(),
                         payload_json,
                         "",
                     ],
@@ -298,7 +359,6 @@ async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
                 .await
                 .with_context(|| format!("upload event {}", event.id))?;
         }
-        save_upload_cursor(&transaction, &device_id, last.id).await?;
         transaction
             .commit()
             .await
@@ -306,21 +366,64 @@ async fn push(store: Store, args: TursoPushArgs) -> Result<()> {
         batches += 1;
     }
 
-    if args.json {
+    Ok(TursoPushReport {
+        uploaded_events: uploaded,
+        skipped_events: skipped,
+        scanned_events: scanned,
+        batches,
+    })
+}
+
+fn remote_dedupe_key(
+    event: &ctx_history_core::Event,
+    sessions: &std::collections::HashMap<uuid::Uuid, (String, Option<String>)>,
+) -> Option<String> {
+    let source_dedupe_key = event.dedupe_key.as_deref()?;
+    let session_id = event.session_id?;
+    let (provider, external_session_id) = sessions.get(&session_id)?;
+    canonical_provider_source_dedupe_key(
+        provider,
+        external_session_id.as_deref(),
+        source_dedupe_key,
+    )
+    .or_else(|| Some(source_dedupe_key.to_owned()))
+}
+
+fn canonical_provider_source_dedupe_key(
+    provider: &str,
+    external_session_id: Option<&str>,
+    source_dedupe_key: &str,
+) -> Option<String> {
+    let external_session_id = external_session_id?.trim();
+    if external_session_id.is_empty() {
+        return None;
+    }
+    let source_dedupe_key = source_dedupe_key.strip_prefix("provider-source:")?;
+    let (_, event_identity) = source_dedupe_key.split_once(':')?;
+    let (provider_event_index, payload_hash) = event_identity.split_once(':')?;
+    if provider_event_index.is_empty() || payload_hash.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "provider:{provider}:{external_session_id}:{provider_event_index}:{payload_hash}"
+    ))
+}
+
+fn print_push_report(report: &TursoPushReport, json_output: bool) -> Result<()> {
+    if json_output {
         print_json(json!({
-            "uploaded_events": uploaded,
-            "skipped_events": skipped,
-            "scanned_events": scanned,
-            "batches": batches,
+            "uploaded_events": report.uploaded_events,
+            "skipped_events": report.skipped_events,
+            "scanned_events": report.scanned_events,
+            "batches": report.batches,
             "idempotent": true,
             "remote_projection": true,
-            "device_id": device_id,
         }))?;
     } else {
-        println!("uploaded_events: {uploaded}");
-        println!("skipped_events: {skipped}");
-        println!("scanned_events: {scanned}");
-        println!("batches: {batches}");
+        println!("uploaded_events: {}", report.uploaded_events);
+        println!("skipped_events: {}", report.skipped_events);
+        println!("scanned_events: {}", report.scanned_events);
+        println!("batches: {}", report.batches);
         println!("idempotent: true");
     }
     Ok(())
@@ -459,54 +562,6 @@ async fn require_projection(conn: &libsql::Connection) -> Result<()> {
     Ok(())
 }
 
-fn export_device_id(store: &Store) -> Result<String> {
-    if let Ok(value) = env::var("CTX_TURSO_DEVICE_ID") {
-        if !value.trim().is_empty() {
-            return Ok(value);
-        }
-    }
-    store
-        .local_device()?
-        .map(|device| device.stable_device_id)
-        .ok_or_else(|| {
-            anyhow!(
-                "CTX_TURSO_DEVICE_ID is required when the local ctx store has no device identity"
-            )
-        })
-}
-
-async fn upload_cursor(conn: &libsql::Connection, device_id: &str) -> Result<Option<uuid::Uuid>> {
-    let mut rows = conn
-        .query(
-            "SELECT last_event_id FROM ctx_turso_upload_cursors WHERE device_id = ?1",
-            [device_id],
-        )
-        .await
-        .context("read Turso upload cursor")?;
-    let Some(row) = rows.next().await.context("read Turso upload cursor row")? else {
-        return Ok(None);
-    };
-    row.get::<String>(0)?
-        .parse()
-        .map(Some)
-        .context("parse Turso upload cursor")
-}
-
-async fn save_upload_cursor(
-    conn: &libsql::Connection,
-    device_id: &str,
-    last_event_id: uuid::Uuid,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO ctx_turso_upload_cursors (device_id, last_event_id) VALUES (?1, ?2) \
-         ON CONFLICT(device_id) DO UPDATE SET last_event_id = excluded.last_event_id",
-        (device_id, last_event_id.to_string()),
-    )
-    .await
-    .context("save Turso upload cursor")?;
-    Ok(())
-}
-
 fn remote_export_allowed(event: &ctx_history_core::Event, include_local_only: bool) -> bool {
     if matches!(event.sync.visibility, Visibility::Withheld)
         || matches!(event.sync.sync_state, SyncState::Withheld)
@@ -526,6 +581,30 @@ mod tests {
         assert_eq!(parse_push_batch_size("250"), Ok(250));
         assert!(parse_push_batch_size("0").is_err());
         assert!(parse_push_batch_size("251").is_err());
+    }
+
+    #[test]
+    fn canonicalizes_provider_source_dedupe_keys_for_cross_mac_merging() {
+        assert_eq!(
+            canonical_provider_source_dedupe_key(
+                "codex",
+                Some("session-123"),
+                "provider-source:a5dcd0d3-41d1-7bad-90ee-e1ba0b64be32:2:fnv1a64:abc",
+            ),
+            Some("provider:codex:session-123:2:fnv1a64:abc".to_owned())
+        );
+    }
+
+    #[test]
+    fn leaves_source_dedupe_key_unchanged_without_a_stable_session_id() {
+        assert_eq!(
+            canonical_provider_source_dedupe_key(
+                "codex",
+                None,
+                "provider-source:a5dcd0d3-41d1-7bad-90ee-e1ba0b64be32:2:fnv1a64:abc",
+            ),
+            None
+        );
     }
 
     #[test]

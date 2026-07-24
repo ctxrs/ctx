@@ -31,6 +31,10 @@ export CTX_TURSO_DATABASE_URL='libsql://your-database.turso.io'
 export CTX_TURSO_AUTH_TOKEN='...'
 
 ctx turso init
+# Import every discovered native provider without creating ctx/work.sqlite.
+ctx turso import --batch-size 100
+
+# Or migrate an existing local ctx index.
 ctx turso push --batch-size 100
 ctx turso search 'deployment' --provider codex
 ctx turso status
@@ -44,15 +48,26 @@ ctx turso status
   default; use `--include-local-only` to make exporting ordinary local history
   an intentional action. Event UUID and provider dedupe keys make replaying a
   push and independently uploading matching history from a second Mac safe.
-- Each Mac needs a stable `CTX_TURSO_DEVICE_ID` unless its existing ctx store
-  already has a local device identity. The remote per-device cursor means later
-  pushes only scan new events.
+- `import` reads every discovered native provider directly into a process-memory
+  ctx store, then uploads it to Turso. It never creates a persistent ctx
+  `work.sqlite`, WAL, `objects`, or `spool` directory. The transient store is
+  discarded after the upload. Each execution performs a complete idempotent
+  event scan, so a new event can never be skipped because its stable UUID sorts
+  before an earlier event. Provider-owned SQLite sources with live WAL files may
+  still be copied to an OS temporary directory for a consistent read; this is
+  never a ctx index and is removed when the command exits.
+- Imports from Mac 1 and Mac 2 are unioned. When both Macs contain the same
+  provider session with a stable provider-owned session ID, its matching events
+  are deduplicated even when their local source paths differ. Sources without a
+  stable provider session ID are kept as separate events to avoid losing valid
+  independent history.
 - `turso search` is a portable, ASCII case-insensitive substring search over
   the uploaded JSON payload. It is intentionally separate from `ctx search` and
   does not provide local semantic search, artifact bodies, raw SQL, or MCP.
-- A local ctx index is needed only for the initial import/push path. Direct
-  provider-to-remote capture is not implemented yet, so this is a remote
-  projection/exporter rather than the requested remote-primary backend.
+- The remote persistence path currently covers the portable event projection.
+  Normal `ctx search`, `show`, SQL, MCP, semantic retrieval, and artifact-body
+  storage still use the local-store feature set; use the `turso` subcommands
+  when running without a local ctx index.
 
 ## Setup And Health
 

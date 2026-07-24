@@ -18,6 +18,24 @@ use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
 
 impl Store {
+    /// Opens an ephemeral Store backed only by process memory. This never
+    /// creates a SQLite file, WAL sidecar, object directory, or spool.
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        configure_connection(&conn, BUSY_TIMEOUT)?;
+        let store = Self {
+            path: PathBuf::from(":memory:"),
+            object_dir: PathBuf::new(),
+            conn,
+            busy_timeout: BUSY_TIMEOUT,
+            event_search_bulk_depth: Default::default(),
+        };
+        store.migrate()?;
+        store.recover_event_search_bulk_mode()?;
+        store.ensure_search_projection_initialized()?;
+        Ok(store)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_busy_timeout(path, BUSY_TIMEOUT)
     }

@@ -11,6 +11,21 @@ fn tempdir() -> tempfile::TempDir {
         .unwrap()
 }
 
+#[test]
+fn in_memory_store_uses_no_filesystem_database_path() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.path().to_string_lossy(), ":memory:");
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(store.object_dir.as_os_str().is_empty());
+}
+
 fn fts_config(store: &Store, table: &str, key: &str, default: i64) -> i64 {
     let sql = format!("SELECT v FROM {table}_config WHERE k = ?1");
     store

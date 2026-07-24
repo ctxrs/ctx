@@ -1,8 +1,8 @@
 # Limitations
 
 ctx is production-scoped to local history indexing and search retrieval. The
-separate `ctx turso` command is an experimental remote libSQL exporter and
-projection, not a remote-primary backend.
+separate `ctx turso` command has an experimental remote-primary persistence path
+for its portable event projection.
 These limitations are intentional unless another document says a capability has
 shipped.
 
@@ -61,12 +61,22 @@ shipped.
 
 ## Remote Projection Semantics
 
-- `ctx turso push` uploads existing local events but does not perform a direct
-  remote provider import. A temporary/local ctx index remains necessary to seed
-  the projection.
+- `ctx turso import` uses an in-process-memory ctx store to read all discovered
+  native providers and uploads the resulting event projection without creating
+  a persistent ctx SQLite index. It is memory-bound for large corpora and scans
+  the complete event set on each execution to guarantee that UUID sort order
+  cannot lose newly imported history. It does not yet stream normalized records
+  directly to libSQL or maintain a remote per-source incremental cursor.
+- `ctx turso push` uploads an existing local index. Neither command makes the
+  ordinary local `ctx search`, `show`, SQL, MCP, semantic retrieval, or
+  artifact-body interfaces remote-capable; use `ctx turso search` for remote
+  projection retrieval.
 - Event UUID plus provider dedupe keys make repeated pushes and most separately
-  captured histories idempotent across Macs. Histories without a provider
-  dedupe key are unioned by event UUID only.
+  captured histories idempotent across Macs. For source-scoped provider keys,
+  Turso derives a canonical key from the provider-owned session ID, event index,
+  and payload hash so the same session copied to different source paths merges.
+  Histories without a stable provider session ID are unioned by their original
+  event UUID only.
 - Turso/libSQL is the first remote protocol target. Arbitrary hosted SQLite
   files and providers that do not implement the libSQL remote protocol are not
   supported.

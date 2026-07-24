@@ -973,6 +973,50 @@ pub(crate) fn run_import_internal(
     })
 }
 
+/// Imports every discovered native provider into a process-memory Store. The
+/// caller owns the Store and must persist its accepted records before dropping
+/// it. This path deliberately has no data root, catalog files, spool, or
+/// SQLite database file.
+pub(crate) fn import_all_providers_in_memory() -> Result<(Store, ImportTotals)> {
+    let args = ImportArgs {
+        provider: None,
+        path: None,
+        history_source: None,
+        history_source_manifest: Vec::new(),
+        reset_cursor: false,
+        format: None,
+        all: true,
+        resume: true,
+        no_daemon: true,
+        json: false,
+        progress: ProgressArg::None,
+    };
+    let requests = import_requests(&args)?;
+    let mut store = Store::open_in_memory()?;
+    let inventory = inventory_import_sources(&store, requests, true)?;
+    let mut totals = ImportTotals::default();
+
+    for failure in inventory.failures {
+        totals.add_source_failure(&failure.stats);
+    }
+    for plan in inventory.sources {
+        match import_one_source_without_search_refresh(
+            &mut store,
+            &plan.source,
+            None,
+            true,
+            &plan.preinventory,
+        ) {
+            Ok(summary) => totals.add(&summary, &plan.stats),
+            Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
+                totals.add_source_failure(&plan.stats);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((store, totals))
+}
+
 fn source_provider_label(source: &SourceInfo) -> &'static str {
     provider_source_spec(source.provider)
         .map(|spec| spec.display_name)
