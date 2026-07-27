@@ -30,7 +30,7 @@ fn ctx_status_has_one_actionable_pro_machine_contract() {
         .unwrap()
         .arg("--data-root")
         .arg(root.path())
-        .args(["status", "--json"])
+        .args(["status", "--format=json"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -50,7 +50,10 @@ fn ctx_status_has_one_actionable_pro_machine_contract() {
 #[test]
 fn commercial_channel_selection_is_exact_and_stable_fails_closed() {
     let root = tempdir().unwrap();
-    for arguments in [vec!["pro", "--json"], vec!["pro", "setup", "--json"]] {
+    for arguments in [
+        vec!["pro", "--format=json"],
+        vec!["pro", "setup", "--format=json"],
+    ] {
         for value in ["", "production", "Staging", "1"] {
             Command::cargo_bin("ctx")
                 .unwrap()
@@ -66,7 +69,10 @@ fn commercial_channel_selection_is_exact_and_stable_fails_closed() {
         }
     }
 
-    for arguments in [vec!["pro", "--json"], vec!["pro", "setup", "--json"]] {
+    for arguments in [
+        vec!["pro", "--format=json"],
+        vec!["pro", "setup", "--format=json"],
+    ] {
         Command::cargo_bin("ctx")
             .unwrap()
             .env_remove("CTX_PRO_CHANNEL")
@@ -98,7 +104,7 @@ fn ordinary_uninstall_is_local_without_commercial_configuration_or_vault() {
         .env_remove("XDG_RUNTIME_DIR")
         .arg("--data-root")
         .arg(root.path())
-        .args(["pro", "uninstall", "--keep-data", "--json"])
+        .args(["pro", "uninstall", "--keep-data", "--format=json"])
         .output()
         .unwrap();
     assert!(
@@ -122,7 +128,7 @@ fn ordinary_uninstall_is_local_without_commercial_configuration_or_vault() {
         .unwrap()
         .arg("--data-root")
         .arg(root.path())
-        .args(["status", "--json"])
+        .args(["status", "--format=json"])
         .output()
         .unwrap();
     assert!(status.status.success());
@@ -165,7 +171,7 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
                 .env_remove("XDG_RUNTIME_DIR")
                 .arg("--data-root")
                 .arg(&data_root)
-                .args(["pro", "uninstall", choice, "--json"])
+                .args(["pro", "uninstall", choice, "--format=json"])
                 .output()
                 .unwrap();
             assert!(
@@ -242,7 +248,7 @@ fn noninteractive_uninstall_requires_an_explicit_data_choice() {
         .unwrap()
         .arg("--data-root")
         .arg(root.path())
-        .args(["pro", "uninstall", "--json"])
+        .args(["pro", "uninstall", "--format=json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -257,7 +263,13 @@ fn uninstall_data_choice_flags_are_mutually_exclusive() {
         .unwrap()
         .arg("--data-root")
         .arg(root.path())
-        .args(["pro", "uninstall", "--delete-data", "--keep-data", "--json"])
+        .args([
+            "pro",
+            "uninstall",
+            "--delete-data",
+            "--keep-data",
+            "--format=json",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -313,10 +325,10 @@ fn obsolete_and_manual_repository_lifecycle_flags_are_rejected() {
 #[test]
 fn default_disabled_referrals_fail_before_identity_auth_or_browser_side_effects() {
     for arguments in [
-        vec!["referral", "create", "agent-smith", "--json"],
-        vec!["referral", "status", "--json"],
-        vec!["referral", "payout", "--json"],
-        vec!["pro", "--referral", "agent-smith", "--json"],
+        vec!["referral", "create", "agent-smith", "--format=json"],
+        vec!["referral", "status", "--format=json"],
+        vec!["referral", "payout", "--format=json"],
+        vec!["pro", "--referral", "agent-smith", "--format=json"],
     ] {
         let parent = tempdir().unwrap();
         let data_root = parent.path().join("missing-data-root");
@@ -347,8 +359,8 @@ fn default_disabled_referrals_fail_before_identity_auth_or_browser_side_effects(
 fn invalid_referral_codenames_are_rejected_without_echoing_the_secret() {
     const INVALID_SECRET: &str = "Private_Referral_Code";
     for arguments in [
-        vec!["pro", "--referral", INVALID_SECRET, "--json"],
-        vec!["referral", "create", INVALID_SECRET, "--json"],
+        vec!["pro", "--referral", INVALID_SECRET, "--format=json"],
+        vec!["referral", "create", INVALID_SECRET, "--format=json"],
     ] {
         let parent = tempdir().unwrap();
         let data_root = parent.path().join("missing-data-root");
@@ -371,17 +383,29 @@ fn invalid_referral_codenames_are_rejected_without_echoing_the_secret() {
 #[test]
 fn referral_input_is_rejected_when_any_explicit_pro_subcommand_follows() {
     for arguments in [
-        vec!["pro", "--referral", "agent-smith", "setup", "--json"],
-        vec!["pro", "setup", "--referral", "agent-smith", "--json"],
-        vec!["pro", "--referral", "agent-smith", "manage", "--json"],
-        vec!["pro", "manage", "--referral", "agent-smith", "--json"],
+        vec!["pro", "--referral", "agent-smith", "setup", "--format=json"],
+        vec!["pro", "setup", "--referral", "agent-smith", "--format=json"],
+        vec![
+            "pro",
+            "--referral",
+            "agent-smith",
+            "manage",
+            "--format=json",
+        ],
+        vec![
+            "pro",
+            "manage",
+            "--referral",
+            "agent-smith",
+            "--format=json",
+        ],
         vec![
             "pro",
             "--referral",
             "agent-smith",
             "uninstall",
             "--keep-data",
-            "--json",
+            "--format=json",
         ],
         vec![
             "pro",
@@ -389,7 +413,7 @@ fn referral_input_is_rejected_when_any_explicit_pro_subcommand_follows() {
             "--referral",
             "agent-smith",
             "--keep-data",
-            "--json",
+            "--format=json",
         ],
     ] {
         let parent = tempdir().unwrap();

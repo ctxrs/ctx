@@ -136,11 +136,11 @@ def _fake_ctx_script() -> str:
             args = args[2:]
 
         payload = {{"schema_version": 1}}
-        if args == ["status", "--json"]:
+        if args == ["status", "--format=json"]:
             payload.update({{"initialized": True, "data_root": "/tmp/ctx-agent-history-dogfood"}})
-        elif args[:2] == ["setup", "--json"]:
+        elif args[:2] == ["setup", "--format=json"]:
             payload.update({{"mode": "catalog_only", "data_root": "/tmp/ctx-agent-history-dogfood", "indexed_items": 1}})
-        elif args[:2] == ["import", "--json"]:
+        elif args[:2] == ["import", "--format=json"]:
             payload.update(
                 {{
                     "resume": True,
@@ -156,7 +156,7 @@ def _fake_ctx_script() -> str:
                     ],
                 }}
             )
-        elif args[:2] == ["search", "--json"]:
+        elif args[:2] == ["search", "--format=json"]:
             payload.update(
                 {{
                     "query": "local agent history",

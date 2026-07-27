@@ -419,7 +419,7 @@ function Read-OwnedDaemonStatus {
 
     $statusLines = @()
     try {
-        $statusLines = @(Invoke-Ctx -CommandArgs @("daemon", "status", "--json") 2>&1)
+        $statusLines = @(Invoke-Ctx -CommandArgs @("daemon", "status", "--format=json") 2>&1)
         $statusExitCode = $LASTEXITCODE
     } catch {
         return [PSCustomObject]@{
@@ -741,7 +741,7 @@ try {
     Write-Host "ctx semantic smoke: semantic_cache=$semanticCache"
     Write-Host "ctx semantic smoke: packaged_runtime=$runtimeDylib"
     Invoke-CtxChecked -FailureLabel "fixture import" -CommandArgs @(
-        "import", "--no-daemon", "--format", "ctx-history-jsonl-v1", "--path", $fixturePath
+        "import", "--no-daemon", "--input-format", "ctx-history-jsonl-v1", "--path", $fixturePath
     ) | Out-Null
 
     $configPath = Join-Path $DataRoot "config.toml"
@@ -758,7 +758,7 @@ try {
         "daemon", "run",
         "--idle-exit-seconds", [string]$TimeoutSeconds,
         "--loop-interval-seconds", "2",
-        "--json"
+        "--format=json"
     )
     $daemon = Start-Process -FilePath $Ctx -ArgumentList $daemonArgs -PassThru -NoNewWindow -RedirectStandardOutput $daemonLog -RedirectStandardError $daemonErr
 
@@ -781,7 +781,7 @@ try {
             $outputLines = @()
             $searchOk = $false
             try {
-                $outputLines = @(Invoke-Ctx -CommandArgs @("search", $query, "--backend", "semantic", "--refresh", "off", "--json") 2>&1)
+                $outputLines = @(Invoke-Ctx -CommandArgs @("search", $query, "--backend", "semantic", "--refresh", "off", "--format=json") 2>&1)
                 $searchOk = $LASTEXITCODE -eq 0
             } catch {
                 $lastSearchError = $_.Exception.Message

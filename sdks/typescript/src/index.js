@@ -136,11 +136,11 @@ export class LocalAgentHistoryClient {
   }
 
   async status() {
-    return this.#agentHistoryJson("status", ["status", "--json"]);
+    return this.#agentHistoryJson("status", ["status", "--format=json"]);
   }
 
   async init(options = {}) {
-    const args = ["setup", "--json", "--progress", options.progress ?? "none"];
+    const args = ["setup", "--format=json", "--progress", options.progress ?? "none"];
     if (options.catalogOnly) {
       args.push("--catalog-only");
     }
@@ -148,17 +148,17 @@ export class LocalAgentHistoryClient {
   }
 
   async sources() {
-    return this.#agentHistoryJson("sources", ["sources", "--json"]);
+    return this.#agentHistoryJson("sources", ["sources", "--format=json"]);
   }
 
   async import(options = {}) {
-    const args = ["import", "--json", "--progress", options.progress ?? "none"];
+    const args = ["import", "--format=json", "--progress", options.progress ?? "none"];
     appendImportArgs(args, options);
     return this.#agentHistoryJson("import", args);
   }
 
   async sync(options = {}) {
-    const args = ["import", "--json", "--progress", options.progress ?? "none"];
+    const args = ["import", "--format=json", "--progress", options.progress ?? "none"];
     appendImportArgs(args, options);
     return this.#agentHistoryJson("sync", args);
   }
@@ -174,7 +174,7 @@ export class LocalAgentHistoryClient {
       args.push(options.query);
     }
     appendSearchArgs(args, options);
-    args.push("--json");
+    args.push("--format=json");
     return this.#agentHistoryJson("search", args);
   }
 

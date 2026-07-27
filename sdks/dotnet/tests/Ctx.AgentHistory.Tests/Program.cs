@@ -5,7 +5,7 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        if (args.SequenceEqual(new[] { "status", "--json" }))
+        if (args.SequenceEqual(new[] { "status", "--format=json" }))
         {
             Console.WriteLine(new JsonObject
             {
@@ -74,7 +74,7 @@ internal static class Program
                 }
             });
 
-            var raw = await adapter.ExecuteJsonAsync("status", ["status", "--json"]);
+            var raw = await adapter.ExecuteJsonAsync("status", ["status", "--format=json"]);
             Equal("false", raw["analyticsEnabled"]!.GetValue<string>());
         }
         finally
@@ -136,11 +136,11 @@ internal static class Program
         await client.ImportHistoryAsync(new ImportOptions { Provider = "codex", Resume = true });
         await client.SyncAsync(new ImportOptions { All = true });
 
-        Equal("status --json", Join(transport.Calls[0]));
-        Equal("setup --json --progress none --catalog-only", Join(transport.Calls[1]));
-        Equal("sources --json", Join(transport.Calls[2]));
-        Equal("import --json --progress none --provider codex --resume", Join(transport.Calls[3]));
-        Equal("import --json --progress none --all", Join(transport.Calls[4]));
+        Equal("status --format=json", Join(transport.Calls[0]));
+        Equal("setup --format=json --progress none --catalog-only", Join(transport.Calls[1]));
+        Equal("sources --format=json", Join(transport.Calls[2]));
+        Equal("import --format=json --progress none --provider codex --resume", Join(transport.Calls[3]));
+        Equal("import --format=json --progress none --all", Join(transport.Calls[4]));
     }
 
     private static async Task BuildsSearchFlags()
@@ -168,7 +168,7 @@ internal static class Program
             IncludeCurrentSession = true
         });
 
-        Equal("search retry --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --json", Join(transport.Calls[0]));
+        Equal("search retry --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --include-subagents --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --format=json", Join(transport.Calls[0]));
         Equal("search", response.Operation);
         Equal("retry", response.Search.Query ?? "");
         Equal("off", response.Search.Freshness!.Mode ?? "");
@@ -251,11 +251,11 @@ internal static class Program
         await client.LocateEventAsync("event-1");
         await client.LocateSessionAsync(new SessionLookupOptions { Provider = "codex", ProviderSessionId = "provider-session" });
 
-        Equal("show event event-1 --format json --window 2", Join(transport.Calls[0]));
-        Equal("show session session-1 --mode full --format json", Join(transport.Calls[1]));
-        Equal("show session --provider codex --provider-session provider-session --mode lite --format json", Join(transport.Calls[2]));
-        Equal("locate event event-1 --format json", Join(transport.Calls[3]));
-        Equal("locate session --provider codex --provider-session provider-session --format json", Join(transport.Calls[4]));
+        Equal("show event event-1 --format=json --window 2", Join(transport.Calls[0]));
+        Equal("show session session-1 --mode full --format=json", Join(transport.Calls[1]));
+        Equal("show session --provider codex --provider-session provider-session --mode lite --format=json", Join(transport.Calls[2]));
+        Equal("locate event event-1 --format=json", Join(transport.Calls[3]));
+        Equal("locate session --provider codex --provider-session provider-session --format=json", Join(transport.Calls[4]));
 
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.ShowEventAsync(""));
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.LocateSessionAsync(new SessionLookupOptions { Provider = "codex" }));

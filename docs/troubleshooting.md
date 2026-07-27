@@ -31,7 +31,7 @@ If you installed with `--no-modify-path`, `-NoModifyPath`, or
 Run:
 
 ```bash
-ctx sources --json
+ctx sources --format json
 ```
 
 Confirm the provider keeps history on this machine and pass an explicit path if
@@ -50,7 +50,7 @@ ctx import --all
 ctx search "the missing phrase"
 ```
 
-Use `ctx import --resume --json` when you want output to mark the run as an
+Use `ctx import --resume --format json` when you want output to mark the run as an
 idempotent rescan.
 
 After upgrading to `0.10.x` or newer, a refresh can take longer once because ctx marks
@@ -62,10 +62,10 @@ citations should report that the raw path is unavailable.
 
 ## JSON Consumer Fails
 
-Run the same command without `--json` to inspect warnings, then run:
+Run the same command without `--format json` to inspect warnings, then run:
 
 ```bash
-ctx doctor --json
+ctx doctor --format json
 ```
 
 Check the command contract in [contracts/json.md](contracts/json.md), including

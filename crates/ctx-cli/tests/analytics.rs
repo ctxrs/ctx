@@ -340,10 +340,14 @@ fn import_index_and_sql_emit_closed_safe_summaries() {
             "codex".to_owned(),
             "--path".to_owned(),
             fixture.clone(),
-            "--json".to_owned(),
+            "--format=json".to_owned(),
             "--no-daemon".to_owned(),
         ],
-        vec!["index".to_owned(), "status".to_owned(), "--json".to_owned()],
+        vec![
+            "index".to_owned(),
+            "status".to_owned(),
+            "--format=json".to_owned(),
+        ],
         vec![
             "sql".to_owned(),
             "SELECT 'raw-query-secret' AS value".to_owned(),
@@ -698,7 +702,7 @@ fn search_analytics_reports_existing_indexed_content() {
             "codex",
             "--path",
             &fixture,
-            "--json",
+            "--format=json",
         ])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
@@ -746,7 +750,7 @@ fn upgrade_analytics_reports_manual_apply_success() {
 
     let mut command = ctx(&temp);
     command
-        .args(["upgrade", "--json"])
+        .args(["upgrade", "--format=json"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -797,7 +801,7 @@ fn upgrade_check_rejects_preexisting_insecure_data_root_without_repair() {
 
     let mut command = ctx(&temp);
     command
-        .args(["upgrade", "check", "--json"])
+        .args(["upgrade", "check", "--format=json"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -839,7 +843,7 @@ fn upgrade_status_rejects_preexisting_insecure_data_root_without_analytics_repai
 
     let stderr = failure_stderr(
         ctx(&temp)
-            .args(["upgrade", "status", "--json"])
+            .args(["upgrade", "status", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state)
@@ -891,7 +895,7 @@ fn upgrade_analytics_reports_manual_failure_kind() {
 
     let mut command = ctx(&temp);
     command
-        .args(["upgrade", "--json"])
+        .args(["upgrade", "--format=json"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -1136,7 +1140,7 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
                 "codex",
                 "--path",
                 &fixture,
-                "--json",
+                "--format=json",
                 "--no-daemon",
             ])
             .env("CTX_DATA_ROOT", &data_root)
@@ -1247,7 +1251,7 @@ fn foreground_provider_refresh_opt_out_suppresses_the_whole_batch() {
             "codex",
             "--path",
             &fixture,
-            "--json",
+            "--format=json",
             "--no-daemon",
         ])
         .env("CTX_DATA_ROOT", &data_root)

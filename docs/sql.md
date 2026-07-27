@@ -127,7 +127,6 @@ Formats:
 
 - `--format table`, the default human-readable table;
 - `--format json`, structured output with columns, rows, limits, timing, and truncation;
-- `--json`, alias for `--format json`;
 - `--format csv`, script-friendly CSV;
 - `--format raw`, one-column raw lines for piping.
 

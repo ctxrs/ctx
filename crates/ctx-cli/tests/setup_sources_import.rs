@@ -11,7 +11,7 @@ fn wait_for_daemon_status(
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_status = Value::Null;
     while Instant::now() < deadline {
-        last_status = json_output(ctx(temp).args(["daemon", "status", "--json"]));
+        last_status = json_output(ctx(temp).args(["daemon", "status", "--format=json"]));
         let daemon = &last_status["daemon"];
         if daemon["status"] == expected_status
             && daemon["running"] == expected_running

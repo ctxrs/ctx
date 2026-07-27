@@ -19,7 +19,7 @@ fn ctx_status_reports_when_pro_helper_is_missing() {
             "--data-root",
             root.path().to_str().unwrap(),
             "status",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .success()
@@ -43,7 +43,7 @@ fn blame_commit_negotiates_the_exact_protocol_and_returns_typed_json() {
             "blame",
             "commit",
             "0123456789abcdef",
-            "--json",
+            "--format=json",
         ])
         .output()
         .unwrap();
@@ -96,12 +96,12 @@ fn commit_and_pr_blame_do_not_require_git_but_file_blame_does() {
     fs::create_dir(&empty_path).unwrap();
 
     for args in [
-        vec!["blame", "commit", "0123456789abcdef", "--json"],
+        vec!["blame", "commit", "0123456789abcdef", "--format=json"],
         vec![
             "blame",
             "pr",
             "https://github.com/ctxrs/ctx/pull/42",
-            "--json",
+            "--format=json",
         ],
     ] {
         Command::cargo_bin("ctx")

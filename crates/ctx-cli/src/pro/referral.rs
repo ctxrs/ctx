@@ -15,6 +15,7 @@ use super::{
     commercial_config::CommercialConfig,
     commercial_lifecycle::{open_browser, CommercialLifecycleService},
 };
+use crate::output::JsonOutputFormat;
 
 const REFERRAL_TAGLINE: &str = "Refer a developer. Earn $10/month toward your agent bill.";
 const REFERRAL_SECONDARY: &str = "Up to $120 per friend.";
@@ -45,25 +46,22 @@ enum ReferralCommand {
 struct ReferralCreateArgs {
     #[arg(value_parser = parse_referral_codename_unchecked)]
     codename: ReferralCodename,
-    #[arg(long, help = "Print machine-readable JSON without interactive sign-in")]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
 struct ReferralStatusArgs {
-    #[arg(long, help = "Print machine-readable JSON without interactive sign-in")]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
 struct ReferralPayoutArgs {
     #[arg(long, help = "Print the Stripe-hosted URL without opening a browser")]
     no_open: bool,
-    #[arg(
-        long,
-        help = "Print machine-readable JSON without interactive sign-in or browser launch"
-    )]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
     #[arg(long, value_parser = parse_country_code)]
     country: Option<CountryCode>,
     #[arg(long, value_enum)]
@@ -80,9 +78,9 @@ impl ReferralArgs {
 
     pub(crate) const fn json_output(&self) -> bool {
         match &self.command {
-            ReferralCommand::Create(args) => args.json,
-            ReferralCommand::Status(args) => args.json,
-            ReferralCommand::Payout(args) => args.json,
+            ReferralCommand::Create(args) => args.format.is_json(),
+            ReferralCommand::Status(args) => args.format.is_json(),
+            ReferralCommand::Payout(args) => args.format.is_json(),
         }
     }
 }
@@ -200,7 +198,7 @@ impl CommercialLifecycleService {
                 self.access_token_noninteractive().map_err(|error| {
                     if crate::pro::stable_error_code(&error) == Some("authentication_required") {
                         anyhow::anyhow!(
-                            "authentication_required: rerun the referral command without --json to sign in"
+                            "authentication_required: rerun the referral command without --format json to sign in"
                         )
                     } else {
                         error
@@ -324,7 +322,7 @@ fn prepare_referral_identity(data_root: &Path, json_output: bool) -> Result<()> 
             .context("authentication_required: load cached ctx identity")?
             .is_none()
         {
-            bail!("authentication_required: rerun the referral command without --json to sign in");
+            bail!("authentication_required: rerun the referral command without --format json to sign in");
         }
     } else {
         crate::identity::installation_id(data_root)
@@ -348,7 +346,7 @@ fn run_with_service(
     match args.command {
         ReferralCommand::Create(args) => {
             let result = service.create(args.codename.as_str(), auth_mode)?;
-            if args.json {
+            if args.format.is_json() {
                 write_json(output, &create_output(&result))
             } else {
                 write!(output, "{}", render_create_human(&result))?;
@@ -357,7 +355,7 @@ fn run_with_service(
         }
         ReferralCommand::Status(args) => {
             let result = service.status(auth_mode)?;
-            if args.json {
+            if args.format.is_json() {
                 write_json(output, &status_output(&result))
             } else {
                 write!(output, "{}", render_status_human(&result))?;
@@ -370,7 +368,7 @@ fn run_with_service(
                 args.entity_type.map(ReferralEntityType::as_str),
                 auth_mode,
             )?;
-            if args.json {
+            if args.format.is_json() {
                 return write_json(output, &payout_output(&result, false));
             }
             let mut browser_opened = false;
@@ -738,7 +736,7 @@ mod tests {
     fn payout_no_open_and_json_are_browser_free_and_json_uses_cached_auth() {
         for args in [
             parse(&["referral", "payout", "--no-open"]),
-            parse(&["referral", "payout", "--json"]),
+            parse(&["referral", "payout", "--format=json"]),
         ] {
             let json = args.json_output();
             let fixture = payout_result();
@@ -814,21 +812,21 @@ mod tests {
     fn every_json_command_uses_cached_auth_and_never_calls_the_payout_opener() {
         let cases = [
             (
-                parse(&["referral", "create", "agent-smith", "--json"]),
+                parse(&["referral", "create", "agent-smith", "--format=json"]),
                 FakeReferralService {
                     create: Some(create_result()),
                     ..FakeReferralService::default()
                 },
             ),
             (
-                parse(&["referral", "status", "--json"]),
+                parse(&["referral", "status", "--format=json"]),
                 FakeReferralService {
                     status: Some(status_result()),
                     ..FakeReferralService::default()
                 },
             ),
             (
-                parse(&["referral", "payout", "--json"]),
+                parse(&["referral", "payout", "--format=json"]),
                 FakeReferralService {
                     payout: Some(payout_result()),
                     ..FakeReferralService::default()
@@ -855,7 +853,7 @@ mod tests {
         for args in [
             &["referral", "create", "agent-smith"][..],
             &["referral", "status"][..],
-            &["referral", "payout", "--json"][..],
+            &["referral", "payout", "--format=json"][..],
         ] {
             let cli =
                 Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied())).unwrap();

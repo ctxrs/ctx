@@ -8,7 +8,7 @@ fn integrations_mcp_install_defaults_to_detected_agents_and_is_idempotent() {
     fs::create_dir_all(temp.path().join(".codex")).unwrap();
     fs::create_dir_all(temp.path().join(".cursor")).unwrap();
 
-    let first = json_output(ctx(&temp).args(["integrations", "install", "mcp", "--json"]));
+    let first = json_output(ctx(&temp).args(["integrations", "install", "mcp", "--format=json"]));
     assert_eq!(first["integration"], "mcp");
     assert_eq!(first["server"]["command"], "ctx");
     let agents = first["results"]
@@ -34,7 +34,7 @@ fn integrations_mcp_install_defaults_to_detected_agents_and_is_idempotent() {
         json!(["mcp", "serve"])
     );
 
-    let second = json_output(ctx(&temp).args(["integrations", "install", "mcp", "--json"]));
+    let second = json_output(ctx(&temp).args(["integrations", "install", "mcp", "--format=json"]));
     assert!(second["results"].as_array().unwrap().iter().all(|row| {
         row["success"] == true && row["already_installed"] == true && row["modified"] == false
     }));
@@ -50,7 +50,7 @@ fn integrations_mcp_provider_alias_installs_explicit_undetected_agent() {
         "mcp",
         "--provider",
         "qwen-code",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(output["results"][0]["agent"], "qwen-code");
     assert_eq!(output["results"][0]["detected"], false);
@@ -83,7 +83,7 @@ fn integrations_mcp_refuses_conflicting_ctx_entry_unless_forced() {
             "mcp",
             "--agent",
             "cursor",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -107,7 +107,7 @@ fn integrations_mcp_refuses_conflicting_ctx_entry_unless_forced() {
         "--agent",
         "cursor",
         "--force",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(forced["results"][0]["success"], true);
     assert_eq!(forced["results"][0]["previous_status"], "conflict");
@@ -130,7 +130,7 @@ fn integrations_mcp_reports_invalid_config_without_overwriting() {
             "mcp",
             "--agent",
             "qwen-code",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -155,7 +155,7 @@ fn integrations_mcp_project_reports_unsupported_global_only_agents() {
         "--project",
         "--agent",
         "github-copilot",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(output["results"][0]["status"], "unsupported");
     assert_eq!(output["results"][0]["supported"], false);
@@ -170,7 +170,7 @@ fn integrations_mcp_project_default_only_uses_detected_project_configs() {
         "install",
         "mcp",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(empty["results"].as_array().unwrap().len(), 0);
 
@@ -180,7 +180,7 @@ fn integrations_mcp_project_default_only_uses_detected_project_configs() {
         "install",
         "mcp",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(output["results"].as_array().unwrap().len(), 1);
     assert_eq!(output["results"][0]["agent"], "warp");

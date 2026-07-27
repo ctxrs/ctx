@@ -38,8 +38,8 @@ harness binaries, auth state, or interactive approval.
 ctx integrations install mcp
 ctx integrations install mcp --agent codex
 ctx integrations install mcp --provider cursor --project
-ctx integrations install mcp --all-agents --json
-ctx integrations status mcp --json
+ctx integrations install mcp --all-agents --format json
+ctx integrations status mcp --format json
 ```
 
 ## Support Matrix

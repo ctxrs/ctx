@@ -15,7 +15,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -30,7 +30,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
                 "codex",
                 "--refresh",
                 "off",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(excluded["results"].as_array().unwrap().len(), 0);
@@ -54,7 +54,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
                 "codex",
                 "--refresh",
                 "off",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(
@@ -74,7 +74,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
                 "--refresh",
                 "off",
                 "--include-current-session",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_search_provider_oracle(&included, "codex", "onboarding", 1, "message");
@@ -91,7 +91,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
                 "--refresh",
                 "off",
                 "--include-current-session",
-                "--json",
+                "--format=json",
             ]),
     );
     assert!(!included_tree["results"].as_array().unwrap().is_empty());
@@ -105,7 +105,8 @@ fn sql_reads_existing_store_and_supports_formats_and_input_sources() {
         .assert()
         .success();
 
-    let json = json_output(ctx(&temp).args(["sql", "SELECT 1 AS one, 'two' AS two", "--json"]));
+    let json =
+        json_output(ctx(&temp).args(["sql", "SELECT 1 AS one, 'two' AS two", "--format=json"]));
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["payload_type"], "sql_result");
     assert_eq!(json["read_only"], true);
@@ -228,7 +229,7 @@ fn fresh_home_search_mvp_flow() {
         "setup should not write config.toml for implicit defaults"
     );
 
-    let setup_json = json_output(ctx(&temp).args(["setup", "--json"]));
+    let setup_json = json_output(ctx(&temp).args(["setup", "--format=json"]));
     assert_eq!(setup_json["schema_version"], 1);
     assert_eq!(setup_json["network_required"], false);
     assert_eq!(setup_json["repo_writes"], false);
@@ -237,7 +238,7 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(setup_json["import"]["reason"], "no_sources");
     assert_eq!(setup_json["background_indexing"]["enabled"], false);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert_eq!(sources["schema_version"], 1);
     assert!(sources["sources"]
         .as_array()
@@ -251,15 +252,20 @@ fn fresh_home_search_mvp_flow() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(import["schema_version"], 2);
     assert!(import["totals"]["imported_sessions"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_files"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_bytes"].as_u64().unwrap() > 0);
 
-    let search =
-        json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--format=json",
+    ]));
     assert_eq!(search["schema_version"], 1);
     assert_omits_keys(
         &search,
@@ -290,7 +296,7 @@ fn fresh_home_search_mvp_flow() {
         "onboarding",
         "--provider",
         "codex",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(term_search["query"], "zzzz-no-match OR onboarding");
     assert!(!term_search["results"].as_array().unwrap().is_empty());
@@ -307,7 +313,7 @@ fn fresh_home_search_mvp_flow() {
         "--provider",
         "codex",
         "--events",
-        "--json",
+        "--format=json",
     ]));
     assert_event_search_provider_oracle(&event_search, "codex", "onboarding", 1, "message");
 
@@ -318,7 +324,7 @@ fn fresh_home_search_mvp_flow() {
         "codex",
         "--session",
         &ctx_session_id,
-        "--json",
+        "--format=json",
     ]));
     assert_event_search_provider_oracle(&session_events, "codex", "onboarding", 1, "message");
     assert_eq!(session_events["filters"]["session"], ctx_session_id);
@@ -336,7 +342,7 @@ fn fresh_home_search_mvp_flow() {
         "codex",
         "--session",
         session_prefix,
-        "--json",
+        "--format=json",
     ]));
     assert_event_search_provider_oracle(
         &prefixed_session_events,
@@ -387,8 +393,12 @@ fn fresh_home_search_mvp_flow() {
     assert!(!human_search.contains("work_record"));
     assert!(!human_search.contains("history_record"));
 
-    let file_search =
-        json_output(ctx(&temp).args(["search", "--file", "crates/foo/src/lib.rs", "--json"]));
+    let file_search = json_output(ctx(&temp).args([
+        "search",
+        "--file",
+        "crates/foo/src/lib.rs",
+        "--format=json",
+    ]));
     assert_eq!(file_search["query"], "");
     assert!(file_search["results"].is_array());
 
@@ -486,7 +496,8 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(show_session_full["session"]["item_id"], ctx_session_id);
     assert_eq!(show_session_full["mode"], "full");
 
-    let locate_event = json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--json"]));
+    let locate_event =
+        json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--format=json"]));
     assert_eq!(locate_event["schema_version"], 1);
     assert_eq!(locate_event["payload_type"], "event_location");
     assert_eq!(locate_event["ctx_event_id"], ctx_event_id);
@@ -540,7 +551,7 @@ fn fresh_home_search_mvp_flow() {
         "show session --mode full --out should remain explicit"
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["schema_version"], 1);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
     assert_eq!(status["semantic"]["status"], "disabled");
@@ -548,7 +559,7 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(status["daemon"]["enabled"], true);
     assert!(status["daemon"]["jobs"]["semantic_index"]["status"].is_string());
 
-    let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
+    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], true);
     assert_eq!(doctor["progress"], "auto");
@@ -556,7 +567,7 @@ fn fresh_home_search_mvp_flow() {
     assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
 
     let doctor_progress = ctx(&temp)
-        .args(["doctor", "--json", "--progress", "json"])
+        .args(["doctor", "--format=json", "--progress", "json"])
         .assert()
         .success()
         .get_output()
@@ -577,7 +588,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -587,7 +598,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         "semantic-only-missing-sidecar",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(default_search["retrieval"]["requested_mode"], "lexical");
     assert_eq!(default_search["retrieval"]["effective_mode"], "lexical");
@@ -600,7 +611,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         "hybrid",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(hybrid["retrieval"]["requested_mode"], "hybrid");
     assert_eq!(hybrid["retrieval"]["effective_mode"], "lexical");
@@ -617,7 +628,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
             "semantic",
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -643,7 +654,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         "hybrid",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(supported_hybrid["retrieval"]["requested_mode"], "hybrid");
     assert_eq!(supported_hybrid["retrieval"]["effective_mode"], "lexical");
@@ -660,7 +671,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
             "semantic",
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -680,12 +691,12 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         "lexical",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(explicit_lexical["retrieval"]["requested_mode"], "lexical");
     assert_eq!(explicit_lexical["retrieval"]["effective_mode"], "lexical");
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["semantic"]["status"], "pending");
     assert!(status["semantic"]["reason"].is_null());
     assert_eq!(
@@ -698,7 +709,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
 fn doctor_reports_missing_store_without_creating_it() {
     let temp = tempdir();
 
-    let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
+    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
 
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], false);
@@ -731,7 +742,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(first["schema_version"], 2);
     assert_eq!(first["resume"], false);
@@ -740,7 +751,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["imported_edges"], 1);
 
-    let primary_default = json_output(ctx(&temp).args(["search", "subagent", "--json"]));
+    let primary_default = json_output(ctx(&temp).args(["search", "subagent", "--format=json"]));
     assert_eq!(primary_default["filters"]["include_subagents"], false);
     let primary_default_text = serde_json::to_string(&primary_default).unwrap();
     assert!(
@@ -748,7 +759,8 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "{primary_default_text}"
     );
 
-    let default_events = json_output(ctx(&temp).args(["search", "subagent", "--events", "--json"]));
+    let default_events =
+        json_output(ctx(&temp).args(["search", "subagent", "--events", "--format=json"]));
     assert_eq!(default_events["filters"]["include_subagents"], false);
     let default_events_text = serde_json::to_string(&default_events).unwrap();
     assert!(
@@ -756,8 +768,12 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "{default_events_text}"
     );
 
-    let with_subagents =
-        json_output(ctx(&temp).args(["search", "subagent", "--include-subagents", "--json"]));
+    let with_subagents = json_output(ctx(&temp).args([
+        "search",
+        "subagent",
+        "--include-subagents",
+        "--format=json",
+    ]));
     assert!(!with_subagents["results"].as_array().unwrap().is_empty());
     assert_eq!(with_subagents["filters"]["include_subagents"], true);
     assert!(serde_json::to_string(&with_subagents)
@@ -776,7 +792,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "subagent",
         "--session",
         child_session_id,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         explicit_child_session["filters"]["session"],
@@ -787,7 +803,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         .contains("codex-session-child"));
 
     let primary_only =
-        json_output(ctx(&temp).args(["search", "subagent", "--primary-only", "--json"]));
+        json_output(ctx(&temp).args(["search", "subagent", "--primary-only", "--format=json"]));
     assert_eq!(primary_only["filters"]["include_subagents"], false);
     assert!(primary_only["filters"]["primary_only"].is_null());
     assert!(
@@ -802,7 +818,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "--path",
         &fixture,
         "--resume",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(second["schema_version"], 2);
     assert_eq!(second["resume"], true);
@@ -836,7 +852,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
@@ -844,7 +860,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["rejected_records"], 0);
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["cataloged_sessions"], 2);
     assert_eq!(status["indexed_catalog_sessions"], 2);
     assert_eq!(status["pending_catalog_sessions"], 0);
@@ -856,7 +872,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(second["resume"], false);
     assert_eq!(second["resume_mode"], "normal_scan");
@@ -880,7 +896,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "codex",
         "--path",
         &basic_fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(basic["totals"]["imported_sessions"], 2);
     assert_eq!(basic["totals"]["imported_events"], 7);
@@ -892,13 +908,14 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "codex",
         "--path",
         &rich_fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(rich["totals"]["imported_sessions"], 1);
     assert_eq!(rich["totals"]["imported_events"], 5);
 
     let query = "setup flow";
-    let search = json_output(ctx(&temp).args(["search", query, "--provider", "codex", "--json"]));
+    let search =
+        json_output(ctx(&temp).args(["search", query, "--provider", "codex", "--format=json"]));
     assert_search_provider_oracle(&search, "codex", query, 1, "message");
 
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
@@ -992,16 +1009,27 @@ fn pi_cli_import_search_flow() {
     let temp = tempdir();
     let fixture = provider_history_fixture("pi-session.jsonl");
 
-    let imported =
-        json_output(ctx(&temp).args(["import", "--provider", "pi", "--path", &fixture, "--json"]));
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pi",
+        "--path",
+        &fixture,
+        "--format=json",
+    ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "pi");
     assert_eq!(imported["sources"][0]["source_format"], "pi_session_jsonl");
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 4);
 
-    let search =
-        json_output(ctx(&temp).args(["search", "provider metadata", "--provider", "pi", "--json"]));
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "provider metadata",
+        "--provider",
+        "pi",
+        "--format=json",
+    ]));
     assert_search_provider_oracle(&search, "pi", "provider metadata", 1, "message");
 
     let second = json_output(ctx(&temp).args([
@@ -1011,7 +1039,7 @@ fn pi_cli_import_search_flow() {
         "--path",
         &fixture,
         "--resume",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(second["resume"], true);
     assert_eq!(second["resume_mode"], "idempotent_rescan");
@@ -1190,10 +1218,10 @@ fn file_only_search_returns_touched_file_matches() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
-    let search = json_output(ctx(&temp).args(["search", "--file", "src/main.rs", "--json"]));
+    let search = json_output(ctx(&temp).args(["search", "--file", "src/main.rs", "--format=json"]));
     assert_eq!(search["query"], "");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
@@ -1212,7 +1240,7 @@ fn file_only_search_returns_touched_file_matches() {
 #[test]
 fn search_normalizes_whitespace_only_filters() {
     let temp = tempdir();
-    let no_file = json_output(ctx(&temp).args(["search", "test", "--file", " ", "--json"]));
+    let no_file = json_output(ctx(&temp).args(["search", "test", "--file", " ", "--format=json"]));
     assert!(
         !no_file["filters"].as_object().unwrap().contains_key("file"),
         "expected no \"file\" key in filters, got: {}",
@@ -1220,7 +1248,7 @@ fn search_normalizes_whitespace_only_filters() {
     );
 
     let no_workspace =
-        json_output(ctx(&temp).args(["search", "test", "--workspace", " ", "--json"]));
+        json_output(ctx(&temp).args(["search", "test", "--workspace", " ", "--format=json"]));
     assert!(
         !no_workspace["filters"]
             .as_object()
@@ -1241,7 +1269,7 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
     let with_workspace = json_output(ctx(&temp).args([
@@ -1249,7 +1277,7 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
         "diagnostic",
         "--workspace",
         " ctx-rich-fixture ",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         with_workspace["filters"]["workspace"], "ctx-rich-fixture",
@@ -1261,7 +1289,8 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
         "workspace-filtered search should match using the trimmed value"
     );
 
-    let with_file = json_output(ctx(&temp).args(["search", "--file", " src/main.rs ", "--json"]));
+    let with_file =
+        json_output(ctx(&temp).args(["search", "--file", " src/main.rs ", "--format=json"]));
     assert_eq!(
         with_file["filters"]["file"], "src/main.rs",
         "file filter value should be trimmed; got filters: {}",

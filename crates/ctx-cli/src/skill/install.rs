@@ -47,7 +47,7 @@ pub(super) fn run_install(
     telemetry.modified_targets = Some(count_bucket(
         results.iter().filter(|result| result.updated).count() as u64,
     ));
-    if args.json {
+    if args.format.is_json() {
         println!(
             "{}",
             json!({
@@ -103,7 +103,7 @@ pub(super) fn run_status(
             .filter(|result| result.status == SkillInstallStatus::Modified)
             .count() as u64,
     ));
-    if args.json {
+    if args.format.is_json() {
         println!(
             "{}",
             json!({

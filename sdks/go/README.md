@@ -57,8 +57,8 @@ client := ctxagenthistory.NewLocalClient(
 )
 ```
 
-The adapter runs JSON-producing CLI commands such as `ctx status --json`,
-`ctx search <query>|--term <term>|--file <path> --json`, and
+The adapter runs JSON-producing CLI commands such as `ctx status --format json`,
+`ctx search <query>|--term <term>|--file <path> --format json`, and
 `ctx show event --format json`, then normalizes CLI JSON into
 `agent-history-v1` wrappers with `contractVersion` and `schemaVersion`.
 

@@ -208,11 +208,11 @@ impl AgentHistoryClient {
     }
 
     pub fn status(&self) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        self.local_json(AgentHistoryOperation::Status, &["status", "--json"])
+        self.local_json(AgentHistoryOperation::Status, &["status", "--format=json"])
     }
 
     pub fn init(&self, options: InitOptions) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        let mut args = vec!["setup", "--json", "--progress", "none"];
+        let mut args = vec!["setup", "--format=json", "--progress", "none"];
         if options.catalog_only {
             args.push("--catalog-only");
         }
@@ -220,7 +220,10 @@ impl AgentHistoryClient {
     }
 
     pub fn sources(&self) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        self.local_json(AgentHistoryOperation::Sources, &["sources", "--json"])
+        self.local_json(
+            AgentHistoryOperation::Sources,
+            &["sources", "--format=json"],
+        )
     }
 
     pub fn import_history(
@@ -277,7 +280,7 @@ impl AgentHistoryClient {
         if options.include_current_session {
             owned.push("--include-current-session".to_owned());
         }
-        owned.push("--json".to_owned());
+        owned.push("--format=json".to_owned());
         self.local_json_owned(AgentHistoryOperation::Search, owned)
     }
 
@@ -363,7 +366,7 @@ impl AgentHistoryClient {
     ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
         let mut owned = vec![
             "import".to_owned(),
-            "--json".to_owned(),
+            "--format=json".to_owned(),
             "--progress".to_owned(),
             "none".to_owned(),
         ];
@@ -824,7 +827,7 @@ exit 2
                 "0.625",
                 "--refresh",
                 "off",
-                "--json",
+                "--format=json",
             ]
         );
     }

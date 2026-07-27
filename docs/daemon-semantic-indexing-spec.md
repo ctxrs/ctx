@@ -88,7 +88,7 @@ The exact words can change, but the output must communicate:
 - how to watch/wait in the foreground
 - search can run before indexing completes
 
-`ctx setup --json` should report the same counts/status as structured fields
+`ctx setup --format json` should report the same counts/status as structured fields
 without starting or nudging the daemon. `ctx setup --no-daemon` initializes
 local state without starting background work.
 
@@ -108,17 +108,22 @@ the indexing worker.
 
 ```text
 ctx index status
+ctx index status --format json
 ctx index watch
+ctx index watch --format jsonl
 ctx index wait --lexical
 ctx index wait --semantic
 ctx index wait --all
+ctx index wait --all --format json
 ```
 
 `ctx index status` prints the latest known state once. `ctx index watch`
 refreshes until interrupted or complete. On an interactive terminal, watch
 redraws one progress block in place; when redirected, it appends plain snapshots
-without terminal control sequences. `ctx index wait` exits zero when the
-requested readiness is reached and non-zero on timeout/error.
+without terminal control sequences. `--format jsonl` writes one JSON object per
+snapshot instead. `ctx index wait` exits zero when the requested readiness is
+reached and non-zero on timeout/error; status and wait use `--format json` for
+one structured result.
 
 Example watch output:
 

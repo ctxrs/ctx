@@ -330,18 +330,18 @@ fn run_import_internal_with_pro_output(
     let automatic_pro_output = pro_output_selection.is_automatic();
     let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
     let prior_route_store =
-        if args.format.is_none() && args.path.as_deref().is_some_and(|path| !path.exists()) {
+        if args.input_format.is_none() && args.path.as_deref().is_some_and(|path| !path.exists()) {
             Some(Store::open(&db_path)?)
         } else {
             None
         };
-    let mut requests = if args.format.is_none() {
+    let mut requests = if args.input_format.is_none() {
         import_requests(args, prior_route_store.as_ref())?
     } else {
         Vec::new()
     };
     drop(prior_route_store);
-    let plugin_requests = if args.format.is_none() {
+    let plugin_requests = if args.input_format.is_none() {
         history_source_plugin_import_requests(
             args,
             &data_root,
@@ -351,7 +351,7 @@ fn run_import_internal_with_pro_output(
         Vec::new()
     };
 
-    if let Some(format) = args.format {
+    if let Some(format) = args.input_format {
         let store = Store::open(&db_path)?;
         return run_explicit_format_import(ExplicitFormatImportContext {
             args,

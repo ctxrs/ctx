@@ -132,7 +132,7 @@ class LocalCliAdapter:
         self.config = config or LocalConfig()
 
     def status(self) -> StatusResponse:
-        raw = self._json(["status", "--json"])
+        raw = self._json(["status", "--format=json"])
         return cast(
             StatusResponse,
             envelope(
@@ -143,7 +143,7 @@ class LocalCliAdapter:
         )
 
     def init(self, *, catalog_only: bool = False, progress: Optional[str] = None) -> InitResponse:
-        args = ["setup", "--json"]
+        args = ["setup", "--format=json"]
         if catalog_only:
             args.append("--catalog-only")
         if progress is not None:
@@ -159,7 +159,7 @@ class LocalCliAdapter:
         )
 
     def sources(self) -> SourcesResponse:
-        raw = self._json(["sources", "--json"])
+        raw = self._json(["sources", "--format=json"])
         return cast(
             SourcesResponse,
             envelope(
@@ -178,7 +178,7 @@ class LocalCliAdapter:
         resume: bool = False,
         progress: Optional[str] = None,
     ) -> ImportResponse:
-        args = ["import", "--json"]
+        args = ["import", "--format=json"]
         if all:
             args.append("--all")
         if provider is not None:
@@ -242,7 +242,7 @@ class LocalCliAdapter:
         include_current_session: bool = False,
     ) -> SearchResponse:
         validate_search_intent(query=query, terms=terms, file=file)
-        args = ["search", "--json"]
+        args = ["search", "--format=json"]
         if query is not None:
             args.append(query)
         _extend_option(args, "--provider", provider)

@@ -26,7 +26,7 @@ public sealed class AgentHistoryClient
 
     public async Task<StatusResponse> StatusAsync(CancellationToken cancellationToken = default)
     {
-        var raw = await InvokeAsync("status", ["status", "--json"], cancellationToken).ConfigureAwait(false);
+        var raw = await InvokeAsync("status", ["status", "--format=json"], cancellationToken).ConfigureAwait(false);
         var envelope = AgentHistoryContract.Envelope("status", _transport.Backend(raw), "status", AgentHistoryContract.NormalizeStatus(raw));
         return new StatusResponse(envelope);
     }
@@ -34,7 +34,7 @@ public sealed class AgentHistoryClient
     public async Task<InitResponse> InitAsync(InitOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new InitOptions();
-        var args = new List<string> { "setup", "--json" };
+        var args = new List<string> { "setup", "--format=json" };
         AddOption(args, "--progress", options.Progress);
         if (options.CatalogOnly)
         {
@@ -48,7 +48,7 @@ public sealed class AgentHistoryClient
 
     public async Task<SourcesResponse> SourcesAsync(CancellationToken cancellationToken = default)
     {
-        var raw = await InvokeAsync("sources", ["sources", "--json"], cancellationToken).ConfigureAwait(false);
+        var raw = await InvokeAsync("sources", ["sources", "--format=json"], cancellationToken).ConfigureAwait(false);
         var envelope = AgentHistoryContract.Envelope("sources", _transport.Backend(raw), "sources", AgentHistoryContract.NormalizeSources(raw));
         return new SourcesResponse(envelope);
     }
@@ -110,7 +110,7 @@ public sealed class AgentHistoryClient
         {
             args.Add("--include-current-session");
         }
-        args.Add("--json");
+        args.Add("--format=json");
 
         var raw = await InvokeAsync("search", args, cancellationToken).ConfigureAwait(false);
         var envelope = AgentHistoryContract.Envelope("search", _transport.Backend(raw), "search", AgentHistoryContract.NormalizeSearch(raw));
@@ -208,7 +208,7 @@ public sealed class AgentHistoryClient
         CancellationToken cancellationToken)
     {
         options ??= new ImportOptions();
-        var args = new List<string> { "import", "--json" };
+        var args = new List<string> { "import", "--format=json" };
         AddOption(args, "--progress", options.Progress);
         if (options.All)
         {

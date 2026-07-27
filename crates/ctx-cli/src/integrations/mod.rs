@@ -62,12 +62,12 @@ impl IntegrationsArgs {
     pub(crate) fn json_output(&self) -> bool {
         match &self.command {
             IntegrationCommand::Install(args) => match &args.target {
-                IntegrationInstallTarget::Mcp(args) => args.json,
+                IntegrationInstallTarget::Mcp(args) => args.format.is_json(),
                 IntegrationInstallTarget::Skills(args) => args.json_output(),
-                IntegrationInstallTarget::SlashCommands(args) => args.json,
+                IntegrationInstallTarget::SlashCommands(args) => args.format.is_json(),
             },
             IntegrationCommand::Status(args) => match &args.target {
-                IntegrationStatusTarget::Mcp(args) => args.json,
+                IntegrationStatusTarget::Mcp(args) => args.format.is_json(),
                 IntegrationStatusTarget::Skills(args) => args.json_output(),
             },
         }

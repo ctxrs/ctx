@@ -13,7 +13,7 @@ fn daemon_autostart_records_lifecycle_trigger_metadata() -> Result<()> {
         force: false,
         start_mode: Some(DaemonStartModeArg::Auto),
         trigger_command: Some(DaemonTriggerCommandArg::Setup),
-        json: true,
+        format: crate::output::JsonOutputFormat::Json,
     };
 
     write_daemon_lifecycle_status(temp.path(), &args, "running", 123, None, None)?;
@@ -36,7 +36,7 @@ fn daemon_report_marks_orphaned_running_status_recoverable() -> Result<()> {
         force: false,
         start_mode: Some(DaemonStartModeArg::Manual),
         trigger_command: None,
-        json: true,
+        format: crate::output::JsonOutputFormat::Json,
     };
     write_daemon_lifecycle_status(temp.path(), &args, "running", 123, None, None)?;
 
@@ -72,7 +72,7 @@ fn daemon_report_preserves_terminal_status_when_advisory_metadata_is_unreleased(
             force: false,
             start_mode: Some(DaemonStartModeArg::Auto),
             trigger_command: Some(DaemonTriggerCommandArg::Setup),
-            json: true,
+            format: crate::output::JsonOutputFormat::Json,
         };
         write_daemon_lifecycle_status(
             temp.path(),

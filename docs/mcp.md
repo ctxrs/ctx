@@ -57,7 +57,7 @@ clipping. After adding both exact `structuredContent` and the text fallback,
 the final serialized JSON-RPC response is capped at 1 MiB. If a complete helper
 page exceeds that MCP-specific cap, the tool returns a small
 `invalid_response` error asking the caller to lower `limit` or use
-`ctx blame ... --json`; it does not truncate a match or evidence entry and does
+`ctx blame ... --format json`; it does not truncate a match or evidence entry and does
 not fabricate a continuation cursor.
 
 `pro_status` is read-only. `blame` advertises `readOnlyHint: false` because its
@@ -107,7 +107,7 @@ history, import files, initialize storage, or write provider data. MCP search
 currently uses the lexical search path only.
 
 The `sources` tool returns the same bounded provider discovery `issues` as
-`ctx sources --json`, including stable issue codes and truncation markers.
+`ctx sources --format json`, including stable issue codes and truncation markers.
 
 MCP search defaults to primary-agent sessions only, matching `ctx search`.
 Pass `include_subagents: true` when implementation details, code review notes,
@@ -117,7 +117,7 @@ by default; pass `include_current_session: true` when the active session tree is
 the target.
 
 The MCP `sql` tool uses the same read-only stable views and result limits as
-`ctx sql --json`. Prefer stable `ctx_*` views for scripts and agent workflows.
+`ctx sql --format json`. Prefer stable `ctx_*` views for scripts and agent workflows.
 Run `ctx docs show sql` for the view schemas and examples.
 
 Malformed tool arguments return `isError: true` with the existing diagnostic

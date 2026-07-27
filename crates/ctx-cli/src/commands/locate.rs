@@ -5,7 +5,7 @@ use anyhow::Result;
 use ctx_history_core::database_path;
 
 use crate::analytics::LocateTelemetry;
-use crate::output::{locate_json_output, print_json};
+use crate::output::print_json;
 use crate::provider_args::ProviderArg;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::{
@@ -29,7 +29,7 @@ pub(crate) fn run_locate(
                 args.provider_session.as_deref(),
             )?;
             let value = locate_session_json(&store, &session);
-            if locate_json_output(args.format, args.json) {
+            if args.format.is_json() {
                 print_json(value)?;
             } else {
                 print_locate_session_text(&value)?;
@@ -39,7 +39,7 @@ pub(crate) fn run_locate(
             let store = open_existing_store_read_only(&database_path(data_root), "ctx locate")?;
             let event = resolve_event(&store, &args.id)?;
             let value = locate_event_json(&store, &event);
-            if locate_json_output(args.format, args.json) {
+            if args.format.is_json() {
                 print_json(value)?;
             } else {
                 print_locate_event_text(&value)?;

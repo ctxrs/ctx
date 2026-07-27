@@ -36,7 +36,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             ctxPath: script.path,
             env: [variable: "true"]
         )
-        let output = try adapter.execute(["status", "--json"])
+        let output = try adapter.execute(["status", "--format=json"])
         let raw = try XCTUnwrap(
             JSONSerialization.jsonObject(with: output) as? [String: String]
         )
@@ -60,11 +60,11 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(
             runner.requests.map(\.arguments),
             [
-                ["--data-root", "/tmp/ctx-sdk-test", "status", "--json"],
-                ["--data-root", "/tmp/ctx-sdk-test", "setup", "--json", "--progress", "none", "--catalog-only"],
-                ["--data-root", "/tmp/ctx-sdk-test", "sources", "--json"],
-                ["--data-root", "/tmp/ctx-sdk-test", "import", "--json", "--progress", "none", "--provider", "codex", "--resume"],
-                ["--data-root", "/tmp/ctx-sdk-test", "import", "--json", "--progress", "none", "--all"]
+                ["--data-root", "/tmp/ctx-sdk-test", "status", "--format=json"],
+                ["--data-root", "/tmp/ctx-sdk-test", "setup", "--format=json", "--progress", "none", "--catalog-only"],
+                ["--data-root", "/tmp/ctx-sdk-test", "sources", "--format=json"],
+                ["--data-root", "/tmp/ctx-sdk-test", "import", "--format=json", "--progress", "none", "--provider", "codex", "--resume"],
+                ["--data-root", "/tmp/ctx-sdk-test", "import", "--format=json", "--progress", "none", "--all"]
             ]
         )
     }
@@ -115,7 +115,7 @@ final class CtxAgentHistoryTests: XCTestCase {
                 "--events",
                 "--refresh", "off",
                 "--include-current-session",
-                "--json"
+                "--format=json"
             ]
         )
     }
@@ -152,7 +152,7 @@ final class CtxAgentHistoryTests: XCTestCase {
     func testReturnsTypedOperationPayloads() throws {
         let runner = CapturingRunner { request in
             switch Array(request.arguments.dropFirst(2).prefix(2)) {
-            case ["status", "--json"]:
+            case ["status", "--format=json"]:
                 return CommandResult(stdout: Self.statusJSON)
             case ["search", "local agent history"]:
                 return CommandResult(stdout: Self.searchJSON)

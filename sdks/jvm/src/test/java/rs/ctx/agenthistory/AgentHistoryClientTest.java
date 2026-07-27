@@ -33,7 +33,7 @@ public final class AgentHistoryClientTest {
                 .build();
 
         new LocalCliAdapter(config).execute(
-                new AgentHistoryOperation("status", java.util.Arrays.asList("status", "--json")));
+                new AgentHistoryOperation("status", java.util.Arrays.asList("status", "--format=json")));
 
         assertEquals("true", config.env().get("CTX_ANALYTICS_ENABLED"));
         assertEquals("false", captured[0].env().get("CTX_ANALYTICS_ENABLED"));
@@ -228,7 +228,7 @@ public final class AgentHistoryClientTest {
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
-        assertContainsInOrder(transport.lastOperation.args(), "search", "agent history", "--json");
+        assertContainsInOrder(transport.lastOperation.args(), "search", "agent history", "--format=json");
         assertContainsInOrder(transport.lastOperation.args(), "--limit", "5");
         assertContainsInOrder(transport.lastOperation.args(), "--backend", "hybrid");
         assertContainsInOrder(transport.lastOperation.args(), "--semantic-weight", "0.35");

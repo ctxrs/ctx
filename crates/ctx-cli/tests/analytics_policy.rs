@@ -180,7 +180,7 @@ fn deprecated_warning_is_combined_and_suppressed_for_machine_output() {
         .contains("deprecated environment variables"));
 
     ctx(&temp)
-        .args(["status", "--json"])
+        .args(["status", "--format=json"])
         .env("CTX_DAEMON_OFF", "1")
         .assert()
         .success()

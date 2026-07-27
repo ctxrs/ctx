@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
     let temp = tempdir();
-    let empty_sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    let empty_sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
     assert!(
         empty_sources["sources"]
             .as_array()
@@ -20,7 +20,7 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "trae-cn",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -38,7 +38,7 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "trae-cn",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle_with_scope(
         &search,
@@ -56,7 +56,7 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "trae",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -74,7 +74,7 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         .path()
         .join("Library/Application Support/Trae CN/User/workspaceStorage");
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert!(
         sources["sources"]
             .as_array()
@@ -91,7 +91,7 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "trae-cn",
         "--refresh",
         "wait",
-        "--json",
+        "--format=json",
     ]));
     assert!(stderr.contains("found no supported discovered native provider"));
 
@@ -101,7 +101,7 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "trae-cn",
         "--path",
         workspace_storage.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -116,7 +116,7 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "trae-cn",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle_with_scope(
         &search,
@@ -138,7 +138,7 @@ fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
         .path()
         .join("Library/Application Support/Trae/User/workspaceStorage");
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert!(
         sources["sources"]
             .as_array()
@@ -154,7 +154,7 @@ fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
         "trae",
         "--path",
         workspace_storage.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -169,7 +169,7 @@ fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
         "trae",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle_with_scope(
         &search,
@@ -189,10 +189,10 @@ fn trae_cn_workspace_storage_is_excluded_from_import_all() {
     install_default_trae_cn_fixture(&temp, query);
 
     let stderr =
-        failure_stderr(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+        failure_stderr(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert!(stderr.contains("no importable provider history sources found"));
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
     assert!(sources["sources"]
         .as_array()
         .unwrap()
@@ -207,7 +207,7 @@ fn astrbot_native_default_discovery_is_included_in_import_all() {
     install_default_astrbot_fixture(&temp, query);
 
     let imported =
-        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert!(imported["sources"]
         .as_array()
         .unwrap()
@@ -228,7 +228,7 @@ fn astrbot_native_default_discovery_is_included_in_import_all() {
         "astrbot",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "astrbot", query, 1, "message");
 }

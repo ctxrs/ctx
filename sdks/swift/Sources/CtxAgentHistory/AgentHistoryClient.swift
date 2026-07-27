@@ -39,11 +39,11 @@ public struct AgentHistoryClient: Sendable {
     }
 
     public func status() throws -> StatusResponse {
-        try StatusResponse(envelope: localEnvelope(operation: .status, arguments: ["status", "--json"]))
+        try StatusResponse(envelope: localEnvelope(operation: .status, arguments: ["status", "--format=json"]))
     }
 
     public func initialize(_ options: InitOptions = InitOptions()) throws -> InitResponse {
-        var arguments = ["setup", "--json"]
+        var arguments = ["setup", "--format=json"]
         appendOption(&arguments, "--progress", options.progress)
         if options.catalogOnly {
             arguments.append("--catalog-only")
@@ -52,18 +52,18 @@ public struct AgentHistoryClient: Sendable {
     }
 
     public func sources() throws -> SourcesResponse {
-        try SourcesResponse(envelope: localEnvelope(operation: .sources, arguments: ["sources", "--json"]))
+        try SourcesResponse(envelope: localEnvelope(operation: .sources, arguments: ["sources", "--format=json"]))
     }
 
     public func importHistory(_ options: ImportOptions = ImportOptions()) throws -> ImportResponse {
-        var arguments = ["import", "--json"]
+        var arguments = ["import", "--format=json"]
         appendOption(&arguments, "--progress", options.progress)
         appendImportOptions(&arguments, options)
         return try ImportResponse(envelope: localEnvelope(operation: .importHistory, arguments: arguments))
     }
 
     public func sync(_ options: ImportOptions = ImportOptions()) throws -> ImportResponse {
-        var arguments = ["import", "--json"]
+        var arguments = ["import", "--format=json"]
         appendOption(&arguments, "--progress", options.progress)
         appendImportOptions(&arguments, options)
         return try ImportResponse(envelope: localEnvelope(operation: .sync, arguments: arguments))
@@ -104,7 +104,7 @@ public struct AgentHistoryClient: Sendable {
         if options.includeCurrentSession {
             arguments.append("--include-current-session")
         }
-        arguments.append("--json")
+        arguments.append("--format=json")
         return try SearchResponse(envelope: localEnvelope(operation: .search, arguments: arguments))
     }
 

@@ -60,7 +60,7 @@ fn setup_without_semantic_flag_preserves_explicit_search_setting() {
         let original = format!("[search]\nsemantic = {enabled}\n");
         fs::write(&config_path, &original).unwrap();
 
-        let setup = json_output(ctx(&temp).args(["setup", "--json", "--progress", "none"]));
+        let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
         assert_eq!(
             setup["background_indexing"]["semantic_enabled"], enabled,
             "{setup:#}"
@@ -75,8 +75,13 @@ fn setup_semantic_persists_opt_in_and_machine_output_does_not_autostart() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
-    let setup =
-        json_output(ctx(&temp).args(["setup", "--semantic", "--json", "--progress", "none"]));
+    let setup = json_output(ctx(&temp).args([
+        "setup",
+        "--semantic",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(setup["background_indexing"]["semantic_enabled"], true);
     assert_eq!(
         setup["background_indexing"]["daemon_autostart"]["reason"],
@@ -87,11 +92,11 @@ fn setup_semantic_persists_opt_in_and_machine_output_does_not_autostart() {
     let config_path = temp.path().join("config.toml");
     let once = fs::read_to_string(&config_path).unwrap();
     assert!(once.contains("[search]\nsemantic = true\n"), "{once}");
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["semantic"]["enabled"], true);
     assert_eq!(status["semantic"]["config_source"], "config");
 
-    json_output(ctx(&temp).args(["setup", "--semantic", "--json", "--progress", "none"]));
+    json_output(ctx(&temp).args(["setup", "--semantic", "--format=json", "--progress", "none"]));
     assert_eq!(fs::read_to_string(config_path).unwrap(), once);
     assert_no_daemon_autostart_mutation(&temp);
 }
@@ -103,8 +108,13 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_config_or_store() {
     let original = "[daemon]\nenabled = false\n";
     fs::write(&config_path, original).unwrap();
 
-    let stderr =
-        failure_stderr(ctx(&temp).args(["setup", "--semantic", "--json", "--progress", "none"]));
+    let stderr = failure_stderr(ctx(&temp).args([
+        "setup",
+        "--semantic",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
     assert_eq!(fs::read_to_string(config_path).unwrap(), original);
     assert!(!temp.path().join("work.sqlite").exists());
@@ -115,7 +125,7 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_config_or_store() {
         "setup",
         "--semantic",
         "--no-daemon",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -133,7 +143,7 @@ fn setup_semantic_clean_cache_queues_daemon_without_foreground_download() {
 
     let setup = json_output(
         ctx(&temp)
-            .args(["setup", "--json", "--progress", "none"])
+            .args(["setup", "--format=json", "--progress", "none"])
             .env("CTX_SEARCH_SEMANTIC", "true")
             .env("CTX_SEMANTIC_CACHE_DIR", &semantic_cache),
     );
@@ -186,7 +196,7 @@ fn status_reads_committed_wal_content_from_an_active_store() {
         .unwrap();
     assert!(temp.path().join("work.sqlite-wal").exists());
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["indexed_sessions"], 2, "{status:#}");
     drop(writer);
 }
@@ -239,7 +249,7 @@ fn status_missing_store_is_read_only_and_does_not_initialize_files() {
 
     let status = json_output(
         ctx(&temp)
-            .args(["status", "--json"])
+            .args(["status", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root),
     );
     assert_eq!(status["schema_version"], 1);
@@ -281,7 +291,7 @@ fn status_existing_wal_mode_store_does_not_mutate_canonical_database() {
     assert!(db_path.exists());
     let canonical_before = fs::read(&db_path).unwrap();
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
 
     assert_eq!(status["initialized"], true);
     assert_eq!(status["read_only"], true);
@@ -300,7 +310,7 @@ fn status_rejects_unsupported_schema_without_migrating_or_creating_side_dirs() {
     conn.pragma_update(None, "user_version", 1).unwrap();
     drop(conn);
 
-    let stderr = failure_stderr(ctx(&temp).args(["status", "--json"]));
+    let stderr = failure_stderr(ctx(&temp).args(["status", "--format=json"]));
     assert!(stderr.contains("schema version 1"), "{stderr}");
     assert!(stderr.contains("writable command"), "{stderr}");
     assert!(stderr.contains("ctx status"), "{stderr}");
@@ -326,7 +336,7 @@ fn status_does_not_repair_empty_search_projection() {
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -346,7 +356,7 @@ fn status_does_not_repair_empty_search_projection() {
     .unwrap();
     drop(conn);
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["initialized"], true);
     assert_eq!(status["read_only"], true);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
@@ -378,7 +388,7 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     )
     .unwrap();
 
-    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--json"]));
+    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--format=json"]));
     assert_eq!(setup["inventory"]["sources"], 1);
     assert_eq!(setup["inventory"]["units"], 1);
     assert_eq!(setup["inventory"]["codex_catalog_sessions"], 1);
@@ -395,7 +405,7 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
         "catalog_only"
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["inventory_units"], 1);
     assert_eq!(status["pending_inventory_units"], 1);
     assert_eq!(status["cataloged_sessions"], 1);
@@ -433,7 +443,7 @@ fn setup_catalog_only_reports_pending_non_codex_inventory() {
     let temp = tempdir();
     install_default_claude_fixture(&temp, "catalog-only claude inventory");
 
-    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--json"]));
+    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--format=json"]));
     assert_eq!(setup["inventory"]["sources"], 1);
     assert_eq!(setup["inventory"]["source_import_files"], 1);
     assert_eq!(setup["inventory"]["pending_source_import_files"], 1);
@@ -481,7 +491,7 @@ fn quiet_setup_suppresses_success_output_but_not_json() {
         "--quiet",
         "setup",
         "--catalog-only",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -518,7 +528,7 @@ fn quiet_status_suppresses_success_output_but_not_json() {
         .success()
         .stdout(predicate::str::contains("initialized: false"));
 
-    let status = json_output(ctx(&temp).args(["--quiet", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["--quiet", "status", "--format=json"]));
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
     assert!(status["inventory_source_bytes"].is_null());
@@ -530,7 +540,7 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
-    let setup = json_output(ctx(&temp).args(["setup", "--json", "--progress", "none"]));
+    let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
     assert_eq!(setup["mode"], "background");
     assert_eq!(setup["inventory"]["sources"], 1);
     assert_eq!(setup["inventory"]["units"], 1);
@@ -549,7 +559,7 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
         "machine_readable_output"
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["inventory_units"], 1);
     assert_eq!(status["pending_inventory_units"], 1);
     assert_eq!(status["cataloged_sessions"], 1);
@@ -560,7 +570,8 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     assert!(status["daemon"]["start_mode"].is_null());
     assert!(status["daemon"]["trigger_command"].is_null());
 
-    let ready = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let ready =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(ready["mode"], "ready");
     assert_eq!(ready["inventory"]["sources"], 1);
     assert_eq!(ready["inventory"]["units"], 1);
@@ -584,7 +595,7 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
             >= 1
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["inventory_units"], 1);
     assert_eq!(status["pending_inventory_units"], 0);
     assert_eq!(status["cataloged_sessions"], 1);
@@ -624,7 +635,8 @@ fn setup_wait_imports_discovered_codex_prompt_history() {
     )
     .unwrap();
 
-    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["mode"], "ready");
     assert_eq!(setup["inventory"]["sources"], 1);
     assert_eq!(setup["inventory"]["units"], 1);
@@ -639,7 +651,7 @@ fn setup_wait_imports_discovered_codex_prompt_history() {
         "codex",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(
         &search,
@@ -655,8 +667,13 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
-    let setup =
-        json_output(ctx(&temp).args(["setup", "--no-daemon", "--json", "--progress", "none"]));
+    let setup = json_output(ctx(&temp).args([
+        "setup",
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(setup["mode"], "ready");
     assert_eq!(setup["import"]["ran"], true);
     assert_eq!(setup["background_indexing"]["enabled"], false);
@@ -669,7 +686,7 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         "explicit_opt_out"
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["daemon"]["enabled"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
@@ -698,7 +715,8 @@ fn setup_import_isolates_empty_codex_session_file() {
         .join("2026/06/24");
     fs::write(sessions.join("rollout-empty-codex-session.jsonl"), "").unwrap();
 
-    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["inventory"]["sources"], 1, "{setup:#}");
     assert_eq!(setup["inventory"]["units"], 2, "{setup:#}");
     assert_eq!(setup["catalog"]["cataloged_sessions"], 2, "{setup:#}");
@@ -729,7 +747,7 @@ fn setup_import_isolates_empty_codex_session_file() {
         "{setup:#}"
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["cataloged_sessions"], 2, "{status:#}");
     assert_eq!(status["indexed_catalog_sessions"], 1, "{status:#}");
     assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
@@ -741,7 +759,7 @@ fn setup_import_isolates_empty_codex_session_file() {
         "setup should import",
         "--provider",
         "codex",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         search["freshness"]["status"], "daemon_background",
@@ -770,7 +788,7 @@ fn setup_all_failed_foreground_import_prints_json_and_exits_nonzero() {
     fs::write(sessions.join("rollout-empty-only.jsonl"), "").unwrap();
 
     let output = ctx(&temp)
-        .args(["setup", "--wait", "--json", "--progress", "none"])
+        .args(["setup", "--wait", "--format=json", "--progress", "none"])
         .assert()
         .failure()
         .get_output()
@@ -805,14 +823,17 @@ fn setup_autostart_records_spawn_failure_status() {
         .clone();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("ctx daemon did not start"), "{stderr}");
-    assert!(stderr.contains("ctx daemon status --json"), "{stderr}");
+    assert!(
+        stderr.contains("ctx daemon status --format json"),
+        "{stderr}"
+    );
     assert!(
         output.stdout.is_empty(),
         "failed quiet setup must not print success or queued output: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 
-    let status = json_output(ctx(&temp).args(["daemon", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(status["daemon"]["status"], "failed");
     assert_eq!(status["daemon"]["reason"], "spawn_failed");
     assert_eq!(status["daemon"]["start_mode"], "auto");
@@ -830,7 +851,7 @@ fn machine_readable_setup_preserves_json_without_autostarting_daemon() {
 
     let setup = json_output(
         ctx(&temp)
-            .args(["setup", "--json", "--progress", "none"])
+            .args(["setup", "--format=json", "--progress", "none"])
             .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
             .env_remove("CI")
             .env_remove("CTX_DAEMON_AUTOSTART_OFF"),
@@ -909,7 +930,7 @@ fn human_setup_without_sources_starts_daemon_without_claiming_background_indexin
         "{stdout}"
     );
 
-    let running = json_output(ctx(&temp).args(["daemon", "status", "--json"]));
+    let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(running["daemon"]["status"], "running", "{running:#}");
     assert_eq!(running["daemon"]["running"], true, "{running:#}");
     assert_eq!(running["daemon"]["trigger_command"], "setup", "{running:#}");
@@ -953,7 +974,7 @@ fn daemon_once_rejections_complete_and_preserve_diagnostics() {
         .success();
 
     let output = ctx_from_binary(&temp, &binary)
-        .args(["daemon", "run", "--once", "--force", "--json"])
+        .args(["daemon", "run", "--once", "--force", "--format=json"])
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success()
@@ -978,11 +999,18 @@ fn daemon_once_rejections_complete_and_preserve_diagnostics() {
     assert!(daemon["last_error"].is_null(), "{daemon:#}");
     assert!(stderr.is_empty(), "{stderr}");
 
-    let index = json_output(ctx_from_binary(&temp, &binary).args(["index", "status", "--json"]));
+    let index =
+        json_output(ctx_from_binary(&temp, &binary).args(["index", "status", "--format=json"]));
     assert_eq!(index["lexical"]["status"], "ready", "{index:#}");
     assert_eq!(index["lexical"]["pending_inventory_units"], 0, "{index:#}");
     ctx_from_binary(&temp, &binary)
-        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .args([
+            "index",
+            "watch",
+            "--format=jsonl",
+            "--interval-seconds",
+            "1",
+        ])
         .timeout(Duration::from_secs(3))
         .assert()
         .success();
@@ -1031,7 +1059,7 @@ fn daemon_rejection_diagnostics_survive_a_later_healthy_source_cycle() {
     for _ in 0..4 {
         let report = json_output(
             ctx_from_binary(&temp, &binary)
-                .args(["daemon", "run", "--once", "--force", "--json"])
+                .args(["daemon", "run", "--once", "--force", "--format=json"])
                 .env("CTX_UPGRADE_AUTO", "off"),
         );
         let rejected = report["jobs"]["history_refresh"]["totals"]["rejected_records"]
@@ -1059,7 +1087,7 @@ fn daemon_rejection_diagnostics_survive_a_later_healthy_source_cycle() {
 
     let doctor = json_output(ctx_from_binary(&temp, &binary).args([
         "doctor",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -1096,7 +1124,7 @@ fn daemon_once_refreshes_discovered_codex_prompt_history() {
 
     let daemon = json_output(
         ctx_from_binary(&temp, &binary)
-            .args(["daemon", "run", "--once", "--force", "--json"])
+            .args(["daemon", "run", "--once", "--force", "--format=json"])
             .env("CTX_UPGRADE_AUTO", "off"),
     );
     assert_eq!(daemon["status"], "completed", "{daemon:#}");
@@ -1120,7 +1148,7 @@ fn daemon_once_refreshes_discovered_codex_prompt_history() {
         "codex",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(
         &search,
@@ -1163,7 +1191,7 @@ fn human_wait_setup_starts_daemon_after_foreground_import() {
         "{stdout}"
     );
 
-    let running = json_output(ctx(&temp).args(["daemon", "status", "--json"]));
+    let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(running["daemon"]["status"], "running", "{running:#}");
     assert_eq!(running["daemon"]["running"], true, "{running:#}");
     assert_eq!(running["daemon"]["trigger_command"], "setup", "{running:#}");
@@ -1197,7 +1225,8 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
     )
     .unwrap();
 
-    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["inventory"]["sources"], 1);
     assert_eq!(setup["inventory"]["units"], 1);
     assert_eq!(setup["inventory"]["source_import_files"], 1);
@@ -1211,7 +1240,7 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
     assert_eq!(setup["import"]["totals"]["imported_sessions"], 1);
     assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["inventory_units"], 1);
     assert_eq!(status["source_import_files"], 1);
     assert_eq!(status["indexed_source_import_files"], 1);
@@ -1236,7 +1265,8 @@ fn setup_inventories_whole_source_sqlite_providers() {
     let temp = tempdir();
     install_default_hermes_fixture(&temp, "setup should inventory hermes");
 
-    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["inventory"]["sources"], 1);
     assert_eq!(setup["inventory"]["units"], 1);
     assert_eq!(setup["inventory"]["source_import_files"], 1);
@@ -1246,7 +1276,7 @@ fn setup_inventories_whole_source_sqlite_providers() {
     assert_eq!(setup["import"]["totals"]["imported_sources"], 1);
     assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["inventory_units"], 1);
     assert_eq!(status["source_import_files"], 1);
     assert_eq!(status["indexed_source_import_files"], 1);
@@ -1283,7 +1313,7 @@ fn clean_multisource_setup_with_hermes_bounds_wal_through_final_maintenance() {
     };
     sampler_ready.wait();
     let mut setup_command = ctx(&temp);
-    setup_command.args(["setup", "--wait", "--json", "--progress", "none"]);
+    setup_command.args(["setup", "--wait", "--format=json", "--progress", "none"]);
     let setup_output = setup_command.output().unwrap();
     running.store(false, Ordering::Release);
     sampler.join().unwrap();
@@ -1336,7 +1366,8 @@ fn clean_multisource_setup_with_hermes_bounds_wal_through_final_maintenance() {
     let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM events");
     drop(conn);
 
-    let replay = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let replay =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(replay["import"]["totals"]["failed_sources"], 0);
     let conn = Connection::open(&db_path).unwrap();
     assert_eq!(

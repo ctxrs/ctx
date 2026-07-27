@@ -111,7 +111,7 @@ fn skill_install_defaults_to_global_canonical_agents_dir_and_is_idempotent() {
     let first = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["integrations", "install", "skills", "--json"]),
+            .args(["integrations", "install", "skills", "--format=json"]),
     );
     assert_eq!(first["skill"], "ctx-agent-history-search");
     assert_eq!(first["results"][0]["agent"], "universal");
@@ -130,7 +130,7 @@ fn skill_install_defaults_to_global_canonical_agents_dir_and_is_idempotent() {
     let second = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["integrations", "install", "skills", "--json"]),
+            .args(["integrations", "install", "skills", "--format=json"]),
     );
     assert_eq!(second["results"][0]["previous_status"], "current");
     assert_eq!(second["results"][0]["already_installed"], true);
@@ -139,7 +139,7 @@ fn skill_install_defaults_to_global_canonical_agents_dir_and_is_idempotent() {
     let status = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["integrations", "status", "skills", "--json"]),
+            .args(["integrations", "status", "skills", "--format=json"]),
     );
     assert_eq!(status["results"][0]["status"], "current");
 }
@@ -152,7 +152,7 @@ fn skill_install_auto_targets_universal_and_detected_claude_code() {
     let install = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["integrations", "install", "skills", "--json"]),
+            .args(["integrations", "install", "skills", "--format=json"]),
     );
     assert_eq!(install["results"].as_array().unwrap().len(), 2);
     assert_eq!(install["results"][0]["agent"], "universal");
@@ -186,7 +186,7 @@ fn skill_install_detected_mimocode_uses_universal_skill_location() {
         "integrations",
         "install",
         "skills",
-        "--json",
+        "--format=json",
     ]));
 
     let agents = output["results"]
@@ -241,7 +241,7 @@ fn skill_install_refreshes_stale_bundled_copy() {
         "skills",
         "--agent",
         "universal",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(stale["results"][0]["status"], "stale");
 
@@ -251,7 +251,7 @@ fn skill_install_refreshes_stale_bundled_copy() {
         "skills",
         "--agent",
         "universal",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(install["results"][0]["previous_status"], "stale");
     assert_eq!(install["results"][0]["updated"], true);
@@ -285,7 +285,7 @@ fn skill_install_auto_upgrades_legacy_bundled_copy_without_metadata() {
         "skills",
         "--agent",
         "universal",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(stale["results"][0]["status"], "stale");
     assert_eq!(
@@ -299,7 +299,7 @@ fn skill_install_auto_upgrades_legacy_bundled_copy_without_metadata() {
         "skills",
         "--agent",
         "universal",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(install["results"][0]["success"], true);
     assert_eq!(install["results"][0]["previous_status"], "stale");
@@ -350,7 +350,7 @@ fn skill_install_backfills_current_metadata_without_rewriting_body() {
         "skills",
         "--agent",
         "universal",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(install["results"][0]["success"], true);
     assert_eq!(install["results"][0]["previous_status"], "current");
@@ -410,7 +410,7 @@ fn skill_install_preserves_modified_copy_unless_forced() {
             "skills",
             "--agent",
             "universal",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -436,7 +436,7 @@ fn skill_install_preserves_modified_copy_unless_forced() {
         "--agent",
         "universal",
         "--force",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(forced["results"][0]["success"], true);
     assert_eq!(forced["results"][0]["previous_status"], "modified");
@@ -473,7 +473,7 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
                 "opencode",
                 "--agent",
                 "mimocode",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(global["results"].as_array().unwrap().len(), 4);
@@ -514,7 +514,7 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
         "claude-code",
         "--agent",
         "mimocode",
-        "--json",
+        "--format=json",
     ]);
     let project_output = json_output(&mut command);
     assert_eq!(project_output["scope"], "project");
@@ -554,7 +554,7 @@ fn skill_install_mimocode_honors_config_dir_env() {
         "skills",
         "--agent",
         "mimocode",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(output["results"][0]["agent"], "mimocode");
@@ -584,7 +584,7 @@ fn skill_install_mimocode_rejects_relative_home_override() {
                 "skills",
                 "--agent",
                 "mimocode",
-                "--json",
+                "--format=json",
             ]),
     );
 

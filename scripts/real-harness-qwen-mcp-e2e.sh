@@ -97,7 +97,7 @@ main() {
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
     CTX_ANALYTICS_ENABLED=false \
-    run "${ctx_bin}" integrations install mcp --agent qwen-code --json > "${install_json}"
+    run "${ctx_bin}" integrations install mcp --agent qwen-code --format json > "${install_json}"
   require_contains "${install_json}" '"agent":"qwen-code"'
   require_contains "${install_json}" '"status":"current"'
   require_contains "${settings_json}" '"mcpServers"'

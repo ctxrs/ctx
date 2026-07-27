@@ -13,7 +13,7 @@ fn runtime_publication_rolls_back_cli_runtime_and_marker_on_marker_failure() {
     let marker_before = fs::read(&marker_path).unwrap();
 
     let stderr = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_FAIL_MARKER_PUBLISH_FOR_TESTS", "1"),
     );
 
@@ -40,7 +40,7 @@ fn runtime_restore_failure_reports_primary_error_and_retains_backup() {
     fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
 
     let stderr = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_FAIL_MARKER_PUBLISH_FOR_TESTS", "1")
             .env("CTX_UPGRADE_FAIL_RUNTIME_RESTORE_FOR_TESTS", "1"),
     );
@@ -94,7 +94,7 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
         let marker_before = fs::read(&marker_path).unwrap();
 
         let _ = failure_stderr(
-            fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
                 .env(injection, point),
         );
         assert!(
@@ -105,7 +105,7 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
             "{injection}={point} did not retain a recovery journal"
         );
 
-        let output = fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        let output = fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS", "1")
             .output()
             .unwrap();
@@ -150,7 +150,7 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
         );
 
         let applied = json_output(fake_release_env(
-            ctx(&temp).args(["upgrade", "--json"]),
+            ctx(&temp).args(["upgrade", "--format=json"]),
             &release,
         ));
         assert_eq!(applied["status"], "applied", "{injection}={point}");
@@ -166,7 +166,7 @@ fn interrupted_publication_journal_exposes_minimal_v2_transaction_contract() {
     fs::create_dir_all(&runtime.target).unwrap();
 
     let _ = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "runtime"),
     );
 
@@ -250,7 +250,7 @@ fn forged_recovery_journal_fails_closed_without_touching_paths() {
     .unwrap();
 
     let stderr = failure_stderr(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
@@ -272,12 +272,12 @@ fn interrupted_committed_transaction_finishes_without_rolling_back() {
     fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
 
     let _ = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_ABORT_AFTER_COMMIT_FOR_TESTS", "1"),
     );
 
     let stderr = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS", "1"),
     );
     assert!(
@@ -303,7 +303,7 @@ fn state_write_failure_after_commit_is_reported_as_warning() {
     let runtime = add_fake_release_runtime(&temp, &release);
 
     let applied = json_output(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_FAIL_STATE_WRITE_FOR_TESTS", "1"),
     );
 
@@ -336,7 +336,7 @@ fn committed_journal_write_failure_rolls_back_immediately() {
     let marker_before = fs::read(&marker_path).unwrap();
 
     let stderr = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_FAIL_COMMIT_JOURNAL_WRITE_FOR_TESTS", "1"),
     );
 

@@ -125,7 +125,7 @@ fn codex_global_and_project_install_match_trusted_project_discovery() {
         "mcp",
         "--agent",
         "codex",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_codex_global(&codex_home),
@@ -143,7 +143,7 @@ fn codex_global_and_project_install_match_trusted_project_discovery() {
                 "--agent",
                 "codex",
                 "--project",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(fake_codex_project(&codex_home, &project), None);
@@ -168,7 +168,7 @@ fn claude_global_connects_and_project_config_is_pending_approval() {
         "mcp",
         "--agent",
         "claude-code",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_claude_user(&claude_config),
@@ -186,7 +186,7 @@ fn claude_global_connects_and_project_config_is_pending_approval() {
                 "--agent",
                 "claude-code",
                 "--project",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(
@@ -207,7 +207,7 @@ fn qwen_global_connects_and_project_requires_explicit_approval() {
         "mcp",
         "--agent",
         "qwen-code",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_qwen_global(temp.path()),
@@ -221,7 +221,7 @@ fn qwen_global_connects_and_project_requires_explicit_approval() {
         "--agent",
         "qwen-code",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_qwen_project(&project),
@@ -248,7 +248,7 @@ fn opencode_global_and_project_configs_are_connected_with_command_array_shape() 
         "mcp",
         "--agent",
         "opencode",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_opencode_global(&xdg_config),
@@ -266,7 +266,7 @@ fn opencode_global_and_project_configs_are_connected_with_command_array_shape() 
                 "--agent",
                 "opencode",
                 "--project",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(
@@ -288,7 +288,7 @@ fn mimocode_global_and_project_configs_are_connected_with_command_array_shape() 
         "mcp",
         "--agent",
         "mimo-code",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_mimocode_global(&mimocode_home.join("config")),
@@ -302,7 +302,7 @@ fn mimocode_global_and_project_configs_are_connected_with_command_array_shape() 
         "--agent",
         "mimocode",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_mimocode_project(&project),
@@ -336,7 +336,7 @@ fn mimocode_mcp_honors_config_dir_env_and_existing_jsonc() {
         "mcp",
         "--agent",
         "mimocode",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(result_for_agent(&status, "mimocode")["status"], "missing");
 
@@ -346,7 +346,7 @@ fn mimocode_mcp_honors_config_dir_env_and_existing_jsonc() {
         "mcp",
         "--agent",
         "mimocode",
-        "--json",
+        "--format=json",
     ]));
     let expected_path = config_path.to_string_lossy().to_string();
     assert_eq!(
@@ -369,7 +369,7 @@ fn mimocode_mcp_default_detection_honors_config_dir_env() {
         "integrations",
         "status",
         "mcp",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(output_agents(&status), vec!["mimocode"]);
     assert_eq!(result_for_agent(&status, "mimocode")["status"], "missing");
@@ -378,7 +378,7 @@ fn mimocode_mcp_default_detection_honors_config_dir_env() {
         "integrations",
         "install",
         "mcp",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(output_agents(&output), vec!["mimocode"]);
     let expected_path = config_path.to_string_lossy().to_string();
@@ -406,7 +406,7 @@ fn mimocode_mcp_uses_existing_config_names_before_defaulting() {
         "mcp",
         "--agent",
         "mimocode",
-        "--json",
+        "--format=json",
     ]));
     let expected_global_path = global_config.to_string_lossy().to_string();
     assert_eq!(
@@ -430,7 +430,7 @@ fn mimocode_mcp_uses_existing_config_names_before_defaulting() {
         "--agent",
         "mimocode",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     let expected_project_path = project_config.to_string_lossy().to_string();
     assert_eq!(
@@ -457,7 +457,7 @@ fn mimocode_mcp_rejects_relative_home_override() {
                 "mcp",
                 "--agent",
                 "mimocode",
-                "--json",
+                "--format=json",
             ]),
     );
 
@@ -478,7 +478,13 @@ fn mcp_global_all_agents_json_covers_the_complete_supported_matrix() {
             .env("CODEX_HOME", &codex_home)
             .env("CLAUDE_CONFIG_DIR", &claude_config)
             .env("COPILOT_HOME", &copilot_home)
-            .args(["integrations", "install", "mcp", "--all-agents", "--json"]),
+            .args([
+                "integrations",
+                "install",
+                "mcp",
+                "--all-agents",
+                "--format=json",
+            ]),
     );
 
     assert_eq!(output["integration"], "mcp");
@@ -568,7 +574,7 @@ fn mcp_project_all_agents_json_covers_the_complete_supported_matrix() {
                 "mcp",
                 "--all-agents",
                 "--project",
-                "--json",
+                "--format=json",
             ]),
     );
 
@@ -636,7 +642,7 @@ fn cursor_global_and_project_configs_are_stdio_mcp_servers() {
         "mcp",
         "--agent",
         "cursor",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_cursor_global(temp.path()),
@@ -650,7 +656,7 @@ fn cursor_global_and_project_configs_are_stdio_mcp_servers() {
         "--agent",
         "cursor",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_cursor_project(&project),
@@ -677,7 +683,7 @@ fn gemini_kiro_and_warp_global_and_project_configs_are_plain_mcp_servers() {
             "mcp",
             "--agent",
             agent,
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(
             global_reader(temp.path()),
@@ -692,7 +698,7 @@ fn gemini_kiro_and_warp_global_and_project_configs_are_plain_mcp_servers() {
             "--agent",
             agent,
             "--project",
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(
             project_reader(&project),
@@ -715,7 +721,7 @@ fn zed_global_and_project_configs_use_context_servers_root() {
         "mcp",
         "--agent",
         "zed",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_zed_global(&xdg_config),
@@ -733,7 +739,7 @@ fn zed_global_and_project_configs_use_context_servers_root() {
                 "--agent",
                 "zed",
                 "--project",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(fake_zed_project(&project), Some(CommandServer::ctx_stdio()));
@@ -750,7 +756,7 @@ fn cline_copilot_and_windsurf_global_configs_use_native_json_shapes() {
         "mcp",
         "--agent",
         "cline",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_cline_global(temp.path()),
@@ -763,7 +769,7 @@ fn cline_copilot_and_windsurf_global_configs_use_native_json_shapes() {
         "mcp",
         "--agent",
         "github-copilot",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_github_copilot_global(&copilot_home),
@@ -776,7 +782,7 @@ fn cline_copilot_and_windsurf_global_configs_use_native_json_shapes() {
         "mcp",
         "--agent",
         "windsurf",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_windsurf_global(temp.path()),
@@ -797,7 +803,7 @@ fn goose_global_config_is_connected_and_project_config_is_unsupported() {
         "mcp",
         "--agent",
         "goose",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_goose_global(&xdg_config),
@@ -814,7 +820,7 @@ fn goose_global_config_is_connected_and_project_config_is_unsupported() {
             "--agent",
             "goose",
             "--project",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -838,7 +844,7 @@ fn goose_global_config_is_connected_and_project_config_is_unsupported() {
                 "--agent",
                 "goose",
                 "--project",
-                "--json",
+                "--format=json",
             ]),
     );
     assert_eq!(goose_project_status["results"][0]["agent"], "goose");
@@ -859,7 +865,7 @@ fn continue_yaml_and_roo_project_only_are_covered() {
         "mcp",
         "--agent",
         "continue",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_continue_global(temp.path()),
@@ -873,7 +879,7 @@ fn continue_yaml_and_roo_project_only_are_covered() {
         "--agent",
         "continue",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         fake_continue_project(&project),
@@ -887,7 +893,7 @@ fn continue_yaml_and_roo_project_only_are_covered() {
         "--agent",
         "roo-code",
         "--project",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(fake_roo_project(&project), Some(CommandServer::ctx_stdio()));
 
@@ -898,7 +904,7 @@ fn continue_yaml_and_roo_project_only_are_covered() {
             "mcp",
             "--agent",
             "roo-code",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()

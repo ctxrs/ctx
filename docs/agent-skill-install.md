@@ -56,7 +56,7 @@ Check installed state with:
 
 ```bash
 ctx integrations status skills
-ctx integrations status skills --agent codex --json
+ctx integrations status skills --agent codex --format json
 ```
 
 `status` reports `current`, `stale`, `modified`, or `missing` for the bundled

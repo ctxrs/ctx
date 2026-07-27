@@ -158,7 +158,8 @@ pub(crate) fn run_search(
     let backend_override = args.backend;
     let requested_backend = resolve_search_backend(backend_override, config)?;
     let semantic_enabled = config.semantic_search_enabled();
-    if args.refresh == RefreshArg::Background && config.daemon.enabled && !args.json {
+    let json_output = args.format.is_json();
+    if args.refresh == RefreshArg::Background && config.daemon.enabled && !json_output {
         semantic::maybe_autostart_daemon_for_search(&data_root, config);
     }
     if args.refresh == RefreshArg::Background
@@ -244,7 +245,7 @@ pub(crate) fn run_search(
         semantic_enabled,
         args.semantic_weight,
         args.refresh,
-        !args.json,
+        !json_output,
     )?;
     telemetry.query_duration = Some(duration_bucket(query_started.elapsed()));
     telemetry.backend_requested = Some(requested_backend);
@@ -259,7 +260,7 @@ pub(crate) fn run_search(
     telemetry.citation_count = Some(count_bucket(citation_count as u64));
     telemetry.zero_result = Some(result_count == 0);
     let render_started = Instant::now();
-    if args.json {
+    if json_output {
         let suggested_next_query = (!uses_composed_terms).then_some(query.as_str());
         print_json(SearchDto::packet(
             &store,
@@ -417,7 +418,7 @@ pub(crate) fn refresh_before_search(
         sources,
         plugin_sources,
         args.refresh,
-        args.json,
+        args.format.is_json(),
         provider_refreshes,
         config,
         output_inventory_complete,

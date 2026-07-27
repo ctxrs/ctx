@@ -141,7 +141,7 @@ main() {
       QWEN_HOME="${qwen_home}" \
       CTX_DATA_ROOT="${data_root}" \
       CTX_ANALYTICS_ENABLED=false \
-      run "${ctx_bin}" integrations install slash-commands --agent gemini-cli --project --json
+      run "${ctx_bin}" integrations install slash-commands --agent gemini-cli --project --format json
   ) > "${install_json}"
   require_contains "${install_json}" '"agent": "gemini-cli"'
   require_contains "${install_json}" '"status": "current"'

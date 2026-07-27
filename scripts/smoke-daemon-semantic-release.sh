@@ -503,7 +503,7 @@ if [[ "${coreml_mode}" == "1" ]]; then
 else
   printf 'ctx semantic smoke: packaged_runtime=%s\n' "${runtime_dylib}"
 fi
-run_ctx import --no-daemon --format ctx-history-jsonl-v1 --path "${fixture_path}" >/dev/null
+run_ctx import --no-daemon --input-format ctx-history-jsonl-v1 --path "${fixture_path}" >/dev/null
 if find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
   echo "error: foreground import initialized or downloaded semantic model state" >&2
   exit 1
@@ -525,7 +525,7 @@ EOF
 
 daemon_log="${data_root}/daemon-smoke.log"
 "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" \
-  daemon run --idle-exit-seconds "${timeout_seconds}" --loop-interval-seconds 2 --json \
+  daemon run --idle-exit-seconds "${timeout_seconds}" --loop-interval-seconds 2 --format json \
   > "${daemon_log}" 2>&1 &
 daemon_pid="$!"
 
@@ -666,7 +666,7 @@ while ((SECONDS < deadline)); do
   fi
 
   daemon_status_ready=0
-  if run_ctx daemon status --json > "${daemon_status_json}" 2> "${daemon_status_error}"; then
+  if run_ctx daemon status --format json > "${daemon_status_json}" 2> "${daemon_status_error}"; then
     last_status_output="$(cat "${daemon_status_json}")"
     last_status_error="$(cat "${daemon_status_error}")"
     if daemon_status_matches; then
@@ -681,12 +681,12 @@ while ((SECONDS < deadline)); do
   fi
 
   if [[ "${daemon_status_ready}" == "1" ]] && \
-    run_ctx search "${query}" --backend semantic --refresh off --json \
+    run_ctx search "${query}" --backend semantic --refresh off --format json \
       > "${search_json}" 2> "${search_error}"; then
     last_output="$(cat "${search_json}")"
     last_search_error="$(cat "${search_error}")"
     if search_json_matches; then
-      if run_ctx daemon status --json > "${daemon_status_json}" 2> "${daemon_status_error}" && \
+      if run_ctx daemon status --format json > "${daemon_status_json}" 2> "${daemon_status_error}" && \
         daemon_status_matches; then
         if ! find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
           echo "error: daemon reported a downloaded model without populating the clean cache" >&2

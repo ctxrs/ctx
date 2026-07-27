@@ -37,7 +37,7 @@ fn test_daemon_run_args() -> DaemonRunArgs {
         force: false,
         start_mode: Some(DaemonStartModeArg::Manual),
         trigger_command: None,
-        json: true,
+        format: crate::output::JsonOutputFormat::Json,
     }
 }
 

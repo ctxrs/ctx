@@ -28,7 +28,7 @@ use crate::{
     config::AppConfig,
     deprecated_controls::DeprecatedControls,
     docs, integrations, local_usage, mcp,
-    output::{LocateFormat, OutputFormat, SqlFormat},
+    output::{JsonOutputFormat, OutputFormat, SqlFormat},
     pro, semantic, upgrade,
 };
 
@@ -87,7 +87,7 @@ pub(crate) fn run_cli() -> Result<()> {
         let CommandRoot::Status(args) = cli.command else {
             unreachable!("usage controls are status commands");
         };
-        return run_usage_action(args.usage, &data_root, args.json, quiet);
+        return run_usage_action(args.usage, &data_root, args.format.is_json(), quiet);
     }
     let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
     let mut analytics_draft = ClientOperationDraft::from_command(&cli.command, json_output);
@@ -291,14 +291,14 @@ pub(crate) fn run_cli() -> Result<()> {
 
 fn command_json_output(command: &CommandRoot) -> bool {
     match command {
-        CommandRoot::Setup(args) => args.json,
-        CommandRoot::Status(args) => args.json,
+        CommandRoot::Setup(args) => args.format.is_json(),
+        CommandRoot::Status(args) => args.format.is_json(),
         CommandRoot::Index(args) => args.json_output(),
-        CommandRoot::Sources(args) => args.json,
-        CommandRoot::Import(args) => args.json,
+        CommandRoot::Sources(args) => args.format.is_json(),
+        CommandRoot::Import(args) => args.format.is_json(),
         CommandRoot::Show(args) => show_json_output(args),
         CommandRoot::Locate(args) => locate_json_output(args),
-        CommandRoot::Search(args) => args.json,
+        CommandRoot::Search(args) => args.format.is_json(),
         CommandRoot::Pro(args) => args.json_output(),
         CommandRoot::Referral(args) => args.json_output(),
         CommandRoot::Blame(args) => args.json_output(),
@@ -307,27 +307,27 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Integrations(args) => args.json_output(),
         CommandRoot::Mcp(_) => false,
         CommandRoot::Daemon(args) => match &args.command {
-            DaemonCommand::Run(args) => args.json,
+            DaemonCommand::Run(args) => args.format.is_json(),
             DaemonCommand::Status(args)
             | DaemonCommand::Enable(args)
-            | DaemonCommand::Disable(args) => args.json,
+            | DaemonCommand::Disable(args) => args.format.is_json(),
         },
         CommandRoot::Upgrade(args) => args.json_output(),
-        CommandRoot::Doctor(args) => args.json,
+        CommandRoot::Doctor(args) => args.format.is_json(),
     }
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
-        ShowTarget::Session(args) => args.json || args.format == OutputFormat::Json,
-        ShowTarget::Event(args) => args.json || args.format == OutputFormat::Json,
+        ShowTarget::Session(args) => args.format == OutputFormat::Json,
+        ShowTarget::Event(args) => args.format == OutputFormat::Json,
     }
 }
 
 fn locate_json_output(args: &LocateArgs) -> bool {
     match &args.target {
-        LocateTarget::Session(args) => args.json || args.format == LocateFormat::Json,
-        LocateTarget::Event(args) => args.json || args.format == LocateFormat::Json,
+        LocateTarget::Session(args) => args.format == JsonOutputFormat::Json,
+        LocateTarget::Event(args) => args.format == JsonOutputFormat::Json,
     }
 }
 
@@ -391,7 +391,7 @@ fn command_is_usage_status_report(command: &CommandRoot) -> bool {
 
 fn import_should_autostart_daemon(args: &ImportArgs) -> bool {
     !args.no_daemon
-        && args.format.is_none()
+        && args.input_format.is_none()
         && args.history_source.is_none()
         && args.history_source_manifest.is_empty()
 }
@@ -424,9 +424,9 @@ mod tests {
     fn setup_handoff_is_owned_by_setup_and_machine_import_does_not_autostart() {
         for args in [
             &["setup"][..],
-            &["setup", "--json"][..],
+            &["setup", "--format", "json"][..],
             &["setup", "--progress", "json"],
-            &["import", "--json"],
+            &["import", "--format", "json"],
             &["import", "--progress", "json"],
         ] {
             assert!(daemon_autostart_trigger(args).is_none(), "{args:?}");

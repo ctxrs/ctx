@@ -24,7 +24,7 @@ Put a manifest at one of:
 - `$CTX_DATA_ROOT/plugins/<plugin>/ctx-history-plugin.json`;
 - any directory or manifest file listed in `CTX_HISTORY_PLUGIN_PATH`.
 
-`ctx sources` and `ctx sources --json` list plugin sources without executing
+`ctx sources` and `ctx sources --format json` list plugin sources without executing
 their commands. Invalid installed manifests are listed as non-importable
 `history_source_plugin` rows so authors can diagnose broken local config.
 
