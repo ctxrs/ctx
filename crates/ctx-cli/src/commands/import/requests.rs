@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 
 use ctx_history_capture::{
     decode_custom_history_jsonl_v1_cursor, import_custom_history_jsonl_v1_reader,
-    provider_source_spec, CustomHistoryJsonlV1ImportOptions, DiscoveryIssue, DiscoveryIssueKind,
-    DiscoveryReport, ProviderImportSummary, ProviderImportSupport, ProviderSourceStatus,
+    provider_source_spec, CaptureWorkLimit, CustomHistoryJsonlV1ImportOptions, DiscoveryIssue,
+    DiscoveryIssueKind, DiscoveryReport, ImportProfile, ProviderImportSummary,
+    ProviderImportSupport, ProviderSourceStatus,
 };
 use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord};
 use ctx_history_store::Store;
@@ -14,8 +15,9 @@ use ctx_history_store::Store;
 use crate::commands::import::catalog::import_record_for_history_source_plugin;
 use crate::commands::import::native::validate_source_import_supported;
 use crate::commands::import::{
-    cleanup_rejected_history_record, history_record_exists, provider_summary_has_imported_content,
-    rejected_source_error, SourceStats,
+    cleanup_rejected_history_record, history_record_exists,
+    import_custom_history_with_canonical_pro_progression, provider_summary_has_imported_content,
+    rejected_source_error, CanonicalProSourceProgression, SourceStats,
 };
 use crate::history_source_plugins::{
     discover_history_source_plugins, run_history_source_plugin, HistorySourcePluginRunOptions,
@@ -229,15 +231,21 @@ pub(crate) fn same_pathish(left: &Path, right: &Path) -> bool {
     left == right
 }
 
-pub(crate) fn import_history_source_plugin(
+pub(crate) fn import_history_source_plugin<P: CanonicalProSourceProgression + ?Sized>(
     store: &mut Store,
     source: &HistorySourcePluginSource,
     data_root: &Path,
     full_rescan: bool,
+    requested_work_limit: CaptureWorkLimit,
+    import_profile: &ImportProfile,
+    pro_output: Option<&mut P>,
 ) -> Result<(ProviderImportSummary, SourceStats)> {
     let record = import_record_for_history_source_plugin(source);
     let record_id = record.id;
     let options = CustomHistoryJsonlV1ImportOptions {
+        source_path: Some(source.manifest_path.clone()),
+        history_record_id: Some(record_id),
+        import_profile: import_profile.clone(),
         ..CustomHistoryJsonlV1ImportOptions::default()
     };
     let machine_id = options.machine_id.clone();
@@ -270,17 +278,21 @@ pub(crate) fn import_history_source_plugin(
     };
     let record_existed = history_record_exists(store, record_id)?;
     store.upsert_record(&record)?;
-    let summary = import_custom_history_jsonl_v1_reader(
-        Cursor::new(stdout),
-        store,
-        CustomHistoryJsonlV1ImportOptions {
-            machine_id,
-            source_path: Some(source.manifest_path.clone()),
-            history_record_id: Some(record_id),
-            ..options
+    let summary = import_custom_history_with_canonical_pro_progression(
+        requested_work_limit,
+        pro_output,
+        |capture_work_limit| {
+            import_custom_history_jsonl_v1_reader(
+                Cursor::new(stdout.as_slice()),
+                store,
+                CustomHistoryJsonlV1ImportOptions {
+                    capture_work_limit,
+                    ..options.clone()
+                },
+            )
+            .map_err(anyhow::Error::from)
         },
-    )
-    .map_err(anyhow::Error::from)?;
+    )?;
     if summary.failed > 0 && !provider_summary_has_imported_content(&summary) {
         cleanup_rejected_history_record(store, record_id, record_existed)?;
         return Err(history_source_plugin_import_failure(source, &summary));

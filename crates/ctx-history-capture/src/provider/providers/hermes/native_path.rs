@@ -44,9 +44,9 @@ use crate::{
         },
     },
     stable_capture_uuid, CaptureError, CaptureWorkLimit, ImportProfile, OutputNativeCursor,
-    OutputSourceIdentity, ProOutputProgress, ProOutputSourceDisposition, ProviderAdapterContext,
-    ProviderImportFailure, ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
-    Result, HERMES_SQLITE_SOURCE_FORMAT,
+    OutputSourceIdentity, ProOutputProgress, ProOutputSinkError, ProOutputSourceDisposition,
+    ProviderAdapterContext, ProviderImportFailure, ProviderImportOptions, ProviderImportSummary,
+    ProviderImportWorkResult, Result, HERMES_SQLITE_SOURCE_FORMAT,
 };
 
 use super::{
@@ -233,10 +233,10 @@ pub(super) fn import_hermes_native_path(
         return Ok(ProviderImportSummary::default());
     }
 
-    let scan_frontier = if replay_only || core_noop {
-        output_plan.scan_frontier
-    } else if output_plan.enabled
-        && output_plan.scan_frontier.next_ordinal < core_plan.cursor.frontier.next_ordinal
+    let scan_frontier = if replay_only
+        || core_noop
+        || output_plan.enabled
+            && output_plan.scan_frontier.next_ordinal < core_plan.cursor.frontier.next_ordinal
     {
         output_plan.scan_frontier
     } else {
@@ -263,7 +263,7 @@ pub(super) fn import_hermes_native_path(
     let mut pending = None;
     let mut frontier = scan_frontier;
     let mut summary = ProviderImportSummary::default();
-    let mut output_failure = None;
+    let mut output_behind = false;
     let mut changed_groups = 0_usize;
 
     let operation: Result<()> = (|| {
@@ -287,12 +287,16 @@ pub(super) fn import_hermes_native_path(
                     changed_groups = changed_groups.saturating_add(1);
                 }
             }
-            if output_plan.enabled && output_failure.is_none() {
-                if let Err(error) =
-                    publish_output_page(&options.import_profile, &context, &mut output_plan, &page)
-                {
-                    output_failure = Some(error);
-                }
+            if output_plan.enabled
+                && !output_behind
+                && !publish_output_page(&options.import_profile, &context, &mut output_plan, &page)?
+            {
+                output_behind = true;
+                output_plan.enabled = false;
+                summary.record_failure(ProviderImportFailure {
+                    line: 0,
+                    error: "Hermes Pro output is behind committed Core".to_owned(),
+                });
             }
             if !replay_only
                 && options.capture_work_limit == CaptureWorkLimit::OneSafeGroup
@@ -323,9 +327,6 @@ pub(super) fn import_hermes_native_path(
     search_finish?;
     if summary.imported != 0 || changed_groups != 0 {
         summary.set_work_result(ProviderImportWorkResult::Changed);
-    }
-    if let Some(error) = output_failure {
-        return Err(error);
     }
     Ok(summary)
 }
@@ -949,71 +950,83 @@ fn publish_output_page(
     context: &PublicationContext<'_>,
     plan: &mut OutputPlan,
     page: &HermesPage,
-) -> Result<()> {
+) -> Result<bool> {
     let sink = profile.sink().ok_or(CaptureError::SystemInvariant(
         "Hermes NativePath output page has no output sink",
     ))?;
     revalidate_source(context)?;
     if page.next_frontier.next_ordinal <= plan.scan_frontier.next_ordinal {
-        return Ok(());
+        return Ok(true);
     }
-    if page.expected_frontier.next_ordinal < plan.scan_frontier.next_ordinal {
-        return Err(CaptureError::InvalidPayload(
-            "Hermes output cursor is not a certified page boundary".to_owned(),
-        ));
-    }
-    let observations = page
-        .rows
-        .iter()
-        .filter_map(|native_row| match &native_row.record {
-            HermesNativeRecord::Message { row, .. } if row.role == "tool" => {
-                Some(hermes_pro_output(row, native_row))
-            }
-            HermesNativeRecord::Session(_)
-            | HermesNativeRecord::Message { .. }
-            | HermesNativeRecord::Rejected(_) => None,
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let expected = safe_frontier(page.expected_frontier)?;
-    let next = safe_frontier(page.next_frontier)?;
-    let output = NativeProOutputPage {
-        inventory_generation: sink.inventory_generation(),
-        source: plan.source.clone(),
-        source_epoch: plan.source_epoch,
-        observed_revision: context.source_revision.to_owned(),
-        parser_revision: HERMES_OUTPUT_PARSER_REVISION.to_owned(),
-        materializer_revision: sink.materializer_revision().to_owned(),
-        disposition: plan.disposition,
-        expected_prior_source_epoch: plan.expected_source_epoch,
-        expected_prior_frontier: plan.expected_frontier.clone(),
-        observations,
+    let output_page = (|| {
+        if page.expected_frontier.next_ordinal < plan.scan_frontier.next_ordinal {
+            return Err(CaptureError::InvalidPayload(
+                "Hermes output cursor is not a certified page boundary".to_owned(),
+            ));
+        }
+        let observations = page
+            .rows
+            .iter()
+            .filter_map(|native_row| match &native_row.record {
+                HermesNativeRecord::Message { row, .. } if row.role == "tool" => {
+                    Some(hermes_pro_output(row, native_row))
+                }
+                HermesNativeRecord::Session(_)
+                | HermesNativeRecord::Message { .. }
+                | HermesNativeRecord::Rejected(_) => None,
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let expected = safe_frontier(page.expected_frontier)?;
+        let next = safe_frontier(page.next_frontier)?;
+        let output = NativeProOutputPage {
+            inventory_generation: sink.inventory_generation(),
+            source: plan.source.clone(),
+            source_epoch: plan.source_epoch,
+            observed_revision: context.source_revision.to_owned(),
+            parser_revision: HERMES_OUTPUT_PARSER_REVISION.to_owned(),
+            materializer_revision: sink.materializer_revision().to_owned(),
+            disposition: plan.disposition,
+            expected_prior_source_epoch: plan.expected_source_epoch,
+            expected_prior_frontier: plan.expected_frontier.clone(),
+            observations,
+        };
+        let replay = NativeProReplayPage::new_with_source_identity(
+            NativeSourceIdentity::new(
+                CaptureProvider::Hermes.as_str(),
+                plan.source.source_id.clone(),
+            ),
+            expected,
+            next.clone(),
+            page.terminal,
+            NativePageAccounting {
+                logical_units: output.observations.len(),
+                conservative_serialized_bytes: NATIVE_INGESTION_PAGE_MAX_BYTES,
+            },
+            output,
+        )
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        Ok::<_, CaptureError>((replay, next))
+    })();
+    let (replay, next) = match output_page {
+        Ok(page) => page,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "hermes_output_page",
+                "Hermes Pro output page is invalid",
+            ));
+            return Ok(false);
+        }
     };
-    let replay = NativeProReplayPage::new_with_source_identity(
-        NativeSourceIdentity::new(
-            CaptureProvider::Hermes.as_str(),
-            plan.source.source_id.clone(),
-        ),
-        expected,
-        next.clone(),
-        page.terminal,
-        NativePageAccounting {
-            logical_units: output.observations.len(),
-            conservative_serialized_bytes: NATIVE_INGESTION_PAGE_MAX_BYTES,
-        },
-        output,
-    )
-    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    process_pro_replay_only(replay, sink.as_ref()).map_err(|failure| {
-        CaptureError::InvalidPayload(format!(
-            "Hermes output lane failed after Core commit: {:?}",
-            failure.output_error
-        ))
-    })?;
+    if process_pro_replay_only(replay, sink.as_ref()).is_err() {
+        // The bounded output coordinator already marked only this sink behind.
+        // Keep the committed Core result and retry this exact frontier later.
+        return Ok(false);
+    }
     plan.expected_source_epoch = Some(plan.source_epoch);
     plan.expected_frontier = Some(next);
     plan.scan_frontier = page.next_frontier;
     plan.disposition = ProOutputSourceDisposition::AppendOrResume;
-    Ok(())
+    Ok(true)
 }
 
 fn core_plan(

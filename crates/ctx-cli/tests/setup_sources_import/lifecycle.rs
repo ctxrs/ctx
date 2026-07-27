@@ -159,6 +159,16 @@ fn status_reads_committed_wal_content_from_an_active_store() {
     let db_path = temp.path().join("work.sqlite");
     let writer = Connection::open(&db_path).unwrap();
     writer
+        .create_scalar_function(
+            "ctx_projection_writer_authorized_v1",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |_| Ok(1_i64),
+        )
+        .unwrap();
+    writer
         .execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
         .unwrap();
     writer
@@ -390,6 +400,17 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     assert_eq!(status["pending_inventory_units"], 1);
     assert_eq!(status["cataloged_sessions"], 1);
     assert_eq!(status["indexed_catalog_sessions"], 0);
+    assert_eq!(
+        status["inventory_source_bytes"],
+        setup["background_indexing"]["source_bytes"]
+    );
+    let source_bytes = setup["background_indexing"]["source_bytes"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        status["lexical_index_estimate_seconds"],
+        source_bytes.div_ceil(16 * 1024 * 1024).max(1)
+    );
     assert_eq!(status["indexed_items"], 0);
     assert_eq!(status["read_only"], true);
 
@@ -500,6 +521,8 @@ fn quiet_status_suppresses_success_output_but_not_json() {
     let status = json_output(ctx(&temp).args(["--quiet", "status", "--json"]));
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
+    assert!(status["inventory_source_bytes"].is_null());
+    assert!(status["lexical_index_estimate_seconds"].is_null());
 }
 
 #[test]
@@ -657,15 +680,19 @@ fn setup_import_isolates_empty_codex_session_file() {
         setup["import"]["totals"]["rejected_records"], 1,
         "{setup:#}"
     );
-    assert!(setup["import"]["sources"][0]["rejections"][0]["error"]
-        .as_str()
-        .unwrap()
-        .contains("rollout-empty-codex-session.jsonl"));
+    assert_eq!(
+        setup["import"]["sources"][0]["rejections"][0],
+        json!({
+            "line": 0,
+            "error": "Codex NativePath source has no valid session owner",
+        }),
+        "{setup:#}"
+    );
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["cataloged_sessions"], 2, "{status:#}");
     assert_eq!(status["indexed_catalog_sessions"], 1, "{status:#}");
-    assert_eq!(status["failed_catalog_sessions"], 1, "{status:#}");
+    assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
     assert_eq!(status["pending_catalog_sessions"], 1, "{status:#}");
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
 
@@ -876,6 +903,17 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
     assert_eq!(status["indexed_source_import_files"], 1);
     assert_eq!(status["pending_inventory_units"], 0);
     assert_eq!(status["indexed_catalog_sessions"], 0);
+    assert_eq!(
+        status["inventory_source_bytes"],
+        setup["background_indexing"]["source_bytes"]
+    );
+    let source_bytes = setup["background_indexing"]["source_bytes"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        status["lexical_index_estimate_seconds"],
+        source_bytes.div_ceil(16 * 1024 * 1024).max(1)
+    );
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
 }
 

@@ -29,6 +29,7 @@ TEXT_SUFFIXES = {
 SKIP_PARTS = {".git", "bazel-bin", "bazel-out", "bazel-testlogs", "target"}
 RELEASED_DEFAULT_SCOPES = {
     "analytics.enabled": "all_cli_installations",
+    "local_usage.enabled": "all_cli_installations",
     "upgrade.auto": "official_installer_managed",
     "daemon.enabled": "all_cli_installations",
     "search.semantic": "all_cli_installations",
@@ -38,6 +39,12 @@ PINNED_STABLE_SNAPSHOTS = {
         "path": "contracts/stable-defaults/v0.25.0.json",
         "sha256": "3a6d7565ca729e50864b1ab81eecefa39bf13c643b3b54e0a58dc0915c2694d0",
     },
+}
+PREVIOUS_STABLE_DEFAULT_KEYS = {
+    "analytics.enabled",
+    "upgrade.auto",
+    "daemon.enabled",
+    "search.semantic",
 }
 
 
@@ -121,7 +128,7 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
     )
     if not semantic:
         fail("could not locate empty-config semantic search default")
-    return {
+    defaults = {
         "analytics.enabled": default_field(
             r"analytics:\s*AnalyticsConfig\s*\{.*?enabled:\s*([^,\n]+),",
             "analytics",
@@ -136,6 +143,12 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
         ),
         "search.semantic": scalar_value(semantic.group(1), constants),
     }
+    if "LocalUsageConfig" in default_source:
+        defaults["local_usage.enabled"] = default_field(
+            r"local_usage:\s*LocalUsageConfig\s*\{.*?enabled:\s*([^,\n]+),",
+            "local usage",
+        )
+    return defaults
 
 
 def default_state(value: object) -> str:
@@ -157,7 +170,7 @@ def previous_stable_defaults(
             f"expected={pinned['sha256']} actual={snapshot_digest}"
         )
     snapshot = json.loads(snapshot_bytes)
-    expected_keys = set(RELEASED_DEFAULT_SCOPES)
+    expected_keys = PREVIOUS_STABLE_DEFAULT_KEYS
     defaults = snapshot.get("defaults")
     if (
         snapshot.get("schema_version") != 1
@@ -237,6 +250,15 @@ def validate_released_defaults(
                 f"{behavior} released default differs from empty-config runtime: "
                 f"declared={released!r} runtime={expected_value!r}"
             )
+        if config_key not in previous_defaults:
+            if previous is not None:
+                fail(f"{behavior} declares a previous default before it existed")
+            if control.get("introduced_after") != previous_tag:
+                fail(f"{behavior} must declare introduced_after={previous_tag}")
+            if control.get("deliberate_change_approval") is not None:
+                fail(f"{behavior} has change approval despite being newly introduced")
+            continue
+
         expected_previous = previous_defaults[config_key]
         if not isinstance(previous, dict) or previous != {
             "value": expected_previous,
@@ -320,7 +342,10 @@ def main() -> None:
     implemented_keys = set(
         re.findall(r'^\s+"([a-z][a-z0-9_.]+)"\s*=>', apply_values, re.MULTILINE)
     )
-    implemented_env = set(re.findall(r'"(CTX_[A-Z0-9_]+)"', apply_env.split("\n    pub fn", 1)[0]))
+    # Canonical controls may be owned by a purpose-specific helper called from
+    # apply_env. Scan the complete production config module so helper-owned
+    # variables are inventoried while any undocumented literal still fails.
+    implemented_env = set(re.findall(r'"(CTX_[A-Z0-9_]+)"', config_source))
     if implemented_keys != set(config_keys):
         fail(
             "config keys differ from contract: "

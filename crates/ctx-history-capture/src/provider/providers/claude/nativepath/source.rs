@@ -242,20 +242,21 @@ impl ClaudeDiscovery {
 /// are the NativePath review matrix: N/R/A/W/Rw/X/M/C/D.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClaudeSourceLifecycle {
-    New,               // N
-    Replay,            // R
-    Append,            // A
-    Rewrite,           // W
-    Rewind,            // Rw
-    RewriteAndRewind,  // W+Rw
-    Replacement,       // X
-    Move,              // M
-    Copy,              // C
+    New,         // N
+    Replay,      // R
+    Append,      // A
+    Rewrite,     // W
+    Rewind,      // Rw
+    Replacement, // X
+    Move,        // M
+    Copy,        // C
+    #[allow(dead_code)]
     DeletionCandidate, // D
     Ambiguous,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) struct ClaudeDeletionCandidate {
     pub(crate) lifecycle: ClaudeSourceLifecycle,
     pub(crate) session_key: ClaudeSessionKey,
@@ -807,6 +808,7 @@ fn is_subagent_jsonl(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with("agent-") && name.len() > "agent-".len())
 }
 
+#[allow(dead_code)]
 pub(crate) fn authoritative_deletion_candidates(
     discovery: &ClaudeDiscovery,
     known: &[super::checkpoint::ParseCheckpoint],

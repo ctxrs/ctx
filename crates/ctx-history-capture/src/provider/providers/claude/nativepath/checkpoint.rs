@@ -7,7 +7,6 @@ use super::source::{ClaudePhysicalFileId, ClaudeSessionKey};
 
 pub(super) const CLAUDE_NATIVEPATH_PARSER_REVISION: u32 = 5;
 pub(super) const CLAUDE_NATIVEPATH_POLICY_REVISION: u32 = 5;
-pub(super) const CLAUDE_NATIVEPATH_FRONTIER_VERSION: u32 = 1;
 const CLAUDE_LANE_OBSERVATION_BINDING_DOMAIN: &[u8] =
     b"ctx-claude-nativepath-lane-observation-binding-v1\0";
 
@@ -22,7 +21,6 @@ pub(crate) enum ChangeSignal {
     Relocation,
     LiveCopy,
     ConflictingLiveCopy,
-    ExactRestore,
     Reparse,
 }
 
@@ -38,16 +36,6 @@ pub(crate) struct ClaudeNativeFrontier {
     pub(crate) native_identity_chain_sha256: [u8; 32],
     pub(crate) native_identity_records: u64,
     pub(crate) appendable_boundary: bool,
-}
-
-impl ClaudeNativeFrontier {
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
-    }
-
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

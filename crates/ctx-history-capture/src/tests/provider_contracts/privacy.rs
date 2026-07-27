@@ -92,7 +92,7 @@ fn assert_imports_without_success_output(
             "{label}: raw command output leaked into stored event payload"
         );
     }
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
     assert_search_hits_provider(&store, searchable, provider);
     assert_search_misses(&store, raw_output);
     assert!(
@@ -368,5 +368,18 @@ fn assert_search_hit_cites_source(
         .unwrap_or_else(|| panic!("missing {provider:?} search hit for {query:?}"));
     assert_eq!(hit.source_format.as_deref(), Some(source_format));
     assert!(hit.raw_source_path.is_some());
-    assert!(hit.cursor.is_some());
+    let event = store.get_event(hit.event_id).unwrap();
+    let source = store
+        .get_capture_source(
+            event
+                .capture_source_id
+                .expect("search hit has capture source"),
+        )
+        .unwrap();
+    assert_eq!(source.descriptor.provider, provider);
+    assert_eq!(
+        source.descriptor.source_format.as_deref(),
+        Some(source_format)
+    );
+    assert!(source.descriptor.source_identity.is_some());
 }

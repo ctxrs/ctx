@@ -5,7 +5,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, ContentRef, EventType};
+use ctx_history_core::{compute_payload_hash, CaptureProvider, ContentRef, EventType};
 use ctx_history_store::Store;
 use rmpv::{encode::write_value as write_msgpack_value, Value as MsgpackValue};
 use rusqlite::{params, Connection};
@@ -50,6 +50,7 @@ trait TestProviderEventFields {
     fn provider_event_index(&self) -> u64;
     fn provider_event_hash(&self) -> Option<&str>;
     fn cursor(&self) -> Option<&str>;
+    fn payload(&self) -> &Value;
 }
 
 impl TestProviderEventFields for TestProviderEvent {
@@ -64,6 +65,10 @@ impl TestProviderEventFields for TestProviderEvent {
     fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
     }
+
+    fn payload(&self) -> &Value {
+        &self.payload
+    }
 }
 
 impl TestProviderEventFields for kiro::KiroNativeEvent {
@@ -77,6 +82,10 @@ impl TestProviderEventFields for kiro::KiroNativeEvent {
 
     fn cursor(&self) -> Option<&str> {
         Some(self.cursor.as_str())
+    }
+
+    fn payload(&self) -> &Value {
+        &self.payload
     }
 }
 
@@ -462,6 +471,18 @@ fn request_for(
     body: &str,
 ) -> CompleteMessageRequest {
     let event_id = Uuid::new_v4();
+    let (expected_provider_event_hash, expected_hash_authority) =
+        if let Some(provider_event_hash) = event.provider_event_hash() {
+            (
+                provider_event_hash.to_owned(),
+                CompleteContentHashAuthority::ProviderSupplied,
+            )
+        } else {
+            (
+                compute_payload_hash(event.payload()).unwrap(),
+                CompleteContentHashAuthority::NormalizedPayloadFallback,
+            )
+        };
     let source_access = SourceAccessBroker::new()
         .admit(
             AuthorizedSourceRoute {
@@ -495,8 +516,8 @@ fn request_for(
         provider_session_id: Some(provider_session_id.to_owned()),
         source_record_ordinal: 0,
         source_record_subrecord_index: subrecord,
-        expected_provider_event_hash: event.provider_event_hash().unwrap().to_owned(),
-        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
+        expected_provider_event_hash,
+        expected_hash_authority,
         expected_native_record_id: Some(native_record_id(
             event.provider_event_index(),
             event.provider_event_hash(),

@@ -80,7 +80,7 @@ use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
         Arc,
     },
     time::Duration,
@@ -103,6 +103,9 @@ pub struct Store {
     conn: Connection,
     busy_timeout: Duration,
     event_search_bulk_depth: Arc<AtomicUsize>,
+    // Even values are inactive; each acquired root owns the following odd
+    // epoch. Nested guards and one-use admissions are valid only in that epoch.
+    event_search_bulk_epoch: Arc<AtomicU64>,
     batch_depth: Cell<usize>,
     import_batch_depth: Cell<usize>,
     event_search_projection_capabilities:

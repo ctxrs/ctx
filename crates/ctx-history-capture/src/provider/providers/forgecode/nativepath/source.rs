@@ -77,6 +77,9 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeSourceObservation 
     columns: BTreeSet<String>,
 }
 
+// Discovery returns the fully certified live source by value; boxing would
+// add allocation to the normal path solely to match the missing-path variant.
+#[allow(clippy::large_enum_variant)]
 pub(in crate::provider::providers::forgecode) enum ForgeCodeDiscovery {
     Live(ForgeCodeSourceObservation),
     Missing(PathBuf),

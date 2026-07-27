@@ -17,10 +17,6 @@ fn test_tempdir_has_no_symlinked_parent_components() {
     .unwrap();
 }
 
-pub(in crate::tests) fn provider_fixture(name: &str) -> PathBuf {
-    materialized_fixture("provider", name)
-}
-
 pub(in crate::tests) fn provider_history_fixture(name: &str) -> PathBuf {
     materialized_fixture("provider-history", name)
 }

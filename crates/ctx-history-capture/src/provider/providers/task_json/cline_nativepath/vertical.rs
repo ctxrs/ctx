@@ -6,7 +6,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     AgentType, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event, EventRole,
-    EventType, Fidelity, Run, RunStatus, RunType, Session, SessionStatus, SyncCursor,
+    EventType, Fidelity, FileTouched, Run, RunStatus, RunType, Session, SessionStatus, SyncCursor,
 };
 use ctx_history_store::{
     decode_native_path_committed_cursor, EventSearchBulkGuard, NativePathCursorSetClassification,
@@ -23,10 +23,11 @@ use uuid::Uuid;
 use crate::{
     provider::{
         importer::{
-            provider_event_import_identity_with_exact_legacy_source, provider_import_session_uuid,
-            provider_path_identity, provider_scoped_source_identity_key,
-            provider_scoped_source_uuid, provider_source_cursor_stream_for_path,
-            provider_source_identity, provider_sync_metadata, timestamps,
+            provider_event_import_identity_with_exact_legacy_source, provider_file_touch_import_id,
+            provider_import_session_uuid, provider_path_identity,
+            provider_scoped_source_identity_key, provider_scoped_source_uuid,
+            provider_source_cursor_stream_for_path, provider_source_identity,
+            provider_sync_metadata, timestamps,
         },
         native_ingestion::{NativeIngestionPage, NativePublicationPage, NativeSourceIdentity},
     },
@@ -120,6 +121,8 @@ struct ResolvedClineSource {
     session: Session,
 }
 
+// Publication classification carries the full atomic cursor transition without heap indirection.
+#[allow(clippy::large_enum_variant)]
 enum ComponentCursorPlan {
     AlreadyCommitted,
     Publish {
@@ -313,13 +316,10 @@ fn import_task_json_nativepath_history(
                     .ok_or(CaptureError::SystemInvariant(
                         "task JSON NativePath output page has no output sink",
                     ))?;
-                crate::provider::native_ingestion::process_pro_replay_only(output, sink.as_ref())
-                    .map_err(|failure| {
-                    CaptureError::InvalidPayload(format!(
-                        "{} NativePath output lane failed after Core commit: {:?}",
-                        dialect.display_name, failure.output_error
-                    ))
-                })?;
+                let _ = crate::provider::native_ingestion::process_pro_replay_only(
+                    output,
+                    sink.as_ref(),
+                );
             }
             if !replay_only
                 && options.capture_work_limit == CaptureWorkLimit::OneSafeGroup
@@ -330,7 +330,7 @@ fn import_task_json_nativepath_history(
             }
         }
         let completion = reader.finish_catalog().map_err(map_source_error)?;
-        record_catalog_rejection(&completion, &mut summary);
+        record_catalog_failures(&completion, &mut summary);
         if !replay_only {
             for checkpoint in &completion.live_checkpoints {
                 summary.merge_from(publish_task_json_task_checkpoint(
@@ -422,7 +422,7 @@ fn verify_cline_core_page_committed(
     Ok(())
 }
 
-fn record_catalog_rejection(
+fn record_catalog_failures(
     completion: &ClineCatalogCompletion,
     summary: &mut ProviderImportSummary,
 ) {
@@ -435,8 +435,41 @@ fn record_catalog_rejection(
     if let Some(rejection) = rejection {
         summary.record_failure(crate::ProviderImportFailure {
             line: 0,
-            error: rejection.message.to_string(),
+            error: format!("{}: {}", rejection.path.display(), rejection.message),
         });
+    }
+    for failure in completion
+        .component_outcomes
+        .iter()
+        .filter_map(|outcome| outcome.failure.as_ref())
+    {
+        summary.record_failure(crate::ProviderImportFailure {
+            line: 0,
+            error: format!("{}: {}", failure.path.display(), failure.message),
+        });
+    }
+    for checkpoint in &completion.live_checkpoints {
+        let retained_rows = [
+            checkpoint.api_history.as_ref(),
+            checkpoint.ui_messages.as_ref(),
+            checkpoint.fallback_history.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|component| component.retained_rows)
+        .sum::<u64>();
+        let has_component_failure = completion.component_outcomes.iter().any(|outcome| {
+            outcome.failure.is_some() && outcome.path.starts_with(&checkpoint.canonical_task_path)
+        });
+        if retained_rows == 0 && !has_component_failure {
+            summary.record_failure(crate::ProviderImportFailure {
+                line: 0,
+                error: format!(
+                    "{}: provider source contained no real conversation message",
+                    checkpoint.canonical_task_path.display()
+                ),
+            });
+        }
     }
 }
 
@@ -1268,6 +1301,60 @@ fn publish_page_events(
         } else {
             summary.skipped_events = summary.skipped_events.saturating_add(1);
             summary.skipped = summary.skipped.saturating_add(1);
+        }
+        for (touch_ordinal, touch) in event.file_touches.iter().enumerate() {
+            let touch_ordinal = u64::try_from(touch_ordinal)
+                .map_err(|_| ClineNativeVerticalError::EventIndexOverflow)?;
+            let provider_touch_index = native_provider_event_index
+                .checked_mul(u64::from(u16::MAX) + 1)
+                .and_then(|base| base.checked_add(touch_ordinal))
+                .ok_or(ClineNativeVerticalError::EventIndexOverflow)?;
+            let provider_session_id = resolved
+                .session
+                .external_session_id
+                .as_deref()
+                .unwrap_or_default();
+            let id = provider_file_touch_import_id(
+                committed_store,
+                context.dialect.provider,
+                provider_session_id,
+                resolved.source_id,
+                Some(provider_event_index),
+                provider_touch_index,
+                resolved.session.id
+                    == crate::provider::importer::provider_session_uuid(
+                        context.dialect.provider,
+                        provider_session_id,
+                    ),
+            )?;
+            group.upsert_file_touched(&FileTouched {
+                id,
+                history_record_id: context.options.history_record_id,
+                run_id: run.as_ref().map(|run| run.id),
+                event_id: Some(normalized.id),
+                vcs_workspace_id: None,
+                path: touch.path.to_string(),
+                change_kind: touch.change_kind,
+                old_path: touch.old_path.as_deref().map(str::to_owned),
+                line_count_delta: None,
+                confidence: touch.confidence,
+                timestamps: timestamps(occurred_at),
+                source_id: Some(resolved.source_id),
+                sync: provider_sync_metadata(
+                    Fidelity::Imported,
+                    json!({
+                        "provider": context.dialect.provider.as_str(),
+                        "provider_session_id": provider_session_id,
+                        "provider_touch_index": provider_touch_index,
+                        "provider_event_index": provider_event_index,
+                        "native_provider_event_index": native_provider_event_index,
+                        "source_generation": generation,
+                        "source_format": context.dialect.source_format,
+                        "session_id": resolved.session.id,
+                        "metadata": touch.metadata,
+                    }),
+                ),
+            })?;
         }
     }
     Ok(())

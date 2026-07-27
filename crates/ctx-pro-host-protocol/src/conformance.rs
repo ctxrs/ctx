@@ -1209,6 +1209,14 @@ fn provider_output_citation_branch_is_typed_exclusive_and_strict() {
 }
 
 #[test]
+fn blame_match_unknown_fields_fail_closed() {
+    let result = provider_output_blame_result();
+    let mut blame_match = serde_json::to_value(&result.matches[0]).unwrap();
+    blame_match["future_match_metadata"] = Value::Bool(true);
+    assert!(serde_json::from_value::<BlameMatch>(blame_match).is_err());
+}
+
+#[test]
 fn maximum_escaping_roots_boundary_is_exact_and_under_four_mib() {
     let roots = (0..MAX_AUTHORIZED_REPOSITORY_ROOTS)
         .map(|index| {

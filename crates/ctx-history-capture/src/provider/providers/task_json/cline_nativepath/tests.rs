@@ -924,6 +924,62 @@ fn malformed_independent_items_are_rejected_locally_and_valid_siblings_survive()
 }
 
 #[test]
+fn multi_call_file_touches_attach_only_to_their_owning_tool_rows() {
+    let fixture = Fixture::new(
+        json!([{
+            "id": "multi-call",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "call-a",
+                    "name": "apply_patch",
+                    "input": {
+                        "patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new\n*** End Patch"
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "call-b",
+                    "name": "apply_patch",
+                    "input": {
+                        "patch": "*** Begin Patch\n*** Add File: src/b.rs\n+new\n*** End Patch"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "*** Begin Patch\n*** Delete File: src/unrelated.rs\n*** End Patch"
+                }
+            ]
+        }]),
+        json!([]),
+    );
+
+    let result = read_all(&fixture.root, &[], ClineNativeProfile::CoreOnly);
+    let tool_rows = component_pages(&result.pages, ClineComponent::ApiHistory)
+        .into_iter()
+        .flat_map(|page| page.core.events.iter())
+        .filter_map(|event| {
+            event.tool_call.as_ref().map(|tool_call| {
+                (
+                    tool_call.call_id.as_deref().expect("tool call id"),
+                    event
+                        .file_touches
+                        .iter()
+                        .map(|touch| touch.path.as_ref())
+                        .collect::<Vec<_>>(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        tool_rows,
+        vec![("call-a", vec!["src/a.rs"]), ("call-b", vec!["src/b.rs"]),]
+    );
+}
+
+#[test]
 fn local_component_io_failure_preserves_siblings_while_resource_io_aborts() {
     let fixture = Fixture::new(api_messages(&["api"]), api_messages(&["ui"]));
     let discovery = discover_cline_root(&fixture.root).expect("discover");

@@ -8,6 +8,38 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
+fn assert_nativepath_record_rejections(
+    summary: &crate::ProviderImportSummary,
+    rejected: usize,
+    source_path: &Path,
+) {
+    assert_eq!(summary.failed, rejected, "{:?}", summary.failures);
+    assert_eq!(summary.failures.len(), rejected, "{:?}", summary.failures);
+    let source_name = source_path.file_name().unwrap().to_string_lossy();
+    let parent = source_path.parent().unwrap().display().to_string();
+    for failure in &summary.failures {
+        assert!(failure.line > 0, "{failure:?}");
+        assert!(failure.error.contains(source_name.as_ref()), "{failure:?}");
+        assert!(failure.error.contains("raw ordinal"), "{failure:?}");
+        assert!(failure.error.contains("(bytes "), "{failure:?}");
+        assert!(failure.error.len() <= 512, "{failure:?}");
+        assert!(!failure.error.contains(&parent), "{failure:?}");
+    }
+}
+
+fn assert_nativepath_missing_owner(summary: &crate::ProviderImportSummary) {
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures.len(), 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures[0].line, 0);
+    assert!(
+        summary.failures[0]
+            .error
+            .contains("Codex NativePath source has no valid session owner"),
+        "{:?}",
+        summary.failures
+    );
+}
+
 fn write_codex_session_with_oversized_event(path: &Path) {
     fs::write(
         path,
@@ -73,12 +105,8 @@ fn codex_session_jsonl_fast_import_reports_one_oversized_line() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert_eq!(summary.failures[0].line, 3);
-    assert!(summary.failures[0]
-        .error
-        .contains("provider record exceeds the"));
-    assert_eq!(summary.skipped_events, 0);
+    assert_nativepath_record_rejections(&summary, 1, &path);
+    assert_eq!(summary.skipped_events, 1);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
 
@@ -126,15 +154,7 @@ fn codex_session_jsonl_reports_oversized_required_header_and_headerless_event() 
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 2, "{:?}", summary.failures);
-    assert_eq!(summary.failures[0].line, 1);
-    assert!(summary.failures[0]
-        .error
-        .contains("provider record exceeds the"));
-    assert_eq!(summary.failures[1].line, 2);
-    assert!(summary.failures[1]
-        .error
-        .contains("entry appeared before session_meta"));
+    assert_nativepath_missing_owner(&summary);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.skipped_sessions, 0);
     assert_eq!(summary.imported_sessions, 0);
@@ -143,7 +163,7 @@ fn codex_session_jsonl_reports_oversized_required_header_and_headerless_event() 
 }
 
 #[test]
-fn codex_session_jsonl_reports_only_oversized_events_without_fake_session() {
+fn codex_session_jsonl_reports_only_oversized_events_with_valid_session_authority() {
     let temp = tempdir();
     let path = temp.path().join("only-oversized-event-codex.jsonl");
     let mut bytes = Vec::new();
@@ -174,16 +194,12 @@ fn codex_session_jsonl_reports_only_oversized_events_without_fake_session() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert_eq!(summary.failures[0].line, 2);
-    assert!(summary.failures[0]
-        .error
-        .contains("provider record exceeds the"));
+    assert_nativepath_record_rejections(&summary, 1, &path);
     assert_eq!(summary.skipped, 0);
-    assert_eq!(summary.skipped_events, 0);
-    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
 
     let mut slow_store = Store::open(temp.path().join("slow-work.sqlite")).unwrap();
     let slow_summary = import_codex_session_jsonl(
@@ -198,16 +214,12 @@ fn codex_session_jsonl_reports_only_oversized_events_without_fake_session() {
     )
     .unwrap();
 
-    assert_eq!(slow_summary.failed, 1, "{:?}", slow_summary.failures);
-    assert_eq!(slow_summary.failures[0].line, 2);
-    assert!(slow_summary.failures[0]
-        .error
-        .contains("provider record exceeds the"));
+    assert_nativepath_record_rejections(&slow_summary, 1, &path);
     assert_eq!(slow_summary.skipped, 0);
-    assert_eq!(slow_summary.skipped_events, 0);
-    assert_eq!(slow_summary.imported_sessions, 0);
+    assert_eq!(slow_summary.skipped_events, 1);
+    assert_eq!(slow_summary.imported_sessions, 1);
     assert_eq!(slow_summary.imported_events, 0);
-    assert!(slow_store.list_sessions().unwrap().is_empty());
+    assert_eq!(slow_store.list_sessions().unwrap().len(), 1);
 }
 
 #[test]
@@ -243,15 +255,7 @@ fn codex_session_jsonl_malformed_header_is_not_hidden_by_oversized_line() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 2, "{:?}", summary.failures);
-    assert!(summary
-        .failures
-        .iter()
-        .any(|failure| failure.error.contains("codex session_meta missing id")));
-    assert!(summary
-        .failures
-        .iter()
-        .any(|failure| failure.error.contains("provider record exceeds the")));
+    assert_nativepath_missing_owner(&summary);
     assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
     assert!(store.list_sessions().unwrap().is_empty());
@@ -295,24 +299,104 @@ fn codex_session_jsonl_malformed_relevant_line_is_not_hidden_by_oversized_line()
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 2, "{:?}", summary.failures);
-    assert!(
+    assert_nativepath_record_rejections(&summary, 2, &path);
+    assert_eq!(
         summary
             .failures
             .iter()
-            .any(|failure| failure.error.contains("EOF while parsing"))
-            || summary
-                .failures
-                .iter()
-                .any(|failure| failure.error.contains("expected"))
+            .map(|failure| failure.line)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
     );
     assert!(summary
         .failures
         .iter()
-        .any(|failure| failure.error.contains("provider record exceeds the")));
-    assert_eq!(summary.imported_sessions, 0);
+        .all(|failure| !failure.error.contains("unterminated")));
+    assert_eq!(summary.skipped_events, 2);
+    assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+}
+
+#[test]
+fn codex_session_jsonl_reports_each_malformed_record_location_without_content() {
+    let temp = tempdir();
+    let path = temp.path().join("multiple-malformed-codex.jsonl");
+    let header = jsonl_line(json!({
+        "timestamp": "2026-07-03T12:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "codex-multiple-malformed",
+            "timestamp": "2026-07-03T12:00:00Z",
+            "cwd": "/workspace",
+            "originator": "codex-cli"
+        }
+    }));
+    let malformed_one = br#"{"timestamp":"2026-07-03T12:00:01Z","secret":"first-rejected-record""#;
+    let malformed_two =
+        br#"{"timestamp":"2026-07-03T12:00:02Z","secret":"second-rejected-record",}"#;
+    let retained = jsonl_line(json!({
+        "timestamp": "2026-07-03T12:00:03Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "retained after malformed records"}]
+        }
+    }));
+    let first_start = header.len() as u64;
+    let first_end = first_start + malformed_one.len() as u64 + 1;
+    let second_start = first_end;
+    let second_end = second_start + malformed_two.len() as u64 + 1;
+    let mut source = header.into_bytes();
+    source.extend_from_slice(malformed_one);
+    source.push(b'\n');
+    source.extend_from_slice(malformed_two);
+    source.push(b'\n');
+    source.extend_from_slice(retained.as_bytes());
+    fs::write(&path, source).unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_nativepath_record_rejections(&summary, 2, &path);
+    assert_eq!(
+        summary
+            .failures
+            .iter()
+            .map(|failure| failure.line)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert!(
+        summary.failures[0]
+            .error
+            .contains(&format!("(bytes {first_start}..{first_end})")),
+        "{:?}",
+        summary.failures
+    );
+    assert!(
+        summary.failures[1]
+            .error
+            .contains(&format!("(bytes {second_start}..{second_end})")),
+        "{:?}",
+        summary.failures
+    );
+    assert!(summary.failures.iter().all(|failure| {
+        !failure.error.contains("first-rejected-record")
+            && !failure.error.contains("second-rejected-record")
+    }));
+    assert_eq!(summary.skipped_events, 2);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
 }
 
 #[test]
@@ -359,12 +443,8 @@ fn codex_session_probe_reports_oversized_line_before_first_real_message() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert_eq!(summary.failures[0].line, 2);
-    assert!(summary.failures[0]
-        .error
-        .contains("provider record exceeds the"));
-    assert_eq!(summary.skipped_events, 0);
+    assert_nativepath_record_rejections(&summary, 1, &path);
+    assert_eq!(summary.skipped_events, 1);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
     assert_eq!(
@@ -422,13 +502,11 @@ fn codex_session_jsonl_keeps_valid_header_when_event_timestamp_is_malformed() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert!(summary.failures[0]
-        .error
-        .contains("timestamp is not a valid RFC3339 timestamp"));
-    assert_eq!(summary.imported_sessions, 0);
+    assert_nativepath_record_rejections(&summary, 1, &path);
+    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
     assert!(store
         .search_event_hits("bad timestamp should not import", 10)
         .unwrap()
@@ -586,13 +664,11 @@ fn codex_session_jsonl_fast_keeps_valid_header_when_event_timestamp_is_malformed
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert!(summary.failures[0]
-        .error
-        .contains("timestamp is not a valid RFC3339 timestamp"));
-    assert_eq!(summary.imported_sessions, 0);
+    assert_nativepath_record_rejections(&summary, 1, &path);
+    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
     assert!(store
         .search_event_hits("fast bad timestamp should not import", 10)
         .unwrap()

@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::reader::CodexRecordRejection;
 use super::{
     classify_source_lifecycle, revalidate_codex_source_observation, CodexAppendProof,
     CodexCatalogSource, CodexCheckpointGeneration, CodexFileObservation, CodexFileTouch,
@@ -315,6 +316,7 @@ pub(crate) struct CodexNativeCorePublication {
     pub(crate) imported_edges: usize,
     pub(crate) skipped_events: usize,
     pub(crate) rejected_records: usize,
+    pub(crate) rejections: Vec<CodexRecordRejection>,
     pub(crate) retained_events: u64,
 }
 
@@ -459,6 +461,8 @@ impl CodexNativeRootGroup {
         self.chunks.is_empty()
     }
 
+    // A rejected chunk is intentionally returned intact for the caller's next group.
+    #[allow(clippy::result_large_err)]
     pub(super) fn try_push(
         &mut self,
         chunk: CodexNativeRootChunk,
@@ -686,26 +690,22 @@ pub(crate) fn prepare_codex_native_source(
         .native_result_records
         .saturating_sub(u64::try_from(scanned_sparse_results).unwrap_or(u64::MAX));
     let resumed_append = scan.resume_proof().is_some();
-    let retained_events = scanned_retained_events.saturating_add(
-        resumed_append
-            .then(|| {
-                committed
-                    .as_ref()
-                    .map(|state| state.retained_events)
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default(),
-    );
-    let authority_skipped_events = scanned_skipped_events.saturating_add(
-        resumed_append
-            .then(|| {
-                committed
-                    .as_ref()
-                    .map(|state| state.skipped_events)
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default(),
-    );
+    let retained_events = scanned_retained_events.saturating_add(if resumed_append {
+        committed
+            .as_ref()
+            .map(|state| state.retained_events)
+            .unwrap_or_default()
+    } else {
+        0
+    });
+    let authority_skipped_events = scanned_skipped_events.saturating_add(if resumed_append {
+        committed
+            .as_ref()
+            .map(|state| state.skipped_events)
+            .unwrap_or_default()
+    } else {
+        0
+    });
     let resumable_partial = committed.as_ref().is_some_and(|state| {
         state.proof.is_none()
             && state.source_revision == current_revision
@@ -801,16 +801,19 @@ pub(crate) fn prepare_codex_native_source(
         skipped_events: authority_skipped_events,
     };
     let imported_edges = usize::from(context.parent_session_id.is_some());
+    let terminal = scan.terminal();
+    let rejections = scan.rejections;
     Ok(CodexNativePreparedSource::Publication(Box::new(
         CodexNativeCorePublication {
             context,
             core_pages,
             output_pages: generic_output_pages,
-            terminal: scan.terminal(),
+            terminal,
             imported_events,
             imported_edges,
             skipped_events: usize::try_from(skipped_events).unwrap_or(usize::MAX),
             rejected_records: usize::try_from(scan_rejected_records).unwrap_or(usize::MAX),
+            rejections,
             retained_events,
         },
     )))

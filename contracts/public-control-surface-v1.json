@@ -24,6 +24,17 @@
       "environment_variable": "CTX_ANALYTICS_ENDPOINT"
     },
     {
+      "behavior": "local usage aggregation",
+      "config_key": "local_usage.enabled",
+      "environment_variable": "CTX_LOCAL_USAGE_ENABLED",
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "introduced_after": "v0.25.0"
+    },
+    {
       "behavior": "automatic upgrade mode",
       "config_key": "upgrade.auto",
       "environment_variable": "CTX_UPGRADE_AUTO",

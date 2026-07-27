@@ -72,7 +72,7 @@ use super::{
     source::{KimiWireObservation, KimiWireSessionState},
 };
 
-const KIMI_NATIVE_CAPTURE_REVISION: u32 = 5;
+const KIMI_NATIVE_CAPTURE_REVISION: u32 = 6;
 const KIMI_NATIVE_POLICY_REVISION: u32 = 7;
 const KIMI_NATIVE_CURSOR_VERSION: u32 = 1;
 const KIMI_NATIVE_POSITION_KIND: &str = "kimi-nativepath-jsonl-frontier-v1";
@@ -335,13 +335,16 @@ pub(crate) fn import_kimi_nativepath_tree(
     let sink = options.import_profile.sink().cloned();
 
     if options.import_profile.is_replay_only() {
-        replay_outputs_or_mark_behind(
+        let mut summary = ProviderImportSummary::default();
+        if replay_outputs(
             &inventory.paths,
             &configured_source_root,
             context.imported_at,
             sink.as_deref(),
-        );
-        return Ok(ProviderImportSummary::default());
+        )? {
+            record_output_behind(&mut summary);
+        }
+        return Ok(summary);
     }
 
     if inventory.paths.is_empty() && known_routes.is_empty() {
@@ -392,18 +395,20 @@ pub(crate) fn import_kimi_nativepath_tree(
     let finish = store
         .finish_event_search_bulk_mode(&bulk_guard)
         .map_err(CaptureError::from);
-    let summary = match (operation, finish) {
+    let mut summary = match (operation, finish) {
         (Ok(summary), Ok(())) => summary,
         (_, Err(error)) => return Err(error),
         (Err(error), Ok(())) => return Err(error),
     };
-    if !summary.work_remaining {
-        replay_outputs_or_mark_behind(
+    if !summary.work_remaining
+        && replay_outputs(
             &inventory.paths,
             &configured_source_root,
             context.imported_at,
             sink.as_deref(),
-        );
+        )?
+    {
+        record_output_behind(&mut summary);
     }
     Ok(summary)
 }
@@ -500,7 +505,8 @@ fn import_kimi_core_file(
                     vec![KimiCoreUnit::Rejection {
                         line: line_number,
                         reason: format!(
-                            "Kimi JSONL record exceeds {MAX_PROVIDER_JSONL_LINE_BYTES} bytes"
+                            "provider record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit (observed {} bytes)",
+                            raw.observed_bytes
                         ),
                     }],
                     false,
@@ -542,6 +548,7 @@ fn import_kimi_core_file(
                     &source_revision,
                     &stream,
                     &checkpoint_before,
+                    options.history_record_id,
                     pending,
                 )?;
                 if page_summary.work_result() == ProviderImportWorkResult::Changed {
@@ -570,6 +577,7 @@ fn import_kimi_core_file(
                     &source_revision,
                     &stream,
                     &checkpoint,
+                    options.history_record_id,
                     pending,
                 )?;
                 if page_summary.work_result() == ProviderImportWorkResult::Changed {
@@ -599,6 +607,7 @@ fn import_kimi_core_file(
         &source_revision,
         &stream,
         &checkpoint,
+        options.history_record_id,
         final_page,
     )?;
     if page_summary.work_result() == ProviderImportWorkResult::Changed {
@@ -676,6 +685,9 @@ fn verify_prefix(path: &Path, checkpoint: &KimiNativeCheckpoint) -> Result<Optio
     Ok((prefix_digest(&hasher) == checkpoint.committed_prefix_sha256).then_some(hasher))
 }
 
+// These inputs are the explicit identity, source range, and checkpoint for one wire record;
+// bundling them would obscure the provider projection boundary without simplifying ownership.
+#[allow(clippy::too_many_arguments)]
 fn project_core_record(
     observation: &KimiWireObservation,
     context: &ProviderAdapterContext,
@@ -855,6 +867,7 @@ fn publish_core_page(
     source_revision: &str,
     stream: &str,
     checkpoint: &KimiNativeCheckpoint,
+    history_record_id: Option<Uuid>,
     page: KimiCorePage,
 ) -> Result<ProviderImportSummary> {
     if !observation.revalidate(path)? {
@@ -967,6 +980,7 @@ fn publish_core_page(
         context,
         &observation.session,
         checkpoint,
+        history_record_id,
         source_id,
         &resolution.canonical_source_identity,
     )?;
@@ -977,8 +991,11 @@ fn publish_core_page(
                 source_id,
                 id,
                 external_session_id,
+                history_record_id,
                 &resolution.canonical_source_identity,
             ))?;
+            summary.imported_sessions = summary.imported_sessions.saturating_add(1);
+            summary.imported = summary.imported.saturating_add(1);
         }
     }
     let session_existed = committed_store.get_session(session.id).is_ok();
@@ -1018,6 +1035,7 @@ fn publish_core_page(
                     context,
                     source_id,
                     &session,
+                    history_record_id,
                     *raw_ordinal,
                     event,
                     &mut summary,
@@ -1031,6 +1049,7 @@ fn publish_core_page(
                     context,
                     source_id,
                     &session,
+                    history_record_id,
                     touch,
                     touch
                         .provider_event_index
@@ -1178,6 +1197,7 @@ fn canonical_kimi_session(
     context: &ProviderAdapterContext,
     session: &KimiWireSessionState,
     checkpoint: &KimiNativeCheckpoint,
+    history_record_id: Option<Uuid>,
     source_id: Uuid,
     source_identity: &str,
 ) -> Result<Session> {
@@ -1217,7 +1237,7 @@ fn canonical_kimi_session(
         .or(parent_session_id);
     Ok(Session {
         id,
-        history_record_id: None,
+        history_record_id,
         parent_session_id,
         root_session_id,
         capture_source_id: Some(source_id),
@@ -1292,11 +1312,12 @@ fn relationship_placeholder(
     source_id: Uuid,
     id: Uuid,
     external_session_id: &str,
+    history_record_id: Option<Uuid>,
     source_identity: &str,
 ) -> Session {
     Session {
         id,
-        history_record_id: None,
+        history_record_id,
         parent_session_id: None,
         root_session_id: None,
         capture_source_id: Some(source_id),
@@ -1375,6 +1396,7 @@ fn publish_kimi_event(
     context: &ProviderAdapterContext,
     source_id: Uuid,
     session: &Session,
+    history_record_id: Option<Uuid>,
     raw_ordinal: u64,
     event: &KimiCoreEvent,
     summary: &mut ProviderImportSummary,
@@ -1411,6 +1433,7 @@ fn publish_kimi_event(
     let run = kimi_command_run(
         source_id,
         session,
+        history_record_id,
         event,
         event_hash,
         identity.run_source_id,
@@ -1442,7 +1465,7 @@ fn publish_kimi_event(
     let canonical = Event {
         id: identity.id,
         seq: identity.seq,
-        history_record_id: None,
+        history_record_id,
         session_id: Some(session.id),
         run_id: run.as_ref().map(|run| run.id),
         event_type: event.event_type,
@@ -1481,6 +1504,7 @@ fn publish_kimi_file_touch(
     context: &ProviderAdapterContext,
     source_id: Uuid,
     session: &Session,
+    history_record_id: Option<Uuid>,
     touch: &KimiFileTouch,
     event_id: Option<Uuid>,
 ) -> Result<()> {
@@ -1498,7 +1522,7 @@ fn publish_kimi_file_touch(
     )?;
     group.upsert_file_touched(&FileTouched {
         id,
-        history_record_id: None,
+        history_record_id,
         run_id: None,
         event_id,
         vcs_workspace_id: None,
@@ -1529,6 +1553,7 @@ fn publish_kimi_file_touch(
 fn kimi_command_run(
     source_id: Uuid,
     session: &Session,
+    history_record_id: Option<Uuid>,
     event: &KimiCoreEvent,
     event_hash: &str,
     run_source_id: Option<Uuid>,
@@ -1559,7 +1584,7 @@ fn kimi_command_run(
     let started_at = kimi_command_started_at(event)?;
     Ok(Some(Run {
         id,
-        history_record_id: None,
+        history_record_id,
         session_id: Some(session.id),
         run_type: RunType::Command,
         status: kimi_command_run_status(&event.payload),
@@ -1663,8 +1688,10 @@ fn kimi_command_run_status(payload: &Value) -> RunStatus {
 }
 
 fn replay_page_summary(page: &KimiCorePage) -> ProviderImportSummary {
-    let mut summary = ProviderImportSummary::default();
-    summary.skipped_sessions = usize::from(page.session_first_observed);
+    let mut summary = ProviderImportSummary {
+        skipped_sessions: usize::from(page.session_first_observed),
+        ..ProviderImportSummary::default()
+    };
     let mut skipped_file_touches = 0_usize;
     for unit in &page.units {
         match unit {
@@ -2162,21 +2189,16 @@ fn effective_source_revision(revision: &str, inventory_token: Option<&str>) -> S
     format!("inventory-observation-sha256-v1:{:x}", digest.finalize())
 }
 
-fn replay_outputs_or_mark_behind(
+fn replay_outputs(
     paths: &BTreeSet<PathBuf>,
     source_root: &Path,
     imported_at: DateTime<Utc>,
     sink: Option<&dyn ProOutputSink>,
-) {
+) -> Result<bool> {
     let Some(sink) = sink else {
-        return;
+        return Ok(false);
     };
-    if let Err(error) = replay_kimi_outputs(paths, source_root, imported_at, sink) {
-        sink.mark_behind(ProOutputSinkError::new(
-            "kimi_nativepath_output_replay",
-            error.to_string(),
-        ));
-    }
+    replay_kimi_outputs(paths, source_root, imported_at, sink)
 }
 
 fn replay_kimi_outputs(
@@ -2184,7 +2206,8 @@ fn replay_kimi_outputs(
     source_root: &Path,
     imported_at: DateTime<Utc>,
     sink: &dyn ProOutputSink,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut output_behind = false;
     for path in paths {
         let locator_identity = provider_path_identity(path)?;
         let source = OutputSourceIdentity {
@@ -2194,12 +2217,16 @@ fn replay_kimi_outputs(
         };
         let progress = match sink.observe_source(&source) {
             Ok(progress) => progress,
-            Err(error) => {
-                sink.mark_behind(error);
+            Err(_) => {
+                sink.mark_behind(ProOutputSinkError::new(
+                    "kimi_output_progress",
+                    "Kimi Pro output progress is unavailable",
+                ));
+                output_behind = true;
                 continue;
             }
         };
-        replay_kimi_source(
+        output_behind |= replay_kimi_source(
             path,
             source_root,
             imported_at,
@@ -2209,7 +2236,7 @@ fn replay_kimi_outputs(
             progress,
         )?;
     }
-    Ok(())
+    Ok(output_behind)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2221,7 +2248,7 @@ fn replay_kimi_source(
     output_source: OutputSourceIdentity,
     locator_identity: String,
     progress: Option<ProOutputProgress>,
-) -> Result<()> {
+) -> Result<bool> {
     let observation = KimiWireObservation::read(path)?;
     let scope_revision =
         kimi_admission_scope_revision_for_display(Some(source_root.display().to_string()));
@@ -2252,14 +2279,23 @@ fn replay_kimi_source(
         })
         && checkpoint.terminal
     {
-        return Ok(());
+        return Ok(false);
     }
-    let mut state = KimiOutputState::new(
+    let mut state = match KimiOutputState::new(
         output_source,
         progress,
         source_can_resume,
         sink.materializer_revision(),
-    )?;
+    ) {
+        Ok(state) => state,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "kimi_output_progress",
+                "Kimi Pro output progress is invalid",
+            ));
+            return Ok(true);
+        }
+    };
     let mut file = File::open(path)?;
     if KimiFrozenFileMetadata::from_metadata(&file.metadata()?)? != *observation.wire() {
         return Err(CaptureError::SourceChangedDuringCapture);
@@ -2289,7 +2325,7 @@ fn replay_kimi_source(
                 && (page_units >= KIMI_OUTPUT_PAGE_MAX_OBSERVATIONS
                     || page_bytes.saturating_add(next_record_bytes) > KIMI_OUTPUT_PAGE_MAX_BYTES)
             {
-                publish_output_page(
+                if !publish_output_page(
                     sink,
                     &observation,
                     &locator_identity,
@@ -2301,7 +2337,9 @@ fn replay_kimi_source(
                     page_units,
                     page_bytes,
                     std::mem::take(&mut observations),
-                )?;
+                )? {
+                    return Ok(true);
+                }
                 expected_checkpoint = checkpoint_before;
                 page_bytes = 64 * 1024;
                 page_units = 0;
@@ -2334,7 +2372,7 @@ fn replay_kimi_source(
             if !raw.oversized {
                 let record = json_record_bytes(&raw.bytes);
                 if let Ok(value) = serde_json::from_slice::<Value>(record) {
-                    if let Some(output) = kimi_output_observation(
+                    let output = match kimi_output_observation(
                         &observation,
                         &locator_identity,
                         ordinal,
@@ -2343,7 +2381,17 @@ fn replay_kimi_source(
                         offset,
                         &value,
                         imported_at,
-                    )? {
+                    ) {
+                        Ok(output) => output,
+                        Err(_) => {
+                            sink.mark_behind(ProOutputSinkError::new(
+                                "kimi_output_page",
+                                "Kimi Pro output observation is invalid",
+                            ));
+                            return Ok(true);
+                        }
+                    };
+                    if let Some(output) = output {
                         page_bytes = page_bytes
                             .saturating_add(output.content.len())
                             .saturating_add(2048);
@@ -2355,7 +2403,7 @@ fn replay_kimi_source(
         }
     }
     checkpoint.terminal = offset == observation.wire().length;
-    publish_output_page(
+    Ok(!publish_output_page(
         sink,
         &observation,
         &locator_identity,
@@ -2367,8 +2415,7 @@ fn replay_kimi_source(
         page_units.max(1),
         page_bytes,
         observations,
-    )?;
-    Ok(())
+    )?)
 }
 
 fn plan_output_scan(
@@ -2477,46 +2524,63 @@ fn publish_output_page(
     logical_units: usize,
     conservative_serialized_bytes: usize,
     observations: Vec<ProOutputObservation>,
-) -> Result<()> {
+) -> Result<bool> {
     if !observation.revalidate(observation.canonical_path())? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
-    let expected_frontier = expected_checkpoint.safe_frontier()?;
-    let next_safe_frontier = next_checkpoint.safe_frontier()?;
-    let output = NativeProOutputPage {
-        inventory_generation: sink.inventory_generation(),
-        source: state.source.clone(),
-        source_epoch: state.source_epoch,
-        observed_revision: observed_revision.to_owned(),
-        parser_revision: KIMI_OUTPUT_PARSER_REVISION.to_owned(),
-        materializer_revision: sink.materializer_revision().to_owned(),
-        disposition: state.disposition,
-        expected_prior_source_epoch: state.expected_source_epoch,
-        expected_prior_frontier: state.expected_sink_frontier.clone(),
-        observations,
+    let output_page = (|| {
+        let expected_frontier = expected_checkpoint.safe_frontier()?;
+        let next_safe_frontier = next_checkpoint.safe_frontier()?;
+        let output = NativeProOutputPage {
+            inventory_generation: sink.inventory_generation(),
+            source: state.source.clone(),
+            source_epoch: state.source_epoch,
+            observed_revision: observed_revision.to_owned(),
+            parser_revision: KIMI_OUTPUT_PARSER_REVISION.to_owned(),
+            materializer_revision: sink.materializer_revision().to_owned(),
+            disposition: state.disposition,
+            expected_prior_source_epoch: state.expected_source_epoch,
+            expected_prior_frontier: state.expected_sink_frontier.clone(),
+            observations,
+        };
+        let replay = NativeProReplayPage::new_with_source_identity(
+            NativeSourceIdentity::new(CaptureProvider::KimiCodeCli.as_str(), locator_identity),
+            expected_frontier,
+            next_safe_frontier.clone(),
+            terminal,
+            NativePageAccounting {
+                logical_units,
+                conservative_serialized_bytes,
+            },
+            output,
+        )
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        Ok::<_, CaptureError>((replay, next_safe_frontier))
+    })();
+    let (replay, next_safe_frontier) = match output_page {
+        Ok(output_page) => output_page,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "kimi_output_page",
+                "Kimi Pro output page is invalid",
+            ));
+            return Ok(false);
+        }
     };
-    let replay = NativeProReplayPage::new_with_source_identity(
-        NativeSourceIdentity::new(CaptureProvider::KimiCodeCli.as_str(), locator_identity),
-        expected_frontier,
-        next_safe_frontier.clone(),
-        terminal,
-        NativePageAccounting {
-            logical_units,
-            conservative_serialized_bytes,
-        },
-        output,
-    )
-    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    process_pro_replay_only(replay, sink).map_err(|failure| {
-        CaptureError::InvalidPayload(format!(
-            "Kimi output sink rejected NativePath page: {:?}",
-            failure.output_error
-        ))
-    })?;
+    if process_pro_replay_only(replay, sink).is_err() {
+        return Ok(false);
+    }
     state.expected_source_epoch = Some(state.source_epoch);
     state.expected_sink_frontier = Some(next_safe_frontier);
     state.disposition = ProOutputSourceDisposition::AppendOrResume;
-    Ok(())
+    Ok(true)
+}
+
+fn record_output_behind(summary: &mut ProviderImportSummary) {
+    summary.record_failure(ProviderImportFailure {
+        line: 0,
+        error: "Kimi Pro output is behind committed Core".to_owned(),
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

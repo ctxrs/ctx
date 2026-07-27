@@ -259,6 +259,9 @@ pub(super) fn import_nanoclaw_project(
     Ok(outcome.summary)
 }
 
+// Core publication deliberately keeps mutable and committed stores, source
+// authority, and import policy separate so their transaction roles stay clear.
+#[allow(clippy::too_many_arguments)]
 fn import_core(
     store: &mut Store,
     committed_store: &Store,

@@ -23,12 +23,12 @@ cp "${repo_root}/crates/ctx-cli/src/analytics/operation.rs" \
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"
-grep -Fq '4 empty-config released defaults' "${tmp}/pass.out"
+grep -Fq '5 empty-config released defaults' "${tmp}/pass.out"
 
 mkdir "${tmp}/no-git-bin"
 ln -s "$(command -v python3)" "${tmp}/no-git-bin/python3"
 PATH="${tmp}/no-git-bin" python3 "${checker}" "${fixture}" > "${tmp}/no-git.out"
-grep -Fq '4 empty-config released defaults' "${tmp}/no-git.out"
+grep -Fq '5 empty-config released defaults' "${tmp}/no-git.out"
 
 expect_fail() {
   local name="$1"
@@ -136,6 +136,12 @@ path.write_text(json.dumps(snapshot, indent=2) + "\n")
 PY
 }
 
+add_undocumented_helper_env() {
+  sed -i '/fn local_usage_env_override() -> LocalUsageEnvOverride {/a\
+    let _undocumented = env::var_os("CTX_UNDOCUMENTED_HELPER_CONTROL");' \
+    "$1/crates/ctx-cli/src/config.rs"
+}
+
 expect_fail inventory-default \
   'analytics delivery released default differs from empty-config runtime' \
   change_inventory_default
@@ -154,5 +160,8 @@ expect_fail rewritten-history \
 expect_fail rewritten-pinned-history \
   'pinned previous stable snapshot digest differs for v0.25.0' \
   rewrite_pinned_history_to_hide_a_regression
+expect_fail undocumented-helper-env \
+  'config environment variables differ from contract' \
+  add_undocumented_helper_env
 
 printf 'public control surface checker tests passed\n'

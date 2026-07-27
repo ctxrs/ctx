@@ -1,12 +1,9 @@
 use super::*;
-use std::{
-    ffi::OsString,
-    sync::{Mutex, MutexGuard},
-};
+use std::{ffi::OsString, sync::MutexGuard};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 const DEFAULT_CONTROL_ENV_KEYS: &[&str] = &[
     "CTX_ANALYTICS_ENABLED",
+    "CTX_LOCAL_USAGE_ENABLED",
     "CTX_ANALYTICS_OFF",
     "CTX_DISABLE_ANALYTICS",
     "CTX_INSTALL_DIAGNOSTICS_OFF",
@@ -26,7 +23,9 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn new(keys: &[&'static str]) -> Self {
-        let lock = ENV_LOCK.lock().unwrap();
+        let lock = TEST_LOCAL_USAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = keys
             .iter()
             .map(|&key| {
@@ -39,6 +38,10 @@ impl EnvGuard {
     }
 
     fn set(&self, key: &'static str, value: &str) {
+        env::set_var(key, value);
+    }
+
+    fn set_os(&self, key: &'static str, value: &OsString) {
         env::set_var(key, value);
     }
 }
@@ -59,6 +62,9 @@ fn parses_day_one_config_values() {
     let values = parse_toml_subset(
         r#"
 [analytics]
+enabled = false
+
+[local_usage]
 enabled = false
 
 [upgrade]
@@ -83,6 +89,7 @@ enabled = false
     assert_eq!(config.search.semantic, None);
     config.apply_values(&values).unwrap();
     assert!(!config.analytics.enabled);
+    assert!(!config.local_usage.enabled);
     assert_eq!(config.upgrade.auto, "off");
     assert_eq!(config.upgrade.channel, "beta");
     assert_eq!(config.upgrade.interval, Duration::from_secs(60 * 60));
@@ -128,6 +135,7 @@ fn load_without_config_file_uses_defaults() {
     let config = AppConfig::load(temp.path()).unwrap();
 
     assert!(config.analytics.enabled);
+    assert!(config.local_usage.enabled);
     assert_eq!(config.upgrade.auto, AUTO_UPGRADE_DEFAULT_MODE);
     assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
     assert!(config.auto_upgrade_enabled());
@@ -162,6 +170,10 @@ fn empty_config_runtime_defaults_match_public_control_inventory() {
         serde_json::json!(config.analytics.enabled)
     );
     assert_eq!(
+        released("local_usage.enabled"),
+        serde_json::json!(config.local_usage.enabled)
+    );
+    assert_eq!(
         released("upgrade.auto"),
         serde_json::json!(config.auto_upgrade_mode().as_str())
     );
@@ -188,6 +200,7 @@ fn legacy_config_without_runtime_control_keys_adopts_public_defaults() {
     let config = AppConfig::load(temp.path()).unwrap();
 
     assert!(config.analytics.enabled);
+    assert!(config.local_usage.enabled);
     assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
     assert!(config.auto_upgrade_enabled());
     assert!(config.daemon.enabled);
@@ -235,6 +248,261 @@ fn explicit_daemon_opt_out_wins_over_default_and_env_enable() {
     env_guard.set("CTX_DAEMON_ENABLED", "false");
     let environment_opt_out = AppConfig::load(temp.path()).unwrap();
     assert!(!environment_opt_out.daemon.enabled);
+}
+
+#[test]
+fn explicit_local_usage_opt_out_wins_over_default_and_env_enable() {
+    let env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "[local_usage]\nenabled = false\n",
+    )
+    .unwrap();
+
+    let persisted = AppConfig::load(temp.path()).unwrap();
+    assert!(!persisted.local_usage.enabled);
+
+    env_guard.set("CTX_LOCAL_USAGE_ENABLED", "true");
+    let still_persisted = AppConfig::load(temp.path()).unwrap();
+    assert!(!still_persisted.local_usage.enabled);
+
+    fs::remove_file(temp.path().join(CONFIG_FILE)).unwrap();
+    env_guard.set("CTX_LOCAL_USAGE_ENABLED", "false");
+    let environment_opt_out = AppConfig::load(temp.path()).unwrap();
+    assert!(!environment_opt_out.local_usage.enabled);
+}
+
+#[test]
+fn local_usage_env_accepts_only_exact_documented_booleans() {
+    let env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+
+    for value in ["true", "false"] {
+        env_guard.set("CTX_LOCAL_USAGE_ENABLED", value);
+        let control = read_local_usage_control(temp.path()).unwrap();
+        assert_eq!(control.effective_enabled, value == "true");
+        assert_eq!(
+            control.environment_override,
+            if value == "true" {
+                LocalUsageEnvOverride::Enabled
+            } else {
+                LocalUsageEnvOverride::Disabled
+            }
+        );
+    }
+    for value in ["TRUE", "1", "yes", " true ", "\"true\"", "invalid"] {
+        env_guard.set("CTX_LOCAL_USAGE_ENABLED", value);
+        let control = read_local_usage_control(temp.path()).unwrap();
+        assert!(!control.effective_enabled, "{value}");
+        assert_eq!(
+            control.environment_override,
+            LocalUsageEnvOverride::Invalid,
+            "{value}"
+        );
+        assert!(!AppConfig::load(temp.path()).unwrap().local_usage.enabled);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_unicode_local_usage_env_fails_closed_without_exposing_the_value() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+    env_guard.set_os(
+        "CTX_LOCAL_USAGE_ENABLED",
+        &OsString::from_vec(vec![b's', b'e', b'c', b'r', b'e', b't', 0xff]),
+    );
+
+    let control = read_local_usage_control(temp.path()).unwrap();
+    assert!(!control.effective_enabled);
+    assert_eq!(control.environment_override, LocalUsageEnvOverride::Invalid);
+    assert!(!AppConfig::load(temp.path()).unwrap().local_usage.enabled);
+    assert_eq!(control.environment_override.as_str(), "invalid");
+}
+
+#[test]
+fn focused_local_usage_reader_distinguishes_valid_unrelated_and_local_damage() {
+    let env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "unrelated malformed line\n[local_usage]\nenabled = false\n",
+    )
+    .unwrap();
+    assert!(
+        !read_local_usage_control(temp.path())
+            .unwrap()
+            .effective_enabled
+    );
+    assert_eq!(
+        resolve_local_usage_control(temp.path()).config_state,
+        LocalUsageConfigState::Resolved(false)
+    );
+
+    fs::write(temp.path().join(CONFIG_FILE), "unrelated malformed line\n").unwrap();
+    let unresolved = resolve_local_usage_control(temp.path());
+    assert_eq!(unresolved.config_state, LocalUsageConfigState::Unresolved);
+    assert!(!unresolved.effective_on_startup());
+    assert!(read_local_usage_control(temp.path()).is_err());
+
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "[local_usage]\nenabled = maybe\n",
+    )
+    .unwrap();
+    assert_eq!(
+        resolve_local_usage_control(temp.path()).config_state,
+        LocalUsageConfigState::Malformed
+    );
+    assert!(read_local_usage_control(temp.path()).is_err());
+
+    fs::write(temp.path().join(CONFIG_FILE), "unrelated malformed line\n").unwrap();
+    env_guard.set("CTX_LOCAL_USAGE_ENABLED", "invalid");
+    let invalid_environment = resolve_local_usage_control(temp.path());
+    assert_eq!(
+        invalid_environment.environment_override,
+        LocalUsageEnvOverride::Invalid
+    );
+    assert!(!invalid_environment.effective_after(Some(true)));
+}
+
+const MALFORMED_LOCAL_USAGE_FORMS: &[(&str, &str)] = &[
+    ("bare", "local_usage = true\n"),
+    ("bare_without_value", "local_usage\n"),
+    ("inline_table", "local_usage = { enabled = true }\n"),
+    ("quoted_key", "\"local_usage\".enabled = true\n"),
+    ("single_quoted_key", "'local_usage'.enabled = true\n"),
+    ("quoted_dotted_key", "\"local_usage.enabled\" = true\n"),
+    (
+        "unicode_u_escaped_key",
+        "\"local\\u005Fusage\".enabled = false\n",
+    ),
+    (
+        "unicode_upper_u_escaped_key",
+        "\"\\U0000006Cocal_usage\".enabled = false\n",
+    ),
+    (
+        "unicode_escaped_dotted_key",
+        "\"local\\u005Fusage.enabled\" = false\n",
+    ),
+    ("quoted_leaf", "local_usage.\"enabled\" = true\n"),
+    ("quoted_table", "[\"local_usage\"]\nenabled = true\n"),
+    (
+        "unicode_escaped_table",
+        "[\"local\\u005Fusage\"]\nenabled = false\n",
+    ),
+    (
+        "unicode_escaped_table_path",
+        "[\"\\U0000006Cocal_usage\".nested]\nvalue = false\n",
+    ),
+    ("single_quoted_table", "['local_usage']\nenabled = true\n"),
+    (
+        "owned_prefix_before_malformed_escape",
+        "\"local\\u005Fusage.\\uZZZZ\" = false\n",
+    ),
+    (
+        "owned_key_before_malformed_escape",
+        "\"local\\u005Fusage\\q\" = false\n",
+    ),
+    ("spaced_dotted_key", "local_usage . enabled = true\n"),
+    (
+        "nested_local_usage_table",
+        "[local_usage.enabled]\nvalue = true\n",
+    ),
+    ("array_table", "[[local_usage]]\nenabled = true\n"),
+    ("duplicate_empty_tables", "[local_usage]\n[local_usage]\n"),
+    (
+        "duplicate_table",
+        "[local_usage]\nenabled = true\n[local_usage]\n",
+    ),
+    (
+        "separated_duplicate_table",
+        "[local_usage]\n[analytics]\nenabled = true\n[local_usage]\nenabled = true\n",
+    ),
+];
+
+#[test]
+fn malformed_local_usage_owned_forms_disable_on_startup() {
+    let _env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+
+    for (name, text) in MALFORMED_LOCAL_USAGE_FORMS {
+        fs::write(temp.path().join(CONFIG_FILE), text).unwrap();
+        let resolution = resolve_local_usage_control(temp.path());
+        assert_eq!(
+            resolution.config_state,
+            LocalUsageConfigState::Malformed,
+            "{name}"
+        );
+        assert!(!resolution.effective_on_startup(), "{name}");
+    }
+}
+
+#[test]
+fn malformed_local_usage_owned_refresh_disables_a_valid_enabled_state() {
+    let _env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(CONFIG_FILE);
+    let mut resolver = LocalUsageConfigResolver::default();
+
+    for (name, text) in MALFORMED_LOCAL_USAGE_FORMS {
+        fs::write(&path, "[local_usage]\nenabled = true\n").unwrap();
+        let enabled = resolver.resolve(temp.path());
+        assert_eq!(
+            enabled.config_state,
+            LocalUsageConfigState::Resolved(true),
+            "{name}"
+        );
+        assert!(enabled.effective_after(Some(false)), "{name}");
+
+        fs::write(&path, text).unwrap();
+        let malformed = resolver.resolve(temp.path());
+        assert_eq!(
+            malformed.config_state,
+            LocalUsageConfigState::Malformed,
+            "{name}"
+        );
+        assert!(!malformed.effective_after(Some(true)), "{name}");
+    }
+}
+
+#[test]
+fn unrelated_config_failure_still_retains_the_previous_refresh_state() {
+    let _env_guard = EnvGuard::new(&["CTX_LOCAL_USAGE_ENABLED"]);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(CONFIG_FILE);
+    let mut resolver = LocalUsageConfigResolver::default();
+
+    fs::write(&path, "[local_usage]\nenabled = true\n").unwrap();
+    assert!(resolver.resolve(temp.path()).effective_on_startup());
+
+    for (name, text) in [
+        ("ordinary", "unrelated malformed line\n"),
+        (
+            "escaped_unrelated_key",
+            "\"analytics\\u005Fendpoint\" = \"broken\"\n",
+        ),
+        (
+            "escaped_unrelated_table",
+            "[\"ana\\u006Cytics\"]\nunknown = true\n",
+        ),
+        (
+            "malformed_escape_before_ownership",
+            "\"local\\uZZZZ_usage\" = true\n",
+        ),
+    ] {
+        fs::write(&path, text).unwrap();
+        let unresolved = resolver.resolve(temp.path());
+        assert_eq!(
+            unresolved.config_state,
+            LocalUsageConfigState::Unresolved,
+            "{name}"
+        );
+        assert!(unresolved.effective_after(Some(true)), "{name}");
+    }
 }
 
 #[test]

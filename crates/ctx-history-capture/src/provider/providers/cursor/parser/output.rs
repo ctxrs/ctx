@@ -313,10 +313,10 @@ impl<'a> CursorOutputPageBuffer<'a> {
 
     fn finish(mut self, final_checkpoint: CursorCheckpoint) -> Result<CursorOutputScanOutcome> {
         self.next_checkpoint = final_checkpoint;
-        if self.expected_checkpoint != self.next_checkpoint || !self.outputs.is_empty() {
-            if !self.flush(true)? {
-                return Ok(CursorOutputScanOutcome::Stopped);
-            }
+        if (self.expected_checkpoint != self.next_checkpoint || !self.outputs.is_empty())
+            && !self.flush(true)?
+        {
+            return Ok(CursorOutputScanOutcome::Stopped);
         }
         Ok(CursorOutputScanOutcome::Complete)
     }

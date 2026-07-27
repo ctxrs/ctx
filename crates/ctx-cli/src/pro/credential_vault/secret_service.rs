@@ -14,6 +14,8 @@ const CONTENT_TYPE: &str = "application/octet-stream";
 const LABEL: &str = "ctx Pro credential";
 const LOCK_FILE: &str = ".ctx-pro-credential-vault-v1.lock";
 const PLATFORM: &str = std::env::consts::OS;
+#[cfg(target_os = "linux")]
+const SECRET_SERVICE_BUS_NAME: &str = "org.freedesktop.secrets";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PlatformBackend;
@@ -25,6 +27,7 @@ impl PlatformBackend {
 
     #[cfg(target_os = "linux")]
     pub(super) fn probe(&self) -> Result<(), CredentialVaultError> {
+        require_secret_service_provider()?;
         let service = connect()?;
         persistent_default_collection(&service).map(|_| ())
     }
@@ -148,7 +151,7 @@ fn persistent_default_collection<'a>(
         .map_err(map_persistent_collection_error)?;
     match service.get_collection_by_alias("session") {
         Ok(session) if session.collection_path == collection.collection_path => {
-            return Err(unavailable());
+            return Err(persistent_collection_unavailable());
         }
         Ok(_) | Err(SecretServiceError::NoResult) => {}
         Err(error) => return Err(map_secret_service_error(error)),
@@ -175,22 +178,87 @@ fn belongs_to_collection(item_path: &str, collection_path: &str) -> bool {
 
 fn map_secret_service_error(error: SecretServiceError) -> CredentialVaultError {
     match error {
-        SecretServiceError::Unavailable => unavailable(),
         SecretServiceError::Locked | SecretServiceError::Prompt => CredentialVaultError::Locked,
+        #[cfg(target_os = "freebsd")]
+        SecretServiceError::Unavailable => unavailable(),
         _ => CredentialVaultError::Backend,
     }
 }
 
 fn map_persistent_collection_error(error: SecretServiceError) -> CredentialVaultError {
     if matches!(error, SecretServiceError::NoResult) {
-        unavailable()
+        persistent_collection_unavailable()
     } else {
         map_secret_service_error(error)
     }
 }
 
+const fn persistent_collection_unavailable() -> CredentialVaultError {
+    #[cfg(target_os = "linux")]
+    {
+        CredentialVaultError::Backend
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        unavailable()
+    }
+}
+
 const fn unavailable() -> CredentialVaultError {
     CredentialVaultError::Unavailable { platform: PLATFORM }
+}
+
+#[cfg(target_os = "linux")]
+fn require_secret_service_provider() -> Result<(), CredentialVaultError> {
+    let connection =
+        zbus::blocking::Connection::session().map_err(map_session_bus_connection_error)?;
+    let proxy = zbus::blocking::fdo::DBusProxy::new(&connection)
+        .map_err(|_| CredentialVaultError::Backend)?;
+    let name = zbus::names::BusName::try_from(SECRET_SERVICE_BUS_NAME)
+        .map_err(|_| CredentialVaultError::Backend)?;
+    let has_owner = proxy
+        .name_has_owner(name)
+        .map_err(|_| CredentialVaultError::Backend)?;
+    let activatable = if has_owner {
+        true
+    } else {
+        proxy
+            .list_activatable_names()
+            .map_err(|_| CredentialVaultError::Backend)?
+            .iter()
+            .any(|name| name.as_str() == SECRET_SERVICE_BUS_NAME)
+    };
+    classify_secret_service_provider(has_owner, activatable)
+}
+
+#[cfg(target_os = "linux")]
+fn map_session_bus_connection_error(error: zbus::Error) -> CredentialVaultError {
+    let deterministically_absent = matches!(
+        &error,
+        zbus::Error::InputOutput(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+    );
+    drop(error);
+    if deterministically_absent {
+        unavailable()
+    } else {
+        CredentialVaultError::Backend
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn classify_secret_service_provider(
+    has_owner: bool,
+    activatable: bool,
+) -> Result<(), CredentialVaultError> {
+    if has_owner || activatable {
+        Ok(())
+    } else {
+        Err(unavailable())
+    }
 }
 
 fn with_vault_lock<T>(
@@ -446,6 +514,74 @@ mod tests {
             "/org/freedesktop/secrets/collection/login/key",
             persistent
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn library_unavailable_and_missing_persistent_collection_fail_closed() {
+        assert_eq!(
+            map_secret_service_error(SecretServiceError::Unavailable),
+            CredentialVaultError::Backend
+        );
+        assert_eq!(
+            map_secret_service_error(SecretServiceError::NoResult),
+            CredentialVaultError::Backend
+        );
+        assert_eq!(
+            map_persistent_collection_error(SecretServiceError::NoResult),
+            CredentialVaultError::Backend
+        );
+        assert_eq!(
+            map_secret_service_error(SecretServiceError::Locked),
+            CredentialVaultError::Locked
+        );
+        assert_eq!(
+            map_secret_service_error(SecretServiceError::Prompt),
+            CredentialVaultError::Locked
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_live_bus_without_owned_or_activatable_provider_is_unavailable() {
+        assert!(classify_secret_service_provider(true, false).is_ok());
+        assert!(classify_secret_service_provider(false, true).is_ok());
+        assert_eq!(
+            classify_secret_service_provider(false, false),
+            Err(unavailable())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_deterministic_missing_session_bus_connection_errors_are_unavailable() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            assert_eq!(
+                map_session_bus_connection_error(
+                    std::io::Error::new(kind, "deterministically absent session bus").into()
+                ),
+                unavailable()
+            );
+        }
+        assert_eq!(
+            map_session_bus_connection_error(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "session bus access denied"
+                )
+                .into()
+            ),
+            CredentialVaultError::Backend
+        );
+        assert_eq!(
+            map_session_bus_connection_error(zbus::Error::Address(
+                "malformed explicit session bus address".to_owned()
+            )),
+            CredentialVaultError::Backend
+        );
     }
 
     #[test]

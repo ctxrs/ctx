@@ -118,11 +118,15 @@ fn native_goose_fixture_imports_searches_and_reimports() {
         .unwrap()
         .unwrap();
     assert_eq!(source.descriptor.cwd.as_deref(), Some("/workspace/goose"));
-    assert!(source
-        .sync
-        .metadata
-        .to_string()
-        .contains("\"goose_schema_version\":14"));
+    assert_eq!(
+        source.sync.metadata["source_trust"].as_str(),
+        Some("provider_native")
+    );
+    let source_revision = source.sync.metadata["source_revision"]
+        .as_str()
+        .expect("Goose NativePath source revision");
+    assert_eq!(source_revision.len(), 64);
+    assert!(source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let events = store.events_for_session(session_id).unwrap();
     assert!(events
         .iter()
@@ -140,6 +144,8 @@ fn native_goose_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         GooseSessionsSqliteImportOptions {
+            machine_id: "test-machine".into(),
+            source_path: Some(fixture.clone()),
             ..GooseSessionsSqliteImportOptions::default()
         },
     )
@@ -389,6 +395,8 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
         &fixture,
         &mut store,
         JunieImportOptions {
+            machine_id: "test-machine".into(),
+            source_path: Some(fixture.clone()),
             ..JunieImportOptions::default()
         },
     )
@@ -397,7 +405,7 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 4);
+    assert_eq!(second.skipped_events, 0);
 }
 
 #[test]
@@ -496,10 +504,12 @@ fn native_zed_fixture_imports_searches_and_reimports() {
         .iter()
         .find(|event| event.event_type == EventType::ToolCall)
         .unwrap();
+    assert_eq!(tool_call.payload["provider_event_index"].as_u64(), Some(2));
     assert_eq!(
-        tool_call.sync.metadata["metadata"]["provider_event_identity_index"].as_u64(),
+        tool_call.sync.metadata["nativepath_publication"].as_u64(),
         Some(1)
     );
+    assert!(tool_call.payload["cursor"].as_str().is_some());
     let rendered = serde_json::to_string(&parent_events).unwrap();
     assert!(rendered.contains("zed sqlite oracle prompt"));
     assert!(rendered.contains("zed sqlite oracle answer"));
@@ -521,8 +531,13 @@ fn native_zed_fixture_imports_searches_and_reimports() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        source.sync.metadata["source_metadata"]["upstream_schema_anchor"]["commit"].as_str(),
-        Some("e3b73c6b30cdc09e820823fe44542b89850d4be1")
+        source.descriptor.source_format.as_deref(),
+        Some(ZED_THREADS_SQLITE_SOURCE_FORMAT)
+    );
+    assert!(source.descriptor.source_identity.is_some());
+    assert_eq!(
+        source.sync.metadata["nativepath_publication"].as_u64(),
+        Some(1)
     );
 
     let second = import_zed_threads_sqlite(
@@ -569,7 +584,6 @@ fn native_zed_tool_call_input_is_metadata_only_and_not_searchable() {
         .expect("tool call event imported");
     let rendered_tool_call = serde_json::to_string(tool_call).unwrap();
     assert!(rendered_tool_call.contains("edit_file"));
-    assert!(rendered_tool_call.contains("input_present"));
     assert!(!rendered_tool_call.contains("ZED_RAW_TOOL_INPUT_NEEDLE"));
     assert!(!rendered_tool_call.contains("ZED_RAW_TOOL_INPUT_KEY_NEEDLE"));
     assert!(!rendered_tool_call.contains("*** Begin Patch"));
@@ -614,9 +628,11 @@ fn native_zed_reports_malformed_and_corrupt_db() {
         ZedThreadsSqliteImportOptions::default(),
     )
     .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("Zed threads table missing required column(s): data"));
+    assert!(
+        err.to_string()
+            .contains("Zed NativePath threads table missing required column(s): data"),
+        "{err}"
+    );
 
     let err = import_zed_threads_sqlite(
         &corrupt,
@@ -676,7 +692,7 @@ fn write_zed_raw_tool_input_db(temp: &TempDir) -> PathBuf {
     .unwrap();
     let thread = json!({
         "title": "Zed raw input fixture",
-        "version": "test",
+        "version": "0.3.0",
         "messages": [
             {
                 "User": {
@@ -778,6 +794,7 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
         &fixture,
         &mut store,
         ForgeCodeSqliteImportOptions {
+            machine_id: "test-machine".into(),
             source_path: Some(fixture.clone()),
             ..ForgeCodeSqliteImportOptions::default()
         },
@@ -786,8 +803,8 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
     assert_eq!(second.failed, 0, "{:?}", second.failures);
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 2);
+    assert_eq!(second.skipped_sessions, 0);
+    assert_eq!(second.skipped_events, 0);
     let file_touch_count_after: i64 = Connection::open(&store_path)
         .unwrap()
         .query_row(
@@ -876,6 +893,7 @@ fn native_deepagents_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         DeepAgentsSqliteImportOptions {
+            machine_id: "test-machine".into(),
             source_path: Some(fixture.clone()),
             ..DeepAgentsSqliteImportOptions::default()
         },
@@ -884,8 +902,8 @@ fn native_deepagents_fixture_imports_searches_and_reimports() {
     assert_eq!(second.failed, 0, "{:?}", second.failures);
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 0);
-    assert_eq!(second.skipped_events, 0);
+    assert_eq!(second.skipped_sessions, 1);
+    assert_eq!(second.skipped_events, 2);
 }
 
 #[test]
@@ -947,9 +965,12 @@ fn native_forgecode_reports_missing_table_and_corrupt_db() {
         ForgeCodeSqliteImportOptions::default(),
     )
     .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("ForgeCode .forge.db is missing required conversations table"));
+    assert!(
+        err.to_string().contains(
+            "ForgeCode conversations table missing required column(s): conversation_id, workspace_id, created_at"
+        ),
+        "{err}"
+    );
 
     let err = import_forgecode_sqlite(
         &corrupt,

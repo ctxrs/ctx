@@ -745,6 +745,7 @@ impl<'a> GeminiNativePageReader<'a> {
         let byte_start = self.offset;
         self.offset = self.offset.saturating_add(record.bytes_observed);
         let byte_end_exclusive = self.offset;
+        let payload = trim_jsonl_ending(&line);
 
         // Gemini appends records in place. No unterminated final physical
         // record is committed, even if its current bytes form valid JSON or
@@ -762,13 +763,15 @@ impl<'a> GeminiNativePageReader<'a> {
             }));
         }
 
-        if record.oversized {
+        if record.oversized || payload.len() > MAX_PROVIDER_JSONL_LINE_BYTES {
             let rejection = self.state.reject(
                 self.raw_ordinal,
                 byte_start,
                 byte_end_exclusive,
                 format!(
-                    "Gemini JSONL record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
+                    "provider record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit \
+                     (observed {} bytes)",
+                    record.bytes_observed
                 ),
             );
             self.observe_native_record(record.bytes_observed);
@@ -782,7 +785,6 @@ impl<'a> GeminiNativePageReader<'a> {
                 completed: true,
             }));
         }
-        let payload = trim_jsonl_ending(&line);
         if payload.iter().all(u8::is_ascii_whitespace) {
             self.complete_prefix_end = self.offset;
             self.append_boundary_safe = record.terminated;
@@ -841,6 +843,26 @@ impl<'a> GeminiNativePageReader<'a> {
                     completed: true,
                 }));
             }
+        }
+        if class != GeminiRecordClass::Header && self.state.session.is_none() {
+            let rejection = self.state.reject(
+                self.raw_ordinal,
+                byte_start,
+                byte_end_exclusive,
+                format!(
+                    "{}: record appeared before an importable native JSONL session header",
+                    self.source.path.display()
+                ),
+            );
+            self.complete_record(record.terminated);
+            return Ok(Some(ScannedGeminiRecord {
+                events: Vec::new(),
+                transient_outputs: Vec::new(),
+                transient_output_reservations: Vec::new(),
+                rejections: vec![rejection],
+                native_event_id: None,
+                completed: true,
+            }));
         }
         let mut events = Vec::new();
         let mut transient_outputs = Vec::new();

@@ -14,8 +14,30 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::{
     os::fd::AsRawFd,
+    path::PathBuf,
+    process::Command,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
+use {
+    super::super::{
+        credential_vault::{
+            BoundedSignedEntitlement, CredentialRecord, CredentialVaultNamespace,
+            InstallationSigningKeySeed, PlatformCredentialVault,
+        },
+        lifecycle::ProDeletionService,
+        local_deletion::LocalDeletionService,
+    },
+    ed25519_dalek::SigningKey,
+};
+
+#[cfg(target_os = "linux")]
+const DUAL_NAMESPACE_DELETION_MODE_ENV: &str = "CTX_TEST_DUAL_NAMESPACE_DELETION_MODE";
+#[cfg(target_os = "linux")]
+const DUAL_NAMESPACE_DELETION_ROOT_ENV: &str = "CTX_TEST_DUAL_NAMESPACE_DELETION_ROOT";
+#[cfg(target_os = "linux")]
+const DUAL_NAMESPACE_DELETION_RUNNER: &str =
+    "pro::client::tests::dual_namespace_graph_key_deletion_subprocess_runner";
 
 fn now() -> DateTime<Utc> {
     "2026-07-22T00:00:00Z".parse().expect("valid fixture time")
@@ -571,6 +593,68 @@ fn blame_capabilities_require_git_only_for_file_targets() {
 }
 
 #[test]
+fn blame_client_binds_responses_to_the_original_request_context() {
+    let request = ctx_pro_host_protocol::BlameRequest {
+        target: BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: Some("ctxrs/ctx".to_owned()),
+        },
+        limit: 10,
+        cursor: None,
+        expected_snapshot: ctx_pro_host_protocol::QuerySnapshotExpectation {
+            checkpoint: JournalCheckpoint {
+                position: JournalPosition {
+                    generation: 1,
+                    sequence: 0,
+                },
+                contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+                cumulative_digest: initial_journal_digest(1),
+            },
+            projection_pending: false,
+        },
+    };
+    let repository = ctx_pro_host_protocol::ResourceRef {
+        id: "repository:1".to_owned(),
+        kind: ctx_pro_host_protocol::ResourceKind::Repository,
+        display: "ctxrs/ctx".to_owned(),
+    };
+    let explicit_absence = BlameResult {
+        target: ctx_pro_host_protocol::ResolvedBlameTarget::Commit {
+            commit: ctx_pro_host_protocol::ResourceRef {
+                id: "commit:1".to_owned(),
+                kind: ctx_pro_host_protocol::ResourceKind::Commit,
+                display: "0123456789abcdef".to_owned(),
+            },
+            repository: repository.clone(),
+        },
+        git_snapshot: None,
+        matches: Vec::new(),
+        evidence: Vec::new(),
+        next: None,
+    };
+    validate_blame_response(&request, &explicit_absence).unwrap();
+
+    let wrong_variant = BlameResult {
+        target: ctx_pro_host_protocol::ResolvedBlameTarget::PullRequest {
+            selector: "42".to_owned(),
+            pull_request: ctx_pro_host_protocol::ResourceRef {
+                id: "pull_request:1".to_owned(),
+                kind: ctx_pro_host_protocol::ResourceKind::PullRequest,
+                display: "https://github.com/ctxrs/ctx/pull/42".to_owned(),
+            },
+            repository,
+        },
+        git_snapshot: None,
+        matches: Vec::new(),
+        evidence: Vec::new(),
+        next: None,
+    };
+    let error = validate_blame_response(&request, &wrong_variant)
+        .expect_err("cross-target response must fail closed");
+    assert_eq!(stable_error_code(&error), Some("invalid_response"));
+}
+
+#[test]
 fn journal_ack_requires_the_exact_checkpoint_and_counts() {
     let checkpoint = JournalCheckpoint {
         position: JournalPosition {
@@ -903,6 +987,88 @@ send(verify, 'graph_key_deletion_prepared', {{
 }
 
 #[cfg(target_os = "linux")]
+fn write_namespace_graph_key_deletion_helper(
+    path: &Path,
+    production: (&str, &str, &str),
+    staging: (&str, &str, &str),
+) {
+    let (production_thumbprint, production_public_key, production_issuer) = production;
+    let (staging_thumbprint, staging_public_key, staging_issuer) = staging;
+    let script = format!(
+        r#"#!/usr/bin/python3
+import json, struct, sys
+
+def receive():
+    header = sys.stdin.buffer.read(12)
+    if len(header) != 12 or header[:8] != b'CTXPRO\x00\x01':
+        sys.exit(20)
+    size = struct.unpack('>I', header[8:12])[0]
+    return json.loads(sys.stdin.buffer.read(size))
+
+def send(request, kind, body):
+    value = {{'sequence':request['sequence'],'request_id':request['request_id'],
+             'message':{{'kind':kind,'body':body}}}}
+    payload = json.dumps(value, separators=(',', ':')).encode()
+    sys.stdout.buffer.write(b'CTXPRO\x00\x01' + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.flush()
+
+hello = receive()
+send(hello, 'hello', {{
+    'protocol_version':1,
+    'protocol_fingerprint':'{PROTOCOL_FINGERPRINT}',
+    'helper_version':'namespace-graph-key-deletion-test',
+    'capabilities':['graph_key_deletion'],
+    'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+}})
+prepare = receive()
+if prepare['message']['kind'] != 'prepare_graph_key_deletion':
+    sys.exit(21)
+expected = {{
+    '{production_thumbprint}': ('{production_public_key}', '{production_issuer}'),
+    '{staging_thumbprint}': ('{staging_public_key}', '{staging_issuer}'),
+}}
+expected_thumbprint = prepare['message']['body']['installation_key_thumbprint']
+if expected_thumbprint not in expected:
+    sys.exit(22)
+expected_public_key, expected_issuer = expected[expected_thumbprint]
+challenge = 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ'
+send(prepare, 'graph_key_deletion_prepared', {{
+    'challenge_base64url':challenge,
+    'expires_at_unix':2000000000,
+    'key_present':True
+}})
+confirm = receive()
+if confirm['message']['kind'] != 'confirm_graph_key_deletion':
+    sys.exit(23)
+authorization = confirm['message']['body']['authorization']
+if authorization['challenge_base64url'] != challenge:
+    sys.exit(24)
+if authorization['installation_public_key_base64url'] != expected_public_key:
+    sys.exit(25)
+grant = authorization['entitlement']['grant']
+if grant['installation_key_thumbprint'] != expected_thumbprint:
+    sys.exit(26)
+if grant['issuer'] != expected_issuer:
+    sys.exit(27)
+send(confirm, 'graph_key_deleted', {{'deleted':True}})
+verify = receive()
+if verify['message']['kind'] != 'prepare_graph_key_deletion':
+    sys.exit(28)
+if verify['message']['body']['installation_key_thumbprint'] != expected_thumbprint:
+    sys.exit(29)
+send(verify, 'graph_key_deletion_prepared', {{
+    'challenge_base64url':challenge,
+    'expires_at_unix':2000000000,
+    'key_present':False
+}})
+"#
+    );
+    fs::write(path, script).expect("write namespace graph-key deletion helper");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .expect("make namespace graph-key deletion helper executable");
+}
+
+#[cfg(target_os = "linux")]
 fn write_nonreading_journal_helper(path: &Path) {
     let script = format!(
         r#"#!/usr/bin/python3
@@ -1060,6 +1226,162 @@ fn graph_key_deletion_is_idempotent_without_loading_authorization() {
     )
     .expect("accept missing graph key");
     assert_eq!(authorization.calls.get(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dual_namespace_graph_key_deletion_uses_each_exact_vault_authorization() {
+    use ctx_pro_host_protocol::{
+        base64url, installation_key_thumbprint, EntitlementAccessKind, EntitlementCapability,
+        EntitlementGrant, SignedEntitlement, ED25519_SIGNATURE_BYTES, ENTITLEMENT_SCHEMA_VERSION,
+        INSTALLATION_PUBLIC_KEY_BYTES,
+    };
+
+    fn store_namespace(
+        data_root: &Path,
+        namespace: CredentialVaultNamespace,
+        seed: u8,
+        issuer: &str,
+        key_id: &str,
+    ) -> (String, String) {
+        let signing_key = SigningKey::from_bytes(&[seed; INSTALLATION_PUBLIC_KEY_BYTES]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let thumbprint = installation_key_thumbprint(&public_key);
+        let vault =
+            PlatformCredentialVault::production(data_root, namespace).expect("open exact vault");
+        vault
+            .store(&CredentialRecord::InstallationSigningKey(
+                InstallationSigningKeySeed::from_bytes([seed; INSTALLATION_PUBLIC_KEY_BYTES]),
+            ))
+            .expect("store exact installation key");
+        vault
+            .store(&CredentialRecord::SignedEntitlement(
+                BoundedSignedEntitlement::new(SignedEntitlement {
+                    grant: EntitlementGrant {
+                        schema_version: ENTITLEMENT_SCHEMA_VERSION,
+                        issuer: issuer.to_owned(),
+                        key_id: key_id.to_owned(),
+                        grant_id: format!("grant-{seed}"),
+                        subject: "subject".to_owned(),
+                        account_id: "account".to_owned(),
+                        product: "ctx-local-pro".to_owned(),
+                        access_kind: EntitlementAccessKind::Active,
+                        installation_key_thumbprint: thumbprint.clone(),
+                        issued_at_unix: 1_800_000_000,
+                        not_before_unix: 1_799_999_700,
+                        refresh_after_unix: 1_800_345_600,
+                        access_deadline_unix: 1_802_592_000,
+                        grace_deadline_unix: 1_803_196_800,
+                        expires_at_unix: 1_800_604_800,
+                        minimum_helper_protocol: PROTOCOL_VERSION,
+                        revocation_epoch: 0,
+                        capabilities: BTreeSet::from([EntitlementCapability::GraphRead]),
+                    },
+                    signature_base64url: base64url(&[seed; ED25519_SIGNATURE_BYTES]),
+                })
+                .expect("bound entitlement"),
+            ))
+            .expect("store exact entitlement");
+        (thumbprint, base64url(&public_key))
+    }
+
+    let root = tempdir().expect("temp dir");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("protect data root");
+    crate::identity::installation_id(root.path()).expect("installation identity");
+    let pro = ctx_pro_host_protocol::ProFilesystemLayout::new(root.path()).pro_root();
+    fs::create_dir(&pro).expect("create Pro root");
+    fs::set_permissions(&pro, fs::Permissions::from_mode(0o700)).expect("protect Pro root");
+    let backend_marker = pro.join(".ctx-pro.credential-backend-v1");
+    fs::write(&backend_marker, b"ctx-pro-credential-backend-v1:file\n")
+        .expect("select file credential vault");
+    fs::set_permissions(&backend_marker, fs::Permissions::from_mode(0o600))
+        .expect("protect backend marker");
+
+    let production_issuer = "https://commercial.ctx.rs";
+    let staging_issuer = "https://commercial.staging.ctx.rs";
+    let (production_thumbprint, production_public_key) = store_namespace(
+        root.path(),
+        CredentialVaultNamespace::Production,
+        31,
+        production_issuer,
+        "production-2026-07-v1",
+    );
+    let (staging_thumbprint, staging_public_key) = store_namespace(
+        root.path(),
+        CredentialVaultNamespace::Staging,
+        32,
+        staging_issuer,
+        "staging-2026-07-v2",
+    );
+
+    let mismatch = StoredAuthorizationProvider::load_for_graph_key_deletion(
+        root.path(),
+        CredentialVaultNamespace::Staging,
+        &production_thumbprint,
+    )
+    .err()
+    .expect("cross-namespace thumbprint must fail closed");
+    assert!(
+        mismatch.to_string().starts_with("entitlement_invalid:"),
+        "{mismatch:#}"
+    );
+
+    let graph = pro.join(ctx_pro_host_protocol::PRO_GRAPH_FILE_NAME);
+    fs::write(&graph, b"encrypted graph fixture").expect("write encrypted graph fixture");
+    let helper = root.path().join("ctx-pro-delete-dual-namespace");
+    write_namespace_graph_key_deletion_helper(
+        &helper,
+        (
+            &production_thumbprint,
+            &production_public_key,
+            production_issuer,
+        ),
+        (&staging_thumbprint, &staging_public_key, staging_issuer),
+    );
+    let status = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg(DUAL_NAMESPACE_DELETION_RUNNER)
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(DUAL_NAMESPACE_DELETION_MODE_ENV, "run")
+        .env(DUAL_NAMESPACE_DELETION_ROOT_ENV, root.path())
+        .env("CTX_PRO_HELPER", &helper)
+        .status()
+        .expect("run production dual-namespace deletion");
+    assert!(status.success(), "deletion subprocess exited with {status}");
+    assert!(!graph.exists(), "encrypted graph was not deleted");
+
+    let cleanup_phase: serde_json::Value = serde_json::from_slice(
+        &fs::read(pro.join(".ctx-pro.graph-key-cleanup.json"))
+            .expect("read durable graph-key cleanup phase"),
+    )
+    .expect("decode durable graph-key cleanup phase");
+    assert_eq!(cleanup_phase["schema_version"], 2);
+    assert_eq!(
+        cleanup_phase["targets"],
+        json!([
+            {
+                "namespace": "production",
+                "installation_key_thumbprint": production_thumbprint,
+            },
+            {
+                "namespace": "staging",
+                "installation_key_thumbprint": staging_thumbprint,
+            },
+        ])
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dual_namespace_graph_key_deletion_subprocess_runner() -> anyhow::Result<()> {
+    if std::env::var(DUAL_NAMESPACE_DELETION_MODE_ENV).as_deref() != Ok("run") {
+        return Ok(());
+    }
+    let data_root = std::env::var_os(DUAL_NAMESPACE_DELETION_ROOT_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("missing dual-namespace deletion data root"))?;
+    LocalDeletionService::production().delete_graph_data(&data_root)
 }
 
 #[cfg(unix)]

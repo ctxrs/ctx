@@ -31,40 +31,67 @@ const SQLITE_AUXILIARY_SUFFIXES: [&str; 5] = ["-journal", "-wal", "-shm", "-lock
 const PRO_INITIALIZATION_MARKER_FILE_NAME: &str = ".ctx-pro.initialized";
 const PRO_INITIALIZATION_MARKER_CONTENT: &[u8] = b"ctx-local-pro-initialized-v1\n";
 const GRAPH_KEY_CLEANUP_PHASE_FILE_NAME: &str = ".ctx-pro.graph-key-cleanup.json";
-const GRAPH_KEY_CLEANUP_PHASE_SCHEMA_VERSION: u16 = 1;
+const GRAPH_KEY_CLEANUP_PHASE_SCHEMA_VERSION: u16 = 2;
 const MAX_GRAPH_KEY_CLEANUP_PHASE_BYTES: u64 = 4 * 1024;
-const MAX_RECORDED_THUMBPRINTS: usize = 4;
+const MAX_RECORDED_GRAPH_KEYS: usize = 4;
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphKeyCredentialNamespace {
+    Production,
+    Staging,
+}
+
+impl GraphKeyCredentialNamespace {
+    const fn credential_vault_namespace(self) -> CredentialVaultNamespace {
+        match self {
+            Self::Production => CredentialVaultNamespace::Production,
+            Self::Staging => CredentialVaultNamespace::Staging,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GraphKeyDeletionTarget {
+    namespace: GraphKeyCredentialNamespace,
+    installation_key_thumbprint: String,
+}
+
+impl GraphKeyDeletionTarget {
+    fn validate(&self) -> bool {
+        decode_base64url(&self.installation_key_thumbprint)
+            .is_some_and(|decoded| decoded.len() == INSTALLATION_PUBLIC_KEY_BYTES)
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct GraphKeyCleanupPhase {
     schema_version: u16,
     installation_id: String,
-    thumbprints: Vec<String>,
+    targets: Vec<GraphKeyDeletionTarget>,
 }
 
 impl GraphKeyCleanupPhase {
     fn validate(&self) -> Result<()> {
         if self.schema_version != GRAPH_KEY_CLEANUP_PHASE_SCHEMA_VERSION
             || !valid_pro_installation_id(&self.installation_id)
-            || self.thumbprints.len() > MAX_RECORDED_THUMBPRINTS
-            || self.thumbprints.windows(2).any(|pair| pair[0] >= pair[1])
-            || self.thumbprints.iter().any(|thumbprint| {
-                !decode_base64url(thumbprint)
-                    .is_some_and(|decoded| decoded.len() == INSTALLATION_PUBLIC_KEY_BYTES)
-            })
+            || self.targets.len() > MAX_RECORDED_GRAPH_KEYS
+            || self.targets.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.targets.iter().any(|target| !target.validate())
         {
             bail!("invalid_request: graph-key cleanup phase is invalid");
         }
         Ok(())
     }
 
-    fn validated_thumbprints(self, installation_id: &str) -> Result<BTreeSet<String>> {
+    fn validated_targets(self, installation_id: &str) -> Result<BTreeSet<GraphKeyDeletionTarget>> {
         self.validate()?;
         if self.installation_id != installation_id {
             bail!("key_store_unavailable: graph-key cleanup identity does not match this root");
         }
-        Ok(self.thumbprints.into_iter().collect())
+        Ok(self.targets.into_iter().collect())
     }
 }
 
@@ -98,33 +125,35 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
             .ok_or_else(|| {
                 anyhow!("key_store_unavailable: local Pro installation identity is missing")
             })?;
-        let thumbprints = match cleanup_phase {
+        let targets = match cleanup_phase {
             Some(phase) => {
-                let thumbprints = phase.validated_thumbprints(&installation_id)?;
-                if (graph.any_present || helper_present) && thumbprints.is_empty() {
+                let targets = phase.validated_targets(&installation_id)?;
+                if (graph.any_present || helper_present) && targets.is_empty() {
                     bail!(
                         "key_store_unavailable: graph-key cleanup phase is incomplete while local Pro artifacts remain"
                     );
                 }
-                thumbprints
+                targets
             }
             None => {
-                let thumbprints = self.backend.installation_thumbprints(data_root)?;
-                if (graph.any_present || helper_present) && thumbprints.is_empty() {
+                let targets = self.backend.graph_key_deletion_targets(data_root)?;
+                if (graph.any_present || helper_present) && targets.is_empty() {
                     bail!(
                         "key_store_unavailable: graph-key identity is missing while local Pro artifacts remain"
                     );
                 }
-                write_graph_key_cleanup_phase(data_root, &installation_id, &thumbprints)?;
-                thumbprints
+                write_graph_key_cleanup_phase(data_root, &installation_id, &targets)?;
+                targets
             }
         };
-        for thumbprint in &thumbprints {
-            let graph_id = pro_graph_record_id(&installation_id, thumbprint).ok_or_else(|| {
-                anyhow!("key_store_unavailable: local Pro installation identity is invalid")
-            })?;
+        for target in &targets {
+            let graph_id =
+                pro_graph_record_id(&installation_id, &target.installation_key_thumbprint)
+                    .ok_or_else(|| {
+                        anyhow!("key_store_unavailable: local Pro installation identity is invalid")
+                    })?;
             self.backend
-                .delete_graph_record(data_root, thumbprint, &graph_id)?;
+                .delete_graph_record(data_root, target, &graph_id)?;
         }
         graph.delete()?;
         if GraphArtifacts::inspect(data_root)?.any_present {
@@ -245,12 +274,12 @@ fn read_graph_key_cleanup_phase(data_root: &Path) -> Result<Option<GraphKeyClean
 fn write_graph_key_cleanup_phase(
     data_root: &Path,
     installation_id: &str,
-    thumbprints: &BTreeSet<String>,
+    targets: &BTreeSet<GraphKeyDeletionTarget>,
 ) -> Result<()> {
     let phase = GraphKeyCleanupPhase {
         schema_version: GRAPH_KEY_CLEANUP_PHASE_SCHEMA_VERSION,
         installation_id: installation_id.to_owned(),
-        thumbprints: thumbprints.iter().cloned().collect(),
+        targets: targets.iter().cloned().collect(),
     };
     phase.validate()?;
     let contents =
@@ -264,6 +293,14 @@ fn write_graph_key_cleanup_phase(
         &contents,
         "graph-key cleanup phase",
     )
+}
+
+#[cfg(test)]
+pub(super) fn write_empty_graph_key_cleanup_phase_for_test(
+    data_root: &Path,
+    installation_id: &str,
+) -> Result<()> {
+    write_graph_key_cleanup_phase(data_root, installation_id, &BTreeSet::new())
 }
 
 fn clear_graph_key_cleanup_phase(data_root: &Path) -> Result<()> {
@@ -327,11 +364,14 @@ fn delete_private_lifecycle_file(path: &Path, label: &str) -> Result<bool> {
 }
 
 trait DeletionBackend {
-    fn installation_thumbprints(&self, data_root: &Path) -> Result<BTreeSet<String>>;
+    fn graph_key_deletion_targets(
+        &self,
+        data_root: &Path,
+    ) -> Result<BTreeSet<GraphKeyDeletionTarget>>;
     fn delete_graph_record(
         &self,
         data_root: &Path,
-        installation_key_thumbprint: &str,
+        target: &GraphKeyDeletionTarget,
         graph_id: &str,
     ) -> Result<()>;
     fn delete_commercial_credentials(&self, data_root: &Path) -> Result<()>;
@@ -341,26 +381,36 @@ trait DeletionBackend {
 pub(super) struct PlatformDeletionBackend;
 
 impl DeletionBackend for PlatformDeletionBackend {
-    fn installation_thumbprints(&self, data_root: &Path) -> Result<BTreeSet<String>> {
-        let mut thumbprints = BTreeSet::new();
+    fn graph_key_deletion_targets(
+        &self,
+        data_root: &Path,
+    ) -> Result<BTreeSet<GraphKeyDeletionTarget>> {
+        let mut targets = BTreeSet::new();
         for namespace in [
-            CredentialVaultNamespace::Production,
-            CredentialVaultNamespace::Staging,
+            GraphKeyCredentialNamespace::Production,
+            GraphKeyCredentialNamespace::Staging,
         ] {
-            let vault =
-                PlatformCredentialVault::production(data_root, namespace).map_err(vault_error)?;
-            thumbprints.extend(recorded_thumbprints(&vault)?);
+            let vault = PlatformCredentialVault::production(
+                data_root,
+                namespace.credential_vault_namespace(),
+            )
+            .map_err(vault_error)?;
+            targets.extend(recorded_graph_key_targets(namespace, &vault)?);
         }
-        Ok(thumbprints)
+        Ok(targets)
     }
 
     fn delete_graph_record(
         &self,
         data_root: &Path,
-        installation_key_thumbprint: &str,
+        target: &GraphKeyDeletionTarget,
         _graph_id: &str,
     ) -> Result<()> {
-        graph_key_deletion::delete_selected(data_root, installation_key_thumbprint)
+        graph_key_deletion::delete_selected(
+            data_root,
+            target.namespace.credential_vault_namespace(),
+            &target.installation_key_thumbprint,
+        )
     }
 
     fn delete_commercial_credentials(&self, data_root: &Path) -> Result<()> {
@@ -384,34 +434,51 @@ impl CredentialRecordReader for PlatformCredentialVault {
     }
 }
 
-fn recorded_thumbprints(vault: &impl CredentialRecordReader) -> Result<BTreeSet<String>> {
-    let mut thumbprints = BTreeSet::new();
-    match vault.load_record(CredentialRecordKind::InstallationSigningKey) {
-        Ok(CredentialRecord::InstallationSigningKey(seed)) => {
-            let public_key = SigningKey::from_bytes(seed.expose())
-                .verifying_key()
-                .to_bytes();
-            thumbprints.insert(installation_key_thumbprint(&public_key));
-        }
-        Ok(_) => bail!("key_store_unavailable: installation key record has the wrong type"),
-        Err(CredentialVaultError::NotFound) => {}
-        Err(error) => return Err(vault_error(error)),
-    };
-    match vault.load_record(CredentialRecordKind::SignedEntitlement) {
-        Ok(CredentialRecord::SignedEntitlement(entitlement)) => {
-            thumbprints.insert(
-                entitlement
-                    .as_inner()
-                    .grant
-                    .installation_key_thumbprint
-                    .clone(),
-            );
-        }
+fn recorded_graph_key_targets(
+    namespace: GraphKeyCredentialNamespace,
+    vault: &impl CredentialRecordReader,
+) -> Result<BTreeSet<GraphKeyDeletionTarget>> {
+    let installation_key_thumbprint =
+        match vault.load_record(CredentialRecordKind::InstallationSigningKey) {
+            Ok(CredentialRecord::InstallationSigningKey(seed)) => {
+                let public_key = SigningKey::from_bytes(seed.expose())
+                    .verifying_key()
+                    .to_bytes();
+                Some(installation_key_thumbprint(&public_key))
+            }
+            Ok(_) => bail!("key_store_unavailable: installation key record has the wrong type"),
+            Err(CredentialVaultError::NotFound) => None,
+            Err(error) => return Err(vault_error(error)),
+        };
+    let entitlement_thumbprint = match vault.load_record(CredentialRecordKind::SignedEntitlement) {
+        Ok(CredentialRecord::SignedEntitlement(entitlement)) => Some(
+            entitlement
+                .as_inner()
+                .grant
+                .installation_key_thumbprint
+                .clone(),
+        ),
         Ok(_) => bail!("key_store_unavailable: signed entitlement record has the wrong type"),
-        Err(CredentialVaultError::NotFound) => {}
+        Err(CredentialVaultError::NotFound) => None,
         Err(error) => return Err(vault_error(error)),
     };
-    Ok(thumbprints)
+    if matches!(
+        (&installation_key_thumbprint, &entitlement_thumbprint),
+        (Some(key), Some(entitlement)) if key != entitlement
+    ) {
+        bail!(
+            "key_store_unavailable: installation key and signed entitlement disagree in one credential namespace"
+        );
+    }
+    Ok(installation_key_thumbprint
+        .or(entitlement_thumbprint)
+        .map(|installation_key_thumbprint| {
+            BTreeSet::from([GraphKeyDeletionTarget {
+                namespace,
+                installation_key_thumbprint,
+            }])
+        })
+        .unwrap_or_default())
 }
 
 pub(super) fn vault_error(error: CredentialVaultError) -> anyhow::Error {
@@ -607,7 +674,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingBackend {
-        thumbprints: BTreeSet<String>,
+        targets: BTreeSet<GraphKeyDeletionTarget>,
         inventory_reads: Cell<usize>,
         corrupt_inventory: bool,
         graph_key_missing: bool,
@@ -617,23 +684,27 @@ mod tests {
         make_root_unsafe_on_graph_delete: Option<PathBuf>,
         deleted: RefCell<Vec<String>>,
         deletion_thumbprints: RefCell<Vec<String>>,
+        deletion_namespaces: RefCell<Vec<GraphKeyCredentialNamespace>>,
         credentials_deleted: RefCell<bool>,
     }
 
     impl DeletionBackend for RecordingBackend {
-        fn installation_thumbprints(&self, _data_root: &Path) -> Result<BTreeSet<String>> {
+        fn graph_key_deletion_targets(
+            &self,
+            _data_root: &Path,
+        ) -> Result<BTreeSet<GraphKeyDeletionTarget>> {
             self.inventory_reads
                 .set(self.inventory_reads.get().saturating_add(1));
             if self.corrupt_inventory {
                 return Err(vault_error(CredentialVaultError::Corrupt));
             }
-            Ok(self.thumbprints.clone())
+            Ok(self.targets.clone())
         }
 
         fn delete_graph_record(
             &self,
             _data_root: &Path,
-            installation_key_thumbprint: &str,
+            target: &GraphKeyDeletionTarget,
             graph_id: &str,
         ) -> Result<()> {
             if let Some(root) = &self.require_cleanup_phase_for_graph_delete {
@@ -647,7 +718,8 @@ mod tests {
             self.deleted.borrow_mut().push(graph_id.to_owned());
             self.deletion_thumbprints
                 .borrow_mut()
-                .push(installation_key_thumbprint.to_owned());
+                .push(target.installation_key_thumbprint.clone());
+            self.deletion_namespaces.borrow_mut().push(target.namespace);
             if let Some(root) = &self.make_root_unsafe_on_graph_delete {
                 make_private_directory_unsafe(root)
                     .context("key_store_unavailable: make graph root unsafe")?;
@@ -676,6 +748,13 @@ mod tests {
         )
     }
 
+    fn test_target(namespace: GraphKeyCredentialNamespace, seed: u8) -> GraphKeyDeletionTarget {
+        GraphKeyDeletionTarget {
+            namespace,
+            installation_key_thumbprint: test_thumbprint(seed),
+        }
+    }
+
     struct ValidKeyCorruptEntitlementReader {
         loads: Cell<usize>,
     }
@@ -695,6 +774,65 @@ mod tests {
                     ))
                 }
                 CredentialRecordKind::SignedEntitlement => Err(CredentialVaultError::Corrupt),
+                CredentialRecordKind::WorkOsSession | CredentialRecordKind::AnonymousTrial => {
+                    Err(CredentialVaultError::Backend)
+                }
+            }
+        }
+    }
+
+    struct MismatchedKeyAndEntitlementReader;
+
+    impl CredentialRecordReader for MismatchedKeyAndEntitlementReader {
+        fn load_record(
+            &self,
+            kind: CredentialRecordKind,
+        ) -> Result<CredentialRecord, CredentialVaultError> {
+            match kind {
+                CredentialRecordKind::InstallationSigningKey => {
+                    Ok(CredentialRecord::InstallationSigningKey(
+                        super::super::credential_vault::InstallationSigningKeySeed::from_bytes(
+                            [20; INSTALLATION_PUBLIC_KEY_BYTES],
+                        ),
+                    ))
+                }
+                CredentialRecordKind::SignedEntitlement => {
+                    use ctx_pro_host_protocol::{
+                        base64url, EntitlementAccessKind, EntitlementCapability, EntitlementGrant,
+                        SignedEntitlement, ED25519_SIGNATURE_BYTES, ENTITLEMENT_SCHEMA_VERSION,
+                        PROTOCOL_VERSION,
+                    };
+
+                    let public_key = SigningKey::from_bytes(&[21; INSTALLATION_PUBLIC_KEY_BYTES])
+                        .verifying_key()
+                        .to_bytes();
+                    let entitlement = SignedEntitlement {
+                        grant: EntitlementGrant {
+                            schema_version: ENTITLEMENT_SCHEMA_VERSION,
+                            issuer: "https://commercial.staging.ctx.rs".to_owned(),
+                            key_id: "staging-2026-07-v2".to_owned(),
+                            grant_id: "grant-mismatch".to_owned(),
+                            subject: "subject".to_owned(),
+                            account_id: "account".to_owned(),
+                            product: "ctx-local-pro".to_owned(),
+                            access_kind: EntitlementAccessKind::Active,
+                            installation_key_thumbprint: installation_key_thumbprint(&public_key),
+                            issued_at_unix: 1_800_000_000,
+                            not_before_unix: 1_799_999_700,
+                            refresh_after_unix: 1_800_345_600,
+                            access_deadline_unix: 1_802_592_000,
+                            grace_deadline_unix: 1_803_196_800,
+                            expires_at_unix: 1_800_604_800,
+                            minimum_helper_protocol: PROTOCOL_VERSION,
+                            revocation_epoch: 0,
+                            capabilities: BTreeSet::from([EntitlementCapability::GraphRead]),
+                        },
+                        signature_base64url: base64url(&[7; ED25519_SIGNATURE_BYTES]),
+                    };
+                    Ok(CredentialRecord::SignedEntitlement(
+                        super::super::credential_vault::BoundedSignedEntitlement::new(entitlement)?,
+                    ))
+                }
                 CredentialRecordKind::WorkOsSession | CredentialRecordKind::AnonymousTrial => {
                     Err(CredentialVaultError::Backend)
                 }
@@ -738,7 +876,7 @@ mod tests {
     fn direct_deletion_accepts_an_already_missing_graph_key() {
         let (root, pro) = fixture();
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(1)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 1)]),
             graph_key_missing: true,
             ..RecordingBackend::default()
         };
@@ -753,9 +891,20 @@ mod tests {
         let reader = ValidKeyCorruptEntitlementReader {
             loads: Cell::new(0),
         };
-        let error = recorded_thumbprints(&reader).unwrap_err();
+        let error = recorded_graph_key_targets(GraphKeyCredentialNamespace::Production, &reader)
+            .unwrap_err();
         assert!(error.to_string().starts_with("key_store_unavailable:"));
         assert_eq!(reader.loads.get(), 2);
+    }
+
+    #[test]
+    fn mismatched_key_and_entitlement_in_one_namespace_fail_closed() {
+        let error = recorded_graph_key_targets(
+            GraphKeyCredentialNamespace::Staging,
+            &MismatchedKeyAndEntitlementReader,
+        )
+        .unwrap_err();
+        assert!(error.to_string().starts_with("key_store_unavailable:"));
     }
 
     #[test]
@@ -764,7 +913,7 @@ mod tests {
         let backend = RecordingBackend {
             // Model a valid thumbprint observed in one exact namespace before a
             // corrupt record makes the complete two-namespace inventory unverifiable.
-            thumbprints: BTreeSet::from([test_thumbprint(11)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 11)]),
             corrupt_inventory: true,
             ..RecordingBackend::default()
         };
@@ -813,14 +962,26 @@ mod tests {
         fs::create_dir(layout.bin_dir()).unwrap();
         fs::write(layout.helper_path(), b"signed helper").unwrap();
 
-        let thumbprints = BTreeSet::from([test_thumbprint(2), test_thumbprint(3)]);
-        let expected_graph_ids = thumbprints
+        let targets = BTreeSet::from([
+            test_target(GraphKeyCredentialNamespace::Production, 2),
+            test_target(GraphKeyCredentialNamespace::Staging, 3),
+        ]);
+        let expected_graph_ids = targets
             .iter()
-            .map(|thumbprint| pro_graph_record_id(&installation_id, thumbprint).unwrap())
+            .map(|target| {
+                pro_graph_record_id(&installation_id, &target.installation_key_thumbprint).unwrap()
+            })
             .collect::<Vec<_>>();
-        let expected_thumbprints = thumbprints.iter().cloned().collect::<Vec<_>>();
+        let expected_thumbprints = targets
+            .iter()
+            .map(|target| target.installation_key_thumbprint.clone())
+            .collect::<Vec<_>>();
+        let expected_namespaces = targets
+            .iter()
+            .map(|target| target.namespace)
+            .collect::<Vec<_>>();
         let backend = RecordingBackend {
-            thumbprints,
+            targets,
             ..RecordingBackend::default()
         };
         let mut service = LocalDeletionService { backend };
@@ -835,6 +996,10 @@ mod tests {
             service.backend.deletion_thumbprints.borrow().as_slice(),
             expected_thumbprints
         );
+        assert_eq!(
+            service.backend.deletion_namespaces.borrow().as_slice(),
+            expected_namespaces
+        );
         assert!(layout.helper_path().exists());
         assert!(!layout.graph_path().exists());
     }
@@ -843,7 +1008,7 @@ mod tests {
     fn cleanup_phase_is_durable_before_graph_key_deletion() {
         let (root, _) = fixture();
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(12)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 12)]),
             require_cleanup_phase_for_graph_delete: Some(root.path().to_path_buf()),
             ..RecordingBackend::default()
         };
@@ -856,9 +1021,9 @@ mod tests {
     #[test]
     fn late_failure_retries_from_cleanup_phase_after_records_are_gone() {
         let (root, pro) = fixture();
-        let thumbprint = test_thumbprint(13);
+        let target = test_target(GraphKeyCredentialNamespace::Staging, 13);
         let first_backend = RecordingBackend {
-            thumbprints: BTreeSet::from([thumbprint.clone()]),
+            targets: BTreeSet::from([target]),
             fail_commercial_credentials_after_delete: true,
             ..RecordingBackend::default()
         };
@@ -894,7 +1059,7 @@ mod tests {
         write_graph_key_cleanup_phase(
             root.path(),
             other_installation_id,
-            &BTreeSet::from([test_thumbprint(14)]),
+            &BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 14)]),
         )
         .unwrap();
         let mut service = LocalDeletionService {
@@ -929,7 +1094,7 @@ mod tests {
             fs::write(path, "ciphertext").unwrap();
         }
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(4)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 4)]),
             ..RecordingBackend::default()
         };
         let mut service = LocalDeletionService { backend };
@@ -941,7 +1106,7 @@ mod tests {
     fn failed_authoritative_key_inventory_verification_preserves_graph_files() {
         let (root, pro) = fixture();
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(5)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 5)]),
             fail_graph_key_verification: true,
             ..RecordingBackend::default()
         };
@@ -956,7 +1121,7 @@ mod tests {
         let (root, pro) = fixture();
         let graph = pro.join(PRO_GRAPH_FILE_NAME);
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(6)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 6)]),
             make_root_unsafe_on_graph_delete: Some(pro.clone()),
             ..RecordingBackend::default()
         };
@@ -980,7 +1145,7 @@ mod tests {
         )
         .unwrap();
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(7)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 7)]),
             ..RecordingBackend::default()
         };
         let mut service = LocalDeletionService { backend };
@@ -1011,7 +1176,7 @@ mod tests {
         let (root, pro) = fixture();
         fs::set_permissions(&pro, fs::Permissions::from_mode(0o755)).unwrap();
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(8)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 8)]),
             ..RecordingBackend::default()
         };
         let mut service = LocalDeletionService { backend };
@@ -1026,7 +1191,7 @@ mod tests {
         let (root, pro) = fixture();
         make_private_directory_unsafe(&pro).unwrap();
         let backend = RecordingBackend {
-            thumbprints: BTreeSet::from([test_thumbprint(9)]),
+            targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 9)]),
             ..RecordingBackend::default()
         };
         let mut service = LocalDeletionService { backend };

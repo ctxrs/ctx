@@ -30,6 +30,10 @@ ctx setup --json
 ctx setup --progress json --json
 ctx status
 ctx status --json
+ctx status --usage detail
+ctx status --usage enable
+ctx status --usage disable
+ctx status --usage reset
 ctx doctor
 ctx doctor --json
 ctx daemon status
@@ -56,8 +60,19 @@ ctx daemon enable
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, inventory counters, legacy Codex catalog
   counters, semantic coverage, daemon enabled/coordinator state,
-  initialization state, local-only marker, and read-only marker. It does not
-  initialize, migrate, or repair the store.
+  initialization state, compact local usage/value aggregates, local-only
+  marker, and read-only marker. It does not initialize, migrate, or repair the
+  canonical history store.
+- `status --usage detail` expands the usage report by ctx version, surface,
+  operation, and duration bucket. `status --usage disable` and `enable` write
+  the canonical `[local_usage] enabled` override; `status --usage reset`
+  atomically clears the usage aggregates. These three control invocations are
+  not themselves counted. Summary and detail are also uncounted, literal
+  read-only reports and do not create the sidecar. Controls are action-focused
+  and do not depend on a successful Core status read. Local usage is default-on
+  product state in the separate owner-private `usage.sqlite` sidecar, has no
+  network path or network-delivery identity, and remains independent of remote
+  reporting controls.
 - `status --quiet` performs the same local checks but prints nothing on
   success. Use `status --json` when scripts need the actual state.
 - `doctor` opens local storage and reports validation findings, including
@@ -324,8 +339,11 @@ all local Pro data? It can be rebuilt if you set up Pro again. [Y/n]`; Enter
 chooses deletion and `n` preserves local Pro data.
 Noninteractive and JSON callers must choose `--delete-data` or `--keep-data`.
 Canonical ctx history is always preserved. If the selected root has never held
-Pro data, either explicit choice succeeds as an idempotent no-op and does not
-create a Pro directory or preservation marker.
+Pro data, either explicit choice succeeds as an idempotent Pro-state no-op and
+does not create a Pro directory or preservation marker. The foreground
+`pro_uninstall` command remains eligible for independent default-on Core local
+usage reporting, so it may create or increment `usage.sqlite` unless local usage
+is disabled.
 
 Trial setup does not open a browser or request an account or payment method.
 It downloads a release-signed helper with a short-lived bootstrap credential,
@@ -343,6 +361,14 @@ The access state is one of `trial`, `active`, `canceling_paid`, `offline_grace`,
 or `locked`; it is separate from helper and graph readiness.
 A locked commercial state may retain an applicable deadline for recovery
 diagnostics, but that deadline never grants access.
+
+On explicit `ctx status`, MCP `pro_status`, and `ctx pro manage` surfaces, a
+trial state may include a `$15/month` continuation action and a locked state may
+include an unpriced `pro_restore_access` action using `ctx pro manage`, with the
+local graph explicitly reported as preserved. Paid
+`active`, `canceling_paid`, and `offline_grace` states do not show a purchase
+action. Existing `next_action` remains separate, no browser opens from status,
+and blame citations never include conversion copy.
 
 The anonymous trial credential, optional WorkOS session material, the
 installation signing key, and the signed entitlement are kept only in the

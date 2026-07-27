@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Focused tests for deterministic Core Bazel build information."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[2]
+MODULE_PATH = ROOT / "scripts/release/public-cli-bazel-build-info.py"
+SPEC = importlib.util.spec_from_file_location("public_cli_bazel_build_info", MODULE_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("could not load build-info producer")
+PRODUCER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PRODUCER)
+
+
+def run(*command: str, cwd: Path) -> str:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+class BuildInfoProducerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temporary.name) / "repo"
+        (self.repo / "contracts").mkdir(parents=True)
+        (self.repo / "crates/ctx-cli").mkdir(parents=True)
+        (self.repo / "scripts/release").mkdir(parents=True)
+        shutil.copy2(ROOT / ".bazelversion", self.repo / ".bazelversion")
+        shutil.copy2(ROOT / "MODULE.bazel", self.repo / "MODULE.bazel")
+        shutil.copy2(ROOT / "MODULE.bazel.lock", self.repo / "MODULE.bazel.lock")
+        shutil.copy2(
+            ROOT / "contracts/release-targets-v1.json",
+            self.repo / "contracts/release-targets-v1.json",
+        )
+        shutil.copy2(
+            ROOT / "scripts/release/linux-bazel-release.Dockerfile",
+            self.repo / "scripts/release/linux-bazel-release.Dockerfile",
+        )
+        (self.repo / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+        (self.repo / "crates/ctx-cli/Cargo.toml").write_text(
+            '[package]\nname = "ctx"\nversion = "0.26.0"\n',
+            encoding="utf-8",
+        )
+        (self.repo / ".gitignore").write_text("inputs/\n", encoding="utf-8")
+        (self.repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+        run("git", "init", "-q", cwd=self.repo)
+        run("git", "config", "user.email", "ctx-release-test@example.invalid", cwd=self.repo)
+        run("git", "config", "user.name", "ctx release test", cwd=self.repo)
+        run("git", "add", ".", cwd=self.repo)
+        run("git", "commit", "-qm", "fixture", cwd=self.repo)
+        self.commit = run("git", "rev-parse", "HEAD", cwd=self.repo)
+
+        inputs = self.repo / "inputs"
+        inputs.mkdir()
+        cargo_lock_sha256 = hashlib.sha256(
+            (self.repo / "Cargo.lock").read_bytes()
+        ).hexdigest()
+        self.artifact = inputs / "ctx"
+        self.artifact.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+case "${{1:-}}" in
+  _release-build-identity)
+    printf 'CTX_RELEASE_BUILD_SOURCE_COMMIT={self.commit}\\n'
+    printf 'CTX_RELEASE_BUILD_CARGO_LOCK_SHA256={cargo_lock_sha256}\\n'
+    printf 'CTX_RELEASE_BUILD_TARGET=x86_64-unknown-linux-gnu\\n'
+    ;;
+  --version) printf 'ctx 0.26.0\\n' ;;
+  *) exit 1 ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        self.artifact.chmod(0o755)
+        self.rustc = inputs / "rustc"
+        self.rustc.write_text(
+            "#!/usr/bin/env sh\n"
+            "printf 'rustc 1.97.1 (8bab26f4f 2026-07-10)\\n'\n",
+            encoding="utf-8",
+        )
+        self.rustc.chmod(0o755)
+        self.common = {
+            "artifact": self.artifact,
+            "bazel_version_file": self.repo / ".bazelversion",
+            "builder_recipe": self.repo
+            / "scripts/release/linux-bazel-release.Dockerfile",
+            "cargo_lock": self.repo / "Cargo.lock",
+            "cargo_toml": self.repo / "crates/ctx-cli/Cargo.toml",
+            "matrix": self.repo / "contracts/release-targets-v1.json",
+            "module_file": self.repo / "MODULE.bazel",
+            "module_lock": self.repo / "MODULE.bazel.lock",
+            "platform": "linux-x64",
+            "source_commit": self.commit,
+            "source_repo": self.repo,
+            "version": "0.26.0",
+        }
+        self.images = {
+            "builder_image_id": "sha256:" + "a" * 64,
+            "runtime_image_id": "sha256:" + "b" * 64,
+            "inspector_image_id": "sha256:" + "c" * 64,
+        }
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def create_args(self, output: Path, **overrides: object) -> argparse.Namespace:
+        values: dict[str, object] = {
+            **self.common,
+            **self.images,
+            "docker": "/usr/bin/docker",
+            "output": output,
+            "rust_version": "rustc 1.97.1 (8bab26f4f 2026-07-10)",
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def verify_args(self, build_info: Path, **overrides: object) -> argparse.Namespace:
+        values: dict[str, object] = {
+            **self.common,
+            "build_info": build_info,
+            "rustc": self.rustc,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def create(self, output: Path, **overrides: object) -> None:
+        with (
+            mock.patch.object(PRODUCER, "verify_image"),
+            mock.patch.object(PRODUCER, "run_container_gates"),
+        ):
+            PRODUCER.create(self.create_args(output, **overrides))
+
+    def test_create_is_deterministic_and_verifies(self) -> None:
+        first = self.repo / "inputs/first.json"
+        second = self.repo / "inputs/second.json"
+        self.create(first)
+        self.create(second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        digest = PRODUCER.verify(self.verify_args(first))
+        self.assertEqual(digest, hashlib.sha256(first.read_bytes()).hexdigest())
+
+    def test_dirty_tree_fails_closed(self) -> None:
+        (self.repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(PRODUCER.BuildInfoError, "checkout is dirty"):
+            self.create(self.repo / "inputs/dirty.json")
+
+    def test_mismatched_source_version_target_and_toolchain_fail_closed(self) -> None:
+        cases = (
+            ({"source_commit": "f" * 40}, "source commit does not match"),
+            ({"version": "0.26.3"}, "source version mismatch"),
+            ({"platform": "linux-arm64"}, "only accepts the owned Linux x64"),
+            ({"rust_version": "rustc 1.98.0 (fffffffff 2026-08-01)"}, "rustc"),
+        )
+        for index, (overrides, message) in enumerate(cases):
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(PRODUCER.BuildInfoError, message):
+                    self.create(self.repo / f"inputs/rejected-{index}.json", **overrides)
+
+    def test_python_310_cargo_version_fallback_is_strict(self) -> None:
+        cargo_toml = self.repo / "crates/ctx-cli/Cargo.toml"
+        with mock.patch.object(PRODUCER, "tomllib", None):
+            self.assertEqual(PRODUCER.release_version(cargo_toml), "0.26.0")
+            cargo_toml.write_text(
+                '[package]\nversion = "0.26.0"\nversion = "0.26.3"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PRODUCER.BuildInfoError, "malformed"):
+                PRODUCER.release_version(cargo_toml)
+
+    def test_pinned_builder_provisions_python_toml_parser(self) -> None:
+        recipe = (
+            ROOT / "scripts/release/linux-bazel-release.Dockerfile"
+        ).read_text(encoding="utf-8")
+        self.assertIn("python3-tomli", recipe)
+
+    def test_verify_rejects_changed_bazel_binding(self) -> None:
+        accepted = self.repo / "inputs/accepted.json"
+        changed = self.repo / "inputs/changed.json"
+        self.create(accepted)
+        value = json.loads(accepted.read_bytes())
+        value["bazel"]["module_lock_sha256"] = "f" * 64
+        changed.write_bytes(PRODUCER.canonical_json(value))
+        with self.assertRaisesRegex(PRODUCER.BuildInfoError, "does not match the exact"):
+            PRODUCER.verify(self.verify_args(changed))
+
+    def test_create_never_replaces_existing_output(self) -> None:
+        output = self.repo / "inputs/existing.json"
+        output.write_text("sentinel\n", encoding="utf-8")
+        with self.assertRaisesRegex(PRODUCER.BuildInfoError, "already exists"):
+            self.create(output)
+        self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
+    def test_dogfood_builder_exposes_release_inputs_to_pinned_inspector(self) -> None:
+        builder = (
+            ROOT / "scripts/release/build-linux-x64-bazel-dogfood.sh"
+        ).read_text(encoding="utf-8")
+        packager = (
+            ROOT / "scripts/package-public-cli-bazel-release.sh"
+        ).read_text(encoding="utf-8")
+        permission_gates = (
+            'chmod 0555 "${artifact}"',
+            'chmod 0444 "${artifact}.sha256" "${artifact}.version"',
+            'chmod 0755 "${task_root}/release-input"',
+        )
+        producer_call = (
+            "python3 -I scripts/release/public-cli-bazel-build-info.py create"
+        )
+        for permission_gate in permission_gates:
+            self.assertIn(permission_gate, builder)
+            self.assertLess(builder.index(permission_gate), builder.index(producer_call))
+        self.assertIn(
+            "route=/build/bazel-links/bin/ctx_release_linux_x64",
+            builder,
+        )
+        self.assertIn('BUILD_WORKSPACE_DIRECTORY="$PWD"', builder)
+        self.assertIn('RUNFILES_DIR="$route.runfiles"', builder)
+        self.assertNotIn(
+            "scripts/bazelw run \\\n      //:ctx_release_linux_x64",
+            builder,
+        )
+        for release_script in (builder, packager):
+            self.assertIn("cargo-version", release_script)
+            self.assertNotIn("import tomllib", release_script)
+
+
+if __name__ == "__main__":
+    unittest.main()

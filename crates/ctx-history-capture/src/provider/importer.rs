@@ -14,8 +14,6 @@ pub(crate) use crate::pro_output::{OutputCommandContext, OutputOutcomeMetadata};
 pub(crate) use commands::{compact_provider_result_payload, provider_command_run};
 #[cfg(test)]
 pub(crate) use cursors::released_jsonl_initial_position_for_test;
-#[cfg(all(test, unix))]
-pub(crate) use cursors::MAX_PROVIDER_PATH_IDENTITY_RAW_BYTES;
 pub(crate) use cursors::{
     certified_provider_sync_cursor, provider_path_identity, provider_source_cursor_stream_for_path,
     BoundedParserCheckpoint, CertifiedProviderCursor,
@@ -36,10 +34,7 @@ pub(crate) use ids::{
     provider_source_root, provider_source_session_uuid, provider_sync_metadata, timestamps,
 };
 #[cfg(test)]
-pub(crate) use ids::{
-    provider_event_seq, provider_event_uuid, provider_file_touch_uuid, provider_source_event_seq,
-    provider_source_event_uuid,
-};
+pub(crate) use ids::{provider_source_event_seq, provider_source_event_uuid};
 use legacy_identity::legacy_session_matches_source;
 
 pub(crate) fn provider_import_session_uuid(

@@ -906,6 +906,11 @@ fn publish_gemini_group(
             .find(|pending| &pending.source.path == path)
             .expect("Gemini pending source exists");
         let session_fact = pending.next_checkpoint.session.as_ref();
+        if session_fact.is_none() {
+            // Rejection-only sources commit their path-scoped cursor without
+            // inventing a canonical Core capture source.
+            continue;
+        }
         let raw_source_path = path.display().to_string();
         let source_root = context.source_root.display().to_string();
         let locator_identity = provider_path_identity(path)?;
@@ -1022,6 +1027,17 @@ fn publish_gemini_group(
     }
 
     for pending in pages {
+        for rejection in &pending.page.rejections {
+            summary.record_failure(ProviderImportFailure {
+                line: usize::try_from(rejection.raw_ordinal)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1),
+                error: rejection.reason.clone(),
+            });
+        }
+        if pending.page.events.is_empty() {
+            continue;
+        }
         let resolved = resolved
             .get(&pending.source.path)
             .ok_or(CaptureError::SystemInvariant(
@@ -1043,14 +1059,6 @@ fn publish_gemini_group(
                 event,
                 &mut summary,
             )?;
-        }
-        for rejection in &pending.page.rejections {
-            summary.record_failure(ProviderImportFailure {
-                line: usize::try_from(rejection.raw_ordinal)
-                    .unwrap_or(usize::MAX)
-                    .saturating_add(1),
-                error: rejection.reason.clone(),
-            });
         }
     }
 

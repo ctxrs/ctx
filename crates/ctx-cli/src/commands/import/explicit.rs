@@ -5,7 +5,10 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use ctx_history_capture::{import_custom_history_jsonl_v1, CustomHistoryJsonlV1ImportOptions};
+use ctx_history_capture::{
+    import_custom_history_jsonl_v1, CaptureWorkLimit, CustomHistoryJsonlV1ImportOptions,
+    ImportProfile,
+};
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 
@@ -19,7 +22,8 @@ use crate::commands::import::report::{
 };
 use crate::commands::import::totals::ImportTotals;
 use crate::commands::import::{
-    cleanup_rejected_history_record, history_record_exists, provider_summary_has_imported_content,
+    cleanup_rejected_history_record, history_record_exists,
+    import_custom_history_with_canonical_pro_progression, provider_summary_has_imported_content,
     CatalogTotals, ImportReport, ImportRunOptions, InventoryTotals, PlannedImportSource,
     SourceStats,
 };
@@ -40,6 +44,7 @@ pub(crate) struct ExplicitFormatImportContext<'a> {
     pub(super) provider_refreshes: &'a mut ProviderRefreshCollector,
     pub(super) refresh_trigger: ProviderRefreshTrigger,
     pub(super) options: ImportRunOptions,
+    pub(super) pro_output: Option<crate::pro::ProOutputImport>,
 }
 
 impl ExplicitFormatImportContext<'_> {
@@ -158,18 +163,29 @@ pub(crate) fn run_explicit_format_import(
     context.store.upsert_record(&record)?;
     progress.message("indexing", format!("importing {}", context.format.as_str()));
     let provider_started = Instant::now();
-    let import_result = match context.format {
-        ImportFormatArg::CtxHistoryJsonlV1 => import_custom_history_jsonl_v1(
-            &path,
-            &mut context.store,
-            CustomHistoryJsonlV1ImportOptions {
-                source_path: Some(path.clone()),
-                history_record_id: Some(record_id),
-                ..CustomHistoryJsonlV1ImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-    };
+    let import_profile = context
+        .pro_output
+        .as_ref()
+        .map(|output| output.profile().clone())
+        .unwrap_or(ImportProfile::CoreOnly);
+    let import_result = import_custom_history_with_canonical_pro_progression(
+        CaptureWorkLimit::Drain,
+        context.pro_output.as_mut(),
+        |capture_work_limit| match context.format {
+            ImportFormatArg::CtxHistoryJsonlV1 => import_custom_history_jsonl_v1(
+                &path,
+                &mut context.store,
+                CustomHistoryJsonlV1ImportOptions {
+                    source_path: Some(path.clone()),
+                    history_record_id: Some(record_id),
+                    capture_work_limit,
+                    import_profile: import_profile.clone(),
+                    ..CustomHistoryJsonlV1ImportOptions::default()
+                },
+            )
+            .map_err(anyhow::Error::from),
+        },
+    );
     let provider_duration = provider_started.elapsed();
     let summary = match import_result {
         Ok(summary) => summary,

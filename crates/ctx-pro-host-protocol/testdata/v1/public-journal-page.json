@@ -3,16 +3,16 @@
   "canonical_schema_version": 47,
   "canonical_schema_identity": "ctx-store-schema-47-final-v3",
   "projection_contract_version": 1,
-  "contract_fingerprint": "3ca944a98eadb45ef9bafef7dd098e6afa2a59f7b4f5b11891f2c72b8f3cc321",
+  "contract_fingerprint": "aec58501039c15d7ffa0ea5015ec0a00fd1e3bd7c63647a65a31c11e2dd4c681",
   "prior_checkpoint": {
     "position": { "generation": 1, "sequence": 0 },
-    "contract_fingerprint": "3ca944a98eadb45ef9bafef7dd098e6afa2a59f7b4f5b11891f2c72b8f3cc321",
-    "cumulative_digest": "86a06eec3ca94b1c46513b238aea9ed45a124ab521c4adb165bc1c94cf2f0abc"
+    "contract_fingerprint": "aec58501039c15d7ffa0ea5015ec0a00fd1e3bd7c63647a65a31c11e2dd4c681",
+    "cumulative_digest": "98d3c9c14e0c15dddb26c3b4a4d1b711ceda926750ab69b57402f84426814d47"
   },
   "frozen_through": {
     "position": { "generation": 1, "sequence": 1 },
-    "contract_fingerprint": "3ca944a98eadb45ef9bafef7dd098e6afa2a59f7b4f5b11891f2c72b8f3cc321",
-    "cumulative_digest": "22ef2608751b4fd386fa5d6639fe75dbb18ca5965cf7148b2630bf0f534a2dfc"
+    "contract_fingerprint": "aec58501039c15d7ffa0ea5015ec0a00fd1e3bd7c63647a65a31c11e2dd4c681",
+    "cumulative_digest": "77fa6412053aaa79601dc0b331a1e0bfacf0f4fb0ed1e260c82cd415ccbd8bba"
   },
   "authorized_repository_roots": ["/fixture/repository"],
   "records": [
@@ -96,7 +96,7 @@
         "provider": "codex",
         "provider_external_id": "provider-session-1"
       },
-      "cumulative_digest": "22ef2608751b4fd386fa5d6639fe75dbb18ca5965cf7148b2630bf0f534a2dfc"
+      "cumulative_digest": "77fa6412053aaa79601dc0b331a1e0bfacf0f4fb0ed1e260c82cd415ccbd8bba"
     }
   ]
 }

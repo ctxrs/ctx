@@ -175,6 +175,41 @@ The route labels are `//:ctx_release_linux_x64`,
 `contracts/release-targets-v1.json`; the packager preserves the raw
 construction names consumed by `scripts/stage-github-release-assets.sh`.
 
+For the staging-only 0.26.0 Linux x64 dogfood candidate, use the tracked
+builder instead of hand-authoring the Linux `--build-info` input:
+
+```bash
+SOURCE_COMMIT="$(git rev-parse --verify HEAD^{commit})"
+scripts/release/build-linux-x64-bazel-dogfood.sh \
+  --staging-dogfood \
+  --source-commit "${SOURCE_COMMIT}" \
+  --version 0.26.0 \
+  --output-dir /secure/build/ctx-v0.26.0-linux-x64
+```
+
+The command requires a clean checkout at exactly `SOURCE_COMMIT`, builds the
+target through `//:ctx_release_linux_x64 --config=release` with compilation
+network access disabled, and never signs, uploads, publishes, deploys, or
+updates a channel. It writes exactly these candidate leaves without replacing
+an existing leaf:
+
+```text
+/secure/build/ctx-v0.26.0-linux-x64/ctx
+/secure/build/ctx-v0.26.0-linux-x64/ctx.sha256
+/secure/build/ctx-v0.26.0-linux-x64/ctx.version
+/secure/build/ctx-v0.26.0-linux-x64/ctx.build-info.json
+/secure/build/ctx-v0.26.0-linux-x64/ctx.cdx.json
+```
+
+`ctx.build-info.json` is canonical, timestamp-free JSON. It binds the exact
+artifact, clean source commit, 0.26.0 source and executable versions,
+`Cargo.lock`, release target matrix, `MODULE.bazel`, `MODULE.bazel.lock`,
+Bazel version, configured Rust toolchain, builder recipe, and immutable
+builder/runtime/inspector image IDs. The producer writes it only after the
+pinned static-ABI and native-runtime gates pass. The release packager
+reconstructs those source/version/target/toolchain bindings from its declared
+runfiles and rejects any changed or non-canonical build-info bytes.
+
 The staging helper has three closed release-set modes. With no mode flag it
 stages the six CLI binaries paired with the six legacy runtime transports.
 `--native-candidate` stages exactly six CLI/native-runtime pairs (12
@@ -187,9 +222,9 @@ for 22 checksum entries. These modes are separate; mode flags cannot be
 combined.
 
 Linux must also pass `--build-info PATH` from the pinned Ubuntu 22.04 builder.
-The generic packager validates that evidence against the exact artifact,
-source SHA, `Cargo.lock`, and target matrix but cannot author builder image or
-authoritative runtime provenance itself. Set
+For Linux x64 staging dogfood, the tracked builder above owns that producer and
+passes its output to the generic packager. Other Linux release lanes must
+provide equivalently validated builder-authored evidence. Set
 `CTX_MACOS_RELEASE_SIGNING=required` on trusted macOS release workers; signing
 remains optional for unsigned local qualification candidates.
 
