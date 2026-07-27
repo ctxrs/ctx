@@ -151,6 +151,13 @@ impl KimiWireObservation {
         )
     }
 
+    pub(super) fn complete_content_revision(&self, admission_scope_revision: &str) -> String {
+        format!(
+            "kimi-wire-jsonl-content-v1:aux={:016x};scope={admission_scope_revision}",
+            self.session.auxiliary_revision,
+        )
+    }
+
     pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
         self.layout.revalidate(path)
     }

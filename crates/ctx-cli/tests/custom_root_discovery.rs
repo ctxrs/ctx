@@ -34,11 +34,14 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
         object_keys(&packet),
         BTreeSet::from([
             "hidden_missing_sources",
+            "issues",
+            "issues_truncated",
             "schema_version",
             "scope",
             "sources",
         ])
     );
+    assert_eq!(packet["issues_truncated"], false);
     let source = packet["sources"].as_array().unwrap().first().unwrap();
     assert_eq!(
         object_keys(source),
@@ -59,6 +62,13 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
         json_output(ctx(&temp).args(["sources", "--provider", "factory-ai-droid", "--json"]));
     assert_eq!(object_keys(&no_path_report), object_keys(&packet));
     assert!(no_path_report["sources"].as_array().unwrap().is_empty());
+    assert_eq!(no_path_report["issues_truncated"], false);
+    let issues = no_path_report["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["provider"], "factory_ai_droid");
+    assert!(issues[0]["path"].is_string());
+    assert_eq!(issues[0]["code"], "insufficient_official_evidence");
+    assert_eq!(issues[0]["message_truncated"], false);
 }
 
 #[test]
@@ -179,11 +189,14 @@ fn unsupported_discovery_is_human_only_and_provider_filtered_import_does_not_dis
         object_keys(&json),
         BTreeSet::from([
             "hidden_missing_sources",
+            "issues",
+            "issues_truncated",
             "schema_version",
             "scope",
             "sources",
         ])
     );
+    assert_eq!(json["issues_truncated"], false);
     let source = json["sources"]
         .as_array()
         .unwrap()

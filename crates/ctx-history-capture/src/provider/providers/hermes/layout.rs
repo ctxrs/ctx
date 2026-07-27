@@ -7,11 +7,32 @@ use std::collections::BTreeSet;
 
 use rusqlite::{Connection, Row};
 
-use crate::captured_batch::CapturedSqliteValue;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
 };
 use crate::{CaptureError, Result};
+
+/// Provider-owned SQLite values retained only for one bounded Hermes page.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum HermesSqliteValue {
+    Null,
+    Integer(i64),
+    RealBits(u64),
+    Text(String),
+}
+
+impl HermesSqliteValue {
+    fn from_real(value: f64) -> Self {
+        Self::RealBits(value.to_bits())
+    }
+
+    fn as_real(&self) -> Option<f64> {
+        match self {
+            Self::RealBits(bits) => Some(f64::from_bits(*bits)),
+            Self::Null | Self::Integer(_) | Self::Text(_) => None,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct HermesSchema {
@@ -144,7 +165,7 @@ impl<F: Copy + Eq> RecordLayout<F> {
         &self,
         row: &Row<'_>,
         offset: usize,
-    ) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
+    ) -> rusqlite::Result<Vec<HermesSqliteValue>> {
         self.fields
             .iter()
             .enumerate()
@@ -169,7 +190,7 @@ impl<F: Copy + Eq> RecordLayout<F> {
 
     fn values<'layout, 'values>(
         &'layout self,
-        values: &'values [CapturedSqliteValue],
+        values: &'values [HermesSqliteValue],
         offset: usize,
         exact: bool,
         invalid_count: &'static str,
@@ -183,11 +204,6 @@ impl<F: Copy + Eq> RecordLayout<F> {
             values,
             offset,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn field_names(&self) -> Vec<&'static str> {
-        self.fields.iter().map(|field| field.spec.column).collect()
     }
 }
 
@@ -252,32 +268,32 @@ impl ValueKind {
         }
     }
 
-    fn capture_value(self, row: &Row<'_>, index: usize) -> rusqlite::Result<CapturedSqliteValue> {
+    fn capture_value(self, row: &Row<'_>, index: usize) -> rusqlite::Result<HermesSqliteValue> {
         match self {
-            Self::Text => row.get(index).map(CapturedSqliteValue::Text),
+            Self::Text => row.get(index).map(HermesSqliteValue::Text),
             Self::OptionalText => row
                 .get::<_, Option<String>>(index)
-                .map(|value| value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Text)),
-            Self::Real => row.get(index).map(CapturedSqliteValue::from_real),
-            Self::OptionalReal => row.get::<_, Option<f64>>(index).map(|value| {
-                value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::from_real)
-            }),
-            Self::Integer => row.get(index).map(CapturedSqliteValue::Integer),
+                .map(|value| value.map_or(HermesSqliteValue::Null, HermesSqliteValue::Text)),
+            Self::Real => row.get(index).map(HermesSqliteValue::from_real),
+            Self::OptionalReal => row
+                .get::<_, Option<f64>>(index)
+                .map(|value| value.map_or(HermesSqliteValue::Null, HermesSqliteValue::from_real)),
+            Self::Integer => row.get(index).map(HermesSqliteValue::Integer),
             Self::OptionalInteger => row
                 .get::<_, Option<i64>>(index)
-                .map(|value| value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer)),
+                .map(|value| value.map_or(HermesSqliteValue::Null, HermesSqliteValue::Integer)),
         }
     }
 }
 
 struct RecordValues<'layout, 'values, F> {
     layout: &'layout RecordLayout<F>,
-    values: &'values [CapturedSqliteValue],
+    values: &'values [HermesSqliteValue],
     offset: usize,
 }
 
 impl<F: Copy + Eq> RecordValues<'_, '_, F> {
-    fn value(&self, field: F) -> Result<&CapturedSqliteValue> {
+    fn value(&self, field: F) -> Result<&HermesSqliteValue> {
         let index = self
             .layout
             .fields
@@ -295,7 +311,7 @@ impl<F: Copy + Eq> RecordValues<'_, '_, F> {
 
     fn text(&self, field: F) -> Result<&str> {
         match self.value(field)? {
-            CapturedSqliteValue::Text(value) => Ok(value),
+            HermesSqliteValue::Text(value) => Ok(value),
             _ => Err(CaptureError::SystemInvariant(
                 "Hermes logical row has an invalid text value",
             )),
@@ -304,8 +320,8 @@ impl<F: Copy + Eq> RecordValues<'_, '_, F> {
 
     fn optional_text(&self, field: F) -> Result<Option<String>> {
         match self.value(field)? {
-            CapturedSqliteValue::Null => Ok(None),
-            CapturedSqliteValue::Text(value) => Ok(Some(value.clone())),
+            HermesSqliteValue::Null => Ok(None),
+            HermesSqliteValue::Text(value) => Ok(Some(value.clone())),
             _ => Err(CaptureError::SystemInvariant(
                 "Hermes logical row has an invalid optional text value",
             )),
@@ -314,7 +330,7 @@ impl<F: Copy + Eq> RecordValues<'_, '_, F> {
 
     fn integer(&self, field: F) -> Result<i64> {
         match self.value(field)? {
-            CapturedSqliteValue::Integer(value) => Ok(*value),
+            HermesSqliteValue::Integer(value) => Ok(*value),
             _ => Err(CaptureError::SystemInvariant(
                 "Hermes logical row has an invalid integer value",
             )),
@@ -323,8 +339,8 @@ impl<F: Copy + Eq> RecordValues<'_, '_, F> {
 
     fn optional_integer(&self, field: F) -> Result<Option<i64>> {
         match self.value(field)? {
-            CapturedSqliteValue::Null => Ok(None),
-            CapturedSqliteValue::Integer(value) => Ok(Some(*value)),
+            HermesSqliteValue::Null => Ok(None),
+            HermesSqliteValue::Integer(value) => Ok(Some(*value)),
             _ => Err(CaptureError::SystemInvariant(
                 "Hermes logical row has an invalid optional integer value",
             )),
@@ -341,7 +357,7 @@ impl<F: Copy + Eq> RecordValues<'_, '_, F> {
 
     fn optional_real(&self, field: F) -> Result<Option<f64>> {
         match self.value(field)? {
-            CapturedSqliteValue::Null => Ok(None),
+            HermesSqliteValue::Null => Ok(None),
             value => value
                 .as_real()
                 .map(Some)
@@ -636,6 +652,7 @@ fn qualified_or(columns: &BTreeSet<String>, alias: &str, column: &str, fallback:
     }
 }
 
+#[derive(Debug)]
 pub(super) struct HermesSessionRow {
     pub(super) id: String,
     pub(super) source: String,
@@ -689,7 +706,7 @@ pub(super) struct HermesMessageRow {
 
 pub(super) fn decode_hermes_session(
     schema: &HermesSchema,
-    values: &[CapturedSqliteValue],
+    values: &[HermesSqliteValue],
     offset: usize,
 ) -> Result<HermesSessionRow> {
     let values = schema.sessions.values(
@@ -729,7 +746,7 @@ pub(super) fn decode_hermes_session(
 
 pub(super) fn decode_hermes_message(
     schema: &HermesSchema,
-    values: &[CapturedSqliteValue],
+    values: &[HermesSqliteValue],
 ) -> Result<HermesMessageRow> {
     let values = schema.messages.values(
         values,

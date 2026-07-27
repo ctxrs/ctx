@@ -16,7 +16,8 @@ use crate::Result;
 
 use self::current::{migrate_to_v42, migrate_to_v43, migrate_to_v44, migrate_to_v46};
 use self::final_v47::{
-    migrate_final_v47_provider_source_routes, migrate_final_v47_source_backed_results,
+    migrate_final_v47_native_path_source_generations, migrate_final_v47_provider_source_routes,
+    migrate_final_v47_semantic_projection_epoch, migrate_final_v47_source_backed_results,
     migrate_final_v47_verified_content_locators,
 };
 use self::legacy::{
@@ -102,6 +103,8 @@ pub(crate) fn run_migrations(
         migrate_final_v47_source_backed_results(conn)?;
         migrate_final_v47_verified_content_locators(conn)?;
         migrate_final_v47_provider_source_routes(conn)?;
+        migrate_final_v47_semantic_projection_epoch(conn)?;
+        migrate_final_v47_native_path_source_generations(conn)?;
     }
     finish_result_blob_cleanup(conn, object_dir)?;
     Ok(())

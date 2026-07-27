@@ -7,14 +7,46 @@ use super::{sender::serialize_event, *};
 
 #[test]
 fn buckets_cover_boundaries() {
-    assert_eq!(count_bucket(0), CountBucket::Zero);
-    assert_eq!(count_bucket(1_001), CountBucket::OverOneThousand);
-    assert_eq!(bytes_bucket(102_400), BytesBucket::OneHundredKbToOneMb);
+    for (value, expected) in [
+        (0, CountBucket::Zero),
+        (1, CountBucket::One),
+        (2, CountBucket::TwoToFive),
+        (6, CountBucket::SixToTwenty),
+        (21, CountBucket::TwentyOneToOneHundred),
+        (101, CountBucket::OneHundredOneToOneThousand),
+        (1_001, CountBucket::OneThousandOneToTenThousand),
+        (10_001, CountBucket::TenThousandOneToOneHundredThousand),
+        (100_001, CountBucket::OneHundredThousandOneToOneMillion),
+        (1_000_001, CountBucket::OverOneMillion),
+    ] {
+        assert_eq!(count_bucket(value), expected);
+    }
+    for (value, expected) in [
+        (0, BytesBucket::Zero),
+        (1, BytesBucket::UnderOneHundredKb),
+        (102_400, BytesBucket::OneHundredKbToOneMb),
+        (1_048_576, BytesBucket::OneToTenMb),
+        (10_485_760, BytesBucket::TenToOneHundredMb),
+        (104_857_600, BytesBucket::OneHundredMbToOneGb),
+        (1_073_741_824, BytesBucket::OneToTenGb),
+        (10_737_418_240, BytesBucket::TenToOneHundredGb),
+        (107_374_182_400, BytesBucket::OverOneHundredGb),
+    ] {
+        assert_eq!(bytes_bucket(value), expected);
+    }
     assert_eq!(text_length_bucket(501), TextLengthBucket::OverFiveHundred);
-    assert_eq!(
-        duration_bucket(Duration::from_secs(30)),
-        DurationBucket::AtLeastThirtySeconds
-    );
+    for (millis, expected) in [
+        (0, DurationBucket::UnderOneHundredMs),
+        (100, DurationBucket::UnderOneSecond),
+        (1_000, DurationBucket::UnderFiveSeconds),
+        (5_000, DurationBucket::UnderThirtySeconds),
+        (30_000, DurationBucket::UnderTwoMinutes),
+        (120_000, DurationBucket::UnderTenMinutes),
+        (600_000, DurationBucket::UnderOneHour),
+        (3_600_000, DurationBucket::AtLeastOneHour),
+    ] {
+        assert_eq!(duration_bucket(Duration::from_millis(millis)), expected);
+    }
 }
 
 #[test]
@@ -67,6 +99,48 @@ fn event_ids_are_uuid_v4_and_timestamps_are_minute_aligned() {
 }
 
 #[test]
+fn automatic_upgrade_event_uses_an_ephemeral_delivery_id() {
+    let event = PublicEventV1::OperationCompleted(OperationCompletedV1 {
+        payload: OperationPayloadV1::Cli(ClientOperationV1::Upgrade(UpgradeTelemetry {
+            mode: UpgradeMode::Auto,
+            operation: UpgradeOperation::Apply,
+            dry_run: false,
+            suppress_event: false,
+            status: Some(UpgradeStatus::Applied),
+            applied: Some(true),
+            scheduled: Some(false),
+            update_available: Some(false),
+            update_was_available: Some(true),
+            upgrade_attempt_id: Some("ua_replacement".to_owned()),
+            managed_install: Some(true),
+            self_upgrade_allowed: Some(true),
+            auto_upgrade_allowed: Some(true),
+            warning_count: Some(CountBucket::Zero),
+            channel: Some(UpgradeChannel::Stable),
+            failure_kind: None,
+        })),
+        output: Some(OutputKind::Human),
+        outcome: Outcome::Success,
+        duration: duration_bucket(Duration::ZERO),
+        deprecated_daemon_control: false,
+        deprecated_upgrade_control: false,
+    });
+    let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    let serialized = serialize_event(&event, occurred_at, None, None);
+
+    assert_eq!(
+        Uuid::parse_str(serialized["event_id"].as_str().unwrap())
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+    assert_eq!(serialized["properties"]["upgrade_mode"], "auto");
+}
+
+#[test]
 fn known_doc_topics_are_closed() {
     assert_eq!(
         DocTopicId::from_known_id("provider-import-policy")
@@ -99,7 +173,6 @@ fn durable_family_serialization_matches_public_goldens() {
                 output: Some(OutputKind::Json),
                 outcome: Outcome::Success,
                 duration: duration_bucket(Duration::from_millis(10)),
-                auto_upgrade: None,
                 deprecated_daemon_control: false,
                 deprecated_upgrade_control: false,
             }),
@@ -116,8 +189,17 @@ fn durable_family_serialization_matches_public_goldens() {
                     trigger: ProviderRefreshTrigger::Search,
                     source_mode: ProviderRefreshSourceMode::Discovered,
                     change: ProviderRefreshChange::Changed,
+                    content_evidence: ProviderRefreshContentEvidence::Accepted,
+                    work_kind: Some(ProviderRefreshWorkKind::Append),
+                    refresh_result: ProviderRefreshResult::Complete,
+                    core_result: ProviderCoreResult::Complete,
+                    canonical_pro_result: ProviderProResult::NoOp,
+                    output_pro_result: ProviderProResult::Complete,
+                    failure_scope: ProviderRefreshFailureScope::None,
+                    failure_type: ProviderRefreshFailureType::None,
                     work_remaining: false,
-                    counts: ProviderRefreshCountsV1::new(1, 3, 8, 0, 0, 0, 0, 2048),
+                    retired_records: Some(count_bucket(0)),
+                    counts: ProviderRefreshCountsV1::new(1, 12, 3, 8, 0, 0, 0, 0, 2048),
                 },
             )),
             include_str!(

@@ -4,15 +4,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::common::io::{
     ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
 };
-use crate::provider::normalization::{provider_optional_regular_file, read_provider_json_file};
-use crate::{fnv1a64, CaptureError, Result};
+use crate::provider::normalization::provider_optional_regular_file;
+use crate::{CaptureError, Result};
 
-use super::{ROVODEV_CAPTURE_REVISION, ROVODEV_POLICY_REVISION};
+const MAX_ROVODEV_DISCOVERY_DIRECTORIES: usize = 65_536;
+const MAX_ROVODEV_DISCOVERY_ENTRIES: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RovoDevFrozenFile {
@@ -46,22 +47,24 @@ impl RovoDevFrozenFile {
         })
     }
 
-    fn revision_component(&self, output: &mut String) {
+    fn hash_revision_authority(&self, digest: &mut Sha256) {
         let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
+            Ok(duration) => (b'+', duration.as_secs(), duration.subsec_nanos()),
             Err(error) => {
                 let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
+                (b'-', duration.as_secs(), duration.subsec_nanos())
             }
         };
-        output.push_str(&format!(
-            "{:?}\0{}\0{side}{seconds}.{nanos:09}\0{}\0{:?}\0{:?}\n",
-            self.path.as_os_str(),
-            self.length,
-            self.readonly,
-            self.device,
-            self.inode,
-        ));
+        let path = format!("{:?}", self.path.as_os_str());
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path.as_bytes());
+        digest.update(self.length.to_be_bytes());
+        digest.update([side]);
+        digest.update(seconds.to_be_bytes());
+        digest.update(nanos.to_be_bytes());
+        digest.update([u8::from(self.readonly)]);
+        digest.update(self.device.unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(self.inode.unwrap_or(u64::MAX).to_be_bytes());
     }
 }
 
@@ -89,27 +92,50 @@ impl RovoDevSessionObservation {
         &self.canonical_path
     }
 
-    pub(super) fn context_path(&self) -> &Path {
-        &self.context_file.path
-    }
-
     pub(super) fn context_length(&self) -> u64 {
         self.context_file.length
     }
 
-    pub(super) fn source_revision(&self) -> String {
-        let mut input = format!(
-            "rovodev-session-file-v1\0capture={ROVODEV_CAPTURE_REVISION}\0policy={ROVODEV_POLICY_REVISION}\n"
-        );
-        self.context_file.revision_component(&mut input);
+    pub(super) fn metadata_length(&self) -> Option<u64> {
+        self.metadata_file.as_ref().map(|file| file.length)
+    }
+
+    pub(super) fn revision_authority(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"ctx-rovodev-frozen-source-revision-v1\0");
+        self.context_file.hash_revision_authority(&mut digest);
         match &self.metadata_file {
-            Some(file) => file.revision_component(&mut input),
-            None => input.push_str("metadata\0missing\n"),
+            Some(file) => {
+                digest.update([1]);
+                file.hash_revision_authority(&mut digest);
+            }
+            None => digest.update([0]),
         }
-        format!(
-            "rovodev-session-file-v1:fnv1a64:{:016x}",
-            fnv1a64(input.as_bytes())
-        )
+        digest.finalize().into()
+    }
+
+    pub(super) fn physical_identity(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"ctx-rovodev-physical-source-v1\0");
+        let canonical = format!("{:?}", self.canonical_path.as_os_str());
+        digest.update((canonical.len() as u64).to_be_bytes());
+        digest.update(canonical.as_bytes());
+        digest.update(self.context_file.device.unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(self.context_file.inode.unwrap_or(u64::MAX).to_be_bytes());
+        if self.context_file.device.is_none() || self.context_file.inode.is_none() {
+            let (side, seconds, nanos) = match self.context_file.modified.duration_since(UNIX_EPOCH)
+            {
+                Ok(duration) => (b'+', duration.as_secs(), duration.subsec_nanos()),
+                Err(error) => {
+                    let duration = error.duration();
+                    (b'-', duration.as_secs(), duration.subsec_nanos())
+                }
+            };
+            digest.update([side]);
+            digest.update(seconds.to_be_bytes());
+            digest.update(nanos.to_be_bytes());
+        }
+        format!("sha256:{:x}", digest.finalize())
     }
 
     pub(super) fn revalidate(&self, source: &RovoDevSessionSource) -> Result<bool> {
@@ -179,21 +205,43 @@ fn rovodev_session_source_from_dir(dir: &Path) -> Result<Option<RovoDevSessionSo
     }))
 }
 
-pub(super) fn read_rovodev_metadata(source: &RovoDevSessionSource) -> (Value, Option<String>) {
-    match source.metadata_path.as_deref() {
-        Some(path) => match read_provider_json_file(path, "Rovo Dev metadata.json") {
-            Ok(value) => (value, None),
-            Err(error) => (Value::Null, Some(error.to_string())),
-        },
-        None => (Value::Null, None),
+#[derive(Debug, Clone)]
+pub(super) struct RovoDevDiscovery {
+    root_exists: bool,
+    sources: Vec<RovoDevSessionSource>,
+}
+
+impl RovoDevDiscovery {
+    pub(super) fn root_exists(&self) -> bool {
+        self.root_exists
+    }
+
+    pub(super) fn sources(&self) -> &[RovoDevSessionSource] {
+        &self.sources
+    }
+
+    pub(super) fn canonical_context_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut paths = self
+            .sources
+            .iter()
+            .map(|source| fs::canonicalize(&source.context_path))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+        Ok(paths)
     }
 }
 
-pub(super) fn visit_rovodev_session_sources(
-    root: &Path,
-    visit: &mut dyn FnMut(RovoDevSessionSource) -> Result<()>,
-) -> Result<usize> {
-    let metadata = fs::symlink_metadata(root)?;
+pub(super) fn discover_rovodev_session_sources(root: &Path) -> Result<RovoDevDiscovery> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RovoDevDiscovery {
+                root_exists: false,
+                sources: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return Err(CaptureError::InvalidProviderTranscriptPath {
@@ -207,26 +255,71 @@ pub(super) fn visit_rovodev_session_sources(
         if root.file_name().and_then(|name| name.to_str()) == Some("session_context.json") {
             if let Some(session_dir) = root.parent() {
                 if let Some(source) = rovodev_session_source_from_dir(session_dir)? {
-                    visit(source)?;
-                    return Ok(1);
+                    return Ok(RovoDevDiscovery {
+                        root_exists: true,
+                        sources: vec![source],
+                    });
                 }
             }
         }
-        return Ok(0);
+        return Ok(RovoDevDiscovery {
+            root_exists: true,
+            sources: Vec::new(),
+        });
     }
     if !file_type.is_dir() {
-        return Ok(0);
+        return Ok(RovoDevDiscovery {
+            root_exists: true,
+            sources: Vec::new(),
+        });
     }
     if let Some(source) = rovodev_session_source_from_dir(root)? {
-        visit(source)?;
-        return Ok(1);
+        return Ok(RovoDevDiscovery {
+            root_exists: true,
+            sources: vec![source],
+        });
     }
-    let mut visited = 0_usize;
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            visited = visited.saturating_add(visit_rovodev_session_sources(&entry.path(), visit)?);
+
+    let mut sources = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited_directories = 0_usize;
+    let mut visited_entries = 0_usize;
+    while let Some(directory) = pending.pop() {
+        visited_directories = visited_directories.saturating_add(1);
+        if visited_directories > MAX_ROVODEV_DISCOVERY_DIRECTORIES {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: root.to_path_buf(),
+                reason: "Rovo Dev session discovery exceeds its directory bound",
+            });
+        }
+        let mut children = Vec::new();
+        for entry in fs::read_dir(&directory)? {
+            visited_entries = visited_entries.saturating_add(1);
+            if visited_entries > MAX_ROVODEV_DISCOVERY_ENTRIES {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path: root.to_path_buf(),
+                    reason: "Rovo Dev session discovery exceeds its entry bound",
+                });
+            }
+            children.push(entry?);
+        }
+        children.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in children {
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() || !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if let Some(source) = rovodev_session_source_from_dir(&path)? {
+                sources.push(source);
+            } else {
+                pending.push(path);
+            }
         }
     }
-    Ok(visited)
+    sources.sort_by(|left, right| left.context_path.cmp(&right.context_path));
+    Ok(RovoDevDiscovery {
+        root_exists: true,
+        sources,
+    })
 }

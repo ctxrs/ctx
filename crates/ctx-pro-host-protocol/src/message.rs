@@ -4,10 +4,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AuthorizationRequest, AuthorizationResult, ConfirmGraphKeyDeletionRequest, GraphKeyDeleted,
+    AuthorizationRequest, AuthorizationResult, BeginOutputInventoryRequest, BlameRequest,
+    BlameResult, ConfirmGraphKeyDeletionRequest, FinishOutputInventoryRequest, GraphKeyDeleted,
     GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest, JournalSyncResult,
-    PrepareGraphKeyDeletionRequest, ProtocolError, QueryRequest, QueryResult, PROTOCOL_FINGERPRINT,
-    PROTOCOL_VERSION,
+    ObserveOutputSourceRequest, OutputInventoryBegan, OutputInventoryFinished,
+    OutputPageMaterialized, OutputProgressRequest, OutputProgressResult, OutputSourceObserved,
+    PrepareGraphKeyDeletionRequest, ProOutputMaterializationPage, ProtocolError,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -88,7 +91,12 @@ pub enum HostMessage {
     ConfirmGraphKeyDeletion(ConfirmGraphKeyDeletionRequest),
     Status(StatusRequest),
     SyncJournal(JournalSyncRequest),
-    Query(QueryRequest),
+    BeginOutputInventory(BeginOutputInventoryRequest),
+    ObserveOutputSource(ObserveOutputSourceRequest),
+    MaterializeOutputPage(ProOutputMaterializationPage),
+    FinishOutputInventory(FinishOutputInventoryRequest),
+    GetOutputProgress(OutputProgressRequest),
+    Blame(BlameRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,7 +113,12 @@ pub enum HelperMessage {
     GraphKeyDeleted(GraphKeyDeleted),
     Status(StatusResult),
     JournalSynced(JournalSyncResult),
-    Query(QueryResult),
+    OutputInventoryBegan(OutputInventoryBegan),
+    OutputSourceObserved(OutputSourceObserved),
+    OutputPageMaterialized(OutputPageMaterialized),
+    OutputInventoryFinished(OutputInventoryFinished),
+    OutputProgress(OutputProgressResult),
+    Blame(BlameResult),
     Error(ProtocolError),
 }
 
@@ -117,6 +130,7 @@ pub enum Capability {
     GraphKeyDeletion,
     Status,
     JournalSync,
+    OutputMaterialization,
     Query,
     GitRead,
 }
@@ -128,6 +142,7 @@ impl Capability {
             Self::GraphKeyDeletion => "graph_key_deletion",
             Self::Status => "status",
             Self::JournalSync => "journal_sync",
+            Self::OutputMaterialization => "output_materialization",
             Self::Query => "query",
             Self::GitRead => "git_read",
         }

@@ -1,10 +1,14 @@
 common --enable_bzlmod
 common --show_timestamps
+common --workspace_status_command=scripts/bazel/workspace-status.sh
+
+startup --max_idle_secs=600
 
 build --announce_rc
 build --verbose_failures
 # Java-backed graph tooling must not depend on a workstation system JDK.
 build --java_runtime_version=remotejdk_21
+test --cache_test_results=auto
 test --test_output=errors
 
 # Fast local Linux iteration: stable fastbuild key, no Rust debug info, and the
@@ -19,7 +23,7 @@ build:dev-debug --compilation_mode=dbg
 build:dev-debug --@rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=2
 
 # Routine tests, hosted CI, and release construction remain distinct cache
-# keys. Worker resource sizing belongs to the runner, not this repository.
+# keys. The repository wrapper supplies adaptive worker resource sizing.
 build:test --compilation_mode=fastbuild
 build:test --stamp=false
 test:test --flaky_test_attempts=1

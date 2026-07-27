@@ -96,10 +96,17 @@ fn authoritative_history_iterator_preserves_edge_record_order_identity_and_conte
             EventType::Message,
         ]
     );
+    assert!(decoded_events
+        .iter()
+        .all(|(event, _)| event.provider_event_hash.is_none()));
     assert_eq!(
         decoded_events
             .iter()
-            .map(|(event, _)| event.provider_event_hash.as_deref().unwrap())
+            .map(|(event, _)| {
+                event.metadata["legacy_provider_event_hash"]
+                    .as_str()
+                    .unwrap()
+            })
             .collect::<Vec<_>>(),
         vec![
             "conversations_v2:kiro-session-11:0:user",
@@ -111,7 +118,7 @@ fn authoritative_history_iterator_preserves_edge_record_order_identity_and_conte
     assert_eq!(
         decoded_events
             .iter()
-            .map(|(event, _)| event.cursor.as_deref().unwrap())
+            .map(|(event, _)| event.cursor.as_str())
             .collect::<Vec<_>>(),
         vec![
             "conversations_v2:kiro-session-11:history:0:user",

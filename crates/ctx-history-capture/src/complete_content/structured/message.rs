@@ -16,10 +16,10 @@ use crate::provider::normalization::{provider_block_text, provider_message_id};
 use crate::provider::providers::{
     auggie::{auggie_request_text, auggie_response_text},
     codebuddy::{codebuddy_decoded_message, codebuddy_message_text},
-    continue_cli::{continue_history_item_event, continue_history_item_text},
+    continue_cli::{continue_history_item_canonical_payload, continue_history_item_text},
     openhands::decode_openhands_event_value,
     task_json::{
-        task_json_event, task_json_event_text, task_json_event_type, task_json_provider,
+        task_json_event_hash, task_json_event_text, task_json_event_type, task_json_provider,
         TaskJsonEventInput,
     },
 };
@@ -256,23 +256,14 @@ fn continue_message(
         .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
     let text = continue_history_item_text(item)
         .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
-    let provider_event_index = u64::try_from(history_item_index)
-        .ok()
-        .and_then(|index| index.checked_add(1))
-        .ok_or_else(|| error(request, CompleteContentErrorKind::ContentVerificationFailed))?;
-    let event = continue_history_item_event(
-        provider_session_id,
-        item,
-        provider_event_index,
-        DateTime::<Utc>::UNIX_EPOCH,
-    );
-    if event.event_type != EventType::Message {
+    let (event_type, payload) = continue_history_item_canonical_payload(item);
+    if event_type != EventType::Message {
         return Err(error(
             request,
             CompleteContentErrorKind::HydrationUnsupported,
         ));
     }
-    let fallback_hash = compute_payload_hash(&event.payload).ok();
+    let fallback_hash = compute_payload_hash(&payload).ok();
     let native_id = provider_hash
         .clone()
         .unwrap_or_else(|| format!("history:{provider_session_id}:{history_item_index}"));
@@ -493,7 +484,7 @@ fn resolve_task_json(
             let task_id = request.provider_session_id.as_deref().ok_or_else(|| {
                 error(request, CompleteContentErrorKind::ContentVerificationFailed)
             })?;
-            let event = task_json_event(
+            let native_id = task_json_event_hash(
                 spec,
                 task_id,
                 TaskJsonEventInput {
@@ -504,9 +495,6 @@ fn resolve_task_json(
                 locator.ordinal as usize,
                 DateTime::<Utc>::UNIX_EPOCH,
             );
-            let native_id = event.provider_event_hash.clone().ok_or_else(|| {
-                error(request, CompleteContentErrorKind::ContentVerificationFailed)
-            })?;
             return Ok(ResolvedMessage {
                 text,
                 provider_hash: Some(native_id.clone()),

@@ -1,521 +1,436 @@
-use std::{fs::FileTimes, fs::OpenOptions, io::Write};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+};
 
-use serde_json::json;
+use ctx_history_core::{CaptureProvider, EventType};
+use ctx_history_store::Store;
+use serde_json::{json, Value};
 
-use crate::test_support_paths::tempdir;
+use crate::{
+    import_openclaw_history, ImportProfile, OpenClawImportOptions, OutputSourceIdentity,
+    ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress, ProOutputSink,
+    ProOutputSinkError, ProviderImportSummary, ProviderImportWorkResult,
+};
 
-use super::*;
+const MACHINE: &str = "openclaw-nativepath-test-machine";
+const SUCCESS_BODY: &str = "OPENCLAW_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
+const FAILURE_BODY: &str = "OPENCLAW_FAILURE_BODY";
 
-const HEADER_CHECKPOINT_SECRET: &str = "openclaw-header-secret-must-not-enter-checkpoint";
-const REWRITTEN_HEADER_SECRET: &str = "rewritten-openclaw-header-secret-same-length-000";
-const INDEX_CHECKPOINT_SECRET: &str = "openclaw-index-secret-must-not-enter-checkpoint";
-
-fn openclaw_fixture_with_messages(
-    message_count: usize,
-) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
-    let temp = tempdir().unwrap();
+#[test]
+fn nativepath_lifecycle_covers_restart_mutations_and_disappearance() {
+    let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("openclaw");
-    let sessions = root.join("agents/personal-agent/sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    let index = sessions.join("sessions.json");
-    fs::write(
-        &index,
-        json!({
-            "session-1": {
-                "sessionId": "session-1",
-                "label": "bounded OpenClaw import",
-                "private_index_text": INDEX_CHECKPOINT_SECRET
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let transcript = sessions.join("session-1.jsonl");
-    let mut contents = format!(
-        "{}\n",
-        json!({
-            "type": "session",
-            "id": "session-1",
-            "timestamp": "2026-07-17T12:00:00Z",
-            "cwd": "/workspace/openclaw",
-            "private_header_text": HEADER_CHECKPOINT_SECRET
-        })
-    );
-    for index in 0..message_count {
-        contents.push_str(
-            &json!({
-                "type": "message",
-                "id": format!("message-{index}"),
-                "timestamp": "2026-07-17T12:00:01Z",
-                "message": {
-                    "role": if index % 2 == 0 { "user" } else { "assistant" },
-                    "content": format!("bounded OpenClaw message {index}")
-                }
-            })
-            .to_string(),
-        );
-        contents.push('\n');
-    }
-    fs::write(&transcript, contents).unwrap();
-    (temp, root, transcript, index)
-}
-
-fn openclaw_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
-    openclaw_fixture_with_messages(65)
-}
-
-#[test]
-fn result_profile_returns_only_explicit_legacy_tool_message_content() {
-    let row = json!({
-        "type": "message",
-        "message": {
-            "role": "tool",
-            "name": "shell",
-            "content": [
-                {"type": "text", "text": "first"},
-                {"output": "second"}
-            ]
-        }
-    });
-    assert_eq!(
-        openclaw_result_content(&row).as_deref(),
-        Some("first\nsecond")
-    );
-    assert_eq!(
-        openclaw_result_content(&json!({
-            "type": "message",
-            "message": {"role": "tool", "name": "shell"}
-        })),
-        None
-    );
-    assert_eq!(
-        openclaw_result_content(&json!({
-            "type": "message",
-            "message": {"role": "assistant", "content": "not a result"}
-        })),
-        None
-    );
-}
-
-fn import_options() -> NormalizedProviderImportOptions {
-    NormalizedProviderImportOptions {
-        history_record_id: None,
-        persist_cursors: false,
-        wrap_transaction: true,
-        fast_event_inserts: true,
-        capture_work_limit: crate::CaptureWorkLimit::Drain,
-        inventory_observation_token: None,
-    }
-}
-
-#[test]
-fn openclaw_session_batches_resume_append_and_preserve_scope() {
-    // Header plus 127 events fills exactly two 64-record batches. The appended record must
-    // therefore begin the same third batch in both resumed and one-shot imports.
-    let (temp, root, transcript, _index) = openclaw_fixture_with_messages(127);
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let context = ProviderAdapterContext {
-        machine_id: "openclaw-batch-machine".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root.clone()),
-        imported_at: "2026-07-17T12:30:00Z".parse().unwrap(),
-    };
-
-    let first = import_openclaw_session_jsonl_file_batched(
+    let transcript = transcript_path(&root);
+    write_fixture(
         &transcript,
-        &mut store,
-        context.clone(),
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 127);
+        &[
+            header("session-1"),
+            message("fresh", "user", "fresh OpenClaw prompt"),
+        ],
+        "fresh label",
+    );
+    let store_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
 
-    let source = store
-        .capture_source_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        source.descriptor.raw_source_path.as_deref(),
-        Some(transcript.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        source.descriptor.source_root.as_deref(),
-        Some(root.to_string_lossy().as_ref())
-    );
-    let header_preview: Value = serde_json::from_str(
-        source.sync.metadata["source_metadata"]["header"]["json"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(header_preview["truncated"], false);
-    let header: Value = serde_json::from_str(header_preview["json"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        header,
-        json!({
-            "type": "session",
-            "id": "session-1",
-            "timestamp": "2026-07-17T12:00:00Z",
-            "cwd": "/workspace/openclaw",
-            "private_header_text": HEADER_CHECKPOINT_SECRET,
-        })
-    );
-    let session = store
-        .session_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    let session_index_preview: Value = serde_json::from_str(
-        session.sync.metadata["metadata"]["session_index"]["json"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(session_index_preview["truncated"], false);
-    let session_index: Value =
-        serde_json::from_str(session_index_preview["json"].as_str().unwrap()).unwrap();
-    assert_eq!(session_index["label"], "bounded OpenClaw import");
+    let fresh = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(fresh.imported_sessions, 1);
+    assert_eq!(fresh.imported_events, 1);
+    let session = openclaw_session(&store);
+    let routed_event = store.events_for_session(session.id).unwrap()[0].id;
+    assert!(store
+        .authorized_source_route_for_event(routed_event)
+        .is_ok());
 
-    let replay = import_openclaw_session_jsonl_file_batched(
+    let noop = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
+    drop(store);
+    let mut store = Store::open(&store_path).unwrap();
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+
+    append_record(
         &transcript,
-        &mut store,
-        context.clone(),
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(replay.imported_sessions, 0);
-    assert_eq!(replay.imported_events, 0);
-    assert_eq!(replay.skipped_sessions, 1);
-    assert_eq!(replay.skipped_events, 127);
-
-    let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
-    writeln!(
-        file,
-        "{}",
-        json!({
-            "type": "message",
-            "id": "message-appended",
-            "timestamp": "2026-07-17T12:01:30Z",
-            "message": {
-                "role": "assistant",
-                "content": "appended OpenClaw answer"
-            }
-        })
-    )
-    .unwrap();
-    drop(file);
-
-    let one_shot_context = context.clone();
-    let append = import_openclaw_session_jsonl_file_batched(
-        &transcript,
-        &mut store,
-        context,
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(append.failed, 0, "{:?}", append.failures);
-    assert_eq!(append.imported_sessions, 0);
+        &message("append", "assistant", "appended OpenClaw answer"),
+    );
+    let append = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(append.work_result(), ProviderImportWorkResult::Changed);
     assert_eq!(append.imported_events, 1);
 
-    let cursor_path = provider_path_identity(&transcript).unwrap();
-    let stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::OpenClaw,
-        OPENCLAW_SOURCE_FORMAT,
-        &cursor_path,
-    );
-    let cursor = store
-        .get_sync_cursor(None, "openclaw-batch-machine", &stream)
-        .unwrap()
-        .unwrap();
-    let certified = CertifiedProviderCursor::decode(&cursor.cursor).unwrap();
-    let checkpoint: OpenClawParserCheckpoint = certified.parser_checkpoint().deserialize().unwrap();
-    assert_eq!(checkpoint.next_ordinal, 129);
-    assert!(checkpoint
-        .header_anchor
-        .is_some_and(|anchor| anchor.start == 0 && anchor.end > anchor.start));
-    assert_eq!(checkpoint.accepted_events, 128);
-    assert!(checkpoint.emitted_session);
-    let checkpoint_bytes = certified.parser_checkpoint().as_bytes();
-    assert!(checkpoint_bytes.len() < 2 * 1024);
-    let checkpoint_text = String::from_utf8_lossy(checkpoint_bytes);
-    assert!(!checkpoint_text.contains(HEADER_CHECKPOINT_SECRET));
-    assert!(!checkpoint_text.contains(INDEX_CHECKPOINT_SECRET));
-    assert!(!checkpoint_text.contains("header_raw"));
-
-    let resumed_session = store
-        .session_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    let resumed_source = store
-        .capture_source_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    let resumed_events = store.events_for_session(resumed_session.id).unwrap();
-
-    let mut one_shot_store = Store::open(temp.path().join("one-shot.sqlite")).unwrap();
-    let one_shot = import_openclaw_session_jsonl_file_batched(
+    write_fixture(
         &transcript,
-        &mut one_shot_store,
-        one_shot_context,
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(one_shot.failed, 0, "{:?}", one_shot.failures);
-    assert_eq!(one_shot.imported_sessions, 1);
-    assert_eq!(one_shot.imported_events, 128);
-    let one_shot_session = one_shot_store
-        .session_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    let one_shot_source = one_shot_store
-        .capture_source_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    let one_shot_events = one_shot_store
-        .events_for_session(one_shot_session.id)
-        .unwrap();
+        &[
+            header("session-1"),
+            message("rewrite", "user", &"rewritten OpenClaw content ".repeat(32)),
+        ],
+        "rewrite label",
+    );
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
 
-    assert_eq!(resumed_session, one_shot_session);
-    assert_eq!(resumed_source, one_shot_source);
-    assert_eq!(resumed_events, one_shot_events);
+    write_fixture(
+        &transcript,
+        &[header("session-1"), message("short", "user", "short")],
+        "short label",
+    );
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+
+    let replacement = transcript.with_extension("replacement");
+    write_fixture(
+        &replacement,
+        &[
+            header("session-1"),
+            message("replacement", "assistant", "replacement generation"),
+        ],
+        "replacement label",
+    );
+    fs::rename(&replacement, &transcript).unwrap();
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+    let disappeared = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(disappeared.work_result(), ProviderImportWorkResult::Changed);
+    assert!(store
+        .authorized_source_route_for_event(routed_event)
+        .is_err());
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
 }
 
 #[test]
-fn openclaw_header_anchor_detects_old_rewrite_beyond_append_proof() {
+fn nativepath_is_core_first_and_replays_outputs_independently() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let transcript = transcript_path(&root);
+    write_fixture(
+        &transcript,
+        &[
+            header("session-output"),
+            message("prompt", "user", "run the command"),
+            tool_result("success", 0, SUCCESS_BODY),
+            tool_result("failure", 13, FAILURE_BODY),
+        ],
+        "output label",
+    );
+    let store_path = temp.path().join("core.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    let sink = Arc::new(RecordingSink::new(store_path.clone()));
+
+    let fresh = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
+    assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
+    assert!(sink.saw_core_before_page.load(Ordering::SeqCst));
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 2);
+    let core_events = store
+        .events_for_session(openclaw_session(&store).id)
+        .unwrap();
+    assert_eq!(core_events.len(), 2);
+    assert!(core_events
+        .iter()
+        .all(|event| event.event_type != EventType::ToolOutput
+            || event.payload.to_string().contains("failure")));
+    let encoded = serde_json::to_string(&core_events).unwrap();
+    assert!(!encoded.contains(SUCCESS_BODY));
+    assert!(encoded.contains(FAILURE_BODY));
+    let pages_after_fresh = sink.pages.load(Ordering::SeqCst);
+
+    let noop = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
+    assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(sink.pages.load(Ordering::SeqCst), pages_after_fresh);
+
+    let replay_store_path = temp.path().join("replay.sqlite");
+    let mut replay_store = Store::open(&replay_store_path).unwrap();
+    let replay_sink = Arc::new(RecordingSink::new(replay_store_path));
+    let replay = import(
+        &root,
+        &mut replay_store,
+        ImportProfile::ProReplayOnly(replay_sink.clone()),
+    );
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert!(replay_store.list_sessions().unwrap().is_empty());
+    assert_eq!(replay_sink.outputs.load(Ordering::SeqCst), 2);
+
+    let failing_store_path = temp.path().join("failing.sqlite");
+    let mut failing_store = Store::open(&failing_store_path).unwrap();
+    let failing_sink = Arc::new(FailingSink::default());
+    let core_survives = import(
+        &root,
+        &mut failing_store,
+        ImportProfile::CoreAndPro(failing_sink.clone()),
+    );
     assert_eq!(
-        HEADER_CHECKPOINT_SECRET.len(),
-        REWRITTEN_HEADER_SECRET.len()
+        core_survives.work_result(),
+        ProviderImportWorkResult::Changed
     );
-    let (temp, root, transcript, _index) = openclaw_fixture_with_messages(600);
-    let mut store = Store::open(temp.path().join("header-anchor.sqlite")).unwrap();
-    let context = ProviderAdapterContext {
-        machine_id: "openclaw-header-anchor-machine".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root),
-        imported_at: "2026-07-17T12:30:00Z".parse().unwrap(),
-    };
+    assert_eq!(failing_store.list_sessions().unwrap().len(), 1);
+    assert!(failing_sink.behind.load(Ordering::SeqCst));
+}
 
-    let first = import_openclaw_session_jsonl_file_batched(
-        &transcript,
-        &mut store,
-        context.clone(),
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_events, 600);
-
-    let cursor_path = provider_path_identity(&transcript).unwrap();
-    let stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::OpenClaw,
-        OPENCLAW_SOURCE_FORMAT,
-        &cursor_path,
-    );
-    let cursor = store
-        .get_sync_cursor(None, "openclaw-header-anchor-machine", &stream)
-        .unwrap()
-        .unwrap();
-    let certified = CertifiedProviderCursor::decode(&cursor.cursor).unwrap();
-    let checkpoint: OpenClawParserCheckpoint = certified.parser_checkpoint().deserialize().unwrap();
-    let anchor = checkpoint.header_anchor.unwrap();
-    let source_length = fs::metadata(&transcript).unwrap().len();
-    assert!(source_length - anchor.end > 64 * 1024);
-
-    let original_metadata = fs::metadata(&transcript).unwrap();
-    let original = fs::read_to_string(&transcript).unwrap();
-    let rewritten = original.replacen(HEADER_CHECKPOINT_SECRET, REWRITTEN_HEADER_SECRET, 1);
-    assert_ne!(rewritten, original);
-    assert_eq!(rewritten.len(), original.len());
-    fs::write(&transcript, rewritten).unwrap();
-    let rewritten_file = OpenOptions::new().write(true).open(&transcript).unwrap();
-    rewritten_file
-        .set_times(
-            FileTimes::new()
-                .set_accessed(original_metadata.accessed().unwrap())
-                .set_modified(original_metadata.modified().unwrap()),
-        )
-        .unwrap();
-    drop(rewritten_file);
-
-    let same_revision = import_openclaw_session_jsonl_file_batched(
-        &transcript,
-        &mut store,
-        context.clone(),
-        import_options(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        same_revision,
-        CaptureError::SourceChangedDuringCapture
-    ));
-
+#[test]
+fn nativepath_retries_incomplete_tail_and_reports_corrupt_records() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let transcript = transcript_path(&root);
+    write_fixture(&transcript, &[header("session-tail")], "tail label");
     let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
-    writeln!(
+    write!(
         file,
-        "{}",
-        json!({
-            "type": "message",
-            "id": "message-after-old-header-rewrite",
-            "timestamp": "2026-07-17T12:02:00Z",
-            "message": {
-                "role": "assistant",
-                "content": "replacement after old header rewrite"
-            }
-        })
+        "{{\"type\":\"message\",\"id\":\"tail\",\"timestamp\":\"2026-07-25T12:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":\"tail"
     )
     .unwrap();
     drop(file);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let replacement = import_openclaw_session_jsonl_file_batched(
-        &transcript,
-        &mut store,
-        context,
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(replacement.failed, 0, "{:?}", replacement.failures);
-    assert_eq!(replacement.imported_events, 1);
-    assert_eq!(replacement.skipped_events, 600);
-    let session = store
-        .session_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
+    let incomplete = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(incomplete.failed, 0);
+    assert!(store
+        .events_for_session(openclaw_session(&store).id)
         .unwrap()
-        .unwrap();
-    assert_eq!(store.events_for_session(session.id).unwrap().len(), 601);
-    let source = store
-        .capture_source_by_external_session(CaptureProvider::OpenClaw, "personal-agent/session-1")
-        .unwrap()
-        .unwrap();
-    let header_preview: Value = serde_json::from_str(
-        source.sync.metadata["source_metadata"]["header"]["json"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    let header: Value = serde_json::from_str(header_preview["json"].as_str().unwrap()).unwrap();
-    assert_eq!(header["private_header_text"], REWRITTEN_HEADER_SECRET);
-}
+        .is_empty());
 
-#[test]
-fn openclaw_rejection_count_survives_unchanged_replay() {
-    let (temp, root, transcript, _index) = openclaw_fixture();
     let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
+    writeln!(file, " completed\"}}}}").unwrap();
     writeln!(file, "{{malformed-openclaw-record").unwrap();
     drop(file);
-
-    let mut store = Store::open(temp.path().join("rejection-replay.sqlite")).unwrap();
-    let context = ProviderAdapterContext {
-        machine_id: "openclaw-rejection-replay-machine".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root),
-        imported_at: "2026-07-17T12:30:00Z".parse().unwrap(),
-    };
-
-    let first = import_openclaw_session_jsonl_file_batched(
-        &transcript,
-        &mut store,
-        context.clone(),
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(first.failed, 1);
-    assert_eq!(first.imported_events, 65);
-
-    let cursor_path = provider_path_identity(&transcript).unwrap();
-    let stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::OpenClaw,
-        OPENCLAW_SOURCE_FORMAT,
-        &cursor_path,
+    let completed = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(completed.imported_events, 1);
+    assert_eq!(completed.failed, 1);
+    assert_eq!(
+        store
+            .events_for_session(openclaw_session(&store).id)
+            .unwrap()
+            .len(),
+        1
     );
-    let cursor = store
-        .get_sync_cursor(None, "openclaw-rejection-replay-machine", &stream)
-        .unwrap()
-        .unwrap();
-    let certified = CertifiedProviderCursor::decode(&cursor.cursor).unwrap();
-    assert_eq!(certified.rejected_records(), 1);
-    let checkpoint_text = String::from_utf8_lossy(certified.parser_checkpoint().as_bytes());
-    assert!(!checkpoint_text.contains("rejected_records"));
-
-    let replay = import_openclaw_session_jsonl_file_batched(
-        &transcript,
-        &mut store,
-        context,
-        import_options(),
-    )
-    .unwrap();
-    assert_eq!(replay.imported_sessions, 0);
-    assert_eq!(replay.imported_events, 0);
+    let replay = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
     assert_eq!(replay.failed, 1);
-    assert_eq!(replay.skipped_sessions, 1);
-    assert_eq!(replay.skipped_events, 65);
 }
 
-#[test]
-fn openclaw_observation_detects_index_and_transcript_changes() {
-    let (_temp, _root, transcript, index) = openclaw_fixture();
-    let observation = OpenClawSessionObservation::read(&transcript).unwrap();
-    assert!(observation.revalidate(&transcript).unwrap());
+struct RecordingSink {
+    store_path: PathBuf,
+    progress: Mutex<Option<ProOutputProgress>>,
+    pages: AtomicUsize,
+    outputs: AtomicUsize,
+    saw_core_before_page: AtomicBool,
+}
 
+impl RecordingSink {
+    fn new(store_path: PathBuf) -> Self {
+        Self {
+            store_path,
+            progress: Mutex::new(None),
+            pages: AtomicUsize::new(0),
+            outputs: AtomicUsize::new(0),
+            saw_core_before_page: AtomicBool::new(false),
+        }
+    }
+}
+
+impl ProOutputSink for RecordingSink {
+    fn inventory_generation(&self) -> u64 {
+        1
+    }
+
+    fn materializer_revision(&self) -> &str {
+        "openclaw-nativepath-test-materializer-v1"
+    }
+
+    fn observe_source(
+        &self,
+        _source: &OutputSourceIdentity,
+    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
+        Ok(self.progress.lock().unwrap().clone())
+    }
+
+    fn materialize_page(
+        &self,
+        page: ProOutputMaterializationPage,
+    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
+        let core = Store::open_read_only(&self.store_path)
+            .map_err(|error| ProOutputSinkError::new("test_store", error.to_string()))?;
+        if !core
+            .list_sessions()
+            .map_err(|error| ProOutputSinkError::new("test_sessions", error.to_string()))?
+            .is_empty()
+        {
+            self.saw_core_before_page.store(true, Ordering::SeqCst);
+        }
+        self.pages.fetch_add(1, Ordering::SeqCst);
+        self.outputs
+            .fetch_add(page.observations.len(), Ordering::SeqCst);
+        let committed_cursor = page.next_safe_cursor.clone();
+        *self.progress.lock().unwrap() = Some(ProOutputProgress {
+            source_epoch: page.source_epoch,
+            observed_revision: page.observed_revision.clone(),
+            cursor: Some(committed_cursor.clone()),
+            parser_revision: page.parser_revision.clone(),
+            materializer_revision: page.materializer_revision.clone(),
+            terminal: page.terminal,
+        });
+        Ok(ProOutputPageResult {
+            source_epoch: page.source_epoch,
+            committed_cursor,
+            accepted_outputs: u32::try_from(page.observations.len()).unwrap(),
+            materialized_facts: 0,
+            replayed: false,
+        })
+    }
+}
+
+#[derive(Default)]
+struct FailingSink {
+    behind: AtomicBool,
+}
+
+impl ProOutputSink for FailingSink {
+    fn inventory_generation(&self) -> u64 {
+        1
+    }
+
+    fn materializer_revision(&self) -> &str {
+        "openclaw-nativepath-failing-materializer-v1"
+    }
+
+    fn observe_source(
+        &self,
+        _source: &OutputSourceIdentity,
+    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
+        Ok(None)
+    }
+
+    fn materialize_page(
+        &self,
+        _page: ProOutputMaterializationPage,
+    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
+        Err(ProOutputSinkError::new(
+            "intentional_test_failure",
+            "output sink failure",
+        ))
+    }
+
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.store(true, Ordering::SeqCst);
+    }
+}
+
+fn import(root: &Path, store: &mut Store, import_profile: ImportProfile) -> ProviderImportSummary {
+    import_openclaw_history(
+        root,
+        store,
+        OpenClawImportOptions {
+            machine_id: MACHINE.to_owned(),
+            source_path: Some(root.to_path_buf()),
+            imported_at: "2026-07-25T12:30:00Z".parse().unwrap(),
+            import_profile,
+            ..OpenClawImportOptions::default()
+        },
+    )
+    .unwrap()
+}
+
+fn openclaw_session(store: &Store) -> ctx_history_core::Session {
+    store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| {
+            session.provider == CaptureProvider::OpenClaw
+                && session.role_hint.as_deref() != Some("relationship_placeholder")
+        })
+        .unwrap()
+}
+
+fn transcript_path(root: &Path) -> PathBuf {
+    root.join("agents/personal-agent/sessions/session-1.jsonl")
+}
+
+fn header(id: &str) -> Value {
+    json!({
+        "type": "session",
+        "id": id,
+        "timestamp": "2026-07-25T12:00:00Z",
+        "cwd": "/workspace/openclaw",
+    })
+}
+
+fn message(id: &str, role: &str, content: &str) -> Value {
+    json!({
+        "type": "message",
+        "id": id,
+        "timestamp": "2026-07-25T12:00:01Z",
+        "message": {
+            "role": role,
+            "content": content,
+        }
+    })
+}
+
+fn tool_result(id: &str, exit_code: i32, content: &str) -> Value {
+    json!({
+        "type": "message",
+        "id": id,
+        "timestamp": "2026-07-25T12:00:02Z",
+        "message": {
+            "role": "tool",
+            "name": "bash",
+            "tool_call_id": format!("call-{id}"),
+            "exit_code": exit_code,
+            "duration_ms": 17,
+            "content": content,
+            "input": {"command": format!("command-{id}")},
+        }
+    })
+}
+
+fn write_fixture(path: &Path, records: &[Value], label: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    fs::write(path, bytes).unwrap();
     fs::write(
-        &index,
+        path.parent().unwrap().join("sessions.json"),
         json!({
             "session-1": {
                 "sessionId": "session-1",
-                "label": "changed OpenClaw metadata"
+                "label": label,
+            },
+            "session-output": {
+                "sessionId": "session-output",
+                "label": label,
+            },
+            "session-tail": {
+                "sessionId": "session-tail",
+                "label": label,
             }
         })
         .to_string(),
     )
     .unwrap();
-    assert!(!observation.revalidate(&transcript).unwrap());
-
-    let changed_index_observation = OpenClawSessionObservation::read(&transcript).unwrap();
-    let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
-    writeln!(file, "{}", json!({"type": "custom", "id": "changed"})).unwrap();
-    drop(file);
-    assert!(!changed_index_observation.revalidate(&transcript).unwrap());
 }
 
-#[test]
-fn openclaw_tree_ignores_jsonl_outside_session_directories() {
-    let (temp, root, _transcript, _index) = openclaw_fixture();
-    let unrelated = root.join("diagnostics.jsonl");
-    fs::write(
-        &unrelated,
-        format!(
-            "{}\n{}\n",
-            json!({
-                "type": "session",
-                "id": "unrelated-session",
-                "timestamp": "2026-07-17T12:00:00Z"
-            }),
-            json!({
-                "type": "message",
-                "id": "unrelated-message",
-                "timestamp": "2026-07-17T12:00:01Z",
-                "message": {
-                    "role": "user",
-                    "content": "must not be imported"
-                }
-            })
-        ),
-    )
-    .unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let context = ProviderAdapterContext {
-        machine_id: "openclaw-tree-filter-machine".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root.clone()),
-        imported_at: "2026-07-17T12:30:00Z".parse().unwrap(),
-    };
-
-    let summary =
-        import_openclaw_session_jsonl_tree_batched(&root, &mut store, context, import_options())
-            .unwrap();
-
-    assert_eq!(summary.imported_sessions, 1);
-    assert!(store
-        .session_by_external_session(CaptureProvider::OpenClaw, "unrelated-session")
-        .unwrap()
-        .is_none());
+fn append_record(path: &Path, record: &Value) {
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    serde_json::to_writer(&mut file, record).unwrap();
+    file.write_all(b"\n").unwrap();
 }

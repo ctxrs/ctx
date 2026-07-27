@@ -1,12 +1,13 @@
 use std::{fs, io::Write};
 
+use ctx_history_core::ContentRef;
 use serde_json::{json, Value};
 
 use super::*;
 use crate::complete_content::jsonl::JsonlCompleteContentResolver;
 use crate::complete_content::{
-    AuthorizedSourceRoute, CompleteContentSourceLocator, ResultContentResolverRegistry,
-    SourceAccessBroker, SourceSnapshot,
+    verified_content_profile_for_locator, AuthorizedSourceRoute, CompleteContentSourceLocator,
+    ResultContentResolverRegistry, SourceAccessBroker, SourceSnapshot,
 };
 use crate::test_support_paths::tempdir;
 

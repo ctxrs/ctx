@@ -1,4 +1,4 @@
-use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
+use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
 use super::*;
@@ -45,81 +45,22 @@ fn standalone_result_content_profile_tokens_are_stable_and_unique() {
     assert_eq!(unique.len(), profiles.len());
 }
 
-fn test_native_event(event_type: EventType, text: &str, body: Value) -> ProviderEventEnvelope {
-    test_native_event_for_provider(CaptureProvider::Codex, event_type, text, body)
+struct TestPolicyEvent {
+    payload: Value,
 }
 
-fn test_native_event_for_provider(
-    provider: CaptureProvider,
-    event_type: EventType,
-    text: &str,
-    body: Value,
-) -> ProviderEventEnvelope {
-    native_event(NativeEventDraft {
-        provider,
-        source_format: "test_provider",
-        provider_session_id: "session-1".to_owned(),
-        provider_event_index: 1,
-        provider_event_hash: None,
-        cursor: "line:1".to_owned(),
-        event_type,
-        role: Some(EventRole::Assistant),
-        occurred_at: "2026-07-07T12:00:00Z".parse().unwrap(),
-        text: text.to_owned(),
-        body,
-        metadata: json!({}),
-    })
-}
-
-#[test]
-fn every_non_codex_provider_routes_through_safe_result_evidence_policy() {
-    let narrative = "RESULT_NARRATIVE_MUST_NOT_RETAIN";
-    let hash = "0123456789abcdef0123456789abcdef01234567";
-    let url = "https://github.com/ctxrs/ctx/pull/123?token=secret#fragment";
-    let text = format!("created commit {hash} {url} {narrative}");
-    let providers = crate::provider_source_specs()
-        .iter()
-        .map(|spec| spec.provider)
-        .filter(|provider| *provider != CaptureProvider::Codex)
-        .collect::<Vec<_>>();
-    assert_eq!(providers.len(), 40);
-
-    for provider in providers {
-        let call_id = format!("{}-call", provider.as_str());
-        let event = test_native_event_for_provider(
-            provider,
-            EventType::CommandOutput,
-            &text,
-            json!({
-                "call_id": call_id,
-                "exit_code": 0,
-                "output": text,
-            }),
-        );
-        let rendered = event.payload.to_string();
-        assert_eq!(event.payload["result_outcome"], "success");
-        assert!(
-            rendered.contains(hash),
-            "{} lost commit id",
-            provider.as_str()
-        );
-        assert!(
-            rendered.contains("https://github.com/ctxrs/ctx/pull/123"),
-            "{} lost forge artifact URL",
-            provider.as_str()
-        );
-        assert!(
-            rendered.contains(&call_id),
-            "{} lost call/result correlation",
-            provider.as_str()
-        );
-        assert!(
-            !rendered.contains(narrative),
-            "{} leaked narrative",
-            provider.as_str()
-        );
-        assert!(!rendered.contains("token=secret"));
-        assert!(!rendered.contains("fragment"));
+fn test_native_event(event_type: EventType, text: &str, body: Value) -> TestPolicyEvent {
+    let retained_text = provider_policy_event_text(event_type, text, &body);
+    let retained_body = provider_policy_body(event_type, &body);
+    TestPolicyEvent {
+        payload: json!({
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
+            "result_evidence": provider_result_identifier_evidence(event_type, text, &body),
+            "result_outcome": provider_result_outcome_evidence(event_type, &body),
+            "source_format": "test_provider",
+            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+        }),
     }
 }
 
@@ -155,45 +96,33 @@ fn result_evidence_abstains_on_unknown_and_keeps_failure_correlation_only() {
 
 #[test]
 fn result_outcome_requires_one_bounded_explicit_consistent_signal() {
-    let providers = [
-        CaptureProvider::Claude,
-        CaptureProvider::Cursor,
-        CaptureProvider::OpenHands,
-    ];
-    for provider in providers {
-        let event =
-            |body| test_native_event_for_provider(provider, EventType::ToolOutput, "", body);
-        assert_eq!(
-            event(json!({"call_id": "unknown"})).payload["result_outcome"],
-            Value::Null,
-            "{} treated call-ID-only evidence as success",
-            provider.as_str()
-        );
-        assert_eq!(
-            event(json!({"call_id": "success", "exit_code": 0})).payload["result_outcome"],
-            "success"
-        );
-        assert_eq!(
-            event(json!({"call_id": "failure", "success": false})).payload["result_outcome"],
-            "failure"
-        );
-        assert_eq!(
-            event(json!({"call_id": "truncated", "truncated": true})).payload["result_outcome"],
-            Value::Null
-        );
-        assert_eq!(
-            event(json!({
-                "results": [
-                    {"call_id": "one", "success": true},
-                    {"call_id": "two", "exit_code": 1},
-                ]
-            }))
-            .payload["result_outcome"],
-            Value::Null,
-            "{} collapsed ambiguous multi-call outcomes",
-            provider.as_str()
-        );
-    }
+    let event = |body| test_native_event(EventType::ToolOutput, "", body);
+    assert_eq!(
+        event(json!({"call_id": "unknown"})).payload["result_outcome"],
+        Value::Null,
+    );
+    assert_eq!(
+        event(json!({"call_id": "success", "exit_code": 0})).payload["result_outcome"],
+        "success"
+    );
+    assert_eq!(
+        event(json!({"call_id": "failure", "success": false})).payload["result_outcome"],
+        "failure"
+    );
+    assert_eq!(
+        event(json!({"call_id": "truncated", "truncated": true})).payload["result_outcome"],
+        Value::Null
+    );
+    assert_eq!(
+        event(json!({
+            "results": [
+                {"call_id": "one", "success": true},
+                {"call_id": "two", "exit_code": 1},
+            ]
+        }))
+        .payload["result_outcome"],
+        Value::Null,
+    );
 }
 
 #[test]

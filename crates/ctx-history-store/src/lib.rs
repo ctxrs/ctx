@@ -8,6 +8,7 @@ mod error;
 mod events;
 mod files;
 mod identity;
+mod native_path_group;
 mod object_store;
 mod projection_journal;
 mod raw_sql;
@@ -16,7 +17,9 @@ mod result_storage;
 mod runs;
 mod schema;
 mod search;
+mod semantic_projection_epoch;
 mod sessions;
+mod source_generations;
 mod source_locators;
 mod sources;
 mod summaries;
@@ -24,7 +27,7 @@ mod sync;
 mod vcs;
 
 pub use archive::validate_archive_version;
-pub use bulk_search::{EventSearchBulkGuard, SourceInventoryGuard};
+pub use bulk_search::{EventSearchBulkGroupAdmission, EventSearchBulkGuard, SourceInventoryGuard};
 pub use canonical_observations::{
     CanonicalActor, CanonicalByteRange, CanonicalCitation, CanonicalFileTouch,
     CanonicalObservation, CanonicalObservationKind, CanonicalResultEvidence,
@@ -39,6 +42,15 @@ pub use error::{Result, StoreError};
 pub use events::ProviderEventHashAuthority;
 pub use files::FileTouchScope;
 pub use identity::{LocalDeviceIdentity, LocalWorkspaceIdentity};
+#[doc(hidden)]
+pub use native_path_group::{
+    decode_native_path_committed_cursor, NativePathCommittedCursor, NativePathCursorKey,
+    NativePathCursorSetClassification, NativePathCursorTransition, NativePathGroupAccounting,
+    NativePathGroupReceipt, NativePathPublicationGroup, NATIVE_PATH_MAX_CORE_BOUND_BYTES,
+    NATIVE_PATH_MAX_GROUP_PAGES, NATIVE_PATH_MAX_GROUP_SOURCES, NATIVE_PATH_MAX_JOURNAL_BYTES,
+    NATIVE_PATH_MAX_JOURNAL_RECORDS, NATIVE_PATH_MAX_MUTATION_UNITS,
+    NATIVE_PATH_MAX_RETAINED_PAGE_BYTES,
+};
 pub use projection_journal::{
     JournalCheckpoint, JournalEntityKind, JournalEvidenceIdentity, JournalOperation,
     JournalPosition, JournalProvenanceIdentity, ProjectionJournalRecord, ProjectionJournalSnapshot,
@@ -52,26 +64,37 @@ pub use raw_sql::{
     RAW_SQL_MAX_RESULT_CELLS, RAW_SQL_MAX_RESULT_PREVIEW_BYTES, RAW_SQL_MAX_ROWS_CAP,
     RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
-pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
+pub use search::projections::{EventEmbeddingDocument, EventSearchHit, SemanticProjectionSnapshot};
+pub use semantic_projection_epoch::CanonicalSemanticProjectionVersion;
+pub use source_generations::{
+    NativePathRetainedSourceEntities, NativePathSourceEntityFrontier, NativePathSourceEntityKind,
+    NativePathSourceGenerationKey, NativePathSourceRetirementPage,
+};
 pub use source_locators::{
     AuthorizedSourceRoute, ProviderSourceLocatorObservation, ProviderSourceLocatorResolution,
-    ProviderSourceRouteBinding,
+    ProviderSourceRouteBinding, ProviderSourceRouteRetirement,
+    ProviderSourceRouteRetirementDisposition, ProviderSourceRouteRetirementReason,
 };
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     path::PathBuf,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize},
+        Arc,
+    },
     time::Duration,
 };
 
 use rusqlite::Connection;
 
 pub const SCHEMA_VERSION: i64 = 47;
-pub const FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v5";
-/// Projection input did not change with the local-only verified locator schema.
-/// Neither the verified locator cleanup nor local provider-route binding changes
-/// the canonical helper input. Keep the frozen helper contract on v3.
+pub const FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v7";
+/// Final-v7 adds local NativePath generation-retirement state, but does not
+/// change projected bytes, canonical rows, or journal framing. Mutation
+/// observation, verified locator cleanup, and local provider-route binding
+/// likewise do not change canonical helper input, so the frozen projection
+/// contract remains v3.
 pub const CANONICAL_PROJECTION_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v3";
 
 pub struct Store {
@@ -85,6 +108,12 @@ pub struct Store {
     event_search_projection_capabilities:
         Cell<Option<search::projections::EventSearchProjectionCapabilities>>,
     projection_journal_active_in_batch: Cell<Option<bool>>,
+    projection_journal_group_collector: RefCell<Option<projection_journal::GroupJournalCollector>>,
+    native_path_group_token: Cell<Option<uuid::Uuid>>,
+    native_path_mutation_scope: Arc<AtomicBool>,
+    native_path_group_poisoned: Arc<AtomicBool>,
+    native_path_transaction_control_scope: Cell<bool>,
+    event_search_bulk_group_admission_outstanding: Arc<AtomicBool>,
 }
 
 #[cfg(test)]

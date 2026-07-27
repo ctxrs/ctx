@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType, Fidelity, ProviderEventEnvelope};
+use ctx_history_core::{EventRole, EventType, Fidelity};
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
@@ -57,29 +57,26 @@ pub(crate) struct TaskJsonEventInput {
     pub(crate) raw: Value,
 }
 
-pub(super) fn task_json_history_item_event(value: &Value) -> Option<Value> {
-    let text = task_json_string_field(value, &["task", "title", "summary", "name"])?;
-    let mut object = serde_json::Map::new();
-    object.insert("role".to_owned(), Value::String("user".to_owned()));
-    object.insert("content".to_owned(), Value::String(text));
-    object.insert("type".to_owned(), Value::String("history_item".to_owned()));
-    if let Some(ts) = value
-        .get("ts")
-        .or_else(|| value.get("timestamp"))
-        .or_else(|| value.get("createdAt"))
-    {
-        object.insert("timestamp".to_owned(), ts.clone());
-    }
-    Some(Value::Object(object))
+pub(super) struct TaskJsonEventDraft {
+    pub(super) provider_event_index: u64,
+    pub(super) provider_event_hash: String,
+    pub(super) cursor: String,
+    pub(super) event_type: EventType,
+    pub(super) role: Option<EventRole>,
+    pub(super) occurred_at: DateTime<Utc>,
+    pub(super) fidelity: Fidelity,
+    pub(super) idempotency_key: String,
+    pub(super) payload: Value,
+    pub(super) metadata: Value,
 }
 
-pub(crate) fn task_json_event(
+pub(super) fn task_json_event_draft(
     spec: TaskJsonProviderSpec,
     task_id: &str,
     input: TaskJsonEventInput,
     event_ordinal: usize,
     occurred_at: DateTime<Utc>,
-) -> ProviderEventEnvelope {
+) -> TaskJsonEventDraft {
     let event_type = task_json_event_type(&input.raw, input.source);
     let role = Some(task_json_event_role(&input.raw, input.source));
     let text = task_json_event_text(&input.raw, input.source, event_type);
@@ -90,20 +87,19 @@ pub(crate) fn task_json_event(
         .unwrap_or_else(|| format!("{}-{}", input.source, input.native_index));
     let event_id = format!("{task_id}:{}:{native_id}", input.source);
 
-    ProviderEventEnvelope {
+    TaskJsonEventDraft {
         provider_event_index: event_ordinal as u64,
-        provider_event_hash: Some(event_id.clone()),
-        cursor: Some(event_id.clone()),
+        provider_event_hash: event_id.clone(),
+        cursor: event_id.clone(),
         event_type,
         role,
         occurred_at,
         fidelity: Fidelity::Imported,
-        idempotency_key: Some(format!(
+        idempotency_key: format!(
             "provider-event:{}:{}:{event_id}",
             spec.provider.as_str(),
             spec.source_format
-        )),
-        artifacts: Vec::new(),
+        ),
         payload: json!({
             "entry_type": task_json_entry_type(&input.raw, input.source),
             "event_id": event_id,
@@ -253,13 +249,6 @@ fn task_json_content_has(value: &Value, expected: &str) -> bool {
                 .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
         })
         .unwrap_or(false)
-}
-
-pub(super) fn task_json_event_time(value: &Value) -> Option<DateTime<Utc>> {
-    task_json_time_field(
-        value,
-        &["timestamp", "ts", "createdAt", "created_at", "time", "date"],
-    )
 }
 
 fn task_json_model(value: &Value) -> Option<Value> {

@@ -10,9 +10,22 @@ use crate::connection::{
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
+pub(crate) fn provider_output_run_is_retained_failure(run: &Run) -> bool {
+    let is_provider_output_run = run
+        .sync
+        .metadata
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        == Some("provider_command_output");
+    !is_provider_output_run || matches!(run.status, RunStatus::Failed | RunStatus::Cancelled)
+}
+
 impl Store {
     pub fn upsert_run(&self, run: &Run) -> Result<()> {
         self.with_import_batch_write(|| {
+            if !provider_output_run_is_retained_failure(run) {
+                return Ok(());
+            }
             self.conn.execute(
                 r#"
                 INSERT INTO runs
@@ -70,6 +83,9 @@ impl Store {
 
     pub fn insert_run_if_absent(&self, run: &Run) -> Result<bool> {
         self.with_import_batch_write(|| {
+            if !provider_output_run_is_retained_failure(run) {
+                return Ok(false);
+            }
             let changed = self
                 .conn
                 .prepare_cached(
@@ -179,4 +195,65 @@ pub(crate) fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         source_id: parse_optional_uuid(row.get(14)?)?,
         sync: sync_metadata_from_row(row, 15, 16, 17, 18, 19, 20)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+    use ctx_history_core::{Fidelity, SyncMetadata};
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn provider_output_run(id: Uuid, status: RunStatus) -> Run {
+        let now: DateTime<Utc> = "2026-07-23T00:00:00Z".parse().unwrap();
+        Run {
+            id,
+            history_record_id: None,
+            session_id: None,
+            run_type: RunType::Command,
+            status,
+            started_at: now,
+            ended_at: Some(now),
+            exit_code: None,
+            cwd: None,
+            command_preview: Some("cargo test".to_owned()),
+            input_blob_id: None,
+            output_blob_id: None,
+            timestamps: EntityTimestamps {
+                created_at: now,
+                updated_at: now,
+            },
+            source_id: None,
+            sync: SyncMetadata {
+                fidelity: Fidelity::Imported,
+                metadata: json!({"source": "provider_command_output"}),
+                ..SyncMetadata::default()
+            },
+        }
+    }
+
+    #[test]
+    fn provider_output_success_and_partial_runs_are_elided_but_failures_remain() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let success = provider_output_run(Uuid::new_v4(), RunStatus::Succeeded);
+        let partial = provider_output_run(Uuid::new_v4(), RunStatus::Partial);
+        let failure = provider_output_run(Uuid::new_v4(), RunStatus::Failed);
+
+        store.upsert_run(&success).unwrap();
+        assert!(!store.insert_run_if_absent(&partial).unwrap());
+        assert!(store.insert_run_if_absent(&failure).unwrap());
+
+        assert!(matches!(
+            store.get_run(success.id),
+            Err(StoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.get_run(partial.id),
+            Err(StoreError::NotFound(_))
+        ));
+        assert_eq!(store.get_run(failure.id).unwrap().status, RunStatus::Failed);
+    }
 }

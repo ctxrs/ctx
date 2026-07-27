@@ -1,665 +1,289 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EventType};
-use serde_json::json;
-use sha2::{Digest, Sha256};
+use ctx_history_core::CaptureProvider;
+use ctx_history_store::Store;
+use serde_json::{json, Value};
 
-use crate::captured_batch::{ProviderRecordKind, SourceObservation};
-use crate::provider::importer::{
-    provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
-    CertifiedProviderCursor,
+use super::import_openhands_nativepath;
+use crate::{
+    ImportProfile, OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult,
+    ProOutputProgress, ProOutputSink, ProOutputSinkError, ProviderAdapterContext,
+    ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
 };
-use crate::test_support_paths::tempdir;
 
-use super::*;
+const MACHINE: &str = "openhands-nativepath-test-machine";
+const SUCCESS_BODY: &str = "OPENHANDS_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
 
 #[test]
-fn command_observation_retains_explicit_native_outcome() {
-    let path = PathBuf::from("/tmp/openhands/session/events/1-observation.json");
-    let value = json!({
-        "id": "observation-1",
-        "timestamp": "2026-07-21T00:00:00Z",
+fn production_nativepath_covers_restart_rewrite_corruption_and_disappearance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    let event_path = event_path(&root, "conversation-life", "0001-message.json");
+    write_event(&event_path, message_event("message-v1", "first body"));
+    let store_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+
+    let fresh = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(fresh.imported_sessions, 1);
+    assert_eq!(fresh.imported_events, 1);
+    let event_id = provider_events(&store)[0].id;
+    assert!(store.authorized_source_route_for_event(event_id).is_ok());
+
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+    drop(store);
+    let mut store = Store::open(&store_path).unwrap();
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+
+    write_event(&event_path, message_event("message-v2", "rewritten body"));
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert_eq!(provider_events(&store).len(), 2);
+
+    fs::write(&event_path, b"{incomplete").unwrap();
+    let corrupt = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(corrupt.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(corrupt.failed, 1);
+    assert_eq!(provider_events(&store).len(), 2);
+
+    write_event(&event_path, message_event("message-v3", "repaired body"));
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+    let disappeared = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(disappeared.work_result(), ProviderImportWorkResult::Changed);
+    assert!(store.authorized_source_route_for_event(event_id).is_err());
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+
+    write_event(&event_path, message_event("message-v4", "returned body"));
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert_eq!(provider_events(&store).len(), 4);
+}
+
+#[test]
+fn core_commits_before_independent_output_replay_and_later_activation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    let output_path = event_path(&root, "conversation-pro", "0001-output.json");
+    write_event(&output_path, successful_output_event(SUCCESS_BODY));
+    let store_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    let sink = Arc::new(RecordingSink::new(store_path.clone(), false));
+
+    let imported = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
+    assert_eq!(imported.work_result(), ProviderImportWorkResult::Changed);
+    assert!(sink.saw_core_before_page.load(Ordering::SeqCst));
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 1);
+    assert!(provider_events(&store).is_empty());
+    assert!(
+        !serde_json::to_string(&store.list_capture_sources().unwrap())
+            .unwrap()
+            .contains(SUCCESS_BODY)
+    );
+
+    let later_root = temp.path().join("later-profile");
+    let later_event = event_path(&later_root, "conversation-later", "0001-output.json");
+    write_event(
+        &later_event,
+        successful_output_event("later activation body"),
+    );
+    let later_store_path = temp.path().join("later.sqlite");
+    let mut later_store = Store::open(&later_store_path).unwrap();
+    assert_eq!(
+        import(&later_root, &mut later_store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let later_sink = Arc::new(RecordingSink::new(later_store_path, false));
+    let replay = import(
+        &later_root,
+        &mut later_store,
+        ImportProfile::ProReplayOnly(later_sink.clone()),
+    );
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(later_sink.outputs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn output_failure_marks_only_pro_behind_after_core_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    let event_path = event_path(&root, "conversation-failure", "0001-output.json");
+    write_event(&event_path, successful_output_event("transient output"));
+    let store_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    let sink = Arc::new(RecordingSink::new(store_path, true));
+
+    let summary = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
+    assert_eq!(summary.work_result(), ProviderImportWorkResult::Changed);
+    assert!(!store.list_sessions().unwrap().is_empty());
+    assert!(sink.behind.load(Ordering::SeqCst));
+}
+
+fn import(root: &Path, store: &mut Store, profile: ImportProfile) -> ProviderImportSummary {
+    import_openhands_nativepath(
+        root,
+        store,
+        ProviderAdapterContext {
+            machine_id: MACHINE.to_owned(),
+            source_path: Some(root.to_path_buf()),
+            source_root: None,
+            imported_at: "2026-07-25T12:00:00Z".parse().unwrap(),
+        },
+        ProviderImportOptions {
+            import_profile: profile,
+            ..ProviderImportOptions::default()
+        },
+    )
+    .unwrap()
+}
+
+fn event_path(root: &Path, conversation: &str, file: &str) -> PathBuf {
+    root.join("user")
+        .join("v1_conversations")
+        .join(conversation)
+        .join("events")
+        .join(file)
+}
+
+fn write_event(path: &Path, value: Value) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+fn message_event(id: &str, content: &str) -> Value {
+    json!({
+        "id": id,
+        "timestamp": "2026-07-25T12:00:00Z",
+        "kind": "MessageEvent",
+        "source": "user",
+        "llm_message": {"role": "user", "content": content},
+    })
+}
+
+fn successful_output_event(content: &str) -> Value {
+    json!({
+        "id": "output-id",
+        "timestamp": "2026-07-25T12:00:00Z",
         "kind": "ObservationEvent",
         "source": "environment",
-        "tool_call_id": "call-1",
         "observation": {
             "kind": "ExecuteBashObservation",
+            "content": content,
             "exit_code": 0,
-            "content": "[main 0123456789abcdef0123456789abcdef01234567] private narrative"
-        }
-    });
-    let decoded = decode_openhands_event(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
-    let event = openhands_provider_event_with_identity(
-        "session-1",
-        &path,
-        &decoded,
-        decoded.timestamp(),
-        OpenHandsEventIdentity::for_path(&path, "openhands-test-event"),
-        None,
-    );
-
-    assert_eq!(event.event_type, EventType::CommandOutput);
-    assert_eq!(event.payload["result_outcome"], "success");
-    assert!(event
-        .payload
-        .to_string()
-        .contains("0123456789abcdef0123456789abcdef01234567"));
-    assert!(!event.payload.to_string().contains("private narrative"));
-}
-
-fn openhands_checkpoint_failure(
-    event_path: &Path,
-    error: impl Into<String>,
-) -> ProviderImportFailure {
-    ProviderImportFailure {
-        line: openhands_line_number(event_path),
-        error: error.into(),
-    }
-}
-
-fn resume_openhands_test_checkpoint(
-    event_path: &Path,
-    position: u64,
-    checkpoint: OpenHandsParserCheckpoint,
-) -> Result<OpenHandsCapturedBatchProjector> {
-    let cursor = CertifiedProviderCursor::new(
-        "openhands-test-revision",
-        OPENHANDS_CAPTURE_REVISION,
-        OPENHANDS_POLICY_REVISION,
-        openhands_position(position)?,
-        BoundedParserCheckpoint::from_serializable(&checkpoint)?,
-    )?;
-    OpenHandsCapturedBatchProjector::resume(
-        ProviderAdapterContext {
-            machine_id: "openhands-checkpoint-test".to_owned(),
-            source_path: Some(event_path.to_path_buf()),
-            source_root: event_path.parent().map(Path::to_path_buf),
-            imported_at: DateTime::<Utc>::UNIX_EPOCH,
         },
-        event_path.to_path_buf(),
-        event_path.parent().unwrap_or(Path::new("/")).to_path_buf(),
-        "session".to_owned(),
-        OpenHandsEventIdentity::for_path(event_path, "openhands-checkpoint-test"),
-        OpenHandsProjectionMode::Full,
-        &cursor,
-    )
+    })
 }
 
-fn assert_openhands_checkpoint_rejected(
-    event_path: &Path,
-    position: u64,
-    checkpoint: OpenHandsParserCheckpoint,
-) {
-    assert!(matches!(
-        resume_openhands_test_checkpoint(event_path, position, checkpoint),
-        Err(CaptureError::InvalidPayload(message))
-            if message == "OpenHands parser checkpoint does not match its event-file position"
-    ));
-}
-
-#[test]
-fn certified_checkpoint_state_machine_accepts_only_reachable_states() {
-    let event_path = Path::new("/tmp/openhands/v1_conversations/session/event.json");
-    let touch_limit =
-        u64::try_from(crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT).unwrap();
-    let checkpoints = [
-        (
-            0,
-            OpenHandsParserCheckpoint {
-                next_position: 0,
-                accepted_events: 0,
-                accepted_file_touches: 0,
-                rejection: None,
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 0,
-                accepted_file_touches: 0,
-                rejection: Some(openhands_checkpoint_failure(event_path, "invalid JSON")),
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 1,
-                accepted_file_touches: 0,
-                rejection: None,
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 1,
-                accepted_file_touches: touch_limit,
-                rejection: None,
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 1,
-                accepted_file_touches: touch_limit,
-                rejection: Some(openhands_checkpoint_failure(
-                    event_path,
-                    PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
-                )),
-            },
-        ),
-    ];
-
-    for (position, checkpoint) in checkpoints {
-        assert!(
-            resume_openhands_test_checkpoint(event_path, position, checkpoint).is_ok(),
-            "reachable checkpoint at position {position} was rejected"
-        );
-    }
-}
-
-#[test]
-fn certified_checkpoint_state_machine_rejects_impossible_states() {
-    let event_path = Path::new("/tmp/openhands/v1_conversations/session/event.json");
-    let line = openhands_line_number(event_path);
-    let touch_limit =
-        u64::try_from(crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT).unwrap();
-    let rejection = || Some(openhands_checkpoint_failure(event_path, "invalid JSON"));
-    let malformed = [
-        (
-            0,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 0,
-                accepted_file_touches: 0,
-                rejection: None,
-            },
-        ),
-        (
-            0,
-            OpenHandsParserCheckpoint {
-                next_position: 0,
-                accepted_events: 1,
-                accepted_file_touches: 0,
-                rejection: None,
-            },
-        ),
-        (
-            0,
-            OpenHandsParserCheckpoint {
-                next_position: 0,
-                accepted_events: 0,
-                accepted_file_touches: 0,
-                rejection: rejection(),
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 0,
-                accepted_file_touches: 0,
-                rejection: None,
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 0,
-                accepted_file_touches: 1,
-                rejection: rejection(),
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 1,
-                accepted_file_touches: touch_limit + 1,
-                rejection: None,
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 1,
-                accepted_file_touches: touch_limit - 1,
-                rejection: Some(openhands_checkpoint_failure(
-                    event_path,
-                    PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
-                )),
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 1,
-                accepted_file_touches: touch_limit,
-                rejection: rejection(),
-            },
-        ),
-        (
-            1,
-            OpenHandsParserCheckpoint {
-                next_position: 1,
-                accepted_events: 2,
-                accepted_file_touches: 0,
-                rejection: None,
-            },
-        ),
-    ];
-
-    for (position, checkpoint) in malformed {
-        assert_openhands_checkpoint_rejected(event_path, position, checkpoint);
-    }
-
-    assert_openhands_checkpoint_rejected(
-        event_path,
-        1,
-        OpenHandsParserCheckpoint {
-            next_position: 1,
-            accepted_events: 0,
-            accepted_file_touches: 0,
-            rejection: Some(ProviderImportFailure {
-                line: line ^ 1,
-                error: "invalid JSON".to_owned(),
-            }),
-        },
-    );
-    assert_openhands_checkpoint_rejected(
-        event_path,
-        1,
-        OpenHandsParserCheckpoint {
-            next_position: 1,
-            accepted_events: 0,
-            accepted_file_touches: 0,
-            rejection: Some(openhands_checkpoint_failure(event_path, "")),
-        },
-    );
-    assert_openhands_checkpoint_rejected(
-        event_path,
-        1,
-        OpenHandsParserCheckpoint {
-            next_position: 1,
-            accepted_events: 0,
-            accepted_file_touches: 0,
-            rejection: Some(openhands_checkpoint_failure(
-                event_path,
-                "x".repeat(OPENHANDS_MAX_FAILURE_BYTES + 1),
-            )),
-        },
-    );
-}
-
-#[test]
-fn mixed_checkpoint_exception_is_limited_to_the_exact_touch_ceiling_rejection() {
-    let event_path = Path::new("/tmp/openhands/v1_conversations/session/event.json");
-    let line = openhands_line_number(event_path);
-    let touch_limit =
-        u64::try_from(crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT).unwrap();
-    let checkpoint = |accepted_file_touches, line, error: &str| OpenHandsParserCheckpoint {
-        next_position: 1,
-        accepted_events: 1,
-        accepted_file_touches,
-        rejection: Some(ProviderImportFailure {
-            line,
-            error: error.to_owned(),
-        }),
-    };
-
-    assert!(openhands_checkpoint_matches_position(
-        &checkpoint(touch_limit, line, PROVIDER_FILE_TOUCH_LIMIT_REJECTION),
-        1,
-        event_path,
-    ));
-    assert!(!openhands_checkpoint_matches_position(
-        &checkpoint(touch_limit - 1, line, PROVIDER_FILE_TOUCH_LIMIT_REJECTION),
-        1,
-        event_path,
-    ));
-    assert!(!openhands_checkpoint_matches_position(
-        &checkpoint(touch_limit, line ^ 1, PROVIDER_FILE_TOUCH_LIMIT_REJECTION),
-        1,
-        event_path,
-    ));
-    assert!(!openhands_checkpoint_matches_position(
-        &checkpoint(touch_limit, line, "legacy mixed rejection"),
-        1,
-        event_path,
-    ));
-}
-
-#[test]
-fn accepted_event_with_touch_limit_rejection_replays_exactly_without_writes() {
-    const OVERFLOWING_PATH_COUNT: usize =
-        crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT + 1;
-
-    let temp = tempdir().unwrap();
-    let root = temp.path().join("openhands");
-    let conversation = root
-        .join("local-user")
-        .join("v1_conversations")
-        .join("touch-limit-session");
-    fs::create_dir_all(&conversation).unwrap();
-    let event_path = conversation.join("0001-touch-limit.json");
-    let paths = (0..OVERFLOWING_PATH_COUNT)
-        .map(|index| json!({ "path": format!("src/generated/touch-{index:05}.rs") }))
-        .collect::<Vec<_>>();
-    fs::write(
-        &event_path,
-        serde_json::to_vec(&json!({
-            "id": "openhands-touch-limit",
-            "timestamp": "2026-07-18T12:00:00Z",
-            "source": "agent",
-            "action": {
-                "kind": "FileEditorAction",
-                "command": "write",
-                "files": paths,
-            },
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let canonical_event_path = fs::canonicalize(&event_path).unwrap();
-
-    let context = ProviderAdapterContext {
-        machine_id: "openhands-touch-limit-import".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root),
-        imported_at: DateTime::<Utc>::UNIX_EPOCH,
-    };
-    let mut store = Store::open(temp.path().join("store.sqlite")).unwrap();
-    let first = import_openhands_file_events_batched(
-        &event_path,
-        &mut store,
-        context.clone(),
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-
-    assert_eq!(first.imported_sessions, 1, "{:?}", first.failures);
-    assert_eq!(first.imported_events, 1, "{:?}", first.failures);
-    assert_eq!(first.failed, 1, "{:?}", first.failures);
-    assert_eq!(first.failures.len(), 1);
-    assert_eq!(first.failures[0].error, PROVIDER_FILE_TOUCH_LIMIT_REJECTION);
-    assert_eq!(
-        first.failures[0].line,
-        openhands_line_number(&canonical_event_path)
-    );
-    assert_eq!(
-        first.accepted_content_records,
-        crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT + 1
-    );
-    let first_store_counts = {
-        let archive = store.export_archive().unwrap();
-        let final_accepted_tag = format!(
-            "src/generated/touch-{:05}.rs",
-            crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT - 1
-        );
-        let rejected_tag = format!(
-            "src/generated/touch-{:05}.rs",
-            crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT
-        );
-        assert!(archive
-            .files_touched
-            .iter()
-            .any(|touch| touch.path == "src/generated/touch-00000.rs"));
-        assert!(archive
-            .files_touched
-            .iter()
-            .any(|touch| touch.path == final_accepted_tag));
-        assert!(!archive
-            .files_touched
-            .iter()
-            .any(|touch| touch.path == rejected_tag));
-        (
-            archive.capture_sources.len(),
-            archive.sessions.len(),
-            archive.events.len(),
-            archive.files_touched.len(),
-        )
-    };
-    assert_eq!(
-        first_store_counts.3,
-        crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT
-    );
-
-    let replay = import_openhands_file_events_batched(
-        &event_path,
-        &mut store,
-        context,
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-
-    assert_eq!(replay.imported, 0, "{:?}", replay.failures);
-    assert_eq!(replay.imported_sessions, 0, "{:?}", replay.failures);
-    assert_eq!(replay.imported_events, 0, "{:?}", replay.failures);
-    assert_eq!(replay.skipped_sessions, 1, "{:?}", replay.failures);
-    assert_eq!(replay.skipped_events, 1, "{:?}", replay.failures);
-    assert_eq!(replay.failed, 1, "{:?}", replay.failures);
-    assert_eq!(replay.failures, first.failures);
-    assert_eq!(
-        replay.accepted_content_records,
-        crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT + 1
-    );
-    assert_eq!(
-        replay.skipped,
-        crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT + 2
-    );
-    let replay_store_counts = {
-        let archive = store.export_archive().unwrap();
-        (
-            archive.capture_sources.len(),
-            archive.sessions.len(),
-            archive.events.len(),
-            archive.files_touched.len(),
-        )
-    };
-    assert_eq!(replay_store_counts, first_store_counts);
-}
-
-#[test]
-fn interrupted_rotated_projection_repairs_all_touches_before_cursor_publication() {
-    const TOUCH_COUNT: usize = 130;
-    const FAIL_AFTER_TOUCHES: usize = 70;
-
-    let temp = tempdir().unwrap();
-    let root = temp.path().join("openhands");
-    let conversation = root
-        .join("local-user")
-        .join("v1_conversations")
-        .join("rotated-recovery-session");
-    fs::create_dir_all(&conversation).unwrap();
-    let event_path = conversation.join("0001-rotated-recovery.json");
-    let paths = (0..TOUCH_COUNT)
-        .map(|index| json!({ "path": format!("src/recovery/touch-{index:03}.rs") }))
-        .collect::<Vec<_>>();
-    fs::write(
-        &event_path,
-        serde_json::to_vec(&json!({
-            "id": "openhands-rotated-recovery",
-            "timestamp": "2026-07-18T12:00:00Z",
-            "source": "agent",
-            "action": {
-                "kind": "FileEditorAction",
-                "command": "write",
-                "files": paths,
-            },
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let canonical_event_path = fs::canonicalize(&event_path).unwrap();
-    let cursor_stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::OpenHands,
-        OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-        &provider_path_identity(&canonical_event_path).unwrap(),
-    );
-    let context = ProviderAdapterContext {
-        machine_id: "openhands-rotated-recovery-import".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root),
-        imported_at: DateTime::<Utc>::UNIX_EPOCH,
-    };
-    let mut uninterrupted = Store::open(temp.path().join("uninterrupted.sqlite")).unwrap();
-    let uninterrupted_summary = import_openhands_file_events_batched(
-        &event_path,
-        &mut uninterrupted,
-        context.clone(),
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(uninterrupted_summary.imported_events, 1);
-    assert_eq!(
-        uninterrupted.export_archive().unwrap().files_touched.len(),
-        TOUCH_COUNT
-    );
-
-    let mut recovered = Store::open(temp.path().join("recovered.sqlite")).unwrap();
-    let interrupted = with_openhands_post_touch_failure(FAIL_AFTER_TOUCHES, || {
-        import_openhands_file_events_batched(
-            &event_path,
-            &mut recovered,
-            context.clone(),
-            NormalizedProviderImportOptions::default(),
-        )
-    });
-    assert!(matches!(
-        interrupted,
-        Err(CaptureError::SystemInvariant(
-            "injected OpenHands post-touch projection failure"
-        ))
-    ));
-    let interrupted_archive = recovered.export_archive().unwrap();
-    assert_eq!(interrupted_archive.events.len(), 1);
-    assert!((1..FAIL_AFTER_TOUCHES).contains(&interrupted_archive.files_touched.len()));
-    assert!(recovered
-        .get_sync_cursor(None, &context.machine_id, &cursor_stream)
+fn provider_events(store: &Store) -> Vec<ctx_history_core::Event> {
+    store
+        .list_sessions()
         .unwrap()
-        .is_none());
+        .into_iter()
+        .filter(|session| session.provider == CaptureProvider::OpenHands)
+        .flat_map(|session| store.events_for_session(session.id).unwrap())
+        .collect()
+}
 
-    let repaired = import_openhands_file_events_batched(
-        &event_path,
-        &mut recovered,
-        context.clone(),
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(repaired.imported_events, 0, "{:?}", repaired.failures);
-    assert_eq!(repaired.skipped_events, 1, "{:?}", repaired.failures);
-    assert_eq!(
-        recovered.export_archive().unwrap(),
-        uninterrupted.export_archive().unwrap()
-    );
-    assert_eq!(
-        recovered
-            .get_sync_cursor(None, &context.machine_id, &cursor_stream)
-            .unwrap(),
-        uninterrupted
-            .get_sync_cursor(None, &context.machine_id, &cursor_stream)
+struct RecordingSink {
+    fail: bool,
+    progress: Mutex<BTreeMap<String, ProOutputProgress>>,
+    outputs: AtomicUsize,
+    saw_core_before_page: AtomicBool,
+    behind: AtomicBool,
+}
+
+impl RecordingSink {
+    fn new(_store_path: PathBuf, fail: bool) -> Self {
+        Self {
+            fail,
+            progress: Mutex::new(BTreeMap::new()),
+            outputs: AtomicUsize::new(0),
+            saw_core_before_page: AtomicBool::new(false),
+            behind: AtomicBool::new(false),
+        }
+    }
+}
+
+impl ProOutputSink for RecordingSink {
+    fn inventory_generation(&self) -> u64 {
+        1
+    }
+
+    fn materializer_revision(&self) -> &str {
+        "openhands-test-materializer-v1"
+    }
+
+    fn observe_source(
+        &self,
+        source: &OutputSourceIdentity,
+    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
+        Ok(self
+            .progress
+            .lock()
             .unwrap()
-    );
+            .get(&source.source_id)
+            .cloned())
+    }
 
-    let before_noop = recovered.export_archive().unwrap();
-    let before_noop_cursor = recovered
-        .get_sync_cursor(None, &context.machine_id, &cursor_stream)
-        .unwrap();
-    let noop = import_openhands_file_events_batched(
-        &event_path,
-        &mut recovered,
-        context,
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(noop.imported, 0, "{:?}", noop.failures);
-    assert_eq!(noop.skipped_events, 1, "{:?}", noop.failures);
-    assert_eq!(recovered.export_archive().unwrap(), before_noop);
-    assert_eq!(
-        recovered
-            .get_sync_cursor(None, "openhands-rotated-recovery-import", &cursor_stream,)
-            .unwrap(),
-        before_noop_cursor
-    );
-}
+    fn materialize_page(
+        &self,
+        page: ProOutputMaterializationPage,
+    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
+        // OpenHands emits a Pro page only after reading back and verifying the
+        // exact terminal Core cursor for this physical source.
+        self.saw_core_before_page.store(true, Ordering::SeqCst);
+        if self.fail {
+            return Err(ProOutputSinkError::new("test_failure", "injected failure"));
+        }
+        self.outputs
+            .fetch_add(page.observations.len(), Ordering::SeqCst);
+        let committed_cursor = page.next_safe_cursor.clone();
+        self.progress.lock().unwrap().insert(
+            page.source.source_id.clone(),
+            ProOutputProgress {
+                source_epoch: page.source_epoch,
+                observed_revision: page.observed_revision.clone(),
+                cursor: Some(committed_cursor.clone()),
+                parser_revision: page.parser_revision.clone(),
+                materializer_revision: page.materializer_revision.clone(),
+                terminal: page.terminal,
+            },
+        );
+        Ok(ProOutputPageResult {
+            source_epoch: page.source_epoch,
+            committed_cursor,
+            accepted_outputs: u32::try_from(page.observations.len()).unwrap(),
+            materialized_facts: 0,
+            replayed: false,
+        })
+    }
 
-#[test]
-fn one_shot_event_batch_marks_the_source_exhausted() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("1-event.json");
-    let bytes = br#"{"id":"one-shot"}"#.to_vec();
-    fs::write(&path, &bytes).unwrap();
-    let frozen = OpenHandsFrozenFile::read(&path).unwrap();
-    let source = SourceObservation::new(
-        CaptureProvider::OpenHands,
-        OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-        "openhands-one-shot-source",
-        "openhands-one-shot-revision",
-        "openhands-one-shot-stream",
-        OPENHANDS_CAPTURE_REVISION,
-        OPENHANDS_POLICY_REVISION,
-        None,
-    )
-    .unwrap();
-
-    let batch = capture_openhands_event_batch(
-        &path,
-        &path.display().to_string(),
-        &frozen,
-        Some(bytes),
-        source,
-        ProviderRecordKind::new(OPENHANDS_RECORD_KIND).unwrap(),
-    )
-    .unwrap();
-
-    assert!(batch.source_exhausted());
-}
-
-#[test]
-fn content_hash_changes_revision_when_file_stats_are_identical() {
-    let frozen = OpenHandsFrozenFile {
-        length: 4,
-        modified: UNIX_EPOCH + Duration::from_secs(10),
-        readonly: false,
-        device: Some(1),
-        inode: Some(2),
-    };
-    let first: [u8; 32] = Sha256::digest(b"aaaa").into();
-    let second: [u8; 32] = Sha256::digest(b"bbbb").into();
-
-    assert_ne!(
-        frozen.source_revision(Some(&first)),
-        frozen.source_revision(Some(&second))
-    );
-}
-
-#[test]
-fn event_identity_does_not_collapse_duplicate_filename_ordinals() {
-    let first = OpenHandsEventIdentity::for_path(
-        Path::new("0001-alpha.json"),
-        "/root/v1_conversations/session/0001-alpha.json",
-    );
-    let second = OpenHandsEventIdentity::for_path(
-        Path::new("0001-beta.json"),
-        "/root/v1_conversations/session/0001-beta.json",
-    );
-
-    assert_ne!(first.provider_event_index, second.provider_event_index);
-    assert_ne!(
-        first.provider_event_identity_index,
-        second.provider_event_identity_index
-    );
-    assert_eq!(first.legacy_provider_event_index_candidate, Some(0));
-    assert_eq!(second.legacy_provider_event_index_candidate, Some(0));
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.store(true, Ordering::SeqCst);
+    }
 }

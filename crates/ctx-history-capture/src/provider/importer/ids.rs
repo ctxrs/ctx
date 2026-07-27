@@ -9,14 +9,6 @@ use crate::{
     fnv1a64, provider::file_touches::MAX_PACKED_PROVIDER_EVENT_INDEX, stable_capture_uuid,
 };
 
-#[cfg(test)]
-pub(crate) fn provider_source_uuid(provider: CaptureProvider, provider_session_id: &str) -> Uuid {
-    stable_capture_uuid(
-        &format!("provider:{}:{provider_session_id}", provider.as_str()),
-        "source",
-    )
-}
-
 pub(crate) fn provider_scoped_source_uuid(
     provider: CaptureProvider,
     provider_session_id: &str,

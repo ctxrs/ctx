@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 
 use ctx_history_capture::{
     discover_provider_sources_for_provider_report, discover_provider_sources_report,
-    provider_source_for_path, DiscoveryReport, ProviderImportSupport, ProviderSource,
-    ProviderSourceStatus,
+    provider_source_for_path, DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport,
+    ProviderImportSupport, ProviderSource, ProviderSourceStatus,
 };
 use ctx_history_core::CaptureProvider;
 
@@ -16,6 +16,9 @@ use crate::history_source_plugins::{
 };
 use crate::identity;
 use crate::provider_args::{cli_supported_provider, ProviderArg};
+
+pub(crate) const MAX_DISCOVERY_ISSUES: usize = 64;
+pub(crate) const MAX_DISCOVERY_ISSUE_MESSAGE_BYTES: usize = 512;
 
 pub(crate) type SourceInfo = ProviderSource;
 pub(crate) fn discovered_plugin_sources_json(data_root: &Path) -> Result<Vec<Value>> {
@@ -102,6 +105,47 @@ pub(crate) fn sources_json(sources: &[SourceInfo]) -> Vec<Value> {
         .collect()
 }
 
+pub(crate) fn discovery_report_issues_json(report: &DiscoveryReport) -> (Vec<Value>, bool) {
+    let issues = report
+        .issues
+        .iter()
+        .take(MAX_DISCOVERY_ISSUES)
+        .map(discovery_issue_json)
+        .collect();
+    (issues, report.issues.len() > MAX_DISCOVERY_ISSUES)
+}
+
+fn discovery_issue_json(issue: &DiscoveryIssue) -> Value {
+    let (message, message_truncated) =
+        bounded_utf8(issue.reason, MAX_DISCOVERY_ISSUE_MESSAGE_BYTES);
+    json!({
+        "provider": issue.provider.as_str(),
+        "path": issue.path,
+        "code": discovery_issue_code(issue.kind),
+        "message": message,
+        "message_truncated": message_truncated,
+    })
+}
+
+fn discovery_issue_code(kind: DiscoveryIssueKind) -> &'static str {
+    match kind {
+        DiscoveryIssueKind::NoDiskHistory => "no_disk_history",
+        DiscoveryIssueKind::SelectorUnreconstructible => "selector_unreconstructible",
+        DiscoveryIssueKind::InsufficientOfficialEvidence => "insufficient_official_evidence",
+    }
+}
+
+fn bounded_utf8(value: &str, maximum_bytes: usize) -> (&str, bool) {
+    if value.len() <= maximum_bytes {
+        return (value, false);
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    (&value[..end], true)
+}
+
 pub(crate) fn plugin_sources_json(sources: &[HistorySourcePluginSource]) -> Vec<Value> {
     sources
         .iter()
@@ -182,4 +226,64 @@ pub(crate) fn import_support_json(support: ProviderImportSupport) -> &'static st
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     identity::home_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue(kind: DiscoveryIssueKind, reason: &'static str) -> DiscoveryIssue {
+        DiscoveryIssue {
+            provider: CaptureProvider::Claude,
+            path: Some(PathBuf::from("relative-provider-root")),
+            kind,
+            reason,
+        }
+    }
+
+    #[test]
+    fn discovery_issue_codes_are_stable_and_typed() {
+        let report = DiscoveryReport {
+            sources: Vec::new(),
+            issues: vec![
+                issue(DiscoveryIssueKind::NoDiskHistory, "memory-only"),
+                issue(
+                    DiscoveryIssueKind::SelectorUnreconstructible,
+                    "unsafe selector",
+                ),
+                issue(
+                    DiscoveryIssueKind::InsufficientOfficialEvidence,
+                    "no official location",
+                ),
+            ],
+        };
+
+        let (issues, truncated) = discovery_report_issues_json(&report);
+
+        assert!(!truncated);
+        assert_eq!(issues[0]["code"], "no_disk_history");
+        assert_eq!(issues[1]["code"], "selector_unreconstructible");
+        assert_eq!(issues[2]["code"], "insufficient_official_evidence");
+    }
+
+    #[test]
+    fn discovery_issue_serialization_bounds_count_and_utf8_message_bytes() {
+        let long_reason: &'static str = Box::leak("€".repeat(200).into_boxed_str());
+        let report = DiscoveryReport {
+            sources: Vec::new(),
+            issues: (0..=MAX_DISCOVERY_ISSUES)
+                .map(|_| issue(DiscoveryIssueKind::SelectorUnreconstructible, long_reason))
+                .collect(),
+        };
+
+        let (issues, truncated) = discovery_report_issues_json(&report);
+
+        assert!(truncated);
+        assert_eq!(issues.len(), MAX_DISCOVERY_ISSUES);
+        for issue in issues {
+            let message = issue["message"].as_str().unwrap();
+            assert!(message.len() <= MAX_DISCOVERY_ISSUE_MESSAGE_BYTES);
+            assert_eq!(issue["message_truncated"], true);
+        }
+    }
 }

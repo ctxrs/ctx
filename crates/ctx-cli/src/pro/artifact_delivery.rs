@@ -17,7 +17,10 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-use super::request_identity::new_idempotency_key;
+use super::{
+    commercial_api::{commercial_http_error, COMMERCIAL_ACCEPT},
+    request_identity::new_idempotency_key,
+};
 
 use super::lifecycle::lifecycle_manifest::{
     platform_target, verified_manifest_for_trust, ProManifest, ReleaseTrust, MAX_ARTIFACT_BYTES,
@@ -31,7 +34,7 @@ const MAX_DOWNLOAD_LIFETIME_SECONDS: u64 = 5 * 60;
 
 pub(crate) struct CommercialArtifactAuth<'a> {
     pub(crate) api_base_url: &'a str,
-    pub(crate) access_token: &'a str,
+    pub(crate) authorization: &'a str,
     pub(crate) release_trust: ReleaseTrust,
 }
 
@@ -112,7 +115,7 @@ pub(crate) fn fetch_latest(
     let envelope_bytes = post_json_bounded(
         &agent,
         &manifest_url,
-        commercial_auth.access_token,
+        commercial_auth.authorization,
         &json!({
             "schema_version": 1,
             "channel": commercial_auth.release_trust.channel.wire_name(),
@@ -133,7 +136,7 @@ pub(crate) fn fetch_latest(
     let authorization_bytes = post_json_bounded(
         &agent,
         &authorization_url,
-        commercial_auth.access_token,
+        commercial_auth.authorization,
         &json!({
             "schema_version": 1,
             "channel": commercial_auth.release_trust.channel.wire_name(),
@@ -187,7 +190,22 @@ fn validate_success_envelope<T>(response: &ApiSuccess<T>) -> Result<()> {
 }
 
 fn validate_auth(auth: &CommercialArtifactAuth<'_>) -> Result<()> {
-    if auth.access_token.is_empty() || auth.access_token.len() > 16 * 1024 {
+    let token = auth
+        .authorization
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
+        .or_else(|| {
+            auth.authorization
+                .strip_prefix("CtxTrial ")
+                .filter(|token| token.len() >= 16)
+        });
+    if token.is_none()
+        || auth.authorization.len() > 16 * 1024
+        || auth
+            .authorization
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
+    {
         bail!("authentication_required: commercial access token is unavailable");
     }
     let _ = api_url(auth.api_base_url, "/v1/artifacts/manifest")?;
@@ -213,26 +231,28 @@ fn api_url(base: &str, path: &str) -> Result<Url> {
 fn post_json_bounded(
     agent: &ureq::Agent,
     url: &Url,
-    access_token: &str,
+    authorization: &str,
     body: &serde_json::Value,
 ) -> Result<Vec<u8>> {
     let body = serde_json::to_vec(body).context("invalid_request: encode commercial request")?;
     let response = agent
         .post(url.as_str())
-        .set("authorization", &format!("Bearer {access_token}"))
+        .set("accept", COMMERCIAL_ACCEPT)
+        .set("authorization", authorization)
         .set("content-type", "application/json")
         .set("idempotency-key", &new_idempotency_key("artifact")?)
-        .send_bytes(&body)
-        .map_err(|error| safe_http_error(error, "commercial API request"))?;
+        .send_bytes(&body);
+    let response =
+        response.map_err(|error| commercial_http_error(error, "commercial API request"))?;
     read_bounded_response(response, MAX_API_RESPONSE_BYTES, "commercial API response")
 }
 
-fn safe_http_error(error: ureq::Error, operation: &str) -> anyhow::Error {
+fn safe_artifact_download_error(error: ureq::Error) -> anyhow::Error {
     match error {
         ureq::Error::Status(status, _) => {
-            anyhow!("service_unavailable: {operation} returned status {status}")
+            anyhow!("service_unavailable: artifact download returned status {status}")
         }
-        ureq::Error::Transport(_) => anyhow!("service_unavailable: {operation} failed"),
+        ureq::Error::Transport(_) => anyhow!("service_unavailable: artifact download failed"),
     }
 }
 
@@ -348,7 +368,7 @@ fn download_and_stage(
         .get(&authorization.url)
         .set("authorization", &authorization.authorization)
         .call()
-        .map_err(|error| safe_http_error(error, "artifact download"))?;
+        .map_err(safe_artifact_download_error)?;
     if response.header("content-type") != Some("application/octet-stream") {
         bail!("invalid_response: artifact download content type is invalid");
     }
@@ -467,6 +487,52 @@ fn cleanup_stage_directory(stage: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pro::commercial_api::{commercial_retry_after, is_retryable_commercial_failure};
+
+    fn test_response(
+        status: u16,
+        content_type: &str,
+        retry_after: Option<&str>,
+        body: &str,
+    ) -> ureq::Response {
+        let retry_after = retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\n{retry_after}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .parse()
+        .unwrap()
+    }
+
+    fn artifact_api_error(
+        status: u16,
+        content_type: &str,
+        retry_after: Option<&str>,
+        body: &str,
+    ) -> anyhow::Error {
+        commercial_http_error(
+            ureq::Error::Status(
+                status,
+                test_response(status, content_type, retry_after, body),
+            ),
+            "commercial API request",
+        )
+    }
+
+    fn worker_problem(code: &str, retryable: bool) -> String {
+        json!({
+            "api_version": "v1",
+            "request_id": "123e4567-e89b-12d3-a456-426614174000",
+            "error": {
+                "code": code,
+                "message": "Worker body detail must stay redacted",
+                "retryable": retryable,
+            },
+        })
+        .to_string()
+    }
 
     #[test]
     fn api_and_download_urls_are_exact_and_never_redirectable() {
@@ -481,6 +547,128 @@ mod tests {
         ] {
             assert!(api_url(invalid, "/v1/artifacts/object").is_err());
         }
+    }
+
+    #[test]
+    fn artifact_problem_responses_preserve_safe_non_transient_failures() {
+        for (status, code, expected_message) in [
+            (
+                401,
+                "authentication_required",
+                "sign in again with `ctx pro`",
+            ),
+            (
+                403,
+                "commercial_access_locked",
+                "an active trial or subscription is required",
+            ),
+            (
+                404,
+                "not_found",
+                "the requested commercial resource was not found",
+            ),
+            (
+                409,
+                "billing_conflict",
+                "multiple active subscriptions need attention",
+            ),
+            (
+                409,
+                "commercial_identity_conflict",
+                "the billing customer belongs to a different signed-in account",
+            ),
+        ] {
+            let error = artifact_api_error(
+                status,
+                "application/problem+json; charset=utf-8",
+                Some("60"),
+                &worker_problem(code, true),
+            );
+            let rendered = error.to_string();
+            assert!(rendered.starts_with(&format!("{code}:")), "{rendered}");
+            assert!(rendered.contains(expected_message), "{rendered}");
+            assert!(!rendered.contains("Worker body detail"), "{rendered}");
+            assert!(!is_retryable_commercial_failure(&error), "{rendered}");
+            assert_eq!(commercial_retry_after(&error), None);
+        }
+    }
+
+    #[test]
+    fn artifact_problem_responses_retain_bounded_transient_retry_semantics() {
+        let rate_limited = artifact_api_error(
+            429,
+            "application/problem+json",
+            Some("999999"),
+            &worker_problem("rate_limited", true),
+        );
+        assert!(is_retryable_commercial_failure(&rate_limited));
+        assert_eq!(
+            commercial_retry_after(&rate_limited),
+            Some(Duration::from_secs(30 * 60))
+        );
+        assert!(rate_limited.to_string().starts_with("rate_limited:"));
+        assert!(!rate_limited.to_string().contains("Worker body detail"));
+
+        let server_error = artifact_api_error(
+            500,
+            "application/problem+json",
+            Some("75"),
+            &worker_problem("internal_error", true),
+        );
+        assert!(is_retryable_commercial_failure(&server_error));
+        assert_eq!(
+            commercial_retry_after(&server_error),
+            Some(Duration::from_secs(75))
+        );
+        assert!(server_error.to_string().starts_with("internal_error:"));
+        assert!(!server_error.to_string().contains("Worker body detail"));
+
+        let invalid_dependency = artifact_api_error(
+            502,
+            "application/problem+json",
+            Some("60"),
+            &worker_problem("dependency_invalid_response", false),
+        );
+        assert!(!is_retryable_commercial_failure(&invalid_dependency));
+        assert_eq!(commercial_retry_after(&invalid_dependency), None);
+    }
+
+    #[test]
+    fn artifact_malformed_error_bodies_are_bounded_and_never_rendered() {
+        let authentication = artifact_api_error(
+            401,
+            "application/problem+json",
+            None,
+            "malformed bearer-secret body",
+        );
+        assert!(!is_retryable_commercial_failure(&authentication));
+        assert!(authentication.to_string().starts_with("invalid_response:"));
+        assert!(!authentication.to_string().contains("bearer-secret"));
+
+        let proxy = artifact_api_error(
+            503,
+            "text/html",
+            Some("999999"),
+            "<html>proxy-secret body</html>",
+        );
+        assert!(is_retryable_commercial_failure(&proxy));
+        assert_eq!(
+            commercial_retry_after(&proxy),
+            Some(Duration::from_secs(30 * 60))
+        );
+        assert!(!proxy.to_string().contains("proxy-secret"));
+
+        let oversized = format!(
+            "bounded-secret{}",
+            "x".repeat(MAX_API_RESPONSE_BYTES as usize)
+        );
+        let oversized = artifact_api_error(503, "application/problem+json", Some("30"), &oversized);
+        assert!(is_retryable_commercial_failure(&oversized));
+        assert_eq!(
+            commercial_retry_after(&oversized),
+            Some(Duration::from_secs(30))
+        );
+        assert!(!oversized.to_string().contains("bounded-secret"));
     }
 
     #[test]

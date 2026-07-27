@@ -177,12 +177,11 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         "tests/fixtures/provider-history/complete-content-jsonl/v1/factory-droid.jsonl";
         (CompleteContentSourceFamily::Jsonl, "factory-droid.message-body.v1", "jsonl-range-v1")
     ),
-    supported_route!(
+    not_needed_route!(
         CaptureProvider::Cursor,
         "cursor_agent_transcript_jsonl_tree",
         VerifiedContentRole::MessageBody,
-        "tests/fixtures/provider-history/complete-content-jsonl/v1/cursor.jsonl";
-        (CompleteContentSourceFamily::Jsonl, "cursor-jsonl.message-body.v1", "jsonl-range-v1")
+        "Cursor NativePath publishes its bounded sanitized canonical message body directly"
     ),
     supported_route!(
         CaptureProvider::Windsurf,
@@ -322,7 +321,7 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         CaptureProvider::Mux,
         "mux_session_jsonl_tree",
         VerifiedContentRole::MessageBody,
-        "provider::providers::mux::captured_batch_tests::mux_materializes_exact_locators_without_redacted_or_missing_results";
+        "complete_content::jsonl::mux::tests::chat_message_survives_append_but_not_record_rewrite";
         (CompleteContentSourceFamily::Jsonl, "mux.message-body.v1", "mux-record-v1")
     ),
     supported_route!(
@@ -456,12 +455,11 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         VerifiedContentRole::ResultBody,
         "the support matrix declares no captured tool or command output for this format"
     ),
-    supported_route!(
+    not_needed_route!(
         CaptureProvider::Qoder,
         "qoder_transcript_jsonl_tree",
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
-        (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::QODER_RESULT_PROFILE, "jsonl-range-v1")
+        "Qoder NativePath deliberately excludes successful result bodies from canonical Core"
     ),
     supported_route!(
         CaptureProvider::Warp,
@@ -539,22 +537,21 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         CaptureProvider::Gemini,
         crate::GEMINI_CLI_SOURCE_FORMAT,
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
+        "provider::providers::native_jsonl::native_path::gemini::tests::gemini_production_nativepath_core_first_failure_isolated_and_replay_catches_up_idempotently";
         (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::GEMINI_RESULT_PROFILE, "jsonl-range-v1")
     ),
     supported_route!(
         CaptureProvider::Tabnine,
         crate::TABNINE_CLI_SOURCE_FORMAT,
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
+        "provider::providers::native_jsonl::native_path::tabnine::tests::production_is_core_first_with_independent_pro_replay";
         (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::TABNINE_RESULT_PROFILE, "jsonl-range-v1")
     ),
-    supported_route!(
+    not_needed_route!(
         CaptureProvider::Cursor,
         "cursor_agent_transcript_jsonl_tree",
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
-        (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::CURSOR_RESULT_PROFILE, "jsonl-range-v1")
+        "Cursor NativePath deliberately excludes successful result bodies from canonical Core"
     ),
     not_needed_route!(
         CaptureProvider::Windsurf,
@@ -573,21 +570,21 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         CaptureProvider::CopilotCli,
         crate::COPILOT_CLI_SOURCE_FORMAT,
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
+        "provider::providers::native_jsonl::native_path::copilot::tests::production_is_core_first_with_independent_pro_replay";
         (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::COPILOT_CLI_RESULT_PROFILE, "jsonl-range-v1")
     ),
     supported_route!(
         CaptureProvider::FactoryAiDroid,
         crate::FACTORY_DROID_SOURCE_FORMAT,
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
+        "provider::providers::native_jsonl::native_path::factory_ai_droid::tests::production_is_core_first_and_pro_failure_is_independent";
         (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::FACTORY_DROID_RESULT_PROFILE, "jsonl-range-v1")
     ),
     supported_route!(
         CaptureProvider::QwenCode,
         "qwen_code_chat_jsonl_tree",
         VerifiedContentRole::ResultBody,
-        "provider::providers::native_jsonl::result_locator_tests::native_import_attaches_verified_result_locators_without_persisting_bodies";
+        "provider::providers::native_jsonl::native_path::qwen_code::tests::core_commits_before_failed_pro_and_later_output_replay_is_independent";
         (CompleteContentSourceFamily::Jsonl, crate::provider::providers::native_jsonl::result_content::QWEN_CODE_RESULT_PROFILE, "jsonl-range-v1")
     ),
     supported_route!(
@@ -642,7 +639,7 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         CaptureProvider::Mux,
         "mux_session_jsonl_tree",
         VerifiedContentRole::ResultBody,
-        "provider::providers::mux::captured_batch_tests::mux_materializes_exact_locators_without_redacted_or_missing_results";
+        "complete_content::jsonl::mux::tests::result_resolution_preserves_exact_boundaries_and_rejects_redaction";
         (CompleteContentSourceFamily::Jsonl, "mux.result-body.v1", "mux-record-v1")
     ),
     supported_route!(

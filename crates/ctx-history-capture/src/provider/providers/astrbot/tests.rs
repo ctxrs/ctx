@@ -1,290 +1,318 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
 use std::{
-    cell::Cell,
-    collections::BTreeMap,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EntityTimestamps, EventRole, SyncCursor};
 use ctx_history_store::Store;
-use rusqlite::{limits::Limit, Connection};
-use serde::Serialize;
-use serde_json::{json, Value};
+use rusqlite::Connection;
 
-use super::codec::*;
-use super::preferences::*;
-use super::producer::*;
-use super::projector::*;
-use super::relationships::*;
-use super::source::*;
-use super::*;
-use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
-use crate::captured_batch::{
-    CapturedBatch, CapturedRecordPayload, NativePosition, SourceObservation,
-    StructuralRejectionKind, CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES,
-    CAPTURE_BATCH_MAX_PARSER_CHECKPOINT_BYTES, CAPTURE_BATCH_MAX_RECORDS,
-};
-use crate::provider::custom_history_jsonl::push_provider_import_failure;
-use crate::provider::importer::{
-    captured_batch_cursor_stream, import_provider_capture_line, provider_path_identity,
-    provider_source_cursor_stream_for_path, BoundedParserCheckpoint, CapturedBatchCursorFinish,
-    CapturedBatchProjector, CertifiedProviderCursor, ProviderImportCaches,
-    ProviderProjectionOutput, ProviderProjectionResult,
-};
-use crate::provider::normalization::provider_timestamp_millis;
-use crate::provider::sqlite::{
-    open_provider_sqlite_readonly, sqlite_schema_fingerprint, with_sqlite_read_snapshot,
-};
 use crate::{
-    CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
-    ProviderNormalizationResult, ASTRBOT_SQLITE_SOURCE_FORMAT,
+    test_support_paths::tempdir, CaptureWorkLimit, ImportProfile, OutputSourceIdentity,
+    ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress, ProOutputSink,
+    ProOutputSinkError, ProviderAdapterContext, ProviderImportOptions, ProviderImportWorkResult,
 };
 
-#[derive(Serialize)]
-struct LegacyCheckpointFixture<'a> {
-    schema_version: u32,
-    source_shape_validated: bool,
-    conversation_rows: &'a BTreeMap<String, i64>,
-    checkpoint_sessions: &'a BTreeMap<String, String>,
+use super::import_astrbot_nativepath;
+
+fn create_database(path: &Path) {
+    let conn = Connection::open(path).expect("open fixture");
+    conn.execute_batch(
+        "pragma user_version = 4;
+         create table conversations (
+             id integer primary key,
+             inner_conversation_id text,
+             conversation_id text,
+             platform_id text,
+             user_id text,
+             content text not null,
+             title text,
+             persona_id text,
+             token_usage text,
+             created_at integer,
+             updated_at integer
+         );
+         create table platform_message_history (
+             id integer primary key,
+             platform_id text,
+             user_id text,
+             sender_id text,
+             sender_name text,
+             content text,
+             llm_checkpoint_id text,
+             created_at integer
+         );
+         create table preferences (scope text, key text, value text);",
+    )
+    .expect("schema");
+}
+
+fn insert_conversation(conn: &Connection, id: i64, session: &str, content: &str) {
+    conn.execute(
+        "insert into conversations (
+             id, inner_conversation_id, conversation_id, platform_id, user_id,
+             content, title, persona_id, token_usage, created_at, updated_at
+         ) values (?1, ?2, ?3, 'webchat', 'user', ?4, 'title', 'persona',
+                   '{\"prompt\":1,\"completion\":2}', ?5, ?6)",
+        rusqlite::params![
+            id,
+            session,
+            format!("conversation-{id}"),
+            content,
+            1_780_000_000_000_i64.saturating_add(id),
+            1_780_000_001_000_i64.saturating_add(id),
+        ],
+    )
+    .expect("conversation");
+}
+
+fn context(path: &Path) -> ProviderAdapterContext {
+    ProviderAdapterContext {
+        machine_id: "astrbot-nativepath-test".to_owned(),
+        source_path: Some(path.to_path_buf()),
+        source_root: None,
+        imported_at: DateTime::<Utc>::from_timestamp_millis(1_790_000_000_000).expect("timestamp"),
+    }
+}
+
+fn options(profile: ImportProfile) -> ProviderImportOptions {
+    ProviderImportOptions {
+        history_record_id: None,
+        capture_work_limit: CaptureWorkLimit::Drain,
+        inventory_observation_token: None,
+        import_profile: profile,
+    }
 }
 
 #[derive(Default)]
-struct CollectingProjectionOutput {
-    normalization: ProviderNormalizationResult,
+struct RecordingSink {
+    state: Mutex<Option<ProOutputProgress>>,
+    content: Mutex<Vec<Vec<u8>>>,
+    behind: Mutex<Vec<&'static str>>,
+    fail_materialization: bool,
 }
 
-impl ProviderProjectionOutput for CollectingProjectionOutput {
-    fn emit_normalization(
-        &mut self,
-        mut normalization: ProviderNormalizationResult,
-    ) -> ProviderProjectionResult<()> {
-        self.normalization.summary.merge(normalization.summary);
-        self.normalization
-            .captures
-            .append(&mut normalization.captures);
-        self.normalization
-            .files_touched
-            .append(&mut normalization.files_touched);
-        Ok(())
+impl ProOutputSink for RecordingSink {
+    fn inventory_generation(&self) -> u64 {
+        7
     }
 
-    fn reject_record(&mut self, line_number: usize, reason: String) {
-        push_provider_import_failure(&mut self.normalization.summary, line_number, reason);
+    fn materializer_revision(&self) -> &str {
+        "astrbot-test-materializer-v1"
     }
-}
 
-fn create_tables(conn: &Connection) {
-    conn.execute_batch(
-        "create table conversations ( \
-             id integer primary key, \
-             inner_conversation_id text, \
-             conversation_id text not null, \
-             platform_id text, \
-             user_id text, \
-             content text not null, \
-             title text, \
-             persona_id text, \
-             token_usage text, \
-             created_at integer, \
-             updated_at integer \
-         ); \
-         create table platform_message_history ( \
-             id integer primary key, \
-             platform_id text, \
-             user_id text, \
-             sender_id text, \
-             sender_name text, \
-             content text, \
-             llm_checkpoint_id text, \
-             created_at integer \
-         ); \
-         create table preferences ( \
-             key text not null, \
-             value text, \
-             scope text \
-         );",
-    )
-    .unwrap();
-}
-
-fn insert_conversation(conn: &Connection, id: i64, session_id: &str, content: &str) {
-    conn.execute(
-        "insert into conversations ( \
-             id, inner_conversation_id, conversation_id, platform_id, user_id, content, \
-             title, persona_id, token_usage, created_at, updated_at \
-         ) values (?1, ?2, ?3, 'platform-test', 'user-test', ?4, ?5, 'persona-test', \
-                   '{\"input\":1}', ?6, ?7)",
-        rusqlite::params![
-            id,
-            session_id,
-            format!("conversation-{id}"),
-            content,
-            format!("Conversation {id}"),
-            1_784_332_800_000_i64.saturating_add(id),
-            1_784_332_900_000_i64.saturating_add(id),
-        ],
-    )
-    .unwrap();
-}
-
-fn insert_platform_message(conn: &Connection, id: i64, checkpoint_id: Option<&str>, content: &str) {
-    conn.execute(
-        "insert into platform_message_history ( \
-             id, platform_id, user_id, sender_id, sender_name, content, \
-             llm_checkpoint_id, created_at \
-         ) values (?1, 'platform-test', 'user-test', ?2, 'Sender', ?3, ?4, ?5)",
-        rusqlite::params![
-            id,
-            if id % 2 == 0 {
-                "user-test"
-            } else {
-                "assistant-test"
-            },
-            content,
-            checkpoint_id,
-            1_784_333_000_000_i64.saturating_add(id),
-        ],
-    )
-    .unwrap();
-}
-
-fn context(path: Option<PathBuf>) -> ProviderAdapterContext {
-    ProviderAdapterContext {
-        machine_id: "astrbot-batch-test".to_owned(),
-        source_path: path,
-        source_root: None,
-        imported_at: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
+    fn observe_source(
+        &self,
+        _source: &OutputSourceIdentity,
+    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
+        Ok(self.state.lock().expect("state").clone())
     }
-}
 
-fn test_source(identity: &str) -> SourceObservation {
-    SourceObservation::new(
-        CaptureProvider::AstrBot,
-        ASTRBOT_SQLITE_SOURCE_FORMAT,
-        format!("astrbot-sqlite:{identity}"),
-        format!("astrbot-snapshot:{identity}"),
-        format!("provider:astrbot:{identity}"),
-        ASTRBOT_CAPTURE_REVISION,
-        ASTRBOT_POLICY_REVISION,
-        None,
-    )
-    .unwrap()
-}
-
-fn import_source(path: &Path) -> (SourceObservation, String) {
-    let canonical_path = fs::canonicalize(path).unwrap();
-    let snapshot = astrbot_source_snapshot(path).unwrap();
-    let cursor_path = provider_path_identity(&canonical_path).unwrap();
-    let cursor_stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::AstrBot,
-        ASTRBOT_SQLITE_SOURCE_FORMAT,
-        &cursor_path,
-    );
-    let conn = open_provider_sqlite_readonly(path).unwrap();
-    let user_version = conn
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .unwrap();
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn).unwrap();
-    let source = SourceObservation::new(
-        CaptureProvider::AstrBot,
-        ASTRBOT_SQLITE_SOURCE_FORMAT,
-        format!("astrbot-sqlite:{cursor_path}"),
-        astrbot_source_revision(&snapshot, user_version, &schema_fingerprint),
-        cursor_stream,
-        ASTRBOT_CAPTURE_REVISION,
-        ASTRBOT_POLICY_REVISION,
-        None,
-    )
-    .unwrap();
-    let stream = captured_batch_cursor_stream(&source);
-    (source, stream)
-}
-
-fn seed_certified_cursor(
-    store: &Store,
-    context: &ProviderAdapterContext,
-    stream: &str,
-    cursor: &CertifiedProviderCursor,
-) -> SyncCursor {
-    let observed_at = context
-        .imported_at
-        .checked_sub_signed(chrono::Duration::seconds(1))
-        .unwrap();
-    let seeded = SyncCursor {
-        id: crate::stable_capture_uuid(
-            &format!(
-                "provider-cursor:{}:{}:{}",
-                CaptureProvider::AstrBot.as_str(),
-                context.machine_id,
-                stream
-            ),
-            "provider-sync-cursor",
-        ),
-        team_id: None,
-        device_id: context.machine_id.clone(),
-        stream: stream.to_owned(),
-        cursor: cursor.encode().unwrap(),
-        last_synced_at: Some(observed_at),
-        timestamps: EntityTimestamps {
-            created_at: observed_at,
-            updated_at: observed_at,
-        },
-    };
-    store.upsert_sync_cursor(&seeded).unwrap();
-    seeded
-}
-
-fn produce_all(
-    conn: &Connection,
-    source: SourceObservation,
-    start: NativePosition,
-) -> Vec<CapturedBatch> {
-    let sql = AstrBotSql::new(conn).unwrap();
-    let mut checkpoint = AstrBotParserCheckpoint::empty();
-    checkpoint.source_shape_validated = true;
-    if astrbot_relationship_projection_needed(conn, &sql, &start).unwrap() {
-        astrbot_prepare_relationship_projection(conn, &sql).unwrap();
-    }
-    let mut fetcher = AstrBotRowFetcher::new(conn, sql, checkpoint).unwrap();
-    let mut producer =
-        SqliteLogicalRowBatchProducer::new(source, start, move |position| fetcher.fetch(position));
-    let mut batches = Vec::new();
-    loop {
-        let batch = with_sqlite_read_snapshot(conn, || {
-            producer.next_batch().map_err(astrbot_sqlite_batch_error)
+    fn materialize_page(
+        &self,
+        page: ProOutputMaterializationPage,
+    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
+        if self.fail_materialization {
+            return Err(ProOutputSinkError::new(
+                "astrbot_test_output_failure",
+                "retry this output page",
+            ));
+        }
+        let accepted_outputs = u32::try_from(page.observations.len()).unwrap_or(u32::MAX);
+        self.content.lock().expect("content").extend(
+            page.observations
+                .iter()
+                .map(|output| output.content.clone()),
+        );
+        *self.state.lock().expect("state") = Some(ProOutputProgress {
+            source_epoch: page.source_epoch,
+            observed_revision: page.observed_revision.clone(),
+            cursor: Some(page.next_safe_cursor.clone()),
+            parser_revision: page.parser_revision.clone(),
+            materializer_revision: page.materializer_revision.clone(),
+            terminal: page.terminal,
+        });
+        Ok(ProOutputPageResult {
+            source_epoch: page.source_epoch,
+            committed_cursor: page.next_safe_cursor,
+            accepted_outputs,
+            materialized_facts: accepted_outputs,
+            replayed: false,
         })
-        .unwrap();
-        let Some(batch) = batch else {
-            break;
-        };
-        assert!(conn.is_autocommit());
-        batches.push(batch);
     }
-    batches
+
+    fn mark_behind(&self, error: ProOutputSinkError) {
+        self.behind.lock().expect("behind").push(error.code);
+    }
 }
 
-fn explain_query_plan(
-    conn: &Connection,
-    sql: &str,
-    params: impl IntoIterator<Item = i64>,
-) -> Vec<String> {
-    let mut statement = conn.prepare(&format!("explain query plan {sql}")).unwrap();
-    statement
-        .query_map(rusqlite::params_from_iter(params), |row| row.get(3))
-        .unwrap()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap()
+#[test]
+fn astrbot_nativepath_core_is_idempotent_and_replays_outputs_later() {
+    let temp = tempdir().expect("temp");
+    let source = temp.path().join("data_v4.db");
+    create_database(&source);
+    let conn = Connection::open(&source).expect("open");
+    insert_conversation(
+        &conn,
+        1,
+        "session-1",
+        r#"[
+            {"role":"user","content":"stable-user-text"},
+            {"role":"tool","id":"tool-1","success":true,"content":"PRO_OUTPUT_SECRET"},
+            {"role":"assistant","content":"stable-assistant-text"}
+        ]"#,
+    );
+    drop(conn);
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).expect("store");
+    let first = import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("core import");
+    assert_eq!(first.work_result(), ProviderImportWorkResult::Changed);
+    let sessions = store.list_sessions().expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    let events = store.events_for_session(sessions[0].id).expect("events");
+    assert_eq!(events.len(), 2, "successful output must not enter Core");
+    assert!(events
+        .iter()
+        .all(|event| !event.payload.to_string().contains("PRO_OUTPUT_SECRET")));
+
+    let replay = import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("idempotent replay");
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+
+    let sink = Arc::new(RecordingSink::default());
+    import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::ProReplayOnly(sink.clone())),
+    )
+    .expect("Pro replay");
+    assert_eq!(
+        sink.content.lock().expect("content").as_slice(),
+        &[b"PRO_OUTPUT_SECRET".to_vec()]
+    );
+
+    let failing_sink = Arc::new(RecordingSink {
+        fail_materialization: true,
+        ..RecordingSink::default()
+    });
+    import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::ProReplayOnly(failing_sink.clone())),
+    )
+    .expect("Pro failure must not fail committed Core");
+    assert_eq!(
+        failing_sink.behind.lock().expect("behind").as_slice(),
+        &["astrbot_test_output_failure"]
+    );
+    assert_eq!(store.list_sessions().expect("Core retained").len(), 1);
 }
 
-mod lifecycle;
-mod preferences;
-mod producer;
-mod projection;
-mod relationships;
+#[test]
+fn astrbot_nativepath_append_and_rewrite_keep_stable_session_identity() {
+    let temp = tempdir().expect("temp");
+    let source = temp.path().join("data_v4.db");
+    create_database(&source);
+    let conn = Connection::open(&source).expect("open");
+    insert_conversation(
+        &conn,
+        1,
+        "session-1",
+        r#"[{"role":"user","content":"before"}]"#,
+    );
+    drop(conn);
+    let mut store = Store::open(temp.path().join("work.sqlite")).expect("store");
+    import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("first");
+    let original_session = store.list_sessions().expect("sessions")[0].id;
+
+    let conn = Connection::open(&source).expect("open append");
+    insert_conversation(
+        &conn,
+        2,
+        "session-2",
+        r#"[{"role":"assistant","content":"appended"}]"#,
+    );
+    drop(conn);
+    import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("append");
+    assert_eq!(store.list_sessions().expect("sessions").len(), 2);
+
+    let conn = Connection::open(&source).expect("open rewrite");
+    conn.execute(
+        "update conversations set content = ?1 where id = 1",
+        [r#"[{"role":"user","content":"after-rewrite"}]"#],
+    )
+    .expect("rewrite");
+    drop(conn);
+    import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("rewrite import");
+    let session = store.get_session(original_session).expect("stable session");
+    let events = store.events_for_session(session.id).expect("events");
+    assert!(events
+        .iter()
+        .any(|event| event.payload.to_string().contains("after-rewrite")));
+}
+
+#[test]
+fn astrbot_nativepath_retires_a_missing_source_route_without_deleting_core() {
+    let temp = tempdir().expect("temp");
+    let source = temp.path().join("data_v4.db");
+    create_database(&source);
+    let conn = Connection::open(&source).expect("open");
+    insert_conversation(
+        &conn,
+        1,
+        "session-1",
+        r#"[{"role":"user","content":"retained-history"}]"#,
+    );
+    drop(conn);
+    let mut store = Store::open(temp.path().join("work.sqlite")).expect("store");
+    import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("import");
+    let moved = temp.path().join("removed.db");
+    fs::rename(&source, moved).expect("remove source");
+    let retirement = import_astrbot_nativepath(
+        &source,
+        &mut store,
+        context(&source),
+        options(ImportProfile::CoreOnly),
+    )
+    .expect("retire");
+    assert_eq!(retirement.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(store.list_sessions().expect("history retained").len(), 1);
+}

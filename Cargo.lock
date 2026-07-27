@@ -684,6 +684,7 @@ dependencies = [
  "jsonc-parser",
  "libc",
  "libloading",
+ "objc2-foundation",
  "ort",
  "predicates",
  "proptest",
@@ -692,6 +693,7 @@ dependencies = [
  "secret-service",
  "security-framework",
  "security-framework-sys",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -708,6 +710,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "xz2",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]
@@ -718,6 +721,7 @@ dependencies = [
  "chrono",
  "ctx-history-core",
  "ctx-history-store",
+ "ctx-pro-host-protocol",
  "directories",
  "json5",
  "jsonc-parser",
@@ -744,6 +748,7 @@ version = "0.26.0"
 dependencies = [
  "chrono",
  "directories",
+ "libc",
  "regex",
  "serde",
  "serde_json",

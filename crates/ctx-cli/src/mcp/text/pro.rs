@@ -1,206 +1,195 @@
 use serde_json::Value;
 
-use super::{clip_chars, clip_inline, push_omitted_line, value_field};
-
-const MAX_RESULTS: usize = 8;
-const MAX_FACTS: usize = 12;
-const MAX_CITATIONS: usize = 12;
-const MAX_COMMANDS: usize = 4;
-const MAX_TEXT_CHARS: usize = 320;
-
-#[derive(Clone, Copy)]
-pub(super) enum ProTextKind {
-    Resource,
-    Location,
-    Blame,
-    Timeline,
-    Related,
-    Facts,
+pub(super) fn is_blame_result(value: &Value) -> bool {
+    value
+        .pointer("/target/kind")
+        .and_then(Value::as_str)
+        .is_some()
+        && value.get("matches").and_then(Value::as_array).is_some()
+        && value.get("evidence").and_then(Value::as_array).is_some()
 }
 
-impl ProTextKind {
-    pub(super) fn from_payload_type(payload_type: &str) -> Option<Self> {
-        match payload_type {
-            "pro_resource" => Some(Self::Resource),
-            "pro_location" => Some(Self::Location),
-            "pro_blame" => Some(Self::Blame),
-            "pro_timeline" => Some(Self::Timeline),
-            "pro_related" => Some(Self::Related),
-            "pro_facts" => Some(Self::Facts),
-            _ => None,
-        }
-    }
-
-    const fn payload_type(self) -> &'static str {
-        match self {
-            Self::Resource => "pro_resource",
-            Self::Location => "pro_location",
-            Self::Blame => "pro_blame",
-            Self::Timeline => "pro_timeline",
-            Self::Related => "pro_related",
-            Self::Facts => "pro_facts",
-        }
-    }
-
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Resource => "ctx show resource",
-            Self::Location => "ctx locate resource",
-            Self::Blame => "ctx blame",
-            Self::Timeline => "ctx timeline",
-            Self::Related => "ctx related",
-            Self::Facts => "ctx facts",
-        }
-    }
-}
-
-pub(super) fn render_pro_text(value: &Value, kind: ProTextKind) -> String {
-    let records = array(value, "results");
-    let flattened_citations = array(value, "citations");
-    let commands = array(value, "suggested_next_commands");
-    let mut out = format!("{}\npayload_type: {}\n", kind.title(), kind.payload_type());
-    push_scalar(&mut out, "schema_version", value.get("schema_version"), "");
-
+pub(super) fn render_blame_text(value: &Value) -> String {
+    let mut out = String::from("ctx blame\n");
     if let Some(target) = value.get("target") {
-        push_resource_fields(&mut out, "target", target, "");
-        push_scalar(&mut out, "target.repository", target.get("repository"), "");
-        push_scalar(&mut out, "target.line", target.get("line"), "");
-    }
-    push_scalar(&mut out, "stale", value.get("stale"), "");
-    out.push_str(&format!("results: {}\n", records.len()));
-    out.push_str(&format!("citations: {}\n", flattened_citations.len()));
-    push_pagination(&mut out, value.get("pagination"));
-
-    for (index, record) in records.iter().take(MAX_RESULTS).enumerate() {
-        push_record(&mut out, index + 1, record);
-    }
-    push_omitted_line(&mut out, records.len(), MAX_RESULTS, "results");
-
-    if !commands.is_empty() {
-        out.push_str(&format!("\nsuggested_next_commands: {}\n", commands.len()));
-        for (index, command) in commands.iter().take(MAX_COMMANDS).enumerate() {
-            push_scalar(
-                &mut out,
-                &format!("{}. command", index + 1),
-                Some(command),
-                "",
-            );
+        push_scalar(&mut out, "target.kind", target.get("kind"), "");
+        match target.get("kind").and_then(Value::as_str) {
+            Some("file") => {
+                push_scalar(&mut out, "target.path", target.get("path"), "");
+                push_resource(&mut out, "target.repository", target.get("repository"), "");
+                if let Some(lines) = target.get("requested_lines") {
+                    push_scalar(&mut out, "target.lines.start", lines.get("start"), "");
+                    push_scalar(&mut out, "target.lines.end", lines.get("end"), "");
+                }
+            }
+            Some("commit") => {
+                push_resource(&mut out, "target.commit", target.get("commit"), "");
+                push_resource(&mut out, "target.repository", target.get("repository"), "");
+            }
+            Some("pull_request") => {
+                push_scalar(&mut out, "target.selector", target.get("selector"), "");
+                push_resource(
+                    &mut out,
+                    "target.pull_request",
+                    target.get("pull_request"),
+                    "",
+                );
+                push_resource(&mut out, "target.repository", target.get("repository"), "");
+            }
+            Some(_) | None => {}
         }
-        push_omitted_line(&mut out, commands.len(), MAX_COMMANDS, "commands");
+    }
+    if let Some(snapshot) = value.get("git_snapshot") {
+        push_scalar(
+            &mut out,
+            "git_snapshot.head_oid",
+            snapshot.get("head_oid"),
+            "",
+        );
+        push_scalar(
+            &mut out,
+            "git_snapshot.worktree_status",
+            snapshot.get("worktree_status"),
+            "",
+        );
+    }
+
+    let matches = array(value, "matches");
+    out.push_str(&format!("matches: {}\n", matches.len()));
+    for (index, value) in matches.iter().enumerate() {
+        render_match(&mut out, index + 1, value);
+    }
+
+    let evidence = array(value, "evidence");
+    out.push_str(&format!("\nevidence: {}\n", evidence.len()));
+    for item in evidence {
+        render_evidence(&mut out, item);
+    }
+
+    if let Some(next) = value.get("next") {
+        push_scalar(&mut out, "next.reason", next.get("reason"), "");
+        push_scalar(&mut out, "next.cursor", next.get("cursor"), "");
     }
     out
 }
 
-pub(super) fn render_unknown_pro_text(value: &Value) -> String {
-    let payload_type = value_field(value, "payload_type").unwrap_or_else(|| "unknown".to_owned());
-    format!(
-        "ctx pro result\npayload_type: {}\nerror_code: unsupported_payload_type\nstatus: not_rendered\n",
-        clip_inline(&payload_type, MAX_TEXT_CHARS)
-    )
+fn render_match(out: &mut String, index: usize, value: &Value) {
+    out.push_str(&format!("\nmatch {index}\n"));
+    push_scalar(out, "kind", value.get("kind"), "  ");
+    let body = value.get("value").unwrap_or(value);
+    match value.get("kind").and_then(Value::as_str) {
+        Some("file") => render_file_match(out, body),
+        Some("commit") => render_commit_match(out, body),
+        Some("pull_request") => render_pull_request_match(out, body),
+        Some(_) | None => {}
+    }
 }
 
-fn push_pagination(out: &mut String, pagination: Option<&Value>) {
-    let Some(pagination) = pagination else {
+fn render_file_match(out: &mut String, value: &Value) {
+    push_scalar(out, "id", value.get("id"), "  ");
+    if let Some(lines) = value.get("lines") {
+        push_scalar(out, "lines.start", lines.get("start"), "  ");
+        push_scalar(out, "lines.end", lines.get("end"), "  ");
+    }
+    push_resource(out, "commit", value.get("commit"), "  ");
+    push_number_list(
+        out,
+        "line_evidence_numbers",
+        value.get("line_evidence_numbers"),
+        "  ",
+    );
+    for (index, attribution) in array(value, "production").iter().enumerate() {
+        out.push_str(&format!("  production {}\n", index + 1));
+        render_attribution(out, attribution, "    ");
+    }
+}
+
+fn render_commit_match(out: &mut String, value: &Value) {
+    for field in [
+        "fact_id",
+        "fact_type",
+        "predicate",
+        "fact_occurred_at_ms",
+        "confidence",
+        "state",
+    ] {
+        push_scalar(out, field, value.get(field), "  ");
+    }
+    push_resource(out, "subject", value.get("subject"), "  ");
+    push_resource(out, "object", value.get("object"), "  ");
+    push_resource(out, "direct_actor", value.get("direct_actor"), "  ");
+    push_resource(out, "owning_root", value.get("owning_root"), "  ");
+    push_number_list(out, "evidence_numbers", value.get("evidence_numbers"), "  ");
+}
+
+fn render_pull_request_match(out: &mut String, value: &Value) {
+    push_resource(out, "pull_request", value.get("pull_request"), "  ");
+    let Some(relationship) = value.get("relationship") else {
         return;
     };
-    push_scalar(out, "pagination.truncated", pagination.get("truncated"), "");
-    push_scalar(
+    push_scalar(out, "relationship.kind", relationship.get("kind"), "  ");
+    let body = relationship.get("value").unwrap_or(relationship);
+    match relationship.get("kind").and_then(Value::as_str) {
+        Some("activity") => {
+            for field in [
+                "fact_id",
+                "action",
+                "fact_occurred_at_ms",
+                "confidence",
+                "state",
+            ] {
+                push_scalar(out, field, body.get(field), "  ");
+            }
+            push_resource(out, "session", body.get("session"), "  ");
+            push_resource(out, "direct_actor", body.get("direct_actor"), "  ");
+            push_resource(out, "owning_root", body.get("owning_root"), "  ");
+            push_number_list(out, "evidence_numbers", body.get("evidence_numbers"), "  ");
+        }
+        Some("commit") => {
+            push_scalar(out, "fact_id", body.get("fact_id"), "  ");
+            push_scalar(out, "relationship", body.get("relationship"), "  ");
+            push_resource(out, "commit", body.get("commit"), "  ");
+            push_number_list(out, "evidence_numbers", body.get("evidence_numbers"), "  ");
+            for (index, attribution) in array(body, "production").iter().enumerate() {
+                out.push_str(&format!("  production {}\n", index + 1));
+                render_attribution(out, attribution, "    ");
+            }
+        }
+        Some(_) | None => {}
+    }
+}
+
+fn render_attribution(out: &mut String, value: &Value, indent: &str) {
+    push_scalar(out, "id", value.get("id"), indent);
+    push_scalar(out, "relationship", value.get("relationship"), indent);
+    push_resource(
         out,
-        "pagination.next_cursor",
-        pagination.get("next_cursor"),
-        "",
+        "producing_session",
+        value.get("producing_session"),
+        indent,
+    );
+    push_resource(out, "direct_actor", value.get("direct_actor"), indent);
+    push_resource(out, "owning_root", value.get("owning_root"), indent);
+    push_scalar(out, "confidence", value.get("confidence"), indent);
+    push_scalar(out, "state", value.get("state"), indent);
+    push_number_list(
+        out,
+        "evidence_numbers",
+        value.get("evidence_numbers"),
+        indent,
     );
 }
 
-fn push_record(out: &mut String, index: usize, record: &Value) {
-    let display = record
-        .get("resource")
-        .and_then(|resource| value_field(resource, "display"))
-        .unwrap_or_else(|| "resource".to_owned());
-    out.push_str(&format!(
-        "\n{}. {}\n",
-        index,
-        clip_inline(&display, MAX_TEXT_CHARS)
-    ));
-    if let Some(resource) = record.get("resource") {
-        push_resource_fields(out, "resource", resource, "   ");
-    }
-    push_scalar(out, "summary", record.get("summary"), "   ");
-    push_scalar(out, "occurred_at_ms", record.get("occurred_at_ms"), "   ");
-
-    let facts = array(record, "facts");
-    let citations = array(record, "citations");
-    out.push_str(&format!("   facts: {}\n", facts.len()));
-    out.push_str(&format!("   citations: {}\n", citations.len()));
-    for (fact_index, fact) in facts.iter().take(MAX_FACTS).enumerate() {
-        push_fact(out, fact_index + 1, fact);
-    }
-    push_omitted_line_indented(out, facts.len(), MAX_FACTS, "facts", "   ");
-    for (citation_index, citation) in citations.iter().take(MAX_CITATIONS).enumerate() {
-        push_citation(out, citation_index + 1, citation, "record", "   ");
-    }
-    push_omitted_line_indented(out, citations.len(), MAX_CITATIONS, "citations", "   ");
-}
-
-fn push_fact(out: &mut String, index: usize, fact: &Value) {
-    out.push_str(&format!("\n   fact {index}\n"));
-    for field in ["id", "fact_type"] {
-        push_scalar(out, field, fact.get(field), "      ");
-    }
-    if let Some(subject) = fact.get("subject") {
-        push_resource_fields(out, "subject", subject, "      ");
-    }
-    push_scalar(out, "predicate", fact.get("predicate"), "      ");
-    if let Some(object) = fact.get("object") {
-        push_fact_object(out, object);
-    }
-    for field in [
-        "confidence",
-        "state",
-        "detector_version",
-        "owning_root_session_id",
-        "direct_actor_session_id",
-    ] {
-        push_scalar(out, field, fact.get(field), "      ");
-    }
-
-    let citations = array(fact, "citations");
-    out.push_str(&format!("      citations: {}\n", citations.len()));
-    for (citation_index, citation) in citations.iter().take(MAX_CITATIONS).enumerate() {
-        push_citation(out, citation_index + 1, citation, "fact", "      ");
-    }
-    push_omitted_line_indented(out, citations.len(), MAX_CITATIONS, "citations", "      ");
-}
-
-fn push_fact_object(out: &mut String, object: &Value) {
-    push_scalar(out, "object.type", object.get("type"), "      ");
-    let Some(value) = object.get("value") else {
+fn render_evidence(out: &mut String, value: &Value) {
+    let number = value
+        .get("number")
+        .and_then(Value::as_u64)
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    out.push_str(&format!("evidence {number}\n"));
+    let Some(citation) = value.get("citation") else {
         return;
     };
-    if object.get("type").and_then(Value::as_str) == Some("resource") {
-        push_resource_fields(out, "object.value", value, "      ");
-    } else {
-        push_scalar(out, "object.value", Some(value), "      ");
-    }
-}
-
-fn push_resource_fields(out: &mut String, label: &str, resource: &Value, indent: &str) {
-    for field in ["id", "kind", "display"] {
-        push_scalar(
-            out,
-            &format!("{label}.{field}"),
-            resource.get(field),
-            indent,
-        );
-    }
-    if label == "target" {
-        push_scalar(out, "target.value", resource.get("value"), indent);
-    }
-}
-
-fn push_citation(out: &mut String, index: usize, citation: &Value, scope: &str, indent: &str) {
-    out.push_str(&format!("{indent}{scope}_citation {index}\n"));
-    let field_indent = format!("{indent}   ");
     for field in [
         "observation_id",
         "observation_seq",
@@ -214,40 +203,62 @@ fn push_citation(out: &mut String, index: usize, citation: &Value, scope: &str, 
         "source_record_subrecord_index",
         "source_sha256",
     ] {
-        push_scalar(out, field, citation.get(field), &field_indent);
+        push_scalar(out, field, citation.get(field), "  ");
     }
     if let Some(range) = citation.get("byte_range") {
-        push_scalar(out, "byte_range.start", range.get("start"), &field_indent);
+        push_scalar(out, "byte_range.start", range.get("start"), "  ");
         push_scalar(
             out,
             "byte_range.end_exclusive",
             range.get("end_exclusive"),
-            &field_indent,
+            "  ",
         );
+    }
+    if citation.get("provider_output").is_some() {
+        out.push_str("  provider_output: see structuredContent\n");
     }
 }
 
-fn push_scalar(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
-    let Some(value) = value else {
+fn push_resource(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
         return;
     };
-    let text = match value {
-        Value::Null => return,
-        Value::String(value) => single_line_text(value),
+    for field in ["id", "kind", "display"] {
+        push_scalar(out, &format!("{label}.{field}"), value.get(field), indent);
+    }
+}
+
+fn push_number_list(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
+    let Some(values) = value.and_then(Value::as_array) else {
+        return;
+    };
+    let rendered = values
+        .iter()
+        .filter_map(Value::as_u64)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    out.push_str(&format!("{indent}{label}: {rendered}\n"));
+}
+
+fn push_scalar(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return;
+    };
+    let rendered = match value {
+        Value::String(value) => escape_controls(value),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::Array(_) | Value::Object(_) => serde_json::to_string(value)
             .unwrap_or_else(|_| "[unrenderable structured value]".to_owned()),
+        Value::Null => return,
     };
-    out.push_str(&format!(
-        "{indent}{label}: {}\n",
-        clip_chars(&text, MAX_TEXT_CHARS)
-    ));
+    out.push_str(&format!("{indent}{label}: {rendered}\n"));
 }
 
-fn single_line_text(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
+fn escape_controls(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
         match character {
             '\\' => escaped.push_str("\\\\"),
             '\n' => escaped.push_str("\\n"),
@@ -268,146 +279,96 @@ fn array<'a>(value: &'a Value, field: &str) -> &'a [Value] {
         .unwrap_or(&[])
 }
 
-fn push_omitted_line_indented(
-    out: &mut String,
-    total: usize,
-    shown: usize,
-    noun: &str,
-    indent: &str,
-) {
-    if total > shown {
-        out.push_str(&format!(
-            "{indent}... {} more {noun} omitted from text\n",
-            total - shown
-        ));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
 
-    fn query_payload(payload_type: &str) -> Value {
-        let canonical_citation = json!({
-            "observation_id": "11111111-1111-4111-8111-111111111111",
-            "observation_seq": 9,
-            "observation_kind": "vcs_change",
-            "session_id": "22222222-2222-4222-8222-222222222222",
-            "event_id": "33333333-3333-4333-8333-333333333333",
-            "event_seq": 4,
-            "source_path": "/history/session.jsonl",
-            "fixture_line": 7,
-            "source_record_ordinal": 8,
-            "source_record_subrecord_index": 2,
-            "byte_range": {"start": 10, "end_exclusive": 42},
-            "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        });
-        json!({
-            "schema_version": 1,
-            "payload_type": payload_type,
+    #[test]
+    fn fallback_contains_every_match_and_evidence_without_payload_labels() {
+        let value = json!({
             "target": {
-                "kind": "file",
-                "value": "src/lib.rs",
-                "repository": "ctxrs/ctx",
-                "line": 42
+                "kind": "commit",
+                "commit": {"id": "commit:abc", "kind": "commit", "display": "abc"},
+                "repository": {"id": "repo:ctx", "kind": "repository", "display": "ctxrs/ctx"}
             },
-            "results": [{
-                "resource": {"id": "file:1", "kind": "file", "display": "src/lib.rs:42"},
-                "summary": "Line provenance",
-                "occurred_at_ms": 1770000000000_i64,
-                "facts": [{
-                    "id": "fact:1",
-                    "fact_type": "vcs_commit",
-                    "subject": {"id": "session:1", "kind": "session", "display": "agent session"},
-                    "predicate": "produced_commit",
-                    "object": {
-                        "type": "resource",
-                        "value": {"id": "commit:abc", "kind": "commit", "display": "abc123"}
-                    },
+            "git_snapshot": null,
+            "matches": [{
+                "kind": "commit",
+                "value": {
+                    "fact_id": "fact:1",
+                    "fact_type": "git.commit.produced",
+                    "predicate": "produced_by",
+                    "subject": {"id": "commit:abc", "kind": "commit", "display": "abc"},
+                    "object": {"id": "session:full", "kind": "session", "display": "session:full"},
+                    "fact_occurred_at_ms": null,
                     "confidence": "explicit",
                     "state": "asserted",
-                    "detector_version": "commit-v1",
-                    "owning_root_session_id": "44444444-4444-4444-8444-444444444444",
-                    "direct_actor_session_id": "55555555-5555-4555-8555-555555555555",
-                    "citations": [canonical_citation.clone()]
-                }],
-                "citations": [canonical_citation.clone()]
+                    "direct_actor": null,
+                    "owning_root": null,
+                    "evidence_numbers": [1]
+                }
             }],
-            "citations": [canonical_citation.clone(), canonical_citation],
-            "pagination": {"next_cursor": "cursor-2", "truncated": true},
-            "stale": false,
-            "suggested_next_commands": [
-                "ctx facts file src/lib.rs --repository ctxrs/ctx --line 42",
-                "ctx timeline file src/lib.rs --repository ctxrs/ctx --line 42"
-            ]
-        })
-    }
-
-    fn empty_query_payload(payload_type: &str) -> Value {
-        json!({
-            "schema_version": 1,
-            "payload_type": payload_type,
-            "target": {"kind": "commit", "value": "abc123"},
-            "results": [],
-            "citations": [],
-            "pagination": {"next_cursor": null, "truncated": false},
-            "stale": false,
-            "suggested_next_commands": []
-        })
+            "evidence": [{
+                "number": 1,
+                "citation": {"event_id": "33333333-3333-4333-8333-333333333333"}
+            }],
+            "next": null
+        });
+        let rendered = render_blame_text(&value);
+        assert!(rendered.contains("matches: 1"));
+        assert!(rendered.contains("object.display: session:full"));
+        assert!(rendered.contains("event_id: 33333333-3333-4333-8333-333333333333"));
+        assert!(!rendered.contains("payload_type"));
+        assert!(!rendered.contains("omitted"));
     }
 
     #[test]
-    fn every_pro_query_payload_has_a_distinct_exact_golden() {
-        for (payload_type, title) in [
-            ("pro_resource", "ctx show resource"),
-            ("pro_location", "ctx locate resource"),
-            ("pro_blame", "ctx blame"),
-            ("pro_timeline", "ctx timeline"),
-            ("pro_related", "ctx related"),
-            ("pro_facts", "ctx facts"),
-        ] {
-            let kind = ProTextKind::from_payload_type(payload_type).expect("known payload type");
-            assert_eq!(
-                render_pro_text(&empty_query_payload(payload_type), kind),
-                format!(
-                    "{title}\npayload_type: {payload_type}\nschema_version: 1\ntarget.kind: commit\ntarget.value: abc123\nstale: false\nresults: 0\ncitations: 0\npagination.truncated: false\n"
-                )
-            );
-        }
-    }
+    fn fallback_keeps_provider_output_locator_only_in_structured_content() {
+        let value = json!({
+            "target": {
+                "kind": "commit",
+                "commit": {"id": "commit:abc", "kind": "commit", "display": "abc"},
+                "repository": {"id": "repo:ctx", "kind": "repository", "display": "ctxrs/ctx"}
+            },
+            "matches": [{
+                "kind": "commit",
+                "value": {
+                    "fact_id": "fact:1",
+                    "fact_type": "git.commit.produced",
+                    "predicate": "produced_by",
+                    "subject": {"id": "commit:abc", "kind": "commit", "display": "abc"},
+                    "object": {"id": "session:full", "kind": "session", "display": "session:full"},
+                    "confidence": "explicit",
+                    "state": "asserted",
+                    "evidence_numbers": [1]
+                }
+            }],
+            "evidence": [{
+                "number": 1,
+                "citation": {
+                    "provider_output": {
+                        "source_id": "source",
+                        "source_epoch": 7,
+                        "locator": {
+                            "version": 1,
+                            "kind": "native",
+                            "payload_base64": "private-locator-payload"
+                        },
+                        "coordinate": {
+                            "unit_key": "unit",
+                            "native_sequence": 9
+                        },
+                        "availability": "available"
+                    }
+                }
+            }],
+            "next": null
+        });
 
-    #[test]
-    fn pro_golden_preserves_graph_semantics_citations_and_pagination() {
-        let rendered = render_pro_text(&query_payload("pro_facts"), ProTextKind::Facts);
-        assert_eq!(
-            rendered,
-            include_str!("../../../testdata/mcp/pro_facts.golden.txt")
-        );
-    }
-
-    #[test]
-    fn unknown_pro_query_payload_fails_closed() {
-        let value = json!({"payload_type": "pro_future", "results": [{"title": "wrong"}]});
-        assert_eq!(
-            render_unknown_pro_text(&value),
-            "ctx pro result\npayload_type: pro_future\nerror_code: unsupported_payload_type\nstatus: not_rendered\n"
-        );
-    }
-
-    #[test]
-    fn graph_values_escape_controls_without_collapsing_meaningful_spaces() {
-        let mut rendered = String::new();
-        push_scalar(
-            &mut rendered,
-            "source_path",
-            Some(&json!("/repo/two  spaces\\literal\nnext")),
-            "",
-        );
-        assert_eq!(
-            rendered,
-            "source_path: /repo/two  spaces\\\\literal\\nnext\n"
-        );
+        let rendered = render_blame_text(&value);
+        assert!(rendered.contains("provider_output: see structuredContent"));
+        assert!(!rendered.contains("private-locator-payload"));
     }
 }

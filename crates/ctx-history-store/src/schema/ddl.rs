@@ -202,6 +202,63 @@ CREATE TABLE IF NOT EXISTS capture_source_provider_routes (
 CREATE INDEX IF NOT EXISTS idx_capture_source_provider_routes_alias
 ON capture_source_provider_routes(provider, source_format, machine_id, alias_group_identity);
 
+-- Durable, local-only retained-entity staging for bounded NativePath source
+-- generations. Provider semantics remain outside Store; these tables only
+-- make omission retirement atomic, restartable, and route-authorized.
+CREATE TABLE IF NOT EXISTS native_path_source_generations (
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    locator_identity TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    cursor_stream TEXT NOT NULL,
+    canonical_source_identity TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('staging', 'retiring', 'complete')),
+    frontier_kind TEXT,
+    frontier_id TEXT,
+    last_request_kind TEXT,
+    last_request_id TEXT,
+    last_next_kind TEXT,
+    last_next_id TEXT,
+    last_done INTEGER NOT NULL DEFAULT 0 CHECK (last_done IN (0, 1)),
+    last_inspected INTEGER NOT NULL DEFAULT 0 CHECK (last_inspected >= 0),
+    last_retired INTEGER NOT NULL DEFAULT 0 CHECK (last_retired >= 0),
+    PRIMARY KEY (
+        provider, source_format, machine_id, locator_identity, generation_id
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_native_path_source_generation_active
+ON native_path_source_generations(
+    provider, source_format, machine_id, locator_identity
+)
+WHERE state IN ('staging', 'retiring');
+
+CREATE TABLE IF NOT EXISTS native_path_source_generation_entities (
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    locator_identity TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    entity_kind TEXT NOT NULL CHECK (
+        entity_kind IN (
+            'capture_source', 'session', 'session_edge', 'run', 'event',
+            'file_touch'
+        )
+    ),
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (
+        provider, source_format, machine_id, locator_identity, generation_id,
+        entity_kind, entity_id
+    ),
+    FOREIGN KEY (
+        provider, source_format, machine_id, locator_identity, generation_id
+    ) REFERENCES native_path_source_generations(
+        provider, source_format, machine_id, locator_identity, generation_id
+    ) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 

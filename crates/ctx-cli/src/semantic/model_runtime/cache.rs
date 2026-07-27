@@ -19,14 +19,21 @@ use sha2::{Digest, Sha256};
 #[cfg(ctx_semantic_fastembed)]
 use uuid::Uuid;
 
+#[cfg(ctx_semantic_fastembed)]
+mod ort_variant;
+#[cfg(ctx_semantic_fastembed)]
+pub(in crate::semantic) use ort_variant::{
+    read_semantic_ort_model_file, semantic_ort_cache_snapshot,
+};
+
 #[cfg(all(test, ctx_semantic_fastembed))]
 use super::semantic_model_acquisition_integrity_error;
 #[cfg(ctx_semantic_fastembed)]
 use super::{
     cache_paths::semantic_model_cache_roots, SemanticCpuModelCacheMissing,
-    SemanticCpuModelIntegrityError, SemanticModelFile, SEMANTIC_HF_MODEL_CACHE_DIR,
-    SEMANTIC_MANAGED_MODEL_CACHE_DIR, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION,
-    SEMANTIC_REQUIRED_MODEL_FILES,
+    SemanticCpuModelIntegrityError, SemanticModelFile, SemanticOrtModelVariant,
+    SEMANTIC_HF_MODEL_CACHE_DIR, SEMANTIC_MANAGED_MODEL_CACHE_DIR, SEMANTIC_MODEL_ID,
+    SEMANTIC_MODEL_REVISION, SEMANTIC_REQUIRED_MODEL_FILES,
 };
 
 #[cfg(ctx_semantic_fastembed)]
@@ -638,6 +645,7 @@ fn publish_semantic_cpu_model_root(
 }
 
 #[cfg(ctx_semantic_fastembed)]
+#[allow(dead_code)] // Preserved compatibility helper for current cache tests.
 pub(in crate::semantic) fn read_semantic_model_file(
     snapshot: &Path,
     relative: &str,

@@ -16,7 +16,8 @@ const MAX_URL_BYTES: usize = 4096;
 const MAX_TIMESTAMP: i64 = 253_402_300_799;
 const MAX_CHECKOUT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MAX_RETRY_AFTER_SECONDS: u64 = 30 * 60;
-const COMMERCIAL_ACCEPT: &str = "application/json, application/problem+json";
+const MAX_TRIAL_CHALLENGE_LIFETIME_SECONDS: i64 = 10 * 60;
+pub(super) const COMMERCIAL_ACCEPT: &str = "application/json, application/problem+json";
 
 #[derive(Debug, Clone)]
 pub(super) struct CommercialApiConfig {
@@ -140,6 +141,32 @@ pub(super) struct PortalResult {
     pub(super) url: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TrialChallenge {
+    pub(super) challenge_id: String,
+    pub(super) challenge_base64url: String,
+    pub(super) expires_at_unix: i64,
+    pub(super) artifact_access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TrialActivation {
+    pub(super) disposition: String,
+    pub(super) entitlement: SignedEntitlement,
+    pub(super) trial_access_token: String,
+    pub(super) trial_deadline_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TrialRefresh {
+    pub(super) entitlement: SignedEntitlement,
+    pub(super) trial_access_token: String,
+    pub(super) trial_deadline_unix: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApiSuccess<T> {
@@ -188,35 +215,48 @@ enum CommercialApiFailure {
 }
 
 impl CommercialApiFailure {
-    fn retryable_during_checkout(&self) -> bool {
+    fn is_retryable(&self) -> bool {
         match self {
             Self::Transport { .. } | Self::Proxy { .. } => true,
             Self::InvalidResponse { .. } => false,
             Self::Response {
-                code, retryable, ..
+                code,
+                status,
+                retryable,
+                ..
             } => {
-                if matches!(
-                    code.as_str(),
-                    "authentication_required"
-                        | "billing_conflict"
-                        | "commercial_access_locked"
-                        | "commercial_identity_conflict"
-                        | "dependency_invalid_response"
-                        | "idempotency_key_invalid"
-                        | "idempotency_key_required"
-                        | "invalid_request"
-                        | "invalid_response"
-                        | "invalid_json"
-                        | "invalid_installation_public_key"
-                        | "method_not_allowed"
-                        | "not_found"
-                        | "request_body_too_large"
-                        | "unsupported_media_type"
-                ) {
+                if matches!(*status, 401 | 403 | 404 | 409)
+                    || matches!(
+                        code.as_str(),
+                        "authentication_required"
+                            | "billing_conflict"
+                            | "commercial_access_locked"
+                            | "commercial_identity_conflict"
+                            | "dependency_invalid_response"
+                            | "idempotency_key_invalid"
+                            | "idempotency_key_required"
+                            | "invalid_request"
+                            | "invalid_response"
+                            | "invalid_json"
+                            | "invalid_installation_public_key"
+                            | "method_not_allowed"
+                            | "not_found"
+                            | "request_body_too_large"
+                            | "unsupported_media_type"
+                    )
+                {
                     return false;
                 }
                 *retryable
             }
+        }
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Proxy { retry_after, .. } => *retry_after,
+            Self::Response { retry_after, .. } if self.is_retryable() => *retry_after,
+            Self::Transport { .. } | Self::InvalidResponse { .. } | Self::Response { .. } => None,
         }
     }
 }
@@ -284,6 +324,76 @@ impl CommercialApiClient {
         )
     }
 
+    pub(super) fn trial_challenge(
+        &self,
+        channel: &str,
+        target: &str,
+        current_version: Option<&str>,
+        protocol_version: u16,
+        protocol_fingerprint: &str,
+        installation_public_key_base64url: &str,
+    ) -> Result<TrialChallenge> {
+        validate_fixed_base64url(installation_public_key_base64url, "installation public key")?;
+        let challenge: TrialChallenge = self.post_authorized(
+            "/v1/trials/challenge",
+            None,
+            &TrialChallengeRequest {
+                schema_version: 1,
+                channel,
+                target,
+                current_version,
+                protocol_version,
+                protocol_fingerprint,
+                installation_public_key_base64url,
+            },
+        )?;
+        challenge.validate()?;
+        Ok(challenge)
+    }
+
+    pub(super) fn activate_trial(
+        &self,
+        access_token: &str,
+        challenge_id: &str,
+        installation_public_key_base64url: &str,
+        evidence: &serde_json::Value,
+    ) -> Result<TrialActivation> {
+        validate_identifier(challenge_id, "trial challenge")?;
+        validate_fixed_base64url(installation_public_key_base64url, "installation public key")?;
+        let authorization = trial_authorization(access_token)?;
+        let activation: TrialActivation = self.post_authorized(
+            "/v1/trials/activate",
+            Some(&authorization),
+            &TrialActivationRequest {
+                schema_version: 1,
+                challenge_id,
+                installation_public_key_base64url,
+                evidence,
+            },
+        )?;
+        activation.validate()?;
+        Ok(activation)
+    }
+
+    pub(super) fn refresh_trial(
+        &self,
+        access_token: &str,
+        installation_public_key_base64url: &str,
+    ) -> Result<TrialRefresh> {
+        validate_fixed_base64url(installation_public_key_base64url, "installation public key")?;
+        let authorization = trial_authorization(access_token)?;
+        let refresh: TrialRefresh = self.post_authorized(
+            "/v1/trials/refresh",
+            Some(&authorization),
+            &TrialRefreshRequest {
+                schema_version: 1,
+                installation_public_key_base64url,
+            },
+        )?;
+        refresh.validate()?;
+        Ok(refresh)
+    }
+
     pub(super) fn origin(&self) -> &str {
         self.config.origin.as_str()
     }
@@ -307,20 +417,32 @@ impl CommercialApiClient {
         body: &B,
     ) -> Result<T> {
         validate_access_token(access_token)?;
+        self.post_authorized(path, Some(&format!("Bearer {access_token}")), body)
+    }
+
+    fn post_authorized<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        authorization: Option<&str>,
+        body: &B,
+    ) -> Result<T> {
         let url = self.endpoint(path)?;
         let body =
             serde_json::to_vec(body).context("invalid_request: encode commercial request")?;
         if body.len() > 16 * 1024 {
             bail!("invalid_request: commercial request is too large");
         }
-        let response = self
+        let mut request = self
             .agent
             .post(url.as_str())
             .set("accept", COMMERCIAL_ACCEPT)
-            .set("authorization", &format!("Bearer {access_token}"))
             .set("content-type", "application/json")
-            .set("idempotency-key", &new_idempotency_key("cli")?)
-            .send_bytes(&body);
+            .set("idempotency-key", &new_idempotency_key("cli")?);
+        if let Some(authorization) = authorization {
+            validate_authorization_header(authorization)?;
+            request = request.set("authorization", authorization);
+        }
+        let response = request.send_bytes(&body);
         self.finish(response, "commercial API request")
     }
 
@@ -336,31 +458,7 @@ impl CommercialApiClient {
                 validate_envelope(&success.api_version, &success.request_id)?;
                 Ok(success.data)
             }
-            Err(ureq::Error::Status(status, response)) => {
-                let retry_after = parse_retry_after(response.header("retry-after"));
-                match classify_error_response(status, response.header("content-type")) {
-                    ErrorResponseKind::Contracted => {
-                        let failure = read_json(response, "commercial API error")
-                            .and_then(|failure| typed_api_failure(status, retry_after, failure));
-                        match failure {
-                            Ok(failure) => Err(failure.into()),
-                            Err(_) => Err(malformed_error_failure(status, retry_after).into()),
-                        }
-                    }
-                    ErrorResponseKind::TransientProxy => Err(CommercialApiFailure::Proxy {
-                        status,
-                        retry_after,
-                    }
-                    .into()),
-                    ErrorResponseKind::Invalid => {
-                        Err(CommercialApiFailure::InvalidResponse { status }.into())
-                    }
-                }
-            }
-            Err(ureq::Error::Transport(_)) => Err(CommercialApiFailure::Transport {
-                operation: operation.to_owned(),
-            }
-            .into()),
+            Err(error) => Err(commercial_http_error(error, operation)),
         }
     }
 
@@ -369,6 +467,41 @@ impl CommercialApiClient {
             .origin
             .join(path)
             .context("invalid_request: invalid commercial API route")
+    }
+}
+
+impl TrialChallenge {
+    fn validate(&self) -> Result<()> {
+        validate_identifier(&self.challenge_id, "trial challenge")?;
+        validate_fixed_base64url(&self.challenge_base64url, "trial challenge")?;
+        validate_trial_token(&self.artifact_access_token)?;
+        let now = unix_time()?;
+        if self.expires_at_unix <= now
+            || self.expires_at_unix > now.saturating_add(MAX_TRIAL_CHALLENGE_LIFETIME_SECONDS)
+        {
+            bail!("invalid_response: trial challenge expiry is outside allowed bounds");
+        }
+        Ok(())
+    }
+}
+
+impl TrialActivation {
+    fn validate(&self) -> Result<()> {
+        if !matches!(
+            self.disposition.as_str(),
+            "trial_started" | "trial_existing"
+        ) {
+            bail!("invalid_response: trial activation disposition is invalid");
+        }
+        validate_trial_token(&self.trial_access_token)?;
+        validate_timestamp(Some(self.trial_deadline_unix), "trial deadline")
+    }
+}
+
+impl TrialRefresh {
+    fn validate(&self) -> Result<()> {
+        validate_trial_token(&self.trial_access_token)?;
+        validate_timestamp(Some(self.trial_deadline_unix), "trial deadline")
     }
 }
 
@@ -428,6 +561,31 @@ struct EntitlementRequest<'a> {
     installation_public_key_base64url: &'a str,
 }
 
+#[derive(Serialize)]
+struct TrialChallengeRequest<'a> {
+    schema_version: u16,
+    channel: &'a str,
+    target: &'a str,
+    current_version: Option<&'a str>,
+    protocol_version: u16,
+    protocol_fingerprint: &'a str,
+    installation_public_key_base64url: &'a str,
+}
+
+#[derive(Serialize)]
+struct TrialActivationRequest<'a> {
+    schema_version: u16,
+    challenge_id: &'a str,
+    installation_public_key_base64url: &'a str,
+    evidence: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct TrialRefreshRequest<'a> {
+    schema_version: u16,
+    installation_public_key_base64url: &'a str,
+}
+
 fn validate_origin(origin: &Url) -> Result<()> {
     if origin.scheme() != "https"
         || origin.host_str().is_none()
@@ -448,6 +606,44 @@ fn validate_access_token(token: &str) -> Result<()> {
         || token.bytes().any(|byte| byte.is_ascii_control())
     {
         bail!("authentication_required: commercial access token is unavailable");
+    }
+    Ok(())
+}
+
+fn validate_authorization_header(value: &str) -> Result<()> {
+    if value.len() > MAX_ACCESS_TOKEN_BYTES
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || !(value.starts_with("Bearer ") || value.starts_with("CtxTrial "))
+    {
+        bail!("authentication_required: commercial access token is unavailable");
+    }
+    Ok(())
+}
+
+fn trial_authorization(token: &str) -> Result<String> {
+    validate_trial_token(token)?;
+    Ok(format!("CtxTrial {token}"))
+}
+
+fn validate_trial_token(token: &str) -> Result<()> {
+    if token.len() < 16
+        || token.len() > MAX_ACCESS_TOKEN_BYTES
+        || token.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+        })
+    {
+        bail!("authentication_required: anonymous trial credential is unavailable");
+    }
+    Ok(())
+}
+
+fn validate_fixed_base64url(value: &str, label: &str) -> Result<()> {
+    if value.len() != 43
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("invalid_request: {label} is invalid");
     }
     Ok(())
 }
@@ -519,34 +715,60 @@ fn commercial_error_message(error: &ApiError) -> &'static str {
         "commercial_identity_conflict" => {
             "the billing customer belongs to a different signed-in account; rerun `ctx pro` with the original account"
         }
+        "not_found" => "the requested commercial resource was not found",
         "rate_limited" => "the commercial service is rate limited; retry shortly",
         _ if error.retryable => "the commercial service is temporarily unavailable",
         _ => "the commercial service rejected the request",
     }
 }
 
+pub(super) fn commercial_http_error(error: ureq::Error, operation: &str) -> anyhow::Error {
+    match error {
+        ureq::Error::Status(status, response) => commercial_status_failure(status, response).into(),
+        ureq::Error::Transport(_) => CommercialApiFailure::Transport {
+            operation: operation.to_owned(),
+        }
+        .into(),
+    }
+}
+
+fn commercial_status_failure(status: u16, response: ureq::Response) -> CommercialApiFailure {
+    let retry_after = parse_retry_after(response.header("retry-after"));
+    match classify_error_response(status, response.header("content-type")) {
+        ErrorResponseKind::Contracted => read_json(response, "commercial API error")
+            .and_then(|failure| typed_api_failure(status, retry_after, failure))
+            .unwrap_or_else(|_| malformed_error_failure(status, retry_after)),
+        ErrorResponseKind::TransientProxy => CommercialApiFailure::Proxy {
+            status,
+            retry_after,
+        },
+        ErrorResponseKind::Invalid => CommercialApiFailure::InvalidResponse { status },
+    }
+}
+
+#[cfg(test)]
+pub(super) fn is_retryable_commercial_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<CommercialApiFailure>()
+        .is_some_and(CommercialApiFailure::is_retryable)
+}
+
+pub(super) fn commercial_retry_after(error: &anyhow::Error) -> Option<Duration> {
+    error
+        .downcast_ref::<CommercialApiFailure>()
+        .and_then(CommercialApiFailure::retry_after)
+}
+
 pub(super) fn is_retryable_checkout_failure(error: &anyhow::Error) -> bool {
     if let Some(failure) = error.downcast_ref::<CommercialApiFailure>() {
-        return failure.retryable_during_checkout();
+        return failure.is_retryable();
     }
     let message = error.to_string();
     message.starts_with("service_unavailable:") || message.starts_with("rate_limited:")
 }
 
 pub(super) fn checkout_retry_after(error: &anyhow::Error) -> Option<Duration> {
-    error
-        .downcast_ref::<CommercialApiFailure>()
-        .and_then(|failure| match failure {
-            CommercialApiFailure::Proxy { retry_after, .. } => *retry_after,
-            CommercialApiFailure::Response { retry_after, .. }
-                if failure.retryable_during_checkout() =>
-            {
-                *retry_after
-            }
-            CommercialApiFailure::Transport { .. }
-            | CommercialApiFailure::InvalidResponse { .. }
-            | CommercialApiFailure::Response { .. } => None,
-        })
+    commercial_retry_after(error)
 }
 
 fn parse_retry_after(value: Option<&str>) -> Option<Duration> {

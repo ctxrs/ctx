@@ -11,15 +11,17 @@ pub(super) fn configure_helper_environment(
     command: &mut Command,
     data_root: &Path,
     installation_id: &str,
-    git_executable: &Path,
+    git_executable: Option<&Path>,
 ) -> Result<()> {
     let layout = ProFilesystemLayout::new(data_root);
     command
         .env_clear()
         .env("CTX_DATA_ROOT", data_root)
         .env(CTX_PRO_DATA_ROOT_ENV, layout.pro_root())
-        .env(CTX_PRO_INSTALLATION_ID_ENV, installation_id)
-        .env(support::GIT_EXECUTABLE_ENV, git_executable);
+        .env(CTX_PRO_INSTALLATION_ID_ENV, installation_id);
+    if let Some(git_executable) = git_executable {
+        command.env(support::GIT_EXECUTABLE_ENV, git_executable);
+    }
 
     #[cfg(windows)]
     command.env("SystemRoot", windows_system_root()?);

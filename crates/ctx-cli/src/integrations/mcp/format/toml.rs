@@ -3,8 +3,8 @@ use toml_edit::{
     value as toml_value, Array as TomlArray, DocumentMut, Item, Table, Value as TomlValue,
 };
 
-use super::super::{SERVER_ARGS, SERVER_COMMAND, SERVER_NAME};
-use super::ConfigStatus;
+use super::super::SERVER_NAME;
+use super::{server_command, ConfigStatus};
 
 pub(super) fn status(body: &str) -> Result<ConfigStatus> {
     let doc = body.parse::<DocumentMut>().context("parse TOML config")?;
@@ -46,9 +46,10 @@ pub(super) fn upsert(body: &str, force: bool) -> Result<String> {
         }
     }
     let mut table = Table::new();
-    table["command"] = toml_value(SERVER_COMMAND);
+    let command = server_command();
+    table["command"] = toml_value(command.executable());
     let mut args = TomlArray::default();
-    for arg in SERVER_ARGS {
+    for arg in command.args() {
         args.push(*arg);
     }
     table["args"] = Item::Value(TomlValue::Array(args));
@@ -57,17 +58,18 @@ pub(super) fn upsert(body: &str, force: bool) -> Result<String> {
 }
 
 fn server_is_current(table: &Table) -> bool {
+    let command = server_command();
     let command_ok = table
         .get("command")
         .and_then(Item::as_str)
-        .is_some_and(|command| command == SERVER_COMMAND);
+        .is_some_and(|value| value == command.executable());
     let args_ok = table
         .get("args")
         .and_then(Item::as_array)
         .is_some_and(|args| {
             args.iter()
                 .filter_map(TomlValue::as_str)
-                .eq(SERVER_ARGS.iter().copied())
+                .eq(command.args().iter().copied())
         });
     command_ok && args_ok
 }

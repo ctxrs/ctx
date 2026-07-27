@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Map, Value};
 
-use super::super::{SERVER_ARGS, SERVER_COMMAND, SERVER_NAME};
-use super::ConfigStatus;
+use super::super::SERVER_NAME;
+use super::{server_command, ConfigStatus, ServerCommand};
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::integrations::mcp) enum JsonRoot {
@@ -112,30 +112,34 @@ fn render(value: &Value) -> Result<String> {
 }
 
 fn server_value(shape: JsonServerShape) -> Value {
+    server_value_for_command(shape, server_command())
+}
+
+fn server_value_for_command(shape: JsonServerShape, command: ServerCommand<'_>) -> Value {
     match shape {
         JsonServerShape::Plain => json!({
-            "command": SERVER_COMMAND,
-            "args": SERVER_ARGS,
+            "command": command.executable(),
+            "args": command.args(),
         }),
         JsonServerShape::StdioType => json!({
             "type": "stdio",
-            "command": SERVER_COMMAND,
-            "args": SERVER_ARGS,
+            "command": command.executable(),
+            "args": command.args(),
         }),
         JsonServerShape::OpenCodeLocal => json!({
             "type": "local",
-            "command": [SERVER_COMMAND, "mcp", "serve"],
+            "command": command.argv(),
             "enabled": true,
         }),
         JsonServerShape::CopilotLocal => json!({
             "type": "local",
-            "command": SERVER_COMMAND,
-            "args": SERVER_ARGS,
+            "command": command.executable(),
+            "args": command.args(),
             "tools": ["*"],
         }),
         JsonServerShape::ClineLocal => json!({
-            "command": SERVER_COMMAND,
-            "args": SERVER_ARGS,
+            "command": command.executable(),
+            "args": command.args(),
             "disabled": false,
             "autoApprove": [],
         }),
@@ -174,15 +178,15 @@ fn server_is_current(value: &Value, shape: JsonServerShape) -> bool {
 }
 
 fn command_string_is_current(object: &Map<String, Value>) -> bool {
-    object.get("command").and_then(Value::as_str) == Some(SERVER_COMMAND)
+    object.get("command").and_then(Value::as_str) == Some(server_command().executable())
 }
 
 fn command_array_is_current(value: Option<&Value>) -> bool {
-    string_array_is(value, &[SERVER_COMMAND, "mcp", "serve"])
+    string_array_is(value, &server_command().argv())
 }
 
 fn args_are_current(value: Option<&Value>) -> bool {
-    string_array_is(value, SERVER_ARGS)
+    string_array_is(value, server_command().args())
 }
 
 fn string_array_is(value: Option<&Value>, expected: &[&str]) -> bool {
@@ -327,6 +331,27 @@ mod tests {
             .unwrap(),
             ConfigStatus::Current
         );
+    }
+
+    #[test]
+    fn writer_preserves_adversarial_argv_without_shell_quoting() {
+        let command = ServerCommand::new(
+            r"C:\Program Files\ctx & tools\ctx-雪.exe",
+            &[
+                "",
+                "two words",
+                "$env:TEMP; $(touch /tmp/nope) | Out-Null",
+                "O'Brien",
+                "%PATH% ^ !",
+            ],
+        );
+
+        let split = server_value_for_command(JsonServerShape::Plain, command);
+        assert_eq!(split["command"], r"C:\Program Files\ctx & tools\ctx-雪.exe");
+        assert_eq!(split["args"], json!(command.args()));
+
+        let combined = server_value_for_command(JsonServerShape::OpenCodeLocal, command);
+        assert_eq!(combined["command"], json!(command.argv()));
     }
 
     #[test]

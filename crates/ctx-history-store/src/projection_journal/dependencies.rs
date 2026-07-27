@@ -5,6 +5,7 @@ use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 use super::impact::query_ids;
+use super::impact::JournalCollector;
 use super::records::append_entity;
 use super::{JournalEntityKind, Result, Store};
 use crate::connection::parse_optional_uuid;
@@ -53,7 +54,11 @@ impl Store {
         &self,
         dependencies: SessionJournalDependencies,
     ) -> Result<()> {
-        journal_session_dependencies(&self.conn, dependencies)
+        journal_session_dependencies(
+            &self.conn,
+            dependencies,
+            Some(&self.projection_journal_group_collector),
+        )
     }
 }
 
@@ -125,12 +130,13 @@ pub(super) fn capture_session_dependencies(
 pub(super) fn journal_session_dependencies(
     conn: &rusqlite::Connection,
     dependencies: SessionJournalDependencies,
+    collector: JournalCollector<'_>,
 ) -> Result<()> {
     for id in dependencies.file_touch_ids {
-        append_entity(conn, JournalEntityKind::FileTouch, id)?;
+        append_entity(conn, JournalEntityKind::FileTouch, id, collector)?;
     }
     for id in dependencies.vcs_change_ids {
-        append_entity(conn, JournalEntityKind::VcsChange, id)?;
+        append_entity(conn, JournalEntityKind::VcsChange, id, collector)?;
     }
     Ok(())
 }

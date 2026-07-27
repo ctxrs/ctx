@@ -38,6 +38,11 @@ use super::transport::{
 use super::transport::{
     remove_daemon_query_endpoint, write_daemon_query_endpoint, DaemonQueryEndpoint,
 };
+#[cfg(windows)]
+#[path = "windows_security.rs"]
+mod windows_security;
+#[cfg(windows)]
+use windows_security::WindowsDaemonQueryPipeSecurity;
 
 pub(in crate::semantic) struct DaemonQueryService {
     pub(in crate::semantic) data_root: PathBuf,
@@ -605,6 +610,11 @@ pub(in crate::semantic) fn create_windows_daemon_query_pipe(
     if !windows_named_pipe_name_is_local(pipe_name) {
         return Err(anyhow!("daemon query pipe name is not local"));
     }
+    let mut pipe_security = WindowsDaemonQueryPipeSecurity::for_current_user_and_system()
+        .context("build daemon query named pipe security descriptor")?;
+    let security_attributes = pipe_security
+        .attributes()
+        .context("build daemon query named pipe security attributes")?;
     let pipe_name_w = windows_wide_null(pipe_name);
     let access = PIPE_ACCESS_DUPLEX
         | if first_instance {
@@ -621,14 +631,18 @@ pub(in crate::semantic) fn create_windows_daemon_query_pipe(
             1024 * 1024,
             256 * 1024,
             0,
-            std::ptr::null(),
+            &security_attributes,
         )
     };
     if handle == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("create daemon query named pipe {pipe_name}"));
     }
-    Ok(WindowsDaemonQueryPipe { handle })
+    let pipe = WindowsDaemonQueryPipe { handle };
+    pipe_security
+        .verify_handle(pipe.handle)
+        .context("verify daemon query named pipe security descriptor")?;
+    Ok(pipe)
 }
 
 #[cfg(windows)]

@@ -15,6 +15,13 @@ use super::{
     HANDSHAKE_TIMEOUT,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProSetupRepairability {
+    NotNeeded,
+    Automated,
+    ManualDiagnosis,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ProStatus {
     pub(crate) schema_version: u32,
@@ -30,6 +37,8 @@ pub(crate) struct ProStatus {
     pub(crate) refresh_after_unix: Option<i64>,
     pub(crate) access_deadline_unix: Option<i64>,
     pub(crate) grace_deadline_unix: Option<i64>,
+    #[serde(skip)]
+    pub(crate) setup_repairability: ProSetupRepairability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,9 +109,25 @@ pub(super) fn smoke_helper_at_path_with_authorization_and_status(
 }
 
 pub(crate) fn status(data_root: &Path) -> ProStatus {
-    let helper_path = match support::helper_path(data_root) {
+    status_with_helper_resolver(data_root, support::helper_path)
+}
+
+pub(crate) fn status_with_helper_resolver(
+    data_root: &Path,
+    resolve_helper: impl FnOnce(&Path) -> Result<PathBuf>,
+) -> ProStatus {
+    let helper_path = match resolve_helper(data_root) {
         Ok(path) => path,
         Err(error) => {
+            let error_code = support::error_code(&error);
+            let setup_repairability =
+                if crate::pro::lifecycle::is_setup_repair_required_error(&error) {
+                    ProSetupRepairability::Automated
+                } else if error_code == "pro_not_installed" {
+                    ProSetupRepairability::NotNeeded
+                } else {
+                    ProSetupRepairability::ManualDiagnosis
+                };
             return ProStatus {
                 schema_version: 1,
                 installed: false,
@@ -112,11 +137,12 @@ pub(crate) fn status(data_root: &Path) -> ProStatus {
                 helper_version: None,
                 protocol_version: PROTOCOL_VERSION,
                 capabilities: Vec::new(),
-                error_code: Some(support::error_code(&error)),
+                error_code: Some(error_code),
                 access_state: None,
                 refresh_after_unix: None,
                 access_deadline_unix: None,
                 grace_deadline_unix: None,
+                setup_repairability,
             };
         }
     };
@@ -147,6 +173,7 @@ pub(crate) fn status(data_root: &Path) -> ProStatus {
                         refresh_after_unix: access.refresh_after_unix,
                         access_deadline_unix: access.access_deadline_unix,
                         grace_deadline_unix: access.grace_deadline_unix,
+                        setup_repairability: ProSetupRepairability::NotNeeded,
                     }
                 }
                 Ok(HelperMessage::Error(error)) => ProStatus {
@@ -163,6 +190,7 @@ pub(crate) fn status(data_root: &Path) -> ProStatus {
                     refresh_after_unix: access.refresh_after_unix,
                     access_deadline_unix: access.access_deadline_unix,
                     grace_deadline_unix: access.grace_deadline_unix,
+                    setup_repairability: ProSetupRepairability::NotNeeded,
                 },
                 _ => ProStatus {
                     schema_version: 1,
@@ -178,6 +206,7 @@ pub(crate) fn status(data_root: &Path) -> ProStatus {
                     refresh_after_unix: access.refresh_after_unix,
                     access_deadline_unix: access.access_deadline_unix,
                     grace_deadline_unix: access.grace_deadline_unix,
+                    setup_repairability: ProSetupRepairability::NotNeeded,
                 },
             }
         }
@@ -195,6 +224,7 @@ pub(crate) fn status(data_root: &Path) -> ProStatus {
             refresh_after_unix: None,
             access_deadline_unix: None,
             grace_deadline_unix: None,
+            setup_repairability: ProSetupRepairability::NotNeeded,
         },
     }
 }

@@ -1,35 +1,18 @@
-use std::{cell::Cell, fs, path::Path};
+use std::path::Path;
 
-use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 
-use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
-use crate::captured_batch::SourceObservation;
-use crate::provider::importer::{
-    captured_batch_cursor_stream, drain_captured_batches, provider_path_identity,
-    provider_source_cursor_stream_for_path, CapturedBatchCursorMode, CapturedSourceAdmission,
-    CertifiedProviderCursor,
-};
-use crate::provider::sqlite::{
-    open_provider_sqlite_readonly, sqlite_schema_fingerprint, with_sqlite_read_snapshot,
-};
-use crate::{
-    CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
-    Result, SHELLEY_SQLITE_SOURCE_FORMAT,
-};
+use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
 
+mod native_path;
 mod normalization;
-mod projector;
 mod relationships;
-mod row_position;
-mod row_stream;
 mod source;
-#[cfg(test)]
-mod tests;
 
 pub(crate) use relationships::{
-    decode_shelley_conversation, decode_shelley_message, shelley_message_complete_text,
-    shelley_verified_record_values, ShelleyConversationRow, ShelleyMessageRow,
+    decode_shelley_conversation, decode_shelley_message, shelley_conversation_values,
+    shelley_message_complete_text, shelley_message_values, shelley_verified_record_values,
+    ShelleyConversationRow, ShelleyMessageRow,
 };
 #[cfg(test)]
 pub(crate) use relationships::{shelley_event_index, shelley_value_text};
@@ -39,155 +22,17 @@ pub(crate) use source::{
 };
 
 pub(crate) use normalization::shelley_complete_event;
-use projector::ShelleyCapturedBatchProjector;
-use row_position::{decode_shelley_position, initial_shelley_position};
-#[cfg(test)]
-use row_position::{encode_shelley_position, shelley_locator, ShelleyCapturePhase, ShelleyKeyset};
-use row_stream::{shelley_captured_error, shelley_sqlite_batch_error, ShelleyRowFetcher};
-pub(crate) use row_stream::{shelley_conversation_values, shelley_message_values};
-use source::{shelley_source_revision, shelley_source_snapshot};
 
-const SHELLEY_CAPTURE_REVISION: u32 = 9;
-const SHELLEY_POLICY_REVISION: u32 = 5;
-const SHELLEY_POSITION_KIND: &str = "shelley-native-message-keyset-v9";
-const SHELLEY_LOCATOR_KIND: &str = "shelley-logical-row-v1";
-const SHELLEY_MESSAGE_RECORD_KIND: &str = "shelley-message-with-conversation-v3";
-const SHELLEY_MESSAGE_CHILD_RECORD_KIND: &str = "shelley-message-child-v1";
-const SHELLEY_MESSAGE_KEY_MARKER_KIND: &str = "shelley-message-key-marker-v1";
-const SHELLEY_MESSAGE_KEY_REJECTION_KIND: &str = "shelley-message-key-rejection-v1";
-const SHELLEY_TERMINAL_MARKER_KIND: &str = "shelley-terminal-marker-v1";
-const SHELLEY_CONVERSATION_RECORD_KIND: &str = "shelley-conversation-v3";
-const SHELLEY_OVERSIZE_SESSION_RECORD_KIND: &str = "shelley-oversize-session-v2";
-const SHELLEY_NONEMPTY_CONVERSATION_RECORD_KIND: &str = "shelley-nonempty-conversation-marker-v1";
-const SHELLEY_POSITION_BYTES: usize = 1 + 8 + 8 + 4;
+const SHELLEY_CAPTURE_REVISION: u32 = 10;
+const SHELLEY_POLICY_REVISION: u32 = 6;
 const SHELLEY_MESSAGE_VALUE_COUNT: usize = 15;
 const SHELLEY_CONVERSATION_VALUE_COUNT: usize = 17;
-const SHELLEY_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
 
-pub(crate) fn import_shelley_sqlite_batched(
+pub(crate) fn import_shelley_nativepath(
     path: &Path,
     store: &mut Store,
-    mut context: ProviderAdapterContext,
-    import_options: NormalizedProviderImportOptions,
+    context: ProviderAdapterContext,
+    import_options: ProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    if context.source_path.is_none() {
-        context.source_path = Some(path.to_path_buf());
-    }
-    let raw_source_path = context
-        .source_path
-        .as_deref()
-        .unwrap_or(path)
-        .display()
-        .to_string();
-    let canonical_path = fs::canonicalize(path)?;
-    let snapshot = shelley_source_snapshot(path)?;
-    let cursor_path = provider_path_identity(&canonical_path)?;
-    let cursor_stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::Shelley,
-        SHELLEY_SQLITE_SOURCE_FORMAT,
-        &cursor_path,
-    );
-    let conn = open_provider_sqlite_readonly(path)?;
-    if !snapshot.revalidate(path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
-    let source = SourceObservation::new(
-        CaptureProvider::Shelley,
-        SHELLEY_SQLITE_SOURCE_FORMAT,
-        format!("shelley-sqlite:{cursor_path}"),
-        shelley_source_revision(&snapshot, user_version, &schema_fingerprint),
-        cursor_stream,
-        SHELLEY_CAPTURE_REVISION,
-        SHELLEY_POLICY_REVISION,
-        import_options.inventory_observation_token.as_deref(),
-    )
-    .map_err(shelley_captured_error)?;
-    let stream = captured_batch_cursor_stream(&source);
-    let expected_store_cursor = store.get_sync_cursor(None, &context.machine_id, &stream)?;
-    let initial_position = initial_shelley_position()?;
-    let mut start_position = initial_position.clone();
-    let mut cursor_mode = CapturedBatchCursorMode::Resume;
-    if let Some(stored_cursor) = expected_store_cursor.as_ref() {
-        match CertifiedProviderCursor::decode_if_certified(&stored_cursor.cursor)? {
-            Some(certified)
-                if certified.matches_revisions(
-                    source.source_revision(),
-                    source.capture_revision(),
-                    source.policy_revision(),
-                ) =>
-            {
-                let _: () = certified.parser_checkpoint().deserialize()?;
-                decode_shelley_position(certified.native_position())?;
-                start_position = certified.native_position().clone();
-            }
-            Some(_) => cursor_mode = CapturedBatchCursorMode::ResetChangedSource,
-            None => cursor_mode = CapturedBatchCursorMode::ReplaceLegacyCursor,
-        }
-    }
-    let admission = CapturedSourceAdmission::conversation_for_context(&source, &context)?;
-    let source_exhausted = Cell::new(false);
-    let producer_source_exhausted = &source_exhausted;
-    let start_exhausted =
-        decode_shelley_position(&start_position)?.is_some_and(|keyset| keyset.exhausted);
-    let mut fetcher = (!start_exhausted)
-        .then(|| ShelleyRowFetcher::new(&conn))
-        .transpose()?;
-    if !snapshot.revalidate(path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let mut producer = Some(SqliteLogicalRowBatchProducer::new(
-        source,
-        start_position,
-        move |position| {
-            let row = match fetcher.as_mut() {
-                Some(fetcher) => fetcher.fetch(position)?,
-                None => None,
-            };
-            if row.is_none() {
-                producer_source_exhausted.set(true);
-            }
-            Ok(row)
-        },
-    ));
-    let mut projector = ShelleyCapturedBatchProjector::new(
-        context.clone(),
-        raw_source_path,
-        user_version,
-        schema_fingerprint,
-    );
-    drain_captured_batches(
-        store,
-        &admission,
-        import_options,
-        &context.machine_id,
-        context.imported_at,
-        expected_store_cursor,
-        &initial_position,
-        cursor_mode,
-        &stream,
-        &mut projector,
-        || {
-            let Some(active_producer) = producer.as_mut() else {
-                return Ok(None);
-            };
-            if !snapshot.revalidate(path)? {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            let batch = with_sqlite_read_snapshot(&conn, || {
-                active_producer
-                    .next_batch()
-                    .map_err(shelley_sqlite_batch_error)
-            })?;
-            if !snapshot.revalidate(path)? {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            if source_exhausted.get() {
-                producer.take();
-            }
-            Ok(batch)
-        },
-        || snapshot.revalidate(path),
-    )
+    native_path::import_shelley_native_path(path, store, context, import_options)
 }

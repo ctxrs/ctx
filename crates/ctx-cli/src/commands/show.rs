@@ -10,7 +10,6 @@ use crate::complete_content::{
     resolve_event_contents, ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
 };
 use crate::output::{effective_format, OutputFormat};
-use crate::pro::ResourceKindArg;
 use crate::provider_args::ProviderArg;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::{
@@ -110,31 +109,6 @@ pub(crate) fn run_show(
             )?;
             write_rendered_events(&store, &event, &events, format, None, &content)?;
         }
-        ShowTarget::Commit(args) => return run_resource(args, ResourceKindArg::Commit, data_root),
-        ShowTarget::PullRequest(args) => {
-            return run_resource(args, ResourceKindArg::PullRequest, data_root)
-        }
-        ShowTarget::Issue(args) => return run_resource(args, ResourceKindArg::Issue, data_root),
-        ShowTarget::File(args) => {
-            return run_resource(args.into(), ResourceKindArg::File, data_root)
-        }
-        ShowTarget::Branch(args) => return run_resource(args, ResourceKindArg::Branch, data_root),
-        ShowTarget::Repository(args) => {
-            return run_resource(args, ResourceKindArg::Repository, data_root)
-        }
     }
     Ok(())
-}
-
-fn run_resource(
-    args: crate::commands::work_graph::ResourceValueArgs,
-    kind: ResourceKindArg,
-    data_root: PathBuf,
-) -> Result<()> {
-    crate::commands::work_graph::run(
-        args.into_work_graph(kind),
-        data_root,
-        ctx_pro_host_protocol::QueryKind::Show,
-        "pro_resource",
-    )
 }

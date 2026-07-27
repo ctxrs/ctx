@@ -1,7 +1,8 @@
 use ctx_history_core::{EventRole, EventType};
+use rusqlite::Row;
 use serde_json::{json, Value};
 
-use crate::captured_batch::CapturedSqliteValue;
+use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{
     capped_text, provider_capped_json, provider_json_text, text_id_index,
 };
@@ -9,6 +10,7 @@ use crate::{CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_
 
 use super::{SHELLEY_CONVERSATION_VALUE_COUNT, SHELLEY_MESSAGE_VALUE_COUNT};
 
+#[derive(Debug, Clone)]
 pub(crate) struct ShelleyConversationRow {
     pub(crate) rowid: i64,
     pub(crate) conversation_id: String,
@@ -48,54 +50,7 @@ pub(crate) struct ShelleyMessageRow {
     pub(crate) forked_from_message_id: Option<String>,
 }
 
-#[cfg(test)]
-pub(super) fn decode_shelley_message_record(
-    values: &[CapturedSqliteValue],
-) -> Result<(ShelleyMessageRow, ShelleyConversationRow)> {
-    let conversation = decode_shelley_message_parent(values)?;
-    let message = decode_shelley_message(values)?;
-    if conversation.conversation_id != message.conversation_id {
-        return Err(CaptureError::InvalidPayload(
-            "Shelley parent-bearing message references a different conversation".to_owned(),
-        ));
-    }
-    Ok((message, conversation))
-}
-
-pub(super) fn decode_shelley_message_parent(
-    values: &[CapturedSqliteValue],
-) -> Result<ShelleyConversationRow> {
-    if values.len() != SHELLEY_MESSAGE_VALUE_COUNT + SHELLEY_CONVERSATION_VALUE_COUNT {
-        return Err(CaptureError::InvalidPayload(
-            "Shelley parent-bearing message logical row has an unexpected value count".to_owned(),
-        ));
-    }
-    decode_shelley_conversation(&values[SHELLEY_MESSAGE_VALUE_COUNT..])
-}
-
-pub(super) fn decode_shelley_message_child_record(
-    values: &[CapturedSqliteValue],
-) -> Result<(ShelleyMessageRow, bool)> {
-    if values.len() != SHELLEY_MESSAGE_VALUE_COUNT + 1 {
-        return Err(CaptureError::InvalidPayload(
-            "Shelley child message logical row has an unexpected value count".to_owned(),
-        ));
-    }
-    let message = decode_shelley_message(values)?;
-    let has_conversation = match values.get(SHELLEY_MESSAGE_VALUE_COUNT) {
-        Some(CapturedSqliteValue::Integer(_)) => true,
-        Some(CapturedSqliteValue::Null) => false,
-        _ => {
-            return Err(CaptureError::InvalidPayload(
-                "Shelley child message conversation reference must be an integer or null"
-                    .to_owned(),
-            ));
-        }
-    };
-    Ok((message, has_conversation))
-}
-
-pub(crate) fn decode_shelley_message(values: &[CapturedSqliteValue]) -> Result<ShelleyMessageRow> {
+pub(crate) fn decode_shelley_message(values: &[NativeSqliteValue]) -> Result<ShelleyMessageRow> {
     if values.len() < SHELLEY_MESSAGE_VALUE_COUNT {
         return Err(CaptureError::InvalidPayload(
             "Shelley message logical row has too few values".to_owned(),
@@ -130,7 +85,7 @@ pub(crate) fn decode_shelley_message(values: &[CapturedSqliteValue]) -> Result<S
 }
 
 pub(crate) fn decode_shelley_conversation(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
 ) -> Result<ShelleyConversationRow> {
     if values.len() != SHELLEY_CONVERSATION_VALUE_COUNT {
         return Err(CaptureError::InvalidPayload(
@@ -169,23 +124,75 @@ pub(crate) fn decode_shelley_conversation(
     })
 }
 
+pub(crate) fn shelley_message_values(row: &Row<'_>) -> rusqlite::Result<Vec<NativeSqliteValue>> {
+    Ok(vec![
+        NativeSqliteValue::Integer(row.get(0)?),
+        NativeSqliteValue::Text(row.get(1)?),
+        NativeSqliteValue::Text(row.get(2)?),
+        NativeSqliteValue::Integer(row.get(3)?),
+        NativeSqliteValue::Text(row.get(4)?),
+        shelley_optional_text_value(row.get(5)?),
+        shelley_optional_text_value(row.get(6)?),
+        shelley_optional_text_value(row.get(7)?),
+        shelley_optional_text_value(row.get(8)?),
+        shelley_optional_text_value(row.get(9)?),
+        shelley_optional_integer_value(row.get(10)?),
+        shelley_optional_integer_value(row.get(11)?),
+        shelley_optional_text_value(row.get(12)?),
+        shelley_optional_text_value(row.get(13)?),
+        shelley_optional_text_value(row.get(14)?),
+    ])
+}
+
+pub(crate) fn shelley_conversation_values(
+    row: &Row<'_>,
+) -> rusqlite::Result<Vec<NativeSqliteValue>> {
+    Ok(vec![
+        NativeSqliteValue::Integer(row.get(0)?),
+        shelley_optional_text_value(row.get(1)?),
+        shelley_optional_text_value(row.get(2)?),
+        shelley_optional_integer_value(row.get(3)?),
+        shelley_optional_text_value(row.get(4)?),
+        shelley_optional_text_value(row.get(5)?),
+        shelley_optional_text_value(row.get(6)?),
+        shelley_optional_integer_value(row.get(7)?),
+        shelley_optional_text_value(row.get(8)?),
+        shelley_optional_text_value(row.get(9)?),
+        shelley_optional_text_value(row.get(10)?),
+        shelley_optional_integer_value(row.get(11)?),
+        shelley_optional_integer_value(row.get(12)?),
+        shelley_optional_text_value(row.get(13)?),
+        shelley_optional_integer_value(row.get(14)?),
+        shelley_optional_text_value(row.get(15)?),
+        shelley_optional_text_value(row.get(16)?),
+    ])
+}
+
+fn shelley_optional_text_value(value: Option<String>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
+}
+
+fn shelley_optional_integer_value(value: Option<i64>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
+}
+
 fn shelley_value<'a>(
-    values: &'a [CapturedSqliteValue],
+    values: &'a [NativeSqliteValue],
     index: usize,
     field: &str,
-) -> Result<&'a CapturedSqliteValue> {
+) -> Result<&'a NativeSqliteValue> {
     values.get(index).ok_or_else(|| {
         CaptureError::InvalidPayload(format!("Shelley logical row is missing {field}"))
     })
 }
 
 fn shelley_required_text(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     index: usize,
     field: &str,
 ) -> Result<String> {
     match shelley_value(values, index, field)? {
-        CapturedSqliteValue::Text(value) => Ok(value.clone()),
+        NativeSqliteValue::Text(value) => Ok(value.clone()),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Shelley logical row {field} must be text"
         ))),
@@ -193,13 +200,13 @@ fn shelley_required_text(
 }
 
 fn shelley_optional_text(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     index: usize,
     field: &str,
 ) -> Result<Option<String>> {
     match shelley_value(values, index, field)? {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Text(value) => Ok(Some(value.clone())),
+        NativeSqliteValue::Null => Ok(None),
+        NativeSqliteValue::Text(value) => Ok(Some(value.clone())),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Shelley logical row {field} must be text or null"
         ))),
@@ -207,12 +214,12 @@ fn shelley_optional_text(
 }
 
 fn shelley_required_integer(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     index: usize,
     field: &str,
 ) -> Result<i64> {
     match shelley_value(values, index, field)? {
-        CapturedSqliteValue::Integer(value) => Ok(*value),
+        NativeSqliteValue::Integer(value) => Ok(*value),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Shelley logical row {field} must be an integer"
         ))),
@@ -220,13 +227,13 @@ fn shelley_required_integer(
 }
 
 fn shelley_optional_integer(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     index: usize,
     field: &str,
 ) -> Result<Option<i64>> {
     match shelley_value(values, index, field)? {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Integer(value) => Ok(Some(*value)),
+        NativeSqliteValue::Null => Ok(None),
+        NativeSqliteValue::Integer(value) => Ok(Some(*value)),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Shelley logical row {field} must be an integer or null"
         ))),
@@ -345,6 +352,7 @@ fn shelley_collect_complete_text(value: &Value, parts: &mut Vec<String>) {
                     return;
                 }
             }
+            let mut selected_child = false;
             for key in [
                 "Text",
                 "text",
@@ -365,6 +373,15 @@ fn shelley_collect_complete_text(value: &Value, parts: &mut Vec<String>) {
                 "Display",
             ] {
                 if let Some(child) = object.get(key) {
+                    selected_child = true;
+                    shelley_collect_complete_text(child, parts);
+                }
+            }
+            if !selected_child {
+                for child in object
+                    .values()
+                    .filter(|child| matches!(child, Value::Array(_) | Value::Object(_)))
+                {
                     shelley_collect_complete_text(child, parts);
                 }
             }
@@ -386,46 +403,46 @@ pub(crate) fn shelley_verified_record_values(
     message: &ShelleyMessageRow,
     conversation: &ShelleyConversationRow,
     parent_bearing: bool,
-) -> Vec<CapturedSqliteValue> {
+) -> Vec<NativeSqliteValue> {
     let optional_text = |value: &Option<String>| {
         value
             .clone()
-            .map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Text)
+            .map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
     };
     let optional_integer =
-        |value: Option<i64>| value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer);
+        |value: Option<i64>| value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer);
     vec![
-        CapturedSqliteValue::Integer(i64::from(parent_bearing)),
-        CapturedSqliteValue::Integer(message.rowid),
-        CapturedSqliteValue::Text(message.message_id.clone()),
-        CapturedSqliteValue::Text(message.conversation_id.clone()),
-        CapturedSqliteValue::Integer(message.sequence_id),
-        CapturedSqliteValue::Text(message.entry_type.clone()),
+        NativeSqliteValue::Integer(i64::from(parent_bearing)),
+        NativeSqliteValue::Integer(message.rowid),
+        NativeSqliteValue::Text(message.message_id.clone()),
+        NativeSqliteValue::Text(message.conversation_id.clone()),
+        NativeSqliteValue::Integer(message.sequence_id),
+        NativeSqliteValue::Text(message.entry_type.clone()),
         optional_text(&message.llm_data),
         optional_text(&message.user_data),
         optional_text(&message.usage_data),
         optional_text(&message.created_at),
         optional_text(&message.display_data),
-        CapturedSqliteValue::Integer(i64::from(message.excluded_from_context)),
+        NativeSqliteValue::Integer(i64::from(message.excluded_from_context)),
         optional_integer(message.generation),
         optional_text(&message.llm_api_url),
         optional_text(&message.model_name),
         optional_text(&message.forked_from_message_id),
-        CapturedSqliteValue::Integer(conversation.rowid),
-        CapturedSqliteValue::Text(conversation.conversation_id.clone()),
+        NativeSqliteValue::Integer(conversation.rowid),
+        NativeSqliteValue::Text(conversation.conversation_id.clone()),
         optional_text(&conversation.slug),
-        CapturedSqliteValue::Integer(i64::from(conversation.user_initiated)),
+        NativeSqliteValue::Integer(i64::from(conversation.user_initiated)),
         optional_text(&conversation.created_at),
         optional_text(&conversation.updated_at),
         optional_text(&conversation.cwd),
-        CapturedSqliteValue::Integer(i64::from(conversation.archived)),
+        NativeSqliteValue::Integer(i64::from(conversation.archived)),
         optional_text(&conversation.parent_conversation_id),
         optional_text(&conversation.model),
         optional_text(&conversation.conversation_options),
         optional_integer(conversation.current_generation),
-        CapturedSqliteValue::Integer(i64::from(conversation.agent_working)),
+        NativeSqliteValue::Integer(i64::from(conversation.agent_working)),
         optional_text(&conversation.tags),
-        CapturedSqliteValue::Integer(i64::from(conversation.is_draft)),
+        NativeSqliteValue::Integer(i64::from(conversation.is_draft)),
         optional_text(&conversation.draft),
         optional_text(&conversation.queued_messages),
     ]
@@ -563,6 +580,7 @@ fn shelley_collect_text(value: &Value, parts: &mut Vec<String>) {
                 }
             }
 
+            let mut selected_child = false;
             for key in [
                 "Text",
                 "text",
@@ -586,6 +604,18 @@ fn shelley_collect_text(value: &Value, parts: &mut Vec<String>) {
                     break;
                 }
                 if let Some(child) = object.get(key) {
+                    selected_child = true;
+                    shelley_collect_text(child, parts);
+                }
+            }
+            if !selected_child {
+                for child in object
+                    .values()
+                    .filter(|child| matches!(child, Value::Array(_) | Value::Object(_)))
+                {
+                    if shelley_text_budget_remaining(parts) == 0 {
+                        break;
+                    }
                     shelley_collect_text(child, parts);
                 }
             }
@@ -646,23 +676,4 @@ fn shelley_content_type(value: &Value) -> Option<String> {
         }
         .map(str::to_owned)
     })
-}
-
-#[derive(Default)]
-pub(super) struct ShelleyRelationshipState {
-    active_conversation: Option<ShelleyConversationRow>,
-}
-
-impl ShelleyRelationshipState {
-    pub(super) fn clear_active_conversation(&mut self) {
-        self.active_conversation = None;
-    }
-
-    pub(super) fn replace_active_conversation(&mut self, conversation: ShelleyConversationRow) {
-        self.active_conversation = Some(conversation);
-    }
-
-    pub(super) fn active_conversation(&self) -> Option<&ShelleyConversationRow> {
-        self.active_conversation.as_ref()
-    }
 }

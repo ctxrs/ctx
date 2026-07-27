@@ -141,6 +141,39 @@ def validate_module_text(module_text: str) -> None:
                 f"wrong checksum for {archive}: expected {checksum}, got {actual[archive]}"
             )
 
+    crate_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "crate"
+        and node.func.attr == "from_cargo"
+    ]
+    if len(crate_calls) != 1:
+        raise PinContractError("expected exactly one crate.from_cargo declaration")
+    crate_keywords = {
+        keyword.arg: keyword.value
+        for keyword in crate_calls[0].keywords
+        if keyword.arg
+    }
+    triples_node = crate_keywords.get("supported_platform_triples")
+    if triples_node is None:
+        raise PinContractError(
+            "crate.from_cargo is missing supported_platform_triples"
+        )
+    triples = _literal(triples_node, assignments)
+    if not isinstance(triples, list) or any(
+        not isinstance(triple, str) for triple in triples
+    ):
+        raise PinContractError("supported_platform_triples must be a string list")
+    missing_triples = sorted(set(HOST_SHA256S) - set(triples))
+    if missing_triples:
+        raise PinContractError(
+            "crate_universe is missing release host triple "
+            f"{missing_triples[0]}"
+        )
+
 
 def validate_release_matrix_text(matrix_text: str) -> None:
     try:

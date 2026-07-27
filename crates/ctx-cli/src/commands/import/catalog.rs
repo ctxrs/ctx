@@ -1,292 +1,20 @@
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 use anyhow::{anyhow, Context, Result};
-use serde_json::Value;
+use ctx_history_capture::{observe_ordinary_file, stable_capture_uuid, OrdinaryFileObservation};
+use ctx_history_core::HistoryRecord;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
-use ctx_history_capture::{
-    catalog_codex_session_tree, import_codex_session_jsonl_tail, import_codex_session_paths,
-    observe_ordinary_file, stable_capture_uuid, CatalogSummary, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgressCallback, OrdinaryFileObservation,
-    ProviderImportFailure, ProviderImportSummary,
+use crate::{
+    commands::import::SourceStats, history_source_plugins::HistorySourcePluginSource,
+    provider_args::ImportFormatArg, provider_sources::SourceInfo,
 };
-use ctx_history_core::{utc_now, CaptureProvider, HistoryRecord};
-use ctx_history_store::{CatalogSession, Store};
-
-use crate::commands::import::report::{error_summary, import_error_scope, ImportFailureScope};
-use crate::commands::import::{provider_summary_has_imported_content, SourceStats};
-use crate::history_source_plugins::HistorySourcePluginSource;
-use crate::provider_args::ImportFormatArg;
-use crate::provider_sources::SourceInfo;
-
-fn catalog_inventory_observation_token(session: &CatalogSession) -> Option<String> {
-    session
-        .metadata
-        .get("inventory_file_change_token_v1")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn import_incremental_codex_session_tree(
-    store: &mut Store,
-    source: &SourceInfo,
-    record_id: Uuid,
-    progress: Option<CodexSessionImportProgressCallback>,
-    preinventory_catalog: Option<&CatalogSummary>,
-) -> Result<ProviderImportSummary> {
-    let source_root = source.path.display().to_string();
-    let mut summary = ProviderImportSummary::default();
-    if let Some(catalog) = preinventory_catalog {
-        summary.failed += catalog.failed_sessions;
-        summary.failures.extend(catalog.failures.clone());
-    } else {
-        let catalog = catalog_codex_session_tree(
-            &source.path,
-            store,
-            CodexSessionCatalogOptions {
-                source_root: Some(source.path.clone()),
-                ..CodexSessionCatalogOptions::default()
-            },
-        )
-        .with_context(|| format!("inventory Codex sessions from {}", source.path.display()))?;
-        summary.failed += catalog.failed_sessions;
-        summary.failures.extend(catalog.failures);
-    }
-
-    let pending = store.list_pending_catalog_sessions(CaptureProvider::Codex, &source_root)?;
-    if pending.is_empty() {
-        return Ok(summary);
-    }
-
-    let mut full_import_sessions = Vec::new();
-    for session in &pending {
-        let state = store.catalog_source_index_state(
-            CaptureProvider::Codex,
-            &source_root,
-            &session.source_path,
-        )?;
-        let tail_start = state
-            .as_ref()
-            .and_then(|state| state.last_imported_file_size_bytes)
-            .filter(|indexed_size| *indexed_size > 0 && *indexed_size < session.file_size_bytes);
-        if let Some(start_offset) = tail_start {
-            let checkpoint_hash = state
-                .as_ref()
-                .and_then(|state| state.last_imported_file_sha256.as_deref());
-            if !catalog_import_checkpoint_matches(
-                Path::new(&session.source_path),
-                start_offset,
-                checkpoint_hash,
-            )? {
-                full_import_sessions.push(session.clone());
-                continue;
-            }
-            let tail_summary = match import_codex_session_jsonl_tail(
-                PathBuf::from(&session.source_path),
-                start_offset,
-                store,
-                CodexSessionImportOptions {
-                    source_path: Some(source.path.clone()),
-                    history_record_id: Some(record_id),
-                    inventory_observation_token: catalog_inventory_observation_token(session),
-                    progress: progress.clone(),
-                    ..CodexSessionImportOptions::default()
-                },
-            )
-            .map_err(anyhow::Error::from)
-            {
-                Ok(summary) => summary,
-                Err(err) => {
-                    mark_catalog_sessions_failed(
-                        store,
-                        std::slice::from_ref(session),
-                        &err.to_string(),
-                    )?;
-                    return Err(err);
-                }
-            };
-            if tail_summary.failed > 0 && !provider_summary_has_imported_content(&tail_summary) {
-                mark_catalog_sessions_failed(
-                    store,
-                    std::slice::from_ref(session),
-                    "tail import failed for one or more appended events",
-                )?;
-                summary.merge_from(tail_summary);
-                continue;
-            }
-            let tail_event_count = tail_summary
-                .imported_events
-                .saturating_add(tail_summary.skipped_events)
-                as u64;
-            let event_count = state
-                .and_then(|state| state.last_imported_event_count)
-                .map(|event_count| event_count.saturating_add(tail_event_count));
-            mark_catalog_session_indexed(
-                store,
-                session,
-                event_count,
-                utc_now().timestamp_millis(),
-            )?;
-            summary.merge_from(tail_summary);
-        } else {
-            full_import_sessions.push(session.clone());
-        }
-    }
-
-    if !full_import_sessions.is_empty() {
-        for session in &full_import_sessions {
-            let paths = vec![PathBuf::from(&session.source_path)];
-            let file_summary = match import_codex_session_paths(
-                paths,
-                store,
-                CodexSessionImportOptions {
-                    source_path: Some(source.path.clone()),
-                    history_record_id: Some(record_id),
-                    inventory_observation_token: catalog_inventory_observation_token(session),
-                    progress: progress.clone(),
-                    ..CodexSessionImportOptions::default()
-                },
-            )
-            .map_err(anyhow::Error::from)
-            {
-                Ok(file_summary) => file_summary,
-                Err(err) => {
-                    let failure_scope = import_error_scope(&err);
-                    let error = error_summary(&err);
-                    mark_catalog_sessions_failed(store, std::slice::from_ref(session), &error)?;
-                    if failure_scope == ImportFailureScope::System {
-                        return Err(err);
-                    }
-                    summary.failed += 1;
-                    summary
-                        .failures
-                        .push(ProviderImportFailure { line: 0, error });
-                    continue;
-                }
-            };
-            if file_summary.failed > 0 && !provider_summary_has_imported_content(&file_summary) {
-                mark_catalog_sessions_failed(
-                    store,
-                    std::slice::from_ref(session),
-                    &catalog_session_import_failure(&file_summary),
-                )?;
-            } else {
-                mark_catalog_sessions_indexed(store, std::slice::from_ref(session), &file_summary)?;
-            }
-            summary.merge_from(file_summary);
-        }
-    }
-    Ok(summary)
-}
-
-fn catalog_session_import_failure(summary: &ProviderImportSummary) -> String {
-    summary
-        .failures
-        .first()
-        .map(|failure| {
-            if failure.line == 0 {
-                failure.error.clone()
-            } else {
-                format!("line {}: {}", failure.line, failure.error)
-            }
-        })
-        .unwrap_or_else(|| "session import failed".to_owned())
-}
-
-pub(crate) fn mark_catalog_sessions_indexed(
-    store: &Store,
-    sessions: &[CatalogSession],
-    summary: &ProviderImportSummary,
-) -> Result<()> {
-    let indexed_at_ms = utc_now().timestamp_millis();
-    let event_count = if sessions.len() == 1 {
-        Some(
-            summary
-                .imported_events
-                .saturating_add(summary.skipped_events) as u64,
-        )
-    } else {
-        None
-    };
-    for session in sessions {
-        mark_catalog_session_indexed(store, session, event_count, indexed_at_ms)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn mark_catalog_session_indexed(
-    store: &Store,
-    session: &CatalogSession,
-    event_count: Option<u64>,
-    indexed_at_ms: i64,
-) -> Result<()> {
-    let file_sha256 =
-        sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
-            .with_context(|| format!("hash checkpoint prefix for {}", session.source_path))?;
-    store.mark_catalog_source_observation_indexed(
-        session,
-        Some(&file_sha256),
-        event_count,
-        indexed_at_ms,
-    )?;
-    Ok(())
-}
-
-pub(crate) fn catalog_import_checkpoint_matches(
-    path: &Path,
-    byte_count: u64,
-    expected_sha256: Option<&str>,
-) -> Result<bool> {
-    let Some(expected_sha256) = expected_sha256 else {
-        return Ok(true);
-    };
-    let actual_sha256 = sha256_file_prefix_hex(path, byte_count)?;
-    Ok(actual_sha256 == expected_sha256)
-}
-
-pub(crate) fn sha256_file_prefix_hex(path: &Path, byte_count: u64) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut remaining = byte_count;
-    let mut buffer = [0_u8; 8192];
-    while remaining > 0 {
-        let to_read = buffer.len().min(remaining as usize);
-        let read = file.read(&mut buffer[..to_read])?;
-        if read == 0 {
-            return Err(anyhow!(
-                "file ended before checkpoint byte offset {byte_count}: {}",
-                path.display()
-            ));
-        }
-        hasher.update(&buffer[..read]);
-        remaining -= read as u64;
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-pub(crate) fn mark_catalog_sessions_failed(
-    store: &Store,
-    sessions: &[CatalogSession],
-    error: &str,
-) -> Result<()> {
-    let indexed_at_ms = utc_now().timestamp_millis();
-    for session in sessions {
-        store.mark_catalog_source_observation_failed(session, error, indexed_at_ms)?;
-    }
-    Ok(())
-}
 
 pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
-    // Every importable provider persists events through Store APIs that update
-    // the event-search projection transactionally. Unsupported sources have no
-    // importer and therefore cannot make that guarantee.
     source.import_support.is_importable()
 }
 
@@ -306,9 +34,6 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
             &observation,
             true,
         );
-        // WAL and rollback-journal files can hold committed changes that have
-        // not reached the main database. The shared-memory file is excluded
-        // because read-only SQLite clients may update it.
         for suffix in ["-wal", "-journal"] {
             let mut sidecar = path.as_os_str().to_os_string();
             sidecar.push(suffix);
@@ -331,13 +56,13 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
                     return Err(anyhow!(
                         "import source sidecar is not a regular file: {}",
                         sidecar.display()
-                    ))
+                    ));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("stat import source sidecar {}", sidecar.display())
-                    })
+                    });
                 }
             }
         }
@@ -514,36 +239,4 @@ pub(crate) fn import_record_for_history_source_plugin(
     );
     record.id = stable_capture_uuid(&key, "record");
     record
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider_sources::explicit_path_source;
-    use ctx_history_capture::provider_source_specs;
-
-    #[test]
-    fn every_importable_provider_uses_incremental_event_search() {
-        for spec in provider_source_specs() {
-            let source = explicit_path_source(
-                spec.provider,
-                PathBuf::from(format!("{}-history", spec.provider.as_str())),
-            );
-
-            assert_eq!(source.import_support, spec.import_support);
-            assert!(
-                source_uses_incremental_event_search(&source),
-                "{} import must maintain event search incrementally",
-                spec.provider
-            );
-        }
-    }
-
-    #[test]
-    fn unsupported_source_does_not_claim_incremental_event_search() {
-        let source = explicit_path_source(CaptureProvider::Shell, PathBuf::from("shell-history"));
-
-        assert!(!source.import_support.is_importable());
-        assert!(!source_uses_incremental_event_search(&source));
-    }
 }

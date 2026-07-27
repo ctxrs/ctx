@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a staged ONNX Runtime native library and load it on native hosts."""
+"""Validate a staged semantic runtime library and load ONNX Runtime when requested."""
 
 import argparse
 import ctypes
@@ -8,6 +8,57 @@ import re
 import struct
 import subprocess
 from pathlib import Path
+
+
+CUDA_EXTERNAL_ELF_DEPENDENCIES = {
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libcuda.so.1",
+    "libdl.so.2",
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libnvidia-ml.so.1",
+    "libpthread.so.0",
+    "librt.so.1",
+    "libstdc++.so.6",
+}
+
+
+def validate_elf_dependency_closure(root: Path, libraries: list[str]) -> None:
+    bundled = {
+        path.name
+        for path in root.iterdir()
+        if path.is_file() and not path.is_symlink()
+    }
+    if len(libraries) != len(set(libraries)):
+        raise SystemExit("duplicate CUDA dependency-closure input")
+    for library in libraries:
+        if "/" in library or "\\" in library or library not in bundled:
+            raise SystemExit(f"invalid CUDA dependency-closure input: {library}")
+        try:
+            output = subprocess.run(
+                ["readelf", "-d", "--wide", str(root / library)],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise SystemExit(f"could not inspect ELF dependencies for {library}") from error
+        needed = set(
+            re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", output)
+        )
+        unresolved = sorted(
+            needed - bundled - CUDA_EXTERNAL_ELF_DEPENDENCIES
+        )
+        if unresolved:
+            raise SystemExit(
+                f"CUDA archive has unresolved ELF dependencies for {library}: "
+                + ", ".join(unresolved)
+            )
+    print(
+        "CUDA static ELF dependency closure ok; GPU execution-provider "
+        "qualification remains deferred"
+    )
 
 
 def freebsd_provenance(
@@ -41,22 +92,30 @@ def validate_binary(
     ports_commit: str,
     deps_sha256: str,
     freebsd_abi: str,
+    require_version_marker: bool = True,
 ) -> None:
+    binary_platform = (
+        "linux-x64"
+        if platform == "linux-x64-cuda12"
+        else "windows-x64"
+        if platform == "windows-x64-windowsml"
+        else platform
+    )
     data = path.read_bytes()
     if len(data) < 64:
         raise SystemExit(
             f"native runtime library is implausibly small: {len(data)} bytes"
         )
-    if version.encode() not in data:
+    if require_version_marker and version.encode() not in data:
         raise SystemExit(
             f"native runtime library does not contain version marker {version}"
         )
 
-    if platform.startswith("linux-") or platform == "freebsd-x64":
+    if binary_platform.startswith("linux-") or binary_platform == "freebsd-x64":
         if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
             raise SystemExit("native runtime library is not 64-bit little-endian ELF")
         elf_type, machine = struct.unpack_from("<HH", data, 16)
-        expected_machine = 183 if platform == "linux-aarch64" else 62
+        expected_machine = 183 if binary_platform == "linux-aarch64" else 62
         if elf_type != 3:
             raise SystemExit(
                 f"native runtime ELF type is {elf_type}, expected ET_DYN (3)"
@@ -67,7 +126,7 @@ def validate_binary(
                 f"expected {expected_machine} for {platform}"
             )
         osabi = data[7]
-        if platform == "freebsd-x64":
+        if binary_platform == "freebsd-x64":
             if osabi != 9:
                 raise SystemExit(
                     f"native runtime ELF OSABI is {osabi}, expected FreeBSD (9)"
@@ -85,7 +144,7 @@ def validate_binary(
             raise SystemExit(
                 f"native runtime ELF OSABI is {osabi}, expected System V or GNU/Linux"
             )
-        if platform.startswith("linux-"):
+        if binary_platform.startswith("linux-"):
             versions = {
                 (int(match.group(1)), int(match.group(2)))
                 for match in re.finditer(rb"GLIBC_(\d+)\.(\d+)", data)
@@ -99,9 +158,9 @@ def validate_binary(
                     f"native Linux runtime requires GLIBC_{required[0]}.{required[1]}, "
                     f"newer than allowed GLIBC_{allowed[0]}.{allowed[1]}"
                 )
-    elif platform.startswith("macos-"):
+    elif binary_platform.startswith("macos-"):
         magic, cpu_type, _cpu_subtype, file_type = struct.unpack_from("<IIII", data, 0)
-        expected_cpu = 0x0100000C if platform == "macos-arm64" else 0x01000007
+        expected_cpu = 0x0100000C if binary_platform == "macos-arm64" else 0x01000007
         if magic != 0xFEEDFACF:
             raise SystemExit(
                 "native runtime library is not a thin 64-bit little-endian Mach-O"
@@ -115,7 +174,7 @@ def validate_binary(
             raise SystemExit(
                 f"native runtime Mach-O file type is {file_type}, expected MH_DYLIB (6)"
             )
-    elif platform == "windows-x64":
+    elif binary_platform == "windows-x64":
         if data[:2] != b"MZ" or len(data) < 0x40:
             raise SystemExit("native runtime library is not a PE image")
         pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
@@ -146,7 +205,7 @@ def uname(flag: str) -> str:
 
 
 def host_matches(platform: str, system: str, machine: str) -> bool:
-    if platform == "linux-x64":
+    if platform in ("linux-x64", "linux-x64-cuda12"):
         return system == "Linux" and machine in ("x86_64", "amd64")
     if platform == "linux-aarch64":
         return system == "Linux" and machine in ("aarch64", "arm64")
@@ -156,7 +215,7 @@ def host_matches(platform: str, system: str, machine: str) -> bool:
         return system == "Darwin" and machine == "x86_64"
     if platform == "freebsd-x64":
         return system == "FreeBSD" and machine in ("x86_64", "amd64")
-    if platform == "windows-x64":
+    if platform in ("windows-x64", "windows-x64-windowsml"):
         return (
             system.startswith(("MINGW", "MSYS", "CYGWIN")) and machine == "x86_64"
         )
@@ -238,6 +297,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freebsd-ports-commit", required=True)
     parser.add_argument("--freebsd-deps-sha256", required=True)
     parser.add_argument("--freebsd-abi", required=True)
+    parser.add_argument("--skip-version-marker", action="store_true")
+    parser.add_argument("--skip-load-check", action="store_true")
+    parser.add_argument("--dependency-root", type=Path)
+    parser.add_argument("--dependency-library", action="append", default=[])
     return parser.parse_args()
 
 
@@ -253,18 +316,28 @@ def main() -> None:
         args.freebsd_ports_commit,
         args.freebsd_deps_sha256,
         args.freebsd_abi,
+        not args.skip_version_marker,
     )
-    validate_loaded_runtime(
-        args.platform,
-        args.library,
-        args.version,
-        args.api_version,
-        args.freebsd_build_recipe,
-        args.source_sha256,
-        args.freebsd_ports_commit,
-        args.freebsd_deps_sha256,
-        args.freebsd_abi,
-    )
+    if bool(args.dependency_root) != bool(args.dependency_library):
+        raise SystemExit(
+            "--dependency-root and --dependency-library must be provided together"
+        )
+    if args.dependency_root:
+        validate_elf_dependency_closure(
+            args.dependency_root, args.dependency_library
+        )
+    if not args.skip_load_check:
+        validate_loaded_runtime(
+            args.platform,
+            args.library,
+            args.version,
+            args.api_version,
+            args.freebsd_build_recipe,
+            args.source_sha256,
+            args.freebsd_ports_commit,
+            args.freebsd_deps_sha256,
+            args.freebsd_abi,
+        )
 
 
 if __name__ == "__main__":

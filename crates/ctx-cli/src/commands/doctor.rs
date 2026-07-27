@@ -6,6 +6,7 @@ use serde_json::json;
 use ctx_history_core::database_path;
 
 use crate::analytics::{count_bucket, DoctorTelemetry};
+use crate::config::AppConfig;
 use crate::output::print_json;
 use crate::progress::{progress_mode_name, ProgressReporter};
 use crate::semantic::{daemon_report, semantic_health_findings, semantic_worker_report};
@@ -46,6 +47,10 @@ pub(crate) fn run_doctor(
     };
     let daemon = daemon_report(&data_root, &semantic_report);
     let pro = crate::pro::lifecycle_status_json(&data_root);
+    let config = AppConfig::load(&data_root)?;
+    let upgrade_diagnostics = crate::upgrade::upgrade_diagnostics(&config);
+    findings.extend(upgrade_diagnostics.findings);
+    let upgrade = upgrade_diagnostics.report;
     if pro["installed"].as_bool() == Some(true) {
         if let Some(code @ ("helper_upgrade_required" | "protocol_mismatch")) =
             pro["error_code"].as_str()
@@ -84,13 +89,17 @@ pub(crate) fn run_doctor(
             "progress": progress_mode_name(args.progress),
             "findings": findings,
             "daemon": daemon,
+            "upgrade": upgrade,
             "pro": pro,
         }))?;
-    } else if findings.is_empty() {
-        println!("ok");
     } else {
-        for finding in findings {
-            println!("{finding}");
+        println!("upgrade_auto: {}", config.auto_upgrade_mode().as_str());
+        if findings.is_empty() {
+            println!("ok");
+        } else {
+            for finding in findings {
+                println!("{finding}");
+            }
         }
     }
     Ok(())

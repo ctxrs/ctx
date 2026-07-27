@@ -1,20 +1,21 @@
 use std::{iter::Enumerate, slice::Iter};
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType, ProviderEventEnvelope};
+use ctx_history_core::{EventRole, EventType};
 use serde_json::Value;
 
-use crate::captured_batch::CapturedSqliteValue;
+use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{
     provider_timestamp_millis, provider_timestamp_value, provider_value_text,
 };
 use crate::{CaptureError, Result};
 
-use super::event::kiro_event;
+use super::event::{kiro_native_event, KiroNativeEvent};
 
 pub(super) const KIRO_V2_RECORD_KIND: &str = "kiro-conversation-v2-v1";
 pub(super) const KIRO_LEGACY_RECORD_KIND: &str = "kiro-conversation-v1";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KiroConversationRow {
     pub(crate) table: &'static str,
     pub(crate) rowid: i64,
@@ -25,14 +26,34 @@ pub(crate) struct KiroConversationRow {
     pub(crate) updated_at: Option<i64>,
 }
 
+pub(super) fn kiro_row_complete_values(row: &KiroConversationRow) -> Vec<NativeSqliteValue> {
+    match row.table {
+        "conversations_v2" => vec![
+            NativeSqliteValue::Integer(row.rowid),
+            NativeSqliteValue::Text(row.key.clone()),
+            NativeSqliteValue::Text(row.conversation_id.clone().unwrap_or_default()),
+            NativeSqliteValue::Text(row.value.clone()),
+            row.created_at
+                .map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
+            row.updated_at
+                .map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
+        ],
+        _ => vec![
+            NativeSqliteValue::Integer(row.rowid),
+            NativeSqliteValue::Text(row.key.clone()),
+            NativeSqliteValue::Text(row.value.clone()),
+        ],
+    }
+}
+
 pub(super) fn decode_kiro_conversation(
     record_kind: &str,
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
 ) -> Result<KiroConversationRow> {
     match (record_kind, values) {
         (
             KIRO_V2_RECORD_KIND,
-            [CapturedSqliteValue::Integer(rowid), CapturedSqliteValue::Text(key), CapturedSqliteValue::Text(conversation_id), CapturedSqliteValue::Text(value), created_at, updated_at],
+            [NativeSqliteValue::Integer(rowid), NativeSqliteValue::Text(key), NativeSqliteValue::Text(conversation_id), NativeSqliteValue::Text(value), created_at, updated_at],
         ) => Ok(KiroConversationRow {
             table: "conversations_v2",
             rowid: *rowid,
@@ -44,7 +65,7 @@ pub(super) fn decode_kiro_conversation(
         }),
         (
             KIRO_LEGACY_RECORD_KIND,
-            [CapturedSqliteValue::Integer(rowid), CapturedSqliteValue::Text(key), CapturedSqliteValue::Text(value)],
+            [NativeSqliteValue::Integer(rowid), NativeSqliteValue::Text(key), NativeSqliteValue::Text(value)],
         ) => Ok(KiroConversationRow {
             table: "conversations",
             rowid: *rowid,
@@ -58,14 +79,14 @@ pub(super) fn decode_kiro_conversation(
             "Kiro logical row has an invalid value shape",
         )),
         _ => Err(CaptureError::SystemInvariant(
-            "Kiro projector received an unexpected record kind",
+            "Kiro history decoder received an unexpected record kind",
         )),
     }
 }
 
 pub(crate) fn decode_kiro_conversation_for_complete(
     table: &str,
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
 ) -> Result<KiroConversationRow> {
     let record_kind = match table {
         "conversations_v2" => KIRO_V2_RECORD_KIND,
@@ -79,10 +100,10 @@ pub(crate) fn decode_kiro_conversation_for_complete(
     decode_kiro_conversation(record_kind, values)
 }
 
-fn kiro_optional_integer(value: &CapturedSqliteValue) -> Result<Option<i64>> {
+fn kiro_optional_integer(value: &NativeSqliteValue) -> Result<Option<i64>> {
     match value {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Integer(value) => Ok(Some(*value)),
+        NativeSqliteValue::Null => Ok(None),
+        NativeSqliteValue::Integer(value) => Ok(Some(*value)),
         _ => Err(CaptureError::SystemInvariant(
             "Kiro logical row has an invalid optional integer value",
         )),
@@ -214,6 +235,57 @@ pub(crate) fn kiro_tool_uses_text(value: &Value) -> Option<String> {
     (!names.is_empty()).then(|| format!("tool calls: {}", names.join(", ")))
 }
 
+pub(super) fn kiro_history_entry_events(
+    row: &KiroConversationRow,
+    provider_session_id: &str,
+    history_index: usize,
+    entry: &Value,
+    started_at: DateTime<Utc>,
+) -> Vec<KiroNativeHistoryEvent> {
+    let user_at = kiro_entry_timestamp(entry, "user", started_at);
+    let mut events = Vec::with_capacity(2);
+    if let Some(text) = kiro_user_prompt_text(entry) {
+        events.push(KiroNativeHistoryEvent {
+            complete_text: text.clone(),
+            event: kiro_native_event(
+                row,
+                provider_session_id,
+                history_index,
+                0,
+                EventType::Message,
+                EventRole::User,
+                user_at,
+                text,
+                entry,
+                None,
+            ),
+        });
+    }
+    if let Some(assistant) = kiro_assistant_message(entry) {
+        events.push(KiroNativeHistoryEvent {
+            complete_text: assistant.text.clone(),
+            event: kiro_native_event(
+                row,
+                provider_session_id,
+                history_index,
+                1,
+                assistant.event_type,
+                EventRole::Assistant,
+                kiro_entry_timestamp(entry, "assistant", user_at),
+                assistant.text,
+                entry,
+                assistant.tool_uses,
+            ),
+        });
+    }
+    events
+}
+
+pub(super) struct KiroNativeHistoryEvent {
+    pub(super) event: KiroNativeEvent,
+    pub(super) complete_text: String,
+}
+
 #[derive(Clone, Copy)]
 enum KiroHistoryTextSource {
     User,
@@ -230,7 +302,7 @@ impl KiroHistoryTextSource {
 }
 
 pub(crate) struct KiroHistoryEvent<'a> {
-    pub(crate) event: ProviderEventEnvelope,
+    pub(crate) event: KiroNativeEvent,
     pub(crate) entry: &'a Value,
     text_source: KiroHistoryTextSource,
 }
@@ -239,27 +311,7 @@ impl<'a> KiroHistoryEvent<'a> {
     pub(crate) fn complete_text(&self) -> String {
         self.text_source
             .complete_text(self.entry)
-            .expect("Kiro history text was present for the decoded event")
-    }
-
-    pub(super) fn into_projection_parts(
-        self,
-    ) -> (
-        ProviderEventEnvelope,
-        &'a Value,
-        impl FnOnce() -> String + 'a,
-    ) {
-        let Self {
-            event,
-            entry,
-            text_source,
-        } = self;
-        let complete_text = move || {
-            text_source
-                .complete_text(entry)
-                .expect("Kiro history text was present for the projected event")
-        };
-        (event, entry, complete_text)
+            .unwrap_or_default()
     }
 }
 
@@ -298,7 +350,7 @@ impl<'a> Iterator for KiroHistoryEvents<'a> {
                 if let Some(assistant) = kiro_assistant_message(entry) {
                     let assistant_at = kiro_entry_timestamp(entry, "assistant", user_at);
                     return Some(KiroHistoryEvent {
-                        event: kiro_event(
+                        event: kiro_native_event(
                             self.row,
                             self.provider_session_id,
                             history_index,
@@ -322,7 +374,7 @@ impl<'a> Iterator for KiroHistoryEvents<'a> {
             self.pending_assistant = Some((history_index, entry, user_at));
             if let Some(text) = kiro_user_prompt_text(entry) {
                 return Some(KiroHistoryEvent {
-                    event: kiro_event(
+                    event: kiro_native_event(
                         self.row,
                         self.provider_session_id,
                         history_index,

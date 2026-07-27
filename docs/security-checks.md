@@ -29,20 +29,20 @@ the local retrieval product.
   APIs, and search must not download the local embedding model when the required
   cache is missing. Explicit semantic/hybrid search may initialize an
   already-cached local model to embed the query.
-- `ctx setup --no-daemon`, `ctx setup --catalog-only`, `ctx setup --json`,
-  `ctx import --no-daemon`, and `ctx import --json` must not autostart daemon
-  maintenance. `ctx search --refresh background` may autostart local daemon
-  maintenance, including with JSON output; `--refresh off` must never do so.
+- `ctx setup --no-daemon`, `ctx setup --catalog-only`, and
+  `ctx import --no-daemon` must not autostart daemon maintenance.
+  Machine-readable foreground commands must not start or nudge the daemon,
+  regardless of refresh mode.
 - `ctx docs` reads embedded documentation and writes only an explicit topic
   output path for `ctx docs show --out` or an explicit man-page output
   directory when `ctx docs man --out` is used.
 - `ctx upgrade` uses signed release metadata with explicit self-upgrade policy
   and applies only to official installer-managed binaries with a matching
   install sidecar.
-- Background auto-upgrade is explicit-opt-in and managed-install-only, skipped
-  for status/JSON/MCP/docs/sql/upgrade commands, requires explicit signed
-  auto-upgrade policy, and must not collect provider history or pollute command
-  stdout/stderr.
+- Automatic upgrade defaults on for managed installs, but the enabled daemon is
+  its only scheduler. A disabled daemon performs no automatic check, download,
+  or apply. Signed policy and explicit opt-outs remain mandatory, and upgrade
+  work must not collect provider history or pollute command stdout/stderr.
 
 - A ctx-owned background coordinator, when launched by `ctx daemon run` or
   setup/import autostart, must write only under the configured ctx data root,
@@ -80,7 +80,7 @@ jq empty docs/provider-support-matrix.json
 When Bazel owns the docs gate, run:
 
 ```bash
-bazel test //:docs_check --config=ci
+scripts/bazelw test //:docs_check --config=ci
 ```
 
 ## Bazel Security Gates
@@ -88,7 +88,7 @@ bazel test //:docs_check --config=ci
 Run the public local transcript oracle through Bazel:
 
 ```bash
-bazel test //:local_transcript_oracle --config=ci
+scripts/bazelw test //:local_transcript_oracle --config=ci
 ```
 
 `//:local_transcript_oracle` imports a synthetic provider history with fake

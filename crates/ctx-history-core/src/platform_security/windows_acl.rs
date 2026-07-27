@@ -8,6 +8,7 @@ use std::{
     io,
     mem::size_of,
     os::windows::{
+        ffi::OsStrExt as _,
         fs::{MetadataExt as _, OpenOptionsExt as _},
         io::AsRawHandle as _,
     },
@@ -17,19 +18,22 @@ use std::{
 
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE,
+        CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
+        ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, HANDLE,
     },
     Security::{
         AddAccessAllowedAceEx,
         Authorization::{GetSecurityInfo, SetSecurityInfo, SE_FILE_OBJECT},
         CreateWellKnownSid, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
-        GetTokenInformation, InitializeAcl, IsValidSid, TokenUser, WinLocalSystemSid,
+        GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TokenUser, WinLocalSystemSid,
         ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+        SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -39,6 +43,109 @@ const SECURITY_MAX_SID_SIZE: usize = 68;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const PRIVATE_ACCESS_MASK: u32 = 0x001f_01ff;
 const PRIVATE_DIRECTORY_INHERITANCE: u8 = 0x03;
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private directory path must be non-empty and traversal-free",
+        ));
+    }
+    let absolute = std::path::absolute(path)?;
+    let mut component_paths: Vec<_> = absolute.ancestors().collect();
+    component_paths.reverse();
+    component_paths.retain(|candidate| !candidate.as_os_str().is_empty());
+
+    let identities = PrivateIdentities::current()?;
+    let mut acl = private_acl(&identities, ObjectKind::Directory)?;
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    // SAFETY: descriptor is live and writable for this initialization.
+    if unsafe {
+        InitializeSecurityDescriptor((&raw mut descriptor).cast(), SECURITY_DESCRIPTOR_REVISION)
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: descriptor and ACL remain live for every synchronous create.
+    if unsafe {
+        SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl.as_mut_ptr().cast(), 0)
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // Prevent CreateDirectoryW from merging inherited permissive entries.
+    // SAFETY: descriptor is initialized and remains live.
+    if unsafe {
+        SetSecurityDescriptorControl(
+            (&raw mut descriptor).cast(),
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| invalid_acl())?,
+        lpSecurityDescriptor: (&raw mut descriptor).cast(),
+        bInheritHandle: 0,
+    };
+
+    // Each open omits delete and write sharing. Retaining every ancestor handle
+    // prevents a checked component from being replaced or converted to a
+    // reparse point while descendant creation is in progress.
+    let mut held = Vec::with_capacity(component_paths.len());
+    let mut created_private_ancestor = false;
+    for candidate in component_paths {
+        let is_final = candidate == absolute;
+        let mut raced_existing = false;
+        let access = if is_final || created_private_ancestor {
+            READ_CONTROL
+        } else {
+            0
+        };
+        let handle = match open_handle(candidate, ObjectKind::Directory, access) {
+            Ok(handle) => handle,
+            Err(error) if is_not_found(&error) => {
+                let wide = wide_path(candidate)?;
+                // The protected owner/SYSTEM DACL is installed by the create
+                // itself; no inherited-permissive interval exists.
+                if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
+                    let code = last_error_code();
+                    if code != ERROR_ALREADY_EXISTS {
+                        return Err(win32_error(code));
+                    }
+                    raced_existing = true;
+                } else {
+                    created_private_ancestor = true;
+                }
+                open_handle(candidate, ObjectKind::Directory, READ_CONTROL)?
+            }
+            Err(error) => return Err(error),
+        };
+        validate_handle_type(&handle, ObjectKind::Directory).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput && !is_final {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "private state path traverses a reparse point",
+                )
+            } else {
+                error
+            }
+        })?;
+        if is_final || created_private_ancestor || raced_existing {
+            verify_handle_with_identities(&handle, ObjectKind::Directory, &identities)?;
+        }
+        created_private_ancestor |= raced_existing;
+        held.push(handle);
+    }
+    Ok(())
+}
 
 pub(super) fn restrict_private_directory(path: &Path) -> io::Result<()> {
     restrict(path, ObjectKind::Directory)
@@ -46,6 +153,10 @@ pub(super) fn restrict_private_directory(path: &Path) -> io::Result<()> {
 
 pub(super) fn restrict_private_file(path: &Path) -> io::Result<()> {
     restrict(path, ObjectKind::File)
+}
+
+pub(super) fn restrict_private_file_handle(handle: &File) -> io::Result<()> {
+    restrict_handle(handle, ObjectKind::File)
 }
 
 pub(super) fn verify_private_directory(path: &Path) -> io::Result<()> {
@@ -276,6 +387,25 @@ fn open_handle(path: &Path, kind: ObjectKind, access: u32) -> io::Result<File> {
         .share_mode(share)
         .custom_flags(flags)
         .open(path)
+}
+
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private state path contains a NUL character",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+fn is_not_found(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .and_then(|code| u32::try_from(code).ok())
+        .is_some_and(|code| code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
 }
 
 fn private_acl(identities: &PrivateIdentities, kind: ObjectKind) -> io::Result<AlignedBuffer> {

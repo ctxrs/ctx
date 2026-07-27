@@ -18,20 +18,21 @@ research agent.
   background daemon maintenance profile. An explicit `[daemon] enabled = false`
   remains a durable opt-out.
   `ctx setup --no-daemon`,
-  `ctx setup --catalog-only`, and `ctx setup --json` do not autostart
-  maintenance.
+  `ctx setup --catalog-only`, and machine-readable setup do not autostart or
+  nudge maintenance.
 - `ctx sources` reports known local provider history paths, including whether a
   native source is currently importable.
 - `ctx import` indexes supported local transcript formats and selected local
   history-source plugins, and can opportunistically start the same short
   one-pass ctx-owned maintenance profile when `[daemon].enabled` is true for
   native provider imports. `ctx import --no-daemon`, custom JSONL imports, explicit
-  history-source-only imports, and `ctx import --json` do not autostart
-  maintenance.
+  history-source-only imports, and machine-readable import do not autostart or
+  nudge maintenance.
 - `ctx search` can refresh a bounded batch from discovered native provider
   sources and enabled auto history-source plugins before returning ranked local
   hits from the local index, with event IDs when a hit maps to an indexed event.
-  Default background refresh may autostart daemon maintenance even while
+  Default background refresh may autostart daemon maintenance for
+  human-readable search while
   semantic search is disabled. Semantic and hybrid search read existing local
   sidecar coverage only; search does not run vector backfill or download
   embedding models. Hybrid uses semantic evidence only after sidecar coverage
@@ -42,11 +43,15 @@ research agent.
   artifacts.
 - `ctx locate session` and `ctx locate event` report provenance and resume
   metadata.
-- `ctx pro` uses hosted WorkOS sign-in, activates a Stripe-backed trial or
-  subscription, installs or repairs the signed target-specific helper, and
-  catches the encrypted graph up. When Stripe returns a new Checkout session,
-  the command waits for access in the same invocation. `ctx pro setup` is a
-  supported explicit synonym.
+- `ctx pro` starts or resumes an anonymous 14-day trial without an account,
+  authentication, or payment method, installs or repairs the signed
+  target-specific helper, and catches the encrypted graph up. The official
+  interactive installer offers the same trial with an explicit default-yes
+  confirmation; unattended, CI, and machine-readable setup remain Core-only
+  unless the installer receives an explicit Pro-trial option. Trial activation
+  failure never changes Core setup success or daemon startup. WorkOS sign-in
+  and Stripe are used only for paid conversion and account management.
+  `ctx pro setup` is a supported explicit synonym.
   `ctx status` reports Pro state and the next useful action without mutating
   canonical history or graph data. Entitlement authorization may advance
   nonsecret anti-clock-rollback metadata.
@@ -55,20 +60,30 @@ research agent.
   data; noninteractive callers must explicitly pass `--delete-data` or
   `--keep-data`. The keep path is local-only and preserves local Pro data;
   verified `--delete-data` remains idempotently available after the helper is
-  gone.
+  gone. Missing and never-Pro roots are unchanged and report that Pro data is
+  absent rather than preserved or deleted. Interrupted initialization remains
+  identity-aware and deletable before a helper or graph file exists. Destructive
+  uninstall fails before deletion on corrupt credential inventory and persists
+  an exact-root cleanup phase so retries remain verifiable after graph-key or
+  credential records are already absent.
 - Pro materialization is an internal idempotent capability invoked by setup,
-  daemon freshness, and graph queries. Repository roots are inferred from
+  daemon freshness, and blame. Repository roots are inferred from
   canonical activity rather than accepted as setup flags.
-- Pro resource forms of `ctx show` and `ctx locate`, plus `ctx blame`,
-  `ctx timeline`, and `ctx facts`, return bounded deterministic records with
-  exact canonical citations. A graph query may catch stale derived state up;
+- The only public Pro query is `ctx blame file|commit|pr`. It returns typed,
+  bounded matches with complete deduplicated canonical evidence. OSS
+  `ctx show session|event` and `ctx locate session|event` remain available;
+  there are no Pro show, locate, timeline, facts, or related aliases. Blame may
+  catch stale derived state up;
   that changes only the encrypted graph. Pure canonical tail appends
   resume from the durable frontier; incompatible mutation epochs, legacy
   derived state, or repository semantics trigger a token-checked derived reset
   and replay without changing canonical history. Materialization reports
-  `NotMaterialized`, `Partial`, `NeedsResume`, `NeedsRebuild`, or `Ready`; only
-  facts and timeline expose continuation cursors. Typed relationship traversal
-  remains available to agents through MCP.
+  `NotMaterialized`, `Partial`, `NeedsResume`, `NeedsRebuild`, or `Ready`.
+  Blame continuation cursors are opaque and graph-state-bound.
+- PR activity is not code production. A PR-to-commit relationship is present
+  only when a recognized structured forge record binds the canonical PR
+  identity and exact Git object ID. Without that proof, associated commits are
+  explicitly unproven.
 - `ctx sql` runs one read-only SQL statement against the existing local index
   for advanced inspection when normal search is not expressive enough.
 - `ctx doctor` reports local storage health.
@@ -83,15 +98,15 @@ research agent.
   autostart reports semantic status read-only; explicit `ctx daemon run` is the
   path that may perform semantic catch-up.
 - `ctx status` and `ctx doctor` report ctx-owned daemon coordinator state.
-- JSON output supports local agents and scripts. Setup and import JSON do not
-  autostart daemon maintenance; search JSON follows its explicit
-  `--refresh background|off|wait` lifecycle.
+- JSON output supports local agents and scripts without daemon-start or
+  daemon-nudge side effects. A daemon already running independently continues
+  its own maintenance and automatic-upgrade cadence.
 
 ## Local Pro Access States
 
 | State | Meaning | Local Pro graph access |
 | --- | --- | --- |
-| trial | 14-day trial with a payment method | allowed |
+| trial | anonymous 14-day trial; no account or payment method | allowed |
 | active | paid monthly subscription | allowed |
 | canceling-paid | canceled at period end, but the current period is paid | allowed through the paid deadline |
 | grace | the bounded signed offline grant remains valid | allowed through the final grace deadline |
@@ -100,10 +115,14 @@ research agent.
 `ctx pro manage` handles cancellation, payment recovery, and resubscription.
 Core OSS setup, search, indexed show/locate, and SQL remain available in every
 state. Pro uninstall and explicit Pro data deletion also remain available.
-Hosted traffic is limited to identity,
-billing, entitlements, signed release metadata, and authenticated artifact
-delivery; it excludes transcript text, source code, repository paths or URLs,
-Git objects, graph facts, citations, and queries.
+Hosted traffic is limited to anonymous-trial challenge/evidence tokens,
+identity and billing after conversion, entitlements, signed release metadata,
+and authenticated artifact delivery. Trial evidence consists only of
+challenge-bound application-specific digests; raw platform identifiers are
+discarded inside the signed helper, and the service stores independently keyed
+lookup tokens. The signal is best-effort abuse detection, not hardware
+attestation. Hosted traffic excludes transcript text, source code, repository
+paths or URLs, Git objects, graph facts, citations, and queries.
 
 ## Out Of Scope
 

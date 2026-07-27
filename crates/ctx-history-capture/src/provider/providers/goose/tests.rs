@@ -1,12 +1,7 @@
-use ctx_history_core::CaptureProvider;
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::captured_batch::SourceObservation;
-use crate::GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT;
-
-use super::normalization::goose_normalized_result_content;
-use super::{GOOSE_CAPTURE_REVISION, GOOSE_POLICY_REVISION};
+use super::normalization::{goose_normalized_result_content, goose_output_projection};
 
 #[test]
 fn goose_result_content_is_unbounded_ordered_and_does_not_search_wrappers() {
@@ -28,6 +23,37 @@ fn goose_result_content_is_unbounded_ordered_and_does_not_search_wrappers() {
         })),
         None
     );
+}
+
+#[test]
+fn goose_output_body_and_outcome_use_the_same_direct_tool_responses() {
+    let content = json!([
+        {
+            "type": "toolResponse",
+            "toolCallId": "call-1",
+            "toolResult": "exact failure body",
+            "exitCode": 9,
+            "durationMs": 42
+        },
+        {
+            "type": "wrapper",
+            "content": {
+                "type": "toolResponse",
+                "toolResult": "must not affect body or outcome",
+                "success": true
+            }
+        }
+    ]);
+
+    let output = goose_output_projection(&content);
+    assert_eq!(
+        goose_normalized_result_content(&content).as_deref(),
+        Some("exact failure body")
+    );
+    assert_eq!(output.call_id.as_deref(), Some("call-1"));
+    assert_eq!(output.outcome.outcome, crate::OutputOutcome::Failure);
+    assert_eq!(output.outcome.exit_code, Some(9));
+    assert_eq!(output.outcome.duration_ms, Some(42));
 }
 
 pub(super) fn create_goose_tables(conn: &Connection) {
@@ -106,23 +132,5 @@ pub(super) fn insert_message(conn: &Connection, id: i64, session_id: &str, text:
     .unwrap();
 }
 
-pub(super) fn test_source(revision: &str) -> SourceObservation {
-    SourceObservation::new(
-        CaptureProvider::Goose,
-        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-        "goose-sqlite:test",
-        revision,
-        "provider:goose:test",
-        GOOSE_CAPTURE_REVISION,
-        GOOSE_POLICY_REVISION,
-        None,
-    )
-    .unwrap()
-}
-
-mod persistence;
-mod position;
-mod projection;
-mod schema;
-mod source;
-mod stream;
+mod native_path;
+mod production;

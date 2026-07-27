@@ -1,11 +1,22 @@
 {
   "schema_version": 1,
+  "previous_stable_tag": "v0.25.0",
+  "previous_stable_snapshot": "contracts/stable-defaults/v0.25.0.json",
   "principle": "One canonical control per behavior and justified channel.",
   "controls": [
     {
       "behavior": "analytics delivery",
       "config_key": "analytics.enabled",
-      "environment_variable": "CTX_ANALYTICS_ENABLED"
+      "environment_variable": "CTX_ANALYTICS_ENABLED",
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "previous_stable_default": {
+        "value": true,
+        "state": "on"
+      }
     },
     {
       "behavior": "analytics endpoint",
@@ -15,7 +26,16 @@
     {
       "behavior": "automatic upgrade mode",
       "config_key": "upgrade.auto",
-      "environment_variable": "CTX_UPGRADE_AUTO"
+      "environment_variable": "CTX_UPGRADE_AUTO",
+      "released_default": {
+        "value": "apply",
+        "state": "on",
+        "scope": "official_installer_managed"
+      },
+      "previous_stable_default": {
+        "value": "apply",
+        "state": "on"
+      }
     },
     {
       "behavior": "upgrade channel",
@@ -35,12 +55,37 @@
     {
       "behavior": "daemon maintenance",
       "config_key": "daemon.enabled",
-      "environment_variable": "CTX_DAEMON_ENABLED"
+      "environment_variable": "CTX_DAEMON_ENABLED",
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "previous_stable_default": {
+        "value": false,
+        "state": "off"
+      },
+      "deliberate_change_approval": {
+        "previous_stable_tag": "v0.25.0",
+        "reason": "Enable bounded local daemon maintenance by default while retaining explicit opt-out controls.",
+        "evidence_commits": [
+          "751ae2e53d416a8de26dffd7a9627cb68db38782"
+        ]
+      }
     },
     {
       "behavior": "semantic search",
       "config_key": "search.semantic",
-      "environment_variable": "CTX_SEARCH_SEMANTIC"
+      "environment_variable": "CTX_SEARCH_SEMANTIC",
+      "released_default": {
+        "value": false,
+        "state": "off",
+        "scope": "all_cli_installations"
+      },
+      "previous_stable_default": {
+        "value": false,
+        "state": "off"
+      }
     }
   ],
   "retired_controls": [
@@ -55,5 +100,17 @@
   "deprecated_compatibility_removal_version": null,
   "deprecated_control_references": [
     "docs/storage.md"
+  ],
+  "deprecated_compatibility_consumers": [
+    {
+      "path": "crates/ctx-cli/src/analytics/operation.rs",
+      "purpose": "Classify handler-emitted deprecated control IDs for aggregate telemetry without reading environment variables.",
+      "controls": [
+        "CTX_DAEMON_OFF",
+        "CTX_DISABLE_DAEMON",
+        "CTX_UPGRADE_OFF",
+        "CTX_DISABLE_AUTO_UPGRADE"
+      ]
+    }
   ]
 }

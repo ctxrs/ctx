@@ -1,17 +1,13 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{Confidence, EventType, Fidelity, FileChangeKind, ProviderEventEnvelope};
+use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
-use crate::provider::file_touches::{normalize_file_path, FileTouchDraft};
 use crate::provider::normalization::{
-    provider_capped_json, provider_normalized_result_value, provider_policy_body,
-    provider_policy_event_text, provider_required_timestamp_millis,
-    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
-    provider_value_text,
+    provider_normalized_result_value, provider_required_timestamp_millis, provider_value_text,
 };
-use crate::{fnv1a64, CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::{CaptureError, Result};
 
-use super::schema::{OpenCodeMessageRow, OpenCodeSqliteDialect};
+use super::schema::OpenCodeSqliteDialect;
 
 pub(super) const OPENCODE_MESSAGE_PART_DEFAULT_ROLE: &str = "assistant";
 
@@ -64,8 +60,17 @@ pub(super) fn opencode_tool_part_event_data(
     let status = opencode_tool_part_status(data);
     let exit_code = opencode_tool_part_exit_code(data);
     let is_error = opencode_tool_part_is_error(data, status.as_deref(), exit_code);
-    let result_evidence = provider_result_identifier_evidence(EventType::ToolOutput, "", data);
-    let result_outcome = provider_result_outcome_evidence(EventType::ToolOutput, data);
+    let call_id = [
+        "/call_id",
+        "/callId",
+        "/callID",
+        "/tool_call_id",
+        "/state/call_id",
+        "/state/callId",
+    ]
+    .iter()
+    .find_map(|pointer| data.pointer(pointer))
+    .and_then(Value::as_str);
     Some(json!({
         "role": "tool",
         "time": { "created": time_created },
@@ -74,11 +79,10 @@ pub(super) fn opencode_tool_part_event_data(
         "part_id": part_id,
         "part_type": part_type,
         "tool_name": tool_name,
+        "call_id": call_id,
         "status": status,
         "exit_code": exit_code,
         "is_error": is_error,
-        "result_evidence": result_evidence,
-        "result_outcome": result_outcome,
         "output_retention": "metadata_only",
     }))
 }
@@ -89,7 +93,6 @@ pub(super) fn opencode_tool_part_event_data(
 /// The supported generations use either a direct result field or the modern
 /// `state` envelope. Precedence is explicit and the function never searches
 /// arbitrary descendants. The caller owns any byte bound.
-#[allow(dead_code)] // Activated by SQLite result-locator attachment.
 pub(crate) fn opencode_normalized_result_content(entry_type: &str, data: &Value) -> Option<String> {
     let candidates: &[&str] = match entry_type {
         "tool" | "tool_result" | "result" => &[
@@ -163,50 +166,6 @@ pub(super) fn opencode_tool_part_is_error(
         })
 }
 
-pub(super) fn opencode_message_part_identity_index(message_id: &str, part_id: &str) -> i64 {
-    let key = format!("message+part:{message_id}:{part_id}");
-    let index = fnv1a64(key.as_bytes()) & 0x0000_ffff_ffff;
-    index.max(1) as i64
-}
-
-pub(super) fn opencode_patch_file_touch_drafts<'a>(
-    data: &'a Value,
-    part_id: &'a str,
-    part_type: &'a str,
-) -> impl Iterator<Item = FileTouchDraft> + 'a {
-    let direct_path = data
-        .get("path")
-        .and_then(Value::as_str)
-        .and_then(normalize_file_path)
-        .into_iter();
-    let file_paths = data
-        .get("files")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|file| match file {
-            Value::String(path) => normalize_file_path(path),
-            Value::Object(object) => object
-                .get("path")
-                .and_then(Value::as_str)
-                .and_then(normalize_file_path),
-            _ => None,
-        });
-    direct_path
-        .chain(file_paths)
-        .map(move |path| FileTouchDraft {
-            path,
-            old_path: None,
-            change_kind: Some(FileChangeKind::Modified),
-            confidence: Confidence::Explicit,
-            metadata: json!({
-                "source": "opencode_message_part_metadata",
-                "part_id": part_id,
-                "part_type": part_type,
-            }),
-        })
-}
-
 pub(super) fn opencode_message_type_from_data(data: &Value) -> Option<String> {
     data.get("role")
         .or_else(|| data.get("type"))
@@ -214,145 +173,6 @@ pub(super) fn opencode_message_type_from_data(data: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
-}
-
-pub(super) fn opencode_event(
-    row: &OpenCodeMessageRow,
-    data: &Value,
-    occurred_at: DateTime<Utc>,
-    provider_event_index: u64,
-    dialect: &OpenCodeSqliteDialect,
-) -> ProviderEventEnvelope {
-    let is_message_part = data.get("source_table").and_then(Value::as_str) == Some("message+part");
-    let event_type = opencode_event_type(&row.entry_type, data);
-    let role = Some(provider_role(Some(&row.entry_type)));
-    let text = opencode_event_text(&row.entry_type, data, event_type, dialect);
-    let body = if is_message_part {
-        opencode_message_part_event_body(data)
-    } else {
-        data.clone()
-    };
-    let retained_text = provider_policy_event_text(event_type, &text, &body);
-    let result_evidence = body
-        .get("result_evidence")
-        .cloned()
-        .unwrap_or_else(|| provider_result_identifier_evidence(event_type, &text, &body));
-    let result_outcome = body
-        .get("result_outcome")
-        .cloned()
-        .unwrap_or_else(|| provider_result_outcome_evidence(event_type, &body));
-    let payload = if is_message_part {
-        json!({
-            "entry_type": row.entry_type,
-            "message_id": data
-                .get("message_id")
-                .and_then(Value::as_str)
-                .unwrap_or(&row.id),
-            "part_id": data.get("part_id").cloned(),
-            "part_type": data.get("part_type").cloned(),
-            "session_message_seq": row.seq,
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "body": provider_capped_json(&provider_policy_body(event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
-        })
-    } else {
-        json!({
-            "entry_type": row.entry_type,
-            "message_id": row.id,
-            "session_message_seq": row.seq,
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "body": provider_capped_json(&provider_policy_body(event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
-        })
-    };
-    let metadata = if is_message_part {
-        json!({
-            "source": dialect.source_format,
-            "source_format": dialect.source_format,
-            "session_message_id": row.id,
-            "session_message_seq": row.seq,
-            "message_id": data.get("message_id").cloned(),
-            "part_id": data.get("part_id").cloned(),
-            "part_type": data.get("part_type").cloned(),
-            "time_created": row.time_created,
-            "time_updated": row.time_updated,
-            "model": data.get("model").cloned(),
-            "tokens": data.get("tokens").cloned(),
-            "cost": data.get("cost").cloned(),
-            "finish": data.get("finish").cloned(),
-            "error": data.get("error").cloned(),
-        })
-    } else {
-        json!({
-            "source": dialect.source_format,
-            "source_format": dialect.source_format,
-            "session_message_id": row.id,
-            "session_message_seq": row.seq,
-            "time_created": row.time_created,
-            "time_updated": row.time_updated,
-            "model": data.get("model").cloned(),
-            "tokens": data.get("tokens").cloned(),
-            "cost": data.get("cost").cloned(),
-            "finish": data.get("finish").cloned(),
-            "error": data.get("error").cloned(),
-        })
-    };
-    ProviderEventEnvelope {
-        provider_event_index,
-        provider_event_hash: Some(row.id.clone()),
-        cursor: Some(opencode_event_cursor(row, data)),
-        event_type,
-        role,
-        occurred_at,
-        fidelity: Fidelity::Imported,
-        idempotency_key: Some(format!(
-            "provider-event:{}:{}:{}",
-            dialect.provider.as_str(),
-            row.session_id,
-            row.id
-        )),
-        artifacts: Vec::new(),
-        payload,
-        metadata,
-    }
-}
-
-pub(super) fn opencode_message_part_event_body(data: &Value) -> Value {
-    json!({
-        "role": data.get("role").cloned(),
-        "time": data.get("time").cloned(),
-        "text": data.get("text").cloned(),
-        "source_table": data.get("source_table").cloned(),
-        "message_id": data.get("message_id").cloned(),
-        "part_id": data.get("part_id").cloned(),
-        "part_type": data.get("part_type").cloned(),
-        "tool_name": data.get("tool_name").cloned(),
-        "status": data.get("status").cloned(),
-        "exit_code": data.get("exit_code").cloned(),
-        "is_error": data.get("is_error").cloned(),
-        "result_evidence": data.get("result_evidence").cloned(),
-        "result_outcome": data.get("result_outcome").cloned(),
-        "output_retention": data.get("output_retention").cloned(),
-    })
-}
-
-pub(super) fn opencode_event_cursor(row: &OpenCodeMessageRow, data: &Value) -> String {
-    if data.get("source_table").and_then(Value::as_str) == Some("message+part") {
-        return format!(
-            "message:{}:part:{}",
-            data.get("message_id")
-                .and_then(Value::as_str)
-                .unwrap_or(&row.id),
-            data.get("part_id")
-                .and_then(Value::as_str)
-                .unwrap_or(&row.id)
-        );
-    }
-    format!("session_message:{}:seq:{}", row.session_id, row.seq)
 }
 
 pub(super) fn opencode_event_type(entry_type: &str, data: &Value) -> EventType {

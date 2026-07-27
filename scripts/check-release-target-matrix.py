@@ -21,8 +21,9 @@ EXPECTED = {
         "archive": "tar.gz",
         "vault": "secret-service",
         "runtime_authority": "native-freebsd-x86_64",
-        "diagnostic_authorities": [],
+        "diagnostic_authorities": ["freebsd-15.1"],
         "platform_signature": "release-manifest",
+        "linux_build": None,
     },
     "linux-arm64": {
         "os": "linux",
@@ -36,6 +37,16 @@ EXPECTED = {
         "runtime_authority": "native-linux-aarch64",
         "diagnostic_authorities": ["qemu-user"],
         "platform_signature": "release-manifest",
+        "linux_build": {
+            "builder_image": "docker.io/library/ubuntu:22.04@sha256:"
+            "0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
+            "ubuntu_snapshot": "20260701T000000Z",
+            "glibc_max": "2.35",
+            "rust_toolchain": "1.97.1",
+            "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
+            "rust_sysroot": "/opt/rustup/toolchains/"
+            "1.97.1-aarch64-unknown-linux-gnu",
+        },
     },
     "linux-x64": {
         "os": "linux",
@@ -49,6 +60,16 @@ EXPECTED = {
         "runtime_authority": "native-linux-x86_64",
         "diagnostic_authorities": [],
         "platform_signature": "release-manifest",
+        "linux_build": {
+            "builder_image": "docker.io/library/ubuntu:22.04@sha256:"
+            "0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
+            "ubuntu_snapshot": "20260701T000000Z",
+            "glibc_max": "2.35",
+            "rust_toolchain": "1.97.1",
+            "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
+            "rust_sysroot": "/opt/rustup/toolchains/"
+            "1.97.1-x86_64-unknown-linux-gnu",
+        },
     },
     "macos-arm64": {
         "os": "macos",
@@ -62,6 +83,7 @@ EXPECTED = {
         "runtime_authority": "native-apple-arm64",
         "diagnostic_authorities": [],
         "platform_signature": "developer-id-notarized",
+        "linux_build": None,
     },
     "macos-x64": {
         "os": "macos",
@@ -75,6 +97,7 @@ EXPECTED = {
         "runtime_authority": "native-macos-x86_64",
         "diagnostic_authorities": ["rosetta-2", "non-apple-qemu"],
         "platform_signature": "developer-id-notarized",
+        "linux_build": None,
     },
     "windows-x64": {
         "os": "windows",
@@ -88,6 +111,7 @@ EXPECTED = {
         "runtime_authority": "native-windows-x86_64",
         "diagnostic_authorities": [],
         "platform_signature": "unsigned",
+        "linux_build": None,
     },
 }
 REQUIRED_STRING_FIELDS = {
@@ -121,7 +145,10 @@ def load_and_validate(path: Path = MATRIX_PATH) -> dict[str, object]:
     for target in targets:
         if not isinstance(target, dict):
             raise ValueError("release target entries must be objects")
-        if set(target) != REQUIRED_STRING_FIELDS | {"diagnostic_authorities"}:
+        if set(target) != REQUIRED_STRING_FIELDS | {
+            "diagnostic_authorities",
+            "linux_build",
+        }:
             raise ValueError("release target entry has missing or unexpected fields")
         if any(not isinstance(target[field], str) or not target[field] for field in REQUIRED_STRING_FIELDS):
             raise ValueError("release target string fields must be non-empty")
@@ -139,7 +166,8 @@ def load_and_validate(path: Path = MATRIX_PATH) -> dict[str, object]:
         expected = EXPECTED.get(target_id)
         actual = {
             field: target[field]
-            for field in REQUIRED_STRING_FIELDS | {"diagnostic_authorities"}
+            for field in REQUIRED_STRING_FIELDS
+            | {"diagnostic_authorities", "linux_build"}
             if field != "id"
         }
         if expected != actual:

@@ -15,24 +15,32 @@ use super::{
     },
     SemanticEmbeddingBackend,
 };
-use super::{BackendPreference, SemanticEmbedder};
+use super::{BackendPreference, SemanticDaemonModelAcquisition, SemanticEmbedder};
+#[cfg(all(ctx_semantic_fastembed, any(target_os = "macos", test)))]
+use super::{SemanticModelAcquisitionBackend, SemanticModelAcquisitionSource};
+#[cfg(any(target_os = "macos", test))]
+use crate::semantic::model_acquisition::{
+    coreml_descriptor_provisioned, model_acquisition_error_kind, CoreMlAcquisitionSource,
+    ModelAcquisitionErrorKind,
+};
+#[cfg(all(ctx_semantic_fastembed, any(target_os = "macos", test)))]
+use crate::semantic::resource_policy::semantic_model_load_deferred;
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
 use crate::semantic::{
     health_search::semantic_embed_policy_for,
     model_acquisition::{
-        acquire_coreml_bundle_for_daemon, cached_coreml_bundle, coreml_descriptor_provisioned,
-        model_acquisition_error_kind, AcquiredCoreMlBundle, CoreMlAcquisitionSource,
-        ModelAcquisitionErrorKind,
+        acquire_coreml_bundle_for_daemon, cached_coreml_bundle, AcquiredCoreMlBundle,
     },
     model_bundle::VerifiedModelBundle,
     model_contract::{
         semantic_model_key, SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION,
         SEMANTIC_QUERY_PREFIX,
     },
-    resource_policy::{semantic_model_load_deferred, SemanticSystemResources},
+    resource_policy::SemanticSystemResources,
 };
 #[cfg(any(target_os = "macos", test))]
 use crate::semantic::{
+    health_search::semantic_model_acquisition_integrity_error,
     model_contract::SEMANTIC_PASSAGE_PREFIX, resource_policy::SemanticComputeClass,
 };
 
@@ -41,8 +49,14 @@ pub(super) fn acquire_coreml_backend(
     _cache_dir: &Path,
     _preference: BackendPreference,
     _fallback: Option<&'static str>,
-    _allow_download: bool,
 ) -> Result<SemanticEmbedder> {
+    Err(anyhow!("Core ML semantic embeddings require macOS"))
+}
+
+#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
+pub(super) fn acquire_coreml_model_for_daemon(
+    _cache_dir: &Path,
+) -> Result<SemanticDaemonModelAcquisition> {
     Err(anyhow!("Core ML semantic embeddings require macOS"))
 }
 
@@ -51,7 +65,6 @@ pub(super) fn acquire_coreml_backend(
     cache_dir: &Path,
     preference: BackendPreference,
     fallback: Option<&'static str>,
-    allow_download: bool,
 ) -> Result<SemanticEmbedder> {
     let compute = coreml_compute_units_from_env()?;
     if let Some(deferred) = semantic_model_load_deferred(
@@ -60,12 +73,7 @@ pub(super) fn acquire_coreml_backend(
     ) {
         return Err(deferred.into());
     }
-    let acquired = if allow_download {
-        Some(acquire_coreml_bundle_for_daemon(cache_dir)?)
-    } else {
-        None
-    };
-    let model = CoreMlE5Embedder::acquire(cache_dir, acquired, compute)?;
+    let model = CoreMlE5Embedder::acquire(cache_dir, None, compute)?;
     let policy = semantic_embed_policy_for(model.compute_class);
     let acquisition_source = model.acquisition_source;
     Ok(SemanticEmbedder {
@@ -75,10 +83,47 @@ pub(super) fn acquire_coreml_backend(
         preference,
         acquisition_source,
         acquisition_fallback: fallback,
+        model_fingerprint: String::new(),
+        backend_fingerprint: String::new(),
+        canary_passed: false,
     })
 }
 
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
+pub(super) fn acquire_coreml_model_for_daemon(
+    cache_dir: &Path,
+) -> Result<SemanticDaemonModelAcquisition> {
+    let compute = coreml_compute_units_from_env()?;
+    acquire_coreml_model_for_daemon_with(
+        SemanticSystemResources::current().available_memory_bytes,
+        compute.compute_class,
+        || Ok(acquire_coreml_bundle_for_daemon(cache_dir)?.source),
+    )
+}
+
+#[cfg(all(ctx_semantic_fastembed, any(target_os = "macos", test)))]
+pub(super) fn acquire_coreml_model_for_daemon_with<Acquire>(
+    available_memory_bytes: Option<u64>,
+    compute_class: SemanticComputeClass,
+    acquire: Acquire,
+) -> Result<SemanticDaemonModelAcquisition>
+where
+    Acquire: FnOnce() -> Result<CoreMlAcquisitionSource>,
+{
+    if let Some(deferred) = semantic_model_load_deferred(available_memory_bytes, compute_class) {
+        return Err(deferred.into());
+    }
+    let source = match acquire()? {
+        CoreMlAcquisitionSource::Cache => SemanticModelAcquisitionSource::Cache,
+        CoreMlAcquisitionSource::Download => SemanticModelAcquisitionSource::Download,
+    };
+    Ok(SemanticDaemonModelAcquisition::new(
+        SemanticModelAcquisitionBackend::CoreMl,
+        source,
+    ))
+}
+
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn coreml_fallback_reason(error: &anyhow::Error) -> &'static str {
     match model_acquisition_error_kind(error) {
         Some(ModelAcquisitionErrorKind::Unavailable) if !coreml_descriptor_provisioned() => {
@@ -87,6 +132,39 @@ pub(super) fn coreml_fallback_reason(error: &anyhow::Error) -> &'static str {
         Some(ModelAcquisitionErrorKind::Unavailable) => "coreml_unavailable",
         Some(ModelAcquisitionErrorKind::Integrity) => "integrity_failure",
         None => "coreml_load_error",
+    }
+}
+
+#[cfg(all(ctx_semantic_fastembed, any(target_os = "macos", test)))]
+pub(super) fn acquire_auto_coreml_backend_with<T, CoreMl, Cpu>(
+    acquire_and_authorize_coreml: CoreMl,
+    acquire_cpu: Cpu,
+) -> Result<T>
+where
+    CoreMl: FnOnce() -> Result<T>,
+    Cpu: FnOnce(&'static str) -> Result<T>,
+{
+    match acquire_and_authorize_coreml() {
+        Ok(backend) => Ok(backend),
+        Err(error) if semantic_model_acquisition_integrity_error(&error) => Err(error),
+        Err(error) => acquire_cpu(coreml_fallback_reason(&error)),
+    }
+}
+
+#[cfg(ctx_semantic_fastembed)]
+pub(super) fn recover_coreml_after_inference_with<T, CoreMl, Cpu>(
+    preference: BackendPreference,
+    reacquire_coreml: CoreMl,
+    acquire_cpu: Cpu,
+) -> Result<T>
+where
+    CoreMl: FnOnce() -> Result<T>,
+    Cpu: FnOnce() -> Result<T>,
+{
+    if preference == BackendPreference::Auto {
+        acquire_cpu()
+    } else {
+        reacquire_coreml()
     }
 }
 

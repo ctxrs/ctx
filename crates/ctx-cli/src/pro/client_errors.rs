@@ -11,6 +11,8 @@ pub(super) fn protocol_error(error: ProtocolError) -> anyhow::Error {
         ErrorClass::MissingSource => "source_unavailable",
         ErrorClass::MissingRepository => "repository_unavailable",
         ErrorClass::StaleFact => "stale_fact",
+        ErrorClass::LineOutOfRange => "line_out_of_range",
+        ErrorClass::StaleSnapshot => "stale_snapshot",
         ErrorClass::Ambiguous => "ambiguous",
         ErrorClass::Corrupt => "corrupt_graph",
         ErrorClass::InvalidRequest | ErrorClass::Bounds => "invalid_request",
@@ -28,6 +30,10 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
     match code {
         "pro_not_installed" => Some("pro_not_installed"),
         "commercial_unavailable" => Some("commercial_unavailable"),
+        "commercial_access_locked" => Some("commercial_access_locked"),
+        "anonymous_trial_already_consumed" => Some("anonymous_trial_already_consumed"),
+        "anonymous_trial_identity_ambiguous" => Some("anonymous_trial_identity_ambiguous"),
+        "anonymous_trial_installation_limit" => Some("anonymous_trial_installation_limit"),
         "helper_upgrade_required" => Some("helper_upgrade_required"),
         "entitlement_expired" => Some("entitlement_expired"),
         "key_store_unavailable" => Some("key_store_unavailable"),
@@ -40,6 +46,8 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
         "source_unavailable" => Some("source_unavailable"),
         "repository_unavailable" => Some("repository_unavailable"),
         "stale_fact" => Some("stale_fact"),
+        "line_out_of_range" => Some("line_out_of_range"),
+        "stale_snapshot" => Some("stale_snapshot"),
         "ambiguous" => Some("ambiguous"),
         "corrupt_graph" => Some("corrupt_graph"),
         "invalid_request" => Some("invalid_request"),
@@ -62,6 +70,8 @@ mod tests {
             (ErrorClass::MissingSource, "source_unavailable"),
             (ErrorClass::MissingRepository, "repository_unavailable"),
             (ErrorClass::StaleFact, "stale_fact"),
+            (ErrorClass::LineOutOfRange, "line_out_of_range"),
+            (ErrorClass::StaleSnapshot, "stale_snapshot"),
         ] {
             let mapped = protocol_error(ProtocolError::new(class, "untrusted helper detail"));
             assert_eq!(mapped.to_string(), expected);

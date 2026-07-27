@@ -76,7 +76,6 @@ pub(crate) struct OperationCompletedV1 {
     pub(crate) output: Option<OutputKind>,
     pub(crate) outcome: Outcome,
     pub(crate) duration: DurationBucket,
-    pub(crate) auto_upgrade: Option<AutoUpgradeTelemetry>,
     pub(crate) deprecated_daemon_control: bool,
     pub(crate) deprecated_upgrade_control: bool,
 }
@@ -113,17 +112,27 @@ impl OperationCompletedV1 {
             output: None,
             outcome,
             duration: duration_bucket(duration),
-            auto_upgrade: None,
             deprecated_daemon_control: false,
             deprecated_upgrade_control: false,
         }
+    }
+
+    pub(crate) fn for_automatic_upgrade(
+        upgrade: UpgradeTelemetry,
+        outcome: Outcome,
+        duration: Duration,
+    ) -> Self {
+        Self::for_non_cli(
+            OperationPayloadV1::Cli(ClientOperationV1::Upgrade(upgrade)),
+            outcome,
+            duration,
+        )
     }
 }
 
 pub(crate) struct ClientOperationDraft {
     output: OutputKind,
     operation: ClientOperationV1,
-    auto_upgrade: Option<AutoUpgradeTelemetry>,
     deprecated_daemon_control: bool,
     deprecated_upgrade_control: bool,
 }
@@ -164,7 +173,6 @@ impl ClientOperationDraft {
             CommandRoot::Show(args) => match &args.target {
                 ShowTarget::Session(args) => ClientOperationV1::Show(ShowTelemetry {
                     target_kind: TargetKind::Session,
-                    resource_kind: None,
                     transcript_mode: Some(TranscriptModeKind::from_mode(args.mode)),
                     output_format: RenderFormat::from_output_format(args.format),
                     writes_out_file: args.out.is_some(),
@@ -174,7 +182,6 @@ impl ClientOperationDraft {
                 }),
                 ShowTarget::Event(args) => ClientOperationV1::Show(ShowTelemetry {
                     target_kind: TargetKind::Event,
-                    resource_kind: None,
                     transcript_mode: None,
                     output_format: RenderFormat::from_output_format(args.format),
                     writes_out_file: false,
@@ -184,36 +191,18 @@ impl ClientOperationDraft {
                     )),
                     events_returned: None,
                 }),
-                ShowTarget::Commit(_) => resource_show(ResourceKind::Commit, json_output),
-                ShowTarget::PullRequest(_) => resource_show(ResourceKind::PullRequest, json_output),
-                ShowTarget::Issue(_) => resource_show(ResourceKind::Issue, json_output),
-                ShowTarget::File(_) => resource_show(ResourceKind::File, json_output),
-                ShowTarget::Branch(_) => resource_show(ResourceKind::Branch, json_output),
-                ShowTarget::Repository(_) => resource_show(ResourceKind::Repository, json_output),
             },
             CommandRoot::Locate(args) => match &args.target {
                 LocateTarget::Session(args) => ClientOperationV1::Locate(LocateTelemetry {
                     target_kind: TargetKind::Session,
-                    resource_kind: None,
                     output_format: RenderFormat::from_locate_format(args.format),
                     provider_lookup: args.provider.is_some() || args.provider_session.is_some(),
                 }),
                 LocateTarget::Event(args) => ClientOperationV1::Locate(LocateTelemetry {
                     target_kind: TargetKind::Event,
-                    resource_kind: None,
                     output_format: RenderFormat::from_locate_format(args.format),
                     provider_lookup: false,
                 }),
-                LocateTarget::Commit(_) => resource_locate(ResourceKind::Commit, json_output),
-                LocateTarget::PullRequest(_) => {
-                    resource_locate(ResourceKind::PullRequest, json_output)
-                }
-                LocateTarget::Issue(_) => resource_locate(ResourceKind::Issue, json_output),
-                LocateTarget::File(_) => resource_locate(ResourceKind::File, json_output),
-                LocateTarget::Branch(_) => resource_locate(ResourceKind::Branch, json_output),
-                LocateTarget::Repository(_) => {
-                    resource_locate(ResourceKind::Repository, json_output)
-                }
             },
             CommandRoot::Search(args) => ClientOperationV1::Search(SearchTelemetry {
                 has_query: args.query.is_some(),
@@ -269,11 +258,7 @@ impl ClientOperationDraft {
                 ClientOperationV1::Integration(IntegrationTelemetry::default())
             }
             CommandRoot::Upgrade(args) => ClientOperationV1::Upgrade(UpgradeTelemetry {
-                mode: if args.background() {
-                    UpgradeMode::Auto
-                } else {
-                    UpgradeMode::Manual
-                },
+                mode: UpgradeMode::Manual,
                 operation: match args.operation() {
                     "check" => UpgradeOperation::Check,
                     "status" => UpgradeOperation::Status,
@@ -282,10 +267,13 @@ impl ClientOperationDraft {
                     _ => UpgradeOperation::Apply,
                 },
                 dry_run: args.dry_run,
+                suppress_event: false,
                 status: None,
                 applied: None,
                 scheduled: None,
                 update_available: None,
+                update_was_available: None,
+                upgrade_attempt_id: None,
                 managed_install: None,
                 self_upgrade_allowed: None,
                 auto_upgrade_allowed: None,
@@ -296,15 +284,12 @@ impl ClientOperationDraft {
             CommandRoot::Doctor(_) => ClientOperationV1::Doctor(DoctorTelemetry::default()),
             CommandRoot::Pro(_)
             | CommandRoot::Blame(_)
-            | CommandRoot::Timeline(_)
-            | CommandRoot::Facts(_)
             | CommandRoot::Mcp(_)
             | CommandRoot::Daemon(_) => return None,
         };
         Some(Self {
             output: OutputKind::from_json_output(json_output),
             operation,
-            auto_upgrade: None,
             deprecated_daemon_control: false,
             deprecated_upgrade_control: false,
         })
@@ -316,10 +301,6 @@ impl ClientOperationDraft {
             ids.contains("CTX_DAEMON_OFF") || ids.contains("CTX_DISABLE_DAEMON");
         self.deprecated_upgrade_control =
             ids.contains("CTX_UPGRADE_OFF") || ids.contains("CTX_DISABLE_AUTO_UPGRADE");
-    }
-
-    pub(crate) fn set_auto_upgrade(&mut self, telemetry: AutoUpgradeTelemetry) {
-        self.auto_upgrade = Some(telemetry);
     }
 
     pub(crate) fn setup_mut(&mut self) -> &mut SetupTelemetry {
@@ -423,39 +404,15 @@ impl ClientOperationDraft {
                 Outcome::Failure
             },
             duration: duration_bucket(duration),
-            auto_upgrade: self.auto_upgrade,
             deprecated_daemon_control: self.deprecated_daemon_control,
             deprecated_upgrade_control: self.deprecated_upgrade_control,
         })
     }
-}
 
-fn resource_show(kind: ResourceKind, json_output: bool) -> ClientOperationV1 {
-    ClientOperationV1::Show(ShowTelemetry {
-        target_kind: TargetKind::Resource,
-        resource_kind: Some(kind),
-        transcript_mode: None,
-        output_format: if json_output {
-            RenderFormat::Json
-        } else {
-            RenderFormat::Text
-        },
-        writes_out_file: false,
-        provider_lookup: false,
-        window: None,
-        events_returned: None,
-    })
-}
-
-fn resource_locate(kind: ResourceKind, json_output: bool) -> ClientOperationV1 {
-    ClientOperationV1::Locate(LocateTelemetry {
-        target_kind: TargetKind::Resource,
-        resource_kind: Some(kind),
-        output_format: if json_output {
-            RenderFormat::Json
-        } else {
-            RenderFormat::Text
-        },
-        provider_lookup: false,
-    })
+    pub(crate) fn should_emit(&self) -> bool {
+        !matches!(
+            &self.operation,
+            ClientOperationV1::Upgrade(value) if value.suppress_event
+        )
+    }
 }

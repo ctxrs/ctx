@@ -1,4 +1,3 @@
-use crate::provider::codex::session::join_codex_import_worker;
 use crate::test_support_paths::capture_repo_root;
 use crate::tests::codex::catalog_harness::{
     elapsed_ms, incremental_codex_catch_up, incremental_perf_file_count,
@@ -10,8 +9,8 @@ use crate::tests::support::fixtures::jsonl::write_oversized_jsonl_line;
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
-    catalog_codex_session_tree, import_codex_session_tree, CaptureError,
-    CodexSessionCatalogOptions, CodexSessionImportOptions,
+    catalog_codex_session_tree, import_codex_session_tree, CodexSessionCatalogOptions,
+    CodexSessionImportOptions,
 };
 use chrono::{DateTime, Utc};
 use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType, Fidelity};
@@ -39,7 +38,8 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     .unwrap();
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 8);
+    assert_eq!(first.imported_events, 7);
+    assert_eq!(first.skipped_events, 1);
     assert_eq!(first.imported_edges, 1);
 
     let second = import_codex_session_tree(
@@ -75,7 +75,7 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     assert_eq!(child.role_hint.as_deref(), Some("worker"));
 
     let parent_events = store.events_for_session(parent_id).unwrap();
-    assert_eq!(parent_events.len(), 6);
+    assert_eq!(parent_events.len(), 5);
     assert!(parent_events
         .iter()
         .any(|event| event.event_type == EventType::Message
@@ -111,22 +111,6 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     assert!(child_events
         .iter()
         .any(|event| event.payload.to_string().contains("local history search")));
-}
-
-#[test]
-fn codex_parallel_join_panic_is_a_typed_system_failure() {
-    let error = std::thread::scope(|scope| {
-        let handle = scope.spawn(|| -> crate::Result<()> {
-            panic!("intentional Codex normalization worker panic")
-        });
-        join_codex_import_worker(handle)
-    })
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        CaptureError::WorkerPanicked("Codex import")
-    ));
 }
 
 #[test]
@@ -260,7 +244,7 @@ fn codex_catalog_re_pends_unchanged_sources_from_older_normalization_revisions()
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].metadata["normalization_capture_revision"], 8);
-    assert_eq!(pending[0].metadata["normalization_policy_revision"], 3);
+    assert_eq!(pending[0].metadata["normalization_policy_revision"], 4);
 
     let cached = catalog_codex_session_tree(
         &root,

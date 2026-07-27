@@ -62,9 +62,11 @@ download_verified() {
 extract_official_asset() {
   local archive="$1"
   local destination="$2"
+  local selected_provider_libraries="$3"
   python3 - "${upstream_kind}" "${archive}" "${upstream_root}" \
     "${upstream_library}" "${library_name}" "${destination}" \
-    "${ONNXRUNTIME_VERSION}" "${ONNXRUNTIME_COMMIT}" <<'PY'
+    "${ONNXRUNTIME_VERSION}" "${ONNXRUNTIME_COMMIT}" \
+    "${selected_provider_libraries}" <<'PY'
 import os
 import posixpath
 import shutil
@@ -73,7 +75,7 @@ import sys
 import tarfile
 import zipfile
 
-kind, archive, expected_root, source_library, library_name, destination, version, commit = sys.argv[1:]
+kind, archive, expected_root, source_library, library_name, destination, version, commit, provider_libraries = sys.argv[1:]
 required = {
     f"{expected_root}/{source_library}": f"lib/{library_name}",
     f"{expected_root}/LICENSE": "LICENSE",
@@ -81,6 +83,8 @@ required = {
     f"{expected_root}/VERSION_NUMBER": "VERSION_NUMBER",
     f"{expected_root}/GIT_COMMIT_ID": "GIT_COMMIT_ID",
 }
+for provider in provider_libraries.split():
+    required[f"{expected_root}/lib/{provider}"] = f"lib/{provider}"
 
 
 def canonical_name(raw):
@@ -175,8 +179,226 @@ for name, expected in (("VERSION_NUMBER", version), ("GIT_COMMIT_ID", commit)):
     with open(path, "wb") as handle:
         handle.write((expected + "\n").encode())
 
-os.chmod(os.path.join(destination, "lib", library_name), 0o755)
+for name in (library_name, *provider_libraries.split()):
+    os.chmod(os.path.join(destination, "lib", name), 0o755)
 for name in ("LICENSE", "ThirdPartyNotices.txt", "VERSION_NUMBER", "GIT_COMMIT_ID"):
+    os.chmod(os.path.join(destination, name), 0o644)
+PY
+}
+
+stage_cuda_dependencies() {
+  local destination="$1"
+  local cache_dir="$2"
+  local cublas="${cache_dir}/${NVIDIA_CUBLAS_ASSET}"
+  local cuda_runtime="${cache_dir}/${NVIDIA_CUDA_RUNTIME_ASSET}"
+  local cuda_nvrtc="${cache_dir}/${NVIDIA_CUDA_NVRTC_ASSET}"
+  local curand="${cache_dir}/${NVIDIA_CURAND_ASSET}"
+  local cufft="${cache_dir}/${NVIDIA_CUFFT_ASSET}"
+  local cudnn="${cache_dir}/${NVIDIA_CUDNN_ASSET}"
+
+  download_verified "${NVIDIA_CUBLAS_URL}" "${NVIDIA_CUBLAS_SHA256}" "${cublas}"
+  download_verified \
+    "${NVIDIA_CUDA_RUNTIME_URL}" "${NVIDIA_CUDA_RUNTIME_SHA256}" "${cuda_runtime}"
+  download_verified \
+    "${NVIDIA_CUDA_NVRTC_URL}" "${NVIDIA_CUDA_NVRTC_SHA256}" "${cuda_nvrtc}"
+  download_verified "${NVIDIA_CURAND_URL}" "${NVIDIA_CURAND_SHA256}" "${curand}"
+  download_verified "${NVIDIA_CUFFT_URL}" "${NVIDIA_CUFFT_SHA256}" "${cufft}"
+  download_verified "${NVIDIA_CUDNN_URL}" "${NVIDIA_CUDNN_SHA256}" "${cudnn}"
+
+  python3 - "${destination}" \
+    "${NVIDIA_CUDA_LICENSE_SHA256}" "${NVIDIA_CUDNN_LICENSE_SHA256}" \
+    "${cublas}" "${cuda_runtime}" "${cuda_nvrtc}" "${curand}" "${cufft}" "${cudnn}" <<'PY'
+import hashlib
+import os
+import posixpath
+import shutil
+import stat
+import sys
+import zipfile
+
+destination, cuda_license_sha256, cudnn_license_sha256, *archives = sys.argv[1:]
+specs = [
+    (
+        archives[0],
+        (
+            "nvidia/cublas/lib/libcublasLt.so.12",
+            "nvidia/cublas/lib/libcublas.so.12",
+        ),
+        "nvidia_cublas_cu12-12.9.2.10.dist-info/licenses/License.txt",
+        cuda_license_sha256,
+        "NVIDIA-CUDA-LICENSE.txt",
+    ),
+    (
+        archives[1],
+        ("nvidia/cuda_runtime/lib/libcudart.so.12",),
+        "nvidia_cuda_runtime_cu12-12.9.79.dist-info/licenses/License.txt",
+        cuda_license_sha256,
+        None,
+    ),
+    (
+        archives[2],
+        ("nvidia/cuda_nvrtc/lib/libnvrtc.so.12",),
+        "nvidia_cuda_nvrtc_cu12-12.9.86.dist-info/licenses/License.txt",
+        cuda_license_sha256,
+        None,
+    ),
+    (
+        archives[3],
+        ("nvidia/curand/lib/libcurand.so.10",),
+        "nvidia_curand_cu12-10.3.10.19.dist-info/License.txt",
+        cuda_license_sha256,
+        None,
+    ),
+    (
+        archives[4],
+        ("nvidia/cufft/lib/libcufft.so.11",),
+        "nvidia_cufft_cu12-11.4.1.4.dist-info/licenses/License.txt",
+        cuda_license_sha256,
+        None,
+    ),
+    (
+        archives[5],
+        (
+            "nvidia/cudnn/lib/libcudnn.so.9",
+            "nvidia/cudnn/lib/libcudnn_graph.so.9",
+            "nvidia/cudnn/lib/libcudnn_ops.so.9",
+        ),
+        "nvidia_cudnn_cu12-9.25.0.15.dist-info/licenses/License.txt",
+        cudnn_license_sha256,
+        "NVIDIA-CUDNN-LICENSE.txt",
+    ),
+]
+
+
+def canonical_name(raw):
+    if not raw or "\\" in raw or raw.startswith("/"):
+        raise SystemExit(f"unsafe NVIDIA wheel path: {raw!r}")
+    name = posixpath.normpath(raw.rstrip("/"))
+    if name in ("", ".", "..") or name.startswith("../"):
+        raise SystemExit(f"unsafe NVIDIA wheel path: {raw!r}")
+    return name
+
+
+for archive, libraries, license_member, expected_license, license_output in specs:
+    with zipfile.ZipFile(archive) as wheel:
+        members = {}
+        for member in wheel.infolist():
+            name = canonical_name(member.filename)
+            if name in members:
+                raise SystemExit(f"duplicate NVIDIA wheel path: {name}")
+            mode = member.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise SystemExit(f"NVIDIA wheel contains a symbolic link: {name}")
+            members[name] = member
+        for source in libraries:
+            member = members.get(source)
+            if member is None or member.is_dir():
+                raise SystemExit(f"NVIDIA wheel library is missing: {source}")
+            target = os.path.join(destination, "lib", posixpath.basename(source))
+            if os.path.exists(target):
+                raise SystemExit(f"duplicate staged NVIDIA library: {target}")
+            with wheel.open(member) as input_file, open(target, "wb") as output:
+                shutil.copyfileobj(input_file, output)
+            os.chmod(target, 0o755)
+        member = members.get(license_member)
+        if member is None or member.is_dir():
+            raise SystemExit(f"NVIDIA wheel license is missing: {license_member}")
+        license_bytes = wheel.read(member)
+        actual_license = hashlib.sha256(license_bytes).hexdigest()
+        if actual_license != expected_license:
+            raise SystemExit(
+                f"NVIDIA wheel license mismatch: expected {expected_license}, "
+                f"got {actual_license}"
+            )
+        if license_output:
+            target = os.path.join(destination, license_output)
+            with open(target, "wb") as output:
+                output.write(license_bytes)
+            os.chmod(target, 0o644)
+PY
+}
+
+stage_windows_ml_nuget() {
+  local destination="$1"
+  local cache_dir="$2"
+  local package="${cache_dir}/microsoft.windows.ai.machinelearning.${WINDOWS_ML_VERSION}.nupkg"
+  download_verified "${WINDOWS_ML_NUGET_URL}" "${WINDOWS_ML_NUGET_SHA256}" "${package}"
+  python3 - "${package}" "${destination}" \
+    "${WINDOWS_ML_LICENSE_SIZE}" "${WINDOWS_ML_LICENSE_SHA256}" \
+    "${WINDOWS_ML_NOTICES_SIZE}" "${WINDOWS_ML_NOTICES_SHA256}" \
+    "${WINDOWS_ML_LIBRARY_SIZE}" "${WINDOWS_ML_LIBRARY_SHA256}" \
+    "${WINDOWS_ML_ONNXRUNTIME_SIZE}" "${WINDOWS_ML_ONNXRUNTIME_SHA256}" \
+    "${WINDOWS_ML_DIRECTML_SIZE}" "${WINDOWS_ML_DIRECTML_SHA256}" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+import zipfile
+
+package, destination, *expected_values = sys.argv[1:]
+expected = iter(expected_values)
+required = {
+    "license.txt": ("LICENSE", int(next(expected)), next(expected)),
+    "ThirdPartyNotices.txt": (
+        "ThirdPartyNotices.txt",
+        int(next(expected)),
+        next(expected),
+    ),
+    "runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll": (
+        "lib/Microsoft.Windows.AI.MachineLearning.dll",
+        int(next(expected)),
+        next(expected),
+    ),
+    "runtimes/win-x64/native/onnxruntime.dll": (
+        "lib/onnxruntime.dll",
+        int(next(expected)),
+        next(expected),
+    ),
+    "runtimes/win-x64/native/DirectML.dll": (
+        "lib/DirectML.dll",
+        int(next(expected)),
+        next(expected),
+    ),
+}
+os.makedirs(os.path.join(destination, "lib"), exist_ok=True)
+with zipfile.ZipFile(package) as bundle:
+    members = {}
+    for member in bundle.infolist():
+        name = member.filename.replace("\\", "/").rstrip("/")
+        if not name or name.startswith("/") or ".." in name.split("/"):
+            raise SystemExit(f"unsafe NuGet path: {member.filename!r}")
+        if name in members:
+            raise SystemExit(f"duplicate NuGet path: {name}")
+        mode = member.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            raise SystemExit(f"NuGet package contains symbolic link: {name}")
+        members[name] = member
+    for source, (target, expected_size, expected_sha256) in required.items():
+        member = members.get(source)
+        if member is None or member.is_dir():
+            raise SystemExit(f"required NuGet file is missing: {source}")
+        if member.file_size != expected_size:
+            raise SystemExit(
+                f"NuGet file size mismatch for {source}: "
+                f"expected {expected_size}, got {member.file_size}"
+            )
+        content = bundle.read(member)
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise SystemExit(
+                f"NuGet file SHA-256 mismatch for {source}: "
+                f"expected {expected_sha256}, got {actual_sha256}"
+            )
+        target_path = os.path.join(destination, *target.split("/"))
+        with open(target_path, "wb") as output:
+            output.write(content)
+for name in (
+    "Microsoft.Windows.AI.MachineLearning.dll",
+    "onnxruntime.dll",
+    "DirectML.dll",
+):
+    os.chmod(os.path.join(destination, "lib", name), 0o755)
+for name in ("LICENSE", "ThirdPartyNotices.txt"):
     os.chmod(os.path.join(destination, name), 0o644)
 PY
 }
@@ -217,7 +439,6 @@ if ! configure_release_platform "$1" || [[ "${stage_kind}" != "official" ]]; the
   printf 'platform has no official ONNX Runtime release stage: %s\n' "$1" >&2
   exit 2
 fi
-configure_official_source "$1"
 destination="$2"
 cache_dir="$3"
 if [[ $# -eq 4 ]]; then
@@ -228,10 +449,19 @@ else
 fi
 require_command python3
 mkdir -p "${destination}/lib" "${cache_dir}" "${work_dir}"
-archive="${cache_dir}/${upstream_asset}"
-download_verified "${ONNXRUNTIME_RELEASE_BASE_URL}/${upstream_asset}" \
-  "${upstream_sha256}" "${archive}"
-extract_official_asset "${archive}" "${destination}"
-if [[ "${platform}" == "windows-x64" ]]; then
-  stage_windows_vc_runtime "${destination}" "${cache_dir}"
+if [[ "${platform}" == "windows-x64-windowsml" ]]; then
+  stage_windows_ml_nuget "${destination}" "${cache_dir}"
+else
+  configure_official_source "$1"
+  archive="${cache_dir}/${upstream_asset}"
+  download_verified "${ONNXRUNTIME_RELEASE_BASE_URL}/${upstream_asset}" \
+    "${upstream_sha256}" "${archive}"
+  extract_official_asset \
+    "${archive}" "${destination}" "${upstream_provider_libraries}"
+  if [[ "${platform}" == "linux-x64-cuda12" ]]; then
+    stage_cuda_dependencies "${destination}" "${cache_dir}"
+  fi
+  if [[ "${platform}" == "windows-x64" ]]; then
+    stage_windows_vc_runtime "${destination}" "${cache_dir}"
+  fi
 fi

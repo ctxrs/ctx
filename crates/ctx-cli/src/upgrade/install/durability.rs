@@ -1,22 +1,22 @@
 use std::{
     fs,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, Context, Result};
 
+use super::super::download::DownloadedArtifact;
 use super::super::path::ctx_binary_version;
 
-pub(super) fn stage_binary(
+pub(super) fn stage_downloaded_binary(
     staged: &Path,
     target: &Path,
-    bytes: &[u8],
+    artifact: &mut DownloadedArtifact,
     expected_version: &str,
 ) -> Result<()> {
     let mut file = fs::File::create(staged)
         .with_context(|| format!("create staged artifact {}", staged.display()))?;
-    file.write_all(bytes)?;
+    artifact.copy_verified_to(&mut file)?;
     file.sync_all()?;
     drop(file);
     make_executable(staged, target)?;
@@ -26,7 +26,7 @@ pub(super) fn stage_binary(
 fn verify_staged_version(staged: &Path, expected_version: &str) -> Result<()> {
     let version = ctx_binary_version(staged)
         .with_context(|| format!("run staged ctx {}", staged.display()))?;
-    if !version.contains(expected_version) {
+    if !version.matches_exactly(expected_version) {
         return Err(anyhow!(
             "staged ctx version mismatch: expected {expected_version}, got {}",
             version.trim()
@@ -65,17 +65,13 @@ pub(super) fn backup_file_for_atomic_replace(
     backup: &Path,
     label: &str,
 ) -> Result<()> {
-    if let Err(link_error) = fs::hard_link(target, backup) {
-        fs::copy(target, backup).with_context(|| {
-            format!(
-                "backup {label} {} to {} after hard-link failed: {link_error}",
-                target.display(),
-                backup.display()
-            )
-        })?;
-        fs::File::open(backup)?.sync_all()?;
-    }
-    Ok(())
+    fs::hard_link(target, backup).with_context(|| {
+        format!(
+            "backup {label} {} to {} with a hard link",
+            target.display(),
+            backup.display()
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -91,4 +87,19 @@ pub(super) fn sync_directory(path: &Path) -> Result<()> {
     fs::File::open(path)
         .and_then(|file| file.sync_all())
         .with_context(|| format!("sync directory {}", path.display()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hard_link_backup_failure_does_not_fall_back_to_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("ctx");
+        let backup = temp.path().join("missing").join("ctx.previous");
+        fs::write(&target, b"old").unwrap();
+        assert!(backup_file_for_atomic_replace(&target, &backup, "ctx binary").is_err());
+        assert!(!backup.exists());
+    }
 }

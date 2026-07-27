@@ -24,7 +24,7 @@ use ctx_history_capture::{
     ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
     CursorNativeImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
     FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, ImportProfile, JunieImportOptions,
     KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     LingmaSqliteImportOptions, MiMoCodeSqliteImportOptions, MistralVibeImportOptions,
     MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
@@ -36,7 +36,6 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 
-use crate::commands::import::catalog::import_incremental_codex_session_tree;
 use crate::commands::import::SourcePreinventory;
 use crate::provider_sources::SourceInfo;
 
@@ -51,33 +50,26 @@ pub(super) fn import_direct_source(
     preinventory: &SourcePreinventory,
     capture_work_limit: CaptureWorkLimit,
     inventory_observation_token: Option<String>,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     match source.provider {
         CaptureProvider::Codex => {
             if input_path.is_dir() {
-                if full_rescan {
-                    import_codex_session_tree(
-                        input_path,
-                        store,
-                        CodexSessionImportOptions {
-                            source_path: Some(source.path.clone()),
-                            history_record_id: Some(record_id),
-                            capture_work_limit,
-                            inventory_observation_token: inventory_observation_token.clone(),
-                            progress: progress.clone(),
-                            ..CodexSessionImportOptions::default()
-                        },
-                    )
-                    .map_err(anyhow::Error::from)
-                } else {
-                    import_incremental_codex_session_tree(
-                        store,
-                        source,
-                        record_id,
-                        progress.clone(),
-                        preinventory.codex_session_catalog(),
-                    )
-                }
+                let _ = (full_rescan, preinventory);
+                import_codex_session_tree(
+                    input_path,
+                    store,
+                    CodexSessionImportOptions {
+                        source_path: Some(source.path.clone()),
+                        history_record_id: Some(record_id),
+                        capture_work_limit,
+                        inventory_observation_token: inventory_observation_token.clone(),
+                        import_profile: import_profile.clone(),
+                        progress: progress.clone(),
+                        ..CodexSessionImportOptions::default()
+                    },
+                )
+                .map_err(anyhow::Error::from)
             } else if input_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -91,6 +83,7 @@ pub(super) fn import_direct_source(
                         history_record_id: Some(record_id),
                         capture_work_limit,
                         inventory_observation_token: inventory_observation_token.clone(),
+                        import_profile: import_profile.clone(),
                         ..CodexHistoryImportOptions::default()
                     },
                 )
@@ -104,6 +97,7 @@ pub(super) fn import_direct_source(
                         history_record_id: Some(record_id),
                         capture_work_limit,
                         inventory_observation_token: inventory_observation_token.clone(),
+                        import_profile: import_profile.clone(),
                         progress,
                         ..CodexSessionImportOptions::default()
                     },
@@ -119,6 +113,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..PiSessionImportOptions::default()
             },
         )
@@ -131,6 +126,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..ClaudeProjectsImportOptions::default()
             },
         )
@@ -143,6 +139,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..ClineTaskJsonImportOptions::default()
             },
         )
@@ -155,6 +152,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..RooTaskJsonImportOptions::default()
             },
         )
@@ -167,6 +165,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..CodeBuddyImportOptions::default()
             },
         )
@@ -179,6 +178,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..TraeImportOptions::default()
             },
         )
@@ -191,6 +191,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..OpenCodeSqliteImportOptions::default()
             },
         )
@@ -203,6 +204,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..KiloSqliteImportOptions::default()
             },
         )
@@ -215,6 +217,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..MiMoCodeSqliteImportOptions::default()
             },
         )
@@ -227,6 +230,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..KiroSqliteImportOptions::default()
             },
         )
@@ -239,6 +243,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..ForgeCodeSqliteImportOptions::default()
             },
         )
@@ -251,6 +256,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..DeepAgentsSqliteImportOptions::default()
             },
         )
@@ -263,6 +269,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..CrushSqliteImportOptions::default()
             },
         )
@@ -275,6 +282,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..GooseSessionsSqliteImportOptions::default()
             },
         )
@@ -287,6 +295,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..OpenClawImportOptions::default()
             },
         )
@@ -299,6 +308,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..HermesSqliteImportOptions::default()
             },
         )
@@ -311,6 +321,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..NanoClawImportOptions::default()
             },
         )
@@ -323,6 +334,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..AstrBotSqliteImportOptions::default()
             },
         )
@@ -335,6 +347,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..ShelleySqliteImportOptions::default()
             },
         )
@@ -347,6 +360,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..ContinueCliImportOptions::default()
             },
         )
@@ -359,6 +373,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..OpenHandsImportOptions::default()
             },
         )
@@ -371,6 +386,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..LingmaSqliteImportOptions::default()
             },
         )
@@ -383,6 +399,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..QoderImportOptions::default()
             },
         )
@@ -395,6 +412,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..WarpSqliteImportOptions::default()
             },
         )
@@ -407,6 +425,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..GeminiCliImportOptions::default()
             },
         )
@@ -419,6 +438,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..TabnineCliImportOptions::default()
             },
         )
@@ -431,6 +451,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..CursorNativeImportOptions::default()
             },
         )
@@ -443,6 +464,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..WindsurfCascadeHookImportOptions::default()
             },
         )
@@ -455,6 +477,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..ZedThreadsSqliteImportOptions::default()
             },
         )
@@ -467,6 +490,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..CopilotCliImportOptions::default()
             },
         )
@@ -479,6 +503,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..FactoryAiDroidImportOptions::default()
             },
         )
@@ -491,6 +516,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..QwenCodeImportOptions::default()
             },
         )
@@ -503,6 +529,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..KimiCodeCliImportOptions::default()
             },
         )
@@ -515,6 +542,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..AuggieImportOptions::default()
             },
         )
@@ -527,6 +555,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..JunieImportOptions::default()
             },
         )
@@ -539,6 +568,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..FirebenderSqliteImportOptions::default()
             },
         )
@@ -551,6 +581,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..RovoDevImportOptions::default()
             },
         )
@@ -563,6 +594,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..MistralVibeImportOptions::default()
             },
         )
@@ -575,6 +607,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..MuxImportOptions::default()
             },
         )
@@ -587,6 +620,7 @@ pub(super) fn import_direct_source(
                 history_record_id: Some(record_id),
                 capture_work_limit,
                 inventory_observation_token: inventory_observation_token.clone(),
+                import_profile: import_profile.clone(),
                 ..AntigravityCliImportOptions::default()
             },
         )

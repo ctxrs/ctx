@@ -1,0 +1,15 @@
+PR          ctxrs/ctx#42
+repository  ctxrs/ctx
+
+Code produced
+  No associated commits on this page.
+
+PR activity
+  reviewed   session reviewer  [1]
+    confidence explicit  state asserted
+
+Evidence
+  [1] ctx show event 00000000-0000-0000-0000-000000000001
+
+1 matches shown; more matches are available.
+continue  ctx blame pr 42 --repository ctxrs/ctx --cursor commit-page

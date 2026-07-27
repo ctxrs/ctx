@@ -1,6 +1,6 @@
 """Native Bazel integration-test helper for the ctx CLI package."""
 
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 CTX_CLI_RUSTC_FLAGS = [
@@ -21,6 +21,10 @@ CTX_CLI_RUSTC_FLAGS = [
         "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
+        "--cfg=ctx_semantic_fastembed",
+        "--cfg=ctx_sqlite_vec",
+    ],
+    "@rules_rust//rust/platform:x86_64-unknown-freebsd": [
         "--cfg=ctx_semantic_fastembed",
         "--cfg=ctx_sqlite_vec",
     ],
@@ -54,11 +58,16 @@ def ctx_cli_integration_test(
         src,
         binary = ":ctx",
         crate_features = [],
+        extra_env = {},
         extra_compile_data = [],
         extra_data = [],
         extra_deps = [],
         extra_srcs = [],
         tags = []):
+    test_env = {
+        "CARGO_BIN_EXE_ctx": "$(rootpath %s)" % binary,
+    }
+    test_env.update(extra_env)
     ctx_rust_test(
         name = name,
         srcs = [src] + extra_srcs + native.glob(["tests/support/**/*.rs"]),
@@ -78,10 +87,8 @@ def ctx_cli_integration_test(
         deps = all_crate_deps(
             normal = True,
             normal_dev = True,
-        ) + _CTX_CLI_DEPS + crate_deps(["xz2"]) + extra_deps,
-        env = {
-            "CARGO_BIN_EXE_ctx": "$(rootpath %s)" % binary,
-        },
+        ) + _CTX_CLI_DEPS + extra_deps,
+        env = test_env,
         proc_macro_deps = all_crate_deps(
             proc_macro = True,
             proc_macro_dev = True,

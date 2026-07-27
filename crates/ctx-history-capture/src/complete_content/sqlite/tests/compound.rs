@@ -127,7 +127,11 @@ fn deepagents_message_request(
         source_record_subrecord_index: 0,
         expected_provider_event_hash: resolved.event.provider_event_hash.clone().unwrap(),
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
-        expected_native_record_id: Some(native_record_id(&resolved.event)),
+        expected_native_record_id: Some(native_record_id(
+            resolved.event.provider_event_index,
+            resolved.event.provider_event_hash.as_deref(),
+            Some(resolved.event.cursor.as_str()),
+        )),
         expected_record_digest: Some(resolved.record_digest),
         expected_content_ref: ContentRef::from_bytes(resolved.text.as_bytes()),
         indexed_text: resolved.text.chars().take(indexed_limit_chars).collect(),
@@ -172,7 +176,11 @@ fn deepagents_result_request(
         .unwrap(),
         source_record_ordinal: ordinal,
         source_record_subrecord_index: 0,
-        expected_native_record_id: native_record_id(&resolved.event),
+        expected_native_record_id: native_record_id(
+            resolved.event.provider_event_index,
+            resolved.event.provider_event_hash.as_deref(),
+            Some(resolved.event.cursor.as_str()),
+        ),
         expected_record_digest: resolved.record_digest,
         expected_content_ref: ContentRef::from_bytes(resolved.text.as_bytes()).unwrap(),
     }

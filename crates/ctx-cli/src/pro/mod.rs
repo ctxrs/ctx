@@ -1,27 +1,29 @@
+mod anonymous_trial;
 pub(crate) mod artifact_delivery;
 mod authorization;
 mod client;
 mod commercial_api;
 mod commercial_config;
+mod commercial_deletion;
 mod commercial_lifecycle;
 mod credential_vault;
 mod graph_key_deletion;
 mod lifecycle;
 mod local_deletion;
+mod pending_materialization;
 mod render;
 mod request_identity;
+mod setup_validation;
 mod verified_executable;
 mod workos_device;
-pub(crate) use client::{query, stable_error_code};
+pub(crate) use client::ProOutputImport;
+pub(crate) use client::{blame, stable_error_code};
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
-pub(crate) use render::{print_query_result, query_result_json};
+pub(crate) use pending_materialization::run_if_pending as run_pending_materialization;
+pub(crate) use render::{blame_result_json, print_blame_result};
 
 use anyhow::anyhow;
-use clap::ValueEnum;
-use ctx_pro_host_protocol::{ResourceKind, ResourceSelector};
-use serde_json::{json, Value};
-
-pub(crate) const DEFAULT_QUERY_LIMIT: u32 = 100;
+pub(crate) const DEFAULT_BLAME_LIMIT: u32 = 20;
 
 pub(crate) fn actionable_error(error: anyhow::Error) -> anyhow::Error {
     let Some(code) = stable_error_code(&error) else {
@@ -42,55 +44,4 @@ pub(crate) fn actionable_error(error: anyhow::Error) -> anyhow::Error {
         _ => return error,
     };
     anyhow!("{code}: {guidance}")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ResourceKindArg {
-    Repository,
-    Checkout,
-    Worktree,
-    Branch,
-    Commit,
-    File,
-    #[value(name = "pr", alias = "pull-request")]
-    PullRequest,
-    Issue,
-    Remote,
-    Release,
-    Command,
-    Check,
-    Session,
-    Agent,
-    Run,
-}
-
-impl ResourceKindArg {
-    pub(crate) const fn protocol(self) -> ResourceKind {
-        match self {
-            Self::Repository => ResourceKind::Repository,
-            Self::Checkout => ResourceKind::Checkout,
-            Self::Worktree => ResourceKind::Worktree,
-            Self::Branch => ResourceKind::Branch,
-            Self::Commit => ResourceKind::Commit,
-            Self::File => ResourceKind::File,
-            Self::PullRequest => ResourceKind::PullRequest,
-            Self::Issue => ResourceKind::Issue,
-            Self::Remote => ResourceKind::Remote,
-            Self::Release => ResourceKind::Release,
-            Self::Command => ResourceKind::Command,
-            Self::Check => ResourceKind::Check,
-            Self::Session => ResourceKind::Session,
-            Self::Agent => ResourceKind::Agent,
-            Self::Run => ResourceKind::Run,
-        }
-    }
-}
-
-pub(crate) fn selector_json(selector: &ResourceSelector) -> Value {
-    json!({
-        "kind": selector.kind.wire_name(),
-        "value": selector.value,
-        "repository": selector.repository,
-        "line": selector.line,
-    })
 }

@@ -51,6 +51,13 @@ and private relevance evals justify flipping the default.
   setup should leave existing data intact, start daemon-owned indexing when
   possible, and let the daemon acquire the local embedding model and build
   missing semantic sidecars.
+- A daemon already running with semantic disabled reloads that opt-in between
+  maintenance cycles. It starts the private query service before claiming the
+  semantic configuration as applied or running semantic indexing. Reload parse
+  failures retain the last known-good runtime; query-service activation
+  failures remain retryable and are reported as `activation_failed`, never as
+  live semantic enablement. Opt-out tears down daemon semantic ownership without
+  requiring an unrelated process restart.
 - Equal public-platform support uses one embedding model and one runtime family:
   `intfloat/multilingual-e5-small` through ONNX Runtime. The model produces
   384-dimensional vectors and requires `query: ` for query inputs and
@@ -85,9 +92,14 @@ and private relevance evals justify flipping the default.
 - The daemon does not create or mutate semantic sidecars when semantic is
   disabled.
 - When semantic is enabled and the local embedding model is missing, the daemon
-  enters `acquiring_model`, downloads/initializes the model through fastembed,
-  verifies the cache, and records `model_acquisition_failed` if acquisition
-  fails.
+  enters `acquiring_model`, downloads the pinned revision into a private staging
+  cache, verifies every required file's size and SHA-256 before atomic
+  publication, and records `model_acquisition_failed` if acquisition fails.
+  Same-sized corrupt cache files are repaired through the same daemon-only path.
+- After acquisition verifies the cache, the daemon enters `loading_model`.
+  ONNX Runtime, fastembed, or native model initialization failures retain the
+  verified-cache state and report `model_load_failed`, not an acquisition
+  failure.
 - On semantic-capable Unix builds, the daemon now exposes a private `0600` Unix
   socket query service for query embeddings. CLI search no longer initializes or
   downloads the embedding model in the foreground; semantic/hybrid search asks
@@ -101,8 +113,10 @@ and private relevance evals justify flipping the default.
   `--refresh off` does not autostart daemon work; strict semantic fails with an
   actionable daemon-query-service error when the daemon is not running.
 - Daemon query socket startup is required when semantic is enabled. If the
-  socket cannot bind, daemon startup fails visibly instead of running without a
-  query service.
+  socket cannot bind during initial startup, daemon startup fails visibly. If a
+  running semantic-disabled daemon cannot bind while applying a later opt-in,
+  it keeps non-semantic daemon work alive, retries the activation, and reports
+  the semantic runtime inactive and the reload failed.
 - Daemon model acquisition shields fastembed's `HF_HOME` override while filling
   the ctx-selected cache root, preserving ctx cache precedence during download
   as well as during normal model loading.
@@ -210,8 +224,10 @@ and private relevance evals justify flipping the default.
 
 - Done on this branch: cache discovery was broadened, and daemon-owned model
   acquisition now handles a missing cache during semantic opt-in.
-- Remaining after merge: dogfood the missing-model path on a throwaway root or
-  mockable cache root, without deleting the real cache.
+- Done on this branch: the release semantic smoke starts from an isolated empty
+  model cache, proves foreground fixture import leaves it empty, and requires
+  the daemon runtime to report `acquisition_source = download` before strict
+  semantic retrieval can pass.
 - Keep env-var precedence, but broaden default discovery:
   - `$HF_HOME`;
   - `$CTX_SEMANTIC_CACHE_DIR`;
@@ -222,6 +238,12 @@ and private relevance evals justify flipping the default.
 - Status should report the selected cache root or the checked roots when missing.
 - Search and daemon must resolve the same cache root.
 - Tests:
+  - foreground setup/import on an opted-in clean cache creates no downloader
+    state;
+  - clean-cache daemon scheduling runs semantic acquisition without waiting for
+    a pre-existing model;
+  - invalid signed/pinned inputs fail before publication and produce a stable
+    acquisition failure with retry classification;
   - cache is found in data root;
   - cache is found in a common fallback root without `CTX_SEMANTIC_CACHE_DIR`;
   - env vars still override fallback roots.

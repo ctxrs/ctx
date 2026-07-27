@@ -14,6 +14,8 @@ use crate::{
 
 use super::*;
 
+const MAX_EVENTS_PER_REQUEST: usize = 50;
+
 pub(crate) fn send_batch(data_root: &Path, config: &AppConfig, events: &[PublicEventV1]) {
     if events.is_empty()
         || !config.analytics.enabled
@@ -32,35 +34,72 @@ fn send_batch_inner(data_root: &Path, config: &AppConfig, events: &[PublicEventV
     let client_profile_id = crate::identity::device_id(data_root)?;
     let data_root_id = crate::identity::installation_id(data_root)?;
     let install_marker = install_marker::current_exe_install_marker();
-    let capability_snapshot = execution_capabilities::pending(data_root).ok().flatten();
+    let mut capability_snapshot = execution_capabilities::pending(data_root).ok().flatten();
     let occurred_at = minute_rounded_now();
     let serialized = events
         .iter()
-        .map(|event| {
+        .enumerate()
+        .map(|(index, event)| {
             serialize_event(
                 event,
                 occurred_at,
-                capability_snapshot
-                    .as_ref()
-                    .map(|pending| pending.snapshot()),
+                (index < MAX_EVENTS_PER_REQUEST)
+                    .then(|| {
+                        capability_snapshot
+                            .as_ref()
+                            .map(|pending| pending.snapshot())
+                    })
+                    .flatten(),
                 install_marker
                     .as_ref()
                     .map(|marker| marker.install_attempt_id.as_str()),
             )
         })
         .collect::<Vec<_>>();
+    let snapshot_attached = capability_snapshot.is_some();
+    post_event_chunks(
+        &serialized,
+        snapshot_attached,
+        |chunk| {
+            let body = serialize_batch_body(&client_profile_id, &data_root_id, chunk)?;
+            net::post_telemetry_json(&config.analytics.endpoint, &body)
+        },
+        || {
+            if let Some(snapshot) = capability_snapshot.take() {
+                snapshot.mark_reported()?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn serialize_batch_body(
+    client_profile_id: &str,
+    data_root_id: &str,
+    events: &[Value],
+) -> Result<Vec<u8>> {
     let payload = json!({
         "client_profile_id": client_profile_id,
         "data_root_id": data_root_id,
         "app_version": env!("CARGO_PKG_VERSION"),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
-        "events": serialized,
+        "events": events,
     });
-    let body = serde_json::to_vec(&payload)?;
-    net::post_telemetry_json(&config.analytics.endpoint, &body)?;
-    if let Some(snapshot) = capability_snapshot {
-        snapshot.mark_reported()?;
+    Ok(serde_json::to_vec(&payload)?)
+}
+
+fn post_event_chunks(
+    events: &[Value],
+    snapshot_attached: bool,
+    mut post: impl FnMut(&[Value]) -> Result<()>,
+    mut acknowledge_snapshot: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    for (index, chunk) in events.chunks(MAX_EVENTS_PER_REQUEST).enumerate() {
+        post(chunk)?;
+        if index == 0 && snapshot_attached {
+            acknowledge_snapshot()?;
+        }
     }
     Ok(())
 }
@@ -83,9 +122,6 @@ pub(super) fn serialize_event(
             let mut properties = operation_properties(event);
             if let Some(output) = event.output {
                 properties.insert("output".to_owned(), json!(output.as_str()));
-            }
-            if let Some(auto_upgrade) = &event.auto_upgrade {
-                insert_auto_upgrade_properties(&mut properties, auto_upgrade);
             }
             if event.deprecated_daemon_control {
                 properties.insert("deprecated_daemon_control".to_owned(), json!(true));
@@ -136,7 +172,7 @@ pub(super) fn serialize_event(
         properties.insert("install_manager".to_owned(), json!("ctx-hosted-installer"));
     }
     let mut value = json!({
-        "event_id": Uuid::new_v4().to_string(),
+        "event_id": event_id(event),
         "event_name": event_name,
         "event_version": 1,
         "occurred_at": occurred_at,
@@ -150,6 +186,11 @@ pub(super) fn serialize_event(
         value["install_attempt_id"] = json!(install_attempt_id);
     }
     value
+}
+
+fn event_id(event: &PublicEventV1) -> String {
+    let _ = event;
+    Uuid::new_v4().to_string()
 }
 
 fn operation_properties(event: &OperationCompletedV1) -> Map<String, Value> {
@@ -169,12 +210,50 @@ fn insert_provider_refresh_properties(
     properties: &mut Map<String, Value>,
     refresh: &ForegroundProviderRefreshV1,
 ) {
-    insert_optional_provider(properties, "provider", Some(refresh.provider));
+    insert_str(properties, "provider", refresh.provider.as_str());
     insert_str(properties, "trigger", refresh.trigger.as_str());
     insert_str(properties, "source_mode", refresh.source_mode.as_str());
     insert_str(properties, "change", refresh.change.as_str());
+    insert_str(
+        properties,
+        "content_evidence",
+        refresh.content_evidence.as_str(),
+    );
+    insert_optional_str(
+        properties,
+        "work_kind",
+        refresh.work_kind.map(ProviderRefreshWorkKind::as_str),
+    );
+    insert_str(
+        properties,
+        "refresh_result",
+        refresh.refresh_result.as_str(),
+    );
+    insert_str(properties, "core_result", refresh.core_result.as_str());
+    insert_str(
+        properties,
+        "canonical_pro_result",
+        refresh.canonical_pro_result.as_str(),
+    );
+    insert_str(
+        properties,
+        "output_pro_result",
+        refresh.output_pro_result.as_str(),
+    );
+    insert_str(properties, "failure_scope", refresh.failure_scope.as_str());
+    insert_str(properties, "failure_type", refresh.failure_type.as_str());
     insert_bool(properties, "work_remaining", refresh.work_remaining);
+    insert_optional_count(
+        properties,
+        "retired_records_bucket",
+        refresh.retired_records,
+    );
     insert_optional_count(properties, "sources_bucket", Some(refresh.counts.sources));
+    insert_optional_count(
+        properties,
+        "source_files_bucket",
+        Some(refresh.counts.source_files),
+    );
     insert_optional_count(properties, "sessions_bucket", Some(refresh.counts.sessions));
     insert_optional_count(properties, "events_bucket", Some(refresh.counts.events));
     insert_optional_count(properties, "edges_bucket", Some(refresh.counts.edges));
@@ -336,11 +415,6 @@ fn insert_client_operation_properties(
             insert_str(properties, "target_kind", value.target_kind.as_str());
             insert_optional_str(
                 properties,
-                "resource_kind",
-                value.resource_kind.map(ResourceKind::as_str),
-            );
-            insert_optional_str(
-                properties,
                 "transcript_mode",
                 value.transcript_mode.map(TranscriptModeKind::as_str),
             );
@@ -352,11 +426,6 @@ fn insert_client_operation_properties(
         }
         ClientOperationV1::Locate(value) => {
             insert_str(properties, "target_kind", value.target_kind.as_str());
-            insert_optional_str(
-                properties,
-                "resource_kind",
-                value.resource_kind.map(ResourceKind::as_str),
-            );
             insert_str(properties, "output_format", value.output_format.as_str());
             insert_bool(properties, "provider_lookup", value.provider_lookup);
         }
@@ -623,6 +692,16 @@ fn insert_upgrade_properties(properties: &mut Map<String, Value>, value: &Upgrad
     insert_optional_bool(properties, "upgrade_applied", value.applied);
     insert_optional_bool(properties, "upgrade_scheduled", value.scheduled);
     insert_optional_bool(properties, "update_available", value.update_available);
+    insert_optional_bool(
+        properties,
+        "update_was_available",
+        value.update_was_available,
+    );
+    insert_optional_str(
+        properties,
+        "upgrade_attempt_id",
+        value.upgrade_attempt_id.as_deref(),
+    );
     insert_optional_bool(properties, "managed_install", value.managed_install);
     insert_optional_bool(
         properties,
@@ -651,21 +730,6 @@ fn insert_upgrade_properties(properties: &mut Map<String, Value>, value: &Upgrad
     );
 }
 
-fn insert_auto_upgrade_properties(
-    properties: &mut Map<String, Value>,
-    value: &AutoUpgradeTelemetry,
-) {
-    insert_bool(properties, "auto_upgrade_probe", true);
-    insert_bool(properties, "auto_upgrade_due", value.due);
-    insert_bool(properties, "auto_upgrade_spawned", value.spawned);
-    insert_str(
-        properties,
-        "auto_upgrade_spawn_status",
-        value.status.as_str(),
-    );
-    insert_str(properties, "auto_upgrade_channel", value.channel.as_str());
-}
-
 fn insert_capability_properties(
     properties: &mut Map<String, Value>,
     snapshot: &CapabilitySnapshotV1,
@@ -689,7 +753,7 @@ fn insert_capability_properties(
     );
 }
 
-fn insert_str(properties: &mut Map<String, Value>, key: &'static str, value: &'static str) {
+fn insert_str(properties: &mut Map<String, Value>, key: &'static str, value: &str) {
     properties.insert(key.to_owned(), Value::String(value.to_owned()));
 }
 
@@ -700,7 +764,7 @@ fn insert_bool(properties: &mut Map<String, Value>, key: &'static str, value: bo
 fn insert_optional_str(
     properties: &mut Map<String, Value>,
     key: &'static str,
-    value: Option<&'static str>,
+    value: Option<&str>,
 ) {
     if let Some(value) = value {
         insert_str(properties, key, value);
@@ -756,5 +820,93 @@ fn insert_optional_provider(
 ) {
     if let Some(value) = value {
         properties.insert(key.to_owned(), Value::String(value.as_str().to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn numbered_events(count: usize) -> Vec<Value> {
+        (0..count).map(|index| json!({ "index": index })).collect()
+    }
+
+    #[test]
+    fn outbound_payloads_never_exceed_fifty_events_and_preserve_order() {
+        for (event_count, expected_chunk_sizes) in [
+            (1, vec![1]),
+            (49, vec![49]),
+            (50, vec![50]),
+            (51, vec![50, 1]),
+            (100, vec![50, 50]),
+            (101, vec![50, 50, 1]),
+            (123, vec![50, 50, 23]),
+        ] {
+            let events = numbered_events(event_count);
+            let mut payloads = Vec::new();
+
+            post_event_chunks(
+                &events,
+                false,
+                |chunk| {
+                    let body = serialize_batch_body("client", "root", chunk)?;
+                    payloads.push(serde_json::from_slice::<Value>(&body)?);
+                    Ok(())
+                },
+                || panic!("a batch without a capability snapshot must not acknowledge one"),
+            )
+            .unwrap();
+
+            assert_eq!(
+                payloads
+                    .iter()
+                    .map(|payload| payload["events"].as_array().unwrap().len())
+                    .collect::<Vec<_>>(),
+                expected_chunk_sizes
+            );
+            assert!(payloads.iter().all(|payload| {
+                payload["events"].as_array().unwrap().len() <= MAX_EVENTS_PER_REQUEST
+            }));
+            assert_eq!(
+                payloads
+                    .iter()
+                    .flat_map(|payload| payload["events"].as_array().unwrap())
+                    .map(|event| event["index"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                (0..event_count as u64).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn capability_ack_tracks_the_snapshot_bearing_chunk_not_later_chunks() {
+        for (failure_on_post, expected_posts, expected_acks, should_succeed) in [
+            (Some(1), 1, 0, false),
+            (Some(2), 2, 1, false),
+            (None, 3, 1, true),
+        ] {
+            let events = numbered_events(101);
+            let mut posts = 0;
+            let mut acknowledgements = 0;
+            let result = post_event_chunks(
+                &events,
+                true,
+                |_chunk| {
+                    posts += 1;
+                    if failure_on_post == Some(posts) {
+                        return Err(anyhow::anyhow!("injected post failure"));
+                    }
+                    Ok(())
+                },
+                || {
+                    acknowledgements += 1;
+                    Ok(())
+                },
+            );
+
+            assert_eq!(result.is_ok(), should_succeed);
+            assert_eq!(posts, expected_posts);
+            assert_eq!(acknowledgements, expected_acks);
+        }
     }
 }

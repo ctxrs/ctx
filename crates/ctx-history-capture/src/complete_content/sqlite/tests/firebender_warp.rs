@@ -45,7 +45,7 @@ fn create_warp_database(
     user_body: &str,
     result_body: &str,
     wal: bool,
-) -> (Connection, Vec<CapturedSqliteValue>) {
+) -> (Connection, Vec<NativeSqliteValue>) {
     let conn = Connection::open(path).unwrap();
     if wal {
         conn.pragma_update(None, "journal_mode", "wal").unwrap();
@@ -75,11 +75,11 @@ fn create_warp_database(
     )
     .unwrap();
     let values = vec![
-        CapturedSqliteValue::Integer(1),
-        CapturedSqliteValue::Text("warp-conversation-1".to_owned()),
-        CapturedSqliteValue::Text("warp-task-1".to_owned()),
-        CapturedSqliteValue::Blob(task),
-        CapturedSqliteValue::Text("2026-07-22 12:00:00".to_owned()),
+        NativeSqliteValue::Integer(1),
+        NativeSqliteValue::Text("warp-conversation-1".to_owned()),
+        NativeSqliteValue::Text("warp-task-1".to_owned()),
+        NativeSqliteValue::Blob(task),
+        NativeSqliteValue::Text("2026-07-22 12:00:00".to_owned()),
     ];
     (conn, values)
 }
@@ -90,21 +90,12 @@ fn warp_locator(rowid: i64, message_index: u32) -> Vec<u8> {
     value
 }
 
-fn warp_event(event_type: EventType, native_id: &str) -> ProviderEventEnvelope {
-    ProviderEventEnvelope {
+fn warp_event(event_type: EventType, native_id: &str) -> TestProviderEvent {
+    TestProviderEvent {
         provider_event_index: 0,
         provider_event_hash: Some(native_id.to_owned()),
         cursor: Some(format!("warp:{native_id}")),
         event_type,
-        role: Some(if event_type == EventType::ToolOutput {
-            EventRole::Tool
-        } else {
-            EventRole::User
-        }),
-        occurred_at: DateTime::<Utc>::UNIX_EPOCH,
-        fidelity: Fidelity::Imported,
-        idempotency_key: Some(format!("warp:{native_id}")),
-        artifacts: Vec::new(),
         payload: json!({
             "text": "",
             "text_retention": {
@@ -120,7 +111,7 @@ fn warp_event(event_type: EventType, native_id: &str) -> ProviderEventEnvelope {
 
 fn warp_result_request(
     path: &Path,
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     result_body: &str,
 ) -> ResultContentRequest {
     let event_id = Uuid::new_v4();
@@ -269,7 +260,7 @@ fn firebender_recovers_unicode_escaped_multiline_bytes_and_retains_only_truncate
 
     let locator =
         NativeLocator::new(FIREBENDER_LOCATOR_KIND, 1_i64.to_be_bytes().to_vec()).unwrap();
-    attach_sqlite_complete_content_locator(
+    attach_test_sqlite_message_locator(
         &mut event,
         CaptureProvider::Firebender,
         FIREBENDER_SQLITE_SOURCE_FORMAT,
@@ -305,7 +296,7 @@ fn firebender_recovers_unicode_escaped_multiline_bytes_and_retains_only_truncate
 
     let short = "ordinary short message";
     let (_, mut short_event) = create_event_without_database(short);
-    attach_sqlite_complete_content_locator(
+    attach_test_sqlite_message_locator(
         &mut short_event,
         CaptureProvider::Firebender,
         FIREBENDER_SQLITE_SOURCE_FORMAT,
@@ -478,8 +469,7 @@ fn firebender_name_only_tool_message_never_gets_result_evidence() {
         "tool_calls": [{"name": "display-only-tool-call"}],
     });
     assert!(firebender::firebender_result_content(&message).is_none());
-    let mut event =
-        firebender::firebender_event(SESSION_ID, 0, &message, DateTime::<Utc>::UNIX_EPOCH);
+    let mut event = firebender_event(SESSION_ID, 0, &message, DateTime::<Utc>::UNIX_EPOCH);
     let locator =
         NativeLocator::new(FIREBENDER_LOCATOR_KIND, 1_i64.to_be_bytes().to_vec()).unwrap();
     attach_sqlite_result_content_locator(

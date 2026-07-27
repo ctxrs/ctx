@@ -102,8 +102,8 @@ fn event(id: Uuid, seq: u64, body: serde_json::Value) -> Event {
         history_record_id: None,
         session_id: None,
         run_id: None,
-        event_type: EventType::ToolOutput,
-        role: Some(EventRole::User),
+        event_type: EventType::ToolCall,
+        role: Some(EventRole::Assistant),
         occurred_at: now(),
         capture_source_id: None,
         payload: body,
@@ -369,7 +369,7 @@ fn archive_event_identity_collision_replays_the_canonical_id() {
 
     assert_eq!(
         incremental.get_event(canonical_event_id).unwrap().payload,
-        json!({})
+        json!({"body": "final"})
     );
     assert!(incremental.get_event(incoming_event_id).is_err());
     assert_eq!(
@@ -396,7 +396,7 @@ fn archive_event_identity_collision_replays_the_canonical_id() {
         .filter(|record| record.stable_entity_id == canonical_event_id)
         .map(|record| record.entity_revision)
         .collect::<Vec<_>>();
-    assert_eq!(canonical_revisions, vec![1]);
+    assert_eq!(canonical_revisions, vec![1, 2]);
     assert!(incremental_records
         .iter()
         .all(|record| record.stable_entity_id != incoming_event_id));
@@ -567,13 +567,13 @@ fn direct_entity_apis_append_rewrite_tombstone_and_undelete_without_churn() {
     store.upsert_vcs_change(&change).unwrap();
 
     let records = all_records(&store);
-    assert_eq!(records.len(), 11);
+    assert_eq!(records.len(), 12);
     assert_eq!(
         records
             .iter()
             .map(|record| record.sequence)
             .collect::<Vec<_>>(),
-        (1..=11).collect::<Vec<_>>()
+        (1..=12).collect::<Vec<_>>()
     );
     for id in [file_id, change_id] {
         let revisions = records
@@ -599,8 +599,9 @@ fn direct_entity_apis_append_rewrite_tombstone_and_undelete_without_churn() {
             .collect::<Vec<_>>(),
         vec![
             (1, JournalOperation::Upsert),
-            (2, JournalOperation::Delete),
-            (3, JournalOperation::Upsert),
+            (2, JournalOperation::Upsert),
+            (3, JournalOperation::Delete),
+            (4, JournalOperation::Upsert),
         ]
     );
 }
@@ -651,12 +652,12 @@ fn insert_if_absent_and_provider_reconcile_write_only_semantic_changes() {
         )
         .unwrap());
     let records = all_records(&store);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].stable_entity_id, id);
-    assert_eq!(records[0].entity_revision, 1);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].stable_entity_id, id);
+    assert_eq!(records[1].entity_revision, 2);
     assert_eq!(
-        records[0].canonical_payload.as_ref().unwrap()["payload"],
-        json!({})
+        records[1].canonical_payload.as_ref().unwrap()["payload"],
+        json!({"body": {"text": "normalized rewrite"}})
     );
 }
 
@@ -836,11 +837,11 @@ fn result_evidence_rewrites_but_complete_content_only_changes_do_not() {
         id,
         1,
         json!({
-            "body": {"output_preview": "safe"},
             "result_outcome": "success",
             "result_evidence": [{"kind": "call_id", "value": "call-1"}]
         }),
     );
+    value.event_type = EventType::CommandFinished;
     value.sync.metadata["verified_content_locators_v1"] =
         json!({"version": 1, "locators": [{"path": "/secret/first"}]});
     store.upsert_event(&value).unwrap();
@@ -1113,7 +1114,7 @@ fn baseline_plus_mixed_deltas_equals_a_fresh_full_baseline() {
 }
 
 #[test]
-fn capture_source_archive_import_uses_the_same_transactional_journal_path() {
+fn canonical_archive_import_uses_the_transactional_journal_path() {
     let temp = tempdir().unwrap();
     let mut store = Store::open(temp.path().join("ctx.db")).unwrap();
     store.activate_projection_journal(FINGERPRINT).unwrap();
@@ -1121,20 +1122,13 @@ fn capture_source_archive_import_uses_the_same_transactional_journal_path() {
     let event_id = Uuid::new_v4();
     let mut archive = ctx_history_core::SessionHistoryArchive::default();
     archive
-        .events
-        .push(event(event_id, 1, json!({"body": "archive-source"})));
-    let descriptor = source(source_id, "/archive/session.jsonl").descriptor;
+        .capture_sources
+        .push(source(source_id, "/archive/session.jsonl"));
+    let mut archived_event = event(event_id, 1, json!({"body": "archive-source"}));
+    archived_event.capture_source_id = Some(source_id);
+    archive.events.push(archived_event);
 
-    store
-        .import_archive_from_capture_source(
-            &archive,
-            source_id,
-            &descriptor,
-            now(),
-            ctx_history_core::Fidelity::Imported,
-            true,
-        )
-        .unwrap();
+    store.import_archive(&archive, true).unwrap();
     let records = all_records(&store);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].stable_entity_id, event_id);

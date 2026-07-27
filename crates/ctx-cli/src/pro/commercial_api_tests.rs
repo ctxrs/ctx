@@ -403,3 +403,28 @@ fn finish_consumes_worker_problem_json_and_sanitizes_proxy_responses() {
         .to_string()
         .contains("secret-success-body"));
 }
+
+#[test]
+fn anonymous_trial_credentials_and_challenges_are_strictly_bounded() {
+    assert_eq!(
+        trial_authorization("abcDEF_123-456.xyz~").unwrap(),
+        "CtxTrial abcDEF_123-456.xyz~"
+    );
+    for invalid in ["short", "contains space token", "line\nbreak"] {
+        assert!(trial_authorization(invalid).is_err());
+    }
+
+    let challenge = TrialChallenge {
+        challenge_id: "challenge-123".to_owned(),
+        challenge_base64url: "a".repeat(43),
+        expires_at_unix: unix_time().unwrap() + 60,
+        artifact_access_token: "a".repeat(32),
+    };
+    challenge.validate().unwrap();
+
+    let expired = TrialChallenge {
+        expires_at_unix: unix_time().unwrap() - 1,
+        ..challenge
+    };
+    assert!(expired.validate().is_err());
+}

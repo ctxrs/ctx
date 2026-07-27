@@ -4,9 +4,9 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    import_custom_history_jsonl_v1_reader, provider_source_spec, CustomHistoryJsonlV1ImportOptions,
-    DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderImportSummary,
-    ProviderImportSupport, ProviderSourceStatus,
+    decode_custom_history_jsonl_v1_cursor, import_custom_history_jsonl_v1_reader,
+    provider_source_spec, CustomHistoryJsonlV1ImportOptions, DiscoveryIssue, DiscoveryIssueKind,
+    DiscoveryReport, ProviderImportSummary, ProviderImportSupport, ProviderSourceStatus,
 };
 use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord};
 use ctx_history_store::Store;
@@ -247,7 +247,8 @@ pub(crate) fn import_history_source_plugin(
     } else {
         store
             .get_sync_cursor(None, &machine_id, &cursor_stream)?
-            .map(|cursor| cursor.cursor)
+            .map(|cursor| decode_custom_history_jsonl_v1_cursor(&cursor.cursor))
+            .transpose()?
     };
     let run = run_history_source_plugin(
         source,

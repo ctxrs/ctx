@@ -83,6 +83,13 @@ pub enum StoreError {
     },
     #[error("capture source {capture_source_id} has a conflicting local provider route binding")]
     CaptureSourceProviderRouteConflict { capture_source_id: Uuid },
+    #[error(
+        "provider history source route retirement conflicts with current authority for {provider}/{source_format}"
+    )]
+    ProviderSourceRouteRetirementConflict {
+        provider: String,
+        source_format: String,
+    },
     #[error("no authorized current provider source route is available for event {event_id}")]
     AuthorizedSourceRouteUnavailable { event_id: Uuid },
     #[error("multiple authorized current provider source routes match event {event_id}")]
@@ -97,6 +104,40 @@ pub enum StoreError {
     },
     #[error("bulk search guard belongs to a different ctx index")]
     InvalidBulkSearchGuard,
+    #[error("bulk search group admission is invalid or belongs to a different ctx index")]
+    InvalidBulkSearchGroupAdmission,
+    #[error("a bulk search group admission is already outstanding for this Store")]
+    BulkSearchGroupAdmissionOutstanding,
+    #[error("a NativePath publication group is already active on this Store")]
+    NativePathGroupAlreadyActive,
+    #[error("a NativePath publication group requires an outermost autocommit boundary")]
+    NativePathGroupRequiresAutocommit,
+    #[error("NativePath publication group {limit} accounting is {actual}; maximum is {maximum}")]
+    NativePathGroupLimitExceeded {
+        limit: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("NativePath publication group was poisoned by a refused mutation")]
+    NativePathGroupPoisoned,
+    #[error("NativePath publication group transaction control is Store-owned")]
+    NativePathTransactionControlDenied,
+    #[error("projection journal lifecycle changes are not allowed inside a NativePath group")]
+    NativePathJournalLifecycleDuringGroup,
+    #[error("NativePath publication group journal has already been sealed")]
+    NativePathJournalSealed,
+    #[error("NativePath cursor set does not belong to the active publication group")]
+    InvalidNativePathCursorSet,
+    #[error("NativePath cursor compare-and-set conflicts with freshly read Store state")]
+    NativePathCursorConflict,
+    #[error("NativePath source generation conflicts with current route or staged state")]
+    NativePathSourceGenerationConflict,
+    #[error("NativePath legacy provider-hash migration was not exactly authorized")]
+    InvalidNativePathLegacyProviderHashMigration,
+    #[error(
+        "session relationship update would change the canonical actor projection; dependent fanout is intentionally not performed"
+    )]
+    ProjectionChangingSessionRelationship,
     #[error("archive conflicts with existing {kind}: {id}")]
     ImportConflict { kind: &'static str, id: Uuid },
     #[error("archive artifact {id} content does not match its blob hash")]

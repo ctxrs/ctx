@@ -11,7 +11,7 @@ fn cpu_model_load_defers_before_cache_or_runtime_access() {
             available_parallelism: 8,
         },
     );
-    let error = match acquire_cpu_backend(temp.path(), policy, BackendPreference::Cpu, false) {
+    let error = match acquire_cpu_backend(temp.path(), policy, BackendPreference::Cpu) {
         Ok(_) => panic!("low-memory acquisition should defer"),
         Err(error) => error,
     };
@@ -19,18 +19,44 @@ fn cpu_model_load_defers_before_cache_or_runtime_access() {
 }
 
 fn write_test_semantic_cache(root: &Path) -> Result<()> {
+    write_test_semantic_cache_variant(root, SemanticOrtModelVariant::CpuFp32)
+}
+
+fn write_test_semantic_cache_variant(root: &Path, variant: SemanticOrtModelVariant) -> Result<()> {
     let snapshot = root
         .join(SEMANTIC_HF_MODEL_CACHE_DIR)
         .join("snapshots")
         .join(SEMANTIC_MODEL_REVISION);
     fs::create_dir_all(&snapshot)?;
-    for file in SEMANTIC_REQUIRED_MODEL_FILES {
+    for file in variant.required_files() {
         let path = snapshot.join(file.path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::File::create(path)?.set_len(file.size)?;
     }
+    Ok(())
+}
+
+#[test]
+fn accelerator_only_model_cache_is_available_and_reported() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let cache = temp.path().join("accelerator-cache");
+    write_test_semantic_cache_variant(
+        &cache.join(SEMANTIC_MANAGED_MODEL_CACHE_DIR),
+        SemanticOrtModelVariant::AcceleratorO4Fp16,
+    )?;
+
+    assert!(semantic_model_cache_snapshot_dir(&cache).is_none());
+    assert!(semantic_accelerator_model_cache_available(&cache));
+    assert!(semantic_model_cache_available(&cache));
+    let status = semantic_model_acquisition_status_json(&cache);
+    assert_eq!(status["cpu"]["cache_status"], "missing");
+    assert_eq!(status["accelerator"]["cache_status"], "present");
+    assert_eq!(
+        status["accelerator"]["model_variant"],
+        "accelerator-o4-fp16"
+    );
     Ok(())
 }
 

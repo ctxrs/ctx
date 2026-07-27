@@ -1,0 +1,8 @@
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
+
+loc_check_inputs(name = "loc_check_inputs")
+
+exports_files([
+    "cc_toolchain_config.bzl",
+    "repository.bzl",
+])

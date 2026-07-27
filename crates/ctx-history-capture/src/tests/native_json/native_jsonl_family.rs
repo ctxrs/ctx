@@ -1,6 +1,6 @@
 use crate::tests::support::assertions::{
-    assert_event_type_count, assert_event_with_role, assert_events_have_provider_citations,
-    assert_search_hits_provider, assert_search_misses,
+    assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
+    assert_search_misses,
 };
 use crate::tests::support::fixtures::jsonl::{
     jsonl_line, oversized_jsonl_line, write_claude_smoke_fixture,
@@ -13,7 +13,7 @@ use crate::{
     PiSessionImportOptions, ProviderImportSupport, ProviderSourceStatus, PROVIDER_MAX_TEXT_CHARS,
 };
 use chrono::{DateTime, Utc};
-use ctx_history_core::{AgentType, CaptureProvider, Confidence, EventRole, EventType};
+use ctx_history_core::{AgentType, CaptureProvider, Confidence, EventType};
 use ctx_history_store::Store;
 use serde_json::json;
 use std::fs;
@@ -124,7 +124,7 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 2);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Continue, "continue-tool-boundary");
     let events = store.events_for_session(session_id).unwrap();
@@ -147,14 +147,10 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
     assert!(!rendered_tool.contains(raw_output));
     assert!(!rendered_tool.contains(raw_old));
     assert!(!rendered_tool.contains(raw_new));
-    let result = events
-        .iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("separate source-backed Continue result imported");
-    let rendered_result = serde_json::to_string(result).unwrap();
-    assert!(rendered_result.contains("continue.result-body.v1"));
-    assert!(!rendered_result.contains(raw_output));
-    assert!(result.payload["body"]["result_content_ref"].is_object());
+    assert_eq!(events.len(), 2);
+    assert_event_type_count(&events, EventType::ToolCall, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
+    assert_event_type_count(&events, EventType::CommandOutput, 0);
     assert!(store
         .search_event_hits("continue tool policy oracle prompt", 10)
         .unwrap()
@@ -215,18 +211,16 @@ fn native_pi_fixture_imports_event_types_searches_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 6);
+    assert_eq!(first.imported_events, 4);
 
     let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-session-docs-1");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 6);
+    assert_eq!(events.len(), 4);
     assert_event_type_count(&events, EventType::Message, 2);
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
-    assert_event_type_count(&events, EventType::CommandOutput, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
+    assert_event_type_count(&events, EventType::CommandOutput, 0);
     assert_event_type_count(&events, EventType::Summary, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
-    assert_event_with_role(&events, EventType::CommandOutput, EventRole::Tool);
     assert_events_have_provider_citations(&events);
 
     assert_search_hits_provider(
@@ -255,8 +249,8 @@ fn native_pi_fixture_imports_event_types_searches_and_reimports() {
     assert_eq!(second.failed, 0, "{:?}", second.failures);
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 6);
+    assert_eq!(second.skipped_sessions, 0);
+    assert_eq!(second.skipped_events, 0);
 }
 
 #[test]
@@ -316,7 +310,7 @@ fn native_claude_manifested_files_import_parent_and_subagent() {
 
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.imported_sessions, 2);
-    assert_eq!(summary.imported_events, 5);
+    assert_eq!(summary.imported_events, 4);
     assert_eq!(summary.imported_edges, 1);
     let parent_id =
         stored_provider_session_id(&store, CaptureProvider::Claude, "claude-native-parent");
@@ -332,14 +326,12 @@ fn native_claude_manifested_files_import_parent_and_subagent() {
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    let tool_output = events
-        .iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("Claude tool result imported");
-    let rendered = tool_output.payload.to_string();
-    assert!(rendered.contains("abcdef0123456789abcdef0123456789abcdef01"));
-    assert!(rendered.contains("https://github.com/ctxrs/ctx/pull/123"));
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
+    assert_event_type_count(&events, EventType::CommandOutput, 0);
+    let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("tool-1"));
+    assert!(!rendered.contains("abcdef0123456789abcdef0123456789abcdef01"));
+    assert!(!rendered.contains("https://github.com/ctxrs/ctx/pull/123"));
     assert!(!rendered.contains("token=claude-secret"));
     assert!(!rendered.contains("fragment"));
     assert!(!rendered.contains("CLAUDE_RESULT_NARRATIVE_MUST_NOT_RETAIN"));
@@ -359,7 +351,7 @@ fn native_claude_manifested_files_import_parent_and_subagent() {
     assert_eq!(replay.imported_sessions, 0);
     assert_eq!(replay.imported_events, 0);
     assert_eq!(replay.skipped_sessions, 1);
-    assert_eq!(replay.skipped_events, 3);
+    assert_eq!(replay.skipped_events, 2);
 
     {
         use std::io::Write;
@@ -386,7 +378,7 @@ fn native_claude_manifested_files_import_parent_and_subagent() {
     let appended = import_claude_projects_jsonl_tree(&parent_path, &mut store, options).unwrap();
     assert_eq!(appended.failed, 0, "{:?}", appended.failures);
     assert_eq!(appended.imported_events, 1);
-    assert_eq!(store.events_for_session(parent_id).unwrap().len(), 4);
+    assert_eq!(store.events_for_session(parent_id).unwrap().len(), 3);
 }
 
 #[test]
@@ -411,7 +403,7 @@ fn native_claude_tree_streams_parent_and_subagent_in_one_call() {
 
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.imported_sessions, 2);
-    assert_eq!(summary.imported_events, 5);
+    assert_eq!(summary.imported_events, 4);
     assert_eq!(summary.imported_edges, 1);
     let parent_id =
         stored_provider_session_id(&store, CaptureProvider::Claude, "claude-native-parent");

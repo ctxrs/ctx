@@ -50,7 +50,13 @@ pub(super) fn run_daemon_once_with_activity(
             &semantic_job,
         )?;
         let (did_work, failed) = (semantic_did_work, daemon_job_failed(&semantic_job));
-        let state = daemon_cycle_state(runtime, &history_refresh_job, &semantic_job);
+        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let state = daemon_cycle_state(
+            runtime,
+            &history_refresh_job,
+            &semantic_job,
+            &semantic_report,
+        );
         return Ok(DaemonIteration::new(did_work, failed, state));
     }
 
@@ -95,12 +101,32 @@ pub(super) fn run_daemon_once_with_activity(
         &semantic_job,
     )?;
 
+    let pro_materialization_did_work =
+        if !daemon_foreground_query_preempts(query_activity, query_generation)
+            && daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS)
+            && daemon_history_freshness(
+                runtime,
+                &history_refresh_job,
+                daemon_job_in_retry_backoff(&history_refresh_job),
+            ) == DaemonHistoryFreshnessV1::Current
+        {
+            crate::pro::run_pending_materialization(data_root).unwrap_or(false)
+        } else {
+            false
+        };
+
     let (did_work, failed) = (
-        history_refresh_did_work || semantic_did_work,
+        history_refresh_did_work || semantic_did_work || pro_materialization_did_work,
         daemon_job_failed(&history_refresh_job) || daemon_job_failed(&semantic_job),
     );
 
-    let state = daemon_cycle_state(runtime, &history_refresh_job, &semantic_job);
+    let semantic_report = semantic_worker_report_for_daemon(data_root);
+    let state = daemon_cycle_state(
+        runtime,
+        &history_refresh_job,
+        &semantic_job,
+        &semantic_report,
+    );
     Ok(DaemonIteration::new(did_work, failed, state)
         .with_provider_refresh_events(provider_refresh_events))
 }
@@ -109,6 +135,7 @@ pub(super) fn daemon_cycle_state(
     runtime: &DaemonRuntime,
     history_job: &Value,
     semantic_job: &Value,
+    semantic_report: &SemanticWorkerReport,
 ) -> DaemonCycleStateV1 {
     let history_backoff = daemon_job_in_retry_backoff(history_job);
     let semantic_backoff = daemon_job_in_retry_backoff(semantic_job);
@@ -120,8 +147,8 @@ pub(super) fn daemon_cycle_state(
     };
     DaemonCycleStateV1::new(
         daemon_history_freshness(runtime, history_job, history_backoff),
-        daemon_semantic_backlog(semantic_job),
-        daemon_semantic_coverage(semantic_job),
+        daemon_semantic_backlog(semantic_report),
+        daemon_semantic_coverage(semantic_report),
         retry_backoff,
     )
 }
@@ -161,32 +188,22 @@ fn daemon_history_freshness(
     DaemonHistoryFreshnessV1::Unknown
 }
 
-fn daemon_semantic_backlog(job: &Value) -> DaemonBacklogV1 {
-    job.get("coverage")
-        .and_then(|coverage| coverage.get("queued_items_estimate"))
-        .and_then(Value::as_u64)
-        .map(|count| DaemonBacklogV1::Bucket(count_bucket(count)))
-        .unwrap_or(DaemonBacklogV1::Unknown)
+fn daemon_semantic_backlog(report: &SemanticWorkerReport) -> DaemonBacklogV1 {
+    if !report.searchable_items_known {
+        return DaemonBacklogV1::Unknown;
+    }
+    DaemonBacklogV1::Bucket(count_bucket(report.queued_items_estimate as u64))
 }
 
-fn daemon_semantic_coverage(job: &Value) -> DaemonCoverageV1 {
-    let Some(coverage) = job.get("coverage") else {
+fn daemon_semantic_coverage(report: &SemanticWorkerReport) -> DaemonCoverageV1 {
+    if !report.searchable_items_known {
         return DaemonCoverageV1::Unknown;
-    };
-    let Some(searchable) = coverage.get("searchable_items").and_then(Value::as_u64) else {
-        return DaemonCoverageV1::Unknown;
-    };
-    let Some(completed) = coverage.get("completed_items").and_then(Value::as_u64) else {
-        return DaemonCoverageV1::Unknown;
-    };
-    let Some(dirty) = coverage.get("dirty_items").and_then(Value::as_u64) else {
-        return DaemonCoverageV1::Unknown;
-    };
-    if searchable == 0 {
+    }
+    if report.searchable_items == 0 {
         DaemonCoverageV1::Empty
-    } else if dirty > 0 {
+    } else if report.dirty_items > 0 {
         DaemonCoverageV1::Dirty
-    } else if completed >= searchable {
+    } else if report.embedded_items >= report.searchable_items {
         DaemonCoverageV1::Complete
     } else {
         DaemonCoverageV1::Incomplete
@@ -236,12 +253,20 @@ pub(super) fn run_daemon_semantic_job_with_retry(
     deadline: Option<Instant>,
     semantic_enabled: bool,
 ) -> Value {
+    if let Some(job) = runtime.semantic_blocked_job.as_ref() {
+        return job.clone();
+    }
     if !runtime.semantic_retry.ready() {
         return daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
     }
     let job = run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
-        .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, format!("{error:#}")));
-    record_daemon_job_retry(&mut runtime.semantic_retry, job)
+        .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
+    let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
+    if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
+    {
+        runtime.semantic_blocked_job = Some(job.clone());
+    }
+    job
 }
 
 pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job: Value) -> Value {
@@ -258,6 +283,9 @@ pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job:
 }
 
 pub(super) fn daemon_job_should_backoff(job: &Value) -> bool {
+    if let Some(class) = semantic_failure_class_from_job(job) {
+        return class.retries_with_backoff();
+    }
     daemon_job_failed(job)
         || (job.get("reason").and_then(Value::as_str) != Some("retry_backoff")
             && (job.get("retryable").and_then(Value::as_bool) == Some(true)
@@ -281,9 +309,7 @@ pub(super) fn semantic_bootstrap_should_run_first(
     let store = Store::open(&db_path).context("open ctx store for daemon semantic bootstrap")?;
     refresh_semantic_document_count_cache(&store)?;
     let report = semantic_worker_report(data_root, Some(&store))?;
-    Ok(report.searchable_items > 0
-        && report.queued_items_estimate > 0
-        && report.model_cache_available)
+    Ok(report.searchable_items > 0 && report.queued_items_estimate > 0)
 }
 
 pub(super) fn semantic_report_should_queue_recent_work(report: &SemanticWorkerReport) -> bool {
@@ -363,10 +389,11 @@ use super::{
         finish_daemon_history_refresh_job, preserve_daemon_history_runtime_state,
         record_daemon_history_job_retry, run_daemon_history_refresh_job,
     },
-    daemon_retry::DaemonRetryBackoff,
+    daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
     daemon_worker::{
         daemon_semantic_deadline_skipped_job, daemon_semantic_failed_job,
         daemon_semantic_retry_backoff_job, daemon_semantic_skipped_job, run_daemon_semantic_job,
+        semantic_worker_report_for_daemon,
     },
     paths_status::{
         daemon_history_refresh_job_path, daemon_semantic_job_path, semantic_worker_report,

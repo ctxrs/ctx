@@ -86,13 +86,6 @@ fn provider_fixtures_preserve_unicode_and_escaping() {
             "Droid snowman ☃\nquoted \"body\" and escaped \\\\ path",
         ),
         (
-            CaptureProvider::Cursor,
-            crate::CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-            include_str!("../../../../../tests/fixtures/provider-history/complete-content-jsonl/v1/cursor.jsonl"),
-            0,
-            "Cursor snowman ☃\nquoted \"body\" and escaped \\\\ path",
-        ),
-        (
             CaptureProvider::Windsurf,
             crate::WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
             include_str!("../../../../../tests/fixtures/provider-history/complete-content-jsonl/v1/windsurf.jsonl"),

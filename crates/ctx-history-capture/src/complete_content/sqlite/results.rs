@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Debug)]
 pub(crate) struct SqliteResultRecord {
-    pub(crate) values: Vec<CapturedSqliteValue>,
+    pub(crate) values: Vec<NativeSqliteValue>,
     pub(crate) native_record_id: String,
     pub(crate) content: String,
 }
@@ -27,19 +27,19 @@ pub(super) fn firebender_result_record(
     let Some(values) = conn
         .query_row(&sql, [rowid], |row| {
             Ok(vec![
-                CapturedSqliteValue::Text(row.get(0)?),
-                CapturedSqliteValue::Text(row.get(1)?),
-                CapturedSqliteValue::Integer(row.get(2)?),
-                CapturedSqliteValue::Integer(row.get(3)?),
-                CapturedSqliteValue::Text(row.get(4)?),
-                CapturedSqliteValue::Text(row.get(5)?),
+                NativeSqliteValue::Text(row.get(0)?),
+                NativeSqliteValue::Text(row.get(1)?),
+                NativeSqliteValue::Integer(row.get(2)?),
+                NativeSqliteValue::Integer(row.get(3)?),
+                NativeSqliteValue::Text(row.get(4)?),
+                NativeSqliteValue::Text(row.get(5)?),
             ])
         })
         .optional()?
     else {
         return Ok(None);
     };
-    let [CapturedSqliteValue::Text(session_id), _, CapturedSqliteValue::Integer(created_at), _, CapturedSqliteValue::Text(messages_json), _] =
+    let [NativeSqliteValue::Text(session_id), _, NativeSqliteValue::Integer(created_at), _, NativeSqliteValue::Text(messages_json), _] =
         values.as_slice()
     else {
         return Err(CaptureError::InvalidPayload(
@@ -61,8 +61,12 @@ pub(super) fn firebender_result_record(
     let fallback =
         DateTime::<Utc>::from_timestamp_millis(*created_at).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let occurred_at = firebender::firebender_message_time(message, fallback);
-    let event =
-        firebender::firebender_event(session_id, u64::from(subrecord_index), message, occurred_at);
+    let event = firebender::firebender_native_event(
+        session_id,
+        u64::from(subrecord_index),
+        message,
+        occurred_at,
+    );
     if !matches!(
         event.event_type,
         EventType::ToolOutput | EventType::CommandOutput
@@ -76,7 +80,11 @@ pub(super) fn firebender_result_record(
     })?;
     Ok(Some(SqliteResultRecord {
         values,
-        native_record_id: native_record_id(&event),
+        native_record_id: native_record_id(
+            event.provider_event_index,
+            event.provider_event_hash.as_deref(),
+            Some(&event.cursor),
+        ),
         content,
     }))
 }
@@ -273,7 +281,11 @@ pub(super) fn resolve_zed_result(
     if !matches!(
         decoded_event.event.event_type,
         EventType::ToolOutput | EventType::CommandOutput
-    ) || native_record_id(&decoded_event.event) != request.expected_native_record_id
+    ) || native_record_id(
+        decoded_event.event.provider_event_index,
+        decoded_event.event.provider_event_hash.as_deref(),
+        decoded_event.event.cursor.as_deref(),
+    ) != request.expected_native_record_id
     {
         return Err(result_error(
             request,

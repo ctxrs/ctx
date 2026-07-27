@@ -4,6 +4,8 @@ module(
 )
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
+bazel_dep(name = "rules_cc", version = "0.2.8")
+bazel_dep(name = "platforms", version = "1.1.0")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 
@@ -14,8 +16,8 @@ rust.toolchain(
     edition = "2021",
     # Source: Rust 1.97.1 channel manifest dated 2026-07-16.
     # https://static.rust-lang.org/dist/2026-07-16/channel-rust-1.97.1.toml
-    # Native Windows Bazel actions use MSVC; the public GNU binary remains a
-    # Cargo release-construction target.
+    # Default Windows Bazel actions remain MSVC. The public release route below
+    # selects a distinct GNU-target toolchain and makes this set ineligible.
     sha256s = {
         "cargo-1.97.1-aarch64-apple-darwin.tar.xz": "2d84a74e9558192a7de674aca6aa3ab7464bed2df97e0377156ddb7e09a0fd7a",
         "cargo-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "8f70bcaccea5ba4db187c3fd4d64e24592b4e16af513497201f5909d61691dbe",
@@ -55,28 +57,98 @@ rust.toolchain(
         "rustfmt-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "907fe97d6afbde1eca1b34c992c76e1406d422e2e6f137813d382acec7eb4d14",
     },
     rustfmt_version = "1.97.1",
+    target_settings = ["//tools/bazel:default_rust_toolchain"],
     versions = ["1.97.1"],
 )
 
+rust.repository_set(
+    name = "ctx_windows_gnu",
+    edition = "2021",
+    # The compiler executes on the native Windows authority while rustc and
+    # crate_universe select the contracted GNU target graph.
+    exec_triple = "x86_64-pc-windows-msvc",
+    rustfmt_version = "1.97.1",
+    sha256s = {
+        "cargo-1.97.1-x86_64-pc-windows-msvc.tar.xz": "1180ac0cd30ee98af682528c10505f5cba118f122aec9b7ca18ae605b1db38a0",
+        "clippy-1.97.1-x86_64-pc-windows-msvc.tar.xz": "3be927ecfbbba535bee2f4d23cd08c639278c8746c04bd70fb21ea58667b054b",
+        "llvm-tools-1.97.1-x86_64-pc-windows-msvc.tar.xz": "4f51224d60b67ed343079cbc1743143e97e7ec8a540ad3d056ac0a2a8eb532e8",
+        "rust-std-1.97.1-x86_64-pc-windows-gnu.tar.xz": "513ed4875d5a3726d02c5872034f0673593ae343ea62a70939213e894c274be3",
+        "rustc-1.97.1-x86_64-pc-windows-msvc.tar.xz": "0119e2788f3391a891b2e0fe611e82b433670eeae76c45995b081d0ac7715c6d",
+        "rustfmt-1.97.1-x86_64-pc-windows-msvc.tar.xz": "1718eea97fc34543c71a5849bc72952f88bc6c789c9110626bc00b2791642e81",
+    },
+    target_compatible_with = [
+        "//tools/bazel/platforms:windows_gnu",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+    ],
+    target_settings = ["//tools/bazel:windows_gnu_toolchain"],
+    target_triple = "x86_64-pc-windows-gnu",
+    versions = ["1.97.1"],
+)
+# repository_set also emits a target toolchain for its execution triple. Give
+# that MSVC target the opposite ABI constraint so it cannot match the GNU
+# release platform while the shared route setting is enabled.
+rust.repository_set(
+    name = "ctx_windows_gnu",
+    target_compatible_with = [
+        "//tools/bazel/platforms:windows_msvc",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+    ],
+    target_triple = "x86_64-pc-windows-msvc",
+)
+
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.annotation(
+    # ort's generic ELF .fini_array cleanup runs too late on FreeBSD, after
+    # ONNX Runtime's C++ teardown has started. Register ReleaseEnv after the
+    # environment is created so it runs first, matching ort's macOS ordering.
+    crate = "ort",
+    patch_args = ["-p1"],
+    patches = ["//tools/bazel/patches:ort-freebsd-release-env-order.patch"],
+    version = "2.0.0-rc.12",
+)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
     manifests = ["//:Cargo.toml"],
-    # Preserve rules_rust's reduced defaults and add the shipped macOS x64
-    # target, which the upstream default intentionally omits.
+    # Preserve rules_rust's reduced defaults and add every shipped native host
+    # that the upstream default intentionally omits.
     supported_platform_triples = [
         "aarch64-apple-darwin",
         "aarch64-unknown-linux-gnu",
         "wasm32-unknown-unknown",
         "wasm32-wasip1",
         "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnu",
         "x86_64-pc-windows-msvc",
+        "x86_64-unknown-freebsd",
         "x86_64-unknown-linux-gnu",
         "x86_64-unknown-nixos-gnu",
     ],
 )
+crate.render_config(
+    platforms_template = "@@//tools/bazel/platforms:{triple}",
+    repositories = ["crates"],
+)
 use_repo(crate, "crates")
+
+# The Windows release contract is GNU, not MSVC. Own the complete linker,
+# CRT, C++ runtime, and import-library input instead of inheriting whichever
+# MinGW happens to be installed on a release worker.
+llvm_mingw_repository = use_repo_rule(
+    "//tools/bazel/mingw:repository.bzl",
+    "llvm_mingw_repository",
+)
+llvm_mingw_repository(
+    name = "ctx_llvm_mingw",
+    sha256 = "744809646fdefe24a357399788d68fb07ecc65fa0be71baa2406793ce25c9813",
+    strip_prefix = "llvm-mingw-20260616-msvcrt-x86_64",
+    urls = [
+        "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-msvcrt-x86_64.zip",
+    ],
+)
+register_toolchains("@ctx_llvm_mingw//:windows_x64_gnu_toolchain")
 
 # Development links use a content-pinned mold input. The public build macros
 # expose it only through the Linux development configuration; CI/debug/release

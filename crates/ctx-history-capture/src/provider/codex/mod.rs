@@ -1,7 +1,11 @@
 pub(crate) mod catalog;
 pub(crate) mod events;
 pub(crate) mod history;
+pub(crate) mod nativepath;
 pub(crate) mod session;
+
+pub(crate) const CODEX_CAPTURE_REVISION: u32 = 8;
+pub(crate) const CODEX_POLICY_REVISION: u32 = 4;
 
 pub use catalog::{catalog_codex_session_files, catalog_codex_session_tree};
 pub use history::import_codex_history_jsonl;

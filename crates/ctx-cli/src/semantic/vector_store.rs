@@ -29,13 +29,9 @@ pub(super) struct SemanticHitSearch {
 #[derive(Debug, Clone)]
 pub(super) struct SemanticChunkDocument {
     pub(super) event_id: Uuid,
-    pub(super) history_record_id: Option<Uuid>,
-    pub(super) session_id: Option<Uuid>,
     pub(super) seq: u64,
     pub(super) chunk_index: usize,
-    pub(super) chunk_count: usize,
     pub(super) source_text_hash: String,
-    pub(super) chunk_text_hash: String,
     pub(super) text: String,
     pub(super) start_char: usize,
     pub(super) end_char: usize,
@@ -55,8 +51,10 @@ pub(super) struct SemanticIndexOutcome {
 
 #[derive(Debug, Default)]
 pub(super) struct SemanticPruneOutcome {
+    pub(super) scanned_events: usize,
     pub(super) deleted_chunks: usize,
     pub(super) queued_stale_events: usize,
+    pub(super) scan_complete: bool,
 }
 
 pub(super) struct SemanticVectorStore {

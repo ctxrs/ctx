@@ -354,12 +354,9 @@ fn mcp_pro_status_splits_transport_from_one_pro_product_event() {
     }
     let pro = events
         .iter()
-        .filter(|event| {
-            event["surface"] == "pro_host"
-                && event["operation"] == "query"
-                && event["properties"]["query_kind"] == "status"
-        })
+        .filter(|event| event["surface"] == "pro_host" && event["operation"] == "status")
         .collect::<Vec<_>>();
     assert_eq!(pro.len(), 1, "expected one Pro status event: {events:#?}");
-    assert_eq!(pro[0]["properties"]["query_surface"], "mcp");
+    assert_eq!(pro[0]["properties"]["status_surface"], "mcp");
+    assert!(pro[0]["properties"].get("query_kind").is_none());
 }

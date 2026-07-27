@@ -3,15 +3,16 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use uuid::Uuid;
 
 use ctx_history_capture::{
-    provider_source_spec, CaptureError, CatalogSummary, ProviderImportSummary,
+    provider_source_spec, CaptureError, CatalogSummary, ImportProfile, ProviderImportSummary,
+    ProviderImportWorkResult,
 };
 use ctx_history_core::database_path;
 use ctx_history_store::{SourceImportFile, Store, StoreError};
@@ -38,28 +39,27 @@ mod requests;
 mod totals;
 
 use catalog::source_uses_incremental_event_search;
-#[cfg(test)]
-pub(crate) use catalog::{catalog_import_checkpoint_matches, sha256_file_prefix_hex};
 use explicit::{large_import_notice, run_explicit_format_import, ExplicitFormatImportContext};
 pub(crate) use inventory::{
     inventory_available_sources, inventory_import_sources, ImportInventory,
 };
-use native::import_one_source;
+use native::import_one_source_with_profile;
 pub(crate) use native::{
-    import_one_source_for_background_refresh, import_one_source_for_search_refresh,
-    import_one_source_without_search_refresh,
+    import_one_source_for_background_refresh_with_profile,
+    import_one_source_for_search_refresh_with_profile,
 };
 pub(crate) use provider_refresh::{
     ImportSourceFailure, ImportSourceOutcome, ImportSourceRun, ProviderRefreshCollector,
+    ProviderRefreshRuntimeFacts,
 };
 pub(crate) use report::{
-    error_summary, import_error_scope, import_totals_json, one_line_error, source_error_reason,
+    error_summary, import_error_scope, import_failure_type, import_totals_json, one_line_error,
+    source_error_reason,
 };
 use report::{
-    history_source_plugin_failure_json, history_source_plugin_import_json, import_failure_type,
-    low_disk_space_warning, print_history_source_plugin_failed,
-    print_history_source_plugin_imported, print_import_report, print_source_failed,
-    print_source_imported, source_failure_json, source_import_json,
+    history_source_plugin_failure_json, history_source_plugin_import_json, low_disk_space_warning,
+    print_history_source_plugin_failed, print_history_source_plugin_imported, print_import_report,
+    print_source_failed, print_source_imported, source_failure_json, source_import_json,
 };
 pub(crate) use report::{ImportFailureScope, ImportFailureType};
 pub(crate) use requests::import_history_source_plugin;
@@ -101,6 +101,53 @@ pub(crate) struct ImportRunOptions {
     pub(crate) allow_empty_sources: bool,
     pub(crate) include_history_source_plugins: bool,
     pub(crate) operation: &'static str,
+}
+
+enum ProOutputSelection {
+    Automatic,
+    Disabled,
+    Connected(crate::pro::ProOutputImport),
+}
+
+impl ProOutputSelection {
+    fn begin(self, data_root: &Path) -> (Option<crate::pro::ProOutputImport>, bool) {
+        match self {
+            Self::Automatic => (
+                crate::pro::ProOutputImport::begin_if_available(data_root),
+                false,
+            ),
+            Self::Disabled => (None, false),
+            Self::Connected(output) => (Some(output), true),
+        }
+    }
+}
+
+pub(crate) trait CanonicalProSourceProgression {
+    fn progress_to_committed_core_frontier(&mut self);
+}
+
+impl CanonicalProSourceProgression for crate::pro::ProOutputImport {
+    fn progress_to_committed_core_frontier(&mut self) {
+        crate::pro::ProOutputImport::note_core_source_committed(self);
+    }
+}
+
+/// Advances canonical Pro after a Core source attempt that either reported a
+/// committed change or returned an error after possibly committing one or more
+/// NativePath pages. A successful no-op cannot have advanced the journal and is
+/// skipped. Output-Pro remains independently replayable.
+pub(crate) fn progress_canonical_pro_after_core_source_attempt<P: CanonicalProSourceProgression>(
+    pro_output: Option<&mut P>,
+    successful_summary: Option<&ProviderImportSummary>,
+) {
+    if successful_summary
+        .is_some_and(|summary| summary.work_result() != ProviderImportWorkResult::Changed)
+    {
+        return;
+    }
+    if let Some(pro_output) = pro_output {
+        pro_output.progress_to_committed_core_frontier();
+    }
 }
 
 pub(crate) fn resume_mode_name(resume: bool) -> &'static str {
@@ -391,6 +438,29 @@ pub(crate) fn run_import_internal(
     config: &crate::config::AppConfig,
     options: ImportRunOptions,
 ) -> Result<ImportReport> {
+    run_import_internal_with_pro_output(
+        args,
+        data_root,
+        telemetry,
+        provider_refreshes,
+        refresh_trigger,
+        config,
+        options,
+        ProOutputSelection::Automatic,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_import_internal_with_pro_output(
+    args: &ImportArgs,
+    data_root: PathBuf,
+    telemetry: &mut ImportTelemetry,
+    provider_refreshes: &mut ProviderRefreshCollector,
+    refresh_trigger: ProviderRefreshTrigger,
+    config: &crate::config::AppConfig,
+    options: ImportRunOptions,
+    pro_output_selection: ProOutputSelection,
+) -> Result<ImportReport> {
     let _ = config;
     validate_import_args(args)?;
     fs::create_dir_all(&data_root).map_err(|source| CaptureError::SystemIo {
@@ -420,29 +490,41 @@ pub(crate) fn run_import_internal(
         });
     }
 
+    let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
     let requests = import_requests(args)?;
     let plugin_requests = history_source_plugin_import_requests(
         args,
         &data_root,
         options.include_history_source_plugins,
     )?;
+    let output_inventory_discovery_complete = args.provider.is_none() && args.path.is_none();
+    let inventory_progress =
+        ProgressReporter::new(options.progress, options.json, options.operation, 0);
     if requests.is_empty() && plugin_requests.is_empty() {
         if options.allow_empty_sources {
+            if output_inventory_discovery_complete {
+                complete_pro_output_inventory(
+                    pro_output,
+                    &inventory_progress,
+                    require_complete_pro_output,
+                )?;
+            } else if require_complete_pro_output {
+                bail!("not_materialized: provider output inventory is incomplete");
+            }
             return Ok(ImportReport::empty(args.resume));
         }
         return Err(anyhow!(
             "no importable provider history sources found; use --path, --history-source, or run `ctx sources`"
         ));
     }
-
-    let inventory_progress =
-        ProgressReporter::new(options.progress, options.json, options.operation, 0);
     inventory_progress.message("inventorying", "Preparing local history...");
     // Explicit single-file and generic paths must reach the native adapter's
-    // certified-cursor gate. Codex session trees have a revision-aware catalog,
-    // so their ordinary explicit imports can retain the bounded incremental path.
-    let force_inventory_reindex = args.resume || args.path.is_some();
-    let allow_incremental_codex_catalog = args.path.is_some() && !args.resume;
+    // certified-cursor gate. Pro-enabled runs also requeue unchanged sources so
+    // the public parser can observe them and replay from private progress.
+    let pro_output_enabled = pro_output.is_some();
+    let force_inventory_reindex = args.resume || args.path.is_some() || pro_output_enabled;
+    let allow_incremental_codex_catalog =
+        pro_output_enabled || (args.path.is_some() && !args.resume);
     let inventory = inventory_import_sources(
         &store,
         requests,
@@ -452,6 +534,12 @@ pub(crate) fn run_import_internal(
     .context("inventory local history sources")?;
     let planned_sources = inventory.sources;
     let inventory_failures = inventory.failures;
+    let output_inventory_discovery_complete =
+        output_inventory_discovery_complete && inventory_failures.is_empty();
+    let import_profile = pro_output
+        .as_ref()
+        .map(|output| output.profile().clone())
+        .unwrap_or(ImportProfile::CoreOnly);
     let planned_total_bytes = inventory.totals.source_bytes;
     inventory_progress.done(
         "inventorying",
@@ -530,6 +618,7 @@ pub(crate) fn run_import_internal(
             "indexing",
             format!("running history source plugin {}", plugin_source.label()),
         );
+        let provider_started = Instant::now();
         match import_history_source_plugin(
             &mut store,
             &plugin_source,
@@ -538,12 +627,16 @@ pub(crate) fn run_import_internal(
         ) {
             Ok((summary, stats)) => {
                 totals.add(&summary, &stats);
-                provider_refreshes.record_success(
+                provider_refreshes.record_success_with_facts(
                     ctx_history_core::CaptureProvider::Custom,
                     refresh_trigger,
                     ProviderRefreshSourceMode::HistorySourcePlugin,
                     &summary,
                     &stats,
+                    ProviderRefreshRuntimeFacts::observed_success(
+                        provider_started.elapsed(),
+                        &summary,
+                    ),
                 );
                 progress.done(
                     "indexing",
@@ -571,12 +664,17 @@ pub(crate) fn run_import_internal(
                     } else {
                         totals.add_source_failure(&SourceStats::default());
                     }
-                    provider_refreshes.record_failure(
+                    provider_refreshes.record_failure_with_facts(
                         ctx_history_core::CaptureProvider::Custom,
                         refresh_trigger,
                         ProviderRefreshSourceMode::HistorySourcePlugin,
                         &SourceStats::default(),
                         rejected_summary.as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_started.elapsed(),
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     progress.done(
                         "indexing",
@@ -602,12 +700,17 @@ pub(crate) fn run_import_internal(
                         failure_type,
                     ));
                 } else {
-                    provider_refreshes.record_failure(
+                    provider_refreshes.record_failure_with_facts(
                         ctx_history_core::CaptureProvider::Custom,
                         refresh_trigger,
                         ProviderRefreshSourceMode::HistorySourcePlugin,
                         &SourceStats::default(),
                         rejected_summary.as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_started.elapsed(),
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     return Err(err);
                 }
@@ -660,15 +763,18 @@ pub(crate) fn run_import_internal(
                 let join_source = plan.source.clone();
                 let join_stats = plan.stats;
                 let failure_source = plan.source.clone();
+                let import_profile = import_profile.clone();
                 let handle = thread::spawn(move || -> ImportSourceRun {
+                    let provider_started = Instant::now();
                     let result = (|| -> Result<ProviderImportSummary> {
                         let mut store = Store::open(&db_path)?;
-                        import_one_source_without_search_refresh(
+                        native::import_one_source_without_search_refresh_with_profile(
                             &mut store,
                             &plan.source,
                             progress_callback,
                             full_rescan,
                             &plan.preinventory,
+                            &import_profile,
                         )
                         .with_context(|| {
                             format!(
@@ -683,6 +789,10 @@ pub(crate) fn run_import_internal(
                             index,
                             source: plan.source,
                             stats: plan.stats,
+                            runtime_facts: Some(ProviderRefreshRuntimeFacts::observed_success(
+                                provider_started.elapsed(),
+                                &summary,
+                            )),
                             summary,
                         }),
                         Err(err) => {
@@ -701,6 +811,11 @@ pub(crate) fn run_import_internal(
                                 failure_type,
                                 rejected_summary,
                                 system_error,
+                                runtime_facts: Some(ProviderRefreshRuntimeFacts::observed_failure(
+                                    provider_started.elapsed(),
+                                    failure_scope,
+                                    failure_type,
+                                )),
                             })
                         }
                     }
@@ -712,10 +827,8 @@ pub(crate) fn run_import_internal(
         let mut runs = Vec::with_capacity(handles.len());
         let mut first_error = None;
         for (index, source, stats, handle) in handles {
-            match handle.join() {
-                Ok(ImportSourceRun::Imported(outcome)) => {
-                    runs.push(ImportSourceRun::Imported(outcome))
-                }
+            let run = match handle.join() {
+                Ok(ImportSourceRun::Imported(outcome)) => ImportSourceRun::Imported(outcome),
                 Ok(ImportSourceRun::Failed(mut failure)) => {
                     if failure.failure_scope == ImportFailureScope::System {
                         first_error.get_or_insert_with(|| {
@@ -729,7 +842,7 @@ pub(crate) fn run_import_internal(
                             })
                         });
                     }
-                    runs.push(ImportSourceRun::Failed(failure));
+                    ImportSourceRun::Failed(failure)
                 }
                 Err(_) => {
                     let panic_error =
@@ -743,30 +856,36 @@ pub(crate) fn run_import_internal(
                         failure_type: ImportFailureType::WorkerPanic,
                         rejected_summary: None,
                         system_error: Some(panic_error),
+                        runtime_facts: None,
                     };
                     first_error.get_or_insert_with(|| {
                         anyhow::Error::new(CaptureError::WorkerPanicked("provider import"))
                     });
-                    runs.push(ImportSourceRun::Failed(failure));
+                    ImportSourceRun::Failed(failure)
                 }
-            }
+            };
+            let successful_summary = match &run {
+                ImportSourceRun::Imported(outcome) => Some(&outcome.summary),
+                ImportSourceRun::Failed(_) => None,
+            };
+            progress_canonical_pro_after_core_source_attempt(
+                pro_output.as_mut(),
+                successful_summary,
+            );
+            runs.push(run);
         }
         if let Some(err) = first_error {
             for run in &runs {
                 match run {
-                    ImportSourceRun::Imported(outcome) => provider_refreshes.record_success(
-                        outcome.source.provider,
+                    ImportSourceRun::Imported(outcome) => provider_refreshes.record_import_outcome(
                         refresh_trigger,
                         native_source_mode,
-                        &outcome.summary,
-                        &outcome.stats,
+                        outcome,
                     ),
-                    ImportSourceRun::Failed(failure) => provider_refreshes.record_failure(
-                        failure.source.provider,
+                    ImportSourceRun::Failed(failure) => provider_refreshes.record_import_failure(
                         refresh_trigger,
                         native_source_mode,
-                        &failure.stats,
-                        failure.rejected_summary.as_ref(),
+                        failure,
                     ),
                 }
             }
@@ -778,12 +897,10 @@ pub(crate) fn run_import_internal(
             match run {
                 ImportSourceRun::Imported(outcome) => {
                     totals.add(&outcome.summary, &outcome.stats);
-                    provider_refreshes.record_success(
-                        outcome.source.provider,
+                    provider_refreshes.record_import_outcome(
                         refresh_trigger,
                         native_source_mode,
-                        &outcome.summary,
-                        &outcome.stats,
+                        &outcome,
                     );
                     progress.parallel_source_done(
                         &outcome.source,
@@ -808,12 +925,10 @@ pub(crate) fn run_import_internal(
                     } else {
                         totals.add_source_failure(&failure.stats);
                     }
-                    provider_refreshes.record_failure(
-                        failure.source.provider,
+                    provider_refreshes.record_import_failure(
                         refresh_trigger,
                         native_source_mode,
-                        &failure.stats,
-                        failure.rejected_summary.as_ref(),
+                        &failure,
                     );
                     progress.parallel_source_failed(
                         &failure.source,
@@ -852,21 +967,32 @@ pub(crate) fn run_import_internal(
             let source_progress =
                 progress.codex_import_callback(&plan.source, completed_source_bytes);
             completed_source_bytes = completed_source_bytes.saturating_add(plan.stats.bytes);
-            match import_one_source(
+            let provider_started = Instant::now();
+            let import_result = import_one_source_with_profile(
                 &mut store,
                 &plan.source,
                 source_progress,
                 args.resume,
                 &plan.preinventory,
-            ) {
+                &import_profile,
+            );
+            progress_canonical_pro_after_core_source_attempt(
+                pro_output.as_mut(),
+                import_result.as_ref().ok(),
+            );
+            match import_result {
                 Ok(summary) => {
                     totals.add(&summary, &plan.stats);
-                    provider_refreshes.record_success(
+                    provider_refreshes.record_success_with_facts(
                         plan.source.provider,
                         refresh_trigger,
                         native_source_mode,
                         &summary,
                         &plan.stats,
+                        ProviderRefreshRuntimeFacts::observed_success(
+                            provider_started.elapsed(),
+                            &summary,
+                        ),
                     );
                     progress.done(
                         "indexing",
@@ -894,18 +1020,21 @@ pub(crate) fn run_import_internal(
                             failure_type,
                             rejected_summary,
                             system_error: None,
+                            runtime_facts: Some(ProviderRefreshRuntimeFacts::observed_failure(
+                                provider_started.elapsed(),
+                                failure_scope,
+                                failure_type,
+                            )),
                         };
                         if let Some(summary) = failure.rejected_summary.as_ref() {
                             totals.add_rejected_source(summary, &failure.stats);
                         } else {
                             totals.add_source_failure(&failure.stats);
                         }
-                        provider_refreshes.record_failure(
-                            failure.source.provider,
+                        provider_refreshes.record_import_failure(
                             refresh_trigger,
                             native_source_mode,
-                            &failure.stats,
-                            failure.rejected_summary.as_ref(),
+                            &failure,
                         );
                         progress.done(
                             "indexing",
@@ -922,12 +1051,17 @@ pub(crate) fn run_import_internal(
                         }
                         imported_sources.push(source_failure_json(&failure));
                     } else {
-                        provider_refreshes.record_failure(
+                        provider_refreshes.record_failure_with_facts(
                             plan.source.provider,
                             refresh_trigger,
                             native_source_mode,
                             &plan.stats,
                             rejected_summary.as_ref(),
+                            ProviderRefreshRuntimeFacts::observed_failure(
+                                provider_started.elapsed(),
+                                failure_scope,
+                                failure_type,
+                            ),
                         );
                         return Err(err);
                     }
@@ -963,6 +1097,11 @@ pub(crate) fn run_import_internal(
     telemetry.edges_imported = Some(analytics::count_bucket(totals.imported_edges as u64));
     telemetry.skipped = Some(analytics::count_bucket(totals.skipped as u64));
     telemetry.rejected_records = Some(analytics::count_bucket(totals.failed as u64));
+    if output_inventory_can_finish(output_inventory_discovery_complete, &totals) {
+        complete_pro_output_inventory(pro_output, &progress, require_complete_pro_output)?;
+    } else if require_complete_pro_output {
+        bail!("not_materialized: provider output inventory is incomplete");
+    }
     Ok(ImportReport {
         resume: args.resume && native_import_requested,
         totals,
@@ -971,6 +1110,58 @@ pub(crate) fn run_import_internal(
         catalog_sources: inventory.catalog_sources,
         sources: imported_sources,
     })
+}
+
+pub(crate) fn prepare_core_for_pro_materialization(data_root: &Path) -> Result<()> {
+    run_pro_materialization_import(data_root, ProOutputSelection::Disabled)
+}
+
+pub(crate) fn catch_up_pro_outputs(
+    data_root: &Path,
+    output: crate::pro::ProOutputImport,
+) -> Result<()> {
+    run_pro_materialization_import(data_root, ProOutputSelection::Connected(output))
+}
+
+fn run_pro_materialization_import(
+    data_root: &Path,
+    pro_output_selection: ProOutputSelection,
+) -> Result<()> {
+    let args = ImportArgs {
+        provider: None,
+        path: None,
+        history_source: None,
+        history_source_manifest: Vec::new(),
+        reset_cursor: false,
+        format: None,
+        all: true,
+        resume: false,
+        partial: false,
+        no_daemon: true,
+        json: false,
+        progress: ProgressArg::None,
+    };
+    let config = crate::config::AppConfig::load(data_root)?;
+    let mut telemetry = ImportTelemetry::from_args(&args);
+    let mut provider_refreshes = ProviderRefreshCollector::default();
+    run_import_internal_with_pro_output(
+        &args,
+        data_root.to_path_buf(),
+        &mut telemetry,
+        &mut provider_refreshes,
+        ProviderRefreshTrigger::Setup,
+        &config,
+        ImportRunOptions {
+            progress: ProgressArg::None,
+            json: false,
+            print_human: false,
+            allow_empty_sources: true,
+            include_history_source_plugins: false,
+            operation: "pro-materialization",
+        },
+        pro_output_selection,
+    )
+    .map(|_| ())
 }
 
 fn source_provider_label(source: &SourceInfo) -> &'static str {
@@ -982,4 +1173,90 @@ fn source_provider_label(source: &SourceInfo) -> &'static str {
 pub(crate) fn should_parallelize_import(planned_sources: &[PlannedImportSource]) -> bool {
     let _ = planned_sources;
     false
+}
+
+pub(crate) fn output_inventory_can_finish(discovery_complete: bool, totals: &ImportTotals) -> bool {
+    discovery_complete && totals.failed_sources == 0 && !totals.capture_work_remaining
+}
+
+pub(crate) fn finish_pro_output_inventory(
+    output: Option<crate::pro::ProOutputImport>,
+    progress: &ProgressReporter,
+) {
+    let Some(output) = output else {
+        return;
+    };
+    if let Err(error) = output.finish() {
+        let warning = crate::pro::ProOutputImport::finish_warning(&error);
+        if progress.is_enabled() {
+            progress.warning(&warning);
+        } else {
+            eprintln!("warning: {warning}");
+        }
+    }
+}
+
+fn complete_pro_output_inventory(
+    output: Option<crate::pro::ProOutputImport>,
+    progress: &ProgressReporter,
+    required: bool,
+) -> Result<()> {
+    if !required {
+        finish_pro_output_inventory(output, progress);
+        return Ok(());
+    }
+    let output = output.ok_or_else(|| {
+        anyhow!("not_materialized: connected Pro output materialization session is missing")
+    })?;
+    output.finish().map(|_| ())
+}
+
+#[cfg(test)]
+mod pro_output_inventory_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct TestCanonicalProProgression {
+        frontier_checks: usize,
+    }
+
+    impl CanonicalProSourceProgression for TestCanonicalProProgression {
+        fn progress_to_committed_core_frontier(&mut self) {
+            self.frontier_checks += 1;
+        }
+    }
+
+    #[test]
+    fn empty_full_inventory_can_finish() {
+        assert!(output_inventory_can_finish(true, &ImportTotals::default()));
+    }
+
+    #[test]
+    fn failed_or_incomplete_inventory_cannot_finish() {
+        let mut failed = ImportTotals::default();
+        failed.failed_sources = 1;
+        assert!(!output_inventory_can_finish(true, &failed));
+
+        let mut incomplete = ImportTotals::default();
+        incomplete.capture_work_remaining = true;
+        assert!(!output_inventory_can_finish(true, &incomplete));
+        assert!(!output_inventory_can_finish(
+            false,
+            &ImportTotals::default()
+        ));
+    }
+
+    #[test]
+    fn explicit_import_progresses_after_changed_or_failed_core_attempts() {
+        let mut changed = ProviderImportSummary::default();
+        changed.imported = 1;
+        let no_op = ProviderImportSummary::default();
+        let mut progression = TestCanonicalProProgression::default();
+
+        progress_canonical_pro_after_core_source_attempt(Some(&mut progression), Some(&changed));
+        progress_canonical_pro_after_core_source_attempt(Some(&mut progression), Some(&no_op));
+        progress_canonical_pro_after_core_source_attempt(Some(&mut progression), None);
+
+        assert_eq!(progression.frontier_checks, 2);
+    }
 }

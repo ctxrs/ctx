@@ -28,13 +28,17 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+semver.workspace = true
 sha2.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 toml_edit = "0.22"
 ureq = { version = "2.10", default-features = true }
 url.workspace = true
 uuid.workspace = true
+xz2.workspace = true
 zeroize = { workspace = true, features = ["derive"] }
+zstd.workspace = true
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-search = { path = "../ctx-history-search" }
@@ -44,32 +48,31 @@ ctx-pro-host-protocol = { path = "../ctx-pro-host-protocol" }
 [target.'cfg(unix)'.dependencies]
 flate2 = "1"
 libc.workspace = true
-tar.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 secret-service = { version = "5.1", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 coreml-native = "=0.2.0"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "alloc"] }
 security-framework = { version = "3.7", default-features = false }
 security-framework-sys = { version = "2.17", default-features = false }
 tokenizers = "0.22.2"
-xz2.workspace = true
+
+[target.'cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))'.dependencies]
+libloading = "0.9.0"
 
 [target.'cfg(windows)'.dependencies]
-libloading = "0.9.0"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(any(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"), target_env = "gnu"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")), all(target_os = "windows", target_arch = "x86_64"), all(target_os = "freebsd", target_arch = "x86_64")))'.dependencies]
 fastembed = { version = "5.17.2", default-features = false, features = ["hf-hub-rustls-tls", "ort-load-dynamic"] }
 fs2 = "0.4.3"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "cuda", "directml"] }
 sqlite-vec = "=0.1.9"
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
 proptest.workspace = true
-tar.workspace = true
 tempfile.workspace = true
-xz2.workspace = true

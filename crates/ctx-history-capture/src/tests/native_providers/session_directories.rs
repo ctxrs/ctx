@@ -1,6 +1,6 @@
 use crate::tests::support::assertions::{
-    assert_event_type_count, assert_event_with_role, assert_events_have_provider_citations,
-    assert_search_hits_provider, assert_search_misses, assert_structural_oversize_failure,
+    assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
+    assert_search_misses, assert_structural_oversize_failure,
 };
 use crate::tests::support::fixtures::jsonl::{jsonl_line, oversized_jsonl_line};
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
@@ -11,7 +11,7 @@ use crate::{
     RovoDevImportOptions,
 };
 use chrono::{DateTime, Utc};
-use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType};
+use ctx_history_core::{AgentType, CaptureProvider, EventType};
 use ctx_history_store::Store;
 use serde_json::Value;
 use std::fs;
@@ -42,17 +42,18 @@ fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 4);
+    assert_eq!(first.imported_events, 3);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::MistralVibe, "mistral-vibe-native");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    assert!(events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolOutput));
+    assert!(!events.iter().any(|event| matches!(
+        event.event_type,
+        EventType::ToolOutput | EventType::CommandOutput
+    )));
     assert!(store
         .search_event_hits("mistral vibe oracle", 10)
         .unwrap()
@@ -72,7 +73,7 @@ fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 4);
+    assert_eq!(second.skipped_events, 3);
 }
 
 #[test]
@@ -115,16 +116,15 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 6);
+    assert_eq!(first.imported_events, 4);
     assert_eq!(first.imported_edges, 1);
 
     let parent_id = stored_provider_session_id(&store, CaptureProvider::Mux, "mux-parent-session");
     let parent_events = store.events_for_session(parent_id).unwrap();
-    assert_eq!(parent_events.len(), 4);
+    assert_eq!(parent_events.len(), 3);
     assert_event_type_count(&parent_events, EventType::Message, 2);
     assert_event_type_count(&parent_events, EventType::ToolCall, 1);
-    assert_event_type_count(&parent_events, EventType::ToolOutput, 1);
-    assert_event_with_role(&parent_events, EventType::ToolOutput, EventRole::Assistant);
+    assert_event_type_count(&parent_events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&parent_events);
     let parent_rendered = serde_json::to_string(&parent_events).unwrap();
     assert!(parent_rendered.contains("mux jsonl oracle prompt"));
@@ -136,9 +136,9 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     assert_eq!(child.parent_session_id, Some(parent_id));
     assert_eq!(child.agent_type, AgentType::Subagent);
     let child_events = store.events_for_session(child_id).unwrap();
-    assert_eq!(child_events.len(), 2);
+    assert_eq!(child_events.len(), 1);
     assert_event_type_count(&child_events, EventType::Message, 1);
-    assert_event_type_count(&child_events, EventType::ToolOutput, 1);
+    assert_event_type_count(&child_events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&child_events);
     assert!(!serde_json::to_string(&child_events)
         .unwrap()
@@ -173,7 +173,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     // Replay accounting is source-scoped: the parent chat, parent partial,
     // and child chat streams each retain one accepted session projection.
     assert_eq!(second.skipped_sessions, 3);
-    assert_eq!(second.skipped_events, 6);
+    assert_eq!(second.skipped_events, 4);
 }
 
 #[test]
@@ -210,7 +210,7 @@ fn native_mux_rejects_oversized_chat_record_and_keeps_valid_siblings() {
     assert_eq!(summary.skipped_sessions, 2);
     assert_eq!(summary.skipped_events, 0);
     assert_eq!(summary.imported_sessions, 2);
-    assert_eq!(summary.imported_events, 6);
+    assert_eq!(summary.imported_events, 4);
     assert!(store
         .search_event_hits("mux jsonl oracle prompt", 10)
         .unwrap()
@@ -279,13 +279,12 @@ fn native_rovodev_fixture_imports_searches_reimports_and_file_touches() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 2);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::RovoDev, "rovodev-fixture-session");
     let events = store.events_for_session(session_id).unwrap();
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&events);
     assert_eq!(
         events[0].sync.metadata["source_format"].as_str(),
@@ -321,5 +320,5 @@ fn native_rovodev_fixture_imports_searches_reimports_and_file_touches() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert_eq!(second.skipped_events, 2);
 }

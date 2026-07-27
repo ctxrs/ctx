@@ -1,10 +1,13 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
 load(":test_targets.bzl", "CTX_CLI_RUSTC_FLAGS", "ctx_cli_integration_test", "ctx_cli_test_data")
 
 package(default_visibility = ["//visibility:public"])
+
+loc_check_inputs(name = "loc_check_inputs")
 
 exports_files([
     "BUILD.bazel",
@@ -26,6 +29,37 @@ cargo_toml_env_vars(
 COMMON_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/ctx-cli",
 }
+
+RELEASE_BUILD_RUSTC_ENV = select({
+    "//tools/bazel/platforms:aarch64-apple-darwin": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "aarch64-apple-darwin",
+    ),
+    "//tools/bazel/platforms:aarch64-unknown-linux-gnu": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "aarch64-unknown-linux-gnu",
+    ),
+    "//tools/bazel/platforms:x86_64-apple-darwin": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "x86_64-apple-darwin",
+    ),
+    "//tools/bazel/platforms:x86_64-pc-windows-gnu": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "x86_64-pc-windows-gnu",
+    ),
+    "//tools/bazel/platforms:x86_64-unknown-freebsd": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "x86_64-unknown-freebsd",
+    ),
+    "//tools/bazel/platforms:x86_64-unknown-linux-gnu": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "x86_64-unknown-linux-gnu",
+    ),
+    "//conditions:default": dict(
+        COMMON_RUSTC_ENV,
+        CTX_RELEASE_BUILD_TARGET = "unselected",
+    ),
+})
 
 CTX_CLI_DEPS = [
     "//crates/ctx-history-capture:lib",
@@ -63,9 +97,13 @@ ctx_rust_binary(
     compile_data = CTX_CLI_COMPILE_DATA,
     deps = all_crate_deps(normal = True) + CTX_CLI_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env = COMMON_RUSTC_ENV,
-    rustc_env_files = [":cargo_toml_env_vars"],
+    rustc_env = RELEASE_BUILD_RUSTC_ENV,
+    rustc_env_files = [
+        ":cargo_toml_env_vars",
+        "release-stamp.env",
+    ],
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
+    stamp = -1,
 )
 
 ctx_rust_test(
@@ -83,7 +121,7 @@ ctx_rust_test(
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
-    ) + CTX_CLI_DEPS + crate_deps(["xz2"]),
+    ) + CTX_CLI_DEPS,
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,
@@ -109,6 +147,13 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "auto_upgrade_acceptance_tests",
+    src = "tests/auto_upgrade_acceptance.rs",
+    extra_env = {"RUST_TEST_THREADS": "1"},
+    tags = ["release-gate"],
+)
+
+ctx_cli_integration_test(
     name = "cli_public_help_docs_tests",
     src = "tests/cli_public_help_docs.rs",
     tags = ["cli-contract"],
@@ -124,6 +169,11 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "custom_root_discovery_tests",
     src = "tests/custom_root_discovery.rs",
+)
+
+ctx_cli_integration_test(
+    name = "daemon_config_reload_tests",
+    src = "tests/daemon_config_reload.rs",
 )
 
 ctx_cli_integration_test(
@@ -264,6 +314,11 @@ ctx_cli_integration_test(
         "src/upgrade/install.rs",
         "//:upgrade_extractor_contract",
     ],
+)
+
+ctx_cli_integration_test(
+    name = "upgrade_analytics_tests",
+    src = "tests/upgrade_analytics.rs",
 )
 
 test_suite(

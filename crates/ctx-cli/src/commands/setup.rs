@@ -20,7 +20,10 @@ use crate::config::CONFIG_FILE;
 use crate::output::print_json;
 use crate::progress::{format_bytes, format_count, plural, ProgressArg, ProgressReporter};
 use crate::provider_sources::{discovered_sources, sources_json};
-use crate::semantic::semantic_query_service_supported;
+use crate::semantic::{
+    autostart_daemon_and_wait, daemon_autostart_suppression_reason,
+    semantic_query_service_supported, DaemonHandoff,
+};
 use crate::{config, ImportArgs, SetupArgs};
 
 pub(crate) fn run_setup(
@@ -29,24 +32,53 @@ pub(crate) fn run_setup(
     telemetry: &mut SetupTelemetry,
     provider_refreshes: &mut ProviderRefreshCollector,
     quiet: bool,
-    config: &config::AppConfig,
+    config: &mut config::AppConfig,
 ) -> Result<()> {
-    fs::create_dir_all(&data_root)?;
-    let db_path = database_path(data_root.clone());
-    let store = Store::open(&db_path)?;
-    let config_path = data_root.join(CONFIG_FILE);
-    config::write_default_config(&data_root)?;
-    let semantic_enabled = config.semantic_search_enabled();
     let semantic_supported = semantic_query_service_supported();
+    if args.semantic && (!config.daemon.enabled || args.no_daemon) {
+        bail!(
+            "`ctx setup --semantic` requires daemon maintenance. Enable [daemon] enabled = true and rerun without --no-daemon"
+        );
+    }
+    if args.semantic {
+        config::set_semantic_search_enabled(&data_root, true)?;
+        config.search.semantic = Some(true);
+    }
+    let semantic_enabled = config.semantic_search_enabled();
     if semantic_enabled && semantic_supported && (!config.daemon.enabled || args.no_daemon) {
         bail!(
             "local semantic search requires the ctx daemon. Set [daemon] enabled = true, remove --no-daemon, or set [search] semantic = false"
         );
     }
+
+    fs::create_dir_all(&data_root)?;
+    let db_path = database_path(data_root.clone());
+    let store = Store::open(&db_path)?;
+    let config_path = data_root.join(CONFIG_FILE);
+    config::write_default_config(&data_root)?;
     let sources = discovered_sources();
     let progress_arg = setup_progress_arg(args.progress, quiet);
     let progress = ProgressReporter::new(progress_arg, args.json, "setup", 0);
-    let daemon_backgrounding_enabled = config.daemon.enabled && !args.no_daemon;
+    let machine_readable_output = args.json || args.progress == ProgressArg::Json;
+    let daemon_suppression_reason = daemon_autostart_suppression_reason();
+    let daemon_backgrounding_enabled = config.daemon.enabled
+        && !args.no_daemon
+        && (machine_readable_output || daemon_suppression_reason.is_none());
+    let daemon_autostart_requested =
+        daemon_backgrounding_enabled && !args.catalog_only && !machine_readable_output;
+    let daemon_autostart_reason = if args.catalog_only {
+        Some("catalog_only")
+    } else if args.no_daemon {
+        Some("explicit_opt_out")
+    } else if !config.daemon.enabled {
+        Some("daemon_disabled")
+    } else if machine_readable_output {
+        Some("machine_readable_output")
+    } else if daemon_suppression_reason.is_some() {
+        daemon_suppression_reason
+    } else {
+        None
+    };
     let foreground_import = !args.catalog_only && (args.wait || !daemon_backgrounding_enabled);
     let mut inventory_only = None;
     let import_report = if args.catalog_only || !foreground_import {
@@ -148,6 +180,15 @@ pub(crate) fn run_setup(
     } else {
         SetupMode::Background
     });
+    let daemon_handoff = if daemon_autostart_requested && !all_import_sources_failed {
+        Some(autostart_daemon_and_wait(
+            &data_root,
+            config,
+            crate::DaemonTriggerCommandArg::Setup,
+        )?)
+    } else {
+        None
+    };
 
     if args.json {
         print_json(json!({
@@ -195,7 +236,8 @@ pub(crate) fn run_setup(
                 background_indexing_enabled,
                 semantic_enabled,
                 semantic_supported,
-                args.json
+                daemon_autostart_requested,
+                daemon_autostart_reason,
             ),
             "network_required": false,
             "repo_writes": false,
@@ -252,6 +294,11 @@ pub(crate) fn run_setup(
                     semantic_supported,
                 );
             }
+            print_daemon_autostart_guidance(
+                daemon_autostart_requested,
+                daemon_autostart_reason,
+                daemon_handoff.as_ref(),
+            );
             println!("Get started:");
             if args.catalog_only {
                 println!("  ctx import --all");
@@ -425,7 +472,8 @@ fn setup_background_indexing_json(
     enabled: bool,
     semantic_enabled: bool,
     semantic_supported: bool,
-    json_output: bool,
+    daemon_autostart_requested: bool,
+    daemon_autostart_reason: Option<&str>,
 ) -> Value {
     let semantic_estimate = semantic_index_estimate(inventory);
     json!({
@@ -438,25 +486,21 @@ fn setup_background_indexing_json(
         "semantic_estimate_seconds": (enabled && semantic_enabled && semantic_supported).then_some(semantic_estimate.expected_seconds),
         "semantic_estimate_backend": (enabled && semantic_enabled && semantic_supported).then_some(semantic_estimate.backend),
         "semantic_cpu_fallback_estimate_seconds": (enabled && semantic_enabled && semantic_supported).then_some(semantic_estimate.cpu_fallback_seconds).flatten(),
-        "daemon_autostart": setup_daemon_autostart_json(enabled, json_output),
+        "daemon_autostart": setup_daemon_autostart_json(
+            daemon_autostart_requested,
+            daemon_autostart_reason,
+        ),
         "status_command": "ctx index status",
         "watch_command": "ctx index watch",
         "wait_command": "ctx index wait --all",
     })
 }
 
-fn setup_daemon_autostart_json(enabled: bool, json_output: bool) -> Value {
-    if !enabled {
+fn setup_daemon_autostart_json(requested: bool, reason: Option<&str>) -> Value {
+    if !requested {
         return json!({
             "status": "not_needed",
-            "reason": "not_requested",
-            "status_command": "ctx daemon status",
-        });
-    }
-    if json_output {
-        return json!({
-            "status": "skipped",
-            "reason": "json_output",
+            "reason": reason.unwrap_or("not_requested"),
             "status_command": "ctx daemon status",
         });
     }
@@ -465,6 +509,42 @@ fn setup_daemon_autostart_json(enabled: bool, json_output: bool) -> Value {
         "reason": null,
         "status_command": "ctx daemon status",
     })
+}
+
+fn print_daemon_autostart_guidance(
+    requested: bool,
+    reason: Option<&str>,
+    handoff: Option<&DaemonHandoff>,
+) {
+    if let Some(handoff) = handoff {
+        println!(
+            "Daemon is running (PID {}); background maintenance handoff is verified.",
+            handoff.pid
+        );
+        return;
+    }
+    if requested {
+        println!("Daemon handoff was not verified; run `ctx daemon status`.");
+        return;
+    }
+    match reason {
+        Some("explicit_opt_out") => {
+            println!("Daemon autostart was skipped for this setup because --no-daemon was used.");
+        }
+        Some("daemon_disabled") => {
+            println!("Daemon autostart was skipped because daemon maintenance is disabled.");
+        }
+        Some("machine_readable_output") => {
+            println!("Daemon autostart was skipped because machine-readable output was requested.");
+        }
+        Some("catalog_only") => {
+            println!("Catalog-only setup does not autostart daemon maintenance.");
+        }
+        Some("ci" | "autostart_disabled" | "daemon_child") => {
+            println!("Daemon autostart is disabled for this process; setup ran in the foreground.");
+        }
+        _ => {}
+    }
 }
 
 fn print_background_indexing_guidance(
@@ -486,9 +566,8 @@ fn print_background_indexing_guidance(
     );
     if semantic_enabled && semantic_supported {
         let estimate = semantic_index_estimate(inventory);
-        println!(
-            "Semantic search: enabled; the daemon will download the local embedding model if needed."
-        );
+        println!("Semantic search: enabled; model acquisition is queued for the daemon.");
+        println!("The setup process does not download the embedding model.");
         if let Some(cpu_fallback_seconds) = estimate.cpu_fallback_seconds {
             println!(
                 "Estimated semantic indexing: {} with CoreML; CPU fallback can take about {}.",

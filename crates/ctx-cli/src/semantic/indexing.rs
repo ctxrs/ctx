@@ -4,21 +4,20 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use ctx_history_store::{EventEmbeddingDocument, Store};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{
-    model_contract::{SEMANTIC_DIMENSIONS, SEMANTIC_PASSAGE_PREFIX, SEMANTIC_QUERY_PREFIX},
+    model_contract::{SEMANTIC_PASSAGE_PREFIX, SEMANTIC_QUERY_PREFIX},
     model_runtime::SharedSemanticRuntime,
     reports::SemanticRetrievalDiagnostics,
     runtime_limits::{
         SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS,
         SEMANTIC_DEADLINE_CHUNKS_PER_SECOND, SEMANTIC_DEADLINE_MIN_CHUNK_BATCH,
-        SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_FULL_SCAN_MAX_CHUNKS,
-        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
-        SEMANTIC_SOURCE_MAX_CHARS, SEMANTIC_VECTOR_OVERFETCH,
+        SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
+        SEMANTIC_SOURCE_MAX_CHARS,
     },
     vector_store::{
         SemanticChunkDocument, SemanticHitSearch, SemanticIndexOutcome, SemanticVectorHit,
@@ -33,16 +32,13 @@ pub(super) fn backfill_semantic_embeddings(
     runtime: &SharedSemanticRuntime,
     model_init_ms: &mut Option<u64>,
     cache_dir: &Path,
-    query_text: Option<&str>,
     max_to_index: usize,
-    json_output: bool,
     continue_past_indexed_pages: bool,
     deadline: Option<Instant>,
 ) -> Result<usize> {
     let mut existing_hashes = HashMap::new();
     let mut before = None;
     let mut indexed = 0_usize;
-    let mut scanned = 0_usize;
     let mut recent_probe_done = false;
 
     let dirty_ids =
@@ -56,7 +52,6 @@ pub(super) fn backfill_semantic_embeddings(
             .filter(|event_id| !found_event_ids.contains(event_id))
             .copied()
             .collect::<Vec<_>>();
-        scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
             vector_store,
             runtime,
@@ -72,41 +67,8 @@ pub(super) fn backfill_semantic_embeddings(
         if !consumed_event_ids.is_empty() {
             vector_store.dequeue_dirty_events(&consumed_event_ids)?;
         }
-        if indexed > 0 && !json_output {
-            eprintln!(
-                "semantic index: embedded {indexed} dirty-priority chunks (scanned {scanned} events)"
-            );
-        }
         if !continue_past_indexed_pages {
             return Ok(indexed);
-        }
-    }
-
-    if indexed < max_to_index {
-        if let Some(query_text) = query_text {
-            let terms = semantic_backfill_terms(query_text);
-            if !terms.is_empty() {
-                let remaining = max_to_index.saturating_sub(indexed);
-                let docs = store.event_embedding_documents_matching_terms(&terms, remaining)?;
-                extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
-                scanned = scanned.saturating_add(docs.len());
-                let outcome = index_semantic_documents(
-                    vector_store,
-                    runtime,
-                    model_init_ms,
-                    cache_dir,
-                    &mut existing_hashes,
-                    docs,
-                    remaining,
-                    deadline,
-                )?;
-                indexed = indexed.saturating_add(outcome.indexed_chunks);
-                if outcome.indexed_chunks > 0 && !json_output {
-                    eprintln!(
-                        "semantic index: embedded {indexed} query-directed chunks (scanned {scanned} events)"
-                    );
-                }
-            }
         }
     }
 
@@ -132,7 +94,6 @@ pub(super) fn backfill_semantic_embeddings(
             .map(|doc| (doc.event_id, (doc.anchor_occurred_at_ms, doc.seq)))
             .collect::<Vec<_>>();
         extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
-        scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
             vector_store,
             runtime,
@@ -147,9 +108,6 @@ pub(super) fn backfill_semantic_embeddings(
         indexed = indexed.saturating_add(added);
         let consumed_cursor =
             semantic_consumed_page_anchor_cursor(&page_cursors, &outcome.consumed_event_ids);
-        if !json_output {
-            eprintln!("semantic index: embedded {indexed} chunks (scanned {scanned} events)");
-        }
         if !continue_past_indexed_pages {
             break;
         }
@@ -371,44 +329,21 @@ pub(super) fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
 }
 
-pub(super) fn semantic_rust_full_scan_chunk_limit() -> usize {
-    let bytes_per_vector = SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>());
-    let byte_limited_chunks = SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
-        .checked_div(bytes_per_vector)
-        .unwrap_or(SEMANTIC_FULL_SCAN_MAX_CHUNKS);
-    SEMANTIC_FULL_SCAN_MAX_CHUNKS.min(byte_limited_chunks)
-}
-
-pub(super) fn semantic_full_corpus_vector_scan_ready(
-    vector_store: &SemanticVectorStore,
-) -> Result<bool> {
-    if vector_store.sqlite_vec0_search_ready().unwrap_or(false) {
-        return Ok(true);
-    }
-    let stats = vector_store.cached_or_exact_stats()?;
-    Ok(stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit())
-}
-
 pub(super) fn semantic_chunks_for_document(
     doc: &EventEmbeddingDocument,
     source_text: &str,
     source_text_hash: &str,
 ) -> Vec<SemanticChunkDocument> {
     let chunks = semantic_text_chunks(source_text);
-    let chunk_count = chunks.len();
     chunks
         .into_iter()
         .enumerate()
         .map(
             |(chunk_index, (start_char, end_char, text))| SemanticChunkDocument {
                 event_id: doc.event_id,
-                history_record_id: doc.history_record_id,
-                session_id: doc.session_id,
                 seq: doc.seq,
                 chunk_index,
-                chunk_count,
                 source_text_hash: source_text_hash.to_owned(),
-                chunk_text_hash: semantic_text_hash(&semantic_embedded_chunk_text(doc, &text)),
                 text: semantic_embedded_chunk_text(doc, &text),
                 start_char,
                 end_char,
@@ -566,97 +501,6 @@ pub(super) fn semantic_text_hash(text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub(super) fn semantic_tokens(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .filter_map(|token| {
-            let token = token.trim().to_lowercase();
-            if token.len() < 2 {
-                None
-            } else {
-                Some(stem_semantic_token(&token))
-            }
-        })
-        .collect()
-}
-
-pub(super) fn semantic_backfill_terms(text: &str) -> Vec<String> {
-    let mut terms = Vec::<String>::new();
-    for token in semantic_tokens(text) {
-        push_unique_term(&mut terms, &token);
-        match canonical_semantic_token(&token) {
-            Some("email") => {
-                for term in ["mail", "email", "inbox", "mailbox", "zoho", "smtp"] {
-                    push_unique_term(&mut terms, term);
-                }
-            }
-            Some("send_limit") => {
-                for term in ["throttle", "limit", "blocked", "bulk", "send", "sending"] {
-                    push_unique_term(&mut terms, term);
-                }
-            }
-            Some("agent_memory") => {
-                for term in ["agentmemory", "memory", "memories"] {
-                    push_unique_term(&mut terms, term);
-                }
-            }
-            Some("outreach") => {
-                for term in ["outreach", "lead", "enrich", "campaign", "reply"] {
-                    push_unique_term(&mut terms, term);
-                }
-            }
-            Some("hosted_team") => {
-                for term in ["hosted", "cloud", "enterprise", "team", "shared"] {
-                    push_unique_term(&mut terms, term);
-                }
-            }
-            Some("market") => {
-                for term in ["competitor", "pricing", "price", "matrix"] {
-                    push_unique_term(&mut terms, term);
-                }
-            }
-            _ => {}
-        }
-    }
-    terms.truncate(20);
-    terms
-}
-
-pub(super) fn push_unique_term(terms: &mut Vec<String>, term: &str) {
-    if term.len() >= 3 && !terms.iter().any(|existing| existing == term) {
-        terms.push(term.to_owned());
-    }
-}
-
-pub(super) fn stem_semantic_token(token: &str) -> String {
-    for suffix in ["ing", "ed", "es", "s"] {
-        if token.len() > suffix.len() + 3 && token.ends_with(suffix) {
-            return token[..token.len() - suffix.len()].to_owned();
-        }
-    }
-    token.to_owned()
-}
-
-pub(super) fn canonical_semantic_token(token: &str) -> Option<&'static str> {
-    match token {
-        "mail" | "email" | "inbox" | "mailbox" | "mx" | "spf" | "dmarc" | "smtp" | "zoho" => {
-            Some("email")
-        }
-        "throttle" | "limit" | "quota" | "blocked" | "bulk" | "spike" | "send" | "sender"
-        | "sending" => Some("send_limit"),
-        "admin" | "reauth" | "password" | "delete" | "auth" => Some("auth_admin"),
-        "agentmemory" | "memory" | "memories" | "remember" => Some("agent_memory"),
-        "outreach" | "lead" | "leads" | "enrich" | "campaign" | "reply" | "buyer" => {
-            Some("outreach")
-        }
-        "hosted" | "cloud" | "enterprise" | "team" | "shared" => Some("hosted_team"),
-        "competitor" | "competitors" | "pricing" | "price" | "matrix" => Some("market"),
-        "privacy" | "private" | "scoped" | "scope" | "governance" | "policy" => Some("governance"),
-        "semantic" | "hybrid" | "vector" | "embedding" | "embeddings" => Some("semantic"),
-        "subagent" | "subagents" | "worker" | "workers" => Some("subagent"),
-        _ => None,
-    }
-}
-
 pub(super) fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(values.len() * 4);
     for value in values {
@@ -665,31 +509,14 @@ pub(super) fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
     blob
 }
 
-pub(super) fn dot_product_f32_blob(left: &[f32], right_blob: &[u8]) -> Result<Option<f32>> {
-    if !right_blob.len().is_multiple_of(4) {
-        return Err(anyhow!(
-            "invalid semantic vector blob length {}",
-            right_blob.len()
-        ));
-    }
-    if right_blob.len() / 4 != left.len() {
-        return Ok(None);
-    }
-    let mut sum = 0.0_f32;
-    for (value, chunk) in left.iter().zip(right_blob.chunks_exact(4)) {
-        sum += value * f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
-    Ok(Some(sum))
-}
-
 pub(super) fn compare_semantic_hits_desc(
     left: &SemanticVectorHit,
     right: &SemanticVectorHit,
 ) -> std::cmp::Ordering {
     right
         .similarity
-        .partial_cmp(&left.similarity)
-        .unwrap_or(std::cmp::Ordering::Equal)
+        .total_cmp(&left.similarity)
+        .then_with(|| left.event_id.cmp(&right.event_id))
 }
 
 pub(super) fn semantic_hits_for_query(
@@ -697,28 +524,8 @@ pub(super) fn semantic_hits_for_query(
     vector_store: &SemanticVectorStore,
     query_embedding: &[f32],
     limit: usize,
-    event_filter: Option<&[Uuid]>,
 ) -> Result<SemanticHitSearch> {
-    if event_filter.is_none() && !semantic_full_corpus_vector_scan_ready(vector_store)? {
-        let stats = vector_store.cached_or_exact_stats()?;
-        return Err(anyhow!(
-            "semantic vector backend cannot scan full sidecar locally ({} chunks exceed rust scan cap of {} and sqlite-vec is unavailable)",
-            stats.embedded_chunks,
-            semantic_rust_full_scan_chunk_limit()
-        ));
-    }
-    let sqlite_vec0_full_scan_ready =
-        event_filter.is_none() && vector_store.sqlite_vec0_search_ready().unwrap_or(false);
-    let vector_limit = if sqlite_vec0_full_scan_ready {
-        limit.max(1)
-    } else {
-        limit.saturating_mul(SEMANTIC_VECTOR_OVERFETCH).max(limit)
-    };
-    let vector_search = if let Some(event_filter) = event_filter {
-        vector_store.search_event_ids(query_embedding, event_filter, vector_limit)?
-    } else {
-        vector_store.search(query_embedding, vector_limit)?
-    };
+    let vector_search = vector_store.search(query_embedding, limit)?;
     let mut diagnostics = SemanticRetrievalDiagnostics {
         vector_backend: vector_search.stats.backend,
         vector_scan_ms: Some(vector_search.stats.scan_ms),
@@ -739,7 +546,14 @@ pub(super) fn semantic_hits_for_query(
     }
     let mut vector_hits = best_by_event.into_values().collect::<Vec<_>>();
     vector_hits.sort_by(compare_semantic_hits_desc);
-    let current_hashes = current_semantic_source_hashes(store, &vector_hits)?;
+    let candidate_chunk_ranges = vector_hits
+        .iter()
+        .map(|hit| (hit.event_id, (hit.start_char, hit.end_char)))
+        .collect::<HashMap<_, _>>();
+    let hydration_started = Instant::now();
+    let canonical_snapshot = store.semantic_projection_snapshot_by_id(&candidate_chunk_ranges)?;
+    diagnostics.hydration_ms = Some(hydration_started.elapsed().as_millis() as u64);
+    let current_hashes = current_semantic_source_hashes(&canonical_snapshot.documents);
     let before_stale_filter = vector_hits.len();
     vector_hits.retain(|hit| {
         current_hashes
@@ -750,14 +564,8 @@ pub(super) fn semantic_hits_for_query(
     if vector_hits.len() > limit {
         vector_hits.truncate(limit);
     }
-    let chunk_ranges = vector_hits
-        .iter()
-        .map(|hit| (hit.event_id, (hit.start_char, hit.end_char)))
-        .collect::<HashMap<_, _>>();
-    let hydration_started = Instant::now();
-    let hydrated_hits = store.semantic_event_hits_by_id(&chunk_ranges)?;
-    diagnostics.hydration_ms = Some(hydration_started.elapsed().as_millis() as u64);
-    let hydrated_by_id = hydrated_hits
+    let hydrated_by_id = canonical_snapshot
+        .hits
         .into_iter()
         .map(|hit| (hit.event_id, hit))
         .collect::<HashMap<_, _>>();
@@ -775,19 +583,13 @@ pub(super) fn semantic_hits_for_query(
 }
 
 pub(super) fn current_semantic_source_hashes(
-    store: &Store,
-    vector_hits: &[SemanticVectorHit],
-) -> Result<HashMap<Uuid, String>> {
-    let event_ids = vector_hits
+    documents: &[EventEmbeddingDocument],
+) -> HashMap<Uuid, String> {
+    documents
         .iter()
-        .map(|hit| hit.event_id)
-        .collect::<Vec<_>>();
-    let docs = store.event_embedding_documents_by_ids(&event_ids)?;
-    Ok(docs
-        .into_iter()
         .map(|doc| {
             let source_text = semantic_source_text(&doc.text);
-            (doc.event_id, semantic_document_hash(&doc, &source_text))
+            (doc.event_id, semantic_document_hash(doc, &source_text))
         })
-        .collect())
+        .collect()
 }

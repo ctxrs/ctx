@@ -1,50 +1,71 @@
 use std::{
     fs::{self, File, Metadata},
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
-    thread,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
 use std::cell::Cell;
 
 use ctx_history_core::CaptureProvider;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::captured_batch::{
-    CapturedBatch, CapturedBatchBuilder, CapturedRecord, NativeLocator, NativePosition,
-    ProviderRecordKind, SourceObservation, StructuralRejectionKind,
-    CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES,
-};
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    path_has_component,
-};
-use crate::provider::importer::{provider_path_identity, provider_source_cursor_stream_for_path};
-use crate::{fnv1a64, CaptureError, Result, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT};
-
-use super::{
-    openhands_bounded_derived_text, OPENHANDS_CAPTURE_REVISION, OPENHANDS_INVENTORY_MIN_INTERVAL,
-    OPENHANDS_INVENTORY_PAGE_RECORDS, OPENHANDS_LOCATOR_KIND, OPENHANDS_MAX_PATH_BYTES,
-    OPENHANDS_POLICY_REVISION, OPENHANDS_POSITION_KIND,
+use crate::{
+    common::io::{
+        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        path_has_component,
+    },
+    fnv1a64,
+    provider::importer::{provider_path_identity, provider_source_cursor_stream_for_path},
+    CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct OpenHandsFrozenFile {
-    pub(super) length: u64,
-    pub(super) modified: SystemTime,
-    pub(super) readonly: bool,
-    pub(super) device: Option<u64>,
-    pub(super) inode: Option<u64>,
+const OPENHANDS_DISCOVERY_MAX_DEPTH: usize = 16;
+const OPENHANDS_DISCOVERY_MAX_ENTRIES: usize = 16_384;
+const OPENHANDS_MAX_PATH_BYTES: usize = 7 * 1024;
+const OPENHANDS_ROUTE_HASH_DOMAIN: &[u8] = b"ctx-openhands-nativepath-route-v1\0";
+const OPENHANDS_SOURCE_REVISION_DOMAIN: &[u8] = b"ctx-openhands-nativepath-source-revision-v1\0";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct OpenHandsObservedTime {
+    before_epoch: bool,
+    seconds: u64,
+    nanos: u32,
 }
 
-impl OpenHandsFrozenFile {
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        Self::from_metadata(&fs::symlink_metadata(path)?)
+impl OpenHandsObservedTime {
+    fn from_system_time(value: SystemTime) -> Self {
+        match value.duration_since(UNIX_EPOCH) {
+            Ok(duration) => Self {
+                before_epoch: false,
+                seconds: duration.as_secs(),
+                nanos: duration.subsec_nanos(),
+            },
+            Err(error) => {
+                let duration = error.duration();
+                Self {
+                    before_epoch: true,
+                    seconds: duration.as_secs(),
+                    nanos: duration.subsec_nanos(),
+                }
+            }
+        }
     }
+}
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OpenHandsFileObservation {
+    pub(super) length: u64,
+    modified: OpenHandsObservedTime,
+    readonly: bool,
+    device: Option<u64>,
+    inode: Option<u64>,
+}
+
+impl OpenHandsFileObservation {
     fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -56,134 +77,158 @@ impl OpenHandsFrozenFile {
 
         Ok(Self {
             length: metadata.len(),
-            modified: metadata.modified()?,
+            modified: OpenHandsObservedTime::from_system_time(metadata.modified()?),
             readonly: metadata.permissions().readonly(),
             device,
             inode,
         })
     }
 
-    pub(super) fn source_revision(&self, content_hash: Option<&[u8; 32]>) -> String {
-        let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        format!(
-            "openhands-event-v1:length={};modified={side}{seconds}.{nanos:09};readonly={};device={};inode={};sha256={}",
-            self.length,
-            self.readonly,
-            self.device
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            self.inode
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            content_hash.map_or_else(
-                || "oversize".to_owned(),
-                |hash| openhands_hex(hash),
-            ),
-        )
-    }
-
-    pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
-        match Self::read(path) {
-            Ok(current) => Ok(current == *self),
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(false)
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
+    pub(super) fn physical_identity(&self) -> (Option<u64>, Option<u64>) {
+        (self.device, self.inode)
     }
 }
 
-pub(super) struct OpenHandsEventSource {
+#[derive(Debug)]
+pub(super) struct OpenHandsObservedFile {
     pub(super) canonical_path: PathBuf,
     pub(super) canonical_path_text: String,
     pub(super) conversation_dir: PathBuf,
     pub(super) session_id: String,
-    pub(super) frozen: OpenHandsFrozenFile,
-    pub(super) raw_bytes: Option<Vec<u8>>,
+    pub(super) user_id: Option<String>,
     pub(super) path_identity: String,
-    pub(super) observation: SourceObservation,
+    pub(super) route_sha256: [u8; 32],
+    pub(super) cursor_stream: String,
+    pub(super) observation: OpenHandsFileObservation,
+    pub(super) raw_bytes: Option<Vec<u8>>,
+    pub(super) content_sha256: Option<[u8; 32]>,
 }
 
-impl OpenHandsEventSource {
-    pub(super) fn observe(path: &Path, inventory_observation_token: Option<&str>) -> Result<Self> {
+impl OpenHandsObservedFile {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         ensure_regular_provider_transcript_file(path)?;
         let canonical_path = fs::canonicalize(path)?;
         let canonical_path_text = openhands_checked_path_text(&canonical_path)?;
         let session_id = openhands_conversation_id_from_path(&canonical_path)
             .ok_or_else(|| openhands_missing_event_files(path))
             .and_then(|value| openhands_bounded_derived_text(value, "conversation id"))?;
+        let user_id = openhands_user_id_from_path(&canonical_path)
+            .map(|value| openhands_bounded_derived_text(value, "user id"))
+            .transpose()?;
         let conversation_dir = canonical_path
             .parent()
             .ok_or_else(|| openhands_missing_event_files(path))?
             .to_path_buf();
-        let frozen = OpenHandsFrozenFile::read(&canonical_path)?;
-        let raw_bytes = if frozen.length > openhands_oversize_limit()? {
+        let mut file = open_openhands_source_file(&canonical_path)?;
+        let descriptor_observation = OpenHandsFileObservation::from_metadata(&file.metadata()?)?;
+        let path_observation =
+            OpenHandsFileObservation::from_metadata(&fs::metadata(&canonical_path)?)?;
+        if descriptor_observation != path_observation {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+
+        let limit = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).map_err(|_| {
+            CaptureError::SystemInvariant("OpenHands record byte limit exceeds u64")
+        })?;
+        let raw_bytes = if descriptor_observation.length > limit {
             None
         } else {
-            Some(read_openhands_frozen_bytes(&canonical_path, &frozen)?)
+            let capacity = usize::try_from(descriptor_observation.length).map_err(|_| {
+                CaptureError::SystemInvariant("OpenHands file length exceeds platform limits")
+            })?;
+            let mut bytes = Vec::with_capacity(capacity);
+            file.by_ref()
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if u64::try_from(bytes.len()).ok() != Some(descriptor_observation.length)
+                || bytes.len() > MAX_PROVIDER_JSONL_LINE_BYTES
+            {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            Some(bytes)
         };
-        let content_hash = raw_bytes
+        let after_descriptor = OpenHandsFileObservation::from_metadata(&file.metadata()?)?;
+        let after_path = OpenHandsFileObservation::from_metadata(&fs::metadata(&canonical_path)?)?;
+        if after_descriptor != descriptor_observation || after_path != descriptor_observation {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let content_sha256 = raw_bytes
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         let path_identity = provider_path_identity(&canonical_path)?;
+        let route_sha256 = route_sha256(&path_identity);
         let cursor_stream = provider_source_cursor_stream_for_path(
             CaptureProvider::OpenHands,
             OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
             &path_identity,
         );
-        let observation = SourceObservation::new(
-            CaptureProvider::OpenHands,
-            OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-            format!("openhands-event-file:{path_identity}"),
-            frozen.source_revision(content_hash.as_ref()),
-            cursor_stream,
-            OPENHANDS_CAPTURE_REVISION,
-            OPENHANDS_POLICY_REVISION,
-            inventory_observation_token,
-        )
-        .map_err(openhands_captured_error)?;
         Ok(Self {
             canonical_path,
             canonical_path_text,
             conversation_dir,
             session_id,
-            frozen,
-            raw_bytes,
+            user_id,
             path_identity,
-            observation,
+            route_sha256,
+            cursor_stream,
+            observation: descriptor_observation,
+            raw_bytes,
+            content_sha256,
         })
     }
-}
 
-struct OpenHandsInventoryPacer {
-    entries: usize,
-    window_started: Instant,
-}
-
-impl OpenHandsInventoryPacer {
-    fn new() -> Self {
-        Self {
-            entries: 0,
-            window_started: Instant::now(),
+    pub(super) fn revalidate(&self) -> Result<bool> {
+        match fs::metadata(&self.canonical_path) {
+            Ok(metadata) => {
+                Ok(OpenHandsFileObservation::from_metadata(&metadata)? == self.observation)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
         }
     }
 
-    fn observe(&mut self) {
-        self.entries = self.entries.saturating_add(1);
-        if self.entries < OPENHANDS_INVENTORY_PAGE_RECORDS {
-            return;
+    pub(super) fn source_revision(&self, inventory_token: Option<&str>) -> String {
+        let mut digest = Sha256::new();
+        digest.update(OPENHANDS_SOURCE_REVISION_DOMAIN);
+        digest.update(self.route_sha256);
+        digest.update(self.observation.length.to_be_bytes());
+        digest.update([u8::from(self.observation.modified.before_epoch)]);
+        digest.update(self.observation.modified.seconds.to_be_bytes());
+        digest.update(self.observation.modified.nanos.to_be_bytes());
+        digest.update([u8::from(self.observation.readonly)]);
+        hash_optional_u64(&mut digest, self.observation.device);
+        hash_optional_u64(&mut digest, self.observation.inode);
+        match self.content_sha256 {
+            Some(content_sha256) => {
+                digest.update([1]);
+                digest.update(content_sha256);
+            }
+            None => digest.update([0]),
         }
-        let elapsed = self.window_started.elapsed();
-        if elapsed < OPENHANDS_INVENTORY_MIN_INTERVAL {
-            thread::sleep(OPENHANDS_INVENTORY_MIN_INTERVAL - elapsed);
+        if let Some(token) = inventory_token {
+            digest.update([1]);
+            digest.update((token.len() as u64).to_be_bytes());
+            digest.update(token.as_bytes());
+        } else {
+            digest.update([0]);
         }
-        self.entries = 0;
-        self.window_started = Instant::now();
+        format!("openhands-nativepath-source-v1:{}", hex(&digest.finalize()))
+    }
+
+    pub(super) fn current_prefix_matches(
+        &self,
+        prior_length: u64,
+        prior_content_sha256: [u8; 32],
+    ) -> bool {
+        let Some(bytes) = self.raw_bytes.as_deref() else {
+            return false;
+        };
+        let Ok(prior_length) = usize::try_from(prior_length) else {
+            return false;
+        };
+        bytes
+            .get(..prior_length)
+            .is_some_and(|prefix| <[u8; 32]>::from(Sha256::digest(prefix)) == prior_content_sha256)
     }
 }
 
@@ -212,139 +257,105 @@ pub(crate) fn count_openhands_source_file_opens<T>(operation: impl FnOnce() -> T
     (output, opens)
 }
 
-pub(super) fn capture_openhands_event_batch(
-    path: &Path,
-    path_text: &str,
-    frozen: &OpenHandsFrozenFile,
-    raw_bytes: Option<Vec<u8>>,
-    source: SourceObservation,
-    record_kind: ProviderRecordKind,
-) -> Result<CapturedBatch> {
-    if !frozen.revalidate(path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
+fn hash_optional_u64(digest: &mut Sha256, value: Option<u64>) {
+    digest.update([u8::from(value.is_some())]);
+    if let Some(value) = value {
+        digest.update(value.to_be_bytes());
     }
-    let locator = NativeLocator::new(OPENHANDS_LOCATOR_KIND, path_text.as_bytes().to_vec())
-        .map_err(openhands_captured_error)?;
-    let line_number = openhands_line_number(path);
-    let ordinal = u64::try_from(line_number.saturating_sub(1))
-        .map_err(|_| CaptureError::SystemInvariant("OpenHands source citation exceeds u64"))?;
-    let record = if frozen.length > openhands_oversize_limit()? {
-        CapturedRecord::structural_rejection(
-            ordinal,
-            locator,
-            record_kind,
-            StructuralRejectionKind::OversizeRecord,
-            frozen.length,
-        )
-    } else {
-        let bytes = raw_bytes.ok_or(CaptureError::SystemInvariant(
-            "OpenHands bounded event bytes were not retained for projection",
-        ))?;
-        CapturedRecord::content(ordinal, locator, record_kind, bytes)
-            .map_err(openhands_captured_error)?
-    };
-    let mut builder = CapturedBatchBuilder::new(source, openhands_position(0)?);
-    builder.push(record).map_err(openhands_captured_error)?;
-    builder.mark_source_exhausted();
-    builder
-        .finish(openhands_position(1)?)
-        .map_err(openhands_captured_error)
 }
 
-pub(super) fn openhands_position(position: u64) -> Result<NativePosition> {
-    NativePosition::new(OPENHANDS_POSITION_KIND, position.to_be_bytes().to_vec())
-        .map_err(openhands_captured_error)
+fn route_sha256(path_identity: &str) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(OPENHANDS_ROUTE_HASH_DOMAIN);
+    digest.update((path_identity.len() as u64).to_be_bytes());
+    digest.update(path_identity.as_bytes());
+    digest.finalize().into()
 }
 
-pub(super) fn decode_openhands_position(position: &NativePosition) -> Result<u64> {
-    if position.kind() != OPENHANDS_POSITION_KIND {
-        return Err(CaptureError::InvalidPayload(
-            "OpenHands cursor has an unexpected position kind".to_owned(),
-        ));
-    }
-    let bytes: [u8; 8] = position.value().try_into().map_err(|_| {
-        CaptureError::InvalidPayload("OpenHands cursor position is malformed".to_owned())
-    })?;
-    let decoded = u64::from_be_bytes(bytes);
-    if decoded > 1 {
-        return Err(CaptureError::InvalidPayload(
-            "OpenHands cursor position is outside its event-file boundary".to_owned(),
-        ));
-    }
-    Ok(decoded)
+#[derive(Debug)]
+pub(super) struct OpenHandsInventory {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) root_missing: bool,
 }
 
-pub(super) fn visit_openhands_event_paths(
-    root: &Path,
-    visit: &mut dyn FnMut(&Path) -> Result<()>,
-) -> Result<()> {
-    visit_openhands_event_paths_with_pacer(root, &mut OpenHandsInventoryPacer::new(), visit)
-}
-
-fn visit_openhands_event_paths_with_pacer(
-    root: &Path,
-    pacer: &mut OpenHandsInventoryPacer,
-    visit: &mut dyn FnMut(&Path) -> Result<()>,
-) -> Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
+pub(super) fn discover_openhands_event_paths(root: &Path) -> Result<OpenHandsInventory> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: root.to_path_buf(),
+                reason: "symlinked provider transcript roots are rejected",
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(OpenHandsInventory {
+                paths: Vec::new(),
+                root_missing: true,
+            });
+        }
+        Err(error) => return Err(error.into()),
     }
     ensure_provider_path_parents_are_not_symlinks(root)?;
-    if file_type.is_file() {
-        if openhands_json_path_is_event(root) {
-            ensure_regular_provider_transcript_file(root)?;
-            visit(root)?;
-        }
-        return Ok(());
-    }
-    if !file_type.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root)? {
-        pacer.observe();
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            visit_openhands_event_paths_with_pacer(&path, pacer, visit)?;
-        } else if file_type.is_file() && openhands_json_path_is_event(&path) {
-            ensure_regular_provider_transcript_file(&path)?;
-            visit(&path)?;
-        }
-    }
-    Ok(())
+    let mut paths = Vec::new();
+    let mut visited_entries = 0_usize;
+    discover_at(root, 0, &mut visited_entries, &mut paths)?;
+    paths.sort();
+    paths.dedup();
+    Ok(OpenHandsInventory {
+        paths,
+        root_missing: false,
+    })
 }
 
-pub(super) fn read_openhands_frozen_bytes(
+fn discover_at(
     path: &Path,
-    frozen: &OpenHandsFrozenFile,
-) -> Result<Vec<u8>> {
-    if !frozen.revalidate(path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
+    depth: usize,
+    visited_entries: &mut usize,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if depth > OPENHANDS_DISCOVERY_MAX_DEPTH {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "OpenHands event directory nesting exceeds the supported limit",
+        });
     }
-    let maximum = openhands_oversize_limit()?;
-    let read_limit = maximum.checked_add(1).ok_or(CaptureError::SystemInvariant(
-        "OpenHands record read limit overflowed",
-    ))?;
-    let capacity = usize::try_from(frozen.length.min(read_limit)).map_err(|_| {
-        CaptureError::SystemInvariant("OpenHands file length exceeds platform limits")
-    })?;
-    let mut bytes = Vec::with_capacity(capacity);
-    open_openhands_source_file(path)?
-        .take(read_limit)
-        .read_to_end(&mut bytes)?;
-    if !frozen.revalidate(path)? || u64::try_from(bytes.len()).ok() != Some(frozen.length) {
-        return Err(CaptureError::SourceChangedDuringCapture);
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "symlinked OpenHands event entries are rejected",
+        });
     }
-    if bytes.len() > CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES {
-        return Err(CaptureError::SourceChangedDuringCapture);
+    if metadata.is_file() {
+        if openhands_json_path_is_event(path) {
+            ensure_regular_provider_transcript_file(path)?;
+            paths.push(fs::canonicalize(path)?);
+        }
+        return Ok(());
     }
-    Ok(bytes)
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let mut children = fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    *visited_entries =
+        visited_entries
+            .checked_add(children.len())
+            .ok_or(CaptureError::SystemInvariant(
+                "OpenHands discovery entry count overflowed",
+            ))?;
+    if *visited_entries > OPENHANDS_DISCOVERY_MAX_ENTRIES {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "OpenHands event discovery exceeds the supported entry limit",
+        });
+    }
+    children.sort();
+    for child in children {
+        discover_at(&child, depth.saturating_add(1), visited_entries, paths)?;
+    }
+    Ok(())
 }
 
 pub(super) fn openhands_missing_event_files(path: &Path) -> CaptureError {
@@ -368,25 +379,6 @@ pub(super) fn openhands_checked_path_text(path: &Path) -> Result<String> {
         });
     }
     Ok(text.to_owned())
-}
-
-fn openhands_oversize_limit() -> Result<u64> {
-    u64::try_from(CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES)
-        .map_err(|_| CaptureError::SystemInvariant("OpenHands byte limit exceeds u64"))
-}
-
-pub(super) fn openhands_captured_error(error: impl std::fmt::Display) -> CaptureError {
-    CaptureError::InvalidPayload(error.to_string())
-}
-
-fn openhands_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }
 
 pub(crate) fn openhands_json_path_is_event(path: &Path) -> bool {
@@ -422,4 +414,37 @@ pub(super) fn openhands_user_id_from_path(path: &Path) -> Option<String> {
 
 pub(super) fn openhands_line_number(path: &Path) -> usize {
     fnv1a64(path.display().to_string().as_bytes()) as usize
+}
+
+pub(super) fn openhands_legacy_filename_index_candidate(path: &Path) -> Option<u64> {
+    let stem = path.file_stem()?.to_str()?;
+    let (ordinal, suffix) = stem.split_once('-')?;
+    if ordinal.is_empty() || suffix.is_empty() || !ordinal.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    ordinal
+        .parse::<u64>()
+        .ok()
+        .and_then(|ordinal| ordinal.checked_sub(1))
+}
+
+fn openhands_bounded_derived_text(value: String, field: &str) -> Result<String> {
+    const MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024;
+    if value.len() > MAX_DERIVED_TEXT_BYTES {
+        return Err(CaptureError::InvalidPayload(format!(
+            "OpenHands {field} exceeds {MAX_DERIVED_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(value)
+}
+
+pub(super) fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }

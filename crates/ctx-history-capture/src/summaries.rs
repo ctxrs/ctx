@@ -1,31 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 pub(crate) const MAX_RETAINED_PROVIDER_FAILURES: usize = 64;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpoolCounts {
-    pub pending: usize,
-    pub tmp: usize,
-    pub processing: usize,
-    pub done: usize,
-    pub failed: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpoolImportFailure {
-    pub path: PathBuf,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpoolImportSummary {
-    pub processed_files: usize,
-    pub skipped_files: usize,
-    pub imported_records: usize,
-    pub failed_files: usize,
-    pub failures: Vec<SpoolImportFailure>,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderImportSummary {
@@ -136,21 +111,5 @@ impl ProviderImportSummary {
 
     pub(crate) fn merge(&mut self, other: ProviderImportSummary) {
         self.merge_from(other);
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpoolRepairSummary {
-    pub retried_files: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ArchiveCounts {
-    pub(crate) records: usize,
-}
-
-impl ArchiveCounts {
-    pub(crate) fn add(&mut self, other: Self) {
-        self.records += other.records;
     }
 }
