@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use crate::captured_batch::{
     CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, SourceObservation,
 };
-use crate::complete_content::structured::attach_structured_complete_content_locator;
+use crate::complete_content::structured::{
+    attach_structured_complete_content_locator, attach_structured_result_content_locator,
+};
 use crate::provider::file_touches::{
     visit_provider_file_touches_from_raw_value, ProviderFileTouchSourceContext,
     PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
@@ -612,6 +614,18 @@ impl TaskJsonCapturedBatchProjector {
             &complete_text,
         )
         .map_err(ProviderProjectionFatal::new)?;
+        if let Some(content) = super::task_json_result_content(&raw, source) {
+            attach_structured_result_content_locator(
+                self.spec.provider,
+                &mut event,
+                source_record_ordinal,
+                0,
+                &native_id,
+                record_bytes,
+                &content,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
         let source_root = self.context.source_root_display();
         let capture = task_json_capture_from_state(
             self.spec,

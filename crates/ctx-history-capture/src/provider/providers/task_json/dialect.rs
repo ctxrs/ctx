@@ -3,8 +3,8 @@ use ctx_history_core::CaptureProvider;
 use crate::captured_batch::{NativeLocator, NativePosition};
 use crate::{CaptureError, Result, CLINE_TASK_JSON_SOURCE_FORMAT, ROO_TASK_JSON_SOURCE_FORMAT};
 
-pub(super) const TASK_JSON_CAPTURE_REVISION: u32 = 3;
-pub(super) const TASK_JSON_POLICY_REVISION: u32 = 4;
+pub(super) const TASK_JSON_CAPTURE_REVISION: u32 = 4;
+pub(super) const TASK_JSON_POLICY_REVISION: u32 = 5;
 pub(super) const TASK_JSON_RECORD_KIND: &str = "task-json-native-item-v1";
 pub(super) const TASK_JSON_POSITION_KIND: &str = "task-json-stream-v1";
 pub(super) const TASK_JSON_LOCATOR_KIND: &str = "task-json-source-item-v1";

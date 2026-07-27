@@ -140,7 +140,9 @@ fn astrbot_real_import_resumes_legacy_cursor_and_terminal_reopen_skips_projectio
         NormalizedProviderImportOptions::default(),
     )
     .unwrap();
-    assert_eq!(replay, ProviderImportSummary::default());
+    let mut expected = ProviderImportSummary::default();
+    expected.set_work_result(crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(replay, expected);
     assert_eq!(astrbot_relationship_projection_test_prepare_count(), 0);
     assert_eq!(
         astrbot_relationship_projection_test_pacing(),

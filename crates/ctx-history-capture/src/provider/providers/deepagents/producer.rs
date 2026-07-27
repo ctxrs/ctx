@@ -44,6 +44,7 @@ pub(super) struct DeepAgentsPreparedWrite {
 pub(super) struct DeepAgentsPreparedThread {
     pub(super) next: NativePosition,
     pub(super) ordinal: u64,
+    pub(super) rowid: i64,
     pub(super) summary: Option<DeepAgentsThreadSummary>,
     pub(super) rejection_reason: Option<String>,
 }
@@ -169,6 +170,7 @@ impl<'connection> DeepAgentsRowFetcher<'connection> {
                 let prepared = DeepAgentsPreparedThread {
                     next,
                     ordinal: next_ordinal,
+                    rowid: candidate.rowid,
                     summary,
                     rejection_reason,
                 };
@@ -353,7 +355,7 @@ impl<'connection> DeepAgentsRowFetcher<'connection> {
 
     fn thread_row(&self, record: DeepAgentsPreparedThread) -> Result<SqliteLogicalRow> {
         if let Some(reason) = record.rejection_reason {
-            let locator = deepagents_locator(DEEPAGENTS_THREAD_LOCATOR_KIND, &record.ordinal)?;
+            let locator = deepagents_locator(DEEPAGENTS_THREAD_LOCATOR_KIND, &record.rowid)?;
             return SqliteLogicalRow::values(
                 record.next.clone(),
                 record.ordinal,
@@ -371,8 +373,7 @@ impl<'connection> DeepAgentsRowFetcher<'connection> {
         let summary = record.summary.ok_or(CaptureError::SystemInvariant(
             "Deep Agents accepted thread is missing its summary",
         ))?;
-        let locator =
-            deepagents_locator(DEEPAGENTS_THREAD_LOCATOR_KIND, &summary.thread.thread_id)?;
+        let locator = deepagents_locator(DEEPAGENTS_THREAD_LOCATOR_KIND, &record.rowid)?;
         SqliteLogicalRow::values(
             record.next.clone(),
             record.ordinal,

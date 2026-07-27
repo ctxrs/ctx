@@ -4,9 +4,10 @@ use serde_json::{json, Value};
 
 use crate::provider::file_touches::{normalize_file_path, FileTouchDraft};
 use crate::provider::normalization::{
-    provider_capped_json, provider_policy_body, provider_policy_event_text,
-    provider_required_timestamp_millis, provider_result_identifier_evidence,
-    provider_result_outcome_evidence, provider_role, provider_value_text,
+    provider_capped_json, provider_normalized_result_value, provider_policy_body,
+    provider_policy_event_text, provider_required_timestamp_millis,
+    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
+    provider_value_text,
 };
 use crate::{fnv1a64, CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
@@ -80,6 +81,41 @@ pub(super) fn opencode_tool_part_event_data(
         "result_outcome": result_outcome,
         "output_retention": "metadata_only",
     }))
+}
+
+/// Returns the complete normalized result body shared by OpenCode, Kilo, and
+/// MiMo Code SQLite profiles.
+///
+/// The supported generations use either a direct result field or the modern
+/// `state` envelope. Precedence is explicit and the function never searches
+/// arbitrary descendants. The caller owns any byte bound.
+#[allow(dead_code)] // Activated by SQLite result-locator attachment.
+pub(crate) fn opencode_normalized_result_content(entry_type: &str, data: &Value) -> Option<String> {
+    let candidates: &[&str] = match entry_type {
+        "tool" | "tool_result" | "result" => &[
+            "/state/output",
+            "/state/result",
+            "/state/content",
+            "/output",
+            "/result",
+            "/content",
+            "/text",
+        ],
+        "shell" => &[
+            "/output",
+            "/state/output",
+            "/stdout",
+            "/stderr",
+            "/result",
+            "/content",
+            "/text",
+        ],
+        _ => return None,
+    };
+    candidates
+        .iter()
+        .find_map(|pointer| data.pointer(pointer))
+        .map(provider_normalized_result_value)
 }
 
 pub(super) fn opencode_tool_part_name(data: &Value) -> String {

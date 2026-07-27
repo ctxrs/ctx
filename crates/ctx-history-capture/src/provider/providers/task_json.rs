@@ -20,10 +20,14 @@ mod scanner;
 mod source;
 
 pub(crate) use dialect::{task_json_provider, TaskJsonProviderSpec};
+pub(crate) use normalization::task_json_result_content;
 pub(crate) use normalization::{
     task_json_event, task_json_event_text, task_json_event_type, task_json_string_field,
     task_json_time_field, TaskJsonEventInput,
 };
+
+#[cfg(test)]
+pub(crate) const TASK_JSON_RESULT_CONTENT_PROFILE: &str = "task-json.result-body.v1";
 
 use dialect::{
     task_json_captured_batch_error, task_json_decode_position, task_json_native_position,

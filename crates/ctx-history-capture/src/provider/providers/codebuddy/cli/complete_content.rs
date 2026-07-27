@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::fs::Metadata;
 
 use ctx_history_core::{CaptureProvider, ProviderCaptureEnvelope};
 use serde_json::Value;
@@ -7,7 +7,6 @@ use crate::captured_batch::{CapturedRecord, SourceObservation};
 use crate::complete_content::jsonl::{
     attach_exact_jsonl_complete_content_locator, ExactJsonlSourceBinding,
 };
-use crate::provider::importer::provider_path_identity;
 use crate::{Result, CODEBUDDY_SOURCE_FORMAT};
 
 use super::super::source::CodeBuddyFrozenFile;
@@ -65,10 +64,11 @@ pub(crate) fn codebuddy_cli_complete_content_record(
     Some((text, native_record_id))
 }
 
-pub(crate) fn codebuddy_cli_complete_content_source(path: &Path) -> Result<(String, String)> {
-    let frozen = CodeBuddyFrozenFile::read(path)?;
-    let canonical_path = fs::canonicalize(path)?;
-    let path_identity = provider_path_identity(&canonical_path)?;
+pub(crate) fn codebuddy_cli_complete_content_source_from_admitted(
+    metadata: &Metadata,
+    path_identity: String,
+) -> Result<(String, String)> {
+    let frozen = CodeBuddyFrozenFile::from_metadata(metadata)?;
     Ok((
         frozen.source_revision_with_policy("cli-jsonl", CODEBUDDY_CLI_POLICY_REVISION),
         path_identity,

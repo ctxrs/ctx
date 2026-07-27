@@ -300,7 +300,8 @@ runtime_authority="$(
   "${script_dir}/public-cli-runtime-authority.sh" \
     "${runtime_platform}" "${host_system}" "${host_arch}" passed \
     "${host_native_arch}" "${process_translated}" "${hardware_identity}" \
-    "${emulation}" "${hypervisor}" "${evidence_complete}"
+    "${emulation}" "${hypervisor}" "${evidence_complete}" \
+    "${CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID:-}"
 )"
 if [[ "${downgrade_runtime_authority}" == "1" ]]; then
   runtime_authority=non_authoritative

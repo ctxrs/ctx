@@ -12,7 +12,7 @@ use crate::common::io::{collect_jsonl_paths, ensure_regular_provider_transcript_
 use crate::provider::providers::native_jsonl::visit_native_jsonl_files;
 use crate::{CodexSessionImportOptions, ProviderImportSummary, Result};
 
-pub(super) const CODEX_CAPTURE_REVISION: u32 = 7;
+pub(super) const CODEX_CAPTURE_REVISION: u32 = 8;
 pub(super) const CODEX_POLICY_REVISION: u32 = 3;
 const CODEX_RECORD_KIND: &str = "codex-session-jsonl-v1";
 const CODEX_MAX_TOOL_CONTEXTS: usize = 24;

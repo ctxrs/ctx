@@ -1,9 +1,10 @@
 use std::{fs, path::Path};
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ProviderEventEnvelope};
 use ctx_history_store::Store;
+use rusqlite::Connection;
 
-use crate::captured_batch::SourceObservation;
+use crate::captured_batch::{CapturedSqliteValue, SourceObservation};
 use crate::provider::importer::{
     captured_batch_cursor_stream, drain_captured_batches, provider_path_identity,
     provider_source_cursor_stream_for_path, CapturedBatchCursorMode, CapturedSourceAdmission,
@@ -35,7 +36,7 @@ use sqlite::{
 use text::{decode_lingma_sqlite_text, LingmaSqliteEncoding};
 
 const LINGMA_CAPTURE_REVISION: u32 = 5;
-const LINGMA_POLICY_REVISION: u32 = 5;
+const LINGMA_POLICY_REVISION: u32 = 6;
 const LINGMA_POSITION_KIND: &str = "lingma-chat-record-rowid-v5";
 const LINGMA_LOCATOR_KIND: &str = "lingma-chat-record-v1";
 const LINGMA_RECORD_KIND: &str = "lingma-chat-record-row-local-v2";
@@ -170,6 +171,21 @@ pub(crate) fn import_lingma_sqlite_batched(
 
 fn lingma_captured_error(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
+}
+
+/// Reads the exact logical row shape used by capture for verified-content reopening.
+pub(crate) fn lingma_complete_values(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    sqlite::lingma_complete_values(conn, rowid)
+}
+
+/// Replays the authoritative user-prompt normalization for one captured row.
+pub(crate) fn lingma_complete_user_message(
+    values: &[CapturedSqliteValue],
+) -> Result<(ProviderEventEnvelope, String)> {
+    projector::lingma_complete_user_message(values)
 }
 
 #[cfg(test)]

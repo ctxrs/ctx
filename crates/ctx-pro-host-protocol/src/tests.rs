@@ -312,6 +312,20 @@ fn transient_result_content_is_exact_bounded_and_not_in_the_journal_digest() {
 }
 
 #[test]
+fn transient_result_content_is_redacted_from_debug_output() {
+    let secret = "PRIVATE_TRANSIENT_RESULT_DEBUG_CANARY";
+    let request = request_with_result_content(secret);
+
+    for debug_output in [
+        format!("{:?}", request.result_contents[0]),
+        format!("{request:?}"),
+    ] {
+        assert!(!debug_output.contains(secret));
+        assert!(debug_output.contains("<redacted>"));
+    }
+}
+
+#[test]
 fn transient_result_content_allows_distinct_revisions_of_one_event() {
     let generation = 10;
     let content = "same complete output";

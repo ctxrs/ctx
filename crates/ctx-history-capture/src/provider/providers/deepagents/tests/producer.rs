@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn native_sqlite_locators_are_reversible_row_addresses_not_hashes() {
+    let conn = Connection::open_in_memory().unwrap();
+    create_tables(&conn);
+    insert_checkpoint(&conn, "thread-a", "checkpoint-a");
+    let checkpoint_rowid = conn.last_insert_rowid();
+    insert_write(
+        &conn,
+        "thread-a",
+        "checkpoint-a",
+        "task-a",
+        0,
+        &message_blob(vec![message_value("human", "hello", "message-a")]),
+    );
+    let write_rowid = conn.last_insert_rowid();
+    let batches = produce_all(
+        &conn,
+        test_source("reversible-locators"),
+        initial_deepagents_position().unwrap(),
+        context(None),
+    );
+    let records = batches
+        .iter()
+        .flat_map(|batch| batch.records())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].locator().kind(), DEEPAGENTS_THREAD_LOCATOR_KIND);
+    assert_eq!(
+        serde_json::from_slice::<i64>(records[0].locator().value()).unwrap(),
+        checkpoint_rowid
+    );
+    assert_eq!(records[1].locator().kind(), DEEPAGENTS_WRITE_LOCATOR_KIND);
+    assert_eq!(
+        serde_json::from_slice::<i64>(records[1].locator().value()).unwrap(),
+        write_rowid
+    );
+}
+
+#[test]
 fn logical_rows_split_at_sixty_four_and_resume_the_exact_keyset() {
     let conn = Connection::open_in_memory().unwrap();
     create_tables(&conn);

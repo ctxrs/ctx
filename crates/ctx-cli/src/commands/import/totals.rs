@@ -1,4 +1,4 @@
-use ctx_history_capture::ProviderImportSummary;
+use ctx_history_capture::{ProviderImportSummary, ProviderImportWorkResult};
 
 use super::SourceStats;
 
@@ -18,6 +18,7 @@ pub(crate) struct ImportTotals {
     pub(crate) skipped: usize,
     pub(crate) failed: usize,
     pub(crate) capture_work_remaining: bool,
+    pub(crate) work_result: ProviderImportWorkResult,
 }
 
 impl ImportTotals {
@@ -35,6 +36,7 @@ impl ImportTotals {
         self.skipped += summary.skipped;
         self.failed += summary.failed;
         self.capture_work_remaining |= summary.work_remaining;
+        self.work_result = self.work_result.merge(summary.work_result());
     }
 
     pub(crate) fn add_source_failure(&mut self, stats: &SourceStats) {
@@ -57,5 +59,6 @@ impl ImportTotals {
         self.skipped = self.skipped.saturating_add(summary.skipped);
         self.failed = self.failed.saturating_add(summary.failed);
         self.capture_work_remaining |= summary.work_remaining;
+        self.work_result = self.work_result.merge(summary.work_result());
     }
 }

@@ -1,10 +1,12 @@
+use chrono::Utc;
 use ctx_history_core::{
     AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderSourceTrust,
 };
 use serde_json::{json, Value};
 
 use crate::captured_batch::{
-    CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, SourceObservation,
+    CapturedBatch, CapturedRecord, CapturedRecordPayload, CapturedSqliteValue, NativeLocator,
+    NativePosition, SourceObservation,
 };
 use crate::provider::importer::{
     BoundedParserCheckpoint, CapturedBatchCursorFinish, CapturedBatchProjector,
@@ -24,7 +26,8 @@ use crate::{
 
 use super::position::decode_nanoclaw_position;
 use super::rows::{
-    decode_nanoclaw_message_record, decode_nanoclaw_session, NanoClawMessageRow, NanoClawSessionRow,
+    decode_nanoclaw_message_record, decode_nanoclaw_session,
+    nanoclaw_message_values_for_content_digest, NanoClawMessageRow, NanoClawSessionRow,
 };
 use super::{NANOCLAW_MESSAGE_RECORD_KIND, NANOCLAW_SESSION_RECORD_KIND};
 
@@ -96,10 +99,12 @@ impl CapturedBatchProjector for NanoClawCapturedBatchProjector {
                         return Ok(());
                     }
                 };
-                output.emit_normalization(nanoclaw_message_normalization(
+                let normalization = nanoclaw_message_normalization(
                     &session,
                     message,
                     seq,
+                    record.locator(),
+                    values,
                     NanoClawNormalizationContext {
                         project_root: &self.raw_source_path,
                         central_path: &self.central_path,
@@ -107,7 +112,9 @@ impl CapturedBatchProjector for NanoClawCapturedBatchProjector {
                         schema_fingerprint: &self.schema_fingerprint,
                         adapter: &self.context,
                     },
-                ))
+                )
+                .map_err(ProviderProjectionFatal::new)?;
+                output.emit_normalization(normalization)
             }
             _ => Err(ProviderProjectionFatal::system_invariant(
                 "NanoClaw projector received an unexpected record kind",
@@ -159,8 +166,10 @@ fn nanoclaw_message_normalization(
     session: &NanoClawSessionRow,
     message: NanoClawMessageRow,
     seq: Option<u64>,
+    locator: &NativeLocator,
+    values: &[CapturedSqliteValue],
     normalization: NanoClawNormalizationContext<'_>,
-) -> ProviderNormalizationResult {
+) -> Result<ProviderNormalizationResult> {
     let NanoClawNormalizationContext {
         project_root,
         central_path,
@@ -169,63 +178,21 @@ fn nanoclaw_message_normalization(
         adapter: context,
     } = normalization;
     let provider_session_id = format!("{}/{}", session.agent_group_id, session.id);
-    let occurred_at = provider_timestamp_millis(message.timestamp, context.imported_at);
+    let (mut event, complete_text) =
+        nanoclaw_event_for_complete(session, &message, seq, context.imported_at);
+    let occurred_at = event.occurred_at;
     let started_at = provider_timestamp_millis(session.created_at, occurred_at);
-    let content = message
-        .content
-        .as_deref()
-        .map(provider_json_text)
-        .unwrap_or(Value::Null);
-    let text = provider_value_text(&content).unwrap_or_else(|| {
-        format!(
-            "NanoClaw {}",
-            message.kind.as_deref().unwrap_or(message.source)
-        )
-    });
-    let event_index = nanoclaw_event_index(&message, seq);
-    let role = if message.source == "inbound" {
-        Some(EventRole::User)
-    } else {
-        Some(EventRole::Assistant)
-    };
-    let event = native_event(NativeEventDraft {
-        provider: CaptureProvider::NanoClaw,
-        source_format: NANOCLAW_SOURCE_FORMAT,
-        provider_session_id: provider_session_id.clone(),
-        provider_event_index: event_index,
-        provider_event_hash: Some(format!("{}:{}", message.source, message.id)),
-        cursor: format!(
-            "{}:{}:{}",
-            message.source,
-            session.id,
-            message.seq.unwrap_or_default()
-        ),
-        event_type: EventType::Message,
-        role,
-        occurred_at,
-        text,
-        body: json!({
-            "message_id": message.id,
-            "seq": message.seq,
-            "kind": message.kind,
-            "content": content,
-            "status": message.status,
-            "in_reply_to": message.in_reply_to,
-            "platform_id": message.platform_id,
-            "channel_type": message.channel_type,
-            "thread_id": message.thread_id,
-            "trigger": message.trigger,
-            "source_session_id": message.source_session_id,
-            "on_wake": message.on_wake,
-        }),
-        metadata: json!({
-            "source": format!("nanoclaw_{}", message.source),
-            "source_format": NANOCLAW_SOURCE_FORMAT,
-            "message_id": message.id,
-            "seq": message.seq,
-        }),
-    });
-    ProviderNormalizationResult {
+    let event_index = event.provider_event_index;
+    let digest_values = nanoclaw_message_values_for_content_digest(values)?;
+    crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+        &mut event,
+        CaptureProvider::NanoClaw,
+        NANOCLAW_SOURCE_FORMAT,
+        locator,
+        digest_values,
+        || complete_text,
+    )?;
+    Ok(ProviderNormalizationResult {
         captures: vec![(
             event_index.min(usize::MAX as u64) as usize,
             native_provider_capture(
@@ -277,7 +244,72 @@ fn nanoclaw_message_normalization(
             ),
         )],
         ..ProviderNormalizationResult::default()
-    }
+    })
+}
+
+pub(crate) fn nanoclaw_event_for_complete(
+    session: &NanoClawSessionRow,
+    message: &NanoClawMessageRow,
+    seq: Option<u64>,
+    fallback: chrono::DateTime<Utc>,
+) -> (ctx_history_core::ProviderEventEnvelope, String) {
+    let provider_session_id = format!("{}/{}", session.agent_group_id, session.id);
+    let occurred_at = provider_timestamp_millis(message.timestamp, fallback);
+    let content = message
+        .content
+        .as_deref()
+        .map(provider_json_text)
+        .unwrap_or(Value::Null);
+    let text = provider_value_text(&content).unwrap_or_else(|| {
+        format!(
+            "NanoClaw {}",
+            message.kind.as_deref().unwrap_or(message.source)
+        )
+    });
+    let event_index = nanoclaw_event_index(message, seq);
+    let role = if message.source == "inbound" {
+        Some(EventRole::User)
+    } else {
+        Some(EventRole::Assistant)
+    };
+    let event = native_event(NativeEventDraft {
+        provider: CaptureProvider::NanoClaw,
+        source_format: NANOCLAW_SOURCE_FORMAT,
+        provider_session_id,
+        provider_event_index: event_index,
+        provider_event_hash: Some(format!("{}:{}", message.source, message.id)),
+        cursor: format!(
+            "{}:{}:{}",
+            message.source,
+            session.id,
+            message.seq.unwrap_or_default()
+        ),
+        event_type: EventType::Message,
+        role,
+        occurred_at,
+        text: text.clone(),
+        body: json!({
+            "message_id": message.id,
+            "seq": message.seq,
+            "kind": message.kind,
+            "content": content,
+            "status": message.status,
+            "in_reply_to": message.in_reply_to,
+            "platform_id": message.platform_id,
+            "channel_type": message.channel_type,
+            "thread_id": message.thread_id,
+            "trigger": message.trigger,
+            "source_session_id": message.source_session_id,
+            "on_wake": message.on_wake,
+        }),
+        metadata: json!({
+            "source": format!("nanoclaw_{}", message.source),
+            "source_format": NANOCLAW_SOURCE_FORMAT,
+            "message_id": message.id,
+            "seq": message.seq,
+        }),
+    });
+    (event, text)
 }
 
 pub(super) fn nanoclaw_event_index(message: &NanoClawMessageRow, seq: Option<u64>) -> u64 {

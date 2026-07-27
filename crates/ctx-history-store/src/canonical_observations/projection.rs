@@ -2,9 +2,7 @@ use ctx_history_core::{compact_result_payload, ContentRef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(super) const COMPLETE_CONTENT_LOCATOR_KEY: &str = "complete_content_locator_v1";
-pub(super) const COMPLETE_CONTENT_BODY_DIGEST_KEY: &str = "complete_content_body_sha256";
-pub(super) const RESULT_CONTENT_LOCATOR_KEY: &str = "result_content_locator_v1";
+pub(crate) const VERIFIED_CONTENT_LOCATORS_KEY: &str = "verified_content_locators_v1";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,11 +109,9 @@ fn parse_identifier(value: Value) -> Option<CanonicalResultIdentifier> {
     Some(CanonicalResultIdentifier { kind, value })
 }
 
-pub(super) fn strip_local_complete_content_metadata(metadata: &mut Value) {
+pub(crate) fn strip_local_complete_content_metadata(metadata: &mut Value) {
     if let Some(object) = metadata.as_object_mut() {
-        object.remove(COMPLETE_CONTENT_LOCATOR_KEY);
-        object.remove(COMPLETE_CONTENT_BODY_DIGEST_KEY);
-        object.remove(RESULT_CONTENT_LOCATOR_KEY);
+        object.remove(VERIFIED_CONTENT_LOCATORS_KEY);
     }
 }
 
@@ -211,8 +207,7 @@ mod tests {
     #[test]
     fn local_complete_content_locator_never_enters_pro_metadata() {
         let mut metadata = json!({
-            "complete_content_locator_v1": {"family": "jsonl_range", "path": "/secret"},
-            "complete_content_body_sha256": "a".repeat(64),
+            "verified_content_locators_v1": {"version": 1, "locators": [{"private": "/secret"}]},
             "source_record_ordinal": 4
         });
         strip_local_complete_content_metadata(&mut metadata);

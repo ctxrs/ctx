@@ -1,10 +1,11 @@
 use ctx_history_capture::complete_content::sqlite::SqliteCompleteContentResolver;
 use ctx_history_capture::complete_content::{
-    CompleteContentBodyDigest, CompleteContentHashAuthority, CompleteContentResolver,
-    CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessageRequest,
-    SourceSnapshot,
+    verified_content_profile, AuthorizedSourceRoute, CompleteContentBodyDigest,
+    CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
+    CompleteContentSourceLocator, CompleteMessageRequest, SourceAccessBroker, SourceSnapshot,
+    VerifiedContentRole,
 };
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ContentRef};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -49,19 +50,40 @@ fn native_sqlite_target_recovers_exact_firebender_message() {
         LogicalValue::Text(&messages_json),
         LogicalValue::Text("{}"),
     ]);
+    let event_id = Uuid::new_v4();
+    let source_access = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::Firebender,
+                source_format: "firebender_chat_history_sqlite".to_owned(),
+                family: CompleteContentSourceFamily::Sqlite,
+                raw_source_path: database,
+                source_root: Some(temp.path().to_path_buf()),
+                source_identity: Some("stable-source".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            event_id,
+        )
+        .unwrap();
     let request = CompleteMessageRequest {
-        event_id: Uuid::new_v4(),
+        event_id,
         provider: CaptureProvider::Firebender,
         source_format: "firebender_chat_history_sqlite".to_owned(),
-        raw_source_path: database,
-        source_root: Some(temp.path().to_path_buf()),
-        source_identity: Some("stable-source".to_owned()),
+        source_access,
         source_family: Some(CompleteContentSourceFamily::Sqlite),
+        content_profile: verified_content_profile(
+            CaptureProvider::Firebender,
+            "firebender_chat_history_sqlite",
+            CompleteContentSourceFamily::Sqlite,
+            VerifiedContentRole::MessageBody,
+        )
+        .unwrap()
+        .to_owned(),
         source_locator: CompleteContentSourceLocator::new(
             "firebender-chat-session-row-v1",
             1_i64.to_be_bytes().to_vec(),
         ),
-        source_snapshot: SourceSnapshot::default(),
         provider_session_id: Some("session-1".to_owned()),
         source_record_ordinal: 0,
         source_record_subrecord_index: 0,
@@ -69,7 +91,7 @@ fn native_sqlite_target_recovers_exact_firebender_message() {
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
         expected_native_record_id: Some("native-message-1".to_owned()),
         expected_record_digest: Some(record_digest),
-        expected_body_digest: Some(CompleteContentBodyDigest::from_text(&body)),
+        expected_content_ref: ContentRef::from_bytes(body.as_bytes()),
         indexed_text: body.chars().take(INDEXED_LIMIT).collect(),
         indexed_limit_chars: INDEXED_LIMIT,
     };

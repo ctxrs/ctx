@@ -13,8 +13,8 @@ use super::position::{
 };
 use super::schema::{
     goose_message_columns, goose_message_expressions, goose_message_only_values,
-    goose_session_columns, goose_session_expressions, goose_session_values,
-    GOOSE_MESSAGE_RECORD_KIND, GOOSE_SESSION_RECORD_KIND,
+    goose_message_values_at, goose_session_columns, goose_session_expressions,
+    goose_session_values, GOOSE_MESSAGE_RECORD_KIND, GOOSE_SESSION_RECORD_KIND,
 };
 
 const GOOSE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
@@ -257,6 +257,31 @@ fn with_goose_length_preflight<T>(
 ) -> Result<T> {
     let _guard = SqliteLengthPreflightGuard::new(conn);
     query().map_err(CaptureError::from)
+}
+
+pub(super) fn goose_message_values_at_rowid(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    let columns = goose_message_columns(conn)?;
+    let expressions = goose_message_expressions(&columns, "m");
+    let select = expressions.hydration.join(", ");
+    conn.query_row(
+        &format!(
+            "select s.rowid, {select} from messages m \
+             left join sessions s on s.id = m.session_id where m.rowid = ?1"
+        ),
+        [rowid],
+        |row| {
+            let mut values = vec![row
+                .get::<_, Option<i64>>(0)?
+                .map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer)];
+            values.extend(goose_message_values_at(row, 1)?);
+            Ok(values)
+        },
+    )
+    .optional()
+    .map_err(CaptureError::from)
 }
 
 fn goose_fetch_first_candidate(

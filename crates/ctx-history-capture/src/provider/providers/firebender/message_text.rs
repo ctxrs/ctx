@@ -2,27 +2,20 @@ use serde_json::Value;
 
 use crate::provider::normalization::provider_value_text;
 
+/// Exact logical result bytes for one authoritative Firebender tool message.
+///
+/// Result reopening is deliberately narrower than display text: only the
+/// provider's `content` field is eligible. Names and tool-call summaries are
+/// presentation fallbacks and must never become result evidence.
+pub(crate) fn firebender_result_content(message: &Value) -> Option<String> {
+    (message.get("role").and_then(Value::as_str) == Some("tool"))
+        .then(|| message.get("content").and_then(firebender_content_text))
+        .flatten()
+}
+
 pub(crate) fn firebender_message_text(message: &Value) -> Option<String> {
-    if let Some(content) = message.get("content") {
-        match content {
-            Value::Object(object) => {
-                if let Some(text) = object
-                    .get("text")
-                    .or_else(|| object.get("content"))
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.trim().is_empty())
-                {
-                    return Some(text.to_owned());
-                }
-            }
-            _ => {
-                if let Some(text) =
-                    provider_value_text(content).filter(|text| !text.trim().is_empty())
-                {
-                    return Some(text);
-                }
-            }
-        }
+    if let Some(text) = message.get("content").and_then(firebender_content_text) {
+        return Some(text);
     }
     if let Some(tool_calls) = message
         .get("tool_calls")
@@ -47,4 +40,16 @@ pub(crate) fn firebender_message_text(message: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
+}
+
+fn firebender_content_text(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::Object(object) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => provider_value_text(content),
+    }?;
+    (!text.trim().is_empty()).then_some(text)
 }

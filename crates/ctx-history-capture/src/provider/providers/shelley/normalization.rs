@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, Fidelity, ProviderCaptureEnvelope, ProviderEventEnvelope,
-    ProviderSourceTrust,
+    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
+    ProviderEventEnvelope, ProviderSourceTrust,
 };
 use serde_json::{json, Value};
 
@@ -13,7 +13,7 @@ use crate::{ProviderAdapterContext, ProviderNormalizationResult, SHELLEY_SQLITE_
 
 use super::relationships::{
     shelley_event_index, shelley_event_role, shelley_event_type, shelley_message_body,
-    shelley_message_text, ShelleyConversationRow, ShelleyMessageRow,
+    shelley_message_complete_text, shelley_message_text, ShelleyConversationRow, ShelleyMessageRow,
 };
 
 pub(super) fn shelley_message_normalization(
@@ -23,7 +23,8 @@ pub(super) fn shelley_message_normalization(
     user_version: i64,
     schema_fingerprint: &str,
     context: &ProviderAdapterContext,
-) -> ProviderNormalizationResult {
+    parent_bearing: bool,
+) -> crate::Result<ProviderNormalizationResult> {
     let mut result = ProviderNormalizationResult::default();
     let started_at = shelley_timestamp(conversation.created_at.as_deref(), context.imported_at);
     let ended_at = conversation
@@ -31,19 +32,60 @@ pub(super) fn shelley_message_normalization(
         .as_deref()
         .map(|timestamp| shelley_timestamp(Some(timestamp), context.imported_at));
     let occurred_at = shelley_timestamp(message.created_at.as_deref(), started_at);
-    let body = shelley_message_body(&message);
-    let text = shelley_message_text(&message, &body)
+    let mut event = shelley_complete_event(&message, conversation, occurred_at);
+    let needs_locator = matches!(
+        event.event_type,
+        EventType::ToolOutput | EventType::CommandOutput
+    ) || (event.event_type == EventType::Message
+        && event
+            .payload
+            .pointer("/text_retention/truncated")
+            .and_then(Value::as_bool)
+            == Some(true));
+    if needs_locator {
+        let complete_text = shelley_message_complete_text(&message)
+            .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
+        crate::complete_content::sqlite::attach_shelley_content_locator(
+            &mut event,
+            &message,
+            conversation,
+            parent_bearing,
+            &complete_text,
+        )?;
+    }
+    result.captures.push((
+        message.rowid.max(0) as usize,
+        shelley_capture(
+            ShelleyCaptureDraft {
+                conversation,
+                started_at,
+                ended_at,
+                raw_source_path,
+                user_version,
+                schema_fingerprint,
+                event: Some(event),
+            },
+            context,
+        ),
+    ));
+    Ok(result)
+}
+
+pub(crate) fn shelley_complete_event(
+    message: &ShelleyMessageRow,
+    conversation: &ShelleyConversationRow,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let body = shelley_message_body(message);
+    let text = shelley_message_text(message, &body)
         .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
-    let event_type = shelley_event_type(&message, &body);
+    let event_type = shelley_event_type(message, &body);
     let role = shelley_event_role(&message.entry_type);
-    // Compatibility: native traversal keys never participate in normalized identity. The
-    // existing logical index and message-id hash remain the public event identity inputs.
-    let provider_event_index = shelley_event_index(&message);
-    let event = native_event(NativeEventDraft {
+    native_event(NativeEventDraft {
         provider: CaptureProvider::Shelley,
         source_format: SHELLEY_SQLITE_SOURCE_FORMAT,
         provider_session_id: conversation.conversation_id.clone(),
-        provider_event_index,
+        provider_event_index: shelley_event_index(message),
         provider_event_hash: Some(message.message_id.clone()),
         cursor: format!(
             "conversation:{}:sequence:{}:message:{}",
@@ -69,23 +111,7 @@ pub(super) fn shelley_message_normalization(
             "model_name": message.model_name,
             "forked_from_message_id": message.forked_from_message_id,
         }),
-    });
-    result.captures.push((
-        message.rowid.max(0) as usize,
-        shelley_capture(
-            ShelleyCaptureDraft {
-                conversation,
-                started_at,
-                ended_at,
-                raw_source_path,
-                user_version,
-                schema_fingerprint,
-                event: Some(event),
-            },
-            context,
-        ),
-    ));
-    result
+    })
 }
 
 pub(super) fn shelley_empty_conversation_normalization(

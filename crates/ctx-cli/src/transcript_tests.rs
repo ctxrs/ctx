@@ -92,21 +92,28 @@ fn recoverable_message_guidance_still_offers_complete_content() {
 #[test]
 fn locate_reports_complete_content_capability_without_locator_material() {
     use ctx_history_capture::complete_content::{
-        CompleteContentBodyDigest, CompleteContentSourceFamily,
+        CompleteContentBodyDigest, CompleteContentSourceFamily, VerifiedContentLocatorV1,
+        VerifiedContentLocatorsV1, VerifiedContentRole,
     };
+    use ctx_history_core::ContentRef;
 
     let mut event = test_event();
-    let locator = PersistedCompleteContentLocatorV1::new(
-        CompleteContentSourceFamily::Fixture,
-        "ascii-token",
-        b"private-locator",
+    let mut address = [0_u8; 16];
+    address[8..].copy_from_slice(&1_u64.to_be_bytes());
+    let locator = VerifiedContentLocatorV1::new(
+        VerifiedContentRole::MessageBody,
+        "codex.message-body.v1",
+        ContentRef::from_bytes(b"private-body").unwrap(),
+        CompleteContentSourceFamily::Jsonl,
+        "jsonl-range-v1",
+        &address,
         "native-1",
         CompleteContentBodyDigest::from_text("private-record"),
-        CompleteContentBodyDigest::from_text("private-body"),
     )
     .unwrap();
+    let locators = VerifiedContentLocatorsV1::singleton(locator).unwrap();
     event.sync.metadata = json!({
-        COMPLETE_CONTENT_LOCATOR_METADATA_KEY: locator.to_metadata_value(),
+        VERIFIED_CONTENT_LOCATORS_METADATA_KEY: locators.to_metadata_value(),
         "source_record_ordinal": 4,
         "source_record_subrecord_index": 1,
     });

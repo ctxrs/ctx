@@ -22,7 +22,7 @@ impl ProviderProjectionOutput for CollectingProjectionOutput {
 }
 
 #[test]
-fn one_pass_producer_keeps_tool_only_and_metadata_only_rows() {
+fn one_pass_producer_keeps_calls_results_and_metadata_only_rows() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "create table chat_sessions (
@@ -48,6 +48,24 @@ fn one_pass_producer_keeps_tool_only_and_metadata_only_rows() {
                     "id": "call-1",
                     "function": {"name": "read_file", "arguments": "{}"}
                 }]
+            }]))
+            .unwrap(),
+            "{}",
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into chat_sessions values (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            "result-only",
+            "Result only",
+            1_700_000_000_004_i64,
+            1_700_000_000_005_i64,
+            serde_json::to_string(&json!([{
+                "id": "result-1",
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": {"type": "text", "text": "authoritative result bytes"}
             }]))
             .unwrap(),
             "{}",
@@ -120,10 +138,10 @@ fn one_pass_producer_keeps_tool_only_and_metadata_only_rows() {
         }
     }
 
-    assert_eq!(fetch_calls.get(), 3);
-    assert_eq!(projected_records, 2);
+    assert_eq!(fetch_calls.get(), 4);
+    assert_eq!(projected_records, 3);
     assert!(output.rejections.is_empty());
-    assert_eq!(output.normalizations.len(), 2);
+    assert_eq!(output.normalizations.len(), 3);
     let tool_capture = &output.normalizations[0].captures[0].1;
     assert_eq!(tool_capture.session.provider_session_id, "tool-only");
     assert_eq!(
@@ -136,6 +154,21 @@ fn one_pass_producer_keeps_tool_only_and_metadata_only_rows() {
         "metadata-only"
     );
     assert!(metadata_capture.event.is_none());
+    let result_event = output.normalizations[2].captures[0]
+        .1
+        .event
+        .as_ref()
+        .unwrap();
+    assert_eq!(result_event.event_type, EventType::ToolOutput);
+    assert!(result_event.payload["result_content_ref"].is_object());
+    assert!(
+        result_event.metadata[crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY]
+            .is_object()
+    );
+    assert!(!result_event
+        .payload
+        .to_string()
+        .contains("authoritative result bytes"));
 }
 
 #[test]

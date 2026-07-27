@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 use crate::captured_batch::{CapturedSqliteValue, NativeLocator};
 use crate::common::time::parse_rfc3339_utc;
-use crate::{compute_payload_hash, CaptureError, Result};
+use crate::{CaptureError, Result};
 
 use super::cursor::deepagents_decode_u64;
 use super::deepagents_captured_error;
@@ -131,10 +131,10 @@ pub(super) fn deepagents_locator(
     kind: &str,
     value: &impl serde::Serialize,
 ) -> Result<NativeLocator> {
-    let hash = compute_payload_hash(&serde_json::to_value(value).map_err(|error| {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
         CaptureError::InvalidPayload(format!("Deep Agents locator encoding failed: {error}"))
-    })?)?;
-    NativeLocator::new(kind, hash.into_bytes()).map_err(deepagents_captured_error)
+    })?;
+    NativeLocator::new(kind, encoded).map_err(deepagents_captured_error)
 }
 
 pub(super) fn deepagents_encode_offsets(offsets: &[u32]) -> Vec<u8> {

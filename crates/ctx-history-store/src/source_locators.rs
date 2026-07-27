@@ -1,10 +1,15 @@
-use std::{fmt, path::Path};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ctx_history_core::CaptureProvider;
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
+use crate::connection::{parse_text_enum, parse_uuid};
 use crate::{Result, Store, StoreError};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -48,10 +53,137 @@ impl fmt::Debug for ProviderSourceLocatorObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderSourceRouteBinding {
+    provider: CaptureProvider,
+    source_format: String,
+    machine_id: String,
+    canonical_source_identity: String,
+    alias_group_identity: String,
+}
+
+impl fmt::Debug for ProviderSourceRouteBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderSourceRouteBinding")
+            .field("provider", &self.provider)
+            .field("source_format", &self.source_format)
+            .field("machine_id", &self.machine_id)
+            .field(
+                "canonical_source_identity_bytes",
+                &self.canonical_source_identity.len(),
+            )
+            .field(
+                "alias_group_identity_bytes",
+                &self.alias_group_identity.len(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderSourceLocatorResolution {
     pub canonical_source_identity: String,
     pub relocated: bool,
+    route_binding: ProviderSourceRouteBinding,
+}
+
+impl ProviderSourceLocatorResolution {
+    pub fn route_binding(&self) -> ProviderSourceRouteBinding {
+        self.route_binding.clone()
+    }
+}
+
+impl fmt::Debug for ProviderSourceLocatorResolution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderSourceLocatorResolution")
+            .field(
+                "canonical_source_identity_bytes",
+                &self.canonical_source_identity.len(),
+            )
+            .field("relocated", &self.relocated)
+            .field("route_binding", &self.route_binding)
+            .finish()
+    }
+}
+
+/// The exact current local provider path authorized for one event.
+///
+/// This is route authorization, not proof that source bytes are unchanged.
+/// A content broker must combine it with the event's typed verified-content
+/// locator, dispatch to that provider-family resolver, and require the resolver
+/// to verify its provider-specific source identity/snapshot and addressed-record
+/// digest after opening. It must not reuse the capture source's historical path
+/// or interpret `source_revision` as a universal file digest.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthorizedSourceRoute {
+    event_id: Uuid,
+    capture_source_id: Uuid,
+    provider: CaptureProvider,
+    source_format: String,
+    machine_id: String,
+    canonical_source_identity: String,
+    raw_source_path: PathBuf,
+    source_revision: String,
+}
+
+impl AuthorizedSourceRoute {
+    pub const fn event_id(&self) -> Uuid {
+        self.event_id
+    }
+
+    pub const fn capture_source_id(&self) -> Uuid {
+        self.capture_source_id
+    }
+
+    pub const fn provider(&self) -> CaptureProvider {
+        self.provider
+    }
+
+    pub fn source_format(&self) -> &str {
+        &self.source_format
+    }
+
+    pub fn machine_id(&self) -> &str {
+        &self.machine_id
+    }
+
+    pub fn canonical_source_identity(&self) -> &str {
+        &self.canonical_source_identity
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.raw_source_path
+    }
+
+    /// Opaque revision evidence used by provider-source reconciliation.
+    ///
+    /// Its construction differs by provider and it is not a portable
+    /// `SourceSnapshot`. A broker may pass it only to a provider-specific
+    /// verifier that understands that provider's revision contract.
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
+}
+
+impl fmt::Debug for AuthorizedSourceRoute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedSourceRoute")
+            .field("event_id", &self.event_id)
+            .field("capture_source_id", &self.capture_source_id)
+            .field("provider", &self.provider)
+            .field("source_format", &self.source_format)
+            .field("machine_id", &self.machine_id)
+            .field(
+                "canonical_source_identity_bytes",
+                &self.canonical_source_identity.len(),
+            )
+            .field("raw_source_path", &"<local-path>")
+            .field("source_revision_bytes", &self.source_revision.len())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -105,7 +237,7 @@ impl Store {
                     true,
                     exact.is_relocation_alias,
                 )?;
-                return Ok(resolution(&exact, exact.is_relocation_alias));
+                return Ok(resolution(observation, &exact, exact.is_relocation_alias));
             }
             let current = self
                 .current_provider_source_locator(observation, &exact.alias_group_identity)?
@@ -123,7 +255,7 @@ impl Store {
             }
             self.set_provider_source_current(observation, &current, &exact)?;
             self.update_provider_source_locator(&exact, observation, true, true)?;
-            return Ok(resolution(&exact, true));
+            return Ok(resolution(observation, &exact, true));
         }
 
         let candidates = self.provider_source_revision_candidates(observation)?;
@@ -154,6 +286,11 @@ impl Store {
             return Ok(ProviderSourceLocatorResolution {
                 canonical_source_identity: candidate.canonical_source_identity.clone(),
                 relocated: true,
+                route_binding: route_binding(
+                    observation,
+                    &candidate.canonical_source_identity,
+                    &candidate.alias_group_identity,
+                ),
             });
         }
 
@@ -166,7 +303,220 @@ impl Store {
         Ok(ProviderSourceLocatorResolution {
             canonical_source_identity: observation.proposed_source_identity.clone(),
             relocated: false,
+            route_binding: route_binding(
+                observation,
+                &observation.proposed_source_identity,
+                &locator_storage_key(&observation.locator_identity),
+            ),
         })
+    }
+
+    /// Binds one persisted capture source to the exact physical alias group
+    /// selected during provider-source reconciliation. The binding is local
+    /// authorization state and does not affect the semantic projection journal.
+    pub fn bind_capture_source_provider_route(
+        &self,
+        capture_source_id: Uuid,
+        binding: &ProviderSourceRouteBinding,
+    ) -> Result<()> {
+        self.with_import_batch_write(|| {
+            self.bind_capture_source_provider_route_inner(capture_source_id, binding)
+        })
+    }
+
+    fn bind_capture_source_provider_route_inner(
+        &self,
+        capture_source_id: Uuid,
+        binding: &ProviderSourceRouteBinding,
+    ) -> Result<()> {
+        let expected = self
+            .conn
+            .query_row(
+                "SELECT provider, source_format, machine_id, source_identity
+                 FROM capture_sources WHERE id = ?1",
+                [capture_source_id.to_string()],
+                |row| {
+                    Ok((
+                        parse_text_enum::<CaptureProvider>(row.get::<_, String>(0)?)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (matches_capture_source, matches_except_machine) = expected.map_or(
+            (false, false),
+            |(provider, source_format, machine_id, canonical_source_identity)| {
+                let stable_fields_match = provider == binding.provider
+                    && source_format.as_deref() == Some(binding.source_format.as_str())
+                    && canonical_source_identity.as_deref()
+                        == Some(binding.canonical_source_identity.as_str());
+                (
+                    stable_fields_match && machine_id == binding.machine_id,
+                    stable_fields_match,
+                )
+            },
+        );
+        let locator_exists = self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM provider_source_locators
+                 WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+                   AND canonical_source_identity = ?4 AND alias_group_identity = ?5
+             )",
+            params![
+                binding.provider.as_str(),
+                binding.source_format,
+                binding.machine_id,
+                binding.canonical_source_identity,
+                binding.alias_group_identity,
+            ],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !locator_exists {
+            return Err(StoreError::CaptureSourceProviderRouteConflict { capture_source_id });
+        }
+        if !matches_capture_source {
+            // `machine_id` is operator-configurable. A later import may rename
+            // the same machine while retaining the exact path and provider
+            // revision. Preserve the already-authorized route in that one
+            // byte-equivalent case; all other rebinding attempts fail closed.
+            let equivalent = self.equivalent_current_provider_route(capture_source_id, binding)?;
+            if matches_except_machine && equivalent {
+                return Ok(());
+            }
+            return Err(StoreError::CaptureSourceProviderRouteConflict { capture_source_id });
+        }
+
+        self.conn.execute(
+            "INSERT INTO capture_source_provider_routes
+             (capture_source_id, provider, source_format, machine_id, alias_group_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(capture_source_id) DO NOTHING",
+            params![
+                capture_source_id.to_string(),
+                binding.provider.as_str(),
+                binding.source_format,
+                binding.machine_id,
+                binding.alias_group_identity,
+            ],
+        )?;
+        let persisted = self.conn.query_row(
+            "SELECT provider, source_format, machine_id, alias_group_identity
+             FROM capture_source_provider_routes WHERE capture_source_id = ?1",
+            [capture_source_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        let proposed = (
+            binding.provider.as_str().to_owned(),
+            binding.source_format.clone(),
+            binding.machine_id.clone(),
+            binding.alias_group_identity.clone(),
+        );
+        if persisted != proposed {
+            if self.equivalent_current_provider_route(capture_source_id, binding)? {
+                self.conn.execute(
+                    "UPDATE capture_source_provider_routes
+                     SET provider = ?2, source_format = ?3, machine_id = ?4,
+                         alias_group_identity = ?5
+                     WHERE capture_source_id = ?1",
+                    params![
+                        capture_source_id.to_string(),
+                        binding.provider.as_str(),
+                        binding.source_format,
+                        binding.machine_id,
+                        binding.alias_group_identity,
+                    ],
+                )?;
+                return Ok(());
+            }
+            return Err(StoreError::CaptureSourceProviderRouteConflict { capture_source_id });
+        }
+        Ok(())
+    }
+
+    fn equivalent_current_provider_route(
+        &self,
+        capture_source_id: Uuid,
+        proposed: &ProviderSourceRouteBinding,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM capture_source_provider_routes bound
+                 JOIN provider_source_locators current
+                   ON current.provider = bound.provider
+                  AND current.source_format = bound.source_format
+                  AND current.machine_id = bound.machine_id
+                  AND current.alias_group_identity = bound.alias_group_identity
+                  AND current.is_current = 1
+                 JOIN provider_source_locators candidate
+                   ON candidate.provider = ?2
+                  AND candidate.source_format = ?3
+                  AND candidate.machine_id = ?4
+                  AND candidate.alias_group_identity = ?5
+                  AND candidate.is_current = 1
+                 WHERE bound.capture_source_id = ?1
+                   AND current.canonical_source_identity = ?6
+                   AND candidate.canonical_source_identity = ?6
+                   AND current.raw_source_path IS NOT NULL
+                   AND current.raw_source_path = candidate.raw_source_path
+                   AND current.source_revision = candidate.source_revision
+             )",
+            params![
+                capture_source_id.to_string(),
+                proposed.provider.as_str(),
+                proposed.source_format,
+                proposed.machine_id,
+                proposed.alias_group_identity,
+                proposed.canonical_source_identity,
+            ],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
+    }
+
+    /// Resolves the one current physical provider source authorized for an
+    /// event. Historical capture paths are deliberately never consulted.
+    pub fn authorized_source_route_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<AuthorizedSourceRoute> {
+        let mut statement = self.conn.prepare(
+            "SELECT e.id, cs.id, cs.provider, cs.source_format, cs.machine_id,
+                    cs.source_identity, locator.raw_source_path, locator.source_revision
+             FROM events e
+             JOIN capture_sources cs ON cs.id = e.capture_source_id
+             JOIN capture_source_provider_routes route ON route.capture_source_id = cs.id
+             JOIN provider_source_locators locator
+               ON locator.provider = route.provider
+              AND locator.source_format = route.source_format
+              AND locator.machine_id = route.machine_id
+              AND locator.alias_group_identity = route.alias_group_identity
+              AND locator.is_current = 1
+             WHERE e.id = ?1
+               AND route.provider = cs.provider
+               AND route.source_format = cs.source_format
+               AND route.machine_id = cs.machine_id
+               AND locator.canonical_source_identity = cs.source_identity
+               AND locator.raw_source_path IS NOT NULL
+               AND locator.raw_source_path <> ''
+             ORDER BY locator.locator_identity
+             LIMIT 2",
+        )?;
+        let rows = statement.query_map([event_id.to_string()], authorized_source_route_row)?;
+        let mut routes = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        match routes.len() {
+            0 => Err(StoreError::AuthorizedSourceRouteUnavailable { event_id }),
+            1 => Ok(routes.pop().expect("one route was counted")),
+            _ => Err(StoreError::AuthorizedSourceRouteAmbiguous { event_id }),
+        }
     }
 
     fn provider_source_locator_by_identity(
@@ -357,11 +707,47 @@ fn locator_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
     })
 }
 
-fn resolution(row: &LocatorRow, relocated: bool) -> ProviderSourceLocatorResolution {
+fn resolution(
+    observation: &ProviderSourceLocatorObservation,
+    row: &LocatorRow,
+    relocated: bool,
+) -> ProviderSourceLocatorResolution {
     ProviderSourceLocatorResolution {
         canonical_source_identity: row.canonical_source_identity.clone(),
         relocated,
+        route_binding: route_binding(
+            observation,
+            &row.canonical_source_identity,
+            &row.alias_group_identity,
+        ),
     }
+}
+
+fn route_binding(
+    observation: &ProviderSourceLocatorObservation,
+    canonical_source_identity: &str,
+    alias_group_identity: &str,
+) -> ProviderSourceRouteBinding {
+    ProviderSourceRouteBinding {
+        provider: observation.provider,
+        source_format: observation.source_format.clone(),
+        machine_id: observation.machine_id.clone(),
+        canonical_source_identity: canonical_source_identity.to_owned(),
+        alias_group_identity: alias_group_identity.to_owned(),
+    }
+}
+
+fn authorized_source_route_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthorizedSourceRoute> {
+    Ok(AuthorizedSourceRoute {
+        event_id: parse_uuid(row.get::<_, String>(0)?)?,
+        capture_source_id: parse_uuid(row.get::<_, String>(1)?)?,
+        provider: parse_text_enum::<CaptureProvider>(row.get::<_, String>(2)?)?,
+        source_format: row.get(3)?,
+        machine_id: row.get(4)?,
+        canonical_source_identity: row.get(5)?,
+        raw_source_path: PathBuf::from(row.get::<_, String>(6)?),
+        source_revision: row.get(7)?,
+    })
 }
 
 fn exact_locator_is_missing(path: Option<&str>) -> bool {
@@ -375,226 +761,4 @@ fn exact_locator_is_missing(path: Option<&str>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn observation(
-        path: &Path,
-        locator: &str,
-        cursor: &str,
-        revision: &str,
-    ) -> ProviderSourceLocatorObservation {
-        ProviderSourceLocatorObservation {
-            provider: CaptureProvider::Codex,
-            source_format: "codex_session_jsonl".to_owned(),
-            machine_id: "machine-1".to_owned(),
-            locator_identity: locator.to_owned(),
-            cursor_stream: cursor.to_owned(),
-            proposed_source_identity: format!("identity-{locator}"),
-            raw_source_path: Some(path.to_string_lossy().into_owned()),
-            source_revision: revision.to_owned(),
-            observed_at_ms: 1,
-        }
-    }
-
-    #[test]
-    fn changed_source_at_a_new_locator_never_aliases() {
-        let temp = tempfile::tempdir().unwrap();
-        let old_path = temp.path().join("old.jsonl");
-        let new_path = temp.path().join("new.jsonl");
-        std::fs::write(&old_path, b"old source").unwrap();
-        let store = Store::open(temp.path().join("ctx.db")).unwrap();
-        let first = store
-            .reconcile_provider_source_locator(&observation(
-                &old_path,
-                "old-locator",
-                "old-cursor",
-                "revision-1",
-            ))
-            .unwrap();
-        std::fs::remove_file(&old_path).unwrap();
-        std::fs::write(&new_path, b"rewritten source").unwrap();
-        let rewritten = store
-            .reconcile_provider_source_locator(&observation(
-                &new_path,
-                "new-locator",
-                "new-cursor",
-                "revision-2",
-            ))
-            .unwrap();
-
-        assert!(!rewritten.relocated);
-        assert_ne!(
-            rewritten.canonical_source_identity,
-            first.canonical_source_identity
-        );
-    }
-
-    fn assert_shared_canonical_source_allows_multiple_current_physical_sources() {
-        let temp = tempfile::tempdir().unwrap();
-        let first_path = temp.path().join("first.jsonl");
-        let second_path = temp.path().join("second.jsonl");
-        let moved_path = temp.path().join("moved-first.jsonl");
-        std::fs::write(&first_path, b"first source").unwrap();
-        std::fs::write(&second_path, b"second source").unwrap();
-        let store = Store::open(temp.path().join("ctx.db")).unwrap();
-        let mut first = observation(&first_path, "first", "cursor-first", "revision-first");
-        first.proposed_source_identity = "shared-root-identity".to_owned();
-        let mut second = observation(&second_path, "second", "cursor-second", "revision-second");
-        second.proposed_source_identity = "shared-root-identity".to_owned();
-
-        assert!(
-            !store
-                .reconcile_provider_source_locator(&first)
-                .unwrap()
-                .relocated
-        );
-        assert!(
-            !store
-                .reconcile_provider_source_locator(&second)
-                .unwrap()
-                .relocated
-        );
-
-        std::fs::rename(&first_path, &moved_path).unwrap();
-        let mut moved = observation(
-            &moved_path,
-            "moved-first",
-            "cursor-moved-first",
-            "revision-first",
-        );
-        moved.proposed_source_identity = "new-root-identity".to_owned();
-        let resolution = store.reconcile_provider_source_locator(&moved).unwrap();
-        assert!(resolution.relocated);
-        assert_eq!(resolution.canonical_source_identity, "shared-root-identity");
-
-        let second_replay = store.reconcile_provider_source_locator(&second).unwrap();
-        assert!(!second_replay.relocated);
-        assert_eq!(
-            second_replay.canonical_source_identity,
-            "shared-root-identity"
-        );
-    }
-
-    #[test]
-    fn unique_missing_locator_reconciles_and_survives_restart() {
-        let temp = tempfile::tempdir().unwrap();
-        let database = temp.path().join("ctx.db");
-        let old_path = temp.path().join("old.jsonl");
-        let new_path = temp.path().join("new.jsonl");
-        std::fs::write(&old_path, b"same provider source").unwrap();
-        let store = Store::open(&database).unwrap();
-        let first = store
-            .reconcile_provider_source_locator(&observation(
-                &old_path,
-                "old-locator",
-                "old-cursor",
-                "revision-1",
-            ))
-            .unwrap();
-        assert!(!first.relocated);
-        std::fs::rename(&old_path, &new_path).unwrap();
-        let moved = store
-            .reconcile_provider_source_locator(&observation(
-                &new_path,
-                "new-locator",
-                "new-cursor",
-                "revision-1",
-            ))
-            .unwrap();
-        assert!(moved.relocated);
-        assert_eq!(moved.canonical_source_identity, "identity-old-locator");
-        drop(store);
-
-        let reopened = Store::open(&database).unwrap();
-        let appended = reopened
-            .reconcile_provider_source_locator(&observation(
-                &new_path,
-                "new-locator",
-                "new-cursor",
-                "revision-2",
-            ))
-            .unwrap();
-        assert!(appended.relocated);
-        assert_eq!(appended.canonical_source_identity, "identity-old-locator");
-
-        std::fs::rename(&new_path, &old_path).unwrap();
-        let moved_back = reopened
-            .reconcile_provider_source_locator(&observation(
-                &old_path,
-                "old-locator",
-                "old-cursor",
-                "revision-2",
-            ))
-            .unwrap();
-        assert!(moved_back.relocated);
-        assert_eq!(moved_back.canonical_source_identity, "identity-old-locator");
-    }
-
-    #[test]
-    fn identical_live_sources_never_alias_and_known_alias_collision_fails_closed() {
-        let temp = tempfile::tempdir().unwrap();
-        let first_path = temp.path().join("first.jsonl");
-        let second_path = temp.path().join("second.jsonl");
-        let third_path = temp.path().join("third.jsonl");
-        std::fs::write(&first_path, b"same").unwrap();
-        let store = Store::open(temp.path().join("ctx.db")).unwrap();
-        store
-            .reconcile_provider_source_locator(&observation(
-                &first_path,
-                "first",
-                "cursor-first",
-                "revision-same",
-            ))
-            .unwrap();
-        std::fs::rename(&first_path, &second_path).unwrap();
-        let moved = store
-            .reconcile_provider_source_locator(&observation(
-                &second_path,
-                "second",
-                "cursor-second",
-                "revision-same",
-            ))
-            .unwrap();
-        assert!(moved.relocated);
-
-        std::fs::write(&first_path, b"same").unwrap();
-        let error = store
-            .reconcile_provider_source_locator(&observation(
-                &first_path,
-                "first",
-                "cursor-first",
-                "revision-same",
-            ))
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            StoreError::ProviderSourceRelocationAmbiguous { .. }
-        ));
-
-        std::fs::write(&third_path, b"same").unwrap();
-        let third = store
-            .reconcile_provider_source_locator(&observation(
-                &third_path,
-                "third",
-                "cursor-third",
-                "revision-same",
-            ))
-            .unwrap();
-        assert!(!third.relocated, "multiple live sources must stay distinct");
-        assert_shared_canonical_source_allows_multiple_current_physical_sources();
-    }
-
-    #[test]
-    fn debug_output_never_contains_the_local_path() {
-        let observation = observation(
-            Path::new("/private/home/alice/provider/session.jsonl"),
-            "private-locator",
-            "private-cursor",
-            "private-revision",
-        );
-        let debug = format!("{observation:?}");
-        assert!(!debug.contains("/private/home/alice"));
-        assert!(debug.contains("<local-path>"));
-    }
-}
+mod tests;

@@ -20,7 +20,7 @@ use super::{
 };
 
 const CRUSH_POSITION_KIND: &str = "crush-sqlite-keyset-v1";
-const CRUSH_LOCATOR_KIND: &str = "crush-sqlite-row-v1";
+pub(crate) const CRUSH_LOCATOR_KIND: &str = "crush-sqlite-row-v1";
 const CRUSH_POSITION_BYTES: usize = 1 + 8 + 8;
 pub(super) const CRUSH_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 13;
 
@@ -504,7 +504,9 @@ fn session_values_at(
     ])
 }
 
-fn message_child_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
+pub(crate) fn message_child_values(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
     let mut values = vec![
         optional_integer_value(row.get(0)?),
         optional_integer_value(row.get(1)?),
@@ -512,6 +514,25 @@ fn message_child_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<Capture
     ];
     values.extend(message_values_at(row, 3)?);
     Ok(values)
+}
+
+pub(super) fn crush_message_values_at_rowid(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    let session_columns = super::source::session_columns(conn)?;
+    let message_columns = super::source::message_columns(conn)?;
+    let parent_created_at = optional_session_column(&session_columns, "created_at");
+    let parent_updated_at = optional_session_column(&session_columns, "updated_at");
+    let message_projection = message_projection(&message_columns, "m");
+    let sql = format!(
+        "select s.rowid, cast({parent_created_at} as integer), \
+                cast({parent_updated_at} as integer), {message_projection} \
+         from messages m left join sessions s on s.id = m.session_id where m.rowid = ?1"
+    );
+    conn.query_row(&sql, [rowid], message_child_values)
+        .optional()
+        .map_err(CaptureError::from)
 }
 
 fn message_values_at(

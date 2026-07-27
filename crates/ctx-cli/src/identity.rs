@@ -243,7 +243,7 @@ pub fn device_id(data_root: &Path) -> Result<String> {
 fn device_id_at_path(path: &Path) -> Result<String> {
     if path.exists() {
         let mut value: serde_json::Value = serde_json::from_slice(
-            &fs::read(&path).with_context(|| format!("read {}", path.display()))?,
+            &fs::read(path).with_context(|| format!("read {}", path.display()))?,
         )
         .with_context(|| format!("parse {}", path.display()))?;
         if let Some(id) = value
@@ -275,7 +275,7 @@ fn device_id_at_path(path: &Path) -> Result<String> {
         "device_id": id,
         "created_at": utc_now(),
     }))?;
-    write_private_file(&path, &body).with_context(|| format!("write {}", path.display()))?;
+    write_private_file(path, &body).with_context(|| format!("write {}", path.display()))?;
     Ok(id)
 }
 
@@ -459,6 +459,14 @@ pub(crate) fn create_private_file(path: &Path, body: &[u8]) -> std::io::Result<(
     file.write_all(body)
 }
 
+#[cfg(not(unix))]
+pub(crate) fn create_private_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::{fs::OpenOptions, io::Write};
+
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    file.write_all(body)
+}
+
 #[cfg(test)]
 mod installation_identity_tests {
     use std::sync::{Arc, Barrier};
@@ -587,12 +595,4 @@ mod installation_identity_tests {
         assert_eq!(persisted["device_id"], id);
         assert_ne!(persisted["created_at"], "old");
     }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn create_private_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::{fs::OpenOptions, io::Write};
-
-    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
-    file.write_all(body)
 }

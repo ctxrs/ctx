@@ -167,13 +167,25 @@ pub struct JournalRecord {
 ///
 /// These bytes are excluded from canonical payload hashes, record digests,
 /// cumulative digests, and durable journal chunks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultContentSidecar {
     pub journal_sequence: u64,
     pub stable_entity_id: Uuid,
     pub content_ref: ContentRef,
     pub content: String,
+}
+
+impl std::fmt::Debug for ResultContentSidecar {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResultContentSidecar")
+            .field("journal_sequence", &self.journal_sequence)
+            .field("stable_entity_id", &self.stable_entity_id)
+            .field("content_ref", &self.content_ref)
+            .field("content", &"<redacted>")
+            .finish()
+    }
 }
 
 impl JournalRecord {

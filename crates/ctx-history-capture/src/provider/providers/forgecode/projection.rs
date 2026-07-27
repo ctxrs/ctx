@@ -18,7 +18,10 @@ use crate::provider::importer::{
 use crate::provider::normalization::provider_line_from_index;
 use crate::{CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result};
 
-use super::event::{forgecode_for_each_metric_file_touch, forgecode_timestamp};
+use super::event::{
+    forgecode_event_type, forgecode_for_each_metric_file_touch, forgecode_message_parts,
+    forgecode_message_text, forgecode_normalized_result_content, forgecode_timestamp,
+};
 use super::normalization::{forgecode_capture, forgecode_event, ForgeCodeCaptureContext};
 use super::source::{
     decode_forgecode_conversation, decode_forgecode_position, ForgeCodeConversationRow,
@@ -51,6 +54,10 @@ impl CapturedBatchProjector for ForgeCodeCapturedBatchProjector {
                     decode_forgecode_conversation(values).map_err(ProviderProjectionFatal::new)?;
                 forgecode_project_row(
                     &row,
+                    ForgeCodeResultSource {
+                        locator: record.locator(),
+                        values,
+                    },
                     &self.raw_source_path,
                     self.user_version,
                     &self.schema_fingerprint,
@@ -110,8 +117,14 @@ impl CapturedBatchProjector for ForgeCodeCapturedBatchProjector {
     }
 }
 
+struct ForgeCodeResultSource<'a> {
+    locator: &'a crate::captured_batch::NativeLocator,
+    values: &'a [CapturedSqliteValue],
+}
+
 fn forgecode_project_row(
     row: &ForgeCodeConversationRow,
+    result_source: ForgeCodeResultSource<'_>,
     raw_source_path: &str,
     user_version: i64,
     schema_fingerprint: &str,
@@ -168,7 +181,26 @@ fn forgecode_project_row(
             let provider_event_index = (index as u64).saturating_add(1);
             let occurred_at =
                 started_at + Duration::milliseconds(i64::try_from(index).unwrap_or(i64::MAX));
-            let event = forgecode_event(row, entry, provider_event_index, occurred_at);
+            let mut event = forgecode_event(row, entry, provider_event_index, occurred_at);
+            let parts = forgecode_message_parts(entry);
+            crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                &mut event,
+                CaptureProvider::ForgeCode,
+                FORGECODE_SQLITE_SOURCE_FORMAT,
+                result_source.locator,
+                result_source.values,
+                forgecode_normalized_result_content(parts.body),
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+            crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+                &mut event,
+                CaptureProvider::ForgeCode,
+                FORGECODE_SQLITE_SOURCE_FORMAT,
+                result_source.locator,
+                result_source.values,
+                || forgecode_message_text(parts, forgecode_event_type(parts)),
+            )
+            .map_err(ProviderProjectionFatal::new)?;
             let line = provider_line_from_index(provider_event_index);
             output.use_explicit_file_touches();
             let mut capture = Some(forgecode_capture(

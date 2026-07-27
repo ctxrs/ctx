@@ -5,7 +5,9 @@ use ctx_history_core::{EventRole, EventType};
 use serde_json::Value;
 
 use crate::common::time::parse_rfc3339_utc;
-use crate::provider::normalization::{provider_role, provider_value_text};
+use crate::provider::normalization::{
+    provider_explicit_result_value_text, provider_role, provider_value_text,
+};
 use crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 
 #[derive(Debug, Clone)]
@@ -232,7 +234,7 @@ fn openhands_role(value: &Value, entry_type: &str) -> EventRole {
 fn openhands_event_text(value: &Value, entry_type: &str, event_type: EventType) -> String {
     if let Some(text) = value
         .pointer("/llm_message/content")
-        .and_then(provider_value_text)
+        .and_then(provider_explicit_result_value_text)
     {
         return text;
     }
@@ -279,6 +281,44 @@ fn openhands_event_text(value: &Value, entry_type: &str, event_type: EventType) 
     } else {
         String::new()
     }
+}
+
+/// Returns the explicit result body selected by OpenHands' authoritative
+/// decoded event. It never substitutes an event-kind label.
+pub(crate) fn openhands_result_content(event: &OpenHandsDecodedEvent) -> Option<String> {
+    if !matches!(
+        event.event_type,
+        EventType::ToolOutput | EventType::CommandOutput
+    ) {
+        return None;
+    }
+    let value = &event.value;
+    value
+        .pointer("/observation/content")
+        .and_then(provider_value_text)
+        .or_else(|| {
+            value
+                .pointer("/observation/output")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            value
+                .pointer("/observation/error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            value
+                .get("content")
+                .and_then(provider_explicit_result_value_text)
+        })
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
 }
 
 #[cfg(test)]
@@ -360,5 +400,41 @@ mod tests {
                 MAX_PROVIDER_JSONL_LINE_BYTES + 1
             )
         );
+    }
+
+    #[test]
+    fn result_profile_uses_explicit_observation_bytes_only() {
+        let path = Path::new("/profile/v1_conversations/session/result.json");
+        let decoded = decode_openhands_event_value(
+            path,
+            json!({
+                "id": "result-id",
+                "timestamp": "2026-07-22T12:00:00Z",
+                "kind": "ObservationEvent",
+                "source": "environment",
+                "observation": {
+                    "kind": "ExecuteBashObservation",
+                    "content": "stdout\n"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            openhands_result_content(&decoded).as_deref(),
+            Some("stdout\n")
+        );
+
+        let no_body = decode_openhands_event_value(
+            path,
+            json!({
+                "id": "empty-result",
+                "timestamp": "2026-07-22T12:00:00Z",
+                "kind": "ObservationEvent",
+                "source": "environment",
+                "observation": {"kind": "ExecuteBashObservation"}
+            }),
+        )
+        .unwrap();
+        assert_eq!(openhands_result_content(&no_body), None);
     }
 }

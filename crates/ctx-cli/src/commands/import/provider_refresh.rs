@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use ctx_history_capture::ProviderImportSummary;
+use ctx_history_capture::{ProviderImportSummary, ProviderImportWorkResult};
 use ctx_history_core::CaptureProvider;
 
 use crate::analytics::{
@@ -59,7 +59,7 @@ struct ProviderRefreshAggregate {
     trigger: ProviderRefreshTrigger,
     source_mode: ProviderRefreshSourceMode,
     totals: ImportTotals,
-    changed: bool,
+    work_result: ProviderImportWorkResult,
 }
 
 impl ProviderRefreshCollector {
@@ -84,7 +84,7 @@ impl ProviderRefreshCollector {
         stats: &SourceStats,
     ) {
         let aggregate = self.aggregate_mut(provider, trigger, source_mode);
-        aggregate.changed |= summary.has_accepted_content();
+        aggregate.work_result = aggregate.work_result.merge(summary.work_result());
         aggregate.totals.add(summary, stats);
     }
 
@@ -148,7 +148,7 @@ impl ProviderRefreshCollector {
                         provider: aggregate.provider,
                         trigger: aggregate.trigger,
                         source_mode: aggregate.source_mode,
-                        change: if aggregate.changed {
+                        change: if aggregate.work_result == ProviderImportWorkResult::Changed {
                             ProviderRefreshChange::Changed
                         } else {
                             ProviderRefreshChange::NoOp
@@ -190,7 +190,7 @@ impl ProviderRefreshCollector {
             trigger,
             source_mode,
             totals: ImportTotals::default(),
-            changed: false,
+            work_result: ProviderImportWorkResult::NoOp,
         });
         self.aggregates
             .last_mut()

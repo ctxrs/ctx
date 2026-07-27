@@ -19,11 +19,12 @@ mod projector;
 mod source;
 
 use chat::import_mux_chat_batched;
+pub(crate) use normalization::{mux_event_id, mux_event_text, mux_event_type, mux_result_content};
 use partial::import_mux_partial_batched;
 use source::{visit_mux_session_sources, MuxSessionSource};
 
 const MUX_CAPTURE_REVISION: u32 = 2;
-const MUX_POLICY_REVISION: u32 = 4;
+const MUX_POLICY_REVISION: u32 = 5;
 const MUX_CHAT_RECORD_KIND: &str = "mux-chat-jsonl-v1";
 const MUX_PARTIAL_RECORD_KIND: &str = "mux-partial-json-v1";
 const MUX_WHOLE_JSON_POSITION_KIND: &str = "whole-json-item-v1";

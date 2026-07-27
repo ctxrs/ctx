@@ -281,6 +281,11 @@ or index failures abort the command. A source with only rejected records is a
 failure; a source with valid content and rejections completes with an explicit
 `completed_with_rejections` outcome.
 
+Import results report `change: changed|no_op` independently from insert and
+skip counters. Replacing a changed source can reconcile existing rows in place,
+so `change: changed` remains truthful even when `imported_events` is zero and
+the existing rows are counted as skipped.
+
 When `[daemon].enabled` is true, `import` may opportunistically start a short
 one-pass ctx-owned maintenance profile after the foreground import finishes.
 The daemon work includes bounded native provider-history refresh plus semantic

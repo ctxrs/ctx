@@ -18,7 +18,7 @@ use super::durability::sync_directory;
 use super::durability::{backup_path, stage_binary, sync_parent};
 #[cfg(unix)]
 use super::marker::current_install_path;
-use super::marker::{existing_install_attempt_id, install_marker_path, write_install_marker_to};
+use super::marker::{existing_install_attribution, install_marker_path, write_install_marker_to};
 #[cfg(unix)]
 use super::runtime::semantic_runtime_root;
 use super::runtime::{stage_runtime_artifact, StagedRuntime};
@@ -60,8 +60,8 @@ pub(in crate::upgrade) fn apply_artifact(
         let _ = fs::remove_file(&staged);
         return Err(error);
     }
-    let install_attempt_id = existing_install_attempt_id(&marker_path);
-    if let Err(error) = write_install_marker_to(&marker_staged, plan, install_attempt_id.as_deref())
+    let install_attribution = existing_install_attribution(&marker_path);
+    if let Err(error) = write_install_marker_to(&marker_staged, plan, install_attribution.as_ref())
     {
         let _ = fs::remove_file(&staged);
         let _ = fs::remove_file(&marker_staged);

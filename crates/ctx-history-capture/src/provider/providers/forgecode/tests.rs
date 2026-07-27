@@ -26,7 +26,7 @@ use crate::{
     FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
-use super::event::forgecode_for_each_metric_file_touch;
+use super::event::{forgecode_for_each_metric_file_touch, forgecode_normalized_result_content};
 use super::projection::ForgeCodeCapturedBatchProjector;
 use super::source::{
     decode_forgecode_conversation, decode_forgecode_position, encode_forgecode_position,
@@ -39,6 +39,31 @@ use super::{
     import_forgecode_sqlite_batched, FORGECODE_CAPTURE_REVISION, FORGECODE_POLICY_REVISION,
     FORGECODE_RECORD_KIND, FORGECODE_REJECTED_RECORD_KIND, FORGECODE_SQLITE_VALUE_OVERHEAD_BYTES,
 };
+
+#[test]
+fn forgecode_result_content_uses_dto_order_and_explicit_variant_precedence() {
+    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 23);
+    let body = json!({
+        "output": {
+            "values": [
+                {"markdown": "markdown", "text": long.clone()},
+                {"pair": [{"Text": "first"}, {"Text": "ignored"}]},
+                {"unknown": {"output": "kept as json"}}
+            ]
+        }
+    });
+
+    assert_eq!(
+        forgecode_normalized_result_content(&body),
+        Some(format!(
+            "{long}\nfirst\n{{\"unknown\":{{\"output\":\"kept as json\"}}}}"
+        ))
+    );
+    assert_eq!(
+        forgecode_normalized_result_content(&json!({"output": {"is_error": true}})),
+        None
+    );
+}
 
 #[derive(Default)]
 struct CollectingProjectionOutput {

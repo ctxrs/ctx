@@ -288,7 +288,7 @@ mod tests {
         };
         assert_eq!(
             observation.source_revision("chat-jsonl"),
-            "mux-chat-jsonl-v1:fnv1a64:f003519cea356bc5"
+            "mux-chat-jsonl-v1:fnv1a64:e350839c0c65661c"
         );
         assert_eq!(
             observation.metadata_revision(),

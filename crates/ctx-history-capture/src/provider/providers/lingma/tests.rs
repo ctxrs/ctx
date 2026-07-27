@@ -535,6 +535,74 @@ fn lingma_bounded_projection_uses_row_local_metadata_and_native_event_order() {
 }
 
 #[test]
+fn lingma_projector_attaches_only_verified_truncated_user_prompt_locator() {
+    let conn = Connection::open_in_memory().unwrap();
+    create_lingma_table(&conn);
+    let prompt = format!(
+        "exact Lingma prompt {}",
+        "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 64)
+    );
+    let summary = format!(
+        "summary-only assistant {}",
+        "y".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 64)
+    );
+    insert_lingma_row(
+        &conn,
+        "locator-session",
+        "locator-request",
+        &prompt,
+        Some(&summary),
+        None,
+        Some(1_700_000_000),
+    );
+    let mut producer = LingmaBatchProducer::new(
+        &conn,
+        test_source("lingma-snapshot:locator"),
+        initial_lingma_position().unwrap(),
+        test_schema(&conn),
+    )
+    .unwrap();
+    let batch = producer.next_batch().unwrap().unwrap();
+    let mut projector = LingmaCapturedBatchProjector::new(
+        ProviderAdapterContext {
+            machine_id: "locator-machine".to_owned(),
+            source_path: None,
+            source_root: None,
+            imported_at: test_imported_at(),
+        },
+        "local.db".to_owned(),
+        0,
+        "test-schema".to_owned(),
+    );
+    let mut output = CollectingProjectionOutput::default();
+    projector
+        .project_record(&batch.records()[0], &mut output)
+        .unwrap();
+    assert_eq!(output.normalization.captures.len(), 2);
+    let user = output.normalization.captures[0].1.event.as_ref().unwrap();
+    let locators = crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
+        &user.metadata[crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let locator = locators
+        .locator(crate::complete_content::VerifiedContentRole::MessageBody)
+        .unwrap();
+    assert_eq!(
+        locator.content_profile(),
+        "lingma-user-prompt.message-body.v1"
+    );
+    assert_eq!(locator.kind(), LINGMA_LOCATOR_KIND);
+    assert_eq!(locator.content_ref().byte_len(), prompt.len() as u64);
+
+    let assistant = output.normalization.captures[1].1.event.as_ref().unwrap();
+    assert_eq!(assistant.metadata["content_fidelity"], "summary_only");
+    assert!(assistant
+        .metadata
+        .get(crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
+        .is_none());
+}
+
+#[test]
 fn lingma_preflight_rejects_oversize_before_hydration() {
     let conn = Connection::open_in_memory().unwrap();
     create_lingma_table(&conn);

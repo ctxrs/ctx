@@ -130,6 +130,19 @@ fn native_goose_fixture_imports_searches_and_reimports() {
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
+    let tool_output = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolOutput)
+        .unwrap();
+    assert!(tool_output.payload["body"]["result_content_ref"].is_object());
+    let locators = crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
+        &tool_output.sync.metadata[crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    assert!(locators
+        .locator(crate::complete_content::VerifiedContentRole::ResultBody)
+        .is_some());
+    assert!(!tool_output.payload.to_string().contains("fixture oracle"));
     assert!(store
         .search_event_hits("goose oracle", 10)
         .unwrap()

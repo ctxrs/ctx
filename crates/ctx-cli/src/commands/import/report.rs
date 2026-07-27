@@ -3,7 +3,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use ctx_history_capture::{CaptureError, ProviderImportSummary, ProviderSourceStatus};
+use ctx_history_capture::{
+    CaptureError, ProviderImportSummary, ProviderImportWorkResult, ProviderSourceStatus,
+};
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::StoreError;
 
@@ -86,6 +88,7 @@ pub(crate) fn import_totals_json(totals: &ImportTotals) -> Value {
         "skipped_edges": totals.skipped_edges,
         "skipped": totals.skipped,
         "rejected_records": totals.failed,
+        "change": totals.work_result.as_str(),
     })
 }
 
@@ -113,6 +116,7 @@ pub(crate) fn print_import_report_human(report: &ImportReport) {
     println!("skipped_edges: {}", report.totals.skipped_edges);
     println!("skipped: {}", report.totals.skipped);
     println!("rejected_records: {}", report.totals.failed);
+    println!("change: {}", report.totals.work_result.as_str());
     println!("resume: {}", report.resume);
     println!("resume_mode: {}", report.resume_mode());
 }
@@ -143,6 +147,7 @@ pub(crate) fn source_import_json(
         "skipped_edges": summary.skipped_edges,
         "skipped": summary.skipped,
         "rejected_records": summary.failed,
+        "change": summary.work_result().as_str(),
         "rejections": provider_failures_json(summary),
     })
 }
@@ -171,6 +176,7 @@ pub(crate) fn custom_format_import_json(
         "skipped_edges": summary.skipped_edges,
         "skipped": summary.skipped,
         "rejected_records": summary.failed,
+        "change": summary.work_result().as_str(),
         "rejections": provider_failures_json(summary),
     })
 }
@@ -199,6 +205,7 @@ pub(crate) fn custom_format_failure_json(
         "skipped_events": 0,
         "skipped_edges": 0,
         "skipped": 0,
+        "change": ProviderImportWorkResult::NoOp.as_str(),
         "error": one_line_error(error),
         "rejected_records": 0,
         "rejections": [],
@@ -232,6 +239,7 @@ pub(crate) fn history_source_plugin_import_json(
         "skipped_edges": summary.skipped_edges,
         "skipped": summary.skipped,
         "rejected_records": summary.failed,
+        "change": summary.work_result().as_str(),
         "rejections": provider_failures_json(summary),
     })
 }
@@ -271,6 +279,7 @@ pub(crate) fn source_failure_json(failure: &ImportSourceFailure) -> Value {
         "skipped_events": 0,
         "skipped_edges": 0,
         "skipped": 0,
+        "change": ProviderImportWorkResult::NoOp.as_str(),
         "error": source_error_reason(&failure.source, &failure.error),
         "rejected_records": 0,
         "rejections": [],
@@ -281,6 +290,7 @@ pub(crate) fn source_failure_json(failure: &ImportSourceFailure) -> Value {
         value["skipped_edges"] = json!(summary.skipped_edges);
         value["skipped"] = json!(summary.skipped);
         value["rejected_records"] = json!(summary.failed);
+        value["change"] = json!(summary.work_result().as_str());
         value["rejections"] = json!(provider_failures_json(summary));
     }
     value
@@ -313,6 +323,7 @@ pub(crate) fn history_source_plugin_failure_json(
         "skipped_events": 0,
         "skipped_edges": 0,
         "skipped": 0,
+        "change": ProviderImportWorkResult::NoOp.as_str(),
         "error": one_line_error(error),
         "rejected_records": 0,
         "rejections": [],
@@ -323,6 +334,7 @@ pub(crate) fn history_source_plugin_failure_json(
         value["skipped_edges"] = json!(summary.skipped_edges);
         value["skipped"] = json!(summary.skipped);
         value["rejected_records"] = json!(summary.failed);
+        value["change"] = json!(summary.work_result().as_str());
         value["rejections"] = json!(provider_failures_json(summary));
     }
     value
@@ -335,8 +347,9 @@ pub(crate) fn print_source_imported(source: &SourceInfo, summary: &ProviderImpor
         "imported"
     };
     println!(
-        "{outcome} {}: sessions={} events={} edges={} skipped={} rejected={}",
+        "{outcome} {}: change={} sessions={} events={} edges={} skipped={} rejected={}",
         source.provider.as_str(),
+        summary.work_result().as_str(),
         summary.imported_sessions,
         summary.imported_events,
         summary.imported_edges,
@@ -356,8 +369,9 @@ pub(crate) fn print_history_source_plugin_imported(
         "imported"
     };
     println!(
-        "{outcome} history source plugin {}: sessions={} events={} edges={} skipped={} rejected={}",
+        "{outcome} history source plugin {}: change={} sessions={} events={} edges={} skipped={} rejected={}",
         source.label(),
+        summary.work_result().as_str(),
         summary.imported_sessions,
         summary.imported_events,
         summary.imported_edges,

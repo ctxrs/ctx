@@ -2,7 +2,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderEventEnvelope,
+    AgentType, CaptureProvider, ContentRef, EventRole, EventType, Fidelity, ProviderEventEnvelope,
     SessionStatus,
 };
 use serde_json::{json, Value};
@@ -15,6 +15,9 @@ use crate::provider::normalization::{
 };
 use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
+use super::result_content::{
+    extract_native_jsonl_result_content, native_jsonl_result_content_profile,
+};
 use super::windsurf::{windsurf_event_body, windsurf_event_text};
 
 pub(crate) fn antigravity_tool_call_text(value: &Value) -> Option<String> {
@@ -243,10 +246,43 @@ pub(crate) fn native_jsonl_event(
     line_number: usize,
     occurred_at: DateTime<Utc>,
 ) -> Option<ProviderEventEnvelope> {
+    native_jsonl_event_with_result_content_ref(
+        provider,
+        source_format,
+        value,
+        line_number,
+        occurred_at,
+    )
+    .map(|(event, _)| event)
+}
+
+pub(super) fn native_jsonl_event_with_result_content_ref(
+    provider: CaptureProvider,
+    source_format: &str,
+    value: &Value,
+    line_number: usize,
+    occurred_at: DateTime<Utc>,
+) -> Option<(ProviderEventEnvelope, Option<ContentRef>)> {
     let event_type = native_jsonl_event_type(provider, value);
     let entry_type = native_jsonl_entry_type(provider, value);
     let role = native_jsonl_role(provider, value);
-    let text = native_jsonl_event_text(provider, value, event_type, &entry_type);
+    let result_profile = (event_type == EventType::ToolOutput)
+        .then(|| native_jsonl_result_content_profile(provider))
+        .flatten();
+    let result_content = result_profile.and_then(|profile| {
+        extract_native_jsonl_result_content(profile, value)
+            .ok()
+            .flatten()
+    });
+    let text = if result_profile.is_some() {
+        result_content.clone().unwrap_or_default()
+    } else {
+        native_jsonl_event_text(provider, value, event_type, &entry_type)
+    };
+    let result_content_ref = result_content
+        .as_deref()
+        .filter(|content| content.len() <= crate::complete_content::COMPLETE_CONTENT_MAX_BODY_BYTES)
+        .and_then(|content| ContentRef::from_bytes(content.as_bytes()));
     let body_value = if provider == CaptureProvider::Windsurf {
         windsurf_event_body(value)
     } else {
@@ -271,7 +307,7 @@ pub(crate) fn native_jsonl_event(
         PROVIDER_MAX_PREVIEW_CHARS,
     );
 
-    Some(ProviderEventEnvelope {
+    let event = ProviderEventEnvelope {
         provider_event_index: (line_number - 1) as u64,
         provider_event_hash: Some(event_id.clone()),
         cursor: Some(event_id.clone()),
@@ -304,7 +340,8 @@ pub(crate) fn native_jsonl_event(
             "model": native_jsonl_model(provider, value),
             "tokens": native_jsonl_tokens(provider, value),
         }),
-    })
+    };
+    Some((event, result_content_ref))
 }
 
 pub(crate) fn native_jsonl_event_id(

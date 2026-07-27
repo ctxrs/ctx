@@ -50,6 +50,289 @@ fn seed_artifact_blob(
 }
 
 #[test]
+fn same_version_v3_identity_purges_unreleased_locators_and_advances_to_final() {
+    let temp = tempdir();
+    let path = temp.path().join("verified-content.sqlite");
+    let before = {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO events
+                 (id, seq, event_type, occurred_at_ms, metadata_json)
+                 VALUES (?1, 1, 'message', 1, ?2)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    serde_json::json!({
+                        "complete_content_locator_v1": {"path": "/private"},
+                        "result_content_locator_v1": {"path": "/private"},
+                        "complete_content_body_sha256": "a".repeat(64),
+                        "preserved": true
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+        store
+            .activate_projection_journal(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let snapshot = store.projection_journal_snapshot(None).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE ctx_store_schema_identity SET schema_identity = ?1 WHERE singleton = 1",
+                ["ctx-store-schema-47-final-v3"],
+            )
+            .unwrap();
+        snapshot
+    };
+
+    let store = Store::open(&path).unwrap();
+    let after = store.projection_journal_snapshot(None).unwrap();
+    let (identity, metadata): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT i.schema_identity, e.metadata_json
+             FROM ctx_store_schema_identity i CROSS JOIN events e
+             WHERE i.singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(identity, FINAL_SCHEMA_IDENTITY);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+        serde_json::json!({"preserved": true})
+    );
+    assert_eq!(after.frozen_through, before.frozen_through);
+    assert_eq!(after.records.len(), before.records.len());
+    assert_eq!(
+        after
+            .records
+            .iter()
+            .map(|record| (record.stable_entity_id, record.entity_revision))
+            .collect::<Vec<_>>(),
+        before
+            .records
+            .iter()
+            .map(|record| (record.stable_entity_id, record.entity_revision))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn same_version_v2_identity_runs_source_backed_then_locator_cleanup() {
+    let temp = tempdir();
+    let path = temp.path().join("v2-to-v4.sqlite");
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO events
+                 (id, seq, event_type, occurred_at_ms, metadata_json)
+                 VALUES (?1, 1, 'message', 1, ?2)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    serde_json::json!({
+                        "complete_content_locator_v1": {"path": "/private"},
+                        "preserved": true
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE ctx_store_schema_identity SET schema_identity = ?1 WHERE singleton = 1",
+                ["ctx-store-schema-47-final-v2"],
+            )
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let (identity, metadata): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT i.schema_identity, e.metadata_json
+             FROM ctx_store_schema_identity i CROSS JOIN events e
+             WHERE i.singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(identity, FINAL_SCHEMA_IDENTITY);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+        serde_json::json!({"preserved": true})
+    );
+}
+
+#[test]
+fn same_version_v4_route_backfill_is_conservative_and_preserves_journal() {
+    let temp = tempdir();
+    let path = temp.path().join("provider-routes.sqlite");
+    let source_id = Uuid::new_v4();
+    let ambiguous_source_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+    let exact_path = temp.path().join("provider/session.jsonl");
+    let exact_path = exact_path.to_string_lossy().into_owned();
+    let journal_before;
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO capture_sources
+                 (id, kind, provider, machine_id, raw_source_path, source_format,
+                  source_identity, external_session_id, started_at_ms, fidelity)
+                 VALUES (?1, 'provider_import', 'codex', 'machine-1', ?2,
+                         'codex_session_jsonl', 'canonical-1', 'session-1', 1,
+                         'imported')",
+                params![source_id.to_string(), exact_path],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO capture_sources
+                 (id, kind, provider, machine_id, raw_source_path, source_format,
+                  source_identity, external_session_id, started_at_ms, fidelity)
+                 VALUES (?1, 'provider_import', 'codex', 'machine-1', ?2,
+                         'codex_session_jsonl', 'canonical-2', 'session-2', 1,
+                         'imported')",
+                params![ambiguous_source_id.to_string(), exact_path],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO provider_source_locators
+                 (provider, source_format, machine_id, locator_identity, cursor_stream,
+                  canonical_source_identity, alias_group_identity, raw_source_path,
+                  source_revision, is_current, is_relocation_alias, observed_at_ms)
+                 VALUES ('codex', 'codex_session_jsonl', 'machine-1', 'locator-1',
+                         'cursor-1', 'canonical-1', 'alias-1', ?1, 'revision-1',
+                         1, 0, 1)",
+                [exact_path.as_str()],
+            )
+            .unwrap();
+        for (locator_identity, alias_group_identity) in
+            [("locator-2", "alias-2"), ("locator-3", "alias-3")]
+        {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO provider_source_locators
+                     (provider, source_format, machine_id, locator_identity, cursor_stream,
+                      canonical_source_identity, alias_group_identity, raw_source_path,
+                      source_revision, is_current, is_relocation_alias, observed_at_ms)
+                     VALUES ('codex', 'codex_session_jsonl', 'machine-1', ?1,
+                             'cursor-2', 'canonical-2', ?2, ?3, 'revision-2',
+                             1, 0, 1)",
+                    params![locator_identity, alias_group_identity, exact_path],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO events
+                 (id, seq, event_type, occurred_at_ms, capture_source_id)
+                 VALUES (?1, 1, 'tool_output', 1, ?2)",
+                params![event_id.to_string(), source_id.to_string()],
+            )
+            .unwrap();
+        store.activate_projection_journal(&"a".repeat(64)).unwrap();
+        journal_before = store
+            .conn
+            .query_row(
+                "SELECT active, generation, contract_fingerprint,
+                        high_water_sequence, cumulative_digest,
+                        acknowledged_sequence, acknowledged_cumulative_digest
+                 FROM projection_journal_state WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE capture_source_provider_routes;
+                 UPDATE ctx_store_schema_identity
+                 SET schema_identity = 'ctx-store-schema-47-final-v4'
+                 WHERE singleton = 1 AND schema_version = 47;",
+            )
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let identity: String = store
+        .conn
+        .query_row(
+            "SELECT schema_identity FROM ctx_store_schema_identity WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(identity, FINAL_SCHEMA_IDENTITY);
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(event_id)
+            .unwrap()
+            .path(),
+        Path::new(&exact_path)
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM capture_source_provider_routes
+                 WHERE capture_source_id = ?1",
+                [ambiguous_source_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    let journal_after = store
+        .conn
+        .query_row(
+            "SELECT active, generation, contract_fingerprint,
+                    high_water_sequence, cumulative_digest,
+                    acknowledged_sequence, acknowledged_cumulative_digest
+             FROM projection_journal_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(journal_after, journal_before);
+}
+
+#[test]
 fn schema_v8_migrates_legacy_history_record_table_names() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");

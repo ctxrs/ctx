@@ -23,15 +23,18 @@ mod event;
 mod source;
 mod whole_json;
 
+pub(crate) use event::rovodev_result_content;
+
 use source::{
     read_rovodev_metadata, visit_rovodev_session_sources, RovoDevSessionObservation,
     RovoDevSessionSource,
 };
 use whole_json::{whole_json_position, whole_json_position_ordinal, RovoDevCapturedBatchProjector};
 
-const ROVODEV_CAPTURE_REVISION: u32 = 2;
-const ROVODEV_POLICY_REVISION: u32 = 5;
+const ROVODEV_CAPTURE_REVISION: u32 = 3;
+const ROVODEV_POLICY_REVISION: u32 = 6;
 const ROVODEV_RECORD_KIND: &str = "rovodev-session-context-json-v1";
+pub(crate) const ROVODEV_RESULT_CONTENT_PROFILE: &str = "rovodev.result-body.v1";
 
 pub(crate) fn import_rovodev_sessions_batched(
     path: &Path,

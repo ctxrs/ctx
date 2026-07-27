@@ -552,6 +552,8 @@ impl CapturedBatchProjector for KiroCapturedBatchProjector {
             let (mut event, entry, complete_text) = decoded.into_projection_parts();
             crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
                 &mut event,
+                CaptureProvider::KiroCli,
+                KIRO_SQLITE_SOURCE_FORMAT,
                 record.locator(),
                 values,
                 complete_text,

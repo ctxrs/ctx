@@ -150,7 +150,9 @@ fn codex_tail_at_exact_eof_replaces_legacy_cursor() {
         options.clone(),
     )
     .unwrap();
-    assert_eq!(tail, ProviderImportSummary::default());
+    let mut expected = ProviderImportSummary::default();
+    expected.set_work_result(crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(tail, expected);
     let published = store
         .get_sync_cursor(None, &options.machine_id, &stream)
         .unwrap()

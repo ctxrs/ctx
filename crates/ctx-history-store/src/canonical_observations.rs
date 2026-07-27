@@ -18,7 +18,8 @@ use helpers::{
     json_byte_range, json_u64, nonnegative_u64, optional_uuid_column, parse_json_column,
     parse_uuid_column,
 };
-use projection::{strip_local_complete_content_metadata, take_result_evidence};
+pub(crate) use projection::strip_local_complete_content_metadata;
+use projection::take_result_evidence;
 pub use projection::{
     CanonicalResultEvidence, CanonicalResultEvidenceKind, CanonicalResultIdentifier,
     CanonicalResultOutcome,

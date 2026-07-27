@@ -5,7 +5,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ContentRef, EventType};
 use ctx_history_store::Store;
 use serde_json::{json, Value};
 
@@ -15,6 +15,13 @@ use crate::captured_batch::jsonl::{
 use crate::captured_batch::{
     CapturedBatch, CapturedBatchBuilder, CapturedRecord, NativeLocator, NativePosition,
     ProviderRecordKind, SourceObservation,
+};
+use crate::complete_content::jsonl::JsonlCompleteContentResolver;
+use crate::complete_content::{
+    AuthorizedSourceRoute, CompleteContentErrorKind, CompleteContentHashAuthority,
+    CompleteContentResolver, CompleteContentSourceFamily, CompleteMessageRequest,
+    ResultContentRequest, ResultContentResolver, SourceAccessBroker, SourceSnapshot,
+    VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
 use crate::provider::importer::{
     provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
@@ -522,9 +529,9 @@ fn junie_over_limit_transient_turn_is_deterministically_cleared() {
         }}
     });
     let half_plus_one = MAX_JUNIE_TRANSIENT_TURN_BYTES / 2 + 1;
-    assert!(projector.project_session_event(&buffered, half_plus_one, None));
+    assert!(projector.project_session_event(&buffered, half_plus_one, None, None));
     assert!(projector.buffer.open);
-    assert!(!projector.project_session_event(&buffered, half_plus_one, None));
+    assert!(!projector.project_session_event(&buffered, half_plus_one, None, None));
     assert!(!projector.buffer.open);
     assert_eq!(projector.buffer.retained_source_bytes, 0);
     assert!(projector.buffer.results.is_empty());
@@ -747,6 +754,333 @@ fn junie_valid_fixture_session_tree_has_identical_metadata_and_order() {
     );
 }
 
+#[test]
+fn junie_record_set_locators_reopen_exact_buffered_content_and_fail_closed() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session_id = "session-junie-complete-content";
+    let session_dir = root.join(session_id);
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        root.join("index.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "sessionId": session_id,
+                "createdAt": 1_783_339_200_000_i64,
+                "updatedAt": 1_783_339_800_000_i64,
+            })
+        ),
+    )
+    .unwrap();
+    let long_user = "JUNIE_LONG_USER snowman ☃ quoted \" body\n".repeat(600);
+    let long_assistant = "JUNIE_LONG_ASSISTANT cedar compass\n".repeat(600);
+    let exact_output = "JUNIE_EXACT_TOOL_OUTPUT saffron harbor";
+    let mut source = String::new();
+    push_jsonl(
+        &mut source,
+        json!({"kind": "UserPromptEvent", "prompt": long_user}),
+    );
+    push_jsonl(
+        &mut source,
+        json!({
+            "kind": "SessionA2uxEvent",
+            "timestampMs": 1_783_339_260_000_i64,
+            "event": {"agentEvent": {
+                "kind": "LlmResponseMetadataEvent",
+                "modelUsage": [{"model": "provider/model", "inputTokens": 1, "outputTokens": 2}]
+            }}
+        }),
+    );
+    push_jsonl(
+        &mut source,
+        json!({
+            "kind": "SessionA2uxEvent",
+            "timestampMs": 1_783_339_320_000_i64,
+            "event": {"agentEvent": {
+                "kind": "TerminalBlockUpdatedEvent",
+                "stepId": "terminal-exact",
+                "command": "printf exact",
+                "details": exact_output,
+                "status": "COMPLETED"
+            }}
+        }),
+    );
+    push_jsonl(
+        &mut source,
+        json!({
+            "kind": "SessionA2uxEvent",
+            "timestampMs": 1_783_339_380_000_i64,
+            "event": {"agentEvent": {
+                "kind": "ResultBlockUpdatedEvent",
+                "stepId": "assistant-exact",
+                "result": long_assistant
+            }}
+        }),
+    );
+    push_jsonl(
+        &mut source,
+        json!({"kind": "UserPromptEvent", "prompt": "close the buffered turn"}),
+    );
+    let events_path = session_dir.join("events.jsonl");
+    fs::write(&events_path, source.as_bytes()).unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_junie_session_events_batched(
+        &root,
+        &mut store,
+        ProviderAdapterContext {
+            machine_id: "junie-complete-content-machine".to_owned(),
+            source_path: Some(root.clone()),
+            source_root: Some(root.clone()),
+            imported_at: "2026-07-22T12:00:00Z".parse().unwrap(),
+        },
+        NormalizedProviderImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    let session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.external_session_id.as_deref() == Some(session_id))
+        .unwrap();
+    let capture_source = store
+        .get_capture_source(session.capture_source_id.unwrap())
+        .unwrap();
+    let events = store.events_for_session(session.id).unwrap();
+    let output = events
+        .iter()
+        .find(|event| event.event_type == EventType::CommandOutput)
+        .unwrap();
+    let assistant = events
+        .iter()
+        .find(|event| {
+            event.event_type == EventType::Message
+                && event.payload["body"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("JUNIE_LONG_ASSISTANT"))
+        })
+        .unwrap();
+    let user = events
+        .iter()
+        .find(|event| {
+            event.event_type == EventType::Message
+                && event.payload["body"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("JUNIE_LONG_USER"))
+        })
+        .unwrap();
+    let output_locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &output.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let output_locator = output_locators
+        .locator(VerifiedContentRole::ResultBody)
+        .unwrap();
+    let assistant_locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &assistant.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let assistant_locator = assistant_locators
+        .locator(VerifiedContentRole::MessageBody)
+        .unwrap();
+    let user_locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &user.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let user_locator = user_locators
+        .locator(VerifiedContentRole::MessageBody)
+        .unwrap();
+    let rendered_locators = format!(
+        "{}{}{}",
+        output_locators.to_metadata_value(),
+        assistant_locators.to_metadata_value(),
+        user_locators.to_metadata_value()
+    );
+    assert!(!rendered_locators.contains(exact_output));
+    assert!(!rendered_locators.contains("JUNIE_LONG_ASSISTANT"));
+    assert!(!rendered_locators.contains("JUNIE_LONG_USER"));
+    assert!(!rendered_locators.contains(events_path.to_string_lossy().as_ref()));
+
+    let source_snapshot = SourceSnapshot {
+        size_bytes: Some(source.len() as u64),
+        modified_at_ms: None,
+        sha256: None,
+    };
+    let admit_source = |event_id, snapshot: SourceSnapshot| {
+        SourceAccessBroker::new()
+            .admit(
+                AuthorizedSourceRoute {
+                    source_id: uuid::Uuid::new_v4(),
+                    provider: CaptureProvider::Junie,
+                    source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT.to_owned(),
+                    family: CompleteContentSourceFamily::Jsonl,
+                    raw_source_path: events_path.clone(),
+                    source_root: Some(root.clone()),
+                    source_identity: capture_source.descriptor.source_identity.clone(),
+                    source_snapshot: snapshot,
+                },
+                event_id,
+            )
+            .unwrap()
+    };
+    let coordinate = |event: &ctx_history_core::Event| {
+        (
+            event.sync.metadata["source_record_ordinal"]
+                .as_u64()
+                .unwrap(),
+            event.sync.metadata["source_record_subrecord_index"]
+                .as_u64()
+                .unwrap() as u32,
+        )
+    };
+    let (output_ordinal, output_subrecord) = coordinate(output);
+    let mut result_request = ResultContentRequest {
+        event_id: output.id,
+        provider: CaptureProvider::Junie,
+        source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT.to_owned(),
+        source_access: admit_source(output.id, source_snapshot.clone()),
+        source_family: CompleteContentSourceFamily::Jsonl,
+        content_profile: output_locator.content_profile().to_owned(),
+        source_locator: output_locator.source_locator().unwrap(),
+        source_record_ordinal: output_ordinal,
+        source_record_subrecord_index: output_subrecord,
+        expected_native_record_id: output_locator.native_record_id().to_owned(),
+        expected_record_digest: output_locator.record_sha256().clone(),
+        expected_content_ref: output_locator.content_ref().clone(),
+    };
+    assert_eq!(
+        output_locator.content_ref(),
+        &ContentRef::from_bytes(exact_output.as_bytes()).unwrap()
+    );
+    let persisted_result_ref =
+        serde_json::from_value::<ContentRef>(output.payload["body"]["result_content_ref"].clone())
+            .unwrap();
+    assert_eq!(&persisted_result_ref, output_locator.content_ref());
+    let (assistant_ordinal, assistant_subrecord) = coordinate(assistant);
+    let message_request = CompleteMessageRequest {
+        event_id: assistant.id,
+        provider: CaptureProvider::Junie,
+        source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT.to_owned(),
+        source_access: admit_source(assistant.id, source_snapshot.clone()),
+        source_family: Some(CompleteContentSourceFamily::Jsonl),
+        content_profile: assistant_locator.content_profile().to_owned(),
+        source_locator: assistant_locator.source_locator(),
+        provider_session_id: Some(session_id.to_owned()),
+        source_record_ordinal: assistant_ordinal,
+        source_record_subrecord_index: assistant_subrecord,
+        expected_provider_event_hash: assistant.sync.metadata["provider_event_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
+        expected_native_record_id: Some(assistant_locator.native_record_id().to_owned()),
+        expected_record_digest: Some(assistant_locator.record_sha256().clone()),
+        expected_content_ref: Some(assistant_locator.content_ref().clone()),
+        indexed_text: assistant.payload["body"]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        indexed_limit_chars: crate::PROVIDER_MAX_TEXT_CHARS,
+    };
+    let (user_ordinal, user_subrecord) = coordinate(user);
+    let user_request = CompleteMessageRequest {
+        event_id: user.id,
+        provider: CaptureProvider::Junie,
+        source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT.to_owned(),
+        source_access: admit_source(user.id, source_snapshot.clone()),
+        source_family: Some(CompleteContentSourceFamily::Jsonl),
+        content_profile: user_locator.content_profile().to_owned(),
+        source_locator: user_locator.source_locator(),
+        provider_session_id: Some(session_id.to_owned()),
+        source_record_ordinal: user_ordinal,
+        source_record_subrecord_index: user_subrecord,
+        expected_provider_event_hash: user.sync.metadata["provider_event_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
+        expected_native_record_id: Some(user_locator.native_record_id().to_owned()),
+        expected_record_digest: Some(user_locator.record_sha256().clone()),
+        expected_content_ref: Some(user_locator.content_ref().clone()),
+        indexed_text: user.payload["body"]["text"].as_str().unwrap().to_owned(),
+        indexed_limit_chars: crate::PROVIDER_MAX_TEXT_CHARS,
+    };
+
+    let resolver = JsonlCompleteContentResolver::new();
+    let resolved_result =
+        ResultContentResolver::resolve_results(&resolver, std::slice::from_ref(&result_request));
+    assert_eq!(resolved_result[0].as_ref().unwrap().content, exact_output);
+    let resolved_message =
+        CompleteContentResolver::resolve(&resolver, std::slice::from_ref(&message_request))
+            .unwrap();
+    assert_eq!(resolved_message[0].text, long_assistant);
+    let resolved_user = CompleteContentResolver::resolve(&resolver, &[user_request]).unwrap();
+    assert_eq!(resolved_user[0].text, long_user);
+
+    let mut appended = fs::OpenOptions::new()
+        .append(true)
+        .open(&events_path)
+        .unwrap();
+    writeln!(appended, "{}", json!({"kind": "IgnoredAfterAddress"})).unwrap();
+    appended.sync_all().unwrap();
+    drop(appended);
+    result_request.source_access = admit_source(result_request.event_id, source_snapshot.clone());
+    assert_eq!(
+        ResultContentResolver::resolve_results(&resolver, std::slice::from_ref(&result_request))[0]
+            .as_ref()
+            .unwrap()
+            .content,
+        exact_output
+    );
+
+    let mut wrong_id = result_request.clone();
+    wrong_id.expected_native_record_id = "wrong-native-id".to_owned();
+    assert_eq!(
+        ResultContentResolver::resolve_results(&resolver, &[wrong_id])[0]
+            .as_ref()
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::ContentVerificationFailed
+    );
+    let mut wrong_order = result_request.clone();
+    let source_locator = wrong_order.source_locator.clone();
+    let mut encoded = source_locator.value().to_vec();
+    assert!(encoded.len() >= 7 + 48);
+    let (first, rest) = encoded[7..].split_at_mut(24);
+    first.swap_with_slice(&mut rest[..24]);
+    wrong_order.source_locator =
+        crate::complete_content::CompleteContentSourceLocator::new(source_locator.kind(), encoded)
+            .unwrap();
+    assert_eq!(
+        ResultContentResolver::resolve_results(&resolver, &[wrong_order])[0]
+            .as_ref()
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::HydrationUnsupported
+    );
+
+    let appended_source = fs::read_to_string(&events_path).unwrap();
+    let rewritten = appended_source.replacen("saffron", "Saffron", 1);
+    assert_eq!(rewritten.len(), appended_source.len());
+    fs::write(&events_path, rewritten).unwrap();
+    assert_eq!(
+        ResultContentResolver::resolve_results(&resolver, std::slice::from_ref(&result_request))[0]
+            .as_ref()
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+    fs::write(&events_path, b"{}\n").unwrap();
+    assert_eq!(
+        CompleteContentResolver::resolve(&resolver, &[message_request])
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+}
+
 fn junie_partition_fixture(root: &Path) -> PathBuf {
     let session_id = "session-junie-safe-frontier";
     let session_dir = root.join(session_id);
@@ -925,6 +1259,19 @@ fn junie_group_four_five_eof_noop_append_matches_one_shot_with_dynamic_metadata(
         initial_source.sync.metadata["session_metadata"]["title"].as_str(),
         Some("JUNIE_DYNAMIC_TITLE_AFTER_INDEX")
     );
+    let initial_session = resumed_store
+        .session_by_external_session(CaptureProvider::Junie, "session-junie-safe-frontier")
+        .unwrap()
+        .unwrap();
+    let initial_events = resumed_store
+        .events_for_session(initial_session.id)
+        .unwrap();
+    let over_limit_output = initial_events
+        .iter()
+        .find(|event| event.event_type == EventType::CommandOutput)
+        .unwrap();
+    assert!(over_limit_output.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].is_null());
+    assert!(over_limit_output.payload["body"]["result_content_ref"].is_null());
 
     let replay = import_junie_session_events_batched(
         &root,

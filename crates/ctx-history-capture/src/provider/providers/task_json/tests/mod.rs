@@ -38,8 +38,8 @@ use super::source::{
     task_json_root_history_candidate_paths, visit_task_json_dirs, TaskJsonTaskObservation,
 };
 use super::{
-    import_task_json_history_batched, task_json_event, task_json_provider, TaskJsonEventInput,
-    TaskJsonProviderSpec,
+    import_task_json_history_batched, task_json_event, task_json_provider,
+    task_json_result_content, TaskJsonEventInput, TaskJsonProviderSpec,
 };
 
 mod capture;

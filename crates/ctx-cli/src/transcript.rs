@@ -12,7 +12,7 @@ use ctx_history_core::{CaptureProvider, Event, EventRole, EventType, Session};
 use ctx_history_store::Store;
 
 use ctx_history_capture::complete_content::{
-    PersistedCompleteContentLocatorV1, COMPLETE_CONTENT_LOCATOR_METADATA_KEY,
+    VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
 
 use crate::complete_content::{
@@ -708,8 +708,9 @@ pub(crate) fn locate_event_json(store: &Store, event: &Event) -> Value {
     let locator = event
         .sync
         .metadata
-        .get(COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
-        .and_then(PersistedCompleteContentLocatorV1::from_metadata_value);
+        .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
+        .and_then(VerifiedContentLocatorsV1::from_metadata_value)
+        .and_then(|locators| locators.locator(VerifiedContentRole::MessageBody).cloned());
     compact_json(json!({
         "schema_version": 1,
         "target": "event",

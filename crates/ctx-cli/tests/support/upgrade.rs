@@ -94,6 +94,7 @@ pub(crate) struct FakeRelease {
     pub(crate) metadata: PathBuf,
     pub(crate) signature: PathBuf,
     pub(crate) artifact_sha: String,
+    pub(crate) installed_at: String,
 }
 
 #[cfg(unix)]
@@ -172,6 +173,8 @@ pub(crate) fn fake_legacy_release(temp: &TempDir, latest_version: &str) -> FakeR
     let target = bin_dir.join("ctx");
     let current_bytes = write_fake_ctx_binary(&target, env!("CARGO_PKG_VERSION"));
     let current_sha = sha256_hex(&current_bytes);
+    let installed_at =
+        ctx_history_core::utc_now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let marker = json!({
         "schema_version": 1,
@@ -184,6 +187,7 @@ pub(crate) fn fake_legacy_release(temp: &TempDir, latest_version: &str) -> FakeR
         "sha256": current_sha,
         "metadata_url": null,
         "artifact_url": null,
+        "installed_at": installed_at,
     });
     fs::write(
         install_marker_path(&target),
@@ -220,6 +224,7 @@ CTX_RELEASE_AUTO_UPGRADE_ALLOWED=true\n",
         metadata,
         signature,
         artifact_sha,
+        installed_at,
     }
 }
 

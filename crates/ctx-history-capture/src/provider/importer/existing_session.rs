@@ -58,6 +58,9 @@ pub(super) fn resolve_provider_existing_session_identity(
             "exact source-scoped provider session lookup returned a mismatched session",
         ));
     }
+    if let Some(canonical_source) = canonical_source {
+        store.bind_capture_source_provider_route(source_id, &canonical_source.route_binding)?;
+    }
 
     caches
         .resolved_existing_sessions

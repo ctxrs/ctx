@@ -23,6 +23,43 @@ pub(crate) fn pi_message_has_tool_call(message: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns the exact result text selected by Pi's result-body profile.
+///
+/// This intentionally has no command/name fallback: a record without explicit
+/// result content is not reopenable result evidence.
+pub(crate) fn pi_result_content(entry: &Value) -> Option<String> {
+    if entry.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let message = entry.get("message")?;
+    match message.get("role").and_then(Value::as_str)? {
+        "toolResult" => message.get("content").and_then(pi_result_value_text),
+        "bashExecution" => message
+            .get("output")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn pi_result_value_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    let blocks = value.as_array()?;
+    let parts = blocks
+        .iter()
+        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("text") => block.get("text").and_then(Value::as_str),
+            Some("thinking") => block.get("thinking").and_then(Value::as_str),
+            _ => None,
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 pub(crate) fn pi_entry_text(entry: &Value, message: Option<&Value>) -> Option<String> {
     if let Some(text) = message.and_then(pi_message_text) {
         return Some(text);
@@ -112,5 +149,40 @@ pub(crate) fn pi_content_text(content: &Value) -> Option<String> {
         None
     } else {
         Some(parts.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod result_content_tests {
+    use serde_json::json;
+
+    use super::pi_result_content;
+
+    #[test]
+    fn result_profile_returns_only_explicit_tool_and_command_output() {
+        let tool = json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "toolCall", "name": "must-not-be-synthesized"},
+                    {"type": "thinking", "thinking": "second"}
+                ]
+            }
+        });
+        assert_eq!(pi_result_content(&tool).as_deref(), Some("first\nsecond"));
+
+        let command = json!({
+            "type": "message",
+            "message": {"role": "bashExecution", "command": "pwd", "output": "workspace\n"}
+        });
+        assert_eq!(pi_result_content(&command).as_deref(), Some("workspace\n"));
+
+        let missing = json!({
+            "type": "message",
+            "message": {"role": "bashExecution", "command": "pwd"}
+        });
+        assert_eq!(pi_result_content(&missing), None);
     }
 }

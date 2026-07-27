@@ -43,7 +43,10 @@ ctx_rust_test(
     srcs = RUST_SRCS,
     crate_name = "ctx_history_capture",
     crate_root = "src/lib.rs",
-    compile_data = ["//:public_test_fixtures"],
+    compile_data = [
+        "//:provider_support_matrix",
+        "//:public_test_fixtures",
+    ],
     edition = crate_edition(),
     aliases = aliases(
         normal_dev = True,
