@@ -127,6 +127,17 @@ impl<A> LinuxBackend<A> {
 }
 
 impl<A: SecretServiceAdapter> LinuxBackend<A> {
+    fn inspect_unselected_secret_service<T>(
+        secret_service: &A,
+        operation: impl FnOnce(&A) -> Result<T, CredentialVaultError>,
+    ) -> Result<T, CredentialVaultError> {
+        match secret_service.probe() {
+            Ok(()) => operation(secret_service),
+            Err(CredentialVaultError::Unavailable { .. }) => Err(CredentialVaultError::NotFound),
+            Err(error) => Err(error),
+        }
+    }
+
     fn with_mutating_selected_backend<T>(
         &self,
         operation: impl FnOnce(BackendSelection, &VaultRoot, &A) -> Result<T, CredentialVaultError>,
@@ -229,7 +240,10 @@ impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
         validate_record_id(record_id)?;
         self.with_read_backend(|selection, root, secret_service| match selection {
             Some(BackendSelection::File) => root.load_file_record(record_id),
-            Some(BackendSelection::SecretService) | None => secret_service.load(record_id),
+            Some(BackendSelection::SecretService) => secret_service.load(record_id),
+            None => Self::inspect_unselected_secret_service(secret_service, |secret_service| {
+                secret_service.load(record_id)
+            }),
         })
     }
 
@@ -259,7 +273,10 @@ impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
         validate_record_id(record_id)?;
         self.with_read_backend(|selection, root, secret_service| match selection {
             Some(BackendSelection::File) => root.delete_file_record(record_id),
-            Some(BackendSelection::SecretService) | None => secret_service.delete(record_id),
+            Some(BackendSelection::SecretService) => secret_service.delete(record_id),
+            None => Self::inspect_unselected_secret_service(secret_service, |secret_service| {
+                secret_service.delete(record_id)
+            }),
         })
     }
 }
