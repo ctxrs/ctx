@@ -1,5 +1,6 @@
 use crate::cli::{parse_search_limit, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT};
 use crate::commands::sql::parse_sql_timeout;
+use crate::pro::parse_referral_codename;
 use crate::search_filters::parse_since_filter;
 use crate::transcript::normalize_uuid_prefix;
 use crate::value_parsers::parse_event_window_limit;
@@ -15,6 +16,7 @@ proptest! {
         prop_assert!(panic::catch_unwind(|| parse_event_window_limit(&input)).is_ok());
         prop_assert!(panic::catch_unwind(|| parse_sql_timeout(&input)).is_ok());
         prop_assert!(panic::catch_unwind(|| normalize_uuid_prefix(&input, "test")).is_ok());
+        prop_assert!(panic::catch_unwind(|| parse_referral_codename(&input)).is_ok());
     }
 
     #[test]

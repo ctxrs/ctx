@@ -50,8 +50,8 @@ use crate::{
         native_ingestion::{
             process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
             NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,
+            NATIVE_INGESTION_PAGE_MAX_UNITS,
         },
-        normalization::provider_capped_json_value,
         sqlite::{
             ensure_sqlite_table_columns, open_provider_sqlite_readonly, sqlite_schema_fingerprint,
             sqlite_table_columns, sqlite_table_exists, ProviderSqliteSourceSnapshot,
@@ -61,10 +61,10 @@ use crate::{
     CaptureError, CaptureWorkLimit, ImportProfile, OutputSourceIdentity, ProOutputProgress,
     ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition, ProviderAdapterContext,
     ProviderImportFailure, ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
-    Result, KIRO_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    Result, KIRO_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
-use super::event::{kiro_core_value, KiroFileTouch, KiroNativeEvent};
+use super::event::{KiroFileTouch, KiroNativeEvent};
 use super::history::{
     kiro_history_entry_events, kiro_provider_session_id, kiro_row_complete_values,
     kiro_session_ended_at, kiro_session_started_at, KiroConversationRow,
@@ -77,9 +77,11 @@ const KIRO_OUTPUT_PARSER_REVISION: &str = "kiro-nativepath-output-v1";
 const KIRO_LOCATOR_KIND: &str = "kiro-conversation-row-v1";
 const KIRO_LEGACY_POSITION_KIND: &str = "kiro-conversation-keyset-v1";
 const KIRO_PAGE_HISTORY_ITEMS: usize = 30;
-const KIRO_PAGE_FILE_TOUCHES: usize = 256;
+const KIRO_PAGE_OVERHEAD_UNITS: usize = 1;
+const KIRO_PAGE_MAX_UNITS: usize = NATIVE_INGESTION_PAGE_MAX_UNITS;
 const KIRO_PAGE_MAX_BYTES: usize = ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
 const KIRO_PAGE_BASE_BYTES: usize = 2 * 1024;
+const KIRO_MAX_REJECTION_DETAILS: usize = 64;
 const KIRO_RETIREMENT_PAGE_ENTITIES: usize = 512;
 const KIRO_PREFIX_DOMAIN: &[u8] = b"ctx-kiro-nativepath-prefix-v1\0";
 const KIRO_PUBLICATION_DOMAIN: &[u8] = b"ctx-kiro-nativepath-publication-v1\0";
@@ -141,13 +143,14 @@ pub(super) fn import_kiro_native_path(
     let stored = store.get_sync_cursor(None, &context.machine_id, &source.cursor_stream)?;
     let start = core_start(stored.as_ref(), &source)?;
     if start.already_terminal {
+        let summary = start.summary();
         replay_outputs_or_mark_behind(store, &source, &context, &options.import_profile);
-        return Ok(ProviderImportSummary::default());
+        return Ok(summary);
     }
 
     let started_in_retirement = start.retirement.is_some();
     let bulk_guard = store.begin_event_search_bulk_mode()?;
-    let mut summary = ProviderImportSummary::default();
+    let mut summary = start.summary();
     let operation = (|| {
         if !started_in_retirement {
             let mut scanner = KiroScanner::new(&source, start.frontier, context.imported_at)?;
@@ -282,7 +285,7 @@ impl KiroTables {
     fn probe(connection: &Connection) -> Result<Self> {
         let v2 = sqlite_table_exists(connection, "conversations_v2")?;
         if v2 {
-            ensure_sqlite_table_columns(
+            ensure_kiro_table_columns(
                 &sqlite_table_columns(connection, "conversations_v2")?,
                 "Kiro conversations_v2",
                 &[
@@ -296,14 +299,14 @@ impl KiroTables {
         }
         let legacy = sqlite_table_exists(connection, "conversations")?;
         if legacy {
-            ensure_sqlite_table_columns(
+            ensure_kiro_table_columns(
                 &sqlite_table_columns(connection, "conversations")?,
                 "Kiro conversations",
                 &["key", "value"],
             )?;
         }
         if !v2 && !legacy {
-            return Err(CaptureError::InvalidPayload(
+            return Err(CaptureError::UnsupportedSchema(
                 "Kiro SQLite source has neither conversations_v2 nor conversations".to_owned(),
             ));
         }
@@ -317,6 +320,17 @@ impl KiroTables {
             KiroPhase::Legacy
         }
     }
+}
+
+fn ensure_kiro_table_columns(
+    columns: &BTreeSet<String>,
+    label: &str,
+    required: &[&str],
+) -> Result<()> {
+    ensure_sqlite_table_columns(columns, label, required).map_err(|cause| match cause {
+        CaptureError::InvalidPayload(reason) => CaptureError::UnsupportedSchema(reason),
+        cause => cause,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

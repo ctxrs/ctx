@@ -4,14 +4,16 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 try:
     import tomllib
@@ -33,6 +35,13 @@ TOML_TABLE = re.compile(
 )
 TOML_VERSION = re.compile(
     r'^\s*version\s*=\s*"([^"\\\r\n]+)"\s*(?:#.*)?$'
+)
+CONTAINER_GATE_INPUTS = (
+    (Path("scripts/check-public-cli-artifact.sh"), 0o555),
+    (Path("scripts/check-release-binary-compat.sh"), 0o555),
+    (Path("scripts/run-native-candidate-smoke.sh"), 0o555),
+    (Path("contracts/public-control-surface-v1.json"), 0o444),
+    (Path("tests/fixtures/custom-history-jsonl/basic.jsonl"), 0o444),
 )
 
 
@@ -358,6 +367,27 @@ def verify_image(
             )
 
 
+@contextmanager
+def staged_container_gate_source(source_repo: Path) -> Iterator[Path]:
+    """Expose only reviewed gate inputs to the unprivileged containers."""
+    with tempfile.TemporaryDirectory(prefix="ctx-public-container-gates-") as temporary:
+        gate_root = Path(temporary)
+        for relative_path, mode in CONTAINER_GATE_INPUTS:
+            destination = gate_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(
+                regular_bytes(
+                    source_repo / relative_path,
+                    f"container gate input {relative_path}",
+                )
+            )
+            destination.chmod(mode)
+        gate_root.chmod(0o755)
+        for directory in (path for path in gate_root.rglob("*") if path.is_dir()):
+            directory.chmod(0o755)
+        yield gate_root
+
+
 def run_container_gates(
     *,
     docker: str,
@@ -387,54 +417,55 @@ def run_container_gates(
         "--tmpfs",
         "/tmp:rw,nosuid,nodev",
     ]
-    run_checked(
-        common
-        + [
-            "-e",
-            f"CTX_PUBLIC_CLI_EXPECTED_VERSION={version}",
-            "-v",
-            f"{source_repo}:/repo:ro",
-            "-v",
-            f"{artifact_dir}:/artifacts:ro",
-            "-w",
-            "/repo",
-            inspector_image_id,
-            "bash",
-            "scripts/check-public-cli-artifact.sh",
-            platform,
-            "/artifacts",
-        ],
-        "pinned inspector static ABI gate",
-    )
-    run_checked(
-        common
-        + [
-            "-e",
-            "HOME=/tmp/home",
-            "-v",
-            f"{source_repo}:/repo:ro",
-            "-v",
-            f"{artifact}:/candidate/ctx:ro",
-            "-w",
-            "/repo",
-            runtime_image_id,
-            "bash",
-            "-euo",
-            "pipefail",
-            "-c",
-            (
-                "timeout --signal=KILL 120s "
-                "bash scripts/run-native-candidate-smoke.sh "
-                "/candidate/ctx "
-                "tests/fixtures/custom-history-jsonl/basic.jsonl "
-                '"$1" /tmp/native-smoke.json '
-                "&& grep -Fq '\"status\":\"passed\"' /tmp/native-smoke.json"
-            ),
-            "bash",
-            version,
-        ],
-        "pinned native runtime gate",
-    )
+    with staged_container_gate_source(source_repo) as gate_source:
+        run_checked(
+            common
+            + [
+                "-e",
+                f"CTX_PUBLIC_CLI_EXPECTED_VERSION={version}",
+                "-v",
+                f"{gate_source}:/repo:ro",
+                "-v",
+                f"{artifact_dir}:/artifacts:ro",
+                "-w",
+                "/repo",
+                inspector_image_id,
+                "bash",
+                "scripts/check-public-cli-artifact.sh",
+                platform,
+                "/artifacts",
+            ],
+            "pinned inspector static ABI gate",
+        )
+        run_checked(
+            common
+            + [
+                "-e",
+                "HOME=/tmp/home",
+                "-v",
+                f"{gate_source}:/repo:ro",
+                "-v",
+                f"{artifact}:/candidate/ctx:ro",
+                "-w",
+                "/repo",
+                runtime_image_id,
+                "bash",
+                "-euo",
+                "pipefail",
+                "-c",
+                (
+                    "timeout --signal=KILL 120s "
+                    "bash scripts/run-native-candidate-smoke.sh "
+                    "/candidate/ctx "
+                    "tests/fixtures/custom-history-jsonl/basic.jsonl "
+                    '"$1" /tmp/native-smoke.json '
+                    "&& grep -Fq '\"status\":\"passed\"' /tmp/native-smoke.json"
+                ),
+                "bash",
+                version,
+            ],
+            "pinned native runtime gate",
+        )
 
 
 def validate_inputs(

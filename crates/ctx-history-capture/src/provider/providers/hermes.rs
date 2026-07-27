@@ -3,7 +3,6 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
 use ctx_history_store::Store;
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -106,32 +105,78 @@ fn hermes_sqlite_value(value: &NativeSqliteValue) -> Result<HermesSqliteValue> {
     }
 }
 
-fn attach_hermes_complete_content(
-    event: &mut HermesNativeEvent,
-    locator: &HermesLocator,
+#[derive(Clone, Debug)]
+struct HermesPreparedCompleteContent {
+    content_ref: ContentRef,
+    record_digest: CompleteContentBodyDigest,
+}
+
+#[derive(Clone, Debug)]
+struct HermesPreparedCoreMessage {
+    native: HermesNativeEvent,
+    complete_content: Option<HermesPreparedCompleteContent>,
+}
+
+impl HermesPreparedCoreMessage {
+    fn owned_bytes(&self) -> usize {
+        serde_json::to_vec(&self.native.payload)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
+            .saturating_add(
+                serde_json::to_vec(&self.native.metadata)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(usize::MAX),
+            )
+            .saturating_add(self.native.cursor.len())
+            .saturating_add(4 * 1024)
+    }
+}
+
+fn prepare_hermes_core_message(
+    row: &HermesMessageRow,
+    source_record_ordinal: u64,
     values: &[HermesSqliteValue],
-    complete_text: impl FnOnce() -> String,
-) -> Result<()> {
-    if event.event_type != EventType::Message
-        || event
+) -> Result<HermesPreparedCoreMessage> {
+    let mut native = hermes_native_event(row, source_record_ordinal)?;
+    let complete_content = if native.event_type == EventType::Message
+        && native
             .payload
             .pointer("/text_retention/truncated")
             .and_then(Value::as_bool)
-            != Some(true)
+            == Some(true)
     {
+        let content_ref = ContentRef::from_bytes(native.complete_text.as_bytes()).ok_or(
+            CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
+        )?;
+        let values = values
+            .iter()
+            .cloned()
+            .map(native_source_value)
+            .collect::<Vec<_>>();
+        Some(HermesPreparedCompleteContent {
+            content_ref,
+            record_digest: hermes_record_digest(&values),
+        })
+    } else {
+        None
+    };
+    native.complete_text.clear();
+    Ok(HermesPreparedCoreMessage {
+        native,
+        complete_content,
+    })
+}
+
+fn attach_hermes_complete_content(
+    event: &mut HermesNativeEvent,
+    locator: &HermesLocator,
+    prepared: Option<&HermesPreparedCompleteContent>,
+) -> Result<()> {
+    let Some(prepared) = prepared else {
         return Ok(());
-    }
+    };
     let locator = NativeLocator::new(HERMES_LOCATOR_KIND, locator.payload())
         .map_err(hermes_native_source_error)?;
-    let values = values
-        .iter()
-        .cloned()
-        .map(native_source_value)
-        .collect::<Vec<_>>();
-    let complete_text = complete_text();
-    let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
-    )?;
     let profile = verified_content_profile(
         CaptureProvider::Hermes,
         HERMES_SQLITE_SOURCE_FORMAT,
@@ -148,12 +193,12 @@ fn attach_hermes_complete_content(
     let persisted = VerifiedContentLocatorV1::new(
         VerifiedContentRole::MessageBody,
         profile,
-        content_ref,
+        prepared.content_ref.clone(),
         CompleteContentSourceFamily::Sqlite,
         locator.kind(),
         locator.value(),
         native_record_id,
-        hermes_record_digest(&values),
+        prepared.record_digest.clone(),
     )
     .ok_or(CaptureError::SystemInvariant(
         "SQLite complete-content locator exceeds the bounded canonical schema",
@@ -169,6 +214,7 @@ fn hermes_message_revision(row: &HermesMessageRow) -> Result<String> {
     ctx_history_core::compute_payload_hash(&event.payload).map_err(Into::into)
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct HermesNativeEvent {
     pub(super) provider_event_index: u64,
     pub(super) provider_event_hash: Option<String>,
@@ -474,42 +520,6 @@ pub(crate) fn hermes_normalized_result_content(role: &str, content: &Value) -> O
     (role == "tool")
         .then(|| provider_value_text(content))
         .flatten()
-}
-
-pub(crate) fn hermes_result_record(
-    conn: &Connection,
-    rowid: i64,
-) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
-    let schema = HermesSchema::detect(conn)?;
-    let layout = schema.messages();
-    let visibility = schema.message_visibility();
-    let visibility = if visibility.is_empty() {
-        String::new()
-    } else {
-        format!(" and {visibility}")
-    };
-    let sql = format!(
-        "select {} from messages m join sessions s on s.id = m.session_id \
-         where m.rowid = ?1{visibility}",
-        layout.projection(),
-    );
-    let values = conn
-        .query_row(&sql, [rowid], |row| layout.capture_values(row, 0))
-        .optional()?;
-    let Some(values) = values else {
-        return Ok(None);
-    };
-    let message = decode_hermes_message(&schema, &values)?;
-    let content_value = hermes_decode_content(message.content.as_deref());
-    let content =
-        hermes_normalized_result_content(&message.role, &content_value).ok_or_else(|| {
-            CaptureError::InvalidPayload("Hermes row is no longer a supported result".to_owned())
-        })?;
-    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
-        values: values.into_iter().map(native_source_value).collect(),
-        native_record_id: format!("message:{}", message.id),
-        content,
-    }))
 }
 
 fn hermes_event_type(row: &HermesMessageRow) -> EventType {

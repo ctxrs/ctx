@@ -19,10 +19,10 @@ use crate::{
     },
     provider::{
         importer::provider_path_identity,
-        providers::{codebuddy, kimi, mistral_vibe, openclaw},
+        providers::{codebuddy, cursor, kimi, mistral_vibe, openclaw},
     },
-    CODEBUDDY_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT, MAX_OPENCLAW_SESSION_INDEX_BYTES,
-    MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
+    CODEBUDDY_SOURCE_FORMAT, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT,
+    MAX_OPENCLAW_SESSION_INDEX_BYTES, MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
 };
 
 use super::{
@@ -70,6 +70,10 @@ pub(super) fn admit_exact_jsonl_binding(
     let exact = matches!(
         (route.provider, route.source_format.as_str()),
         (CaptureProvider::CodeBuddy, CODEBUDDY_SOURCE_FORMAT)
+            | (
+                CaptureProvider::Cursor,
+                CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT
+            )
             | (CaptureProvider::MistralVibe, MISTRAL_VIBE_SOURCE_FORMAT)
             | (CaptureProvider::OpenClaw, OPENCLAW_SOURCE_FORMAT)
             | (CaptureProvider::KimiCodeCli, KIMI_CODE_CLI_SOURCE_FORMAT)
@@ -103,6 +107,9 @@ pub(super) fn admit_exact_jsonl_binding(
                 main_metadata,
                 path_identity,
             )
+        }
+        CaptureProvider::Cursor => {
+            cursor::cursor_complete_content_source_from_admitted(main_metadata, path_identity)
         }
         CaptureProvider::MistralVibe => {
             let metadata_path = sibling(selected_path, "meta.json", event_id)?;

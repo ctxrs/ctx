@@ -4,9 +4,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, inbox_dir,
-    logs_dir, object_dir, spool_dir, CaptureProvider, Confidence, ContextCitationType, Fidelity,
-    HistoryRecord, Session, SyncMetadata, SyncOutboxItem, SyncState, Visibility,
+    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
+    object_dir, CaptureProvider, Confidence, ContextCitationType, Fidelity, HistoryRecord, Session,
+    SyncMetadata, SyncOutboxItem, SyncState, Visibility,
 };
 
 #[test]
@@ -135,14 +135,6 @@ fn local_layout_paths_are_flat_under_data_root() {
     assert_eq!(
         blob_dir(root.clone()),
         PathBuf::from("/tmp/ctx-root/objects")
-    );
-    assert_eq!(
-        spool_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/spool")
-    );
-    assert_eq!(
-        inbox_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/spool")
     );
     assert_eq!(
         config_path(root.clone()),

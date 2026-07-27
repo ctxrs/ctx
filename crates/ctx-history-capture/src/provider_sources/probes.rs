@@ -19,8 +19,11 @@ use crate::common::io::{
     ensure_regular_provider_transcript_file, provider_metadata_is_link_like,
     read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
 };
-use crate::provider::provider_safe_path_segment;
 use crate::provider::sqlite::ProviderSqliteSourceSnapshot;
+use crate::provider::{
+    provider_safe_path_segment,
+    providers::cursor::{discover_cursor_transcripts, CursorDiscoveryIssueKind},
+};
 use crate::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
 use super::{
@@ -73,9 +76,7 @@ pub(super) fn default_location_import_probe(
             )
         }),
         CaptureProvider::Gemini | CaptureProvider::Tabnine => has_gemini_chat_jsonl(path, 10_000),
-        CaptureProvider::Cursor => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            path_has_component(candidate, "agent-transcripts")
-        }),
+        CaptureProvider::Cursor => has_cursor_agent_transcript(path),
         CaptureProvider::Windsurf => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::Qoder => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             path_has_component(candidate, "transcript")
@@ -138,6 +139,38 @@ pub(super) fn default_location_import_probe(
         | CaptureProvider::Gh
         | CaptureProvider::Custom
         | CaptureProvider::Unknown => BoundedProbe::NotFound,
+    }
+}
+
+fn has_cursor_agent_transcript(path: &Path) -> BoundedProbe {
+    let input = if path.is_dir() && path.join("projects").is_dir() {
+        path.join("projects")
+    } else {
+        path.to_path_buf()
+    };
+    let inventory = discover_cursor_transcripts(&input);
+    if !inventory.completed {
+        if inventory
+            .issues
+            .iter()
+            .any(|issue| issue.kind == CursorDiscoveryIssueKind::LimitExceeded)
+        {
+            return BoundedProbe::BudgetExhausted;
+        }
+        if inventory.issues.iter().any(|issue| {
+            matches!(
+                issue.kind,
+                CursorDiscoveryIssueKind::Io | CursorDiscoveryIssueKind::Symlink
+            )
+        }) {
+            return BoundedProbe::IoError;
+        }
+        return BoundedProbe::NotFound;
+    }
+    if inventory.transcripts.is_empty() {
+        BoundedProbe::NotFound
+    } else {
+        BoundedProbe::Found
     }
 }
 

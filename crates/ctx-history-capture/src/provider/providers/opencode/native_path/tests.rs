@@ -551,7 +551,7 @@ fn opencode_nativepath_excludes_every_tool_result_before_hydration_and_derivatio
     assert_eq!(summary.metrics.output_content_cells_transferred, 0);
     assert_eq!(summary.metrics.output_content_bytes_transferred, 0);
     assert_eq!(summary.metrics.output_hashes_built, 0);
-    assert_eq!(summary.metrics.output_previews_built, 2);
+    assert_eq!(summary.metrics.output_previews_built, 0);
     assert_eq!(summary.metrics.output_touches_built, 0);
     assert_eq!(summary.metrics.output_fts_documents_built, 0);
     let events = page_events(&pages);
@@ -559,8 +559,17 @@ fn opencode_nativepath_excludes_every_tool_result_before_hydration_and_derivatio
     assert_eq!(events[1].file_touches[0].path, "src/safe.rs");
     let retained_debug = format!("{events:?}");
     assert!(!retained_debug.contains("OUTPUT_SENTINEL_DO_NOT_TRANSFER"));
-    assert!(retained_debug.contains("src/failed-output.rs"));
-    assert!(retained_debug.contains("src/timeout-output.rs"));
+    assert!(!retained_debug.contains("src/failed-output.rs"));
+    assert!(!retained_debug.contains("src/timeout-output.rs"));
+    for event in events.iter().filter(|event| {
+        matches!(
+            event.kind,
+            OpenCodeNativeEventKind::ToolOutput | OpenCodeNativeEventKind::CommandOutput
+        )
+    }) {
+        assert!(event.body.get("body").is_none());
+        assert!(event.body.get("output_preview").is_none());
+    }
 }
 
 #[test]

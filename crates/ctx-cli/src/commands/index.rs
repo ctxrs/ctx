@@ -122,6 +122,7 @@ fn run_index_watch(
     let interval = Duration::from_secs(args.interval_seconds);
     loop {
         let status = index_status_snapshot(data_root)?;
+        let selection = IndexSelection::default_for(&status);
         record_index_telemetry(telemetry, &status);
         if args.json {
             println!("{}", serde_json::to_string(&status)?);
@@ -129,10 +130,10 @@ fn run_index_watch(
             print_index_watch_human(&status);
             println!();
         }
-        if index_ready(&status, IndexSelection::all()) {
+        if index_ready(&status, selection) {
             break;
         }
-        if let Some(message) = index_terminal_error(&status, IndexSelection::all()) {
+        if let Some(message) = index_terminal_error(&status, selection) {
             return Err(anyhow!(message));
         }
         thread::sleep(interval);

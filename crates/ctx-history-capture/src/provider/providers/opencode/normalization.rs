@@ -2,24 +2,12 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
-use crate::provider::normalization::{
-    provider_normalized_result_value, provider_required_timestamp_millis, provider_value_text,
-};
+use crate::provider::normalization::{provider_required_timestamp_millis, provider_value_text};
 use crate::{CaptureError, Result};
 
 use super::schema::OpenCodeSqliteDialect;
 
 pub(super) const OPENCODE_MESSAGE_PART_DEFAULT_ROLE: &str = "assistant";
-
-pub(super) fn opencode_entry_type_from_data(fallback: &str, data: &str) -> String {
-    if !fallback.trim().is_empty() && fallback != "message" {
-        return fallback.to_owned();
-    }
-    serde_json::from_str::<Value>(data)
-        .ok()
-        .and_then(|value| opencode_message_type_from_data(&value))
-        .unwrap_or_else(|| fallback.to_owned())
-}
 
 pub(super) fn opencode_part_type(column_type: Option<&str>, data: &Value) -> String {
     column_type
@@ -85,40 +73,6 @@ pub(super) fn opencode_tool_part_event_data(
         "is_error": is_error,
         "output_retention": "metadata_only",
     }))
-}
-
-/// Returns the complete normalized result body shared by OpenCode, Kilo, and
-/// MiMo Code SQLite profiles.
-///
-/// The supported generations use either a direct result field or the modern
-/// `state` envelope. Precedence is explicit and the function never searches
-/// arbitrary descendants. The caller owns any byte bound.
-pub(crate) fn opencode_normalized_result_content(entry_type: &str, data: &Value) -> Option<String> {
-    let candidates: &[&str] = match entry_type {
-        "tool" | "tool_result" | "result" => &[
-            "/state/output",
-            "/state/result",
-            "/state/content",
-            "/output",
-            "/result",
-            "/content",
-            "/text",
-        ],
-        "shell" => &[
-            "/output",
-            "/state/output",
-            "/stdout",
-            "/stderr",
-            "/result",
-            "/content",
-            "/text",
-        ],
-        _ => return None,
-    };
-    candidates
-        .iter()
-        .find_map(|pointer| data.pointer(pointer))
-        .map(provider_normalized_result_value)
 }
 
 pub(super) fn opencode_tool_part_name(data: &Value) -> String {

@@ -6,9 +6,211 @@ use std::{
 
 use serde_json::Value;
 
-use crate::{CaptureError, ProviderImportSummary, Result, MAX_PROVIDER_JSONL_LINE_BYTES};
+use crate::{
+    CaptureError, ProviderImportSummary, ProviderJsonlInventoryLimit, Result,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
+};
 
-pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+/// Maximum directories admitted by one provider JSONL inventory.
+///
+/// Codex's ordinary layout uses only a few year/month/day levels. This leaves
+/// ample room for unusually partitioned archives while bounding the stack.
+pub const PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES: usize = 32_768;
+/// Maximum child depth below the requested provider root.
+pub const PROVIDER_JSONL_INVENTORY_MAX_DEPTH: usize = 64;
+/// Maximum regular `.jsonl` paths retained by one provider inventory.
+///
+/// This preserves the prior Codex ceiling and is more than three times the file
+/// count of the qualified 75 GiB physical corpus.
+pub const PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS: usize = 131_072;
+/// Maximum filesystem entries inspected, including non-JSONL entries.
+pub const PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES: usize = 262_144;
+/// Maximum encoded path length retained during provider inventory.
+pub const PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderJsonlInventoryLimits {
+    /// Maximum directories, including the requested root directory.
+    pub max_directories: usize,
+    /// Maximum child depth below the requested root, whose depth is zero.
+    pub max_depth: usize,
+    /// Maximum regular `.jsonl` files returned to the caller.
+    pub max_eligible_paths: usize,
+    /// Maximum inspected entries, including the requested root and junk files.
+    pub max_metadata_entries: usize,
+}
+
+impl Default for ProviderJsonlInventoryLimits {
+    fn default() -> Self {
+        Self {
+            max_directories: PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
+            max_depth: PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
+            max_eligible_paths: PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
+            max_metadata_entries: PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderJsonlInventory {
+    paths: Vec<PathBuf>,
+    directories: usize,
+    metadata_entries: usize,
+}
+
+impl ProviderJsonlInventory {
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    pub fn into_paths(self) -> Vec<PathBuf> {
+        self.paths
+    }
+
+    pub fn directories(&self) -> usize {
+        self.directories
+    }
+
+    pub fn metadata_entries(&self) -> usize {
+        self.metadata_entries
+    }
+}
+
+#[derive(Debug)]
+struct PendingJsonlDirectory {
+    path: PathBuf,
+    depth: usize,
+}
+
+#[derive(Debug)]
+struct ProviderJsonlInventoryState {
+    limits: ProviderJsonlInventoryLimits,
+    paths: Vec<PathBuf>,
+    directories: usize,
+    metadata_entries: usize,
+}
+
+impl ProviderJsonlInventoryState {
+    fn new(limits: ProviderJsonlInventoryLimits) -> Self {
+        Self {
+            limits,
+            paths: Vec::new(),
+            directories: 0,
+            metadata_entries: 0,
+        }
+    }
+
+    fn admit_metadata_entry(&mut self) -> Result<()> {
+        self.metadata_entries = admit_inventory_unit(
+            ProviderJsonlInventoryLimit::MetadataEntries,
+            self.metadata_entries,
+            self.limits.max_metadata_entries,
+        )?;
+        Ok(())
+    }
+
+    fn admit_directory(&mut self, depth: usize) -> Result<()> {
+        if depth > self.limits.max_depth {
+            return Err(inventory_limit_error(
+                ProviderJsonlInventoryLimit::Depth,
+                self.limits.max_depth,
+            ));
+        }
+        self.directories = admit_inventory_unit(
+            ProviderJsonlInventoryLimit::Directories,
+            self.directories,
+            self.limits.max_directories,
+        )?;
+        Ok(())
+    }
+
+    fn admit_eligible_path(&mut self, path: PathBuf) -> Result<()> {
+        admit_inventory_unit(
+            ProviderJsonlInventoryLimit::EligiblePaths,
+            self.paths.len(),
+            self.limits.max_eligible_paths,
+        )?;
+        self.paths.push(path);
+        Ok(())
+    }
+
+    fn finish(mut self) -> ProviderJsonlInventory {
+        self.paths.sort();
+        ProviderJsonlInventory {
+            paths: self.paths,
+            directories: self.directories,
+            metadata_entries: self.metadata_entries,
+        }
+    }
+}
+
+fn admit_inventory_unit(
+    limit: ProviderJsonlInventoryLimit,
+    current: usize,
+    maximum: usize,
+) -> Result<usize> {
+    let observed = current.saturating_add(1);
+    if observed > maximum {
+        return Err(CaptureError::ProviderJsonlInventoryLimitExceeded {
+            limit,
+            maximum,
+            observed,
+        });
+    }
+    Ok(observed)
+}
+
+fn inventory_limit_error(limit: ProviderJsonlInventoryLimit, maximum: usize) -> CaptureError {
+    CaptureError::ProviderJsonlInventoryLimitExceeded {
+        limit,
+        maximum,
+        observed: maximum.saturating_add(1),
+    }
+}
+
+fn path_is_jsonl(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+}
+
+fn ensure_inventory_path_bound(path: &Path) -> Result<()> {
+    if path.as_os_str().as_encoded_bytes().len() > PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES {
+        return Err(CaptureError::InvalidPayload(format!(
+            "provider source path exceeds {PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES} encoded bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Inventories one provider JSONL file or tree without recursive traversal.
+///
+/// The result is lexically sorted and contains only admitted regular `.jsonl`
+/// files. Every encountered child, including non-JSONL and non-regular
+/// entries, consumes the metadata-entry budget. Links are never followed.
+pub fn inventory_provider_jsonl_paths(
+    root: &Path,
+    limits: ProviderJsonlInventoryLimits,
+) -> Result<ProviderJsonlInventory> {
+    inventory_provider_paths(root, limits, path_is_jsonl)
+}
+
+/// Inventories every regular file under one provider source without recursive
+/// traversal. This is used for format-neutral source accounting; provider
+/// readers should use the narrower JSONL inventory above when appropriate.
+pub fn inventory_provider_regular_paths(
+    root: &Path,
+    limits: ProviderJsonlInventoryLimits,
+) -> Result<ProviderJsonlInventory> {
+    inventory_provider_paths(root, limits, |_| true)
+}
+
+fn inventory_provider_paths(
+    root: &Path,
+    limits: ProviderJsonlInventoryLimits,
+    is_eligible: impl Fn(&Path) -> bool,
+) -> Result<ProviderJsonlInventory> {
+    let mut state = ProviderJsonlInventoryState::new(limits);
+    state.admit_metadata_entry()?;
+    ensure_inventory_path_bound(root)?;
     let metadata = fs::symlink_metadata(root)?;
     let file_type = metadata.file_type();
     if provider_metadata_is_link_like(&metadata) {
@@ -19,37 +221,93 @@ pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Resu
     }
     ensure_provider_path_parents_are_not_symlinks(root)?;
     if file_type.is_file() {
-        if root.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            ensure_regular_provider_transcript_file(root)?;
-            paths.push(root.to_path_buf());
+        if is_eligible(root) {
+            state.admit_eligible_path(root.to_path_buf())?;
         }
-        return Ok(());
+        return Ok(state.finish());
     }
     if !file_type.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if provider_metadata_is_link_like(&metadata) {
+        if is_eligible(root) {
             return Err(CaptureError::InvalidProviderTranscriptPath {
-                path,
-                reason: "linked provider transcript path components are rejected",
+                path: root.to_path_buf(),
+                reason: "provider transcript paths must be regular files",
             });
         }
-        let file_type = metadata.file_type();
-        if file_type.is_dir() {
-            collect_jsonl_paths(&path, paths)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            ensure_regular_provider_transcript_file(&path)?;
-            paths.push(path);
+        return Ok(state.finish());
+    }
+
+    state.admit_directory(0)?;
+    let mut stack = vec![PendingJsonlDirectory {
+        path: root.to_path_buf(),
+        depth: 0,
+    }];
+    while let Some(directory) = stack.pop() {
+        let mut children = Vec::new();
+        for entry in fs::read_dir(&directory.path)? {
+            let entry = entry?;
+            state.admit_metadata_entry()?;
+            children.push(entry.path());
+        }
+        children.sort();
+
+        let child_depth = directory.depth.saturating_add(1);
+        let mut child_directories = Vec::new();
+        for path in children {
+            ensure_inventory_path_bound(&path)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if provider_metadata_is_link_like(&metadata) {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path,
+                    reason: "linked provider transcript path components are rejected",
+                });
+            }
+            let file_type = metadata.file_type();
+            if file_type.is_dir() {
+                state.admit_directory(child_depth)?;
+                child_directories.push(PendingJsonlDirectory {
+                    path,
+                    depth: child_depth,
+                });
+            } else if is_eligible(&path) {
+                if !file_type.is_file() {
+                    return Err(CaptureError::InvalidProviderTranscriptPath {
+                        path,
+                        reason: "provider transcript paths must be regular files",
+                    });
+                }
+                state.admit_eligible_path(path)?;
+            }
+        }
+        for child in child_directories.into_iter().rev() {
+            stack.push(child);
         }
     }
+    Ok(state.finish())
+}
+
+pub(crate) fn collect_jsonl_paths_bounded(
+    root: &Path,
+    paths: &mut Vec<PathBuf>,
+    max_paths: usize,
+) -> Result<()> {
+    let inventory = inventory_provider_jsonl_paths(
+        root,
+        ProviderJsonlInventoryLimits {
+            max_eligible_paths: max_paths,
+            ..ProviderJsonlInventoryLimits::default()
+        },
+    )?;
+    paths.extend(inventory.into_paths());
     Ok(())
 }
 
-pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()> {
+/// Returns the length of an ordinary provider file without following links or
+/// opening its contents.
+///
+/// Volatile accounting-only files such as SQLite `-shm` sidecars must
+/// contribute to source totals without becoming revision authority or
+/// introducing read-time mutation failures.
+pub fn provider_regular_file_len(path: &Path) -> Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     if provider_metadata_is_link_like(&metadata) {
@@ -65,6 +323,11 @@ pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()>
         });
     }
     ensure_provider_path_parents_are_not_symlinks(path)?;
+    Ok(metadata.len())
+}
+
+pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()> {
+    provider_regular_file_len(path)?;
     Ok(())
 }
 

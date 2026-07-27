@@ -449,3 +449,7 @@ pub(crate) fn compact_provider_error(value: &str) -> String {
         "unknown provider {value:?}; examples: codex, claude, cursor, pi, copilot-cli, opencode; run `ctx sources --all` to inspect every supported provider location"
     )
 }
+
+#[cfg(test)]
+#[path = "provider_args/tests.rs"]
+mod tests;

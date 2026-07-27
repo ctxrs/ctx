@@ -2,8 +2,7 @@ use super::{
     normalize::{ContinueNativeProfile, ContinuePreparedPage},
     parse::{
         parse_continue_source_with_profile, ContinueIncompleteSource, ContinueOutputExclusionStats,
-        ContinueParseOutcome, ContinueSourceFailure, ContinueSourceFailureKind,
-        ContinueSourcePageStream,
+        ContinueParseOutcome, ContinueSourceFailure, ContinueSourcePageStream,
     },
     source::{ContinueDiscovery, ContinuePathIter, ContinueRootAuthority, ContinueSourceSnapshot},
     ContinueNativePathError,
@@ -137,15 +136,7 @@ impl Iterator for ContinuePreparationStream<'_> {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     self.stats.failed_sources = self.stats.failed_sources.saturating_add(1);
-                    let kind = match error {
-                        ContinueNativePathError::SourceTooLarge { .. } => {
-                            ContinueSourceFailureKind::SourceTooLarge
-                        }
-                        _ => ContinueSourceFailureKind::Access,
-                    };
-                    return Some(Ok(ContinueSourceOutcome::Failed(
-                        ContinueSourceFailure::from_access(&path, kind, error.to_string()),
-                    )));
+                    return Some(Err(error));
                 }
             };
             self.stats.source_content_reads = self.stats.source_content_reads.saturating_add(1);

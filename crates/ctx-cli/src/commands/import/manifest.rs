@@ -21,6 +21,23 @@ mod walk;
 use store_pages::{InventoryPageStore, SOURCE_IMPORT_STORE_PAGE_SIZE};
 use walk::{pace_inventory_page, SourceImportDirectoryWalk};
 
+/// NativePath routes that discover, reconcile, and retire their own complete root manifest.
+///
+/// The CLI inventory row is only a scheduling token for these routes. Dispatching an outer
+/// file-manifest singleton would let the provider mistake one leaf for the authoritative root.
+pub(crate) const PROVIDER_OWNED_ROOT_MANIFEST_ROUTES: [(CaptureProvider, &str); 7] = [
+    (CaptureProvider::Pi, "pi_session_jsonl"),
+    (CaptureProvider::Junie, "junie_session_events_jsonl_tree"),
+    (
+        CaptureProvider::Antigravity,
+        "antigravity_cli_transcript_jsonl_tree",
+    ),
+    (CaptureProvider::OpenHands, "openhands_file_events"),
+    (CaptureProvider::RovoDev, "rovodev_session_json_tree"),
+    (CaptureProvider::Mux, "mux_session_jsonl_tree"),
+    (CaptureProvider::Auggie, "auggie_session_json"),
+];
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SourceImportInventory {
     pub(crate) files: usize,
@@ -267,19 +284,24 @@ pub(crate) fn persist_source_import_files(
 }
 
 pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
-    !matches!(
-        source.source_format,
-        "codex_session_jsonl_tree"
-            | "openclaw_session_jsonl_tree"
-            | "hermes_state_sqlite"
-            | "nanoclaw_project"
-            | "astrbot_data_v4_sqlite"
-            | "shelley_sqlite"
-            | "cline_task_directory_json"
-            | "roo_task_directory_json"
-            | "firebender_chat_history_sqlite"
-            | "codebuddy_history_json"
-    )
+    !provider_owns_root_manifest(source)
+        && !matches!(
+            source.source_format,
+            "codex_session_jsonl_tree"
+                | "openclaw_session_jsonl_tree"
+                | "hermes_state_sqlite"
+                | "nanoclaw_project"
+                | "astrbot_data_v4_sqlite"
+                | "shelley_sqlite"
+                | "cline_task_directory_json"
+                | "roo_task_directory_json"
+                | "firebender_chat_history_sqlite"
+                | "codebuddy_history_json"
+        )
+}
+
+pub(crate) fn provider_owns_root_manifest(source: &SourceInfo) -> bool {
+    PROVIDER_OWNED_ROOT_MANIFEST_ROUTES.contains(&(source.provider, source.source_format))
 }
 
 pub(crate) fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {

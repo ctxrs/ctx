@@ -80,6 +80,56 @@ fn insert_source_event(
 }
 
 #[test]
+fn locator_planning_is_read_only_and_matches_atomic_reconciliation() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_path = temp.path().join("old.jsonl");
+    let moved_path = temp.path().join("moved.jsonl");
+    std::fs::write(&old_path, b"same source").unwrap();
+    let store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let old = observation(&old_path, "old", "old-cursor", "revision-1");
+
+    let before_fresh = store.conn.total_changes();
+    let planned_fresh = store.plan_provider_source_locator(&old).unwrap();
+    assert_eq!(store.conn.total_changes(), before_fresh);
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM provider_source_locators", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.reconcile_provider_source_locator(&old).unwrap(),
+        planned_fresh
+    );
+
+    std::fs::rename(&old_path, &moved_path).unwrap();
+    let moved = observation(&moved_path, "moved", "moved-cursor", "revision-1");
+    let before_move = store.conn.total_changes();
+    let planned_move = store.plan_provider_source_locator(&moved).unwrap();
+    assert!(planned_move.relocated);
+    assert_eq!(planned_move.canonical_source_identity, "identity-old");
+    assert_eq!(store.conn.total_changes(), before_move);
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_source_locators WHERE locator_identity = ?1",
+                [&moved.locator_identity],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.reconcile_provider_source_locator(&moved).unwrap(),
+        planned_move
+    );
+}
+
+#[test]
 fn changed_source_at_a_new_locator_never_aliases() {
     let temp = tempfile::tempdir().unwrap();
     let old_path = temp.path().join("old.jsonl");
@@ -322,6 +372,15 @@ fn exact_alias_binding_disambiguates_shared_identity_and_follows_relocation() {
     store
         .bind_capture_source_provider_route(second_source_id, &second_resolution.route_binding())
         .unwrap();
+    assert!(
+        store
+            .has_prior_provider_source_route(
+                CaptureProvider::Codex,
+                "codex_session_jsonl",
+                &first_path,
+            )
+            .unwrap()
+    );
 
     assert_eq!(
         store
@@ -352,6 +411,24 @@ fn exact_alias_binding_disambiguates_shared_identity_and_follows_relocation() {
             .unwrap()
             .relocated
     );
+    assert!(
+        !store
+            .has_prior_provider_source_route(
+                CaptureProvider::Codex,
+                "codex_session_jsonl",
+                &first_path,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .has_prior_provider_source_route(
+                CaptureProvider::Codex,
+                "codex_session_jsonl",
+                &moved_path,
+            )
+            .unwrap()
+    );
     assert_eq!(
         store
             .authorized_source_route_for_event(first_event_id)
@@ -365,6 +442,49 @@ fn exact_alias_binding_disambiguates_shared_identity_and_follows_relocation() {
             .unwrap()
             .path(),
         second_path
+    );
+
+    store
+        .upsert_capture_source(&capture_source(
+            first_source_id,
+            &moved_path,
+            "shared-canonical-identity",
+        ))
+        .unwrap();
+    let retirement = ProviderSourceRouteRetirement {
+        provider: moved.provider,
+        source_format: moved.source_format.clone(),
+        machine_id: moved.machine_id.clone(),
+        locator_identity: moved.locator_identity.clone(),
+        cursor_stream: moved.cursor_stream.clone(),
+        expected_canonical_source_identity: "shared-canonical-identity".to_owned(),
+        expected_source_revision: moved.source_revision.clone(),
+        retired_at_ms: 2,
+        reason: ProviderSourceRouteRetirementReason::SourceMissing,
+    };
+    store.begin_immediate_batch().unwrap();
+    assert_eq!(
+        store.retire_provider_source_route_tx(&retirement).unwrap(),
+        ProviderSourceRouteRetirementDisposition::Retired
+    );
+    store.commit_batch().unwrap();
+    assert!(
+        !store
+            .has_prior_provider_source_route(
+                CaptureProvider::Codex,
+                "codex_session_jsonl",
+                &first_path,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .has_prior_provider_source_route(
+                CaptureProvider::Codex,
+                "codex_session_jsonl",
+                &moved_path,
+            )
+            .unwrap()
     );
 }
 
@@ -466,6 +586,31 @@ fn exact_route_replay_reproves_capture_source_and_current_locator() {
             .path(),
         source_path
     );
+    store
+        .conn
+        .execute(
+            "UPDATE events SET deleted_at_ms = 2 WHERE id = ?1",
+            [event_id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.authorized_source_route_for_event(event_id),
+        Err(StoreError::AuthorizedSourceRouteUnavailable { .. })
+    ));
+    store
+        .conn
+        .execute(
+            "UPDATE events SET deleted_at_ms = NULL WHERE id = ?1",
+            [event_id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(event_id)
+            .unwrap()
+            .path(),
+        source_path
+    );
 }
 
 #[test]
@@ -490,6 +635,30 @@ fn retired_sole_locator_restores_exact_authority_idempotently() {
     store
         .bind_capture_source_provider_route(source_id, &first.route_binding())
         .unwrap();
+    assert!(store
+        .has_prior_provider_source_route(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            &source_path,
+        )
+        .unwrap());
+    assert!(!store
+        .has_prior_provider_source_route(
+            CaptureProvider::Claude,
+            "codex_session_jsonl",
+            &source_path,
+        )
+        .unwrap());
+    assert!(!store
+        .has_prior_provider_source_route(CaptureProvider::Codex, "different_format", &source_path,)
+        .unwrap());
+    assert!(!store
+        .has_prior_provider_source_route(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            &temp.path().join("different.jsonl"),
+        )
+        .unwrap());
 
     let retirement = ProviderSourceRouteRetirement {
         provider: source.provider,
@@ -512,6 +681,13 @@ fn retired_sole_locator_restores_exact_authority_idempotently() {
         store.authorized_source_route_for_event(event_id),
         Err(StoreError::AuthorizedSourceRouteUnavailable { .. })
     ));
+    assert!(store
+        .has_prior_provider_source_route(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            &source_path,
+        )
+        .unwrap());
 
     source.source_revision = "revision-2".to_owned();
     source.observed_at_ms = 3;

@@ -265,11 +265,8 @@ pub(super) fn copy_bounded_handle(
         .seek(SeekFrom::Start(0))
         .map_err(|cause| map_io_error(event_id, cause))?;
     let mut output = File::create(destination).map_err(|cause| map_io_error(event_id, cause))?;
-    let copied = io::copy(
-        &mut input.by_ref().take(maximum.saturating_add(1)),
-        &mut output,
-    )
-    .map_err(|cause| map_io_error(event_id, cause))?;
+    let copied = io::copy(&mut input.by_ref().take(maximum), &mut output)
+        .map_err(|cause| map_io_error(event_id, cause))?;
     let current = file_identity(&source.file).map_err(|cause| map_io_error(event_id, cause))?;
     if copied != source.metadata.len() || current != source.identity {
         return Err(content_error(

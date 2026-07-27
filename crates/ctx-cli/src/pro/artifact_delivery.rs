@@ -609,19 +609,17 @@ mod tests {
         assert!(rate_limited.to_string().starts_with("rate_limited:"));
         assert!(!rate_limited.to_string().contains("Worker body detail"));
 
-        let server_error = artifact_api_error(
+        let unknown_code = artifact_api_error(
             500,
             "application/problem+json",
             Some("75"),
             &worker_problem("internal_error", true),
         );
-        assert!(is_retryable_commercial_failure(&server_error));
-        assert_eq!(
-            commercial_retry_after(&server_error),
-            Some(Duration::from_secs(75))
-        );
-        assert!(server_error.to_string().starts_with("internal_error:"));
-        assert!(!server_error.to_string().contains("Worker body detail"));
+        assert!(!is_retryable_commercial_failure(&unknown_code));
+        assert_eq!(commercial_retry_after(&unknown_code), None);
+        assert!(unknown_code.to_string().starts_with("invalid_response:"));
+        assert!(!unknown_code.to_string().contains("internal_error"));
+        assert!(!unknown_code.to_string().contains("Worker body detail"));
 
         let invalid_dependency = artifact_api_error(
             502,

@@ -27,6 +27,8 @@ const OPENHANDS_DISCOVERY_MAX_ENTRIES: usize = 16_384;
 const OPENHANDS_MAX_PATH_BYTES: usize = 7 * 1024;
 const OPENHANDS_ROUTE_HASH_DOMAIN: &[u8] = b"ctx-openhands-nativepath-route-v1\0";
 const OPENHANDS_SOURCE_REVISION_DOMAIN: &[u8] = b"ctx-openhands-nativepath-source-revision-v1\0";
+const OPENHANDS_PHYSICAL_FINGERPRINT_DOMAIN: &[u8] =
+    b"ctx-openhands-nativepath-physical-fingerprint-v1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct OpenHandsObservedTime {
@@ -187,7 +189,9 @@ impl OpenHandsObservedFile {
         }
     }
 
-    pub(super) fn source_revision(&self, inventory_token: Option<&str>) -> String {
+    /// Cursor revision for this exact path. The route hash deliberately keeps a
+    /// cursor from being resumed after the file moves.
+    pub(super) fn cursor_revision(&self, inventory_token: Option<&str>) -> String {
         let mut digest = Sha256::new();
         digest.update(OPENHANDS_SOURCE_REVISION_DOMAIN);
         digest.update(self.route_sha256);
@@ -215,6 +219,12 @@ impl OpenHandsObservedFile {
         format!("openhands-nativepath-source-v1:{}", hex(&digest.finalize()))
     }
 
+    /// Bounded physical-source evidence used only to reconcile a missing path
+    /// with one uniquely matching new path.
+    pub(super) fn physical_fingerprint(&self) -> String {
+        openhands_physical_fingerprint(&self.observation, self.content_sha256)
+    }
+
     pub(super) fn current_prefix_matches(
         &self,
         prior_length: u64,
@@ -230,6 +240,32 @@ impl OpenHandsObservedFile {
             .get(..prior_length)
             .is_some_and(|prefix| <[u8; 32]>::from(Sha256::digest(prefix)) == prior_content_sha256)
     }
+}
+
+pub(super) fn openhands_physical_fingerprint(
+    observation: &OpenHandsFileObservation,
+    content_sha256: Option<[u8; 32]>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(OPENHANDS_PHYSICAL_FINGERPRINT_DOMAIN);
+    digest.update(observation.length.to_be_bytes());
+    digest.update([u8::from(observation.modified.before_epoch)]);
+    digest.update(observation.modified.seconds.to_be_bytes());
+    digest.update(observation.modified.nanos.to_be_bytes());
+    digest.update([u8::from(observation.readonly)]);
+    hash_optional_u64(&mut digest, observation.device);
+    hash_optional_u64(&mut digest, observation.inode);
+    match content_sha256 {
+        Some(content_sha256) => {
+            digest.update([1]);
+            digest.update(content_sha256);
+        }
+        None => digest.update([0]),
+    }
+    format!(
+        "openhands-nativepath-physical-v1:{}",
+        hex(&digest.finalize())
+    )
 }
 
 #[cfg(test)]

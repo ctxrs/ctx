@@ -238,6 +238,77 @@ esac
             self.assertIn("cargo-version", release_script)
             self.assertNotIn("import tomllib", release_script)
 
+    def test_container_gates_stage_only_explicit_world_readable_inputs(self) -> None:
+        source = Path(self.temporary.name) / "private-source"
+        source.mkdir(mode=0o700)
+        for relative_path, _ in PRODUCER.CONTAINER_GATE_INPUTS:
+            destination = source / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((ROOT / relative_path).read_bytes())
+            destination.chmod(0o600)
+        source.chmod(0o700)
+
+        with PRODUCER.staged_container_gate_source(source) as staged:
+            staged_path = staged
+            self.assertNotEqual(staged, source)
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(
+                sorted(
+                    path.relative_to(staged)
+                    for path in staged.rglob("*")
+                    if path.is_file()
+                ),
+                sorted(path for path, _ in PRODUCER.CONTAINER_GATE_INPUTS),
+            )
+            for directory in (
+                path for path in staged.rglob("*") if path.is_dir()
+            ):
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+            for relative_path, expected_mode in PRODUCER.CONTAINER_GATE_INPUTS:
+                staged_file = staged / relative_path
+                self.assertEqual(
+                    staged_file.read_bytes(),
+                    (ROOT / relative_path).read_bytes(),
+                )
+                self.assertEqual(staged_file.stat().st_mode & 0o777, expected_mode)
+
+        self.assertFalse(staged_path.exists())
+
+    def test_container_gates_never_mount_the_private_source_checkout(self) -> None:
+        calls: list[tuple[list[str], str]] = []
+
+        def capture(command: list[str], label: str, **_: object) -> str:
+            calls.append((command, label))
+            self.assertNotIn(f"{ROOT}:/repo:ro", command)
+            repo_mount = next(
+                value
+                for index, value in enumerate(command)
+                if command[index - 1 : index] == ["-v"]
+                and value.endswith(":/repo:ro")
+            )
+            staged = Path(repo_mount.removesuffix(":/repo:ro"))
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o755)
+            for relative_path, expected_mode in PRODUCER.CONTAINER_GATE_INPUTS:
+                staged_file = staged / relative_path
+                self.assertEqual(staged_file.stat().st_mode & 0o777, expected_mode)
+            return ""
+
+        with mock.patch.object(PRODUCER, "run_checked", side_effect=capture):
+            PRODUCER.run_container_gates(
+                docker="/usr/bin/docker",
+                source_repo=ROOT,
+                artifact=self.artifact,
+                version="0.26.0",
+                platform="linux-x64",
+                runtime_image_id=self.images["runtime_image_id"],
+                inspector_image_id=self.images["inspector_image_id"],
+            )
+
+        self.assertEqual(
+            [label for _, label in calls],
+            ["pinned inspector static ABI gate", "pinned native runtime gate"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

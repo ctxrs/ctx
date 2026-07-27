@@ -272,9 +272,6 @@ pub(super) fn valid_opaque_locator(
         (CompleteContentSourceFamily::Structured, "structured-message-v1") => {
             structured::decode_structured_locator(value).is_some()
         }
-        (CompleteContentSourceFamily::Structured, "structured-result-v1") => {
-            structured::decode_structured_result_locator(value).is_some()
-        }
         (CompleteContentSourceFamily::Sqlite, "firebender-chat-session-row-v1")
         | (CompleteContentSourceFamily::Sqlite, "zed-thread-row-v1")
         | (CompleteContentSourceFamily::Sqlite, "lingma-chat-record-v1")

@@ -10,7 +10,8 @@ pub(super) const OPENCODE_NATIVE_PAGE_MAX_UNITS: usize = 64;
 pub(super) const OPENCODE_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const OPENCODE_NATIVE_STATE_SCHEMA_VERSION: u32 = 2;
 pub(super) const OPENCODE_NATIVE_PARSER_REVISION: u32 = 2;
-pub(super) const OPENCODE_NATIVE_POLICY_REVISION: u32 = 2;
+pub(super) const OPENCODE_NATIVE_PRIOR_POLICY_REVISION: u32 = 2;
+pub(super) const OPENCODE_NATIVE_POLICY_REVISION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -176,6 +177,8 @@ pub(super) struct OpenCodeNativeEvent {
     pub(super) kind: OpenCodeNativeEventKind,
     pub(super) role: String,
     pub(super) provider_event_index: u64,
+    pub(super) legacy_provider_event_index: u64,
+    pub(super) source_record_ordinal: u64,
     pub(super) time_created: i64,
     pub(super) time_updated: i64,
     pub(super) searchable_text: String,
@@ -512,6 +515,18 @@ impl OpenCodeNativePersistedState {
             && self.ordered_prefix_evidence.is_supported()
             && self.complete
             && self.core_frontier.phase == OpenCodeNativeScanPhase::Complete
+    }
+
+    pub(super) fn is_supported_cursor_migration_source(&self) -> bool {
+        if self.is_supported() {
+            return true;
+        }
+        let mut current = self.clone();
+        if current.policy_revision != OPENCODE_NATIVE_PRIOR_POLICY_REVISION {
+            return false;
+        }
+        current.policy_revision = OPENCODE_NATIVE_POLICY_REVISION;
+        current.is_supported()
     }
 }
 

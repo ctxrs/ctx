@@ -4,16 +4,16 @@ use ctx_history_core::EventType;
 use ctx_history_store::Store;
 use serde_json::Value;
 
-use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
+use crate::{
+    complete_content::CompleteContentBodyDigest, ProviderAdapterContext, ProviderImportOptions,
+    ProviderImportSummary, Result,
+};
 
 mod event;
 mod native_path;
 mod thread;
 
-pub(crate) use event::zed_result_content;
 pub(crate) use thread::decode_zed_thread_for_complete;
-
-pub(crate) const ZED_RESULT_CONTENT_PROFILE: &str = "zed.result-body.v1";
 
 pub(crate) struct ZedCompleteDecodedThread {
     decoded: event::ZedDecodedThread,
@@ -33,17 +33,16 @@ impl ZedCompleteDecodedThread {
         &'a self,
         provider_session_id: &'a str,
         event_index: usize,
-    ) -> Result<Option<ZedCompleteDecodedEvent<'a>>> {
+    ) -> Result<Option<ZedCompleteDecodedEvent>> {
         self.events(provider_session_id)
             .nth(event_index)
             .transpose()
     }
 }
 
-pub(crate) struct ZedCompleteDecodedEvent<'a> {
+pub(crate) struct ZedCompleteDecodedEvent {
     pub(crate) event: ZedCompleteEvent,
     pub(crate) complete_text: String,
-    pub(crate) message: &'a Value,
 }
 
 /// Migration-only fields needed to verify a released complete-content locator.
@@ -55,12 +54,21 @@ pub(crate) struct ZedCompleteEvent {
     pub(crate) payload: Value,
 }
 
+pub(crate) struct ZedNativePathCompleteMessage {
+    pub(crate) provider_event_index: u64,
+    pub(crate) legacy_provider_event_hash: String,
+    pub(crate) cursor: String,
+    pub(crate) event_type: EventType,
+    pub(crate) payload: Value,
+    pub(crate) complete_text: String,
+}
+
 pub(crate) struct ZedCompleteDecodedEvents<'a> {
     native: event::ZedNativeEvents<'a>,
 }
 
 impl<'a> Iterator for ZedCompleteDecodedEvents<'a> {
-    type Item = Result<ZedCompleteDecodedEvent<'a>>;
+    type Item = Result<ZedCompleteDecodedEvent>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.native.next().map(|native| {
@@ -82,7 +90,6 @@ impl<'a> Iterator for ZedCompleteDecodedEvents<'a> {
                         payload: event.payload,
                     },
                     complete_text: decoded.complete_text,
-                    message: decoded.message,
                 }
             })
         })
@@ -93,6 +100,15 @@ pub(crate) fn decode_zed_thread_events(
     row: &thread::ZedThreadRow,
 ) -> Result<ZedCompleteDecodedThread> {
     event::decode_zed_thread_events(row).map(|decoded| ZedCompleteDecodedThread { decoded })
+}
+
+pub(crate) fn decode_zed_nativepath_complete_message(
+    row: &thread::ZedThreadRow,
+    message_ordinal: u64,
+    record_digest: CompleteContentBodyDigest,
+) -> Result<Option<ZedNativePathCompleteMessage>> {
+    native_path::decode_complete_message(row, message_ordinal, record_digest)
+        .map_err(native_path::into_capture_error)
 }
 
 pub(crate) fn import_zed_nativepath(

@@ -11,13 +11,18 @@ mod projection;
 mod source;
 
 pub(crate) use checkpoint::CursorCheckpoint;
-pub(crate) use layout::{discover_cursor_transcripts, CursorTranscriptPath};
-pub(crate) use parser::{CursorRecordRejection, CursorRejectionKind};
+pub(crate) use layout::{
+    discover_cursor_transcripts, CursorDiscoveryIssueKind, CursorTranscriptPath,
+};
+pub(crate) use parser::{
+    cursor_complete_content_message_record, CursorRecordRejection, CursorRejectionKind,
+};
 pub(crate) use projection::{
     CursorEventBody, CursorNativeEvent, CursorNativeSession, CursorPublicationPage,
     CursorPublicationSink,
 };
 pub(crate) use source::{
+    cursor_complete_content_source_from_admitted, cursor_complete_content_source_revision,
     freeze_cursor_source, resolve_cursor_missing_sources, scan_cursor_source_into,
     CursorCompletedExactInventory, CursorFrozenSource, CursorKnownSource,
     CursorMissingSourceDisposition, CursorPriorObservation, CursorReadOutcome,
@@ -26,8 +31,6 @@ pub(crate) use source::{
 
 #[cfg(test)]
 pub(crate) use checkpoint::CursorCheckpointDisposition;
-#[cfg(test)]
-pub(crate) use layout::CursorDiscoveryIssueKind;
 #[cfg(test)]
 pub(crate) use projection::{CURSOR_PUBLICATION_PAGE_MAX_BYTES, CURSOR_PUBLICATION_PAGE_MAX_ROWS};
 #[cfg(test)]

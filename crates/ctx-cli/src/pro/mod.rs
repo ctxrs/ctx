@@ -8,9 +8,11 @@ mod commercial_deletion;
 mod commercial_lifecycle;
 mod credential_vault;
 mod graph_key_deletion;
+mod helper_command;
 mod lifecycle;
 mod local_deletion;
 mod pending_materialization;
+mod referral;
 mod render;
 mod request_identity;
 mod setup_validation;
@@ -20,6 +22,9 @@ pub(crate) use client::ProOutputImport;
 pub(crate) use client::{blame, stable_error_code};
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
 pub(crate) use pending_materialization::run_if_pending as run_pending_materialization;
+#[cfg(test)]
+pub(crate) use referral::parse_referral_codename;
+pub(crate) use referral::{run as run_referral, show_cta_once, ReferralArgs};
 pub(crate) use render::{blame_result_json, print_blame_result};
 
 use anyhow::anyhow;

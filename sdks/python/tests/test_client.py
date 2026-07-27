@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -57,6 +58,27 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertTrue(result["status"]["localOnly"])
         self.assertEqual(result["status"]["freshness"], {"mode": "off", "status": "skipped"})
         self.assertEqual(result["status"]["futureField"], "preserved")
+
+    def test_local_cli_forces_analytics_off_after_ambient_and_user_env(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ctx", "status", "--json"],
+            0,
+            stdout=b'{"initialized":true,"local_only":true}',
+            stderr=b"",
+        )
+        with mock.patch.dict(os.environ, {"CTX_ANALYTICS_ENABLED": "true"}):
+            with mock.patch(
+                "ctx_agent_history.transport.subprocess.run",
+                return_value=completed,
+            ) as run:
+                client = AgentHistoryClient.local(
+                    env={"CTX_ANALYTICS_ENABLED": "true"},
+                )
+
+                client.status()
+
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["CTX_ANALYTICS_ENABLED"], "false")
 
     def test_init_sources_import_sync_search_and_inspect_methods(self) -> None:
         with fake_ctx() as cli:

@@ -29,10 +29,10 @@ fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
         .any(|failure| failure["error"].as_str().unwrap().contains("agy-bad")));
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["source_import_files"], 2, "{status:#}");
+    assert_eq!(status["source_import_files"], 1, "{status:#}");
     assert_eq!(status["indexed_source_import_files"], 1, "{status:#}");
-    assert_eq!(status["failed_source_import_files"], 1, "{status:#}");
-    assert_eq!(status["pending_source_import_files"], 1, "{status:#}");
+    assert_eq!(status["failed_source_import_files"], 0, "{status:#}");
+    assert_eq!(status["pending_source_import_files"], 0, "{status:#}");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -84,6 +84,123 @@ fn mixed_source_replay_remains_completed_with_rejections() {
 }
 
 #[test]
+fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
+    let mixed_temp = tempdir();
+    let mixed_project =
+        write_native_firebender_fixture(&mixed_temp, "firebender mixed rejection replay oracle");
+    let mixed_database = Path::new(&mixed_project)
+        .join(".idea")
+        .join("firebender")
+        .join("chat_history.db");
+    let conn = Connection::open(&mixed_database).unwrap();
+    conn.execute(
+        "update chat_sessions set updated_at = 20 where id = 'firebender-fixture-session'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into chat_sessions
+         (id, name, created_at, updated_at, messages_json, metadata_json)
+         values (?1, ?2, ?3, ?4, ?5, ?6)",
+        params!["firebender-invalid", "invalid", 9_i64, 10_i64, "{", "{}"],
+    )
+    .unwrap();
+    drop(conn);
+
+    for resume in [false, true] {
+        let mut command = ctx(&mixed_temp);
+        command.args([
+            "import",
+            "--provider",
+            "firebender",
+            "--path",
+            &mixed_project,
+            "--json",
+            "--progress",
+            "none",
+        ]);
+        if resume {
+            command.arg("--resume");
+        }
+        let report = json_output(&mut command);
+        assert_eq!(
+            report["outcome"], "completed_with_rejections",
+            "resume={resume}: {report:#}"
+        );
+        assert_eq!(report["failure_scope"], "record", "{report:#}");
+        assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
+        assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
+        assert!(
+            report["totals"]["imported_events"].as_u64().unwrap() > 0 || resume,
+            "{report:#}"
+        );
+        assert_eq!(
+            report["sources"][0]["status"], "completed_with_rejections",
+            "{report:#}"
+        );
+    }
+
+    let invalid_temp = tempdir();
+    let invalid_project =
+        write_native_firebender_fixture(&invalid_temp, "unused all-invalid oracle");
+    let invalid_database = Path::new(&invalid_project)
+        .join(".idea")
+        .join("firebender")
+        .join("chat_history.db");
+    let conn = Connection::open(&invalid_database).unwrap();
+    conn.execute("update chat_sessions set messages_json = '{'", [])
+        .unwrap();
+    drop(conn);
+
+    for resume in [false, true] {
+        let mut command = ctx(&invalid_temp);
+        command.args([
+            "import",
+            "--provider",
+            "firebender",
+            "--path",
+            &invalid_project,
+            "--json",
+            "--progress",
+            "none",
+        ]);
+        if resume {
+            command.arg("--resume");
+        }
+        let output = command.assert().failure().get_output().clone();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "invalid Firebender import JSON ({error}); stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(report["outcome"], "failure", "resume={resume}: {report:#}");
+        assert_eq!(report["failure_scope"], "source", "{report:#}");
+        assert_eq!(
+            report["failure_type"], "record_rejection_and_source_failure",
+            "{report:#}"
+        );
+        assert_eq!(report["totals"]["imported_sessions"], 0, "{report:#}");
+        assert_eq!(report["totals"]["imported_events"], 0, "{report:#}");
+        assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
+        assert_eq!(
+            report["sources"][0]["failure_type"], "record_rejection",
+            "{report:#}"
+        );
+    }
+
+    let conn = Connection::open(invalid_temp.path().join("work.sqlite")).unwrap();
+    for table in ["capture_sources", "sessions", "events"] {
+        let count = conn
+            .query_row(&format!("select count(*) from {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "unexpected all-invalid rows in {table}");
+    }
+}
+
+#[test]
 fn codex_mixed_session_replay_remains_completed_with_rejections() {
     let temp = tempdir();
     let session = temp.path().join("codex-mixed-replay.jsonl");
@@ -121,8 +238,13 @@ fn codex_mixed_session_replay_remains_completed_with_rejections() {
             report["outcome"], "completed_with_rejections",
             "resume={resume}: {report:#}"
         );
+        assert_eq!(report["failure_scope"], "record", "{report:#}");
         assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
         assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
+        assert_eq!(
+            report["sources"][0]["status"], "completed_with_rejections",
+            "{report:#}"
+        );
     }
 
     let search = json_output(ctx(&temp).args([
@@ -328,6 +450,52 @@ fn missing_explicit_format_source_reports_failure_json() {
     );
     assert_eq!(report["sources"][0]["imported_sessions"], 0, "{report:#}");
     assert_eq!(report["sources"][0]["rejections"], json!([]), "{report:#}");
+}
+
+fn failed_warp_report(temp: &TempDir, path: &Path) -> Value {
+    let output = ctx(temp)
+        .args([
+            "import",
+            "--provider",
+            "warp",
+            "--path",
+            path.to_str().unwrap(),
+            "--no-daemon",
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid Warp failure JSON ({error}); stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+#[test]
+fn warp_native_source_failures_keep_cli_classification() {
+    let corrupt_temp = tempdir();
+    let corrupt_path = corrupt_temp.path().join("corrupt-warp.sqlite");
+    fs::write(&corrupt_path, b"not a SQLite database").unwrap();
+    let corrupt = failed_warp_report(&corrupt_temp, &corrupt_path);
+    assert_eq!(
+        corrupt["sources"][0]["failure_type"], "source_database",
+        "{corrupt:#}"
+    );
+
+    let schema_temp = tempdir();
+    let schema_path = schema_temp.path().join("schema-warp.sqlite");
+    drop(Connection::open(&schema_path).unwrap());
+    let schema = failed_warp_report(&schema_temp, &schema_path);
+    assert_eq!(
+        schema["sources"][0]["failure_type"], "unsupported_schema",
+        "{schema:#}"
+    );
 }
 
 #[cfg(unix)]

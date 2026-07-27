@@ -36,6 +36,51 @@ pub(super) use publication::{
 };
 use query::scan_warp_native_snapshot;
 
+pub(super) fn resolve_warp_task_message(
+    task_bytes: &[u8],
+    conversation_id: &str,
+    fallback_task_id: &str,
+    message_index: usize,
+) -> Result<Option<super::WarpTaskContent>> {
+    let decoded =
+        decode::decode_warp_native_task(task_bytes, publication::WarpNativeProfile::CoreOnly)?;
+    let task_id = fallback_task_id;
+    let message_ordinal = u32::try_from(message_index)
+        .map_err(|_| CaptureError::InvalidPayload("Warp message locator exceeds u32".to_owned()))?;
+    let Some(message) = decoded
+        .messages
+        .into_iter()
+        .find(|message| message.message_ordinal == message_ordinal)
+    else {
+        return Ok(None);
+    };
+    let decode::WarpDecodedMessagePayload::Retained(retained) = message.payload else {
+        return Ok(None);
+    };
+    let native_record_id = message
+        .message_id
+        .clone()
+        .unwrap_or_else(|| format!("{task_id}:{}", message.message_ordinal));
+    let identity = publication::WarpNativeEventIdentity {
+        conversation_id: conversation_id.to_owned(),
+        task_id: task_id.to_owned(),
+        message: message
+            .message_id
+            .map(publication::WarpNativeMessageIdentity::ProviderId)
+            .unwrap_or(publication::WarpNativeMessageIdentity::MessageOrdinal(
+                message.message_ordinal,
+            )),
+    };
+    let normalized_payload_hash =
+        publication::normalized_retained_event_hash(&identity, &retained.body, None, None)?;
+    Ok(Some(super::WarpTaskContent {
+        event_type: retained.event_type,
+        native_record_id,
+        text: retained.body,
+        normalized_payload_hash: Some(normalized_payload_hash),
+    }))
+}
+
 const WARP_SOURCE_INVALID_REASON: &str = "Warp SQLite source must be a regular non-symlink file";
 const WARP_SIDECAR_INVALID_REASON: &str = "Warp SQLite sidecar must be a regular non-symlink file";
 

@@ -541,6 +541,37 @@ fn narrow_typed_surface_writes_only_canonical_model_operations() {
 }
 
 #[test]
+fn event_identity_alias_is_atomic_idempotent_and_resolves_to_canonical_event() {
+    let (_temp, store) = open_store();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let canonical_id = Uuid::from_u128(0x100);
+    let alias_id = Uuid::from_u128(0x200);
+    let canonical = event(canonical_id, 1, None, None);
+
+    let mut group = begin_group(&store, &guard);
+    assert!(group
+        .reconcile_provider_event(
+            &canonical,
+            ProviderEventHashAuthority::NormalizedPayloadFallback,
+        )
+        .unwrap());
+    group
+        .bind_event_identity_alias(alias_id, canonical_id, now().timestamp_millis())
+        .unwrap();
+    group
+        .bind_event_identity_alias(alias_id, canonical_id, now().timestamp_millis())
+        .unwrap();
+    publish_and_commit(group).unwrap();
+
+    assert_eq!(store.get_event(alias_id).unwrap().id, canonical_id);
+    assert_eq!(
+        store.event_alias_target_id(alias_id).unwrap(),
+        Some(canonical_id)
+    );
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
 fn retention_noops_charge_units_without_inventing_bound_values() {
     let (_temp, store) = open_store();
     let guard = store.begin_event_search_bulk_mode().unwrap();
@@ -596,6 +627,48 @@ fn failed_typed_mutation_poison_rolls_back_prior_success_when_error_is_ignored()
         Err(StoreError::NotFound(_))
     ));
     store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
+fn rollback_failure_quarantines_connection_until_store_is_reopened() {
+    let (temp, store) = open_store();
+    let db_path = temp.path().join("ctx.db");
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let staged = source(Uuid::from_u128(32));
+    let invalid_session = session(Uuid::from_u128(33), Some(Uuid::from_u128(999)));
+    let mut group = begin_group(&store, &guard);
+    group.upsert_capture_source(&staged).unwrap();
+    assert!(group.insert_session_if_absent(&invalid_session).is_err());
+
+    Store::fail_next_rollback_for_test();
+    assert!(matches!(
+        group.commit(),
+        Err(StoreError::StoreConnectionQuarantined)
+    ));
+    assert!(store.connection_quarantined.get());
+    assert_eq!(store.batch_depth.get(), 1);
+    assert!(!store.conn.is_autocommit());
+    assert!(store.native_path_group_token.get().is_some());
+    assert!(store.native_path_group_poisoned.load(Ordering::SeqCst));
+    assert!(matches!(
+        store.upsert_capture_source(&source(Uuid::from_u128(34))),
+        Err(StoreError::StoreConnectionQuarantined)
+    ));
+
+    drop(guard);
+    drop(store);
+
+    let reopened = Store::open(&db_path).unwrap();
+    assert!(matches!(
+        reopened.get_capture_source(staged.id),
+        Err(StoreError::NotFound(_))
+    ));
+    let recovered = source(Uuid::from_u128(35));
+    reopened.upsert_capture_source(&recovered).unwrap();
+    assert_eq!(
+        reopened.get_capture_source(recovered.id).unwrap(),
+        recovered
+    );
 }
 
 #[test]
@@ -1360,498 +1433,6 @@ fn journal_byte_limit_accepts_exact_and_one_over_poison_rolls_back() {
         .unwrap();
 }
 
-#[test]
-fn store_owned_cursor_classification_publishes_and_recovers_exact_checkpoint() {
-    let (_temp, store) = open_store();
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-    let key = NativePathCursorKey::new(None, "machine", "native-path:checkpoint");
-    let transition = NativePathCursorTransition::new(None, cursor(&key, "provider-next", 1));
-
-    let mut group = begin_unclassified_group(&store, &guard, accounting());
-    assert_eq!(
-        group
-            .classify_cursor_set("publication-1", std::slice::from_ref(&transition))
-            .unwrap(),
-        NativePathCursorSetClassification::AllExpected
-    );
-    group
-        .reconcile_provider_event(
-            &event(Uuid::from_u128(500), 1, None, None),
-            ProviderEventHashAuthority::NormalizedPayloadFallback,
-        )
-        .unwrap();
-    let checkpoint = group
-        .prepare_journal_checkpoint()
-        .unwrap()
-        .expect("active journal checkpoint");
-    group.publish_cursor_set().unwrap();
-    let receipt = group.commit().unwrap();
-    assert_eq!(receipt.checkpoint(), Some(&checkpoint));
-
-    let stored = store
-        .get_sync_cursor(key.team_id(), key.device_id(), key.stream())
-        .unwrap()
-        .unwrap();
-    let committed = decode_native_path_committed_cursor(&stored.cursor).unwrap();
-    assert_eq!(committed.publication_id(), "publication-1");
-    assert_eq!(committed.provider_cursor(), "provider-next");
-    assert_eq!(committed.journal_checkpoint(), Some(&checkpoint));
-
-    let regenerated = NativePathCursorTransition::new(None, cursor(&key, "provider-next", 99));
-    assert_ne!(
-        regenerated.next().timestamps.updated_at,
-        stored.timestamps.updated_at
-    );
-    let mut retry = begin_unclassified_group(&store, &guard, accounting());
-    assert_eq!(
-        retry
-            .classify_cursor_set("publication-1", &[regenerated])
-            .unwrap(),
-        NativePathCursorSetClassification::AllNextSameGroup {
-            checkpoint: Some(checkpoint.clone())
-        }
-    );
-    let retry_receipt = retry.commit().unwrap();
-    assert_eq!(retry_receipt.checkpoint(), Some(&checkpoint));
-    assert_eq!(retry_receipt.attempted_mutation_units(), 0);
-    assert_eq!(
-        store
-            .get_sync_cursor(key.team_id(), key.device_id(), key.stream())
-            .unwrap(),
-        Some(stored),
-        "all-next recovery must not rewrite cursor timestamps or identity"
-    );
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
-
-#[test]
-fn mixed_cursor_states_and_checkpoint_mismatch_conflict_without_callbacks() {
-    let (_temp, store) = open_store();
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-    let first_key = NativePathCursorKey::new(None, "machine", "native-path:first");
-    let second_key = NativePathCursorKey::new(None, "machine", "native-path:second");
-    let transitions = vec![
-        NativePathCursorTransition::new(None, cursor(&first_key, "first-next", 1)),
-        NativePathCursorTransition::new(None, cursor(&second_key, "second-next", 1)),
-    ];
-
-    let two_sources = NativePathGroupAccounting::new(1, 2, 64).unwrap();
-    let mut publish = begin_unclassified_group(&store, &guard, two_sources);
-    publish
-        .classify_cursor_set("publication-set", &transitions)
-        .unwrap();
-    publish.prepare_journal_checkpoint().unwrap();
-    publish.publish_cursor_set().unwrap();
-    publish.commit().unwrap();
-
-    let mut subset_retry = begin_unclassified_group(&store, &guard, two_sources);
-    assert!(matches!(
-        subset_retry.classify_cursor_set("publication-set", std::slice::from_ref(&transitions[0])),
-        Err(StoreError::InvalidNativePathCursorSet)
-    ));
-    assert!(matches!(
-        subset_retry.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-
-    let mut second = store
-        .get_sync_cursor(
-            second_key.team_id(),
-            second_key.device_id(),
-            second_key.stream(),
-        )
-        .unwrap()
-        .unwrap();
-    second.cursor = "expected-second".to_owned();
-    second.timestamps.updated_at += TimeDelta::seconds(1);
-    store.upsert_sync_cursor(&second).unwrap();
-
-    let mixed_transitions = vec![
-        NativePathCursorTransition::new(
-            Some("expected-first".to_owned()),
-            cursor(&first_key, "first-next", 10),
-        ),
-        NativePathCursorTransition::new(
-            Some("expected-second".to_owned()),
-            cursor(&second_key, "second-next", 10),
-        ),
-    ];
-    let mut mixed = begin_unclassified_group(&store, &guard, two_sources);
-    assert!(matches!(
-        mixed.classify_cursor_set("publication-set", &mixed_transitions),
-        Err(StoreError::NativePathCursorConflict)
-    ));
-    assert!(matches!(
-        mixed.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-
-    // Republish both, then give only one row a different, independently valid
-    // checkpoint. Exact common-checkpoint verification must reject the set.
-    store.conn.execute("DELETE FROM sync_cursors", []).unwrap();
-    let mut republish = begin_unclassified_group(&store, &guard, two_sources);
-    republish
-        .classify_cursor_set("publication-set", &transitions)
-        .unwrap();
-    let old_checkpoint = republish.prepare_journal_checkpoint().unwrap().unwrap();
-    republish.publish_cursor_set().unwrap();
-    republish.commit().unwrap();
-
-    let mut advance = begin_group(&store, &guard);
-    advance
-        .reconcile_provider_event(
-            &event(Uuid::from_u128(501), 2, None, None),
-            ProviderEventHashAuthority::NormalizedPayloadFallback,
-        )
-        .unwrap();
-    let new_checkpoint = publish_and_commit(advance)
-        .unwrap()
-        .checkpoint()
-        .cloned()
-        .unwrap();
-    assert_ne!(old_checkpoint, new_checkpoint);
-
-    let mut second = store
-        .get_sync_cursor(
-            second_key.team_id(),
-            second_key.device_id(),
-            second_key.stream(),
-        )
-        .unwrap()
-        .unwrap();
-    let mut envelope = decode_cursor_envelope(&second.cursor).unwrap();
-    envelope.journal_checkpoint = Some(new_checkpoint);
-    second.cursor = encode_cursor_envelope(&envelope).unwrap();
-    second.timestamps.updated_at += TimeDelta::seconds(1);
-    store.upsert_sync_cursor(&second).unwrap();
-
-    let retry_transitions = vec![
-        NativePathCursorTransition::new(None, cursor(&first_key, "first-next", 20)),
-        NativePathCursorTransition::new(None, cursor(&second_key, "second-next", 20)),
-    ];
-    let mut mismatch = begin_unclassified_group(&store, &guard, two_sources);
-    assert!(matches!(
-        mismatch.classify_cursor_set("publication-set", &retry_transitions),
-        Err(StoreError::NativePathCursorConflict)
-    ));
-    assert!(matches!(
-        mismatch.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
-
-#[test]
-fn wal_threshold_blocks_next_group_until_pinned_reader_releases() {
-    let temp = tempfile::tempdir().unwrap();
-    let db_path = temp.path().join("ctx.db");
-    let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-
-    let mut first = begin_group(&store, &guard);
-    first
-        .upsert_capture_source(&source(Uuid::from_u128(600)))
-        .unwrap();
-    publish_and_commit(first).unwrap();
-    store.checkpoint_wal_truncate_required().unwrap();
-
-    let reader = Connection::open(&db_path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    assert_eq!(
-        reader
-            .query_row("SELECT COUNT(*) FROM capture_sources", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
-        1
-    );
-
-    let mut second = begin_group(&store, &guard);
-    second
-        .upsert_capture_source(&source(Uuid::from_u128(601)))
-        .unwrap();
-    publish_and_commit(second).unwrap();
-
-    let _limits = Store::event_search_bulk_test_limits(Some(1), None);
-    assert!(matches!(
-        store.admit_event_search_bulk_group(&guard),
-        Err(StoreError::WalCheckpointBusy {
-            log_frames,
-            checkpointed_frames,
-        }) if log_frames > checkpointed_frames
-    ));
-    reader.execute_batch("ROLLBACK").unwrap();
-    let admitted = store.admit_event_search_bulk_group(&guard).unwrap();
-    store
-        .begin_native_path_publication_group(admitted, accounting())
-        .unwrap()
-        .rollback()
-        .unwrap();
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
-
-#[test]
-fn only_one_bulk_group_admission_can_be_outstanding() {
-    let (_temp, store) = open_store();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-    let first = store.admit_event_search_bulk_group(&guard).unwrap();
-    assert!(matches!(
-        store.finish_event_search_bulk_mode(&guard),
-        Err(StoreError::InvalidBulkSearchGuard)
-    ));
-    assert!(matches!(
-        store.admit_event_search_bulk_group(&guard),
-        Err(StoreError::BulkSearchGroupAdmissionOutstanding)
-    ));
-    drop(first);
-    let replacement = store.admit_event_search_bulk_group(&guard).unwrap();
-    store
-        .begin_native_path_publication_group(replacement, accounting())
-        .unwrap()
-        .rollback()
-        .unwrap();
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
-
-#[test]
-fn nested_bulk_guard_can_publish_while_outer_root_is_live() {
-    let (_temp, store) = open_store();
-    let outer = store.begin_event_search_bulk_mode().unwrap();
-    let nested = store.begin_event_search_bulk_mode().unwrap();
-    let mut group = begin_group(&store, &nested);
-    group
-        .upsert_capture_source(&source(Uuid::from_u128(690)))
-        .unwrap();
-    publish_and_commit(group).unwrap();
-
-    store.finish_event_search_bulk_mode(&nested).unwrap();
-    drop(nested);
-    store.finish_event_search_bulk_mode(&outer).unwrap();
-}
-
-#[test]
-fn nested_bulk_guard_and_admission_expire_with_their_root_epoch() {
-    let (_temp, store) = open_store();
-    let outer = store.begin_event_search_bulk_mode().unwrap();
-    let nested = store.begin_event_search_bulk_mode().unwrap();
-    let stale_admission = store.admit_event_search_bulk_group(&nested).unwrap();
-
-    drop(outer);
-    assert!(matches!(
-        store.admit_event_search_bulk_group(&nested),
-        Err(StoreError::InvalidBulkSearchGuard)
-    ));
-    drop(nested);
-
-    let replacement = store.begin_event_search_bulk_mode().unwrap();
-    assert!(matches!(
-        store.begin_native_path_publication_group(stale_admission, accounting()),
-        Err(StoreError::InvalidBulkSearchGroupAdmission)
-    ));
-    let admission = store.admit_event_search_bulk_group(&replacement).unwrap();
-    store
-        .begin_native_path_publication_group(admission, accounting())
-        .unwrap()
-        .rollback()
-        .unwrap();
-    store.finish_event_search_bulk_mode(&replacement).unwrap();
-}
-
-#[test]
-fn relationship_edge_is_journal_neutral_only_when_actor_is_exactly_unchanged() {
-    let (_temp, store) = open_store();
-    let parent = session(Uuid::from_u128(700), None);
-    let mut child = session(Uuid::from_u128(701), None);
-    child.parent_session_id = Some(parent.id);
-    child.root_session_id = Some(parent.id);
-    store.upsert_session(&parent).unwrap();
-    store.upsert_session(&child).unwrap();
-    store
-        .conn
-        .execute(
-            "INSERT INTO events
-             (id, seq, session_id, event_type, role, occurred_at_ms, payload_json, metadata_json)
-             VALUES (?1, 1, ?2, 'notice', 'assistant', 0, '{\"lineage\":true}', '{}')",
-            params![Uuid::from_u128(702).to_string(), child.id.to_string()],
-        )
-        .unwrap();
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-
-    let relationship = edge(Uuid::from_u128(703), child.id, parent.id);
-    let mut group = begin_group(&store, &guard);
-    group
-        .upsert_projection_neutral_session_edge(&actor(&child), &relationship)
-        .unwrap();
-    let receipt = publish_and_commit(group).unwrap();
-    assert_eq!(receipt.journal_records(), 0);
-    assert!(store.session_edge_exists(relationship.id).unwrap());
-
-    let rejected_edge = edge(Uuid::from_u128(704), child.id, parent.id);
-    let mut changed_actor = actor(&child);
-    changed_actor.parent_session_id = None;
-    let mut rejected = begin_group(&store, &guard);
-    assert!(matches!(
-        rejected.upsert_projection_neutral_session_edge(&changed_actor, &rejected_edge),
-        Err(StoreError::ProjectionChangingSessionRelationship)
-    ));
-    assert!(matches!(
-        rejected.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-    assert!(!store.session_edge_exists(rejected_edge.id).unwrap());
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
-
-#[test]
-fn source_generation_retires_omissions_replays_and_allows_exact_restoration() {
-    let (_temp, store) = open_store();
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-    let source_id = Uuid::from_u128(800);
-    let session_id = Uuid::from_u128(801);
-    let retained_event_id = Uuid::from_u128(802);
-    let retired_event_id = Uuid::from_u128(803);
-    let mut capture_source = source(source_id);
-    let observation = ProviderSourceLocatorObservation {
-        provider: CaptureProvider::Codex,
-        source_format: "codex-jsonl".to_owned(),
-        machine_id: "machine".to_owned(),
-        locator_identity: "locator-800".to_owned(),
-        cursor_stream: "native-path:source-800".to_owned(),
-        proposed_source_identity: format!("source-{source_id}"),
-        raw_source_path: Some("/repo/session.jsonl".to_owned()),
-        source_revision: "revision-1".to_owned(),
-        observed_at_ms: 1,
-    };
-    let mut retained_event = event(retained_event_id, 1, Some(source_id), Some(session_id));
-    let retained_hash = compute_payload_hash(&retained_event.payload).unwrap();
-    retained_event.dedupe_key = Some(Store::provider_source_event_dedupe_key(
-        source_id,
-        1,
-        &retained_hash,
-    ));
-    retained_event.sync.metadata["provider_event_hash_authority"] =
-        json!(ProviderEventHashAuthority::NormalizedPayloadFallback.as_str());
-    let mut retired_event = event(retired_event_id, 2, Some(source_id), Some(session_id));
-    let retired_hash = compute_payload_hash(&retired_event.payload).unwrap();
-    retired_event.dedupe_key = Some(Store::provider_source_event_dedupe_key(
-        source_id,
-        2,
-        &retired_hash,
-    ));
-    retired_event.sync.metadata["provider_event_hash_authority"] =
-        json!(ProviderEventHashAuthority::NormalizedPayloadFallback.as_str());
-    let key = NativePathSourceGenerationKey {
-        provider: CaptureProvider::Codex,
-        source_format: observation.source_format.clone(),
-        machine_id: observation.machine_id.clone(),
-        canonical_source_identity: observation.proposed_source_identity.clone(),
-        locator_identity: observation.locator_identity.clone(),
-        cursor_stream: observation.cursor_stream.clone(),
-        source_revision: observation.source_revision.clone(),
-        generation_id: "generation-1".to_owned(),
-    };
-
-    let mut group = begin_group(&store, &guard);
-    let resolution = group
-        .reconcile_provider_source_locator(&observation)
-        .unwrap();
-    capture_source.descriptor.source_identity = Some(resolution.canonical_source_identity.clone());
-    group.upsert_capture_source(&capture_source).unwrap();
-    group
-        .bind_capture_source_provider_route(source_id, &resolution.route_binding())
-        .unwrap();
-    group
-        .upsert_session(&session(session_id, Some(source_id)))
-        .unwrap();
-    group
-        .reconcile_provider_event(
-            &retained_event,
-            ProviderEventHashAuthority::NormalizedPayloadFallback,
-        )
-        .unwrap();
-    group
-        .reconcile_provider_event(
-            &retired_event,
-            ProviderEventHashAuthority::NormalizedPayloadFallback,
-        )
-        .unwrap();
-    group
-        .stage_source_generation_page(
-            &key,
-            &NativePathRetainedSourceEntities {
-                capture_source_ids: vec![source_id],
-                session_ids: vec![session_id],
-                event_ids: vec![retained_event_id],
-                ..NativePathRetainedSourceEntities::default()
-            },
-        )
-        .unwrap();
-    publish_and_commit(group).unwrap();
-
-    let retirement_cursor_key =
-        NativePathCursorKey::new(None, "test-machine", "native-path:retirement-preview");
-    let retirement_transition =
-        NativePathCursorTransition::new(None, cursor(&retirement_cursor_key, "done", 2));
-    let mut retirement = begin_unclassified_group(&store, &guard, accounting());
-    let preview = retirement
-        .preview_source_generation_retirement_page(&key, None, 16)
-        .unwrap();
-    assert_eq!(
-        retirement
-            .classify_cursor_set(
-                "source-retirement-preview",
-                std::slice::from_ref(&retirement_transition),
-            )
-            .unwrap(),
-        NativePathCursorSetClassification::AllExpected
-    );
-    let page = retirement
-        .retire_source_generation_page(&key, None, 16, 2)
-        .unwrap();
-    assert_eq!(page, preview);
-    assert!(page.done);
-    assert_eq!(page.retired, 1);
-    publish_and_commit(retirement).unwrap();
-
-    assert!(store
-        .get_event(retained_event_id)
-        .unwrap()
-        .sync
-        .deleted_at
-        .is_none());
-    assert!(store
-        .get_event(retired_event_id)
-        .unwrap()
-        .sync
-        .deleted_at
-        .is_some());
-
-    let mut replay = begin_group(&store, &guard);
-    assert_eq!(
-        replay
-            .retire_source_generation_page(&key, None, 16, 2)
-            .unwrap(),
-        page
-    );
-    publish_and_commit(replay).unwrap();
-
-    let mut restore = begin_group(&store, &guard);
-    assert!(!restore
-        .reconcile_provider_event(
-            &retired_event,
-            ProviderEventHashAuthority::NormalizedPayloadFallback,
-        )
-        .unwrap());
-    publish_and_commit(restore).unwrap();
-    assert!(store
-        .get_event(retired_event_id)
-        .unwrap()
-        .sync
-        .deleted_at
-        .is_none());
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
+mod generation;
+mod lifecycle;
+mod publication;

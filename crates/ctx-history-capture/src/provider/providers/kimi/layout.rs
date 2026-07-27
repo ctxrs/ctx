@@ -127,15 +127,16 @@ impl KimiFrozenFileMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct KimiWirePaths {
+pub(super) struct KimiWireRoute {
+    source_root: PathBuf,
     state_path: PathBuf,
     index_path: PathBuf,
     agent_id: String,
     session_id: String,
 }
 
-impl KimiWirePaths {
-    fn from_wire_path(path: &Path) -> Result<Self> {
+impl KimiWireRoute {
+    pub(super) fn parse(path: &Path) -> Result<Self> {
         if path.file_name().and_then(|name| name.to_str()) != Some("wire.jsonl") {
             return Err(invalid_kimi_wire_path(path));
         }
@@ -178,17 +179,22 @@ impl KimiWirePaths {
             .parent()
             .ok_or_else(|| invalid_kimi_wire_path(path))?;
         Ok(Self {
+            source_root: root_dir.to_path_buf(),
             state_path: session_dir.join("state.json"),
             index_path: root_dir.join("session_index.jsonl"),
             agent_id,
             session_id,
         })
     }
+
+    pub(super) fn source_root(&self) -> &Path {
+        &self.source_root
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KimiWireLayout {
-    paths: KimiWirePaths,
+    route: KimiWireRoute,
     canonical_wire_path: PathBuf,
     wire: KimiFrozenFileMetadata,
     state_file: Option<KimiFrozenFileMetadata>,
@@ -199,23 +205,23 @@ pub(super) struct KimiWireLayout {
 
 impl KimiWireLayout {
     pub(super) fn read(path: &Path) -> Result<Self> {
-        let paths = KimiWirePaths::from_wire_path(path)?;
         let wire = KimiFrozenFileMetadata::read(path)?;
         let canonical_wire_path = fs::canonicalize(path)?;
-        let state_file = KimiFrozenFileMetadata::read_optional(&paths.state_path)?;
+        let route = KimiWireRoute::parse(&canonical_wire_path)?;
+        let state_file = KimiFrozenFileMetadata::read_optional(&route.state_path)?;
         let state = match state_file.as_ref() {
-            Some(file) => read_kimi_state(&paths.state_path, file)?,
+            Some(file) => read_kimi_state(&route.state_path, file)?,
             None => Value::Null,
         };
-        let index_file = KimiFrozenFileMetadata::read_optional(&paths.index_path)?;
+        let index_file = KimiFrozenFileMetadata::read_optional(&route.index_path)?;
         let index_entry = match index_file.as_ref() {
             Some(file) => {
-                read_kimi_session_index_entry(&paths.index_path, file, &paths.session_id)?
+                read_kimi_session_index_entry(&route.index_path, file, &route.session_id)?
             }
             None => None,
         };
         Ok(Self {
-            paths,
+            route,
             canonical_wire_path,
             wire,
             state_file,
@@ -232,7 +238,8 @@ impl KimiWireLayout {
         state: Option<(&Metadata, &[u8])>,
         index: Option<(&Metadata, &[u8])>,
     ) -> Result<Self> {
-        let paths = KimiWirePaths::from_wire_path(path)?;
+        KimiWireRoute::parse(path)?;
+        let route = KimiWireRoute::parse(&canonical_wire_path)?;
         let wire = KimiFrozenFileMetadata::from_metadata(wire_metadata)?;
         let (state_file, state) = match state {
             Some((metadata, bytes)) => {
@@ -258,14 +265,14 @@ impl KimiWireLayout {
                 }
                 let entry = read_kimi_session_index_entry_from_reader(
                     BufReader::new(Cursor::new(bytes)),
-                    &paths.session_id,
+                    &route.session_id,
                 )?;
                 (Some(frozen), entry)
             }
             None => (None, None),
         };
         Ok(Self {
-            paths,
+            route,
             canonical_wire_path,
             wire,
             state_file,
@@ -284,11 +291,11 @@ impl KimiWireLayout {
     }
 
     pub(super) fn agent_id(&self) -> &str {
-        &self.paths.agent_id
+        &self.route.agent_id
     }
 
     pub(super) fn session_id(&self) -> &str {
-        &self.paths.session_id
+        &self.route.session_id
     }
 
     pub(super) fn take_state(&mut self) -> Value {
@@ -300,27 +307,48 @@ impl KimiWireLayout {
     }
 
     pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
-        let current_paths = match KimiWirePaths::from_wire_path(path) {
-            Ok(paths) => paths,
+        let canonical_path = match fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let current_route = match KimiWireRoute::parse(&canonical_path) {
+            Ok(route) => route,
             Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
             Err(error) => return Err(error),
         };
-        if current_paths != self.paths
+        if current_route != self.route
             || !self.wire.revalidate(path)?
-            || fs::canonicalize(path)? != self.canonical_wire_path
+            || canonical_path != self.canonical_wire_path
         {
             return Ok(false);
         }
-        if !KimiFrozenFileMetadata::revalidate_optional(&self.state_file, &self.paths.state_path)? {
+        if !KimiFrozenFileMetadata::revalidate_optional(&self.state_file, &self.route.state_path)? {
             return Ok(false);
         }
-        KimiFrozenFileMetadata::revalidate_optional(&self.index_file, &self.paths.index_path)
+        KimiFrozenFileMetadata::revalidate_optional(&self.index_file, &self.route.index_path)
     }
 }
 
 pub(super) fn complete_content_auxiliary_paths(path: &Path) -> Result<(PathBuf, PathBuf)> {
-    let paths = KimiWirePaths::from_wire_path(path)?;
-    Ok((paths.state_path, paths.index_path))
+    let route = KimiWireRoute::parse(path)?;
+    Ok((route.state_path, route.index_path))
+}
+
+pub(super) fn canonical_source_root_for_wire(path: &Path) -> Result<PathBuf> {
+    let routed_path = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::path::absolute(path)?,
+        Err(error) => return Err(error.into()),
+    };
+    let route = KimiWireRoute::parse(&routed_path)?;
+    match fs::canonicalize(route.source_root()) {
+        Ok(root) => Ok(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::path::absolute(route.source_root())?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn read_kimi_state(path: &Path, file: &KimiFrozenFileMetadata) -> Result<Value> {

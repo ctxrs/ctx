@@ -10,8 +10,9 @@ use crate::schema::rebuild::sanitize_v44_result_event_payloads;
 use crate::schema::semantic_projection_epoch::install as install_semantic_projection_epoch;
 use crate::search::projections::{
     event_scriptgram_table_ready, event_search_lookup_table_ready,
-    populate_event_search_projection_from_query, rebuild_search_projection,
-    refresh_semantic_searchable_item_stats,
+    populate_event_search_projection_from_query, prepare_v47_search_projection_tables,
+    rebuild_search_projection, refresh_semantic_searchable_item_stats,
+    search_projection_is_exactly_canonical,
 };
 use crate::{Result, StoreError, FINAL_SCHEMA_IDENTITY};
 
@@ -81,44 +82,81 @@ CREATE TABLE IF NOT EXISTS projection_journal_entities (
 // provider-session invariant; telemetry adoption alone is insufficient because
 // analytics may be disabled or undelivered.
 pub(super) fn migrate_to_v47(conn: &Connection) -> Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE;")?;
-    let migration = (|| -> Result<()> {
-        conn.execute_batch(CREATE_TABLES_SQL)?;
-        let affected_event_ids = repair_duplicate_provider_sessions(conn)?;
-        if !affected_event_ids.is_empty() {
-            refresh_event_search_projection_for_event_ids(conn, &affected_event_ids)?;
-        }
-        sanitize_v44_result_event_payloads(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        conn.execute_batch(PROVIDER_SESSION_INVARIANTS_SQL)?;
-        conn.execute_batch(FINAL_SCHEMA_SQL)?;
-        install_semantic_projection_epoch(conn)?;
-        // v46 may contain a silently partial projection left by an interrupted
-        // legacy autocommit rebuild. Rebuild once inside this final migration
-        // transaction so v47 never blesses that state as initialized.
-        rebuild_search_projection(conn)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO ctx_store_schema_identity
-                 (singleton, schema_version, schema_identity)
-             VALUES (1, 47, ?1)",
-            [FINAL_SCHEMA_IDENTITY],
-        )?;
-        conn.execute_batch("PRAGMA user_version = 47;")?;
-        Ok(())
-    })();
+    let original_temp_store: i64 = conn.query_row("PRAGMA temp_store", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA temp_store = FILE;")?;
+    let result = (|| -> Result<()> {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let migration = (|| -> Result<()> {
+            conn.execute_batch(CREATE_TABLES_SQL)?;
+            let search_projection_tables = prepare_v47_search_projection_tables(conn)?;
+            let affected_event_ids = repair_duplicate_provider_sessions(conn)?;
+            if !affected_event_ids.is_empty() {
+                refresh_event_search_projection_for_event_ids(conn, &affected_event_ids)?;
+            }
+            sanitize_v44_result_event_payloads(conn)?;
+            conn.execute_batch(INDEXES_SQL)?;
+            conn.execute_batch(PROVIDER_SESSION_INVARIANTS_SQL)?;
+            conn.execute_batch(FINAL_SCHEMA_SQL)?;
+            install_semantic_projection_epoch(conn)?;
+            // Bring the rows intentionally changed by v47 to their canonical
+            // state before deciding whether the rest of the released v46
+            // projection is exactly reusable.
+            refresh_result_event_search_projection(conn)?;
+            if !search_projection_is_exactly_canonical(conn, search_projection_tables)? {
+                // A released v46 store can contain a partial, stale, or
+                // otherwise non-canonical projection from a legacy
+                // autocommit rebuild.
+                rebuild_search_projection(conn)?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO ctx_store_schema_identity
+                     (singleton, schema_version, schema_identity)
+                 VALUES (1, 47, ?1)",
+                [FINAL_SCHEMA_IDENTITY],
+            )?;
+            conn.execute_batch("PRAGMA user_version = 47;")?;
+            Ok(())
+        })();
 
-    match migration {
+        match migration {
+            Ok(()) => {
+                conn.execute_batch("COMMIT;")?;
+                Ok(())
+            }
+            Err(err) => {
+                if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                    return Err(StoreError::Sql(rollback_err));
+                }
+                Err(err)
+            }
+        }
+    })();
+    let restore = restore_temp_store(conn, original_temp_store);
+    match result {
         Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
+            restore?;
             Ok(())
         }
         Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
-                return Err(StoreError::Sql(rollback_err));
-            }
+            let _ = restore;
             Err(err)
         }
     }
+}
+
+fn restore_temp_store(conn: &Connection, temp_store: i64) -> Result<()> {
+    let pragma = match temp_store {
+        0 => "PRAGMA temp_store = DEFAULT",
+        1 => "PRAGMA temp_store = FILE",
+        2 => "PRAGMA temp_store = MEMORY",
+        _ => {
+            return Err(StoreError::UnsupportedSchemaIdentity(format!(
+                "invalid SQLite temp_store mode {temp_store}"
+            )));
+        }
+    };
+    conn.execute_batch(pragma)?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -216,20 +254,7 @@ fn refresh_event_search_projection_for_event_ids(
     conn: &Connection,
     event_ids: &BTreeSet<String>,
 ) -> Result<()> {
-    let has_event_search = table_exists(conn, "event_search")?;
-    let has_event_lookup = event_search_lookup_table_ready(conn)?;
-    let has_event_scriptgram = event_scriptgram_table_ready(conn)?;
-    if !has_event_search && !has_event_lookup && !has_event_scriptgram {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        r#"
-        CREATE TEMP TABLE ctx_v47_affected_event_ids (
-            event_id TEXT PRIMARY KEY NOT NULL
-        ) WITHOUT ROWID;
-        "#,
-    )?;
+    create_affected_event_ids_table(conn)?;
     {
         let mut insert = conn
             .prepare_cached("INSERT INTO temp.ctx_v47_affected_event_ids (event_id) VALUES (?1)")?;
@@ -237,19 +262,65 @@ fn refresh_event_search_projection_for_event_ids(
             insert.execute([event_id])?;
         }
     }
+    refresh_event_search_projection_for_affected_table(conn)
+}
+
+pub(super) fn refresh_result_event_search_projection(conn: &Connection) -> Result<()> {
+    create_affected_event_ids_table(conn)?;
+    conn.execute(
+        r#"
+        INSERT INTO temp.ctx_v47_affected_event_ids (event_id)
+        SELECT id
+        FROM events
+        WHERE event_type IN ('tool_output', 'command_output')
+        "#,
+        [],
+    )?;
+    refresh_event_search_projection_for_affected_table(conn)
+}
+
+fn create_affected_event_ids_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS temp.ctx_v47_affected_event_ids;
+        CREATE TEMP TABLE ctx_v47_affected_event_ids (
+            event_id TEXT PRIMARY KEY NOT NULL
+        ) WITHOUT ROWID;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn refresh_event_search_projection_for_affected_table(conn: &Connection) -> Result<()> {
+    let has_event_search = table_exists(conn, "event_search")?;
+    let has_event_lookup = event_search_lookup_table_ready(conn)?;
+    let has_event_scriptgram = event_scriptgram_table_ready(conn)?;
+    if !has_event_search && !has_event_lookup && !has_event_scriptgram {
+        conn.execute_batch("DROP TABLE temp.ctx_v47_affected_event_ids;")?;
+        return Ok(());
+    }
+    let affected: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM temp.ctx_v47_affected_event_ids)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !affected {
+        conn.execute_batch("DROP TABLE temp.ctx_v47_affected_event_ids;")?;
+        return Ok(());
+    }
 
     if has_event_search {
-        delete_affected_fts_rows(conn, "event_search", event_ids)?;
+        delete_affected_fts_rows(conn, "event_search")?;
     }
     if has_event_scriptgram {
-        delete_affected_fts_rows(conn, "event_search_scriptgram", event_ids)?;
+        delete_affected_fts_rows(conn, "event_search_scriptgram")?;
     }
     if has_event_lookup {
-        let mut delete =
-            conn.prepare_cached("DELETE FROM event_search_lookup WHERE event_id = ?1")?;
-        for event_id in event_ids {
-            delete.execute([event_id])?;
-        }
+        conn.execute(
+            "DELETE FROM event_search_lookup
+             WHERE event_id IN (SELECT event_id FROM temp.ctx_v47_affected_event_ids)",
+            [],
+        )?;
     }
 
     populate_event_search_projection_from_query(
@@ -280,40 +351,19 @@ fn refresh_event_search_projection_for_event_ids(
     Ok(())
 }
 
-fn delete_affected_fts_rows(
-    conn: &Connection,
-    table: &str,
-    event_ids: &BTreeSet<String>,
-) -> Result<()> {
-    let (select_sql, delete_sql) = match table {
-        "event_search" => (
-            "SELECT rowid, event_id FROM event_search",
-            "DELETE FROM event_search WHERE rowid = ?1",
-        ),
-        "event_search_scriptgram" => (
-            "SELECT rowid, event_id FROM event_search_scriptgram",
-            "DELETE FROM event_search_scriptgram WHERE rowid = ?1",
-        ),
+fn delete_affected_fts_rows(conn: &Connection, table: &str) -> Result<()> {
+    let delete_sql = match table {
+        "event_search" => {
+            "DELETE FROM event_search
+             WHERE event_id IN (SELECT event_id FROM temp.ctx_v47_affected_event_ids)"
+        }
+        "event_search_scriptgram" => {
+            "DELETE FROM event_search_scriptgram
+             WHERE event_id IN (SELECT event_id FROM temp.ctx_v47_affected_event_ids)"
+        }
         _ => unreachable!("invalid FTS table {table}"),
     };
-    let rowids = {
-        let mut stmt = conn.prepare(select_sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut rowids = Vec::new();
-        for row in rows {
-            let (rowid, event_id) = row?;
-            if event_ids.contains(&event_id) {
-                rowids.push(rowid);
-            }
-        }
-        rowids
-    };
-    let mut delete = conn.prepare_cached(delete_sql)?;
-    for rowid in rowids {
-        delete.execute([rowid])?;
-    }
+    conn.execute(delete_sql, [])?;
     Ok(())
 }
 

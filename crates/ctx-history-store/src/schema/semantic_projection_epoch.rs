@@ -90,7 +90,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS canonical_semantic_projection_sessions_update
 AFTER UPDATE OF
     history_record_id, parent_session_id, root_session_id, capture_source_id,
-    provider, external_session_id, agent_type, is_primary
+    provider, external_session_id, agent_type, is_primary, metadata_json
 ON sessions
 WHEN
     OLD.history_record_id IS NOT NEW.history_record_id
@@ -101,6 +101,7 @@ WHEN
     OR OLD.external_session_id IS NOT NEW.external_session_id
     OR OLD.agent_type IS NOT NEW.agent_type
     OR OLD.is_primary IS NOT NEW.is_primary
+    OR OLD.metadata_json IS NOT NEW.metadata_json
 BEGIN
     UPDATE canonical_semantic_projection_state
     SET mutation_epoch = mutation_epoch + 1

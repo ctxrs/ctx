@@ -549,8 +549,12 @@ fn selected_paths_match_explicit_same_path_source_metadata() {
     ] {
         fs::create_dir_all(directory).unwrap();
     }
-    for file in [
+    fs::write(
         codex.join("history.jsonl"),
+        r#"{"session_id":"same-path","ts":1784371200,"text":"same path"}"#,
+    )
+    .unwrap();
+    for file in [
         open_code.clone(),
         kilo.clone(),
         mimocode.clone(),

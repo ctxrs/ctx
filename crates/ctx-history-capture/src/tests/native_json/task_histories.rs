@@ -451,24 +451,25 @@ fn native_codebuddy_symlinked_message_file_is_not_imported() {
     symlink(&outside_message, messages_dir.join("message-1.json")).unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let summary = import_codebuddy_history(
+    let error = import_codebuddy_history(
         &project,
         &mut store,
         CodeBuddyImportOptions {
             ..CodeBuddyImportOptions::default()
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
-    assert!(summary.failures[0]
-        .error
-        .contains("symlinked provider transcript files are rejected"));
+    assert!(
+        error
+            .to_string()
+            .contains("symlinked provider transcript files are rejected"),
+        "{error}"
+    );
     assert!(store
         .search_event_hits("symlinked CodeBuddy message file must not import", 10)
         .unwrap()
         .is_empty());
     assert!(store.list_sessions().unwrap().is_empty());
+    assert!(store.list_capture_sources().unwrap().is_empty());
 }

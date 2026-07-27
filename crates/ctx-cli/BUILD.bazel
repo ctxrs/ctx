@@ -21,6 +21,19 @@ filegroup(
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
 )
 
+filegroup(
+    name = "native_dispatch_source",
+    srcs = ["src/commands/import/native/dispatch.rs"],
+)
+
+filegroup(
+    name = "provider_import_architecture_sources",
+    srcs = glob(
+        ["src/commands/import/**/*.rs"],
+        exclude = RUST_PROD_SRC_EXCLUDES,
+    ),
+)
+
 cargo_toml_env_vars(
     name = "cargo_toml_env_vars",
     src = "Cargo.toml",
@@ -106,6 +119,74 @@ ctx_rust_binary(
     stamp = -1,
 )
 
+# Optimized Pro protocol tests need the developer helper authority that ordinary
+# release binaries intentionally compile out. This test-only host keeps release
+# optimization while making `debug_assertions` the compile-time authority.
+ctx_rust_binary(
+    name = "ctx_pro_test_host",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_pro_test_host",
+    crate_root = "src/main.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    compile_data = CTX_CLI_COMPILE_DATA,
+    deps = all_crate_deps(normal = True) + CTX_CLI_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = RELEASE_BUILD_RUSTC_ENV,
+    rustc_env_files = [
+        ":cargo_toml_env_vars",
+        "release-stamp.env",
+    ],
+    rustc_flags = CTX_CLI_RUSTC_FLAGS + ["-Cdebug-assertions=yes"],
+    stamp = -1,
+)
+
+# The auto-upgrade acceptance harness needs its deterministic crash and pause
+# seams even when the surrounding release gate uses optimized compilation.
+# Keep that authority in a test-only executable rather than enabling test hooks
+# in the published release binary.
+ctx_rust_binary(
+    name = "ctx_auto_upgrade_acceptance_fixture",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_auto_upgrade_acceptance_fixture",
+    crate_root = "src/main.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    compile_data = CTX_CLI_COMPILE_DATA,
+    deps = all_crate_deps(normal = True) + CTX_CLI_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = RELEASE_BUILD_RUSTC_ENV,
+    rustc_env_files = [
+        ":cargo_toml_env_vars",
+        "release-stamp.env",
+    ],
+    rustc_flags = CTX_CLI_RUSTC_FLAGS + ["-Cdebug-assertions=yes"],
+    stamp = -1,
+)
+
+ctx_rust_binary(
+    name = "ctx_upgrade_test_harness",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx",
+    crate_root = "src/main.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    compile_data = CTX_CLI_COMPILE_DATA,
+    deps = all_crate_deps(normal = True) + CTX_CLI_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = RELEASE_BUILD_RUSTC_ENV,
+    rustc_env_files = [
+        ":cargo_toml_env_vars",
+        "release-stamp.env",
+        "src/upgrade/test-harness.env",
+    ],
+    rustc_flags = CTX_CLI_RUSTC_FLAGS,
+    stamp = -1,
+)
+
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
@@ -129,10 +210,12 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
+    tags = ["exclusive"],
 )
 
 ctx_cli_integration_test(
     name = "analytics_tests",
+    binary = ":ctx_upgrade_test_harness",
     src = "tests/analytics.rs",
 )
 
@@ -149,7 +232,11 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "auto_upgrade_acceptance_tests",
     src = "tests/auto_upgrade_acceptance.rs",
-    extra_env = {"RUST_TEST_THREADS": "1"},
+    extra_data = [":ctx_auto_upgrade_acceptance_fixture"],
+    extra_env = {
+        "CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE": "$(rootpath :ctx_auto_upgrade_acceptance_fixture)",
+        "RUST_TEST_THREADS": "1",
+    },
     tags = ["release-gate"],
 )
 
@@ -252,6 +339,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "pro_host_tests",
     src = "tests/pro_host.rs",
+    binary = ":ctx_pro_test_host",
     tags = ["protocol"],
 )
 
@@ -263,6 +351,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "pro_mcp_tests",
     src = "tests/pro_mcp.rs",
+    binary = ":ctx_pro_test_host",
     tags = ["protocol"],
 )
 
@@ -316,6 +405,11 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "upgrade_tests",
     src = "tests/upgrade.rs",
+    binary = ":ctx_upgrade_test_harness",
+    extra_data = [":ctx"],
+    extra_env = {
+        "CTX_ORDINARY_RELEASE_BINARY": "$(rootpath :ctx)",
+    },
     extra_compile_data = [
         "src/upgrade/install.rs",
         "//:upgrade_extractor_contract",
@@ -324,6 +418,7 @@ ctx_cli_integration_test(
 
 ctx_cli_integration_test(
     name = "upgrade_analytics_tests",
+    binary = ":ctx_upgrade_test_harness",
     src = "tests/upgrade_analytics.rs",
 )
 

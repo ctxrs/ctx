@@ -416,7 +416,16 @@ fn store_pages_validate_as_exact_protocol_v1_journal_requests() {
         canonical_schema_identity: snapshot.canonical_schema_identity,
         projection_contract_version: snapshot.projection_contract_version,
         contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-        prior_checkpoint: prior,
+        prior_checkpoint: prior.clone(),
+        context: JournalContextWindow {
+            base_checkpoint: protocol_checkpoint(snapshot.context.base_checkpoint),
+            records: snapshot
+                .context
+                .records
+                .into_iter()
+                .map(protocol_journal_record)
+                .collect(),
+        },
         frozen_through: protocol_checkpoint(snapshot.frozen_through),
         authorized_repository_roots: snapshot.authorized_repository_roots,
         records: snapshot
@@ -491,6 +500,125 @@ fn frozen_store_pages_coalesce_and_resume_without_skips_or_duplicates() {
 }
 
 #[test]
+fn acknowledged_pages_supply_exact_transient_context_to_the_next_request() {
+    let temp = tempdir().expect("temp dir");
+    let store = Store::open(temp.path().join("ctx.db")).expect("open Store");
+    let source_id = Uuid::from_u128(2);
+    let session_id = Uuid::from_u128(3);
+    store
+        .upsert_capture_source(&source(source_id))
+        .expect("source");
+    store
+        .upsert_session(&session(session_id, source_id))
+        .expect("session");
+    for index in 1..=600_u64 {
+        let mut fixture = event(
+            Uuid::from_u128(u128::from(index).saturating_add(100)),
+            session_id,
+            source_id,
+        );
+        fixture.seq = index;
+        fixture.payload = json!({"body": format!("context-{index}")});
+        store.upsert_event(&fixture).expect("append event");
+    }
+
+    let mut requests = Vec::new();
+    let checkpoint =
+        prepare_nativepath_projection_journal(&store, &mut |message, _| match message {
+            HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
+                state: GraphState::NotMaterialized,
+                checkpoint: None,
+            })),
+            HostMessage::SyncJournal(request) => {
+                request.validate().expect("valid context request");
+                requests.push(request.clone());
+                Ok(exact_journal_sync_response(&request))
+            }
+            _ => bail!("unexpected helper request"),
+        })
+        .expect("materialize journal pages");
+
+    assert_eq!(checkpoint.position.sequence, 600);
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].context.records.is_empty());
+    assert_eq!(requests[0].records.len(), MAX_JOURNAL_RECORDS_PER_BATCH);
+    assert_eq!(requests[1].prior_checkpoint.position.sequence, 512);
+    assert_eq!(requests[1].context.base_checkpoint.position.sequence, 448);
+    assert_eq!(requests[1].context.records.len(), 64);
+    assert_eq!(requests[1].context.records[0].sequence, 449);
+    assert_eq!(requests[1].context.records[63].sequence, 512);
+    assert_eq!(requests[1].records.first().unwrap().sequence, 513);
+    assert_eq!(requests[1].records.last().unwrap().sequence, 600);
+}
+
+#[test]
+fn many_near_maximum_records_never_coalesce_beyond_one_bounded_store_page() {
+    let temp = tempdir().expect("temp dir");
+    let store = Store::open(temp.path().join("ctx.db")).expect("open Store");
+    let source_id = Uuid::from_u128(2);
+    let session_id = Uuid::from_u128(3);
+    store
+        .upsert_capture_source(&source(source_id))
+        .expect("source");
+    store
+        .upsert_session(&session(session_id, source_id))
+        .expect("session");
+    let large_body = "x".repeat(2_900_000);
+    for index in 1..=12_u64 {
+        let mut fixture = event(
+            Uuid::from_u128(u128::from(index).saturating_add(100)),
+            session_id,
+            source_id,
+        );
+        fixture.seq = index;
+        fixture.payload = json!({"body": &large_body, "ordinal": index});
+        store.upsert_event(&fixture).expect("append large event");
+    }
+
+    let mut request_shapes = Vec::new();
+    let checkpoint =
+        prepare_nativepath_projection_journal(&store, &mut |message, _| match message {
+            HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
+                state: GraphState::NotMaterialized,
+                checkpoint: None,
+            })),
+            HostMessage::SyncJournal(request) => {
+                request.validate().expect("valid bounded request");
+                request_shapes.push((
+                    request.records.len(),
+                    serde_json::to_vec(&request.records)
+                        .expect("encode current records")
+                        .len(),
+                    journal_sync_envelope_bytes(&request).expect("encode exact envelope"),
+                ));
+                Ok(exact_journal_sync_response(&request))
+            }
+            _ => bail!("unexpected helper request"),
+        })
+        .expect("materialize bounded large journal pages");
+
+    assert_eq!(checkpoint.position.sequence, 12);
+    assert_eq!(
+        request_shapes
+            .iter()
+            .map(|(records, _, _)| records)
+            .sum::<usize>(),
+        12
+    );
+    assert!(
+        request_shapes.len() > 1,
+        "large legal records must require multiple bounded requests"
+    );
+    assert!(request_shapes
+        .iter()
+        .all(|(records, page_bytes, envelope_bytes)| {
+            *records <= 2
+                && *page_bytes <= ctx_history_store::PROJECTION_JOURNAL_MAX_PAGE_BYTES
+                && *envelope_bytes <= MAX_JOURNAL_SYNC_ENVELOPE_BYTES
+        }));
+}
+
+#[test]
 fn journal_page_is_trimmed_against_the_complete_maximum_envelope() {
     fn record(sequence: u64, prior: &str, payload_bytes: usize) -> JournalRecord {
         let payload = json!({"body": "x".repeat(payload_bytes)});
@@ -528,18 +656,25 @@ fn journal_page_is_trimmed_against_the_complete_maximum_envelope() {
         .map(|index| format!("/{index:03}/{}", "\\\"".repeat(1_020)))
         .collect::<Vec<_>>();
     let initial = initial_journal_digest(1);
-    let first = record(1, &initial, 3 * 1024 * 1024);
-    let second = record(2, &first.cumulative_digest, 1024 * 1024);
+    let context_record = record(1, &initial, 1);
+    let mut records = Vec::new();
+    let mut prior_digest = context_record.cumulative_digest.clone();
+    for sequence in 2..=7 {
+        let next = record(sequence, &prior_digest, 3 * 1024 * 1024);
+        prior_digest.clone_from(&next.cumulative_digest);
+        records.push(next);
+    }
+    let original_records = records.clone();
     let frozen = JournalCheckpoint {
         position: JournalPosition {
             generation: 1,
-            sequence: 2,
+            sequence: 7,
         },
         contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-        cumulative_digest: second.cumulative_digest.clone(),
+        cumulative_digest: records.last().unwrap().cumulative_digest.clone(),
     };
     let request = JournalSyncRequest {
-        mode: JournalSyncMode::FullBaseline,
+        mode: JournalSyncMode::Incremental,
         canonical_schema_version: 47,
         canonical_schema_identity: "ctx-store-schema-47-final-v3".to_owned(),
         projection_contract_version: ctx_pro_host_protocol::PROJECTION_CONTRACT_VERSION,
@@ -547,23 +682,50 @@ fn journal_page_is_trimmed_against_the_complete_maximum_envelope() {
         prior_checkpoint: JournalCheckpoint {
             position: JournalPosition {
                 generation: 1,
-                sequence: 0,
+                sequence: 1,
             },
             contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: initial,
+            cumulative_digest: context_record.cumulative_digest.clone(),
+        },
+        context: JournalContextWindow {
+            base_checkpoint: JournalCheckpoint {
+                position: JournalPosition {
+                    generation: 1,
+                    sequence: 0,
+                },
+                contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+                cumulative_digest: initial,
+            },
+            records: vec![context_record],
         },
         frozen_through: frozen,
         authorized_repository_roots: roots,
-        records: vec![first, second],
+        records,
     };
     assert!(journal_sync_envelope_bytes(&request).unwrap() > MAX_JOURNAL_SYNC_ENVELOPE_BYTES);
 
     let fitted = fit_journal_sync_request(request).expect("fit request");
-    assert_eq!(fitted.records.len(), 1);
+    assert!(!fitted.records.is_empty());
+    assert!(fitted.records.len() < 6);
+    assert_eq!(fitted.context.records.len(), 1);
+    assert_eq!(fitted.context.records[0].sequence, 1);
     assert!(journal_sync_envelope_bytes(&fitted).unwrap() <= MAX_JOURNAL_SYNC_ENVELOPE_BYTES);
+    if fitted.records.len() < original_records.len() {
+        let mut one_more = fitted.clone();
+        one_more
+            .records
+            .push(original_records[fitted.records.len()].clone());
+        assert!(
+            journal_sync_envelope_bytes(&one_more).unwrap() > MAX_JOURNAL_SYNC_ENVELOPE_BYTES,
+            "fitting must retain the largest exact prefix"
+        );
+    }
     fitted.validate().expect("trimmed page remains valid");
-    assert_eq!(fitted.committed_checkpoint().position.sequence, 1);
-    assert_eq!(fitted.frozen_through.position.sequence, 2);
+    assert_eq!(
+        fitted.committed_checkpoint().position.sequence,
+        1 + fitted.records.len() as u64
+    );
+    assert_eq!(fitted.frozen_through.position.sequence, 7);
 }
 
 #[test]
@@ -873,53 +1035,6 @@ impl AuthorizationProvider for RecordingAuthorization {
 }
 
 #[cfg(unix)]
-fn write_smoke_helper(path: &Path, capabilities: &str) {
-    let script = format!(
-        r#"#!/usr/bin/python3
-import json, struct, sys
-
-def receive():
-    header = sys.stdin.buffer.read(12)
-    if len(header) != 12 or header[:8] != b'CTXPRO\x00\x01':
-        sys.exit(20)
-    size = struct.unpack('>I', header[8:12])[0]
-    return json.loads(sys.stdin.buffer.read(size))
-
-def send(request, kind, body):
-    value = {{'sequence':request['sequence'],'request_id':request['request_id'],
-             'message':{{'kind':kind,'body':body}}}}
-    payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO\x00\x01' + struct.pack('>I', len(payload)) + payload)
-    sys.stdout.buffer.flush()
-
-hello = receive()
-send(hello, 'hello', {{
-    'protocol_version':1,
-    'protocol_fingerprint':'{PROTOCOL_FINGERPRINT}',
-    'helper_version':'staged-smoke-test',
-    'capabilities':{capabilities},
-    'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
-}})
-if 'entitlement_authorization' not in {capabilities}:
-    sys.exit(0)
-authorization = receive()
-if authorization['message']['kind'] != 'authorize':
-    sys.exit(21)
-send(authorization, 'authorized', {{
-    'state':'active','refresh_required':False,'expires_at_unix':5,
-    'access_deadline_unix':3,'grace_deadline_unix':4,'capabilities':['graph_read']
-}})
-status = receive()
-if status['message']['kind'] != 'status':
-    sys.exit(22)
-send(status, 'status', {{'state':'ready','checkpoint':None}})
-"#
-    );
-    fs::write(path, script).expect("write helper");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("make helper executable");
-}
-
-#[cfg(unix)]
 fn write_graph_key_deletion_helper(
     path: &Path,
     key_present_before: bool,
@@ -1066,106 +1181,6 @@ send(verify, 'graph_key_deletion_prepared', {{
     fs::write(path, script).expect("write namespace graph-key deletion helper");
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .expect("make namespace graph-key deletion helper executable");
-}
-
-#[cfg(target_os = "linux")]
-fn write_nonreading_journal_helper(path: &Path) {
-    let script = format!(
-        r#"#!/usr/bin/python3
-import json, os, struct, sys, time
-
-def receive():
-    header = sys.stdin.buffer.read(12)
-    if len(header) != 12 or header[:8] != b'CTXPRO\x00\x01':
-        sys.exit(20)
-    size = struct.unpack('>I', header[8:12])[0]
-    return json.loads(sys.stdin.buffer.read(size))
-
-def send(request, kind, body):
-    value = {{'sequence':request['sequence'],'request_id':request['request_id'],
-             'message':{{'kind':kind,'body':body}}}}
-    payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO\x00\x01' + struct.pack('>I', len(payload)) + payload)
-    sys.stdout.buffer.flush()
-
-hello = receive()
-with open(sys.argv[0] + '.pid', 'w', encoding='ascii') as pid_file:
-    pid_file.write(str(os.getpid()))
-send(hello, 'hello', {{
-    'protocol_version':1,
-    'protocol_fingerprint':'{PROTOCOL_FINGERPRINT}',
-    'helper_version':'nonreading-journal-test',
-    'capabilities':['journal_sync'],
-    'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
-}})
-while True:
-    time.sleep(3600)
-"#
-    );
-    fs::write(path, script).expect("write non-reading helper");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .expect("make non-reading helper executable");
-}
-
-#[cfg(target_os = "linux")]
-fn valid_large_journal_request(payload_bytes: usize) -> JournalSyncRequest {
-    let initial_digest = initial_journal_digest(1);
-    let payload = json!({"body": "x".repeat(payload_bytes)});
-    let stable_entity_id = Uuid::from_u128(101);
-    let provenance = JournalProvenanceIdentity {
-        entity_kind: JournalEntityKind::Event,
-        stable_entity_id,
-        capture_source_id: None,
-        provider: None,
-        provider_external_id: None,
-    };
-    let mut record = JournalRecord {
-        generation: 1,
-        sequence: 1,
-        projection_contract_version: ctx_pro_host_protocol::PROJECTION_CONTRACT_VERSION,
-        entity_kind: JournalEntityKind::Event,
-        stable_entity_id,
-        entity_revision: 1,
-        operation: JournalOperation::Upsert,
-        canonical_payload: Some(payload.clone()),
-        payload_sha256: ctx_pro_host_protocol::sha256_hex(
-            &ctx_pro_host_protocol::canonical_payload_bytes(&payload)
-                .expect("encode canonical payload"),
-        ),
-        evidence: Vec::new(),
-        provenance,
-        cumulative_digest: "0".repeat(64),
-    };
-    record.cumulative_digest =
-        ctx_pro_host_protocol::journal_record_digest(&initial_digest, &record)
-            .expect("chain journal record");
-    let request = JournalSyncRequest {
-        mode: JournalSyncMode::FullBaseline,
-        canonical_schema_version: 1,
-        canonical_schema_identity: "ctx-store-schema-test".to_owned(),
-        projection_contract_version: ctx_pro_host_protocol::PROJECTION_CONTRACT_VERSION,
-        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-        prior_checkpoint: JournalCheckpoint {
-            position: JournalPosition {
-                generation: 1,
-                sequence: 0,
-            },
-            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: initial_digest,
-        },
-        frozen_through: JournalCheckpoint {
-            position: JournalPosition {
-                generation: 1,
-                sequence: 1,
-            },
-            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: record.cumulative_digest.clone(),
-        },
-        authorized_repository_roots: Vec::new(),
-        records: vec![record],
-    };
-    request.validate().expect("large journal request is valid");
-    request
 }
 
 #[cfg(unix)]
@@ -1445,109 +1460,5 @@ fn graph_key_deletion_rejects_invalid_helper_challenge_before_authorization() {
     assert_eq!(authorization.calls.get(), 0);
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn exchange_deadline_covers_a_request_write_blocked_by_a_nonreading_helper() {
-    let temp = tempdir().expect("temp dir");
-    crate::identity::installation_id(temp.path()).expect("installation identity");
-    let helper = temp.path().join("ctx-pro-nonreading-journal");
-    write_nonreading_journal_helper(&helper);
-
-    let required = BTreeSet::from([Capability::JournalSync]);
-    let mut client = ProClient::connect_to_path_with_authorization_mode(
-        temp.path(),
-        &helper,
-        None,
-        &required,
-        None,
-        false,
-    )
-    .expect("helper handshake");
-    let stdin = client.stdin.as_ref().expect("helper stdin");
-    let pipe_capacity = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_GETPIPE_SZ) };
-    assert!(
-        pipe_capacity > 0,
-        "read helper pipe capacity: {}",
-        std::io::Error::last_os_error()
-    );
-    let pipe_capacity = usize::try_from(pipe_capacity).expect("positive pipe capacity");
-    let request = valid_large_journal_request(pipe_capacity + 256 * 1024);
-    let encoded = serde_json::to_vec(&HostEnvelope {
-        sequence: client.sequence,
-        request_id: Uuid::from_u128(1),
-        message: HostMessage::SyncJournal(request.clone()),
-    })
-    .expect("encode framed request");
-    assert!(
-        encoded.len() > pipe_capacity,
-        "request payload {} must exceed helper pipe capacity {pipe_capacity}",
-        encoded.len()
-    );
-
-    let started = Instant::now();
-    let error = client
-        .exchange(
-            HostMessage::SyncJournal(request),
-            Duration::from_millis(250),
-        )
-        .expect_err("blocked write must time out");
-    assert_eq!(stable_error_code(&error), Some("helper_timeout"));
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "blocked exchange outlived its bounded cleanup"
-    );
-    assert!(client.stdin.is_none(), "timed-out helper stdin stayed open");
-
-    let pid: i32 = fs::read_to_string(format!("{}.pid", helper.display()))
-        .expect("read helper pid")
-        .parse()
-        .expect("parse helper pid");
-    assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        -1,
-        "timed-out non-reading helper remained alive"
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn staged_smoke_proves_authorization_and_status_before_success() {
-    let temp = tempdir().expect("temp dir");
-    crate::identity::installation_id(temp.path()).expect("installation identity");
-    let helper = temp.path().join("ctx-pro-smoke");
-    write_smoke_helper(&helper, "['entitlement_authorization','status']");
-    let authorization = RecordingAuthorization {
-        calls: Cell::new(0),
-    };
-    let (smoke, status) = super::client_status::smoke_helper_at_path_with_authorization_and_status(
-        temp.path(),
-        &helper,
-        Some(&authorization),
-    )
-    .expect("full staged smoke");
-    assert_eq!(authorization.calls.get(), 1);
-    assert_eq!(status.state, GraphState::Ready);
-    assert!(smoke
-        .capabilities
-        .contains(&Capability::EntitlementAuthorization));
-}
-
-#[cfg(unix)]
-#[test]
-fn staged_smoke_rejects_a_helper_without_entitlement_authorization() {
-    let temp = tempdir().expect("temp dir");
-    crate::identity::installation_id(temp.path()).expect("installation identity");
-    let helper = temp.path().join("ctx-pro-smoke");
-    write_smoke_helper(&helper, "['status']");
-    let authorization = RecordingAuthorization {
-        calls: Cell::new(0),
-    };
-    let error = smoke_helper_at_path_with_authorization(temp.path(), &helper, Some(&authorization))
-        .expect_err("missing entitlement capability must fail");
-    assert!(error.to_string().starts_with("protocol_mismatch:"));
-    assert_eq!(authorization.calls.get(), 0);
-}
+#[path = "client_tests/transport.rs"]
+mod transport;

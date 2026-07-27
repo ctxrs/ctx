@@ -27,6 +27,9 @@ export CTX_FAKE_BAZEL_LOG="${test_root}/fake-bazel.log"
 export CTX_BAZEL_CACHE_ROOT="${test_root}/explicit-cache"
 export CTX_CPU_COUNT=32
 export CTX_TOTAL_MEMORY_GB=128
+# Exercise the wrapper's default derivation independently from the bounded
+# thread count forwarded by an outer Bazel test invocation.
+unset RUST_TEST_THREADS
 export HOME="${test_root}/home"
 export TMPDIR="${test_root}/tmp"
 mkdir -p "${HOME}" "${TMPDIR}"

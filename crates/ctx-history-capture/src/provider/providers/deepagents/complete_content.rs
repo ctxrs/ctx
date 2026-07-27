@@ -150,7 +150,7 @@ pub(crate) fn validate_deepagents_content_schema(conn: &Connection) -> Result<()
     };
 
     if !sqlite_table_exists(conn, "checkpoints")? || !sqlite_table_exists(conn, "writes")? {
-        return Err(CaptureError::InvalidPayload(
+        return Err(CaptureError::UnsupportedSchema(
             "Deep Agents content source is missing required tables".to_owned(),
         ));
     }
@@ -164,7 +164,11 @@ pub(crate) fn validate_deepagents_content_schema(conn: &Connection) -> Result<()
             "checkpoint",
             "metadata",
         ],
-    )?;
+    )
+    .map_err(|error| match error {
+        CaptureError::InvalidPayload(reason) => CaptureError::UnsupportedSchema(reason),
+        error => error,
+    })?;
     ensure_sqlite_table_columns(
         &sqlite_table_columns(conn, "writes")?,
         "Deep Agents writes table",
@@ -179,6 +183,10 @@ pub(crate) fn validate_deepagents_content_schema(conn: &Connection) -> Result<()
             "value",
         ],
     )
+    .map_err(|error| match error {
+        CaptureError::InvalidPayload(reason) => CaptureError::UnsupportedSchema(reason),
+        error => error,
+    })
 }
 
 /// Resolve one content address against a caller-owned frozen, query-only SQLite snapshot.
@@ -209,7 +217,7 @@ pub(crate) fn resolve_deepagents_content(
             "Deep Agents content address matched multiple writes".to_owned(),
         ));
     }
-    let messages = deepagents_messages_from_blob(value_type.as_deref(), &value)?;
+    let messages = deepagents_messages_from_blob(value_type.as_deref(), &value)?.messages;
     let offset = usize::try_from(address.message_offset).map_err(|_| {
         CaptureError::InvalidPayload(
             "Deep Agents message offset exceeds platform limits".to_owned(),
@@ -250,10 +258,6 @@ fn resolved_event(
         .message_id
         .as_deref()
         .map(|message_id| deepagents_message_identity(&address.thread_id, message_id));
-    let provider_event_hash = identity
-        .as_ref()
-        .map(|identity| identity.payload_hash.as_str())
-        .unwrap_or(&cursor);
     deepagents_native_event(
         key,
         &DeepAgentsParsedMessage {
@@ -264,7 +268,7 @@ fn resolved_event(
             message,
         },
         DateTime::<Utc>::UNIX_EPOCH,
-        provider_event_hash,
+        &cursor,
         identity.as_ref().map(|identity| identity.provider_index),
         None,
     )

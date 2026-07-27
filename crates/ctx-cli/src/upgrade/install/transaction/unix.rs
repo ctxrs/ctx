@@ -142,7 +142,9 @@ pub(super) fn publish_install(
     if let Err(primary) = journal::write(&transaction) {
         return rollback_failed_publication(primary, data_root, &mut transaction, false);
     }
-    if cfg!(debug_assertions) && env_flag("CTX_UPGRADE_ABORT_AFTER_COMMIT_FOR_TESTS") {
+    if crate::upgrade::test_harness_enabled()
+        && env_flag("CTX_UPGRADE_ABORT_AFTER_COMMIT_FOR_TESTS")
+    {
         std::process::exit(88);
     }
     match finish_committed_transaction(data_root, &mut transaction)? {
@@ -168,7 +170,7 @@ fn publish_paths(
             abort_after_backup_for_tests(path.label);
         }
         if path.label == "ctx install marker"
-            && cfg!(debug_assertions)
+            && crate::upgrade::test_harness_enabled()
             && env_flag("CTX_UPGRADE_FAIL_MARKER_PUBLISH_FOR_TESTS")
         {
             return Err(anyhow!("injected install marker publication failure"));
@@ -479,7 +481,7 @@ fn restore_or_discard_backup(
     }
     if inject_runtime_restore_failure
         && path.label == "ONNX Runtime sidecar"
-        && cfg!(debug_assertions)
+        && crate::upgrade::test_harness_enabled()
         && env_flag("CTX_UPGRADE_FAIL_RUNTIME_RESTORE_FOR_TESTS")
     {
         return Err(anyhow!(
@@ -565,7 +567,9 @@ fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result
                 continue;
             }
         }
-        if cfg!(debug_assertions) && env_flag("CTX_UPGRADE_FAIL_POST_COMMIT_CLEANUP_FOR_TESTS") {
+        if crate::upgrade::test_harness_enabled()
+            && env_flag("CTX_UPGRADE_FAIL_POST_COMMIT_CLEANUP_FOR_TESTS")
+        {
             errors.push(format!(
                 "injected post-commit cleanup failure for {}",
                 path.label
@@ -905,7 +909,7 @@ pub(super) fn remove_owner_directory_tree(path: &Path) -> Result<()> {
 }
 
 fn abort_after_publish_for_tests(point: &str) {
-    if cfg!(debug_assertions)
+    if crate::upgrade::test_harness_enabled()
         && env::var("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS")
             .ok()
             .is_some_and(|value| value == point)
@@ -927,7 +931,7 @@ fn abort_after_backup_for_tests(label: &str) {
         "ctx install marker" => "marker",
         _ => return,
     };
-    if cfg!(debug_assertions)
+    if crate::upgrade::test_harness_enabled()
         && env::var("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS")
             .ok()
             .is_some_and(|value| value == point)

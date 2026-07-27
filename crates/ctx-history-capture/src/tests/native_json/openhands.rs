@@ -287,7 +287,8 @@ fn native_openhands_c213_cursor_upgrade_stabilizes_source_without_duplicate_even
         .to_string(),
     )
     .unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let store_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
     let legacy_event_id = import_origin_main_openhands_event(
         &mut store,
         &root,
@@ -383,6 +384,79 @@ fn native_openhands_c213_cursor_upgrade_stabilizes_source_without_duplicate_even
     assert_eq!(
         store.get_session(session_id).unwrap().sync.metadata["metadata"],
         original_session.sync.metadata["metadata"]
+    );
+
+    let released_source_id = file_source.id;
+    let released_touch_id = archive.files_touched[0].id;
+    let renamed_path = conversation.join("renamed-action.json");
+    fs::rename(&event_path, &renamed_path).unwrap();
+    let renamed = import_openhands_file_events(
+        &root,
+        &mut store,
+        OpenHandsImportOptions {
+            machine_id: "test-machine".to_owned(),
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T17:06:00Z".parse().unwrap(),
+            ..OpenHandsImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(renamed.imported_events, 0);
+    assert_eq!(renamed.skipped_events, 1);
+    let relocated_source = store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.id == released_source_id)
+        .unwrap();
+    assert_eq!(
+        relocated_source.descriptor.raw_source_path.as_deref(),
+        fs::canonicalize(&renamed_path).unwrap().to_str()
+    );
+    assert_eq!(
+        store.events_for_session(session_id).unwrap()[0].id,
+        legacy_event_id
+    );
+    let relocated_archive = store.export_archive().unwrap();
+    assert_eq!(relocated_archive.files_touched.len(), 1);
+    assert_eq!(relocated_archive.files_touched[0].id, released_touch_id);
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(legacy_event_id)
+            .unwrap()
+            .path(),
+        fs::canonicalize(&renamed_path).unwrap()
+    );
+
+    drop(store);
+    let mut store = Store::open(&store_path).unwrap();
+    let restarted = import_openhands_file_events(
+        &root,
+        &mut store,
+        OpenHandsImportOptions {
+            machine_id: "test-machine".to_owned(),
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T17:07:00Z".parse().unwrap(),
+            ..OpenHandsImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(restarted.imported_events, 0);
+    assert_eq!(restarted.skipped_events, 1);
+    assert_eq!(
+        store.events_for_session(session_id).unwrap()[0].id,
+        legacy_event_id
+    );
+    assert_eq!(
+        store.export_archive().unwrap().files_touched[0].id,
+        released_touch_id
+    );
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(legacy_event_id)
+            .unwrap()
+            .path(),
+        fs::canonicalize(renamed_path).unwrap()
     );
 }
 

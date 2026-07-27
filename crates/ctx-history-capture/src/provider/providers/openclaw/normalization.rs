@@ -4,11 +4,10 @@ use serde_json::{json, Value};
 
 use crate::{
     provider::normalization::{
-        provider_capped_json, provider_policy_body, provider_policy_event_text,
-        provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
-        provider_value_text,
+        provider_policy_event_text, provider_result_identifier_evidence,
+        provider_result_outcome_evidence, provider_role, provider_value_text,
     },
-    OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    OPENCLAW_SOURCE_FORMAT,
 };
 
 pub(crate) struct OpenClawEventFact {
@@ -60,7 +59,6 @@ pub(super) fn event_fact(
         .and_then(provider_value_text)
         .unwrap_or_default();
     let retained_text = provider_policy_event_text(event_type, &text, row);
-    let body = provider_policy_body(event_type, row);
     OpenClawEventFact {
         provider_event_index: event_index,
         provider_event_hash: row.get("id").and_then(Value::as_str).map(str::to_owned),
@@ -74,7 +72,6 @@ pub(super) fn event_fact(
             "result_evidence": provider_result_identifier_evidence(event_type, &text, row),
             "result_outcome": provider_result_outcome_evidence(event_type, row),
             "source_format": OPENCLAW_SOURCE_FORMAT,
-            "body": provider_capped_json(&body, PROVIDER_MAX_PREVIEW_CHARS),
         }),
         metadata: json!({
             "source": "openclaw_jsonl",

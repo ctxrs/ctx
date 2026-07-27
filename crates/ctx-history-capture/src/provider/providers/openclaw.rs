@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     fs::{self, Metadata},
     path::{Path, PathBuf},
@@ -19,14 +21,17 @@ use crate::{
 
 const OPENCLAW_RELEASED_CAPTURE_REVISION: u32 = 3;
 const OPENCLAW_RELEASED_POLICY_REVISION: u32 = 6;
-pub(crate) const OPENCLAW_RESULT_CONTENT_PROFILE: &str = "openclaw-legacy-jsonl.result-body.v1";
+#[cfg(test)]
+thread_local! {
+    static OMIT_FILE_IDS: Cell<bool> = const { Cell::new(false) };
+}
 
 mod complete_content;
 mod native_path;
 mod normalization;
 
 pub(crate) use complete_content::{
-    message_record as openclaw_complete_content_record, result_content as openclaw_result_content,
+    message_record as openclaw_complete_content_record,
     source_from_admitted as openclaw_complete_content_source_from_admitted,
 };
 pub(crate) use native_path::import_openclaw_nativepath_tree;
@@ -63,7 +68,18 @@ impl OpenClawFrozenFileMetadata {
         use std::os::unix::fs::MetadataExt;
 
         #[cfg(unix)]
-        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
+        let (device, inode) = {
+            #[cfg(test)]
+            if OMIT_FILE_IDS.with(Cell::get) {
+                (None, None)
+            } else {
+                (Some(metadata.dev()), Some(metadata.ino()))
+            }
+            #[cfg(not(test))]
+            {
+                (Some(metadata.dev()), Some(metadata.ino()))
+            }
+        };
         #[cfg(not(unix))]
         let (device, inode) = (None, None);
 
@@ -94,6 +110,23 @@ impl OpenClawFrozenFileMetadata {
                 .map_or_else(|| "none".to_owned(), |value| value.to_string()),
         )
     }
+}
+
+#[cfg(test)]
+pub(super) fn without_file_ids<T>(operation: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OMIT_FILE_IDS.with(|omit| omit.set(self.0));
+        }
+    }
+
+    let previous = OMIT_FILE_IDS.with(|omit| omit.replace(true));
+    let restore = Restore(previous);
+    let result = operation();
+    drop(restore);
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

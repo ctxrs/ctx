@@ -144,6 +144,10 @@ pub(super) fn decode_shelley_coordinate(value: &[u8]) -> Option<(bool, i64, i64)
     ))
 }
 
+fn decode_ordered_i64(bytes: &[u8]) -> Option<i64> {
+    Some((u64::from_be_bytes(bytes.try_into().ok()?) ^ (1_u64 << 63)) as i64)
+}
+
 pub(super) fn decode_nanoclaw_locator(
     request: &CompleteMessageRequest,
 ) -> Result<(), CompleteContentError> {
@@ -189,10 +193,6 @@ pub(super) fn decode_kiro_rowid(
     Ok((table, (encoded ^ (1_u64 << 63)) as i64))
 }
 
-pub(super) fn optional_integer(value: Option<i64>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
-}
-
 pub(super) fn optional_text(value: Option<String>) -> NativeSqliteValue {
     value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
 }
@@ -235,6 +235,39 @@ pub(crate) fn attach_sqlite_complete_content_locator(
     let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
         CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
     )?;
+    attach_sqlite_complete_content_locator_with_ref(
+        provider,
+        source_format,
+        native_record_id,
+        payload,
+        metadata,
+        locator,
+        record_digest,
+        content_ref,
+    )
+}
+
+/// Adds a verified message locator from evidence computed while the immutable
+/// source row was hydrated. This lets bounded NativePath staging retain only
+/// the digest and content reference instead of a second copy of the full text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attach_sqlite_complete_content_locator_with_ref(
+    provider: CaptureProvider,
+    source_format: &str,
+    native_record_id: &str,
+    payload: &Value,
+    metadata: &mut Value,
+    locator: &NativeLocator,
+    record_digest: CompleteContentBodyDigest,
+    content_ref: ContentRef,
+) -> crate::Result<()> {
+    if payload
+        .pointer("/text_retention/truncated")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Ok(());
+    }
     let profile = verified_content_profile(
         provider,
         source_format,
@@ -263,7 +296,7 @@ pub(crate) fn attach_sqlite_complete_content_locator(
     Ok(())
 }
 
-pub(super) fn sqlite_logical_record_digest(
+pub(crate) fn sqlite_logical_record_digest(
     values: &[NativeSqliteValue],
 ) -> CompleteContentBodyDigest {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";

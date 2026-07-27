@@ -1,16 +1,24 @@
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::{
     dto::{
-        ZedNativeEvent, ZedNativeEventIdentity, ZedNativeMessageIdentity, ZedNativeOrder,
-        ZedNativePage, ZedNativeRejection, ZedNativeSession, ZedNativeSink,
-        ZED_NATIVE_PAGE_MAX_BYTES, ZED_NATIVE_PAGE_MAX_ROWS,
+        ZedNativeCompleteMessageEvidence, ZedNativeEvent, ZedNativeEventIdentity,
+        ZedNativeMessageIdentity, ZedNativeOrder, ZedNativePage, ZedNativeRejection,
+        ZedNativeSession, ZedNativeSink, ZED_NATIVE_PAGE_MAX_BYTES, ZED_NATIVE_PAGE_MAX_UNITS,
     },
     ZedNativePathError, ZedNativeResult,
 };
+use crate::{
+    complete_content::CompleteContentBodyDigest, compute_payload_hash,
+    provider::normalization::provider_policy_event_text,
+};
+use ctx_history_core::{CaptureProvider, ContentRef, EventType};
 
 const ZED_NATIVE_BODY_MAX_CHARS: usize = 16_000;
 const ZED_NATIVE_PREVIEW_MAX_CHARS: usize = 240;
+const ZED_NATIVE_PAGE_ENCODING_ENVELOPE_BYTES: usize = 1_024;
+const ZED_NATIVE_PAGE_ITEM_ENCODING_ENVELOPE_BYTES: usize = 64;
 const ZED_CORE_DIGEST_DOMAIN: &[u8] = b"ctx-zed-core-generation-v1\0";
 const ZED_EVENT_HASH_DOMAIN: &[u8] = b"ctx-zed-retained-event-v1\0";
 
@@ -32,9 +40,9 @@ impl ZedNativeEvent {
         sqlite_rowid: i64,
         thread_id: &str,
         draft: ZedDecodedCoreEvent,
-    ) -> Self {
-        let body = truncate_chars(&draft.body, ZED_NATIVE_BODY_MAX_CHARS);
-        let preview = truncate_chars(&body, ZED_NATIVE_PREVIEW_MAX_CHARS);
+        record_digest: CompleteContentBodyDigest,
+    ) -> ZedNativeResult<Self> {
+        let legacy_body = truncate_chars(&draft.body, ZED_NATIVE_BODY_MAX_CHARS);
         let message = draft.provider_message_id.map_or_else(
             || ZedNativeMessageIdentity::MessageOrdinal(draft.message_ordinal),
             |value| ZedNativeMessageIdentity::ProviderId {
@@ -46,8 +54,62 @@ impl ZedNativeEvent {
             thread_id: thread_id.to_owned(),
             message,
         };
-        let content_hash = retained_event_hash(&identity, &body);
-        Self {
+        let legacy_content_hash = retained_event_hash(&identity, &legacy_body);
+        let provider_event_index = draft.message_ordinal.checked_mul(2).ok_or_else(|| {
+            ZedNativePathError::UnsupportedSchema("Zed provider event index overflowed".to_owned())
+        })?;
+        let body_shape = json!({
+            "message_kind": draft.kind,
+            "text": draft.body,
+            "call_ids": draft.call_ids,
+        });
+        let retained = provider_policy_event_text(draft.event_type, &draft.body, &body_shape);
+        let body = retained.text;
+        let preview = truncate_chars(&body, ZED_NATIVE_PREVIEW_MAX_CHARS);
+        let cursor = event_cursor(&identity);
+        let payload = json!({
+            "provider": CaptureProvider::Zed.as_str(),
+            "provider_session_id": thread_id,
+            "provider_event_index": provider_event_index,
+            "cursor": cursor,
+            "artifacts": [],
+            "text": body,
+            "text_retention": retained.retention.as_json(),
+            "body": {
+                "message_kind": draft.kind,
+                "text": body,
+                "preview": preview,
+                "call_ids": draft.call_ids,
+            },
+        });
+        let content_hash = compute_payload_hash(&payload)?;
+        let complete_message = (draft.event_type == EventType::Message
+            && payload
+                .pointer("/text_retention/truncated")
+                .and_then(Value::as_bool)
+                == Some(true))
+        .then(|| {
+            ContentRef::from_bytes(draft.body.as_bytes()).map(|content_ref| {
+                ZedNativeCompleteMessageEvidence {
+                    record_digest,
+                    content_ref,
+                }
+            })
+        })
+        .flatten();
+        if draft.event_type == EventType::Message
+            && payload
+                .pointer("/text_retention/truncated")
+                .and_then(Value::as_bool)
+                == Some(true)
+            && complete_message.is_none()
+        {
+            return Err(crate::CaptureError::SystemInvariant(
+                "Zed complete message length exceeds ContentRef bounds",
+            )
+            .into());
+        }
+        Ok(Self {
             sqlite_rowid,
             identity,
             native_order: ZedNativeOrder {
@@ -62,30 +124,16 @@ impl ZedNativeEvent {
             call_ids: draft.call_ids,
             body,
             content_hash,
+            legacy_content_hash,
+            payload,
             preview,
             safe_file_touches: draft.safe_file_touches,
-        }
+            complete_message,
+        })
     }
 
     fn estimated_bytes(&self) -> usize {
-        self.identity
-            .thread_id
-            .len()
-            .saturating_add(match &self.identity.message {
-                ZedNativeMessageIdentity::ProviderId { value, .. } => value.len(),
-                ZedNativeMessageIdentity::MessageOrdinal(_) => 8,
-            })
-            .saturating_add(self.body.len())
-            .saturating_add(self.call_ids.iter().map(String::len).sum::<usize>())
-            .saturating_add(self.content_hash.len())
-            .saturating_add(self.preview.len())
-            .saturating_add(
-                self.safe_file_touches
-                    .iter()
-                    .map(String::len)
-                    .sum::<usize>(),
-            )
-            .saturating_add(192)
+        serde_json::to_vec(self).map_or(usize::MAX, |encoded| encoded.len())
     }
 }
 
@@ -109,8 +157,7 @@ impl<'a> ZedNativePageBuilder<'a> {
     }
 
     pub(super) fn push_session(&mut self, session: ZedNativeSession) -> ZedNativeResult<()> {
-        let bytes = session_estimated_bytes(&session);
-        self.reserve(bytes)?;
+        let bytes = self.reserve(1, session_estimated_bytes(&session))?;
         hash_session(&mut self.core_hasher, &session);
         self.page.estimated_bytes = self.page.estimated_bytes.saturating_add(bytes);
         self.page.sessions.push(session);
@@ -118,8 +165,8 @@ impl<'a> ZedNativePageBuilder<'a> {
     }
 
     pub(super) fn push_event(&mut self, event: ZedNativeEvent) -> ZedNativeResult<()> {
-        let bytes = event.estimated_bytes();
-        self.reserve(bytes)?;
+        let units = 1_usize.saturating_add(event.safe_file_touches.len());
+        let bytes = self.reserve(units, event.estimated_bytes())?;
         hash_event(&mut self.core_hasher, &event);
         self.page.estimated_bytes = self.page.estimated_bytes.saturating_add(bytes);
         self.page.events.push(event);
@@ -127,13 +174,7 @@ impl<'a> ZedNativePageBuilder<'a> {
     }
 
     pub(super) fn push_rejection(&mut self, rejection: ZedNativeRejection) -> ZedNativeResult<()> {
-        let bytes = rejection
-            .thread_id
-            .as_ref()
-            .map_or(0, String::len)
-            .saturating_add(rejection.reason.len())
-            .saturating_add(96);
-        self.reserve(bytes)?;
+        let bytes = self.reserve(1, rejection_estimated_bytes(&rejection))?;
         hash_rejection(&mut self.core_hasher, &rejection);
         self.page.estimated_bytes = self.page.estimated_bytes.saturating_add(bytes);
         self.page.rejections.push(rejection);
@@ -148,19 +189,29 @@ impl<'a> ZedNativePageBuilder<'a> {
         ))
     }
 
-    fn reserve(&mut self, bytes: usize) -> ZedNativeResult<()> {
-        if !self.page.is_empty()
-            && (self.page.row_count() >= ZED_NATIVE_PAGE_MAX_ROWS
-                || self.page.estimated_bytes.saturating_add(bytes) > ZED_NATIVE_PAGE_MAX_BYTES)
-        {
-            self.flush()?;
+    fn reserve(&mut self, units: usize, bytes: usize) -> ZedNativeResult<usize> {
+        if units == 0 || units > ZED_NATIVE_PAGE_MAX_UNITS {
+            return Err(ZedNativePathError::UnsupportedSchema(format!(
+                "one prepared Zed row expands past the {ZED_NATIVE_PAGE_MAX_UNITS}-unit page bound"
+            )));
         }
-        if bytes > ZED_NATIVE_PAGE_MAX_BYTES {
+        let bytes = bytes.saturating_add(ZED_NATIVE_PAGE_ITEM_ENCODING_ENVELOPE_BYTES);
+        if ZED_NATIVE_PAGE_ENCODING_ENVELOPE_BYTES.saturating_add(bytes) > ZED_NATIVE_PAGE_MAX_BYTES
+        {
             return Err(ZedNativePathError::UnsupportedSchema(format!(
                 "one prepared Zed row exceeds the {ZED_NATIVE_PAGE_MAX_BYTES}-byte page bound"
             )));
         }
-        Ok(())
+        if !self.page.is_empty()
+            && (self.page.publication_units().saturating_add(units) > ZED_NATIVE_PAGE_MAX_UNITS
+                || self.page.estimated_bytes.saturating_add(bytes) > ZED_NATIVE_PAGE_MAX_BYTES)
+        {
+            self.flush()?;
+        }
+        if self.page.is_empty() {
+            self.page.estimated_bytes = ZED_NATIVE_PAGE_ENCODING_ENVELOPE_BYTES;
+        }
+        Ok(bytes)
     }
 
     fn flush(&mut self) -> ZedNativeResult<()> {
@@ -206,16 +257,11 @@ fn retained_event_hash(identity: &ZedNativeEventIdentity, body: &str) -> String 
 }
 
 fn session_estimated_bytes(session: &ZedNativeSession) -> usize {
-    session
-        .thread_id
-        .len()
-        .saturating_add(session.parent_thread_id.as_ref().map_or(0, String::len))
-        .saturating_add(session.root_thread_id.len())
-        .saturating_add(session.title.len())
-        .saturating_add(session.summary.len())
-        .saturating_add(session.cwd.as_ref().map_or(0, String::len))
-        .saturating_add(session.folder_paths.iter().map(String::len).sum::<usize>())
-        .saturating_add(192)
+    serde_json::to_vec(session).map_or(usize::MAX, |encoded| encoded.len())
+}
+
+fn rejection_estimated_bytes(rejection: &ZedNativeRejection) -> usize {
+    serde_json::to_vec(rejection).map_or(usize::MAX, |encoded| encoded.len())
 }
 
 fn hash_session(hasher: &mut Sha256, session: &ZedNativeSession) {
@@ -266,8 +312,24 @@ fn hash_event(hasher: &mut Sha256, event: &ZedNativeEvent) {
     }
     hash_text(hasher, &event.body);
     hash_text(hasher, &event.content_hash);
+    hash_text(hasher, &event.legacy_content_hash);
     for path in &event.safe_file_touches {
         hash_text(hasher, path);
+    }
+}
+
+pub(super) fn event_cursor(identity: &ZedNativeEventIdentity) -> String {
+    match &identity.message {
+        ZedNativeMessageIdentity::ProviderId {
+            value,
+            message_ordinal,
+        } => format!(
+            "thread:{}:message:{message_ordinal}:id:{value}",
+            identity.thread_id
+        ),
+        ZedNativeMessageIdentity::MessageOrdinal(message_ordinal) => {
+            format!("thread:{}:message:{message_ordinal}", identity.thread_id)
+        }
     }
 }
 

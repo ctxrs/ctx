@@ -16,8 +16,27 @@ public final class AgentHistoryClientTest {
         decodesAllCanonicalFixturesThroughTypedResponses();
         normalizesRawShowAndLocateResponses();
         buildsSearchCommand();
+        localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
+    }
+
+    private static void localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment() {
+        assertEquals("true", System.getenv("CTX_ANALYTICS_ENABLED"));
+        CommandRequest[] captured = new CommandRequest[1];
+        LocalCliConfig config = LocalCliConfig.builder()
+                .env("CTX_ANALYTICS_ENABLED", "true")
+                .runner(request -> {
+                    captured[0] = request;
+                    return new CommandResult("{}", "", 0);
+                })
+                .build();
+
+        new LocalCliAdapter(config).execute(
+                new AgentHistoryOperation("status", java.util.Arrays.asList("status", "--json")));
+
+        assertEquals("true", config.env().get("CTX_ANALYTICS_ENABLED"));
+        assertEquals("false", captured[0].env().get("CTX_ANALYTICS_ENABLED"));
     }
 
     private static void normalizesSetupJsonAsInitStatus() {

@@ -26,6 +26,4 @@ pub(crate) fn import_forgecode_nativepath(
 ) -> Result<ProviderImportSummary> {
     nativepath::import_forgecode_nativepath(path, store, context, import_options)
 }
-pub(crate) use complete_content::{
-    forgecode_complete_message, forgecode_result_record, load_forgecode_conversation_values,
-};
+pub(crate) use complete_content::{forgecode_complete_message, load_forgecode_conversation_values};

@@ -16,7 +16,9 @@ pub(super) fn codebuddy_title_from_text(text: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddyEventInput {
     pub(super) provider_event_index: u64,
+    pub(super) legacy_provider_event_index: u64,
     pub(super) native_message_id: String,
+    pub(super) event_hash: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<String>,
     pub(super) ref_type: Option<String>,
@@ -183,7 +185,9 @@ pub(super) struct CodeBuddySessionDraft {
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddyEventDraft {
     pub(super) provider_event_index: u64,
+    pub(super) legacy_provider_event_index: u64,
     pub(super) event_hash: String,
+    pub(super) legacy_provider_event_hash: String,
     pub(super) event_type: EventType,
     pub(super) role: EventRole,
     pub(super) occurred_at: DateTime<Utc>,
@@ -250,7 +254,9 @@ fn codebuddy_event(
     let role = provider_role(event.role.as_deref());
     CodeBuddyEventDraft {
         provider_event_index: event.provider_event_index,
-        event_hash: event_id.clone(),
+        legacy_provider_event_index: event.legacy_provider_event_index,
+        event_hash: event.event_hash.clone(),
+        legacy_provider_event_hash: event_id.clone(),
         event_type,
         role,
         occurred_at: event.occurred_at,

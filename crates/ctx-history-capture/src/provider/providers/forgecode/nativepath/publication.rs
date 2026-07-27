@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, path::Path};
+mod events;
+use events::{generation_source_id, publish_events, publish_touches};
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use ctx_history_core::{
     AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event,
@@ -11,6 +17,7 @@ use ctx_history_store::{
     ProviderSourceRouteRetirementDisposition, ProviderSourceRouteRetirementReason, Store,
     StoreError,
 };
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -31,8 +38,9 @@ use crate::{
 };
 
 use super::source::{
-    frontier_bytes, ForgeCodeConversationRow, ForgeCodeFrontier, ForgeCodePage,
-    ForgeCodeSourceObservation, FORGECODE_NATIVE_PARSER_REVISION, FORGECODE_NATIVE_POLICY_REVISION,
+    frontier_bytes, ForgeCodeConversationRow, ForgeCodeFrontier, ForgeCodeMissingSource,
+    ForgeCodePage, ForgeCodeSourceObservation, FORGECODE_NATIVE_PARSER_REVISION,
+    FORGECODE_NATIVE_POLICY_REVISION,
 };
 
 const FORGECODE_CURSOR_VERSION: u32 = 1;
@@ -545,292 +553,6 @@ fn resolve_source_and_session(
     Ok((source_id, Some(session)))
 }
 
-fn generation_source_id(
-    committed_store: &Store,
-    machine_id: &str,
-    raw_source_path: &str,
-    canonical_source_identity: &str,
-    provider_session_id: &str,
-    generation: u64,
-) -> Result<Uuid> {
-    if generation == 0 {
-        return Ok(committed_store
-            .capture_source_by_canonical_identity_session(
-                CaptureProvider::ForgeCode,
-                FORGECODE_SQLITE_SOURCE_FORMAT,
-                machine_id,
-                canonical_source_identity,
-                provider_session_id,
-            )?
-            .map(|source| source.id)
-            .unwrap_or_else(|| {
-                provider_scoped_source_uuid(
-                    CaptureProvider::ForgeCode,
-                    provider_session_id,
-                    FORGECODE_SQLITE_SOURCE_FORMAT,
-                    Some(raw_source_path),
-                )
-            }));
-    }
-    Ok(stable_capture_uuid(
-        &format!(
-            "forgecode-nativepath-generation:{canonical_source_identity}:{provider_session_id}:{generation}"
-        ),
-        "source",
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn publish_events(
-    committed_store: &Store,
-    group: &mut ctx_history_store::NativePathPublicationGroup<'_>,
-    context: &ProviderAdapterContext,
-    import_options: &ProviderImportOptions,
-    source_id: Uuid,
-    session: &Session,
-    row: &ForgeCodeConversationRow,
-    page: &ForgeCodePage,
-    summary: &mut ProviderImportSummary,
-) -> Result<BTreeMap<u64, Uuid>> {
-    let legacy_session =
-        session.id == provider_session_uuid(CaptureProvider::ForgeCode, &row.conversation_id);
-    let mut event_ids = BTreeMap::new();
-    for retained in &page.events {
-        let event_hash = retained
-            .event
-            .provider_event_hash
-            .clone()
-            .unwrap_or(compute_payload_hash(&retained.event.payload)?);
-        let identity = provider_event_import_identity_with_exact_legacy_source(
-            committed_store,
-            CaptureProvider::ForgeCode,
-            &row.conversation_id,
-            source_id,
-            retained.provider_event_index,
-            retained.provider_event_index,
-            &event_hash,
-            None,
-            Some(retained.provider_event_index),
-            legacy_session,
-        )?;
-        let event = forgecode_core_event(
-            context,
-            import_options,
-            &row.conversation_id,
-            source_id,
-            session.id,
-            crate::provider::normalization::provider_line_from_index(retained.provider_event_index),
-            &retained.event,
-            &event_hash,
-            &identity,
-        )?;
-        event_ids.insert(retained.provider_event_index, event.id);
-        if group.reconcile_provider_event(&event, ProviderEventHashAuthority::ProviderSupplied)? {
-            summary.imported_events = summary.imported_events.saturating_add(1);
-            summary.imported = summary.imported.saturating_add(1);
-        } else {
-            summary.skipped_events = summary.skipped_events.saturating_add(1);
-            summary.skipped = summary.skipped.saturating_add(1);
-        }
-        summary.accepted_content_records = summary.accepted_content_records.saturating_add(1);
-    }
-    Ok(event_ids)
-}
-
-fn publish_touches(
-    committed_store: &Store,
-    group: &mut ctx_history_store::NativePathPublicationGroup<'_>,
-    import_options: &ProviderImportOptions,
-    source_id: Uuid,
-    session: &Session,
-    page: &ForgeCodePage,
-    event_ids: &BTreeMap<u64, Uuid>,
-) -> Result<()> {
-    let provider_session_id = session.external_session_id.as_deref().unwrap_or_default();
-    let legacy_session =
-        session.id == provider_session_uuid(CaptureProvider::ForgeCode, provider_session_id);
-    for touch in &page.touches {
-        let event_id = touch
-            .provider_event_index
-            .and_then(|index| event_ids.get(&index).copied());
-        let touch_id = provider_file_touch_import_id(
-            committed_store,
-            CaptureProvider::ForgeCode,
-            provider_session_id,
-            source_id,
-            touch.provider_event_index,
-            touch.provider_touch_index,
-            legacy_session,
-        )?;
-        group.upsert_file_touched(&forgecode_file_touched(
-            touch,
-            provider_session_id,
-            import_options.history_record_id,
-            source_id,
-            session.id,
-            event_id,
-            touch_id,
-        ))?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn forgecode_core_event(
-    context: &ProviderAdapterContext,
-    options: &ProviderImportOptions,
-    provider_session_id: &str,
-    source_id: Uuid,
-    session_id: Uuid,
-    line_number: usize,
-    native: &super::super::event::ForgeCodeNativeEvent,
-    event_hash: &str,
-    identity: &ProviderEventImportIdentity,
-) -> Result<Event> {
-    let dedupe_key =
-        Store::provider_event_dedupe_key_with_payload_hash(&identity.dedupe_key, event_hash)
-            .unwrap_or_else(|| identity.dedupe_key.clone());
-    let mut provider_metadata = native.metadata.clone();
-    let source_record_coordinates =
-        take_forgecode_source_record_coordinates(&mut provider_metadata)?;
-    let verified_content_locators = provider_metadata
-        .as_object_mut()
-        .and_then(|metadata| metadata.remove(VERIFIED_CONTENT_LOCATORS_METADATA_KEY))
-        .map(|value| {
-            VerifiedContentLocatorsV1::from_metadata_value(&value).ok_or_else(|| {
-                CaptureError::InvalidPayload(
-                    "verified content locator annotation is malformed".to_owned(),
-                )
-            })
-        })
-        .transpose()?;
-    let mut sync_metadata = json!({
-        "provider_session_id": provider_session_id,
-        "provider_event_index": native.provider_event_index,
-        "provider_event_hash": event_hash,
-        "provider_event_hash_authority": ProviderEventHashAuthority::ProviderSupplied.as_str(),
-        "cursor": native.cursor,
-        "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
-        "source_trust": ProviderSourceTrust::ProviderNative,
-        "fixture_line": line_number,
-        "imported_at": context.imported_at,
-        "event_idempotency_key": format!(
-            "provider-event:{}:{}:{}",
-            CaptureProvider::ForgeCode.as_str(),
-            provider_session_id,
-            native.provider_event_index,
-        ),
-        "source_record_ordinal": source_record_coordinates
-            .as_ref()
-            .map(|coordinates| coordinates.0),
-        "source_record_subrecord_index": source_record_coordinates
-            .as_ref()
-            .map(|coordinates| coordinates.1),
-        "metadata": provider_metadata,
-    });
-    if let (Some(metadata), Some(locators)) = (
-        sync_metadata.as_object_mut(),
-        verified_content_locators.as_ref(),
-    ) {
-        metadata.insert(
-            VERIFIED_CONTENT_LOCATORS_METADATA_KEY.to_owned(),
-            locators.to_metadata_value(),
-        );
-    }
-    Ok(Event {
-        id: identity.id,
-        seq: identity.seq,
-        history_record_id: options.history_record_id,
-        session_id: Some(session_id),
-        run_id: None,
-        event_type: native.event_type,
-        role: native.role,
-        occurred_at: native.occurred_at,
-        capture_source_id: Some(source_id),
-        payload: json!({
-            "provider": CaptureProvider::ForgeCode.as_str(),
-            "provider_session_id": provider_session_id,
-            "provider_event_index": native.provider_event_index,
-            "provider_event_hash": event_hash,
-            "cursor": native.cursor,
-            "artifacts": [],
-            "body": compact_provider_result_payload(native.event_type, &native.payload),
-        }),
-        payload_blob_id: None,
-        dedupe_key: Some(dedupe_key),
-        sync: provider_sync_metadata(Fidelity::Imported, sync_metadata),
-    })
-}
-
-fn take_forgecode_source_record_coordinates(
-    metadata: &mut serde_json::Value,
-) -> Result<Option<(u64, u32)>> {
-    let Some(object) = metadata.as_object_mut() else {
-        return Ok(None);
-    };
-    let ordinal = object.remove("source_record_ordinal");
-    let subrecord = object.remove("source_record_subrecord_index");
-    if ordinal.is_none() && subrecord.is_none() {
-        return Ok(None);
-    }
-    let ordinal = ordinal.and_then(|value| value.as_u64()).ok_or_else(|| {
-        CaptureError::InvalidPayload("source record ordinal annotation is malformed".to_owned())
-    })?;
-    let subrecord = subrecord
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "source record subrecord annotation is malformed".to_owned(),
-            )
-        })?;
-    Ok(Some((ordinal, subrecord)))
-}
-
-fn forgecode_file_touched(
-    touch: &super::super::event::ForgeCodeFileTouch,
-    provider_session_id: &str,
-    history_record_id: Option<Uuid>,
-    source_id: Uuid,
-    session_id: Uuid,
-    event_id: Option<Uuid>,
-    touch_id: Uuid,
-) -> FileTouched {
-    let source_root = provider_source_root(
-        touch.source_root.as_deref(),
-        touch.raw_source_path.as_deref(),
-    );
-    FileTouched {
-        id: touch_id,
-        history_record_id,
-        run_id: None,
-        event_id,
-        vcs_workspace_id: None,
-        path: touch.path.clone(),
-        change_kind: touch.change_kind,
-        old_path: touch.old_path.clone(),
-        line_count_delta: touch.line_count_delta,
-        confidence: touch.confidence,
-        timestamps: timestamps(touch.occurred_at),
-        source_id: Some(source_id),
-        sync: provider_sync_metadata(
-            Fidelity::Imported,
-            json!({
-                "provider": CaptureProvider::ForgeCode.as_str(),
-                "provider_session_id": provider_session_id,
-                "provider_touch_index": touch.provider_touch_index,
-                "provider_event_index": touch.provider_event_index,
-                "raw_source_path": touch.raw_source_path,
-                "source_id": source_id,
-                "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
-                "source_root": source_root,
-                "metadata": touch.metadata,
-                "session_id": session_id,
-            }),
-        ),
-    }
-}
-
 fn page_summary(page: &ForgeCodePage) -> ProviderImportSummary {
     let mut summary = ProviderImportSummary::default();
     for rejection in &page.rejections {
@@ -977,7 +699,9 @@ fn decode_released_frontier(
     }))
 }
 
-fn legacy_source_revision(source: &ForgeCodeSourceObservation) -> String {
+pub(in crate::provider::providers::forgecode) fn legacy_source_revision(
+    source: &ForgeCodeSourceObservation,
+) -> String {
     format!(
         "forgecode-sqlite-snapshot-v1:capture={FORGECODE_RELEASED_CAPTURE_REVISION};policy={FORGECODE_RELEASED_POLICY_REVISION};schema={};{}",
         source.schema_fingerprint,
@@ -1016,54 +740,73 @@ pub(super) fn retire_missing_source(
     store: &mut Store,
     bulk_guard: &EventSearchBulkGuard,
     context: &ProviderAdapterContext,
-    source_root: Option<&str>,
-    path: &Path,
+    missing: &ForgeCodeMissingSource,
 ) -> Result<ProviderImportSummary> {
-    let raw_source_path = path.display().to_string();
-    let stream = cursor_stream(path)?;
-    let Some(stored) = store.get_sync_cursor(None, &context.machine_id, &stream)? else {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "ForgeCode SQLite source is missing",
-        });
-    };
-    let (provider_cursor, canonical_source_identity, source_revision) =
-        match decode_stored_cursor(&stored.cursor)? {
-            StoredCursorKind::Native(cursor) => (
+    let (path, stream, stored) = resolve_missing_cursor(store, &context.machine_id, missing)?;
+    let selected_path = path.display().to_string();
+    let (
+        provider_cursor,
+        locator_identity,
+        canonical_source_identity,
+        source_revision,
+        raw_source_path,
+    ) = match decode_stored_cursor(&stored.cursor)? {
+        StoredCursorKind::Native(cursor) => {
+            if cursor_stream(Path::new(&cursor.raw_source_path))? != stream {
+                return Err(corrupt_cursor());
+            }
+            let locator_identity = if released_source_revision(&cursor.source_revision) {
+                released_locator_identity(Path::new(&cursor.raw_source_path))?
+            } else {
+                provider_path_identity(Path::new(&cursor.raw_source_path))?
+            };
+            (
                 serde_json::to_string(&cursor)?,
+                locator_identity,
                 cursor.canonical_source_identity,
                 cursor.source_revision,
-            ),
-            StoredCursorKind::ReleasedLegacy {
-                source_revision, ..
-            } => {
-                let canonical = proposed_source_identity(
-                    source_root,
-                    &raw_source_path,
-                    "released-legacy-forgecode",
-                )?;
-                let revision =
-                    source_revision.unwrap_or_else(|| "released-legacy-forgecode".to_owned());
-                let cursor = ForgeCodeCursorWire {
-                    version: FORGECODE_CURSOR_VERSION,
-                    parser_revision: FORGECODE_NATIVE_PARSER_REVISION,
-                    policy_revision: FORGECODE_NATIVE_POLICY_REVISION,
-                    source_revision: revision.clone(),
-                    canonical_source_identity: canonical.clone(),
-                    raw_source_path: raw_source_path.clone(),
-                    frontier: ForgeCodeFrontier::initial(),
-                    terminal: true,
-                    generation: 0,
-                    rejected_records: 0,
-                };
-                (serde_json::to_string(&cursor)?, canonical, revision)
+                cursor.raw_source_path,
+            )
+        }
+        StoredCursorKind::ReleasedLegacy {
+            source_revision,
+            rejected_records,
+        } => {
+            let authority = released_route_authority(store, &context.machine_id, &stream)?;
+            if source_revision.as_deref() != Some(authority.source_revision.as_str()) {
+                return Err(corrupt_cursor());
             }
-        };
+            let locator_identity =
+                released_locator_identity(Path::new(&authority.raw_source_path))?;
+            let cursor = ForgeCodeCursorWire {
+                version: FORGECODE_CURSOR_VERSION,
+                parser_revision: FORGECODE_NATIVE_PARSER_REVISION,
+                policy_revision: FORGECODE_NATIVE_POLICY_REVISION,
+                source_revision: authority.source_revision.clone(),
+                canonical_source_identity: authority.canonical_source_identity.clone(),
+                raw_source_path: authority.raw_source_path.clone(),
+                frontier: ForgeCodeFrontier::initial(),
+                terminal: true,
+                generation: 0,
+                rejected_records,
+            };
+            (
+                serde_json::to_string(&cursor)?,
+                locator_identity,
+                authority.canonical_source_identity,
+                authority.source_revision,
+                authority.raw_source_path,
+            )
+        }
+    };
+    if raw_source_path != selected_path {
+        return Err(corrupt_cursor());
+    }
     let retirement = ProviderSourceRouteRetirement {
         provider: CaptureProvider::ForgeCode,
         source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
         machine_id: context.machine_id.clone(),
-        locator_identity: provider_path_identity(path)?,
+        locator_identity,
         cursor_stream: stream.clone(),
         expected_canonical_source_identity: canonical_source_identity,
         expected_source_revision: source_revision,
@@ -1115,6 +858,96 @@ pub(super) fn retire_missing_source(
         }
     }
     Ok(summary)
+}
+
+fn resolve_missing_cursor(
+    store: &Store,
+    machine_id: &str,
+    missing: &ForgeCodeMissingSource,
+) -> Result<(PathBuf, String, SyncCursor)> {
+    let mut matches = Vec::new();
+    for path in &missing.candidates {
+        let stream = cursor_stream(path)?;
+        if let Some(cursor) = store.get_sync_cursor(None, machine_id, &stream)? {
+            matches.push((path.clone(), stream, cursor));
+        }
+    }
+    match matches.len() {
+        0 => Err(CaptureError::InvalidProviderTranscriptPath {
+            path: missing.preferred_path.clone(),
+            reason: "ForgeCode SQLite source is missing and has no prior route authority",
+        }),
+        1 => matches.pop().ok_or_else(|| {
+            CaptureError::SystemInvariant(
+                "ForgeCode missing-source cursor count changed unexpectedly",
+            )
+        }),
+        _ => Err(CaptureError::InvalidProviderTranscriptPath {
+            path: missing.preferred_path.clone(),
+            reason: "ForgeCode missing path has ambiguous exact-file and default-child authority",
+        }),
+    }
+}
+
+struct ReleasedRouteAuthority {
+    canonical_source_identity: String,
+    raw_source_path: String,
+    source_revision: String,
+}
+
+fn released_route_authority(
+    store: &Store,
+    machine_id: &str,
+    cursor_stream: &str,
+) -> Result<ReleasedRouteAuthority> {
+    let conn = Connection::open_with_flags(
+        store.path(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let mut statement = conn.prepare(
+        "SELECT canonical_source_identity, raw_source_path, source_revision
+         FROM provider_source_locators
+         WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+           AND cursor_stream = ?4 AND is_current = 1
+           AND raw_source_path IS NOT NULL AND raw_source_path <> ''
+         ORDER BY locator_identity
+         LIMIT 2",
+    )?;
+    let rows = statement.query_map(
+        params![
+            CaptureProvider::ForgeCode.as_str(),
+            FORGECODE_SQLITE_SOURCE_FORMAT,
+            machine_id,
+            cursor_stream,
+        ],
+        |row| {
+            Ok(ReleasedRouteAuthority {
+                canonical_source_identity: row.get(0)?,
+                raw_source_path: row.get(1)?,
+                source_revision: row.get(2)?,
+            })
+        },
+    )?;
+    let mut authorities = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    match authorities.len() {
+        1 => authorities.pop().ok_or_else(|| {
+            CaptureError::SystemInvariant("released ForgeCode route count changed unexpectedly")
+        }),
+        _ => Err(CaptureError::InvalidPayload(
+            "released ForgeCode cursor has no unique current route authority".to_owned(),
+        )),
+    }
+}
+
+fn released_source_revision(source_revision: &str) -> bool {
+    source_revision.starts_with("forgecode-sqlite-snapshot-v1:capture=1;policy=5;")
+}
+
+fn released_locator_identity(raw_source_path: &Path) -> Result<String> {
+    Ok(format!(
+        "forgecode-sqlite:{}",
+        provider_path_identity(raw_source_path)?
+    ))
 }
 
 fn retirement_publication_id(

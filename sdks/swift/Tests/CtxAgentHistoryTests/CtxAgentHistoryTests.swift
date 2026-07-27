@@ -2,6 +2,47 @@ import XCTest
 @testable import CtxAgentHistory
 
 final class CtxAgentHistoryTests: XCTestCase {
+    func testForcesAnalyticsOffAfterAmbientAndUserEnvironmentMerging() throws {
+        let variable = "CTX_ANALYTICS_ENABLED"
+        let original = ProcessInfo.processInfo.environment[variable]
+        setenv(variable, "true", 1)
+        defer {
+            if let original {
+                setenv(variable, original, 1)
+            } else {
+                unsetenv(variable)
+            }
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctx-sdk-privacy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("ctx-fake")
+        try Data(
+            """
+            #!/bin/sh
+            set -eu
+            printf '{"analyticsEnabled":"%s"}\\n' "$CTX_ANALYTICS_ENABLED"
+            """.utf8
+        ).write(to: script)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)],
+            ofItemAtPath: script.path
+        )
+
+        XCTAssertEqual(ProcessInfo.processInfo.environment[variable], "true")
+        let adapter = LocalCLIAdapter(
+            ctxPath: script.path,
+            env: [variable: "true"]
+        )
+        let output = try adapter.execute(["status", "--json"])
+        let raw = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: String]
+        )
+        XCTAssertEqual(raw["analyticsEnabled"], "false")
+    }
+
     func testWrapsCoreCLICommands() throws {
         let runner = CapturingRunner { request in
             CommandResult(stdout: #"{"schema_version":1,"initialized":true,"sources":[],"totals":{},"results":[]}"#)
@@ -163,6 +204,7 @@ final class CtxAgentHistoryTests: XCTestCase {
     func testVersioningMetadata() throws {
         let runner = CapturingRunner { request in
             XCTAssertEqual(request.arguments, ["--version"])
+            XCTAssertEqual(request.env["CTX_ANALYTICS_ENABLED"], "false")
             return CommandResult(stdout: "ctx 1.2.3\n")
         }
         let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))

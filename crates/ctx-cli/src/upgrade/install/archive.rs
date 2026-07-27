@@ -198,7 +198,7 @@ pub(super) fn extract_runtime_archive(
 }
 
 fn runtime_expanded_size_limit() -> u64 {
-    if cfg!(debug_assertions) {
+    if crate::upgrade::test_harness_enabled() {
         if let Ok(value) = env::var("CTX_UPGRADE_RUNTIME_MAX_EXPANDED_BYTES_FOR_TESTS") {
             if let Ok(value) = value.parse::<u64>() {
                 if value > 0 {

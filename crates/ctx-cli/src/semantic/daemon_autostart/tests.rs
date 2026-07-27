@@ -167,6 +167,53 @@ fn autostart_child_inherits_effective_analytics_policy() {
         .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
 }
 
+#[cfg(unix)]
+#[test]
+fn autostart_child_detaches_from_the_invoking_terminal_session() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("record-session.sh");
+    let receipt = temp.path().join("session.txt");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s ' \"$$\" >\"$CTX_DAEMON_TEST_RECEIPT\"\nps -o sid= -p \"$$\" >>\"$CTX_DAEMON_TEST_RECEIPT\"\nexec sleep 30\n",
+    )?;
+    let mut permissions = fs::metadata(&executable)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&executable, permissions)?;
+
+    let mut command = daemon_autostart_command(
+        &executable,
+        temp.path(),
+        DaemonTriggerCommandArg::Setup,
+        5,
+        5,
+        None,
+    );
+    command.env("CTX_DAEMON_TEST_RECEIPT", &receipt);
+    let mut child = command.spawn()?;
+    for _ in 0..100 {
+        if fs::read_to_string(&receipt)
+            .is_ok_and(|recorded| recorded.split_whitespace().count() == 2)
+        {
+            break;
+        }
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+    let recorded = fs::read_to_string(&receipt);
+    child.kill()?;
+    child.wait()?;
+    let recorded = recorded?;
+    let values = recorded
+        .split_whitespace()
+        .map(str::parse::<u32>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    assert_eq!(values, vec![child.id(), child.id()]);
+    Ok(())
+}
+
 #[test]
 fn upgrade_handoff_fences_daemon_starts_and_aborts_on_drop() -> Result<()> {
     let temp = tempfile::tempdir()?;

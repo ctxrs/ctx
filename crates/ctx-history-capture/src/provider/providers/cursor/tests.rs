@@ -1,4 +1,7 @@
+mod production;
+
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -8,19 +11,33 @@ use std::{
     },
 };
 
-use ctx_history_core::{CaptureProvider, EventType};
+use ctx_history_core::{
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event,
+    EventRole, EventType, Fidelity, Session, SessionStatus,
+};
 use ctx_history_store::Store;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use super::{
+    cursor_complete_content_source_from_admitted, cursor_complete_content_source_revision,
     discover_cursor_transcripts, freeze_cursor_source, resolve_cursor_missing_sources,
     scan_cursor_source, CursorCheckpoint, CursorCompletedExactInventory, CursorKnownSource,
     CursorMissingSourceDisposition, CursorPriorObservation, CursorReadOutcome,
     CursorSourceGeneration, CursorSourceMutation,
 };
 use super::{CursorPublicationPage, CursorPublicationSink};
+use crate::complete_content::{
+    jsonl::JsonlCompleteContentResolver, AuthorizedSourceRoute, CompleteContentErrorKind,
+    CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
+    CompleteMessageRequest, SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorsV1,
+    VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+};
+use crate::provider::importer::{
+    provider_scoped_source_uuid, provider_session_uuid, provider_source_event_import_identity,
+    provider_sync_metadata, timestamps,
+};
 use crate::provider::providers::cursor::{
     layout::{
         CURSOR_MAX_DIRECTORY_DEPTH, CURSOR_MAX_DIRECTORY_ENTRIES,
@@ -32,9 +49,11 @@ use crate::provider::providers::cursor::{
     },
 };
 use crate::{
-    import_cursor_native_history, CursorNativeImportOptions, ImportProfile, OutputOutcome,
-    OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress,
-    ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition, ProviderImportWorkResult,
+    import_cursor_native_history, CaptureWorkLimit, CursorNativeImportOptions, ImportProfile,
+    OutputOutcome, OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult,
+    ProOutputProgress, ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition,
+    ProviderImportWorkResult, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+    LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
 };
 
 fn tempdir() -> TempDir {
@@ -504,6 +523,169 @@ fn rejection_details_keep_an_exact_count_and_fixed_samples() {
         (CURSOR_REJECTION_SAMPLE_LIMIT - 1) as u64
     );
     assert!(parsed.events.is_empty());
+}
+
+#[test]
+fn v025_bridge_uses_physical_ordinal_only_for_the_first_sibling() {
+    let mut bytes = b"\n{\"malformed\"\n".to_vec();
+    bytes.extend_from_slice(&jsonl([json!({
+        "timestamp": "2026-07-24T12:00:01Z",
+        "role": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "first sibling"},
+                {"type": "text", "text": "second sibling"}
+            ]
+        }
+    })]));
+
+    let parsed = parsed(&bytes, None);
+
+    assert_eq!(parsed.rejections.total, 1);
+    assert_eq!(parsed.events.len(), 2);
+    assert!(parsed.events.iter().all(|event| {
+        event.native_order.semantic_ordinal == 0 && event.native_order.physical_ordinal == 2
+    }));
+    assert_eq!(parsed.events[0].legacy_provider_event_index(), Some(2));
+    assert_eq!(parsed.events[1].legacy_provider_event_index(), None);
+}
+
+#[test]
+fn historical_v025_store_reuses_physical_line_id_without_collapsing_siblings() {
+    const MACHINE: &str = "cursor-v025-upgrade-machine";
+    let temp = tempdir();
+    let root = temp.path().join("projects");
+    let mut bytes = b"\n{\"malformed\"\n".to_vec();
+    bytes.extend_from_slice(&jsonl([json!({
+        "timestamp": "2026-07-24T12:00:01Z",
+        "role": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "released first sibling"},
+                {"type": "text", "text": "new second sibling"}
+            ]
+        }
+    })]));
+    let path = write_transcript(&root, "project", "v025-upgrade", &bytes);
+    let parsed = parsed(&bytes, None);
+    let first_hash = parsed.events[0].provider_event_hash.clone();
+    let canonical_path = fs::canonicalize(&path).unwrap();
+    let raw_source_path = canonical_path.display().to_string();
+    let locator_identity =
+        crate::provider::importer::provider_path_identity(&canonical_path).unwrap();
+    let source_identity = format!("cursor-native-path-v1:{locator_identity}");
+    let source_id = provider_scoped_source_uuid(
+        CaptureProvider::Cursor,
+        "v025-upgrade",
+        LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+        Some(&raw_source_path),
+    );
+    let session_id = provider_session_uuid(CaptureProvider::Cursor, "v025-upgrade");
+    let occurred_at = "2026-07-24T12:00:01Z".parse().unwrap();
+    let mut store = Store::open(temp.path().join("history.sqlite")).unwrap();
+    store
+        .upsert_capture_source(&CaptureSource {
+            id: source_id,
+            descriptor: CaptureSourceDescriptor {
+                kind: CaptureSourceKind::ProviderImport,
+                provider: CaptureProvider::Cursor,
+                machine_id: MACHINE.to_owned(),
+                process_id: None,
+                cwd: None,
+                raw_source_path: Some(raw_source_path.clone()),
+                source_format: Some(LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned()),
+                source_root: Some(root.display().to_string()),
+                source_identity: Some(source_identity),
+                external_session_id: Some("v025-upgrade".to_owned()),
+            },
+            started_at: occurred_at,
+            ended_at: Some(occurred_at),
+            sync: provider_sync_metadata(
+                Fidelity::Imported,
+                json!({"source_format": LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT}),
+            ),
+        })
+        .unwrap();
+    store
+        .upsert_session(&Session {
+            id: session_id,
+            history_record_id: None,
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: Some(source_id),
+            provider: CaptureProvider::Cursor,
+            external_session_id: Some("v025-upgrade".to_owned()),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: occurred_at,
+            ended_at: Some(occurred_at),
+            timestamps: timestamps(occurred_at),
+            sync: provider_sync_metadata(Fidelity::Imported, json!({})),
+        })
+        .unwrap();
+    let released = provider_source_event_import_identity(source_id, 2, &first_hash);
+    store
+        .upsert_event(&Event {
+            id: released.id,
+            seq: released.seq,
+            history_record_id: None,
+            session_id: Some(session_id),
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::Assistant),
+            occurred_at,
+            capture_source_id: Some(source_id),
+            payload: json!({
+                "text": "released first sibling",
+                "body": {"kind": "text", "text": "released first sibling"}
+            }),
+            payload_blob_id: None,
+            dedupe_key: Some(released.dedupe_key),
+            sync: provider_sync_metadata(
+                Fidelity::Imported,
+                json!({
+                    "provider_event_hash": first_hash,
+                    "provider_event_hash_authority": "provider_supplied",
+                    "source_format": LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+                    "source_record_ordinal": 2,
+                    "source_record_subrecord_index": 0,
+                }),
+            ),
+        })
+        .unwrap();
+
+    let summary =
+        production::import_cursor_proof(&root, &mut store, MACHINE, ImportProfile::CoreOnly);
+
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        store
+            .get_capture_source(source_id)
+            .unwrap()
+            .descriptor
+            .source_format,
+        Some(CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned())
+    );
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| event.id == released.id));
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+    assert!(events
+        .iter()
+        .any(|event| { event.payload["text"].as_str() == Some("new second sibling") }));
 }
 
 #[test]
@@ -1262,458 +1444,4 @@ fn zero_row_sources_still_produce_exact_observation_and_checkpoint_authority() {
     assert!(incomplete.session.is_none());
     assert!(!incomplete.checkpoint.terminal);
     assert_eq!(incomplete.stats.incomplete_tail_records, 1);
-}
-
-#[test]
-fn missing_source_candidates_require_a_completed_exact_root_inventory() {
-    let temp = tempdir();
-    let root = temp.path().join("projects");
-    write_transcript(&root, "project", "live-session", &jsonl([user("live")]));
-    let inventory = discover_cursor_transcripts(&root);
-    let frozen = freeze_cursor_source(&inventory.transcripts[0]).unwrap();
-    let known = [
-        CursorKnownSource {
-            canonical_source_key: "live-key".to_owned(),
-            locator_identity: frozen.observation().locator_identity.clone(),
-            native_session_id: "live-session".to_owned(),
-        },
-        CursorKnownSource {
-            canonical_source_key: "missing-key".to_owned(),
-            locator_identity: "provider-path-v1:missing".to_owned(),
-            native_session_id: "missing-session".to_owned(),
-        },
-    ];
-
-    let exact =
-        CursorCompletedExactInventory::from_discovery(&inventory, &[frozen.observation().clone()])
-            .unwrap();
-    assert_eq!(
-        resolve_cursor_missing_sources(&known, Some(&exact)),
-        [
-            CursorMissingSourceDisposition::Present {
-                canonical_source_key: "live-key".to_owned(),
-            },
-            CursorMissingSourceDisposition::RouteUnavailableCandidate {
-                canonical_source_key: "missing-key".to_owned(),
-                locator_identity: "provider-path-v1:missing".to_owned(),
-            },
-        ]
-    );
-
-    let mut incomplete = inventory;
-    incomplete.completed = false;
-    assert!(CursorCompletedExactInventory::from_discovery(
-        &incomplete,
-        &[frozen.observation().clone()],
-    )
-    .is_none());
-    assert_eq!(
-        resolve_cursor_missing_sources(&known, None),
-        [
-            CursorMissingSourceDisposition::RetainWithoutCompletedInventory {
-                canonical_source_key: "live-key".to_owned(),
-            },
-            CursorMissingSourceDisposition::RetainWithoutCompletedInventory {
-                canonical_source_key: "missing-key".to_owned(),
-            },
-        ]
-    );
-
-    let arbitrary_empty_root = temp.path().join("not-a-cursor-projects-root");
-    fs::create_dir(&arbitrary_empty_root).unwrap();
-    let arbitrary_inventory = discover_cursor_transcripts(&arbitrary_empty_root);
-    assert!(arbitrary_inventory.completed);
-    assert!(
-        CursorCompletedExactInventory::from_discovery(&arbitrary_inventory, &[]).is_none(),
-        "a completed but inexact empty directory must not authorize deletion"
-    );
-}
-
-#[test]
-fn unknown_future_rows_fail_closed_without_body_or_hash_construction() {
-    let parsed = parsed(
-        &jsonl([json!({
-            "timestamp": "2026-07-24T12:00:00Z",
-            "type": "future_cursor_event",
-            "future_payload": "must not become a body"
-        })]),
-        None,
-    );
-
-    assert!(parsed.events.is_empty());
-    assert_eq!(parsed.stats.native_result_records, 1);
-    assert_eq!(parsed.stats.result_body_bytes_decoded_or_allocated, 0);
-    assert_eq!(parsed.stats.result_hashes_created, 0);
-}
-
-#[test]
-fn cursor_nativepath_production_core_first_output_replay_is_independent_and_lifecycle_safe() {
-    const MACHINE: &str = "cursor-nativepath-output-proof-machine";
-    const INITIAL_BODY: &str = "cursor-nativepath-initial-success";
-    const APPEND_BODY: &str = "cursor-nativepath-appended-success";
-    const REWRITE_BODY: &str = "cursor-nativepath-rewritten-success";
-    const REPLACEMENT_BODY: &str = "cursor-nativepath-replacement-success";
-    const REDACTED_BODY: &str = "cursor-nativepath-redacted-secret";
-    const CORE_PROMPT: &str = "Core-visible Cursor prompt";
-
-    let temp = tempdir();
-    let root = temp.path().join("projects");
-    let mut rows = vec![user(CORE_PROMPT), call(0)];
-    rows.extend((0..64).map(|index| result(index, INITIAL_BODY)));
-    rows.push(json!({
-        "timestamp": "2026-07-24T12:00:03Z",
-        "role": "user",
-        "message": {
-            "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "call_id": "preferred-call-64",
-                "tool_use_id": "fallback-call-64",
-                "content": format!("{INITIAL_BODY}-64"),
-                "execution": {"exitCode": 9}
-            }]
-        }
-    }));
-    rows.push(json!({
-        "timestamp": "2026-07-24T12:00:03Z",
-        "role": "user",
-        "message": {
-            "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": "redacted-call",
-                "content": REDACTED_BODY,
-                "is_error": false,
-                "redacted": true
-            }]
-        }
-    }));
-    let transcript = write_transcript(&root, "project", "output-proof", &jsonl(rows));
-    let store_path = temp.path().join("history.sqlite");
-    let mut store = Store::open(&store_path).unwrap();
-    let sink = Arc::new(CursorRecordingOutputSink::new(store_path.clone()));
-    sink.fail_pages.store(true, Ordering::SeqCst);
-
-    let fresh = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::CoreAndPro(sink.clone()),
-    );
-    assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-    assert!(sink.saw_core_before_page.load(Ordering::SeqCst));
-    assert_eq!(sink.pages.load(Ordering::SeqCst), 0);
-    assert_eq!(sink.behind.load(Ordering::SeqCst), 1);
-    assert!(sink.progress.lock().unwrap().is_none());
-
-    let session = store
-        .session_by_external_session(CaptureProvider::Cursor, "output-proof")
-        .unwrap()
-        .unwrap();
-    let core_events = store.events_for_session(session.id).unwrap();
-    let core_json = serde_json::to_string(&core_events).unwrap();
-    assert!(core_events
-        .iter()
-        .all(|event| event.event_type != EventType::ToolOutput));
-    for secret in [INITIAL_BODY, REDACTED_BODY] {
-        assert!(!core_json.contains(secret));
-    }
-
-    sink.fail_pages.store(false, Ordering::SeqCst);
-    let catch_up = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::ProReplayOnly(sink.clone()),
-    );
-    assert_eq!(catch_up.work_result(), ProviderImportWorkResult::NoOp);
-    assert!(sink.pages.load(Ordering::SeqCst) >= 2);
-    let outputs = sink.outputs.lock().unwrap();
-    assert_eq!(outputs.len(), 65);
-    assert_eq!(outputs[0].content, format!("{INITIAL_BODY}-0").as_bytes());
-    assert_eq!(outputs[0].semantic_ordinal, 2);
-    assert_eq!(outputs[0].subrecord_index, 0);
-    assert_eq!(outputs[0].call_id.as_deref(), Some("call-0"));
-    assert_eq!(outputs[0].outcome, OutputOutcome::Success);
-    assert_eq!(outputs[64].call_id.as_deref(), Some("preferred-call-64"));
-    assert_eq!(outputs[64].outcome, OutputOutcome::Failure);
-    assert!(outputs.iter().all(|output| !output
-        .content
-        .windows(REDACTED_BODY.len())
-        .any(|window| window == REDACTED_BODY.as_bytes())));
-    drop(outputs);
-    let pages_after_catch_up = sink.pages.load(Ordering::SeqCst);
-
-    let idempotent = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::ProReplayOnly(sink.clone()),
-    );
-    assert_eq!(idempotent.work_result(), ProviderImportWorkResult::NoOp);
-    assert_eq!(sink.pages.load(Ordering::SeqCst), pages_after_catch_up);
-
-    let mut append = OpenOptions::new().append(true).open(&transcript).unwrap();
-    append
-        .write_all(&jsonl([call(65), result(65, APPEND_BODY)]))
-        .unwrap();
-    drop(append);
-    let behind_before_append = sink.behind.load(Ordering::SeqCst);
-    let pages_before_append = sink.pages.load(Ordering::SeqCst);
-    import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::ProReplayOnly(sink.clone()),
-    );
-    assert_eq!(sink.pages.load(Ordering::SeqCst), pages_before_append);
-    assert_eq!(sink.behind.load(Ordering::SeqCst), behind_before_append + 1);
-
-    let append_import = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::CoreAndPro(sink.clone()),
-    );
-    assert_eq!(
-        append_import.work_result(),
-        ProviderImportWorkResult::Changed
-    );
-    assert_eq!(sink.outputs.lock().unwrap().len(), 66);
-    assert_eq!(
-        sink.outputs.lock().unwrap().last().unwrap().content,
-        format!("{APPEND_BODY}-65").as_bytes()
-    );
-    assert_eq!(*sink.epochs.lock().unwrap().last().unwrap(), 0);
-    assert_eq!(
-        *sink.dispositions.lock().unwrap().last().unwrap(),
-        ProOutputSourceDisposition::AppendOrResume
-    );
-
-    fs::write(
-        &transcript,
-        jsonl([user(CORE_PROMPT), call(0), result(0, REWRITE_BODY)]),
-    )
-    .unwrap();
-    let rewrite = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::CoreAndPro(sink.clone()),
-    );
-    assert_eq!(rewrite.work_result(), ProviderImportWorkResult::Changed);
-    assert_eq!(sink.outputs.lock().unwrap().len(), 1);
-    assert_eq!(
-        sink.outputs.lock().unwrap()[0].content,
-        format!("{REWRITE_BODY}-0").as_bytes()
-    );
-    assert_eq!(*sink.epochs.lock().unwrap().last().unwrap(), 1);
-    assert_eq!(
-        *sink.dispositions.lock().unwrap().last().unwrap(),
-        ProOutputSourceDisposition::Rewrite
-    );
-
-    fs::write(&transcript, jsonl([user(CORE_PROMPT)])).unwrap();
-    let truncation = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::CoreAndPro(sink.clone()),
-    );
-    assert_eq!(truncation.work_result(), ProviderImportWorkResult::Changed);
-    assert!(sink.outputs.lock().unwrap().is_empty());
-    assert_eq!(*sink.epochs.lock().unwrap().last().unwrap(), 2);
-
-    let replacement = transcript.with_extension("replacement");
-    fs::write(
-        &replacement,
-        jsonl([user(CORE_PROMPT), call(0), result(0, REPLACEMENT_BODY)]),
-    )
-    .unwrap();
-    fs::remove_file(&transcript).unwrap();
-    fs::rename(&replacement, &transcript).unwrap();
-    let replaced = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::CoreAndPro(sink.clone()),
-    );
-    assert_eq!(replaced.work_result(), ProviderImportWorkResult::Changed);
-    assert_eq!(sink.outputs.lock().unwrap().len(), 1);
-    assert_eq!(
-        sink.outputs.lock().unwrap()[0].content,
-        format!("{REPLACEMENT_BODY}-0").as_bytes()
-    );
-    assert_eq!(*sink.epochs.lock().unwrap().last().unwrap(), 3);
-
-    let final_core = store.events_for_session(session.id).unwrap();
-    let final_core_json = serde_json::to_string(&final_core).unwrap();
-    for secret in [
-        INITIAL_BODY,
-        APPEND_BODY,
-        REWRITE_BODY,
-        REPLACEMENT_BODY,
-        REDACTED_BODY,
-    ] {
-        assert!(!final_core_json.contains(secret));
-    }
-
-    fs::remove_file(&transcript).unwrap();
-    let disappeared = import_cursor_proof(&root, &mut store, MACHINE, ImportProfile::CoreOnly);
-    assert_eq!(disappeared.work_result(), ProviderImportWorkResult::Changed);
-    let pages_before_missing_replay = sink.pages.load(Ordering::SeqCst);
-    let missing_replay = import_cursor_proof(
-        &root,
-        &mut store,
-        MACHINE,
-        ImportProfile::ProReplayOnly(sink.clone()),
-    );
-    assert_eq!(missing_replay.work_result(), ProviderImportWorkResult::NoOp);
-    assert_eq!(
-        sink.pages.load(Ordering::SeqCst),
-        pages_before_missing_replay
-    );
-}
-
-fn import_cursor_proof(
-    root: &Path,
-    store: &mut Store,
-    machine_id: &str,
-    import_profile: ImportProfile,
-) -> crate::ProviderImportSummary {
-    import_cursor_native_history(
-        root,
-        store,
-        CursorNativeImportOptions {
-            machine_id: machine_id.to_owned(),
-            source_path: Some(root.to_path_buf()),
-            imported_at: "2026-07-25T12:00:00Z".parse().unwrap(),
-            import_profile,
-            ..CursorNativeImportOptions::default()
-        },
-    )
-    .unwrap()
-}
-
-struct RecordedCursorOutput {
-    content: Vec<u8>,
-    semantic_ordinal: u64,
-    subrecord_index: u32,
-    call_id: Option<String>,
-    outcome: OutputOutcome,
-}
-
-struct CursorRecordingOutputSink {
-    store_path: PathBuf,
-    fail_pages: AtomicBool,
-    progress: Mutex<Option<ProOutputProgress>>,
-    pages: AtomicUsize,
-    behind: AtomicUsize,
-    saw_core_before_page: AtomicBool,
-    outputs: Mutex<Vec<RecordedCursorOutput>>,
-    epochs: Mutex<Vec<u64>>,
-    dispositions: Mutex<Vec<ProOutputSourceDisposition>>,
-    sources: Mutex<Vec<OutputSourceIdentity>>,
-}
-
-impl CursorRecordingOutputSink {
-    fn new(store_path: PathBuf) -> Self {
-        Self {
-            store_path,
-            fail_pages: AtomicBool::new(false),
-            progress: Mutex::new(None),
-            pages: AtomicUsize::new(0),
-            behind: AtomicUsize::new(0),
-            saw_core_before_page: AtomicBool::new(false),
-            outputs: Mutex::new(Vec::new()),
-            epochs: Mutex::new(Vec::new()),
-            dispositions: Mutex::new(Vec::new()),
-            sources: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl ProOutputSink for CursorRecordingOutputSink {
-    fn inventory_generation(&self) -> u64 {
-        7
-    }
-
-    fn materializer_revision(&self) -> &str {
-        "cursor-nativepath-output-proof-materializer-v1"
-    }
-
-    fn observe_source(
-        &self,
-        _source: &OutputSourceIdentity,
-    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
-        Ok(self.progress.lock().unwrap().clone())
-    }
-
-    fn materialize_page(
-        &self,
-        page: ProOutputMaterializationPage,
-    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
-        let core = Store::open_read_only(&self.store_path)
-            .map_err(|error| ProOutputSinkError::new("test_store", error.to_string()))?;
-        if core
-            .list_sessions()
-            .map_err(|error| ProOutputSinkError::new("test_sessions", error.to_string()))?
-            .iter()
-            .any(|session| session.provider == CaptureProvider::Cursor)
-        {
-            self.saw_core_before_page.store(true, Ordering::SeqCst);
-        }
-        if self.fail_pages.load(Ordering::SeqCst) {
-            return Err(ProOutputSinkError::new(
-                "intentional_test_failure",
-                "intentional Cursor output failure",
-            ));
-        }
-
-        let accepted_outputs = u32::try_from(page.observations.len()).unwrap();
-        if matches!(
-            page.disposition,
-            ProOutputSourceDisposition::NewSource | ProOutputSourceDisposition::Rewrite
-        ) {
-            self.outputs.lock().unwrap().clear();
-        }
-        self.outputs
-            .lock()
-            .unwrap()
-            .extend(
-                page.observations
-                    .into_iter()
-                    .map(|output| RecordedCursorOutput {
-                        content: output.content,
-                        semantic_ordinal: output.coordinate.native_sequence,
-                        subrecord_index: output.coordinate.source_record_subrecord_index.unwrap(),
-                        call_id: output.call_id,
-                        outcome: output.outcome.outcome,
-                    }),
-            );
-        let committed_cursor = page.next_safe_cursor.clone();
-        *self.progress.lock().unwrap() = Some(ProOutputProgress {
-            source_epoch: page.source_epoch,
-            observed_revision: page.observed_revision.clone(),
-            cursor: Some(committed_cursor.clone()),
-            parser_revision: page.parser_revision.clone(),
-            materializer_revision: page.materializer_revision.clone(),
-            terminal: page.terminal,
-        });
-        self.epochs.lock().unwrap().push(page.source_epoch);
-        self.dispositions.lock().unwrap().push(page.disposition);
-        self.sources.lock().unwrap().push(page.source);
-        self.pages.fetch_add(1, Ordering::SeqCst);
-        Ok(ProOutputPageResult {
-            source_epoch: page.source_epoch,
-            committed_cursor,
-            accepted_outputs,
-            materialized_facts: 0,
-            replayed: false,
-        })
-    }
-
-    fn mark_behind(&self, _error: ProOutputSinkError) {
-        self.behind.fetch_add(1, Ordering::SeqCst);
-    }
 }

@@ -16,8 +16,8 @@ use crate::{
     CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
 };
 
-pub(super) const ASTRBOT_CAPTURE_REVISION: u32 = 3;
-pub(super) const ASTRBOT_POLICY_REVISION: u32 = 6;
+pub(super) const ASTRBOT_CAPTURE_REVISION: u32 = 4;
+pub(super) const ASTRBOT_POLICY_REVISION: u32 = 7;
 const ASTRBOT_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "astrbot-conversation-message-v1";
 
 pub(crate) fn astrbot_complete_message_locator(

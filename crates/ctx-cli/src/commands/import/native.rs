@@ -4,15 +4,13 @@ use anyhow::{anyhow, Result};
 use uuid::Uuid;
 
 use ctx_history_capture::{
-    CodexSessionImportProgressCallback, ImportProfile, ProviderImportSummary, ProviderImportSupport,
+    CaptureError, CodexSessionImportProgressCallback, ImportProfile, ProviderImportSummary,
+    ProviderImportSupport,
 };
-use ctx_history_core::utc_now;
-use ctx_history_store::{SourceImportFile, Store};
+use ctx_history_core::{utc_now, HistoryRecord};
+use ctx_history_store::{SourceImportFile, Store, StoreError};
 
-use crate::commands::import::catalog::{
-    import_record_for_source, source_uses_incremental_event_search,
-};
-use crate::commands::import::report::{import_error_scope, ImportFailureScope};
+use crate::commands::import::catalog::import_record_for_source;
 use crate::commands::import::{
     cleanup_rejected_history_record, history_record_exists, provider_summary_has_imported_content,
     rejected_source_error, SourcePreinventory,
@@ -21,14 +19,25 @@ use crate::provider_sources::SourceInfo;
 
 #[cfg(test)]
 use crate::commands::import::manifest::inventory_source_import_files;
-use crate::commands::import::manifest::source_uses_import_file_manifest;
+use crate::commands::import::manifest::{
+    provider_owns_root_manifest, source_uses_import_file_manifest,
+};
 
 mod bulk;
 mod dispatch;
 mod manifested;
 
+const SEARCH_PROJECTION_REPAIR_REQUIRED: &str = "search projection repair required before provider import; ctx will not rebuild the full projection during import; rebuild the local ctx index as documented by `ctx docs show storage`, then retry";
+
 #[cfg(test)]
 use manifested::{import_manifested_source, manifest_pending_source_context};
+
+pub(crate) fn ensure_search_projection_ready_for_provider_import(store: &Store) -> Result<()> {
+    if store.event_search_projection_needs_backfill()? {
+        return Err(CaptureError::SystemInvariant(SEARCH_PROJECTION_REPAIR_REQUIRED).into());
+    }
+    Ok(())
+}
 
 pub(crate) fn validate_source_import_supported(source: &SourceInfo) -> Result<()> {
     match source.import_support {
@@ -54,51 +63,10 @@ pub(crate) fn import_one_source_with_profile(
     preinventory: &SourcePreinventory,
     import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
-    let event_search_needs_backfill = store.event_search_projection_needs_backfill()?;
-    let refresh_search_after_import =
-        event_search_needs_backfill || !source_uses_incremental_event_search(source);
     import_one_source_inner_with_profile(
         store,
         source,
         progress,
-        refresh_search_after_import,
-        full_rescan,
-        preinventory,
-        import_profile,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn import_one_source_without_search_refresh(
-    store: &mut Store,
-    source: &SourceInfo,
-    progress: Option<CodexSessionImportProgressCallback>,
-    full_rescan: bool,
-    preinventory: &SourcePreinventory,
-) -> Result<ProviderImportSummary> {
-    import_one_source_without_search_refresh_with_profile(
-        store,
-        source,
-        progress,
-        full_rescan,
-        preinventory,
-        &ImportProfile::CoreOnly,
-    )
-}
-
-pub(crate) fn import_one_source_without_search_refresh_with_profile(
-    store: &mut Store,
-    source: &SourceInfo,
-    progress: Option<CodexSessionImportProgressCallback>,
-    full_rescan: bool,
-    preinventory: &SourcePreinventory,
-    import_profile: &ImportProfile,
-) -> Result<ProviderImportSummary> {
-    import_one_source_inner_with_profile(
-        store,
-        source,
-        progress,
-        false,
         full_rescan,
         preinventory,
         import_profile,
@@ -179,17 +147,19 @@ fn import_one_source_for_search_refresh_with_limit(
     capture_work_limit: ctx_history_capture::CaptureWorkLimit,
     import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
+    ensure_search_projection_ready_for_provider_import(store)?;
+    // An unchanged outer scheduling token cannot prove a provider-owned root manifest is
+    // unchanged. Enter those providers so they can reconcile siblings, retirement, and Pro state.
     if matches!(import_profile, ImportProfile::CoreOnly)
         && !source_uses_import_file_manifest(source)
+        && !provider_owns_root_manifest(source)
         && preinventory.source_root_file().is_some()
         && store
             .list_pending_source_import_files(source.provider, &source.path.display().to_string())?
             .is_empty()
     {
-        store.upsert_record(&import_record_for_source(source))?;
-        if store.event_search_projection_needs_backfill()? {
-            store.refresh_search_index()?;
-        }
+        let record = import_record_for_source(source);
+        ensure_import_record(store, record)?;
         return Ok(ProviderImportSummary::default());
     }
     bulk::import_one_source_inner_at_path(
@@ -197,7 +167,6 @@ fn import_one_source_for_search_refresh_with_limit(
         source,
         &source.path,
         progress,
-        false,
         false,
         preinventory,
         capture_work_limit,
@@ -211,7 +180,6 @@ pub(crate) fn import_one_source_inner(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
-    refresh_search_after_import: bool,
     full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
@@ -219,7 +187,6 @@ pub(crate) fn import_one_source_inner(
         store,
         source,
         progress,
-        refresh_search_after_import,
         full_rescan,
         preinventory,
         &ImportProfile::CoreOnly,
@@ -230,17 +197,16 @@ pub(crate) fn import_one_source_inner_with_profile(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
-    refresh_search_after_import: bool,
     full_rescan: bool,
     preinventory: &SourcePreinventory,
     import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
+    ensure_search_projection_ready_for_provider_import(store)?;
     bulk::import_one_source_inner_at_path(
         store,
         source,
         &source.path,
         progress,
-        refresh_search_after_import,
         full_rescan,
         preinventory,
         ctx_history_capture::CaptureWorkLimit::Drain,
@@ -287,9 +253,13 @@ impl<'a> NativeSourceRun<'a> {
     fn run(mut self, input_path: &Path) -> Result<ProviderImportSummary> {
         let record = import_record_for_source(self.source);
         let record_id = record.id;
-        let record_existed = history_record_exists(self.store, record_id)?;
-        self.store.upsert_record(&record)?;
-        let summary = if !self.full_rescan && source_uses_import_file_manifest(self.source) {
+        let record_existed = ensure_import_record(self.store, record)?;
+        let missing_without_preinventory =
+            matches!(self.preinventory, SourcePreinventory::None) && !input_path.exists();
+        let summary = if !self.full_rescan
+            && source_uses_import_file_manifest(self.source)
+            && !missing_without_preinventory
+        {
             manifested::import_manifested_source(
                 self.store,
                 self.source,
@@ -367,26 +337,46 @@ impl<'a> NativeSourceRun<'a> {
                 summary
             }
             Err(err) => {
-                let failure_scope = import_error_scope(&err);
                 let inventory_result = mark_source_root_inventory_failed(
                     self.store,
                     self.preinventory,
                     &err.to_string(),
                 );
-                let cleanup_result = if failure_scope == ImportFailureScope::Source {
-                    cleanup_rejected_history_record(self.store, record_id, record_existed)
-                } else {
-                    self.store
-                        .delete_orphan_record(record_id)
-                        .map(|_| ())
-                        .map_err(anyhow::Error::from)
-                };
+                // A raw error does not prove that earlier bounded work from
+                // this source failed to commit. Remove only an orphan and
+                // preserve any attached accepted content.
+                let cleanup_result = self
+                    .store
+                    .delete_orphan_record(record_id)
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from);
                 finish_terminal_inventory_and_cleanup(inventory_result, cleanup_result)?;
                 return Err(err);
             }
         };
         Ok(summary)
     }
+}
+
+fn ensure_import_record(store: &Store, mut desired: HistoryRecord) -> Result<bool> {
+    let existing = match store.get_record(desired.id) {
+        Ok(existing) => existing,
+        Err(StoreError::NotFound(_)) => {
+            store.upsert_record(&desired)?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let unchanged = existing.title == desired.title
+        && existing.body == desired.body
+        && existing.tags == desired.tags
+        && existing.kind == desired.kind
+        && existing.workspace == desired.workspace;
+    if !unchanged {
+        desired.created_at = existing.created_at;
+        store.upsert_record(&desired)?;
+    }
+    Ok(true)
 }
 
 fn finish_terminal_inventory_and_cleanup(

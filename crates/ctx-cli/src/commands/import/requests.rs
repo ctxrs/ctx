@@ -5,14 +5,16 @@ use serde_json::{json, Value};
 
 use ctx_history_capture::{
     decode_custom_history_jsonl_v1_cursor, import_custom_history_jsonl_v1_reader,
-    provider_source_spec, CaptureWorkLimit, CustomHistoryJsonlV1ImportOptions, DiscoveryIssue,
-    DiscoveryIssueKind, DiscoveryReport, ImportProfile, ProviderImportSummary,
+    provider_source_spec, CaptureError, CaptureWorkLimit, CustomHistoryJsonlV1ImportOptions,
+    DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ImportProfile, ProviderImportSummary,
     ProviderImportSupport, ProviderSourceStatus,
 };
 use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord};
 use ctx_history_store::Store;
 
-use crate::commands::import::catalog::import_record_for_history_source_plugin;
+use crate::commands::import::catalog::{
+    import_record_for_history_source_plugin, import_record_for_source,
+};
 use crate::commands::import::native::validate_source_import_supported;
 use crate::commands::import::{
     cleanup_rejected_history_record, history_record_exists,
@@ -38,7 +40,7 @@ pub(crate) fn validate_import_args(args: &ImportArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
+pub(crate) fn import_requests(args: &ImportArgs, store: Option<&Store>) -> Result<Vec<SourceInfo>> {
     if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
         return Ok(Vec::new());
     }
@@ -48,17 +50,22 @@ pub(crate) fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
             .context("ctx import --path requires --provider for native provider history")?
             .capture_provider();
         let source = explicit_path_source(provider, path.clone());
-        if !source
+        validate_source_import_supported(&source)?;
+        let missing = !source
             .path
             .try_exists()
-            .with_context(|| format!("check import path {}", source.path.display()))?
-        {
-            return Err(anyhow!(
-                "import path does not exist: {}",
-                source.path.display()
-            ));
+            .with_context(|| format!("check import path {}", source.path.display()))?;
+        let authorized = if missing {
+            store
+                .map(|store| missing_explicit_path_has_prior_route_authority(store, &source))
+                .transpose()?
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if missing && !authorized {
+            return Err(invalid_missing_explicit_path(&source));
         }
-        validate_source_import_supported(&source)?;
         return Ok(vec![source]);
     }
     if args.all || args.provider.is_none() {
@@ -103,6 +110,26 @@ pub(crate) fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
         validate_source_import_supported(source)?;
     }
     Ok(sources)
+}
+
+pub(crate) fn missing_explicit_path_has_prior_route_authority(
+    store: &Store,
+    source: &SourceInfo,
+) -> Result<bool> {
+    let record_id = import_record_for_source(source).id;
+    Ok(history_record_exists(store, record_id)?
+        && store.has_prior_provider_source_route(
+            source.provider,
+            source.source_format,
+            &source.path,
+        )?)
+}
+
+pub(crate) fn invalid_missing_explicit_path(source: &SourceInfo) -> anyhow::Error {
+    anyhow::Error::new(CaptureError::InvalidProviderTranscriptPath {
+        path: source.path.clone(),
+        reason: "missing explicit path has no matching prior provider route authority",
+    })
 }
 
 pub(crate) fn no_importable_provider_sources_error(

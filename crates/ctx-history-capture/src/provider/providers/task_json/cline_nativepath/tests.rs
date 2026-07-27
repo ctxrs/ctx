@@ -855,7 +855,30 @@ fn authoritative_metadata_identity_upgrade_reprojects_unchanged_components_once(
     assert_eq!(api_pages.len(), 1);
     assert_eq!(
         outcome(&upgraded.outcomes, ClineComponent::ApiHistory).transition,
-        Some(ClineComponentTransition::Rewrite)
+        Some(ClineComponentTransition::ControlOnlyRewrite)
+    );
+    assert_eq!(
+        upgraded.catalog.live_checkpoints[0]
+            .task_metadata
+            .session
+            .identity_aliases
+            .iter()
+            .map(ClineTaskIdentity::as_str)
+            .collect::<Vec<_>>(),
+        ["task-1"]
+    );
+    assert_eq!(
+        api_pages[0].source.task_origin,
+        ClineTaskIdentityOrigin::TaskMetadata
+    );
+    assert_eq!(
+        api_pages[0]
+            .source
+            .task_aliases
+            .iter()
+            .map(ClineTaskIdentity::as_str)
+            .collect::<Vec<_>>(),
+        ["task-1"]
     );
     assert!(api_pages[0]
         .core
@@ -920,6 +943,36 @@ fn malformed_independent_items_are_rejected_locally_and_valid_siblings_survive()
             })
             .count(),
         1
+    );
+}
+
+#[test]
+fn duplicate_native_ids_receive_provider_local_occurrence_identity() {
+    let fixture = Fixture::new(
+        json!([
+            {"id": "duplicate", "role": "user", "content": "first"},
+            {"id": "duplicate", "role": "assistant", "content": "second"}
+        ]),
+        json!([]),
+    );
+    let result = read_all(&fixture.root, &[], ClineNativeProfile::CoreOnly);
+    let identities = component_pages(&result.pages, ClineComponent::ApiHistory)
+        .into_iter()
+        .flat_map(|page| page.core.events.iter())
+        .map(|event| event.identity.item.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        identities,
+        [
+            ClineNativeItemKey::NativeId {
+                native_id: "duplicate".into(),
+                occurrence: 0,
+            },
+            ClineNativeItemKey::NativeId {
+                native_id: "duplicate".into(),
+                occurrence: 1,
+            },
+        ]
     );
 }
 
@@ -1350,129 +1403,5 @@ fn direct_tool_results_preserve_absence_null_and_empty_semantics() {
     }
 }
 
-#[test]
-fn accounting_admits_exact_output_boundary_and_counts_four_kib_identifiers() {
-    let identifier = "i".repeat(4 * 1024);
-    let fixture = Fixture::new(
-        json!([{
-            "id": "tool-call",
-            "role": "assistant",
-            "content": [{
-                "type": "tool_use",
-                "tool_use_id": identifier.clone(),
-                "name": identifier
-            }]
-        }]),
-        json!([{
-            "id": "exact-output",
-            "type": "command_output",
-            "text": "",
-            "exitCode": 0
-        }]),
-    );
-    let baseline = read_all(&fixture.root, &[], ClineNativeProfile::CoreAndPro);
-    let call_page = component_pages(&baseline.pages, ClineComponent::ApiHistory)
-        .pop()
-        .expect("tool-call page");
-    let call = call_page
-        .core
-        .events
-        .iter()
-        .find_map(|event| event.tool_call.as_ref().map(|call| (event, call)))
-        .expect("retained 4 KiB tool call");
-    assert_eq!(call.1.call_id.as_deref().map(str::len), Some(4 * 1024));
-    assert_eq!(call.1.name.as_deref().map(str::len), Some(4 * 1024));
-    assert!(
-        super::normalize::estimated_event_bytes(call.0)
-            >= call.1.call_id.as_deref().unwrap().len() + call.1.name.as_deref().unwrap().len()
-    );
-
-    let empty_output = component_pages(&baseline.pages, ClineComponent::UiMessages)
-        .pop()
-        .expect("empty output page")
-        .transient
-        .as_ref()
-        .expect("transient output")
-        .observations
-        .first()
-        .expect("empty output observation");
-    let empty_encoded = super::normalize::estimated_output_bytes(empty_output);
-    let exact_content_bytes = super::normalize::CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES
-        .checked_sub(16)
-        .expect("transient payload wrapper fits lane")
-        .checked_sub(empty_encoded)
-        .expect("output envelope fits transient lane");
-    write_json(
-        &fixture.ui,
-        &json!([{
-            "id": "exact-output",
-            "type": "command_output",
-            "text": "e".repeat(exact_content_bytes),
-            "exitCode": 0
-        }]),
-    );
-    let exact = read_all(&fixture.root, &[], ClineNativeProfile::CoreAndPro);
-    let exact_page = component_pages(&exact.pages, ClineComponent::UiMessages)
-        .pop()
-        .expect("exact output page");
-    let exact_output = exact_page
-        .transient
-        .as_ref()
-        .expect("exact transient lane")
-        .observations
-        .first()
-        .expect("exact-boundary output");
-    assert_eq!(
-        super::normalize::estimated_output_bytes(exact_output),
-        super::normalize::CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES - 16
-    );
-    assert_eq!(
-        exact_page.accounting.transient_output_bytes,
-        super::normalize::CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES
-    );
-    assert!(exact_page.accounting.conservative_serialized_bytes <= CLINE_NATIVE_PAGE_MAX_BYTES);
-
-    write_json(
-        &fixture.ui,
-        &json!([{
-            "id": "exact-output",
-            "type": "command_output",
-            "text": "e".repeat(exact_content_bytes + 1),
-            "exitCode": 0
-        }]),
-    );
-    let over = read_all(&fixture.root, &[], ClineNativeProfile::CoreAndPro);
-    let over_page = component_pages(&over.pages, ClineComponent::UiMessages)
-        .pop()
-        .expect("over-boundary page");
-    let transient = over_page.transient.as_ref().expect("over transient lane");
-    assert!(transient.observations.is_empty());
-    assert_eq!(transient.rejected_outputs.len(), 1);
-}
-
-#[test]
-fn final_owned_page_bounds_accept_exact_limits_and_reject_plus_one() {
-    let core_limit = super::normalize::CLINE_NATIVE_CORE_PAGE_MAX_BYTES;
-    let total_limit = super::normalize::CLINE_NATIVE_PAGE_MAX_BYTES;
-    let transient_at_total = total_limit - core_limit;
-    assert!(super::reader::owned_page_bounds_are_valid(
-        core_limit,
-        transient_at_total,
-        CLINE_NATIVE_PAGE_MAX_UNITS,
-    ));
-    assert!(!super::reader::owned_page_bounds_are_valid(
-        core_limit + 1,
-        0,
-        CLINE_NATIVE_PAGE_MAX_UNITS,
-    ));
-    assert!(!super::reader::owned_page_bounds_are_valid(
-        core_limit,
-        transient_at_total + 1,
-        CLINE_NATIVE_PAGE_MAX_UNITS,
-    ));
-    assert!(!super::reader::owned_page_bounds_are_valid(
-        0,
-        0,
-        CLINE_NATIVE_PAGE_MAX_UNITS + 1,
-    ));
-}
+mod compatibility;
+mod page_accounting;

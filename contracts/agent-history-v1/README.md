@@ -46,6 +46,14 @@ must not upload transcript content. CLI stderr progress can contain local paths
 and is not included in successful SDK responses unless a language exposes it as
 debug metadata outside this contract.
 
+Every local adapter launches every `ctx` child process with
+`CTX_ANALYTICS_ENABLED=false`. The adapter applies this reserved value after
+inheriting the ambient environment and merging caller-supplied environment
+overrides, so SDK callers cannot re-enable network analytics. This guard is
+process-scoped to SDK-launched local CLI commands, including version probes; it
+does not change the analytics configuration or environment contract for users
+who invoke the standalone `ctx` CLI directly.
+
 ## Shapes
 
 The authoritative machine-readable shape lives in

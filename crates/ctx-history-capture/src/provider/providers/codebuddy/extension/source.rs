@@ -19,6 +19,21 @@ use super::super::{
     CODEBUDDY_CAPTURE_REVISION, CODEBUDDY_MAX_CHECKPOINT_TEXT_BYTES, CODEBUDDY_POLICY_REVISION,
 };
 
+#[derive(Debug)]
+pub(super) enum CodeBuddyExtensionMessageError {
+    Rejected(String),
+    Source(CaptureError),
+}
+
+impl CodeBuddyExtensionMessageError {
+    pub(super) fn rejected(self) -> std::result::Result<String, CaptureError> {
+        match self {
+            Self::Rejected(error) => Ok(error),
+            Self::Source(error) => Err(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddyExtensionMetadata {
     pub(super) session_dir: PathBuf,
@@ -64,27 +79,16 @@ impl CodeBuddyExtensionObservation {
 
 pub(super) fn codebuddy_extension_metadata(
     session_dir: &Path,
-    session_ordinal: usize,
+    _session_ordinal: usize,
 ) -> Result<(Option<CodeBuddyExtensionMetadata>, ProviderImportSummary)> {
-    let mut summary = ProviderImportSummary::default();
+    let summary = ProviderImportSummary::default();
     let session_index_path = session_dir.join("index.json");
-    let session_index =
-        match ensure_regular_provider_transcript_file(&session_index_path).and_then(|_| {
-            read_json_file_limited(
-                &session_index_path,
-                MAX_PROVIDER_JSONL_LINE_BYTES,
-                "CodeBuddy session index.json",
-            )
-        }) {
-            Ok(value) => value,
-            Err(error) => {
-                summary.record_failure(ProviderImportFailure {
-                    line: session_ordinal,
-                    error: format!("index.json: {error}"),
-                });
-                return Ok((None, summary));
-            }
-        };
+    ensure_regular_provider_transcript_file(&session_index_path)?;
+    let session_index = read_json_file_limited(
+        &session_index_path,
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "CodeBuddy session index.json",
+    )?;
     let project_dir = session_dir.parent().unwrap_or(session_dir).to_path_buf();
     let project_hash = project_dir
         .file_name()
@@ -98,12 +102,8 @@ pub(super) fn codebuddy_extension_metadata(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("unknown-session")
         .to_owned();
-    let (project_index, conversation) = codebuddy_project_index_and_conversation(
-        &project_dir,
-        &native_session_id,
-        &mut summary,
-        session_ordinal,
-    );
+    let (project_index, conversation) =
+        codebuddy_project_index_and_conversation(&project_dir, &native_session_id)?;
     Ok((
         Some(CodeBuddyExtensionMetadata {
             session_dir: session_dir.to_path_buf(),
@@ -129,9 +129,17 @@ fn codebuddy_extension_source_revision(
     revision.update(&CODEBUDDY_POLICY_REVISION.to_be_bytes());
     serde_json::to_writer(&mut revision, &metadata.session_index)?;
     serde_json::to_writer(&mut revision, &metadata.project_index)?;
-    codebuddy_hash_path_state(&mut revision, &metadata.session_dir.join("index.json"))?;
-    codebuddy_hash_path_state(&mut revision, &metadata.project_dir.join("index.json"))?;
-    codebuddy_hash_path_state(&mut revision, &metadata.session_dir.join("messages"))?;
+    codebuddy_hash_path_state(
+        &mut revision,
+        &metadata.session_dir.join("index.json"),
+        false,
+    )?;
+    codebuddy_hash_path_state(
+        &mut revision,
+        &metadata.project_dir.join("index.json"),
+        true,
+    )?;
+    codebuddy_hash_path_state(&mut revision, &metadata.session_dir.join("messages"), false)?;
 
     let mut record_count = 0_u64;
     for (message_index, message_ref) in metadata.messages().iter().enumerate() {
@@ -149,6 +157,7 @@ fn codebuddy_extension_source_revision(
                 revision.update(path.as_os_str().as_encoded_bytes());
             }
             Err(error) => {
+                let error = error.rejected()?;
                 revision.update(b"rejected-message");
                 revision.update(error.as_bytes());
                 if let Some(summary) = summary.as_deref_mut() {
@@ -169,7 +178,11 @@ fn codebuddy_extension_source_revision(
     ))
 }
 
-fn codebuddy_hash_path_state(revision: &mut CodeBuddyRevisionHasher, path: &Path) -> Result<()> {
+fn codebuddy_hash_path_state(
+    revision: &mut CodeBuddyRevisionHasher,
+    path: &Path,
+    allow_missing: bool,
+) -> Result<()> {
     revision.update(path.as_os_str().as_encoded_bytes());
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -179,11 +192,10 @@ fn codebuddy_hash_path_state(revision: &mut CodeBuddyRevisionHasher, path: &Path
             revision.update(&[u8::from(metadata.file_type().is_symlink())]);
             CodeBuddyFrozenFile::from_metadata(&metadata)?.update_revision(revision);
         }
-        Err(error) => {
-            revision.update(b"metadata-error");
-            revision.update(error.kind().to_string().as_bytes());
-            revision.update(&error.raw_os_error().unwrap_or_default().to_be_bytes());
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            revision.update(b"missing");
         }
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
@@ -191,26 +203,29 @@ fn codebuddy_hash_path_state(revision: &mut CodeBuddyRevisionHasher, path: &Path
 pub(super) fn codebuddy_extension_message_file(
     session_dir: &Path,
     message_ref: &Value,
-) -> std::result::Result<(PathBuf, CodeBuddyFrozenFile), String> {
+) -> std::result::Result<(PathBuf, CodeBuddyFrozenFile), CodeBuddyExtensionMessageError> {
     let Some(message_id) = message_ref
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
     else {
-        return Err("CodeBuddy message ref has empty id".to_owned());
+        return Err(CodeBuddyExtensionMessageError::Rejected(
+            "CodeBuddy message ref has empty id".to_owned(),
+        ));
     };
     if !provider_safe_path_segment(message_id) {
-        return Err("CodeBuddy message ref id is not a safe path segment".to_owned());
+        return Err(CodeBuddyExtensionMessageError::Rejected(
+            "CodeBuddy message ref id is not a safe path segment".to_owned(),
+        ));
     }
     let path = session_dir
         .join("messages")
         .join(format!("{message_id}.json"));
-    let file = CodeBuddyFrozenFile::read(&path)
-        .map_err(|error| format!("messages/{message_id}.json: {error}"))?;
+    let file = CodeBuddyFrozenFile::read(&path).map_err(CodeBuddyExtensionMessageError::Source)?;
     if file.length > MAX_PROVIDER_JSONL_LINE_BYTES as u64 {
-        return Err(format!(
+        return Err(CodeBuddyExtensionMessageError::Rejected(format!(
             "messages/{message_id}.json: CodeBuddy message JSON exceeds max bytes ({MAX_PROVIDER_JSONL_LINE_BYTES})"
-        ));
+        )));
     }
     Ok((path, file))
 }
@@ -239,35 +254,18 @@ pub(super) fn codebuddy_extension_metadata_text(
 fn codebuddy_project_index_and_conversation(
     project_dir: &Path,
     native_session_id: &str,
-    summary: &mut ProviderImportSummary,
-    line: usize,
-) -> (Option<Value>, Option<Value>) {
+) -> Result<(Option<Value>, Option<Value>)> {
     let path = project_dir.join("index.json");
     let value = match fs::symlink_metadata(&path) {
-        Ok(_) => match ensure_regular_provider_transcript_file(&path).and_then(|_| {
+        Ok(_) => ensure_regular_provider_transcript_file(&path).and_then(|_| {
             read_json_file_limited(
                 &path,
                 MAX_PROVIDER_JSONL_LINE_BYTES,
                 "CodeBuddy project index.json",
             )
-        }) {
-            Ok(value) => value,
-            Err(err) => {
-                summary.record_failure(ProviderImportFailure {
-                    line,
-                    error: format!("project index.json: {err}"),
-                });
-                return (None, None);
-            }
-        },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (None, None),
-        Err(err) => {
-            summary.record_failure(ProviderImportFailure {
-                line,
-                error: format!("project index.json: {err}"),
-            });
-            return (None, None);
-        }
+        })?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(err) => return Err(err.into()),
     };
     let conversation = value
         .get("conversations")
@@ -278,7 +276,7 @@ fn codebuddy_project_index_and_conversation(
                 .find(|item| item.get("id").and_then(Value::as_str) == Some(native_session_id))
         })
         .cloned();
-    (Some(value), conversation)
+    Ok((Some(value), conversation))
 }
 
 pub(super) fn codebuddy_message_time(

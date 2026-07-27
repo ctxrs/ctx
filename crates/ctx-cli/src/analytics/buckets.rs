@@ -56,8 +56,12 @@ pub(crate) enum BytesBucket {
     OneToTenMb,
     TenToOneHundredMb,
     OneHundredMbToOneGb,
-    OneToTenGb,
-    TenToOneHundredGb,
+    OneToTwoGb,
+    TwoToFiveGb,
+    FiveToTenGb,
+    TenToTwentyFiveGb,
+    TwentyFiveToFiftyGb,
+    FiftyToOneHundredGb,
     OverOneHundredGb,
 }
 
@@ -70,8 +74,12 @@ impl BytesBucket {
             Self::OneToTenMb => "1mb-10mb",
             Self::TenToOneHundredMb => "10mb-100mb",
             Self::OneHundredMbToOneGb => "100mb-1gb",
-            Self::OneToTenGb => "1gb-10gb",
-            Self::TenToOneHundredGb => "10gb-100gb",
+            Self::OneToTwoGb => "1gb-2gb",
+            Self::TwoToFiveGb => "2gb-5gb",
+            Self::FiveToTenGb => "5gb-10gb",
+            Self::TenToTwentyFiveGb => "10gb-25gb",
+            Self::TwentyFiveToFiftyGb => "25gb-50gb",
+            Self::FiftyToOneHundredGb => "50gb-100gb",
             Self::OverOneHundredGb => "100gb+",
         }
     }
@@ -85,8 +93,12 @@ pub(crate) fn bytes_bucket(bytes: u64) -> BytesBucket {
         1_048_576..=10_485_759 => BytesBucket::OneToTenMb,
         10_485_760..=104_857_599 => BytesBucket::TenToOneHundredMb,
         104_857_600..=1_073_741_823 => BytesBucket::OneHundredMbToOneGb,
-        1_073_741_824..=10_737_418_239 => BytesBucket::OneToTenGb,
-        10_737_418_240..=107_374_182_399 => BytesBucket::TenToOneHundredGb,
+        1_073_741_824..=2_147_483_647 => BytesBucket::OneToTwoGb,
+        2_147_483_648..=5_368_709_119 => BytesBucket::TwoToFiveGb,
+        5_368_709_120..=10_737_418_239 => BytesBucket::FiveToTenGb,
+        10_737_418_240..=26_843_545_599 => BytesBucket::TenToTwentyFiveGb,
+        26_843_545_600..=53_687_091_199 => BytesBucket::TwentyFiveToFiftyGb,
+        53_687_091_200..=107_374_182_399 => BytesBucket::FiftyToOneHundredGb,
         _ => BytesBucket::OverOneHundredGb,
     }
 }

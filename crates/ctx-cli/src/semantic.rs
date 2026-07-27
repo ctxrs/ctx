@@ -113,6 +113,7 @@ pub(crate) use daemon::run_daemon_command;
 #[cfg(test)]
 use daemon::*;
 mod daemon_retry;
+mod daemon_status;
 #[cfg(test)]
 use daemon_retry::*;
 mod daemon_scheduler;

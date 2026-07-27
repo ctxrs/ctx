@@ -296,7 +296,34 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             return Ok(None);
         };
         let next_ordinal = nanoclaw_next_ordinal(ordinal)?;
-        let observed_bytes = candidate.observed_bytes()?;
+        let next_frontier = NanoClawFrontier {
+            next_ordinal,
+            phase: NanoClawPositionPhase::NextSession,
+            session_rowid: candidate.rowid,
+            message_source: None,
+            message_rowid: 0,
+        };
+        if let Some(reason) = candidate.rejection_reason() {
+            self.active_session = None;
+            return Ok(Some((
+                NanoClawNativeUnit::Rejection {
+                    ordinal,
+                    reason: reason.to_owned(),
+                },
+                next_frontier,
+            )));
+        }
+        let observed_bytes = match candidate.observed_bytes() {
+            Ok(bytes) => bytes,
+            Err(CaptureError::InvalidPayload(reason)) => {
+                self.active_session = None;
+                return Ok(Some((
+                    NanoClawNativeUnit::Rejection { ordinal, reason },
+                    next_frontier,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         if observed_bytes > NANOCLAW_NATIVE_MAX_RECORD_BYTES {
             self.active_session = None;
             return Ok(Some((
@@ -306,17 +333,30 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
                         "NanoClaw session row exceeds the {NANOCLAW_NATIVE_MAX_RECORD_BYTES}-byte NativePath bound"
                     ),
                 },
-                NanoClawFrontier {
-                    next_ordinal,
-                    phase: NanoClawPositionPhase::NextSession,
-                    session_rowid: candidate.rowid,
-                    message_source: None,
-                    message_rowid: 0,
-                },
+                next_frontier,
             )));
         }
-        let session =
-            nanoclaw_hydrate_native_session(self.central, &self.session_columns, candidate.rowid)?;
+        let session = match nanoclaw_hydrate_native_session(
+            self.central,
+            &self.session_columns,
+            candidate.rowid,
+        ) {
+            Ok(session) => session,
+            Err(error) if nanoclaw_row_decode_error_is_local(&error) => {
+                self.active_session = None;
+                return Ok(Some((
+                    NanoClawNativeUnit::Rejection {
+                        ordinal,
+                        reason: format!(
+                            "NanoClaw session row {} could not be decoded: {error}",
+                            candidate.rowid
+                        ),
+                    },
+                    next_frontier,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         if !provider_safe_path_segment(&session.agent_group_id)
             || !provider_safe_path_segment(&session.id)
         {
@@ -326,13 +366,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
                     ordinal,
                     reason: "NanoClaw session identifiers are not safe path segments".to_owned(),
                 },
-                NanoClawFrontier {
-                    next_ordinal,
-                    phase: NanoClawPositionPhase::NextSession,
-                    session_rowid: candidate.rowid,
-                    message_source: None,
-                    message_rowid: 0,
-                },
+                next_frontier,
             )));
         }
         self.active_session =
@@ -475,7 +509,28 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             message_source: Some(candidate.source),
             message_rowid: candidate.rowid,
         };
-        let observed_bytes = candidate.observed_bytes(active.retained_bytes)?;
+        if let Some(reason) = candidate.rejection_reason() {
+            return Ok(Some((
+                NanoClawNativeUnit::Rejection {
+                    ordinal: frontier.next_ordinal,
+                    reason: reason.to_owned(),
+                },
+                next_frontier,
+            )));
+        }
+        let observed_bytes = match candidate.observed_bytes(active.retained_bytes) {
+            Ok(bytes) => bytes,
+            Err(CaptureError::InvalidPayload(reason)) => {
+                return Ok(Some((
+                    NanoClawNativeUnit::Rejection {
+                        ordinal: frontier.next_ordinal,
+                        reason,
+                    },
+                    next_frontier,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         if observed_bytes > NANOCLAW_NATIVE_MAX_RECORD_BYTES {
             return Ok(Some((
                 NanoClawNativeUnit::Rejection {
@@ -492,7 +547,23 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             .ok_or(CaptureError::SystemInvariant(
                 "NanoClaw selected message component is unavailable",
             ))?;
-        let message = component.hydrate(candidate.rowid)?;
+        let message = match component.hydrate(candidate.rowid) {
+            Ok(message) => message,
+            Err(error) if nanoclaw_row_decode_error_is_local(&error) => {
+                return Ok(Some((
+                    NanoClawNativeUnit::Rejection {
+                        ordinal: frontier.next_ordinal,
+                        reason: format!(
+                            "NanoClaw {} message row {} could not be decoded: {error}",
+                            candidate.source.label(),
+                            candidate.rowid
+                        ),
+                    },
+                    next_frontier,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         if !active.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -517,6 +588,20 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             },
             next_frontier,
         )))
+    }
+}
+
+fn nanoclaw_row_decode_error_is_local(error: &CaptureError) -> bool {
+    match error {
+        CaptureError::InvalidPayload(_) | CaptureError::Json(_) => true,
+        CaptureError::Sqlite(error) => matches!(
+            error,
+            rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::IntegralValueOutOfRange(..)
+                | rusqlite::Error::Utf8Error(..)
+                | rusqlite::Error::InvalidColumnType(..)
+        ),
+        _ => false,
     }
 }
 

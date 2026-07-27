@@ -12,7 +12,7 @@ use std::{
 use chrono::DateTime;
 use ctx_history_core::{CaptureProvider, SyncCursor};
 use ctx_history_store::{decode_native_path_committed_cursor, Store};
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
@@ -22,9 +22,9 @@ use crate::{
         BoundedParserCheckpoint, CertifiedProviderCursor,
     },
     test_support_paths::tempdir,
-    CaptureWorkLimit, ImportProfile, OutputSourceIdentity, ProOutputMaterializationPage,
-    ProOutputPageResult, ProOutputProgress, ProOutputSink, ProOutputSinkError,
-    ProviderImportSummary, ProviderImportWorkResult,
+    CaptureError, CaptureWorkLimit, ImportProfile, OutputSourceIdentity,
+    ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress, ProOutputSink,
+    ProOutputSinkError, ProviderImportSummary, ProviderImportWorkResult,
 };
 
 use super::*;
@@ -387,7 +387,60 @@ fn rewrite_truncation_replacement_and_restore_use_source_generations() {
 }
 
 #[test]
-fn disappearance_retires_omitted_entities_and_route_then_reappearance_restores_them() {
+fn canonical_move_preserves_entities_and_rebinds_the_physical_route() {
+    let temp = tempdir().expect("tempdir");
+    let original = temp.path().join("history.jsonl");
+    let moved = temp.path().join("renamed-prompts.jsonl");
+    let line = history_line("moved-session", 1_784_371_200, "moved prompt");
+    write_lines(&original, &[line]);
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    import(&original, &mut store, CaptureWorkLimit::Drain);
+    let imported_session = session(&store, "moved-session");
+    let event_id = store
+        .events_for_session(imported_session.id)
+        .expect("events")[0]
+        .id;
+
+    fs::rename(&original, &moved).expect("move prompt history");
+    let relocated = import(&moved, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(relocated.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(session(&store, "moved-session").id, imported_session.id);
+    let events = store
+        .events_for_session(imported_session.id)
+        .expect("relocated events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, event_id);
+    assert!(events[0].sync.deleted_at.is_none());
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(event_id)
+            .expect("relocated route")
+            .path(),
+        moved
+    );
+
+    fs::remove_file(&moved).expect("remove relocated prompt history");
+    assert_eq!(
+        import(&moved, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert!(store
+        .get_session(imported_session.id)
+        .expect("retained relocated session")
+        .sync
+        .deleted_at
+        .is_none());
+    assert!(store
+        .events_for_session(imported_session.id)
+        .expect("retained relocated events")[0]
+        .sync
+        .deleted_at
+        .is_none());
+    assert!(store.authorized_source_route_for_event(event_id).is_err());
+}
+
+#[test]
+fn disappearance_retires_only_the_route_and_preserves_prior_entities() {
     let temp = tempdir().expect("tempdir");
     let path = temp.path().join("history.jsonl");
     let line = history_line("missing-session", 1_784_371_200, "prompt");
@@ -405,11 +458,27 @@ fn disappearance_retires_omitted_entities_and_route_then_reappearance_restores_t
     assert_eq!(missing.work_result(), ProviderImportWorkResult::Changed);
     assert!(store
         .get_session(imported_session.id)
-        .expect("retired session")
+        .expect("retained session")
         .sync
         .deleted_at
-        .is_some());
+        .is_none());
+    let retained_events = store
+        .events_for_session(imported_session.id)
+        .expect("retained events");
+    assert_eq!(retained_events.len(), 1);
+    assert_eq!(retained_events[0].id, event_id);
+    assert!(retained_events[0].sync.deleted_at.is_none());
     assert!(store.authorized_source_route_for_event(event_id).is_err());
+    let terminal_missing = store
+        .get_sync_cursor(None, MACHINE, &cursor_stream(&path))
+        .expect("cursor lookup")
+        .expect("terminal missing cursor");
+    let terminal_missing =
+        decode_native_path_committed_cursor(&terminal_missing.cursor).expect("NativePath cursor");
+    let terminal_missing: Value =
+        serde_json::from_str(terminal_missing.provider_cursor()).expect("provider cursor JSON");
+    assert_eq!(terminal_missing["phase"]["phase"], "complete");
+    assert_eq!(terminal_missing["phase"]["missing"], true);
     assert_eq!(
         import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
         ProviderImportWorkResult::NoOp
@@ -422,17 +491,24 @@ fn disappearance_retires_omitted_entities_and_route_then_reappearance_restores_t
     );
     assert!(store
         .get_session(imported_session.id)
-        .expect("restored session")
+        .expect("retained session after route restoration")
         .sync
         .deleted_at
         .is_none());
+    assert_eq!(
+        store
+            .events_for_session(imported_session.id)
+            .expect("events after route restoration")
+            .len(),
+        1
+    );
     store
         .authorized_source_route_for_event(event_id)
         .expect("restored source route");
 }
 
 #[test]
-fn disappearance_during_bounded_core_finishes_partial_then_empty_generations() {
+fn disappearance_during_bounded_core_preserves_the_committed_partial_generation() {
     let temp = tempdir().expect("tempdir");
     let path = temp.path().join("history.jsonl");
     let lines = (0..70)
@@ -452,24 +528,21 @@ fn disappearance_during_bounded_core_finishes_partial_then_empty_generations() {
     let imported_session = session(&store, "partial-missing-session");
 
     fs::remove_file(&path).expect("remove partial history");
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        let missing = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
-        if !missing.work_remaining {
-            break;
-        }
-        assert!(
-            attempts < 7,
-            "bounded disappearance did not reach a terminal cursor"
-        );
-    }
+    let missing = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
+    assert!(!missing.work_remaining);
     assert!(store
         .get_session(imported_session.id)
-        .expect("retired partial session")
+        .expect("retained partial session")
         .sync
         .deleted_at
-        .is_some());
+        .is_none());
+    let partial_events = store
+        .events_for_session(imported_session.id)
+        .expect("retained partial events");
+    assert_eq!(partial_events.len(), 60);
+    assert!(partial_events
+        .iter()
+        .all(|event| event.sync.deleted_at.is_none()));
 
     write_lines(&path, &lines);
     let restored = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
@@ -485,6 +558,57 @@ fn disappearance_during_bounded_core_finishes_partial_then_empty_generations() {
             .count(),
         70
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_prompt_history_paths_are_typed_failures_not_missing_route_retirements() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("history.jsonl");
+    let line = history_line("linked-session", 1_784_371_200, "prompt");
+    write_lines(&path, std::slice::from_ref(&line));
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    import(&path, &mut store, CaptureWorkLimit::Drain);
+    let event_id = store
+        .events_for_session(session(&store, "linked-session").id)
+        .expect("events")[0]
+        .id;
+
+    fs::remove_file(&path).expect("remove source");
+    symlink(temp.path().join("missing-target.jsonl"), &path).expect("dangling link");
+    let error = import_codex_history_jsonl(
+        &path,
+        &mut store,
+        CodexHistoryImportOptions {
+            capture_work_limit: CaptureWorkLimit::Drain,
+            ..import_options(&path)
+        },
+    )
+    .expect_err("linked path is not a missing source");
+    assert!(matches!(
+        error,
+        CaptureError::InvalidProviderTranscriptPath { .. }
+    ));
+    store
+        .authorized_source_route_for_event(event_id)
+        .expect("failed import leaves the prior route authorized");
+
+    let parent_target = temp.path().join("real-parent");
+    fs::create_dir_all(&parent_target).expect("real parent");
+    let linked_parent = temp.path().join("linked-parent");
+    symlink(&parent_target, &linked_parent).expect("linked parent");
+    let parent_error = import_codex_history_jsonl(
+        linked_parent.join("history.jsonl"),
+        &mut store,
+        import_options(&linked_parent.join("history.jsonl")),
+    )
+    .expect_err("linked parent is rejected");
+    assert!(matches!(
+        parent_error,
+        CaptureError::InvalidProviderTranscriptPath { .. }
+    ));
 }
 
 #[test]

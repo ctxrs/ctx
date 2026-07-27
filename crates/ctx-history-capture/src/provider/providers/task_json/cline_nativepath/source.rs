@@ -823,6 +823,8 @@ fn component_local_io_error(kind: io::ErrorKind, raw_os_error: Option<i32>) -> b
     }) {
         return true;
     }
+    #[cfg(not(unix))]
+    let _ = raw_os_error;
     false
 }
 

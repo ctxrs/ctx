@@ -24,10 +24,12 @@ use crate::{
     },
     stable_capture_uuid, CaptureError, ImportProfile, OutputAssociations, OutputNativeCoordinate,
     OutputObservationKind, OutputOutcomeMetadata, OutputSourceIdentity, OutputSourceLocator,
-    ProOutputObservation, ProOutputProgress, ProOutputSink, ProOutputSinkError,
-    ProOutputSourceDisposition, ProviderImportSummary, ProviderImportWorkResult, Result,
-    QODER_SOURCE_FORMAT,
+    ProOutputObservation, ProOutputProgress, ProOutputSink, ProOutputSourceDisposition,
+    ProviderImportSummary, ProviderImportWorkResult, Result, QODER_SOURCE_FORMAT,
 };
+
+#[cfg(test)]
+use crate::ProOutputSinkError;
 
 use super::{
     committed_direct_jsonl_replay_authority, decode_direct_jsonl_native_cursor,
@@ -61,7 +63,7 @@ pub(crate) fn import_qoder_nativepath_tree(
             &configured_source_root,
             request.imported_at,
             sink.as_deref(),
-        );
+        )?;
         return Ok(ProviderImportSummary::default());
     }
 
@@ -120,7 +122,7 @@ pub(crate) fn import_qoder_nativepath_tree(
         &configured_source_root,
         request.imported_at,
         sink.as_deref(),
-    );
+    )?;
     Ok(summary)
 }
 
@@ -339,18 +341,11 @@ fn replay_outputs_or_mark_behind(
     source_root: &Path,
     imported_at: DateTime<Utc>,
     sink: Option<&dyn ProOutputSink>,
-) {
+) -> Result<()> {
     let Some(sink) = sink else {
-        return;
+        return Ok(());
     };
-    if let Err(error) =
-        replay_qoder_outputs(store, machine_id, paths, source_root, imported_at, sink)
-    {
-        sink.mark_behind(ProOutputSinkError::new(
-            "qoder_nativepath_output_replay",
-            error.to_string(),
-        ));
-    }
+    replay_qoder_outputs(store, machine_id, paths, source_root, imported_at, sink)
 }
 
 fn replay_qoder_outputs(
@@ -361,38 +356,42 @@ fn replay_qoder_outputs(
     imported_at: DateTime<Utc>,
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
-    for path in paths {
-        let authority = committed_direct_jsonl_replay_authority(
-            store,
-            machine_id,
-            CaptureProvider::Qoder,
-            QODER_SOURCE_FORMAT,
-            path,
-        )?;
-        let locator_identity = provider_path_identity(path)?;
-        let source = OutputSourceIdentity {
-            provider: CaptureProvider::Qoder.as_str().to_owned(),
-            namespace_id: source_root.display().to_string(),
-            source_id: locator_identity.clone(),
-        };
-        let progress = match sink.observe_source(&source) {
-            Ok(progress) => progress,
-            Err(error) => {
-                sink.mark_behind(error);
-                continue;
-            }
-        };
-        replay_qoder_source(
-            path,
-            imported_at,
-            sink,
-            source,
-            locator_identity,
-            progress,
-            &authority,
-        )?;
-    }
-    Ok(())
+    super::driver::replay_selected_output_sources(
+        paths,
+        sink,
+        "qoder_nativepath_output_source",
+        |path| {
+            let authority = committed_direct_jsonl_replay_authority(
+                store,
+                machine_id,
+                CaptureProvider::Qoder,
+                QODER_SOURCE_FORMAT,
+                path,
+            )?;
+            let locator_identity = provider_path_identity(path)?;
+            let source = OutputSourceIdentity {
+                provider: CaptureProvider::Qoder.as_str().to_owned(),
+                namespace_id: source_root.display().to_string(),
+                source_id: locator_identity.clone(),
+            };
+            let progress = match sink.observe_source(&source) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    sink.mark_behind(error);
+                    return Ok(());
+                }
+            };
+            replay_qoder_source(
+                path,
+                imported_at,
+                sink,
+                source,
+                locator_identity,
+                progress,
+                &authority,
+            )
+        },
+    )
 }
 
 fn replay_qoder_source(
@@ -587,7 +586,7 @@ fn output_observation(
         coordinate: OutputNativeCoordinate {
             unit_key: format!("{}:{}", output.raw_ordinal, output.sub_ordinal),
             native_sequence: output.raw_ordinal,
-            native_record_id: output.call_id.clone(),
+            native_record_id: output.native_record_id.clone(),
             source_record_ordinal: Some(output.raw_ordinal),
             source_record_subrecord_index: Some(output.sub_ordinal),
             byte_start: Some(output.byte_start),
@@ -666,430 +665,5 @@ fn retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> Stri
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        io::Write,
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Mutex,
-        },
-    };
-
-    use ctx_history_core::EventType;
-    use serde_json::{json, Value};
-
-    use super::*;
-    use crate::{
-        test_support_paths::tempdir, ProOutputMaterializationPage, ProOutputPageResult,
-        QoderImportOptions,
-    };
-
-    const MACHINE: &str = "qoder-nativepath-test-machine";
-    const SUCCESS_BODY: &str = "QODER_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
-
-    #[test]
-    fn production_lifecycle_covers_all_source_changes_and_retires_disappearance() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join(".qoder/projects");
-        let transcript = transcript_path(&root);
-        write_transcript(
-            &transcript,
-            &[
-                header("qoder-life"),
-                message("fresh-user", "user", "fresh-user"),
-                tool_call("fresh-call"),
-            ],
-        );
-        let store_path = temp.path().join("work.sqlite");
-        let mut store = Store::open(&store_path).unwrap();
-
-        let fresh = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(fresh.imported_sessions, 1);
-        assert_eq!(fresh.imported_events, 3);
-        let session = store
-            .list_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| session.provider == CaptureProvider::Qoder)
-            .unwrap();
-        let original_events = store.events_for_session(session.id).unwrap();
-        assert_eq!(original_events.len(), 3);
-        assert!(original_events.iter().all(|event| !matches!(
-            event.event_type,
-            EventType::ToolOutput | EventType::CommandOutput
-        )));
-        let routed_event = original_events[0].id;
-        assert!(store
-            .authorized_source_route_for_event(routed_event)
-            .is_ok());
-
-        let previous = checkpoint(&store, &transcript);
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Unchanged
-        );
-        let noop = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
-
-        drop(store);
-        let mut store = Store::open(&store_path).unwrap();
-        let restart = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(restart.work_result(), ProviderImportWorkResult::NoOp);
-
-        let previous = checkpoint(&store, &transcript);
-        append_record(
-            &transcript,
-            &message("append", "assistant", "append-assistant"),
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Append
-        );
-        let append = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(append.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(append.imported_events, 1);
-
-        let previous = checkpoint(&store, &transcript);
-        write_transcript(
-            &transcript,
-            &[
-                header("qoder-life"),
-                message("rewrite-user", "user", &"rewrite-user-content-".repeat(24)),
-                message(
-                    "rewrite-assistant",
-                    "assistant",
-                    &"rewrite-assistant-content-".repeat(24),
-                ),
-            ],
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Rewrite
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        write_transcript(
-            &transcript,
-            &[header("qoder-life"), message("short", "user", "short")],
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Truncation
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        let replacement = transcript.with_extension("replacement");
-        write_transcript(
-            &replacement,
-            &[
-                header("qoder-life"),
-                message("replacement", "user", "replacement-generation"),
-            ],
-        );
-        fs::rename(&replacement, &transcript).unwrap();
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Replacement
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        fs::remove_dir_all(&root).unwrap();
-        let disappeared = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(disappeared.work_result(), ProviderImportWorkResult::Changed);
-        assert!(store
-            .authorized_source_route_for_event(routed_event)
-            .is_err());
-        let repeated = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(repeated.work_result(), ProviderImportWorkResult::NoOp);
-    }
-
-    #[test]
-    fn production_is_core_first_with_independent_pro_replay() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join(".qoder/projects");
-        let transcript = transcript_path(&root);
-        write_transcript(
-            &transcript,
-            &[
-                header("qoder-core-first"),
-                message("core-first", "user", "core-first"),
-                tool_call("call-with-output"),
-                tool_result("result-with-output", SUCCESS_BODY),
-            ],
-        );
-        let store_path = temp.path().join("core.sqlite");
-        let mut store = Store::open(&store_path).unwrap();
-        let sink = Arc::new(RecordingSink::new(store_path.clone()));
-
-        let fresh = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
-        assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-        assert!(sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert!(sink.pages.load(Ordering::SeqCst) > 0);
-        assert_eq!(sink.outputs.load(Ordering::SeqCst), 1);
-        let core_events = store
-            .events_for_session(
-                store
-                    .list_sessions()
-                    .unwrap()
-                    .into_iter()
-                    .find(|session| session.provider == CaptureProvider::Qoder)
-                    .unwrap()
-                    .id,
-            )
-            .unwrap();
-        assert!(core_events.iter().all(|event| !matches!(
-            event.event_type,
-            EventType::ToolOutput | EventType::CommandOutput
-        )));
-        assert!(!serde_json::to_string(&core_events)
-            .unwrap()
-            .contains(SUCCESS_BODY));
-        let pages_after_fresh = sink.pages.load(Ordering::SeqCst);
-
-        let noop = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
-        assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
-        assert_eq!(sink.pages.load(Ordering::SeqCst), pages_after_fresh);
-
-        let pro_only_path = temp.path().join("pro-only.sqlite");
-        let mut pro_only_store = Store::open(&pro_only_path).unwrap();
-        let pro_only_sink = Arc::new(RecordingSink::new(pro_only_path));
-        let replay = import(
-            &root,
-            &mut pro_only_store,
-            ImportProfile::ProReplayOnly(pro_only_sink.clone()),
-        );
-        assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
-        assert!(pro_only_store.list_sessions().unwrap().is_empty());
-        assert!(!pro_only_sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert_eq!(pro_only_sink.pages.load(Ordering::SeqCst), 0);
-        assert_eq!(pro_only_sink.outputs.load(Ordering::SeqCst), 0);
-    }
-
-    struct RecordingSink {
-        store_path: PathBuf,
-        progress: Mutex<Option<ProOutputProgress>>,
-        pages: AtomicUsize,
-        outputs: AtomicUsize,
-        saw_core_before_page: AtomicBool,
-    }
-
-    impl RecordingSink {
-        fn new(store_path: PathBuf) -> Self {
-            Self {
-                store_path,
-                progress: Mutex::new(None),
-                pages: AtomicUsize::new(0),
-                outputs: AtomicUsize::new(0),
-                saw_core_before_page: AtomicBool::new(false),
-            }
-        }
-    }
-
-    impl ProOutputSink for RecordingSink {
-        fn inventory_generation(&self) -> u64 {
-            1
-        }
-
-        fn materializer_revision(&self) -> &str {
-            "qoder-nativepath-test-materializer-v1"
-        }
-
-        fn observe_source(
-            &self,
-            _source: &OutputSourceIdentity,
-        ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
-            Ok(self.progress.lock().unwrap().clone())
-        }
-
-        fn materialize_page(
-            &self,
-            page: ProOutputMaterializationPage,
-        ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
-            let core = Store::open_read_only(&self.store_path)
-                .map_err(|error| ProOutputSinkError::new("test_store", error.to_string()))?;
-            if !core
-                .list_sessions()
-                .map_err(|error| ProOutputSinkError::new("test_sessions", error.to_string()))?
-                .is_empty()
-            {
-                self.saw_core_before_page.store(true, Ordering::SeqCst);
-            }
-            self.pages.fetch_add(1, Ordering::SeqCst);
-            self.outputs
-                .fetch_add(page.observations.len(), Ordering::SeqCst);
-            let committed_cursor = page.next_safe_cursor.clone();
-            *self.progress.lock().unwrap() = Some(ProOutputProgress {
-                source_epoch: page.source_epoch,
-                observed_revision: page.observed_revision.clone(),
-                cursor: Some(committed_cursor.clone()),
-                parser_revision: page.parser_revision.clone(),
-                materializer_revision: page.materializer_revision.clone(),
-                terminal: page.terminal,
-            });
-            Ok(ProOutputPageResult {
-                source_epoch: page.source_epoch,
-                committed_cursor,
-                accepted_outputs: u32::try_from(page.observations.len()).unwrap(),
-                materialized_facts: 0,
-                replayed: false,
-            })
-        }
-    }
-
-    fn import(
-        root: &Path,
-        store: &mut Store,
-        import_profile: ImportProfile,
-    ) -> ProviderImportSummary {
-        crate::import_qoder_history(
-            root,
-            store,
-            QoderImportOptions {
-                machine_id: MACHINE.to_owned(),
-                source_path: Some(root.to_path_buf()),
-                imported_at: "2026-07-25T12:00:00Z".parse().unwrap(),
-                import_profile,
-                ..QoderImportOptions::default()
-            },
-        )
-        .unwrap()
-    }
-
-    fn transcript_path(root: &Path) -> PathBuf {
-        root.join("sanitized-workspace/transcript/qoder-life.jsonl")
-    }
-
-    fn header(session_id: &str) -> Value {
-        json!({
-            "type": "session_meta",
-            "sessionId": session_id,
-            "uuid": format!("{session_id}-meta"),
-            "timestamp": "2026-07-25T12:00:00Z",
-            "cwd": "/workspace/qoder",
-            "data": {
-                "meta_type": "session_info",
-                "content": {"mode": "agent", "session_type": "assistant"}
-            }
-        })
-    }
-
-    fn message(id: &str, kind: &str, content: &str) -> Value {
-        json!({
-            "type": kind,
-            "sessionId": "qoder-life",
-            "uuid": id,
-            "timestamp": "2026-07-25T12:00:01Z",
-            "cwd": "/workspace/qoder",
-            "message": {"role": kind, "content": content},
-            "model": "qoder-agent",
-        })
-    }
-
-    fn tool_call(id: &str) -> Value {
-        json!({
-            "type": "assistant",
-            "sessionId": "qoder-life",
-            "uuid": id,
-            "timestamp": "2026-07-25T12:00:02Z",
-            "cwd": "/workspace/qoder",
-            "message": {
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "call-1",
-                    "name": "read_file",
-                    "input": {"file_path": "README.md"}
-                }]
-            },
-            "model": "qoder-agent",
-        })
-    }
-
-    fn tool_result(id: &str, result: &str) -> Value {
-        json!({
-            "type": "user",
-            "sessionId": "qoder-life",
-            "uuid": id,
-            "timestamp": "2026-07-25T12:00:03Z",
-            "cwd": "/workspace/qoder",
-            "message": {
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": "call-1",
-                    "content": "lower-priority-result",
-                    "is_error": false
-                }]
-            },
-            "toolUseResult": result,
-            "model": "qoder-agent",
-        })
-    }
-
-    fn write_transcript(path: &Path, records: &[Value]) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut bytes = Vec::new();
-        for record in records {
-            serde_json::to_writer(&mut bytes, record).unwrap();
-            bytes.push(b'\n');
-        }
-        fs::write(path, bytes).unwrap();
-    }
-
-    fn append_record(path: &Path, record: &Value) {
-        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
-        serde_json::to_writer(&mut file, record).unwrap();
-        file.write_all(b"\n").unwrap();
-    }
-
-    fn checkpoint(store: &Store, path: &Path) -> DirectJsonlCheckpoint {
-        let canonical = fs::canonicalize(path).unwrap();
-        let locator = provider_path_identity(&canonical).unwrap();
-        let stream = provider_source_cursor_stream_for_path(
-            CaptureProvider::Qoder,
-            QODER_SOURCE_FORMAT,
-            &locator,
-        );
-        let cursor = store
-            .get_sync_cursor(None, MACHINE, &stream)
-            .unwrap()
-            .unwrap();
-        decode_direct_jsonl_native_cursor(
-            &cursor.cursor,
-            CaptureProvider::Qoder,
-            QODER_SOURCE_FORMAT,
-        )
-        .unwrap()
-    }
-
-    fn classify(
-        path: &Path,
-        root: &Path,
-        previous: &DirectJsonlCheckpoint,
-    ) -> DirectJsonlSourceChange {
-        open_direct_jsonl_pages(
-            CaptureProvider::Qoder,
-            QODER_SOURCE_FORMAT,
-            path,
-            Some(root.to_path_buf()),
-            "2026-07-25T12:01:00Z".parse().unwrap(),
-            false,
-            Some(previous),
-        )
-        .unwrap()
-        .source_change()
-    }
-}
+#[path = "qoder_tests.rs"]
+mod tests;

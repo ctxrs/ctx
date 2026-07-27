@@ -22,8 +22,7 @@ const MIN_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 8;
 const MAX_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 128;
 const MAX_INSTALL_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_MANAGED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-#[cfg(debug_assertions)]
-const DEBUG_UPGRADE_TARGET_ENV: &str = "CTX_UPGRADE_TEST_TARGET";
+const TEST_HARNESS_UPGRADE_TARGET_ENV: &str = "CTX_UPGRADE_TEST_TARGET";
 
 #[derive(Debug, Clone)]
 pub(in crate::upgrade) struct InstallMarker {
@@ -281,14 +280,12 @@ pub(super) fn current_install_path_for_recovery() -> Result<PathBuf> {
 }
 
 fn current_executable_path() -> Result<PathBuf> {
-    #[cfg(debug_assertions)]
-    return env::var_os(DEBUG_UPGRADE_TARGET_ENV)
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(env::current_exe)
-        .context("resolve current ctx executable");
-    #[cfg(not(debug_assertions))]
-    return env::current_exe().context("resolve current ctx executable");
+    if crate::upgrade::test_harness_enabled() {
+        if let Some(path) = env::var_os(TEST_HARNESS_UPGRADE_TARGET_ENV) {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    env::current_exe().context("resolve current ctx executable")
 }
 
 fn current_binary_sha_at(path: &Path) -> Result<String> {

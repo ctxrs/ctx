@@ -420,7 +420,7 @@ fn resolve_codebuddy(
         return Ok(ResolvedMessage {
             text,
             provider_hash: Some(native_id.clone()),
-            fallback_hash: None,
+            fallback_hash: compute_payload_hash(&raw).ok(),
             native_id,
         });
     }

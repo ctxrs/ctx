@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 use super::store::{open_read_only, usage_path, usage_store_exists, verify_report_dates};
 use super::{DEFINITION_VERSION, RETENTION_DAYS};
 
+const HUMAN_OUTPUT_WIDTH: usize = 80;
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageReport {
     pub(crate) schema_version: i64,
@@ -63,7 +65,7 @@ pub(crate) struct ProBlameTargetSummary {
     pub(crate) error: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct UsageDetails {
     pub(crate) by_operation: Vec<OperationSummary>,
     pub(crate) duration_buckets: Vec<DurationSummary>,
@@ -654,15 +656,6 @@ fn query_details(conn: &Connection) -> Result<UsageDetails, super::UsageStoreErr
     })
 }
 
-impl Default for UsageDetails {
-    fn default() -> Self {
-        Self {
-            by_operation: Vec::new(),
-            duration_buckets: Vec::new(),
-        }
-    }
-}
-
 pub(crate) fn render_human_summary(report: &UsageReport, detailed: bool) {
     println!("local_usage: {}", report.state);
     let Some(summary) = &report.summary else {
@@ -674,11 +667,11 @@ pub(crate) fn render_human_summary(report: &UsageReport, detailed: bool) {
     println!("usage_calls: {}", summary.calls);
     println!("usage_active_utc_days: {}", summary.active_days);
     println!(
-        "usage_classified_result_sets: {} nonempty, {} empty",
+        "usage_mcp_pro_result_classification: {} nonempty, {} empty",
         summary.result_bearing_calls, summary.empty_calls
     );
     println!(
-        "usage_no_result_set_classification: {} calls",
+        "usage_mcp_pro_result_classification_not_applicable: {} calls",
         summary.not_applicable_calls
     );
     let blame = &summary.pro_blame;
@@ -709,17 +702,18 @@ pub(crate) fn render_human_summary(report: &UsageReport, detailed: bool) {
         if let Some(details) = &report.details {
             for operation in &details.by_operation {
                 println!(
-                    "usage_operation: {}/{}/{} calls={} success={} failure={} result={} empty={} not-applicable={}",
-                    operation.ctx_version,
-                    operation.surface,
-                    operation.operation,
-                    operation.calls,
-                    operation.successful_calls,
-                    operation.failed_calls,
-                    operation.result_bearing_calls,
-                    operation.empty_calls,
-                    operation.not_applicable_calls
+                    "usage_operation: {}/{}",
+                    operation.surface, operation.operation
                 );
+                print_wrapped_fields([
+                    format!("ctx_version={}", operation.ctx_version),
+                    format!("calls={}", operation.calls),
+                    format!("success={}", operation.successful_calls),
+                    format!("failure={}", operation.failed_calls),
+                    format!("result={}", operation.result_bearing_calls),
+                    format!("empty={}", operation.empty_calls),
+                    format!("not-applicable={}", operation.not_applicable_calls),
+                ]);
             }
             for duration in &details.duration_buckets {
                 println!(
@@ -731,11 +725,28 @@ pub(crate) fn render_human_summary(report: &UsageReport, detailed: bool) {
     }
 }
 
+fn print_wrapped_fields(fields: impl IntoIterator<Item = String>) {
+    let mut line = String::from("  ");
+    for field in fields {
+        let separator_width = usize::from(line.len() > 2);
+        if line.len() + separator_width + field.len() > HUMAN_OUTPUT_WIDTH {
+            println!("{line}");
+            line.truncate(2);
+        } else if separator_width > 0 {
+            line.push(' ');
+        }
+        line.push_str(&field);
+    }
+    if line.len() > 2 {
+        println!("{line}");
+    }
+}
+
 pub(crate) fn pro_conversion_action(access_state: Option<&str>) -> Option<Value> {
     match access_state {
         Some("trial") => Some(json!({
             "kind": "pro_monthly_conversion",
-            "price": "$15/month",
+            "price": "$20/month",
             "command": "ctx pro manage",
             "reason": "trial_active",
         })),

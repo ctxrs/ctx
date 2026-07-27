@@ -195,11 +195,15 @@ fn codex_session_jsonl_reports_only_oversized_events_with_valid_session_authorit
     .unwrap();
 
     assert_nativepath_record_rejections(&summary, 1, &path);
-    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.skipped_sessions, 1);
     assert_eq!(summary.skipped_events, 1);
-    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("Codex JSONL record exceeds the 16 MiB provider bound"));
+    assert!(store.list_sessions().unwrap().is_empty());
 
     let mut slow_store = Store::open(temp.path().join("slow-work.sqlite")).unwrap();
     let slow_summary = import_codex_session_jsonl(
@@ -215,11 +219,13 @@ fn codex_session_jsonl_reports_only_oversized_events_with_valid_session_authorit
     .unwrap();
 
     assert_nativepath_record_rejections(&slow_summary, 1, &path);
-    assert_eq!(slow_summary.skipped, 0);
+    assert_eq!(slow_summary.skipped, 1);
+    assert_eq!(slow_summary.skipped_sessions, 1);
     assert_eq!(slow_summary.skipped_events, 1);
-    assert_eq!(slow_summary.imported_sessions, 1);
+    assert_eq!(slow_summary.imported_sessions, 0);
     assert_eq!(slow_summary.imported_events, 0);
-    assert_eq!(slow_store.list_sessions().unwrap().len(), 1);
+    assert_eq!(slow_summary.failures, summary.failures);
+    assert!(slow_store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
@@ -313,9 +319,9 @@ fn codex_session_jsonl_malformed_relevant_line_is_not_hidden_by_oversized_line()
         .iter()
         .all(|failure| !failure.error.contains("unterminated")));
     assert_eq!(summary.skipped_events, 2);
-    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
@@ -504,9 +510,9 @@ fn codex_session_jsonl_keeps_valid_header_when_event_timestamp_is_malformed() {
 
     assert_nativepath_record_rejections(&summary, 1, &path);
     assert_eq!(summary.skipped_events, 1);
-    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert!(store.list_sessions().unwrap().is_empty());
     assert!(store
         .search_event_hits("bad timestamp should not import", 10)
         .unwrap()
@@ -666,9 +672,9 @@ fn codex_session_jsonl_fast_keeps_valid_header_when_event_timestamp_is_malformed
 
     assert_nativepath_record_rejections(&summary, 1, &path);
     assert_eq!(summary.skipped_events, 1);
-    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert!(store.list_sessions().unwrap().is_empty());
     assert!(store
         .search_event_hits("fast bad timestamp should not import", 10)
         .unwrap()

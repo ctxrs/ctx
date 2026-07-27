@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{compute_payload_hash, EventRole, EventType};
 use serde_json::{json, Value};
 
 use crate::provider::normalization::{
@@ -68,9 +68,30 @@ pub(super) fn nanoclaw_core_event(
     let retained_body = provider_policy_body(event_type, &body);
     let result_evidence = provider_result_identifier_evidence(event_type, &text, &body);
     let result_outcome = provider_result_outcome_evidence(event_type, &body);
+    let payload = json!({
+        "text": retained_text.text,
+        "text_retention": retained_text.retention.as_json(),
+        "result_evidence": result_evidence,
+        "result_outcome": result_outcome,
+        "source_format": NANOCLAW_SOURCE_FORMAT,
+        "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+    });
+    // The full normalized body participates only in this digest. This keeps a
+    // rewrite wholly beyond Core's retained prefix observable without
+    // persisting or indexing the private tail.
+    let hash_payload = json!({
+        "core": &payload,
+        "normalized_body": &body,
+    });
+    let provider_event_hash = compute_payload_hash(&hash_payload).unwrap_or_else(|_| {
+        format!(
+            "nanoclaw-normalized-{:016x}",
+            fnv1a64(hash_payload.to_string().as_bytes())
+        )
+    });
     let event = NanoClawCoreEvent {
         provider_event_index: event_index,
-        provider_event_hash: format!("{}:{}", message.source, message.id),
+        provider_event_hash,
         cursor: format!(
             "{}:{}:{}",
             message.source,
@@ -80,14 +101,7 @@ pub(super) fn nanoclaw_core_event(
         event_type,
         role,
         occurred_at,
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "source_format": NANOCLAW_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-        }),
+        payload,
         metadata: json!({
             "source": format!("nanoclaw_{}", message.source),
             "source_format": NANOCLAW_SOURCE_FORMAT,

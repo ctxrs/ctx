@@ -10,6 +10,11 @@ pub(super) fn publish_core_page(
     options: &ProviderImportOptions,
     page: KiroCorePage,
 ) -> Result<ProviderImportSummary> {
+    if page.logical_units() > KIRO_PAGE_MAX_UNITS {
+        return Err(CaptureError::SystemInvariant(
+            "Kiro publication page exceeded the NativePath logical-unit bound",
+        ));
+    }
     source.revalidate()?;
     let stored = store.get_sync_cursor(None, &context.machine_id, &source.cursor_stream)?;
     let cursor_plan = cursor_plan(stored.as_ref(), source, &page)?;
@@ -40,6 +45,19 @@ pub(super) fn publish_core_page(
         after: None,
         committed: false,
     });
+    let accepted_content_records = cursor_plan
+        .accepted_content_records
+        .saturating_add(u64::try_from(page.accepted_content_records()).unwrap_or(u64::MAX));
+    let rejected_records = cursor_plan
+        .rejected_records
+        .saturating_add(u64::try_from(page.rejections.len()).unwrap_or(u64::MAX));
+    let rejections = cursor_plan
+        .rejections
+        .iter()
+        .chain(&page.rejections)
+        .take(KIRO_MAX_REJECTION_DETAILS)
+        .cloned()
+        .collect();
     let next_cursor = KiroStoreCursor {
         version: KIRO_NATIVE_CURSOR_VERSION,
         provider: CaptureProvider::KiroCli.as_str().to_owned(),
@@ -50,9 +68,9 @@ pub(super) fn publish_core_page(
         retirement,
         terminal: page.terminal && !generation_scope_present,
         generation: cursor_plan.generation,
-        rejected_records: cursor_plan
-            .rejected_records
-            .saturating_add(u64::try_from(page.rejections.len()).unwrap_or(u64::MAX)),
+        rejected_records,
+        accepted_content_records,
+        rejections,
     };
     let transition = NativePathCursorTransition::new(
         stored.as_ref().map(|cursor| cursor.cursor.clone()),
@@ -201,6 +219,8 @@ pub(super) fn publish_core_page(
 struct KiroCursorPlan {
     generation: u64,
     rejected_records: u64,
+    accepted_content_records: u64,
+    rejections: Vec<KiroRejection>,
 }
 
 fn cursor_plan(
@@ -217,6 +237,8 @@ fn cursor_plan(
         return Ok(KiroCursorPlan {
             generation: 0,
             rejected_records: 0,
+            accepted_content_records: 0,
+            rejections: Vec::new(),
         });
     };
     if let Ok(committed) = decode_native_path_committed_cursor(&stored.cursor) {
@@ -235,6 +257,8 @@ fn cursor_plan(
             return Ok(KiroCursorPlan {
                 generation: prior.generation,
                 rejected_records: prior.rejected_records,
+                accepted_content_records: prior.accepted_content_records,
+                rejections: prior.rejections,
             });
         }
         if page.expected_frontier != KiroFrontier::initial(source.tables) {
@@ -250,6 +274,8 @@ fn cursor_plan(
                     "Kiro NativePath generation overflowed",
                 ))?,
             rejected_records: 0,
+            accepted_content_records: 0,
+            rejections: Vec::new(),
         });
     }
     decode_released_kiro_cursor(&stored.cursor)?;
@@ -261,6 +287,8 @@ fn cursor_plan(
     Ok(KiroCursorPlan {
         generation: 0,
         rejected_records: 0,
+        accepted_content_records: 0,
+        rejections: Vec::new(),
     })
 }
 
@@ -457,7 +485,6 @@ pub(super) fn kiro_session(
                     "rowid": fact.rowid,
                     "key": fact.key,
                     "history_len": fact.history_len,
-                    "conversation": fact.conversation_preview,
                     "nativepath_publication": KIRO_NATIVE_PUBLICATION_REVISION,
                 },
             }),

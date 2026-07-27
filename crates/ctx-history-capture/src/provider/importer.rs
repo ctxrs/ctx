@@ -23,8 +23,9 @@ pub(crate) use identity::provider_event_import_identity;
 pub(crate) use identity::{
     avoid_provider_source_event_seq_collision,
     provider_event_import_identity_with_exact_legacy_source, provider_file_touch_event_id,
-    provider_file_touch_import_id, provider_source_event_import_identity,
-    ExactLegacySourceEventCandidate, ProviderEventImportIdentity,
+    provider_file_touch_import_id, provider_native_event_import_identity_migrating_legacy_hash,
+    provider_source_event_import_identity, ExactLegacySourceEventCandidate,
+    ProviderEventImportIdentity,
 };
 #[cfg(test)]
 pub(crate) use ids::provider_source_root_identity;

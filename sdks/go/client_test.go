@@ -268,6 +268,31 @@ func TestLocalCLIAdapterAddsDataRootEnvironment(t *testing.T) {
 	}
 }
 
+func TestLocalCLIAdapterForcesAnalyticsOffAfterAmbientAndUserEnvironment(t *testing.T) {
+	t.Setenv(analyticsEnabledEnvironment, "true")
+	runner := &recordingRunner{result: commandResult{Stdout: []byte(`{"schema_version":1}`)}}
+	adapter := NewLocalCLIAdapter(
+		WithCLIPath("ctx"),
+		WithEnv([]string{analyticsEnabledEnvironment + "=true"}),
+	)
+	adapter.runner = runner
+
+	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--json"}})
+	if err != nil {
+		t.Fatalf("Do returned error: %v", err)
+	}
+	if got := os.Getenv(analyticsEnabledEnvironment); got != "true" {
+		t.Fatalf("ambient analytics value = %q, want true", got)
+	}
+	if !contains(runner.env, analyticsEnabledEnvironment+"=true") {
+		t.Fatalf("user analytics override missing from env: %#v", runner.env)
+	}
+	effective := append(os.Environ(), runner.env...)
+	if got, ok := environmentValue(effective, analyticsEnabledEnvironment); !ok || got != "false" {
+		t.Fatalf("effective analytics value = %q, %v; want false, true (env: %#v)", got, ok, runner.env)
+	}
+}
+
 func TestHostedClientPlaceholder(t *testing.T) {
 	client := NewHostedClient(HostedConfig{BaseURL: "https://example.invalid", APIKey: "test"})
 	_, err := client.Status(context.Background())
@@ -514,4 +539,17 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func environmentValue(values []string, name string) (string, bool) {
+	value := ""
+	found := false
+	for _, entry := range values {
+		key, current, ok := strings.Cut(entry, "=")
+		if ok && key == name {
+			value = current
+			found = true
+		}
+	}
+	return value, found
 }

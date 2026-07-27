@@ -2,8 +2,8 @@ use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    new_id, Artifact, ArtifactKind, ContentRef, EntityTimestamps, Event, EventRole, EventType,
-    Fidelity, SessionHistoryArchive, SyncMetadata, SyncState, Visibility,
+    new_id, Artifact, ArtifactKind, EntityTimestamps, Event, EventRole, EventType, Fidelity,
+    SessionHistoryArchive, SyncMetadata, SyncState, Visibility,
 };
 use uuid::Uuid;
 
@@ -192,7 +192,6 @@ fn event_write_boundaries_drop_success_bodies_and_bound_failure_diagnostics() {
     let direct_canary = "DIRECT-RESULT-BODY-CANARY-79ef";
     let archive_canary = "ARCHIVE-RESULT-BODY-CANARY-cab4";
     let message_canary = "NON-RESULT-BODY-MUST-SURVIVE-3e11";
-    let direct_content_ref = ContentRef::from_bytes(direct_canary.as_bytes()).unwrap();
     let direct = event(
         1,
         EventType::CommandOutput,
@@ -201,7 +200,10 @@ fn event_write_boundaries_drop_success_bodies_and_bound_failure_diagnostics() {
             "call_id": "call-direct",
             "exit_code": 0,
             "result_outcome": "success",
-            "result_content_ref": direct_content_ref,
+            "result_content_ref": {
+                "sha256": "b".repeat(64),
+                "byte_len": direct_canary.len()
+            },
             "output": direct_canary,
             "output_preview": direct_canary,
         }),
@@ -247,7 +249,6 @@ fn event_write_boundaries_drop_success_bodies_and_bound_failure_diagnostics() {
             "call_id": "call-direct",
             "exit_code": 0,
             "result_outcome": "success",
-            "result_content_ref": direct_content_ref,
         })
     );
     assert_eq!(
@@ -262,7 +263,6 @@ fn event_write_boundaries_drop_success_bodies_and_bound_failure_diagnostics() {
                 "call_id": "call-archive",
                 "exit_code": 1,
                 "result_outcome": "failure",
-                "output_preview": archive_canary,
             }
         })
     );
@@ -274,14 +274,14 @@ fn event_write_boundaries_drop_success_bodies_and_bound_failure_diagnostics() {
         .search_event_hits(direct_canary, 10)
         .unwrap()
         .is_empty());
-    assert_eq!(
-        store.search_event_hits(archive_canary, 10).unwrap().len(),
-        1
-    );
+    assert!(store
+        .search_event_hits(archive_canary, 10)
+        .unwrap()
+        .is_empty());
 
     let exported = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
     assert!(!exported.contains(direct_canary));
-    assert!(exported.contains(archive_canary));
+    assert!(!exported.contains(archive_canary));
     assert!(exported.contains(message_canary));
 }
 
