@@ -155,7 +155,7 @@ pub(super) struct TrialChallenge {
     pub(super) challenge_id: String,
     pub(super) challenge_base64url: String,
     pub(super) expires_at_unix: i64,
-    pub(super) artifact_access_token: String,
+    pub(super) trial_activation_token: String,
 }
 
 #[derive(Deserialize, ZeroizeOnDrop)]
@@ -188,7 +188,7 @@ impl fmt::Debug for TrialChallenge {
             .field("challenge_id", &self.challenge_id)
             .field("challenge_base64url", &self.challenge_base64url)
             .field("expires_at_unix", &self.expires_at_unix)
-            .field("artifact_access_token", &"[REDACTED]")
+            .field("trial_activation_token", &"[REDACTED]")
             .finish()
     }
 }
@@ -401,14 +401,14 @@ impl CommercialApiClient {
 
     pub(super) fn activate_trial(
         &self,
-        access_token: &str,
+        trial_activation_token: &str,
         challenge_id: &str,
         installation_public_key_base64url: &str,
         evidence: &serde_json::Value,
     ) -> Result<TrialActivation> {
         validate_identifier(challenge_id, "trial challenge")?;
         validate_fixed_base64url(installation_public_key_base64url, "installation public key")?;
-        let authorization = trial_authorization(access_token)?;
+        let authorization = trial_authorization(trial_activation_token)?;
         let activation: TrialActivation = self.post_authorized(
             "/v1/trials/activate",
             Some(authorization),
@@ -526,7 +526,7 @@ impl TrialChallenge {
     fn validate(&self) -> Result<()> {
         validate_identifier(&self.challenge_id, "trial challenge")?;
         validate_fixed_base64url(&self.challenge_base64url, "trial challenge")?;
-        validate_trial_token(&self.artifact_access_token)?;
+        validate_trial_token(&self.trial_activation_token)?;
         let now = unix_time()?;
         if self.expires_at_unix <= now
             || self.expires_at_unix > now.saturating_add(MAX_TRIAL_CHALLENGE_LIFETIME_SECONDS)
@@ -817,13 +817,6 @@ fn commercial_status_failure(status: u16, response: ureq::Response) -> Commercia
         },
         ErrorResponseKind::Invalid => CommercialApiFailure::InvalidResponse { status },
     }
-}
-
-#[cfg(test)]
-pub(super) fn is_retryable_commercial_failure(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<CommercialApiFailure>()
-        .is_some_and(CommercialApiFailure::is_retryable)
 }
 
 pub(super) fn commercial_retry_after(error: &anyhow::Error) -> Option<Duration> {
