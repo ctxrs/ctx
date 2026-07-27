@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cache_root="${CTX_BAZEL_CACHE_ROOT:-${XDG_CACHE_HOME:-${HOME}/.cache}/ctx/bazel}"
+workspace_key="$(printf '%s' "${repo_root}" | sha256sum | cut -c1-20)"
+output_root="${BAZEL_OUTPUT_USER_ROOT:-${cache_root}/output-roots/${workspace_key}}"
+repository_cache="${CTX_BAZEL_REPOSITORY_CACHE:-${cache_root}/repository-cache}"
+action_cache="${CTX_BAZEL_ACTION_CACHE:-${cache_root}/action-cache}"
+sandbox_base="${CTX_BAZEL_SANDBOX_BASE:-${TMPDIR:-/tmp}/ctx-bazel-sandboxes/${workspace_key}}"
+
+mkdir -p "${output_root}" "${repository_cache}" "${action_cache}" "${sandbox_base}"
+
+if [[ -n "${BAZEL:-}" ]]; then
+  bazel_bin="${BAZEL}"
+elif command -v bazelisk >/dev/null 2>&1; then
+  bazel_bin="$(command -v bazelisk)"
+elif command -v bazel >/dev/null 2>&1; then
+  bazel_bin="$(command -v bazel)"
+elif [[ -x "${repo_root}/target/tool-cache/bazelisk/bin/bazelisk" ]]; then
+  bazel_bin="${repo_root}/target/tool-cache/bazelisk/bin/bazelisk"
+else
+  printf 'bazelisk or bazel is required (or set BAZEL)\n' >&2
+  exit 127
+fi
+
+if (( "$#" == 0 )); then
+  set -- help
+fi
+
+command_name="$1"
+shift
+
+case "${command_name}" in
+  analyze-profile|canonicalize-flags|clean|dump|help|info|license|shutdown|version)
+    exec "${bazel_bin}" --output_user_root="${output_root}" "${command_name}" "$@"
+    ;;
+  *)
+    shared_args=(
+      --repository_cache="${repository_cache}"
+      --disk_cache="${action_cache}"
+    )
+    case "${command_name}" in
+      build|coverage|run|test)
+        shared_args+=(--sandbox_base="${sandbox_base}")
+        ;;
+    esac
+    exec "${bazel_bin}" --output_user_root="${output_root}" "${command_name}" "${shared_args[@]}" "$@"
+    ;;
+esac

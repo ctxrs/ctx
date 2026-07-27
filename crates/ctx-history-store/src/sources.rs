@@ -13,8 +13,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_capture_source(&self, source: &CaptureSource) -> Result<()> {
-        self.conn.execute(
-            r#"
+        self.with_atomic_write(|| {
+            self.conn
+            .prepare_cached(
+                r#"
                 INSERT INTO capture_sources
                 (
                     id, kind, provider, machine_id, process_id, cwd, raw_source_path,
@@ -34,15 +36,24 @@ impl Store {
                     source_root = excluded.source_root,
                     source_identity = excluded.source_identity,
                     external_session_id = excluded.external_session_id,
-                    started_at_ms = excluded.started_at_ms,
-                    ended_at_ms = excluded.ended_at_ms,
+                    started_at_ms = CASE
+                        WHEN capture_sources.started_at_ms IS NULL THEN excluded.started_at_ms
+                        WHEN excluded.started_at_ms IS NULL THEN capture_sources.started_at_ms
+                        ELSE MIN(capture_sources.started_at_ms, excluded.started_at_ms)
+                    END,
+                    ended_at_ms = CASE
+                        WHEN capture_sources.ended_at_ms IS NULL THEN excluded.ended_at_ms
+                        WHEN excluded.ended_at_ms IS NULL THEN capture_sources.ended_at_ms
+                        ELSE MAX(capture_sources.ended_at_ms, excluded.ended_at_ms)
+                    END,
                     fidelity = excluded.fidelity,
                     visibility = excluded.visibility,
                     sync_state = excluded.sync_state,
                     sync_version = excluded.sync_version,
                     metadata_json = excluded.metadata_json
                 "#,
-            params![
+            )?
+            .execute(params![
                 source.id.to_string(),
                 source.descriptor.kind.as_str(),
                 source.descriptor.provider.as_str(),
@@ -61,9 +72,10 @@ impl Store {
                 source.sync.sync_state.as_str(),
                 source.sync.sync_version as i64,
                 serde_json::to_string(&source.sync.metadata)?,
-            ],
-        )?;
-        Ok(())
+            ])?;
+            self.journal_source_mutated(source.id)?;
+            Ok(())
+        })
     }
 
     pub fn get_capture_source(&self, id: Uuid) -> Result<CaptureSource> {
@@ -105,6 +117,46 @@ impl Store {
                 )
                 .optional()
                 .map_err(StoreError::from)
+    }
+
+    pub fn capture_source_by_canonical_identity_session(
+        &self,
+        provider: CaptureProvider,
+        source_format: &str,
+        machine_id: &str,
+        source_identity: &str,
+        external_session_id: &str,
+    ) -> Result<Option<CaptureSource>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path,
+                    source_format, source_root, source_identity, external_session_id,
+                    started_at_ms, ended_at_ms, fidelity, visibility, sync_state,
+                    sync_version, metadata_json
+             FROM capture_sources
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND source_identity = ?4 AND external_session_id = ?5
+             ORDER BY started_at_ms, id LIMIT 2",
+        )?;
+        let rows = statement.query_map(
+            params![
+                provider.as_str(),
+                source_format,
+                machine_id,
+                source_identity,
+                external_session_id,
+            ],
+            capture_source_from_row,
+        )?;
+        let matches = collect_rows(rows)?;
+        match matches.as_slice() {
+            [] => Ok(None),
+            [source] => Ok(Some(source.clone())),
+            _ => Err(StoreError::AmbiguousCaptureSourceIdentity {
+                provider: provider.as_str().to_owned(),
+                source_format: source_format.to_owned(),
+                external_session_id: external_session_id.to_owned(),
+            }),
+        }
     }
 
     pub fn has_provider_data(&self, provider: CaptureProvider) -> Result<bool> {

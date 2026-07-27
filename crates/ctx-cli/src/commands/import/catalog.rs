@@ -1,11 +1,36 @@
-use super::*;
-use crate::commands::import::manifest::collect_source_import_paths;
-use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
-pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use ctx_history_capture::{
+    catalog_codex_session_tree, import_codex_session_jsonl_tail, import_codex_session_paths,
+    observe_ordinary_file, stable_capture_uuid, CatalogSummary, CodexSessionCatalogOptions,
+    CodexSessionImportOptions, CodexSessionImportProgressCallback, OrdinaryFileObservation,
+    ProviderImportFailure, ProviderImportSummary,
+};
+use ctx_history_core::{utc_now, CaptureProvider, HistoryRecord};
+use ctx_history_store::{CatalogSession, Store};
+
+use crate::commands::import::report::{error_summary, import_error_scope, ImportFailureScope};
+use crate::commands::import::{provider_summary_has_imported_content, SourceStats};
+use crate::history_source_plugins::HistorySourcePluginSource;
+use crate::provider_args::ImportFormatArg;
+use crate::provider_sources::SourceInfo;
+
+fn catalog_inventory_observation_token(session: &CatalogSession) -> Option<String> {
+    session
+        .metadata
+        .get("inventory_file_change_token_v1")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -70,6 +95,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                 CodexSessionImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
+                    inventory_observation_token: catalog_inventory_observation_token(session),
                     progress: progress.clone(),
                     ..CodexSessionImportOptions::default()
                 },
@@ -86,7 +112,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                     return Err(err);
                 }
             };
-            if tail_summary.failed > 0 {
+            if tail_summary.failed > 0 && !provider_summary_has_imported_content(&tail_summary) {
                 mark_catalog_sessions_failed(
                     store,
                     std::slice::from_ref(session),
@@ -123,6 +149,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                 CodexSessionImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
+                    inventory_observation_token: catalog_inventory_observation_token(session),
                     progress: progress.clone(),
                     ..CodexSessionImportOptions::default()
                 },
@@ -144,7 +171,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                     continue;
                 }
             };
-            if file_summary.failed > 0 {
+            if file_summary.failed > 0 && !provider_summary_has_imported_content(&file_summary) {
                 mark_catalog_sessions_failed(
                     store,
                     std::slice::from_ref(session),
@@ -203,17 +230,11 @@ pub(crate) fn mark_catalog_session_indexed(
     let file_sha256 =
         sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
             .with_context(|| format!("hash checkpoint prefix for {}", session.source_path))?;
-    store.mark_catalog_source_indexed(
-        session.provider,
-        CatalogSourceIndexUpdate {
-            source_root: &session.source_root,
-            source_path: &session.source_path,
-            file_size_bytes: session.file_size_bytes,
-            file_modified_at_ms: session.file_modified_at_ms,
-            file_sha256: Some(&file_sha256),
-            event_count,
-            indexed_at_ms,
-        },
+    store.mark_catalog_source_observation_indexed(
+        session,
+        Some(&file_sha256),
+        event_count,
+        indexed_at_ms,
     )?;
     Ok(())
 }
@@ -257,13 +278,7 @@ pub(crate) fn mark_catalog_sessions_failed(
 ) -> Result<()> {
     let indexed_at_ms = utc_now().timestamp_millis();
     for session in sessions {
-        store.mark_catalog_source_failed(
-            session.provider,
-            &session.source_root,
-            &session.source_path,
-            error,
-            indexed_at_ms,
-        )?;
+        store.mark_catalog_source_observation_failed(session, error, indexed_at_ms)?;
     }
     Ok(())
 }
@@ -281,13 +296,14 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
     let mut stats = SourceStats::default();
     let mut change_entries = Vec::new();
     if metadata.file_type().is_file() {
-        add_source_stat(
+        let observation = observe_ordinary_file(path)
+            .with_context(|| format!("observe import source {}", path.display()))?;
+        add_source_observation(
             &mut stats,
             &mut change_entries,
             path.parent().unwrap_or(path),
             path,
-            &metadata,
-            true,
+            &observation,
             true,
         );
         // WAL and rollback-journal files can hold committed changes that have
@@ -298,15 +314,19 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
             sidecar.push(suffix);
             let sidecar = PathBuf::from(sidecar);
             match fs::symlink_metadata(&sidecar) {
-                Ok(metadata) if metadata.file_type().is_file() => add_source_stat(
-                    &mut stats,
-                    &mut change_entries,
-                    path.parent().unwrap_or(path),
-                    &sidecar,
-                    &metadata,
-                    false,
-                    true,
-                ),
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    let observation = observe_ordinary_file(&sidecar).with_context(|| {
+                        format!("observe import source sidecar {}", sidecar.display())
+                    })?;
+                    add_source_observation(
+                        &mut stats,
+                        &mut change_entries,
+                        path.parent().unwrap_or(path),
+                        &sidecar,
+                        &observation,
+                        false,
+                    );
+                }
                 Ok(_) => {
                     return Err(anyhow!(
                         "import source sidecar is not a regular file: {}",
@@ -349,15 +369,22 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.ends_with("-shm"));
-                add_source_stat(
-                    &mut stats,
-                    &mut change_entries,
-                    path,
-                    &entry_path,
-                    &metadata,
-                    true,
-                    include_in_token,
-                );
+                if include_in_token {
+                    let observation = observe_ordinary_file(&entry_path).with_context(|| {
+                        format!("observe import source file {}", entry_path.display())
+                    })?;
+                    add_source_observation(
+                        &mut stats,
+                        &mut change_entries,
+                        path,
+                        &entry_path,
+                        &observation,
+                        true,
+                    );
+                } else {
+                    stats.files += 1;
+                    stats.bytes = stats.bytes.saturating_add(metadata.len());
+                }
             }
         }
     }
@@ -370,34 +397,31 @@ struct SourceChangeEntry {
     len: u64,
     modified_secs: u64,
     modified_nanos: u32,
+    observation_token: [u8; 32],
 }
 
-fn add_source_stat(
+fn add_source_observation(
     stats: &mut SourceStats,
     change_entries: &mut Vec<SourceChangeEntry>,
     base: &Path,
     path: &Path,
-    metadata: &fs::Metadata,
+    observation: &OrdinaryFileObservation,
     include_in_totals: bool,
-    include_in_token: bool,
 ) {
     if include_in_totals {
         stats.files += 1;
-        stats.bytes = stats.bytes.saturating_add(metadata.len());
+        stats.bytes = stats.bytes.saturating_add(observation.len());
     }
-    if !include_in_token {
-        return;
-    }
-    let modified = metadata
-        .modified()
-        .unwrap_or(UNIX_EPOCH)
+    let modified = observation
+        .modified_at()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     change_entries.push(SourceChangeEntry {
         path: path.strip_prefix(base).unwrap_or(path).to_path_buf(),
-        len: metadata.len(),
+        len: observation.len(),
         modified_secs: modified.as_secs(),
         modified_nanos: modified.subsec_nanos(),
+        observation_token: *observation.token(),
     });
 }
 
@@ -411,19 +435,9 @@ fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 32] {
         hasher.update(entry.len.to_le_bytes());
         hasher.update(entry.modified_secs.to_le_bytes());
         hasher.update(entry.modified_nanos.to_le_bytes());
+        hasher.update(entry.observation_token);
     }
     hasher.finalize().into()
-}
-
-pub(crate) fn source_import_stats(source: &SourceInfo) -> Result<SourceStats> {
-    let mut stats = SourceStats::default();
-    for path in collect_source_import_paths(source)? {
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("stat import source file {}", path.display()))?;
-        stats.files += 1;
-        stats.bytes = stats.bytes.saturating_add(metadata.len());
-    }
-    Ok(stats)
 }
 
 pub(crate) fn import_record_for_source(source: &SourceInfo) -> HistoryRecord {

@@ -1,4 +1,4 @@
-use ctx_history_core::{Event, HistoryRecord};
+use ctx_history_core::{Event, EventType, HistoryRecord};
 
 use crate::filters::{
     context_has_excluded_provider_session, hit_matches_excluded_provider_session,
@@ -43,6 +43,12 @@ pub(crate) fn event_text(event: &Event) -> String {
 }
 
 pub fn event_preview_text(event: &Event) -> String {
+    if matches!(
+        event.event_type,
+        EventType::ToolOutput | EventType::CommandOutput
+    ) {
+        return result_metadata_preview(&event.payload);
+    }
     if let Some(preview) = event_payload_preview(&event.payload) {
         return local_snippet(&preview, 900);
     }
@@ -50,6 +56,30 @@ pub fn event_preview_text(event: &Event) -> String {
         return local_snippet(&event.payload.to_string(), 900);
     }
     String::new()
+}
+
+fn result_metadata_preview(payload: &serde_json::Value) -> String {
+    let value = payload.get("body").unwrap_or(payload);
+    let Some(object) = value.as_object() else {
+        return String::new();
+    };
+    [
+        "tool",
+        "exit_code",
+        "duration_ms",
+        "timed_out",
+        "output_bytes",
+        "result_outcome",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        object
+            .get(key)
+            .and_then(preview_fragment)
+            .map(|value| format!("{key}: {value}"))
+    })
+    .collect::<Vec<_>>()
+    .join(" | ")
 }
 
 pub(crate) fn event_payload_preview(payload: &serde_json::Value) -> Option<String> {
@@ -66,15 +96,7 @@ pub(crate) fn event_value_preview(value: &serde_json::Value) -> Option<String> {
         return non_blank(value);
     }
     let object = value.as_object()?;
-    for key in [
-        "text",
-        "preview",
-        "summary",
-        "command",
-        "output_preview",
-        "output",
-        "message",
-    ] {
+    for key in ["text", "preview", "summary", "command", "message"] {
         if let Some(value) = object.get(key).and_then(preview_fragment) {
             return Some(value);
         }

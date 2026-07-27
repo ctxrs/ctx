@@ -71,6 +71,8 @@ pub fn import_provider_fixture_jsonl(
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: crate::CaptureWorkLimit::Drain,
+            inventory_observation_token: None,
         },
     )
 }
@@ -102,6 +104,8 @@ pub fn import_custom_history_jsonl_v1(
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: crate::CaptureWorkLimit::Drain,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )?;
     import_custom_history_edges(
@@ -138,6 +142,8 @@ pub fn import_custom_history_jsonl_v1_reader(
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: crate::CaptureWorkLimit::Drain,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )?;
     import_custom_history_edges(

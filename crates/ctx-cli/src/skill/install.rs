@@ -5,7 +5,7 @@ use ctx_history_core::utc_now;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{analytics, AnalyticsProperties};
+use crate::analytics::{count_bucket, IntegrationResult, IntegrationTelemetry, TargetSelection};
 
 use super::{
     paths::{bundled_hash, ensure_path_inside, sha256_hex},
@@ -20,10 +20,10 @@ use super::{
 pub(super) fn run_install(
     args: SkillInstallArgs,
     context: &super::paths::PathContext,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
 ) -> Result<()> {
     let selection = install_agent_selection(&args, context)?;
-    insert_selection_analytics(analytics_properties, &selection);
+    insert_selection_analytics(telemetry, &selection);
     let targets = resolve_targets_for_agents(&selection.agents, args.project, context)?;
     let mut results = Vec::with_capacity(targets.len());
     let modified_preserve_is_fatal = modified_preserve_is_fatal(selection.source);
@@ -37,17 +37,16 @@ pub(super) fn run_install(
     let fatal_failures = results.iter().filter(|result| result.fatal).count();
     let already_installed = results.iter().all(|result| result.already_installed);
     let updated = results.iter().any(|result| result.updated);
-    analytics::insert_str(
-        analytics_properties,
-        "install_result",
-        if fatal_failures == 0 {
-            "ok"
-        } else {
-            "partial_error"
-        },
-    );
-    analytics::insert_bool(analytics_properties, "already_installed", already_installed);
-    analytics::insert_bool(analytics_properties, "updated", updated);
+    telemetry.result = Some(if fatal_failures == 0 {
+        IntegrationResult::Ok
+    } else {
+        IntegrationResult::PartialError
+    });
+    telemetry.already_installed = Some(already_installed);
+    telemetry.updated = Some(updated);
+    telemetry.modified_targets = Some(count_bucket(
+        results.iter().filter(|result| result.updated).count() as u64,
+    ));
     if args.json {
         println!(
             "{}",
@@ -71,10 +70,10 @@ pub(super) fn run_install(
 pub(super) fn run_status(
     args: SkillStatusArgs,
     context: &super::paths::PathContext,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
 ) -> Result<()> {
     let selection = status_agent_selection(&args, context);
-    insert_selection_analytics(analytics_properties, &selection);
+    insert_selection_analytics(telemetry, &selection);
     let targets = resolve_targets_for_agents(&selection.agents, args.project, context)?;
     let results = targets
         .iter()
@@ -84,22 +83,26 @@ pub(super) fn run_status(
         .iter()
         .filter(|result| result.status == SkillInstallStatus::Current)
         .count();
-    analytics::insert_str(
-        analytics_properties,
-        "status_result",
-        if current_count == results.len() {
-            "all_current"
-        } else if current_count == 0 {
-            "none_current"
-        } else {
-            "partially_current"
-        },
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "current_targets_bucket",
-        current_count as u64,
-    );
+    telemetry.result = Some(if current_count == results.len() {
+        IntegrationResult::AllCurrent
+    } else if current_count == 0 {
+        IntegrationResult::NoneCurrent
+    } else {
+        IntegrationResult::PartiallyCurrent
+    });
+    telemetry.current_targets = Some(count_bucket(current_count as u64));
+    telemetry.missing_targets = Some(count_bucket(
+        results
+            .iter()
+            .filter(|result| result.status == SkillInstallStatus::Missing)
+            .count() as u64,
+    ));
+    telemetry.conflicting_targets = Some(count_bucket(
+        results
+            .iter()
+            .filter(|result| result.status == SkillInstallStatus::Modified)
+            .count() as u64,
+    ));
     if args.json {
         println!(
             "{}",
@@ -116,19 +119,17 @@ pub(super) fn run_status(
 }
 
 fn insert_selection_analytics(
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
     selection: &SkillAgentSelection,
 ) {
-    analytics::insert_str(
-        analytics_properties,
-        "target_agent_group",
-        selection.source.as_str(),
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "target_agents_count_bucket",
-        selection.agents.len() as u64,
-    );
+    telemetry.selection = Some(match selection.source {
+        SkillSelectionSource::Explicit => TargetSelection::Explicit,
+        SkillSelectionSource::All => TargetSelection::All,
+        SkillSelectionSource::Picker => TargetSelection::Picker,
+        SkillSelectionSource::Detected => TargetSelection::Detected,
+        SkillSelectionSource::Fallback => TargetSelection::Fallback,
+    });
+    telemetry.resolved_agents = Some(count_bucket(selection.agents.len() as u64));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

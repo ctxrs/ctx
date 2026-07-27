@@ -220,17 +220,17 @@ function New-UniqueRunRoot {
 $environmentVariableNames = @(
     "USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
     "CTX_DATA_ROOT",
-    "CTX_DAEMON_ENABLED", "CTX_DAEMON_OFF", "CTX_DISABLE_DAEMON",
+    "CTX_DAEMON_ENABLED",
     "CTX_DAEMON_AUTOSTART_OFF", "CTX_DAEMON_AUTOSTART_EXE", "CTX_DAEMON_BACKGROUND_CHILD",
     "CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS",
-    "CTX_SEARCH_SEMANTIC", "CTX_DISABLE_SEMANTIC_SEARCH", "CTX_SEMANTIC_WORKER_OFF",
+    "CTX_SEARCH_SEMANTIC", "CTX_SEMANTIC_WORKER_OFF",
     "CTX_INTERNAL_SEMANTIC_BACKEND",
     "CTX_SEMANTIC_WORKER_MAX_CHUNKS", "CTX_SEMANTIC_WORKER_MAX_SECONDS",
     "CTX_SEMANTIC_THREADS", "CTX_SEMANTIC_EMBED_BATCH",
-    "CTX_ANALYTICS_ENABLED", "CTX_ANALYTICS_OFF", "CTX_DISABLE_ANALYTICS",
+    "CTX_ANALYTICS_ENABLED",
     "CTX_ANALYTICS_ENDPOINT", "CTX_ANALYTICS_DRY_RUN", "CTX_ANALYTICS_DEBUG",
-    "CTX_UPGRADE_OFF", "CTX_DISABLE_AUTO_UPGRADE", "CTX_UPGRADE_AUTO",
-    "CTX_UPGRADE_CHANNEL", "CTX_CHANNEL", "CTX_FUNCTIONS_BASE",
+    "CTX_UPGRADE_AUTO",
+    "CTX_UPGRADE_CHANNEL", "CTX_UPGRADE_FUNCTIONS_BASE",
     "CTX_UPGRADE_INTERVAL_SECONDS", "CTX_UPGRADE_TARGET", "CTX_UPGRADE_BACKGROUND_CHILD",
     "CTX_SEMANTIC_CACHE_DIR", "FASTEMBED_CACHE_DIR", "HF_HOME", "HF_HUB_CACHE",
     "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
@@ -453,13 +453,10 @@ try {
     Set-ProcessEnvironmentVariable -Name "HF_HUB_CACHE" -Value $semanticCache
     Set-ProcessEnvironmentVariable -Name "FASTEMBED_CACHE_DIR" -Value $semanticCache
     Set-ProcessEnvironmentVariable -Name "CTX_SEMANTIC_CACHE_DIR" -Value $semanticCache
-    Set-ProcessEnvironmentVariable -Name "CTX_ANALYTICS_OFF" -Value "1"
-    Set-ProcessEnvironmentVariable -Name "CTX_DISABLE_ANALYTICS" -Value "1"
-    Set-ProcessEnvironmentVariable -Name "CTX_UPGRADE_OFF" -Value "1"
-    Set-ProcessEnvironmentVariable -Name "CTX_DISABLE_AUTO_UPGRADE" -Value "1"
+    Set-ProcessEnvironmentVariable -Name "CTX_ANALYTICS_ENABLED" -Value "false"
     Set-ProcessEnvironmentVariable -Name "CTX_UPGRADE_AUTO" -Value "off"
-    Set-ProcessEnvironmentVariable -Name "CTX_DAEMON_ENABLED" -Value "1"
-    Set-ProcessEnvironmentVariable -Name "CTX_SEARCH_SEMANTIC" -Value "1"
+    Set-ProcessEnvironmentVariable -Name "CTX_DAEMON_ENABLED" -Value "true"
+    Set-ProcessEnvironmentVariable -Name "CTX_SEARCH_SEMANTIC" -Value "true"
     Set-ProcessEnvironmentVariable -Name "CTX_INTERNAL_SEMANTIC_BACKEND" -Value "cpu"
     Set-ProcessEnvironmentVariable -Name "CTX_RUNTIME_DIR" -Value $runtimeRoot
     Set-ProcessEnvironmentVariable -Name "PATH" -Value $savedEnvironment["PATH"]

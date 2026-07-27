@@ -1,430 +1,593 @@
-use std::{
-    collections::BTreeMap,
-    fs::{self},
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
+
+#[cfg(test)]
+use ctx_history_core::{new_id, EntityTimestamps, SyncCursor};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderEventEnvelope,
-    ProviderSourceTrust,
+    AgentType, CaptureProvider, Event, Fidelity, ProviderEventEnvelope, SessionStatus,
 };
+use ctx_history_store::{Store, StoreError};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(test)]
+use sha2::{Digest, Sha256};
 
-use crate::provider::native::OpenHandsEventFile;
-use crate::provider::providers::openclaw::provider_path_has_component;
-
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    read_json_file_limited,
+use crate::captured_batch::ProviderRecordKind;
+use crate::common::io::ensure_provider_path_parents_are_not_symlinks;
+use crate::provider::file_touches::PROVIDER_FILE_TOUCH_LIMIT_REJECTION;
+use crate::provider::importer::{
+    captured_batch_cursor_stream, drain_captured_batches, provider_scoped_source_uuid,
+    CapturedBatchCursorMode, CapturedSourceAdmission, CertifiedProviderCursor,
 };
-use crate::common::time::parse_rfc3339_utc;
-use crate::provider::custom_history_jsonl::push_provider_import_failure;
-use crate::provider::file_touches::provider_file_touches_from_raw_value;
-use crate::provider::native::{
-    native_event, native_provider_capture, provider_role, provider_value_text, NativeEventDraft,
-    NativeSessionDraft,
+#[cfg(test)]
+use crate::provider::importer::{
+    provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
 };
 use crate::{
-    fnv1a64, CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+    fnv1a64, CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderImportFailure, ProviderImportSummary, Result, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
 };
 
-pub(crate) fn normalize_openhands_file_events(
-    path: &Path,
-    context: &ProviderAdapterContext,
-) -> Result<ProviderNormalizationResult> {
-    let mut event_paths = Vec::new();
-    collect_openhands_event_paths(path, &mut event_paths)?;
-    event_paths.sort();
-    if event_paths.is_empty() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "no OpenHands event JSON files found under v1_conversations",
-        });
-    }
+mod event;
+mod projection;
+mod source;
 
-    let mut result = ProviderNormalizationResult::default();
-    let mut events_by_session = BTreeMap::<String, Vec<OpenHandsEventFile>>::new();
-    for event_path in event_paths {
-        let line_number = openhands_line_number(&event_path);
-        let Some(session_id) = openhands_conversation_id_from_path(&event_path) else {
-            continue;
-        };
-        let value = match read_json_file_limited(
-            &event_path,
-            MAX_PROVIDER_JSONL_LINE_BYTES,
-            "OpenHands event JSON",
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                push_provider_import_failure(&mut result.summary, line_number, err.to_string());
-                continue;
-            }
-        };
-        let event_id = openhands_event_id(&event_path, &value);
-        let timestamp = match openhands_event_timestamp(&value) {
-            Some(timestamp) => timestamp,
-            None => {
-                push_provider_import_failure(
-                    &mut result.summary,
-                    line_number,
-                    format!("OpenHands event {event_id} missing valid timestamp"),
-                );
-                continue;
-            }
-        };
-        let user_id = openhands_user_id_from_path(&event_path);
-        events_by_session
-            .entry(session_id.clone())
-            .or_default()
-            .push(OpenHandsEventFile {
-                path: event_path,
-                line_number,
-                session_id,
-                user_id,
-                event_id,
-                timestamp,
-                value,
-            });
-    }
+#[cfg(test)]
+mod tests;
 
-    for events in events_by_session.values_mut() {
-        events.sort_by(|left, right| {
-            left.timestamp
-                .cmp(&right.timestamp)
-                .then_with(|| left.event_id.cmp(&right.event_id))
-                .then_with(|| left.path.cmp(&right.path))
-        });
-        let started_at = events
-            .first()
-            .map(|event| event.timestamp)
-            .unwrap_or(context.imported_at);
-        let ended_at = events.last().map(|event| event.timestamp);
-        let session_id = events
-            .first()
-            .map(|event| event.session_id.clone())
-            .unwrap_or_else(|| "unknown-conversation".to_owned());
-        let user_id = events.iter().find_map(|event| event.user_id.clone());
-        let raw_source_path = events
-            .first()
-            .and_then(|event| event.path.parent())
-            .unwrap_or(path)
-            .display()
-            .to_string();
-        let cwd = events.iter().find_map(openhands_event_cwd);
+pub(crate) use event::{decode_openhands_event, decode_openhands_event_value};
+#[cfg(test)]
+use projection::with_openhands_post_touch_failure;
+use projection::{openhands_provider_event_with_identity, OpenHandsCapturedBatchProjector};
+#[cfg(test)]
+pub(crate) use source::count_openhands_source_file_opens;
+#[cfg(test)]
+use source::OpenHandsFrozenFile;
+use source::{
+    capture_openhands_event_batch, decode_openhands_position, openhands_captured_error,
+    openhands_checked_path_text, openhands_conversation_id_from_path, openhands_json_path_is_event,
+    openhands_line_number, openhands_missing_event_files, openhands_position,
+    visit_openhands_event_paths, OpenHandsEventSource,
+};
 
-        for (index, event_file) in events.iter().enumerate() {
-            let provider_event_index = index as u64;
-            let event = openhands_provider_event(&session_id, event_file, provider_event_index);
-            result
-                .files_touched
-                .extend(provider_file_touches_from_raw_value(
-                    CaptureProvider::OpenHands,
-                    &session_id,
-                    OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-                    Some(raw_source_path.as_str()),
-                    &event_file.value,
-                    &event,
-                    event_file.line_number,
-                ));
-            result.captures.push((
-                event_file.line_number,
-                native_provider_capture(
-                    NativeSessionDraft {
-                        provider: CaptureProvider::OpenHands,
-                        source_format: OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-                        provider_session_id: session_id.clone(),
-                        parent_provider_session_id: None,
-                        root_provider_session_id: None,
-                        external_agent_id: user_id.clone(),
-                        agent_type: AgentType::Primary,
-                        role_hint: Some("primary".to_owned()),
-                        is_primary: true,
-                        started_at,
-                        ended_at,
-                        cwd: cwd.clone(),
-                        fidelity: Fidelity::Imported,
-                        raw_source_path: raw_source_path.clone(),
-                        trust: ProviderSourceTrust::ProviderNative,
-                        source_metadata: json!({
-                            "adapter": OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-                            "storage": "filesystem_event_service",
-                            "conversation_dir": raw_source_path,
-                        }),
-                        session_metadata: json!({
-                            "source_format": OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-                            "provider": "openhands",
-                            "conversation_id": session_id,
-                            "user_id": user_id,
-                            "event_count": events.len(),
-                        }),
-                    },
-                    context,
-                    Some(event),
-                ),
-            ));
-        }
-    }
+const OPENHANDS_CAPTURE_REVISION: u32 = 2;
+const OPENHANDS_POLICY_REVISION: u32 = 5;
+const OPENHANDS_RECORD_KIND: &str = "openhands-event-json-v1";
+const OPENHANDS_POSITION_KIND: &str = "openhands-event-file-v1";
+const OPENHANDS_LOCATOR_KIND: &str = "openhands-event-path-v1";
+const OPENHANDS_INVENTORY_PAGE_RECORDS: usize = 64;
+const OPENHANDS_INVENTORY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+const OPENHANDS_MAX_PATH_BYTES: usize = 7 * 1024;
+const OPENHANDS_MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024;
+const OPENHANDS_MAX_FAILURE_BYTES: usize = 4 * 1024;
+const OPENHANDS_CAPTURED_BATCH_PROJECTION_MARKER: &str = "openhands-captured-batch-v1";
 
-    Ok(result)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OpenHandsEventIdentity {
+    provider_event_index: u64,
+    provider_event_identity_index: u64,
+    canonical_path_hash: u64,
+    legacy_provider_event_index_candidate: Option<u64>,
 }
 
-pub(crate) fn collect_openhands_event_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
+impl OpenHandsEventIdentity {
+    fn for_path(path: &Path, canonical_path_identity: &str) -> Self {
+        let canonical_path_hash = fnv1a64(canonical_path_identity.as_bytes());
+        // The legacy normalizer assigned timestamp-sorted corpus ordinals. A
+        // file-local import cannot prove that mapping. The public index also
+        // uses the path hash because the importer probes it as a legacy alias.
+        Self {
+            provider_event_index: canonical_path_hash,
+            provider_event_identity_index: canonical_path_hash,
+            canonical_path_hash,
+            legacy_provider_event_index_candidate: openhands_legacy_filename_index_candidate(path),
+        }
+    }
+}
+
+fn openhands_legacy_filename_index_candidate(path: &Path) -> Option<u64> {
+    let stem = path.file_stem()?.to_str()?;
+    let (ordinal, suffix) = stem.split_once('-')?;
+    if ordinal.is_empty() || suffix.is_empty() || !ordinal.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    ordinal
+        .parse::<u64>()
+        .ok()
+        .and_then(|ordinal| ordinal.checked_sub(1))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenHandsParserCheckpoint {
+    next_position: u64,
+    accepted_events: u64,
+    accepted_file_touches: u64,
+    rejection: Option<ProviderImportFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum OpenHandsProjectionMode {
+    Full,
+    ExistingStableNoop,
+    ExistingStableUpgrade,
+    ExistingStableRepair,
+    LegacyUpgrade {
+        provider_event_index: u64,
+        occurred_at: DateTime<Utc>,
+        session: OpenHandsLegacySessionSnapshot,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct OpenHandsLegacySessionSnapshot {
+    external_agent_id: Option<String>,
+    agent_type: AgentType,
+    role_hint: Option<String>,
+    is_primary: bool,
+    status: SessionStatus,
+    fidelity: Fidelity,
+    metadata: Value,
+}
+
+fn openhands_checkpoint_matches_position(
+    checkpoint: &OpenHandsParserCheckpoint,
+    position: u64,
+    event_path: &Path,
+) -> bool {
+    if checkpoint.next_position != position {
+        return false;
+    }
+    let Ok(touch_limit) =
+        u64::try_from(crate::provider::file_touches::MAX_PROVIDER_FILE_TOUCHES_PER_EVENT)
+    else {
+        return false;
+    };
+    let rejection_is_bounded = |failure: &ProviderImportFailure| {
+        failure.line == openhands_line_number(event_path)
+            && !failure.error.is_empty()
+            && failure.error.len() <= OPENHANDS_MAX_FAILURE_BYTES
+    };
+
+    match (
+        position,
+        checkpoint.accepted_events,
+        checkpoint.accepted_file_touches,
+        checkpoint.rejection.as_ref(),
+    ) {
+        (0, 0, 0, None) => true,
+        (1, 0, 0, Some(failure)) => rejection_is_bounded(failure),
+        (1, 1, accepted_file_touches, None) => accepted_file_touches <= touch_limit,
+        (1, 1, accepted_file_touches, Some(failure)) => {
+            accepted_file_touches == touch_limit
+                && rejection_is_bounded(failure)
+                && failure.error == PROVIDER_FILE_TOUCH_LIMIT_REJECTION
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn import_openhands_file_events_batched(
+    path: &Path,
+    store: &mut Store,
+    mut context: ProviderAdapterContext,
+    import_options: NormalizedProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
+            path: path.to_path_buf(),
             reason: "symlinked provider transcript roots are rejected",
         });
     }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
+    ensure_provider_path_parents_are_not_symlinks(path)?;
+    if context.source_path.is_none() {
+        context.source_path = Some(path.to_path_buf());
+    }
     if file_type.is_file() {
-        if openhands_json_path_is_event(root) {
-            ensure_regular_provider_transcript_file(root)?;
-            paths.push(root.to_path_buf());
+        if !openhands_json_path_is_event(path) {
+            return Err(openhands_missing_event_files(path));
         }
-        return Ok(());
+        return import_openhands_event_file_batched(path, store, &context, &import_options);
     }
     if !file_type.is_dir() {
-        return Ok(());
+        return Err(openhands_missing_event_files(path));
     }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_openhands_event_paths(&path, paths)?;
-        } else if openhands_json_path_is_event(&path) {
-            ensure_regular_provider_transcript_file(&path)?;
-            paths.push(path);
-        }
+
+    let mut merged = ProviderImportSummary::default();
+    let mut source_count = 0_u64;
+    visit_openhands_event_paths(path, &mut |event_path| {
+        source_count = source_count
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "OpenHands event-file count overflowed",
+            ))?;
+        merged.merge(import_openhands_event_file_batched(
+            event_path,
+            store,
+            &context,
+            &import_options,
+        )?);
+        Ok(())
+    })?;
+    if source_count == 0 {
+        return Err(openhands_missing_event_files(path));
     }
-    Ok(())
+    Ok(merged)
 }
 
-pub(crate) fn openhands_json_path_is_event(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("json")
-        && provider_path_has_component(path, "v1_conversations")
-}
-
-pub(crate) fn openhands_conversation_id_from_path(path: &Path) -> Option<String> {
-    let mut components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str());
-    while let Some(component) = components.next() {
-        if component == "v1_conversations" {
-            return components
-                .next()
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_owned);
-        }
-    }
-    None
-}
-
-pub(crate) fn openhands_user_id_from_path(path: &Path) -> Option<String> {
-    let components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect::<Vec<_>>();
-    components.windows(2).find_map(|window| {
-        (window[1] == "v1_conversations" && !window[0].trim().is_empty())
-            .then(|| window[0].to_owned())
-    })
-}
-
-pub(crate) fn openhands_event_id(path: &Path, value: &Value) -> String {
-    value
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.trim().is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-pub(crate) fn openhands_event_timestamp(value: &Value) -> Option<DateTime<Utc>> {
-    value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_rfc3339_utc)
-}
-
-pub(crate) fn openhands_line_number(path: &Path) -> usize {
-    fnv1a64(path.display().to_string().as_bytes()) as usize
-}
-
-pub(crate) fn openhands_event_cwd(event: &OpenHandsEventFile) -> Option<String> {
-    event
-        .value
-        .pointer("/observation/metadata/working_dir")
-        .or_else(|| event.value.pointer("/observation/metadata/cwd"))
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.trim().is_empty())
-        .map(str::to_owned)
-}
-
-pub(crate) fn openhands_provider_event(
+fn openhands_projection_mode(
+    store: &Store,
+    canonical_path: &Path,
+    conversation_dir: &Path,
     session_id: &str,
-    event_file: &OpenHandsEventFile,
-    provider_event_index: u64,
-) -> ProviderEventEnvelope {
-    let entry_type = openhands_entry_type(&event_file.value);
-    let event_type = openhands_event_type(&event_file.value, &entry_type);
-    let role = Some(openhands_role(&event_file.value, &entry_type));
-    let text = openhands_event_text(&event_file.value, &entry_type, event_type);
-    native_event(NativeEventDraft {
-        provider: CaptureProvider::OpenHands,
-        source_format: OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-        provider_session_id: session_id.to_owned(),
+    identity: OpenHandsEventIdentity,
+    raw_bytes: Option<&[u8]>,
+    current_projection_published: bool,
+) -> Result<OpenHandsProjectionMode> {
+    let Some(decoded) = raw_bytes.and_then(|bytes| {
+        let decoded = decode_openhands_event(canonical_path, bytes).ok()?;
+        if openhands_conversation_id_from_path(canonical_path).as_deref() != Some(session_id) {
+            return None;
+        }
+        Some(decoded)
+    }) else {
+        return Ok(OpenHandsProjectionMode::Full);
+    };
+    let event_hash = decoded.event_id().to_owned();
+    let timestamp = decoded.timestamp();
+
+    let canonical_path_text = openhands_checked_path_text(canonical_path)?;
+    let stable_source_id = provider_scoped_source_uuid(
+        CaptureProvider::OpenHands,
+        session_id,
+        OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+        Some(&canonical_path_text),
+    );
+    let stable_dedupe_key = Store::provider_source_event_dedupe_key(
+        stable_source_id,
+        identity.provider_event_identity_index,
+        &event_hash,
+    );
+    if let Some(stored_event) =
+        openhands_stored_event_for_path(store, &stable_dedupe_key, &canonical_path_text)?
+    {
+        if current_projection_published {
+            return Ok(OpenHandsProjectionMode::ExistingStableNoop);
+        }
+        let incoming_event = openhands_provider_event_with_identity(
+            session_id,
+            canonical_path,
+            &decoded,
+            timestamp,
+            identity,
+            None,
+        );
+        if !openhands_stored_event_matches_projection(&stored_event, &incoming_event) {
+            return Ok(OpenHandsProjectionMode::ExistingStableNoop);
+        }
+        return if openhands_stored_event_has_captured_batch_marker(store, &stored_event)? {
+            Ok(OpenHandsProjectionMode::ExistingStableRepair)
+        } else {
+            Ok(OpenHandsProjectionMode::ExistingStableUpgrade)
+        };
+    }
+
+    let Some(provider_event_index) = identity.legacy_provider_event_index_candidate else {
+        return Ok(OpenHandsProjectionMode::Full);
+    };
+    let conversation_dir_text = openhands_checked_path_text(conversation_dir)?;
+    let legacy_source_id = provider_scoped_source_uuid(
+        CaptureProvider::OpenHands,
+        session_id,
+        OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+        Some(&conversation_dir_text),
+    );
+    let legacy_dedupe_key = Store::provider_source_event_dedupe_key(
+        legacy_source_id,
         provider_event_index,
-        provider_event_hash: Some(event_file.event_id.clone()),
-        cursor: format!("{}:{}", event_file.path.display(), event_file.event_id),
-        event_type,
-        role,
-        occurred_at: event_file.timestamp,
-        text,
-        body: event_file.value.clone(),
-        metadata: json!({
-            "source": OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-            "source_format": OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-            "event_id": event_file.event_id,
-            "entry_type": entry_type,
-            "event_path": event_file.path.display().to_string(),
-            "conversation_id": session_id,
-            "tool_name": event_file.value.get("tool_name").and_then(Value::as_str),
-            "tool_call_id": event_file.value.get("tool_call_id").and_then(Value::as_str),
-            "action_id": event_file.value.get("action_id").and_then(Value::as_str),
-        }),
-    })
-}
-
-pub(crate) fn openhands_entry_type(value: &Value) -> String {
-    if let Some(entry_type) = value
-        .get("kind")
-        .or_else(|| value.get("type"))
-        .and_then(Value::as_str)
+        &event_hash,
+    );
+    if let Some(stored_event) =
+        openhands_stored_event_for_path(store, &legacy_dedupe_key, &canonical_path_text)?
     {
-        return entry_type.to_owned();
-    }
-    if value.get("llm_message").is_some() {
-        "MessageEvent".to_owned()
-    } else if value.get("action").is_some() {
-        "ActionEvent".to_owned()
-    } else if value.get("observation").is_some() {
-        "ObservationEvent".to_owned()
+        let Some(session) = openhands_legacy_session_snapshot(store, &stored_event)? else {
+            return Ok(OpenHandsProjectionMode::Full);
+        };
+        Ok(OpenHandsProjectionMode::LegacyUpgrade {
+            provider_event_index,
+            occurred_at: stored_event.occurred_at,
+            session,
+        })
     } else {
-        "OpenHandsEvent".to_owned()
+        Ok(OpenHandsProjectionMode::Full)
     }
 }
 
-pub(crate) fn openhands_event_type(value: &Value, entry_type: &str) -> EventType {
-    if value.get("llm_message").is_some() || entry_type == "MessageEvent" {
-        return EventType::Message;
-    }
-    if value.get("action").is_some() || entry_type == "ActionEvent" {
-        return match value.pointer("/action/kind").and_then(Value::as_str) {
-            Some("FinishAction") => EventType::Message,
-            Some("ThinkAction") => EventType::Summary,
-            Some("FileEditorAction" | "StrReplaceEditorAction" | "PlanningFileEditorAction") => {
-                EventType::ToolCall
-            }
-            _ => EventType::ToolCall,
-        };
-    }
-    if value.get("observation").is_some() || entry_type == "ObservationEvent" {
-        return match value.pointer("/observation/kind").and_then(Value::as_str) {
-            Some(
-                "FileEditorObservation"
-                | "StrReplaceEditorObservation"
-                | "PlanningFileEditorObservation",
-            ) => EventType::FileTouched,
-            Some("ExecuteBashObservation" | "TerminalObservation") => EventType::CommandOutput,
-            _ => EventType::ToolOutput,
-        };
-    }
-    match entry_type {
-        "StreamingDeltaEvent" => EventType::Message,
-        "CondensationSummaryEvent" | "CondensationEvent" => EventType::Summary,
-        "AgentErrorEvent" | "ConversationErrorEvent" | "ServerErrorEvent" => EventType::ToolOutput,
-        _ => EventType::Notice,
-    }
+fn openhands_stored_event_has_captured_batch_marker(store: &Store, event: &Event) -> Result<bool> {
+    let Some(source_id) = event.capture_source_id else {
+        return Ok(false);
+    };
+    let source = match store.get_capture_source(source_id) {
+        Ok(source) => source,
+        Err(StoreError::NotFound(_)) => return Ok(false),
+        Err(error) => return Err(CaptureError::Store(error)),
+    };
+    Ok(source
+        .sync
+        .metadata
+        .pointer("/source_metadata/captured_batch_projection")
+        .and_then(Value::as_str)
+        == Some(OPENHANDS_CAPTURED_BATCH_PROJECTION_MARKER))
 }
 
-pub(crate) fn openhands_role(value: &Value, entry_type: &str) -> EventRole {
-    if let Some(role) = value.pointer("/llm_message/role").and_then(Value::as_str) {
-        return provider_role(Some(role));
-    }
-    match value.get("source").and_then(Value::as_str) {
-        Some("user") => EventRole::User,
-        Some("agent") => EventRole::Assistant,
-        Some("environment" | "hook") => EventRole::Tool,
-        Some(source) => provider_role(Some(source)),
-        None if entry_type == "ActionEvent" => EventRole::Assistant,
-        None if entry_type == "ObservationEvent" => EventRole::Tool,
-        _ => EventRole::Unknown,
-    }
+fn openhands_legacy_session_snapshot(
+    store: &Store,
+    event: &Event,
+) -> Result<Option<OpenHandsLegacySessionSnapshot>> {
+    let Some(session_id) = event.session_id else {
+        return Ok(None);
+    };
+    let session = match store.get_session(session_id) {
+        Ok(session) => session,
+        Err(StoreError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(CaptureError::Store(error)),
+    };
+    Ok(Some(OpenHandsLegacySessionSnapshot {
+        external_agent_id: session.external_agent_id,
+        agent_type: session.agent_type,
+        role_hint: session.role_hint,
+        is_primary: session.is_primary,
+        status: session.status,
+        fidelity: session.sync.fidelity,
+        metadata: session
+            .sync
+            .metadata
+            .get("metadata")
+            .cloned()
+            .unwrap_or(Value::Null),
+    }))
 }
 
-pub(crate) fn openhands_event_text(
-    value: &Value,
-    entry_type: &str,
-    event_type: EventType,
-) -> String {
-    if let Some(text) = value
-        .pointer("/llm_message/content")
-        .and_then(provider_value_text)
+fn openhands_stored_event_for_path(
+    store: &Store,
+    dedupe_key: &str,
+    canonical_path: &str,
+) -> Result<Option<Event>> {
+    let event_id = match store.event_id_by_dedupe_key(dedupe_key) {
+        Ok(event_id) => event_id,
+        Err(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
+        Err(error) => return Err(CaptureError::Store(error)),
+    };
+    let event = store.get_event(event_id)?;
+    if event
+        .sync
+        .metadata
+        .pointer("/metadata/event_path")
+        .and_then(Value::as_str)
+        != Some(canonical_path)
     {
-        return text;
+        return Ok(None);
     }
-    if let Some(text) = value.get("content").and_then(provider_value_text) {
-        return text;
-    }
-    if let Some(text) = value.pointer("/action/message").and_then(Value::as_str) {
-        return text.to_owned();
-    }
-    if let Some(text) = value.pointer("/action/thought").and_then(Value::as_str) {
-        return text.to_owned();
-    }
-    if let Some(command) = value.pointer("/action/command").and_then(Value::as_str) {
-        return command.to_owned();
-    }
-    if let Some(path) = value.pointer("/action/path").and_then(Value::as_str) {
-        let command = value
-            .pointer("/action/command")
+    Ok(Some(event))
+}
+
+fn openhands_stored_event_matches_projection(
+    stored: &Event,
+    incoming: &ProviderEventEnvelope,
+) -> bool {
+    stored.event_type == incoming.event_type
+        && stored.role == incoming.role
+        && stored.occurred_at == incoming.occurred_at
+        && stored
+            .payload
+            .get("provider_event_index")
+            .and_then(Value::as_u64)
+            == Some(incoming.provider_event_index)
+        && stored
+            .payload
+            .get("provider_event_hash")
             .and_then(Value::as_str)
-            .unwrap_or("file");
-        return format!("{command} {path}");
+            == incoming.provider_event_hash.as_deref()
+        && stored.payload.get("cursor").and_then(Value::as_str) == incoming.cursor.as_deref()
+        && stored.payload.get("artifacts") == Some(&json!([]))
+        && stored.payload.get("body") == Some(&incoming.payload)
+}
+
+fn import_openhands_event_file_batched(
+    path: &Path,
+    store: &mut Store,
+    context: &ProviderAdapterContext,
+    import_options: &NormalizedProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    let OpenHandsEventSource {
+        canonical_path,
+        canonical_path_text,
+        conversation_dir,
+        session_id,
+        frozen,
+        raw_bytes,
+        path_identity,
+        observation: source,
+    } = OpenHandsEventSource::observe(path, import_options.inventory_observation_token.as_deref())?;
+    let identity = OpenHandsEventIdentity::for_path(&canonical_path, &path_identity);
+    let file_context = ProviderAdapterContext {
+        machine_id: context.machine_id.clone(),
+        source_path: Some(canonical_path.clone()),
+        source_root: context
+            .source_root
+            .clone()
+            .or_else(|| context.source_path.clone()),
+        imported_at: context.imported_at,
+    };
+    let stream = captured_batch_cursor_stream(&source);
+    let expected_store_cursor = store.get_sync_cursor(None, &context.machine_id, &stream)?;
+    let current_projection_published = expected_store_cursor
+        .as_ref()
+        .map(|cursor| CertifiedProviderCursor::decode_if_certified(&cursor.cursor))
+        .transpose()?
+        .flatten()
+        .is_some_and(|cursor| {
+            let position = decode_openhands_position(cursor.native_position()).ok();
+            let checkpoint = cursor
+                .parser_checkpoint()
+                .deserialize::<OpenHandsParserCheckpoint>()
+                .ok();
+            cursor.matches_revisions(
+                source.source_revision(),
+                source.capture_revision(),
+                source.policy_revision(),
+            ) && position == Some(1)
+                && checkpoint.as_ref().is_some_and(|checkpoint| {
+                    checkpoint.accepted_events == 1
+                        && openhands_checkpoint_matches_position(checkpoint, 1, &canonical_path)
+                })
+        });
+    let projection_mode = openhands_projection_mode(
+        store,
+        &canonical_path,
+        &conversation_dir,
+        &session_id,
+        identity,
+        raw_bytes.as_deref(),
+        current_projection_published,
+    )?;
+    let initial_position = openhands_position(0)?;
+    let mut cursor_mode = CapturedBatchCursorMode::Resume;
+    let mut resumed_projector = None;
+
+    if let Some(stored_cursor) = expected_store_cursor.as_ref() {
+        match CertifiedProviderCursor::decode_if_certified(&stored_cursor.cursor)? {
+            Some(certified)
+                if certified.matches_revisions(
+                    source.source_revision(),
+                    source.capture_revision(),
+                    source.policy_revision(),
+                ) =>
+            {
+                let position = decode_openhands_position(certified.native_position())?;
+                let projector = OpenHandsCapturedBatchProjector::resume(
+                    file_context.clone(),
+                    canonical_path.clone(),
+                    conversation_dir.clone(),
+                    session_id.clone(),
+                    identity,
+                    projection_mode.clone(),
+                    &certified,
+                )?;
+                if position == 1 {
+                    if !frozen.revalidate(&canonical_path)? {
+                        return Err(CaptureError::SourceChangedDuringCapture);
+                    }
+                    return projector.replay_summary();
+                }
+                if position != 0 {
+                    return Err(CaptureError::InvalidPayload(
+                        "OpenHands cursor is past its event-file boundary".to_owned(),
+                    ));
+                }
+                resumed_projector = Some(projector);
+            }
+            Some(_) => cursor_mode = CapturedBatchCursorMode::ResetChangedSource,
+            None => cursor_mode = CapturedBatchCursorMode::ReplaceLegacyCursor,
+        }
     }
-    if let Some(content) = value
-        .pointer("/observation/content")
-        .and_then(provider_value_text)
-    {
-        return content;
+
+    let mut projector = resumed_projector.unwrap_or_else(|| {
+        OpenHandsCapturedBatchProjector::fresh(
+            file_context.clone(),
+            canonical_path.clone(),
+            conversation_dir,
+            session_id,
+            identity,
+            projection_mode,
+        )
+    });
+    let admission = CapturedSourceAdmission::file_for_context(&source, &file_context)?;
+    let record_kind =
+        ProviderRecordKind::new(OPENHANDS_RECORD_KIND).map_err(openhands_captured_error)?;
+    let mut pending_bytes = Some(raw_bytes);
+    drain_captured_batches(
+        store,
+        &admission,
+        import_options.clone(),
+        &context.machine_id,
+        context.imported_at,
+        expected_store_cursor,
+        &initial_position,
+        cursor_mode,
+        source.cursor_stream(),
+        &mut projector,
+        || {
+            let Some(raw_bytes) = pending_bytes.take() else {
+                return Ok(None);
+            };
+            capture_openhands_event_batch(
+                &canonical_path,
+                &canonical_path_text,
+                &frozen,
+                raw_bytes,
+                source.clone(),
+                record_kind.clone(),
+            )
+            .map(Some)
+        },
+        || frozen.revalidate(&canonical_path),
+    )
+}
+
+fn openhands_bounded_derived_text(value: String, field: &str) -> Result<String> {
+    if value.len() > OPENHANDS_MAX_DERIVED_TEXT_BYTES {
+        return Err(CaptureError::InvalidPayload(format!(
+            "OpenHands {field} exceeds {OPENHANDS_MAX_DERIVED_TEXT_BYTES} bytes"
+        )));
     }
-    if let Some(output) = value.pointer("/observation/output").and_then(Value::as_str) {
-        return output.to_owned();
-    }
-    if let Some(error) = value
-        .pointer("/observation/error")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("error").and_then(Value::as_str))
-    {
-        return error.to_owned();
-    }
-    if let Some(prompt) = value.pointer("/action/prompt").and_then(Value::as_str) {
-        return prompt.to_owned();
-    }
-    if event_type == EventType::Notice {
-        format!("OpenHands event: {entry_type}")
-    } else {
-        String::new()
-    }
+    Ok(value)
+}
+
+#[cfg(test)]
+pub(crate) fn seed_c213_openhands_terminal_cursor(
+    store: &Store,
+    path: &Path,
+    machine_id: &str,
+    observed_at: DateTime<Utc>,
+) -> Result<()> {
+    let canonical_path = fs::canonicalize(path)?;
+    let frozen = OpenHandsFrozenFile::read(&canonical_path)?;
+    let raw_bytes = source::read_openhands_frozen_bytes(&canonical_path, &frozen)?;
+    let content_hash: [u8; 32] = Sha256::digest(&raw_bytes).into();
+    let path_identity = provider_path_identity(&canonical_path)?;
+    let stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::OpenHands,
+        OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+        &path_identity,
+    );
+    let cursor = CertifiedProviderCursor::new(
+        frozen.source_revision(Some(&content_hash)),
+        2,
+        1,
+        openhands_position(1)?,
+        BoundedParserCheckpoint::from_serializable(&OpenHandsParserCheckpoint {
+            next_position: 1,
+            accepted_events: 1,
+            accepted_file_touches: 1,
+            rejection: None,
+        })?,
+    )?;
+    store.upsert_sync_cursor(&SyncCursor {
+        id: new_id(),
+        team_id: None,
+        device_id: machine_id.to_owned(),
+        stream,
+        cursor: cursor.encode()?,
+        last_synced_at: Some(observed_at),
+        timestamps: EntityTimestamps {
+            created_at: observed_at,
+            updated_at: observed_at,
+        },
+    })?;
+    Ok(())
 }

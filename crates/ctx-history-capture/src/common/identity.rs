@@ -20,8 +20,7 @@ pub fn stable_capture_uuid(dedupe_key: &str, role: &str) -> Uuid {
 }
 
 pub fn compute_payload_hash(payload: &Value) -> Result<String> {
-    let bytes = serde_json::to_vec(payload)?;
-    Ok(format!("fnv1a64:{:016x}", fnv1a64(&bytes)))
+    ctx_history_core::compute_payload_hash(payload).map_err(Into::into)
 }
 
 pub(crate) fn default_machine_id() -> String {

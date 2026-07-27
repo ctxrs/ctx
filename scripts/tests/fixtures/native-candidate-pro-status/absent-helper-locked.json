@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "payload_type": "pro_status",
+  "state": "not_setup",
+  "installed": false,
+  "ready": false,
+  "materialized": false,
+  "helper_version": null,
+  "protocol_version": 1,
+  "capabilities": [],
+  "error_code": "entitlement_expired",
+  "access_state": "locked",
+  "refresh_after_unix": null,
+  "access_deadline_unix": 2000600000,
+  "grace_deadline_unix": 2001200000,
+  "next_action": {
+    "command": "ctx pro",
+    "reason": "helper_missing"
+  }
+}

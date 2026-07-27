@@ -1,9 +1,9 @@
 impl SemanticVectorStore {
-    fn maintenance_state_key(key: &str) -> String {
+    pub(super) fn maintenance_state_key(key: &str) -> String {
         format!("{}:{key}", semantic_model_key())
     }
 
-    fn cached_stats(&self) -> Result<Option<SemanticSidecarStats>> {
+    pub(super) fn cached_stats(&self) -> Result<Option<SemanticSidecarStats>> {
         if !sqlite_table_exists(&self.conn, "semantic_index_stats")? {
             return Ok(None);
         }
@@ -29,7 +29,7 @@ impl SemanticVectorStore {
         Ok(stats)
     }
 
-    fn exact_stats(&self) -> Result<SemanticSidecarStats> {
+    pub(super) fn exact_stats(&self) -> Result<SemanticSidecarStats> {
         if !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(SemanticSidecarStats::default());
         }
@@ -57,14 +57,14 @@ impl SemanticVectorStore {
         })
     }
 
-    fn cached_or_exact_stats(&self) -> Result<SemanticSidecarStats> {
+    pub(super) fn cached_or_exact_stats(&self) -> Result<SemanticSidecarStats> {
         if let Some(stats) = self.cached_stats()? {
             return Ok(stats);
         }
         self.exact_stats()
     }
 
-    fn refresh_cached_stats(&self) -> Result<SemanticSidecarStats> {
+    pub(super) fn refresh_cached_stats(&self) -> Result<SemanticSidecarStats> {
         let stats = self.exact_stats()?;
         self.conn.execute(
             r#"
@@ -86,7 +86,7 @@ impl SemanticVectorStore {
         Ok(stats)
     }
 
-    fn maintenance_state_i64(&self, key: &str) -> Result<Option<i64>> {
+    pub(super) fn maintenance_state_i64(&self, key: &str) -> Result<Option<i64>> {
         if !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
             return Ok(None);
         }
@@ -102,7 +102,7 @@ impl SemanticVectorStore {
         Ok(value.and_then(|value| value.parse::<i64>().ok()))
     }
 
-    fn set_maintenance_state_i64(&self, key: &str, value: i64) -> Result<()> {
+    pub(super) fn set_maintenance_state_i64(&self, key: &str, value: i64) -> Result<()> {
         let key = Self::maintenance_state_key(key);
         self.conn.execute(
             r#"
@@ -117,19 +117,21 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn delete_maintenance_state_keys(&self, keys: &[&str]) -> Result<()> {
+    pub(super) fn delete_maintenance_state_keys(&self, keys: &[&str]) -> Result<()> {
         if keys.is_empty() || !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
             return Ok(());
         }
         for key in keys {
             let key = Self::maintenance_state_key(key);
-            self.conn
-                .execute("DELETE FROM semantic_maintenance_state WHERE key = ?1", [key])?;
+            self.conn.execute(
+                "DELETE FROM semantic_maintenance_state WHERE key = ?1",
+                [key],
+            )?;
         }
         Ok(())
     }
 
-    fn backfill_cursor(&self) -> Result<Option<(i64, u64)>> {
+    pub(super) fn backfill_cursor(&self) -> Result<Option<(i64, u64)>> {
         let Some(occurred_at_ms) = self.maintenance_state_i64("backfill_occurred_at_ms_before")?
         else {
             return Ok(None);
@@ -140,7 +142,7 @@ impl SemanticVectorStore {
         Ok(Some((occurred_at_ms, seq.max(0) as u64)))
     }
 
-    fn set_backfill_cursor(&self, cursor: Option<(i64, u64)>) -> Result<()> {
+    pub(super) fn set_backfill_cursor(&self, cursor: Option<(i64, u64)>) -> Result<()> {
         match cursor {
             Some((occurred_at_ms, seq)) => {
                 self.set_maintenance_state_i64("backfill_occurred_at_ms_before", occurred_at_ms)?;
@@ -154,7 +156,65 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn dirty_event_count(&self) -> Result<usize> {
+    pub(super) fn committed_store_reconciliation_cursor(&self) -> Result<Option<(i64, u64)>> {
+        if !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
+            return Ok(None);
+        }
+        let key = Self::maintenance_state_key("committed_store_reconcile_cursor_before");
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some((occurred_at_ms, seq)) = value.as_deref().and_then(|value| value.split_once(':'))
+        else {
+            return Ok(None);
+        };
+        let Some(occurred_at_ms) = occurred_at_ms.parse::<i64>().ok() else {
+            return Ok(None);
+        };
+        let Some(seq) = seq.parse::<u64>().ok() else {
+            return Ok(None);
+        };
+        Ok(Some((occurred_at_ms, seq)))
+    }
+
+    pub(super) fn set_committed_store_reconciliation_cursor(
+        &self,
+        cursor: Option<(i64, u64)>,
+    ) -> Result<()> {
+        let key = Self::maintenance_state_key("committed_store_reconcile_cursor_before");
+        match cursor {
+            Some((occurred_at_ms, seq)) => {
+                self.conn.execute(
+                    r#"
+                    INSERT INTO semantic_maintenance_state (key, value, updated_at_ms)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at_ms = excluded.updated_at_ms
+                    "#,
+                    params![
+                        key,
+                        format!("{occurred_at_ms}:{seq}"),
+                        utc_now().timestamp_millis()
+                    ],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "DELETE FROM semantic_maintenance_state WHERE key = ?1",
+                    [key],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn dirty_event_count(&self) -> Result<usize> {
         if !sqlite_table_exists(&self.conn, "semantic_dirty_events")? {
             return Ok(0);
         }
@@ -170,7 +230,7 @@ impl SemanticVectorStore {
         Ok(count.max(0) as usize)
     }
 
-    fn enqueue_dirty_documents(
+    pub(super) fn enqueue_dirty_documents(
         &mut self,
         docs: &[EventEmbeddingDocument],
         reason: &str,
@@ -208,7 +268,7 @@ impl SemanticVectorStore {
         Ok(changed)
     }
 
-    fn queued_dirty_event_ids(&self, limit: usize) -> Result<Vec<Uuid>> {
+    pub(super) fn queued_dirty_event_ids(&self, limit: usize) -> Result<Vec<Uuid>> {
         if limit == 0 || !sqlite_table_exists(&self.conn, "semantic_dirty_events")? {
             return Ok(Vec::new());
         }
@@ -232,7 +292,7 @@ impl SemanticVectorStore {
         Ok(event_ids)
     }
 
-    fn dequeue_dirty_events(&mut self, event_ids: &[Uuid]) -> Result<usize> {
+    pub(super) fn dequeue_dirty_events(&mut self, event_ids: &[Uuid]) -> Result<usize> {
         if event_ids.is_empty() || !sqlite_table_exists(&self.conn, "semantic_dirty_events")? {
             return Ok(0);
         }
@@ -252,7 +312,7 @@ impl SemanticVectorStore {
         Ok(deleted)
     }
 
-    fn plaintext_value_count(&self) -> Result<usize> {
+    pub(super) fn plaintext_value_count(&self) -> Result<usize> {
         let mut count = 0_usize;
         if sqlite_column_exists(&self.conn, "event_embeddings", "preview_text")? {
             let rows = self
@@ -281,7 +341,10 @@ impl SemanticVectorStore {
         Ok(count)
     }
 
-    fn existing_hashes_for_event_ids(&self, event_ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {
+    pub(super) fn existing_hashes_for_event_ids(
+        &self,
+        event_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, String>> {
         if event_ids.is_empty() || !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(HashMap::new());
         }
@@ -315,7 +378,7 @@ impl SemanticVectorStore {
         Ok(hashes)
     }
 
-    fn upsert_chunk_embeddings(
+    pub(super) fn upsert_chunk_embeddings(
         &mut self,
         items: &[(SemanticChunkDocument, Vec<f32>)],
     ) -> Result<()> {
@@ -437,7 +500,10 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn prune_ineligible_events(&mut self, store: &Store) -> Result<SemanticPruneOutcome> {
+    pub(super) fn prune_ineligible_events(
+        &mut self,
+        store: &Store,
+    ) -> Result<SemanticPruneOutcome> {
         if !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(SemanticPruneOutcome::default());
         }
@@ -498,7 +564,7 @@ impl SemanticVectorStore {
         Ok(outcome)
     }
 
-    fn prune_candidate_events(
+    pub(super) fn prune_candidate_events(
         &self,
         before_event_seq: Option<i64>,
     ) -> Result<Vec<(Uuid, String, bool, i64)>> {
@@ -534,7 +600,10 @@ impl SemanticVectorStore {
         Ok(sidecar_events)
     }
 
-    fn delete_embedding_chunks_for_event_ids(&mut self, event_ids: &[Uuid]) -> Result<usize> {
+    pub(super) fn delete_embedding_chunks_for_event_ids(
+        &mut self,
+        event_ids: &[Uuid],
+    ) -> Result<usize> {
         if event_ids.is_empty() || !sqlite_table_exists(&self.conn, "event_embedding_chunks")? {
             return Ok(0);
         }
@@ -576,5 +645,21 @@ impl SemanticVectorStore {
         tx.commit()?;
         Ok(deleted)
     }
-
 }
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
+use ctx_history_core::utc_now;
+use ctx_history_store::{EventEmbeddingDocument, Store};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, OptionalExtension};
+use uuid::Uuid;
+
+use super::{
+    health_search::{sqlite_column_exists, sqlite_table_exists},
+    indexing::{semantic_document_hash, semantic_source_text, serialize_f32_blob},
+    model_contract::{semantic_model_key, SEMANTIC_DIMENSIONS},
+    runtime_limits::{SEMANTIC_PRUNE_EVENTS_PER_PASS, SEMANTIC_PRUNE_EVENT_BATCH},
+    vector_store::{
+        SemanticChunkDocument, SemanticPruneOutcome, SemanticSidecarStats, SemanticVectorStore,
+    },
+};

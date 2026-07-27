@@ -7,8 +7,15 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use url::{Host, Url};
 
-pub fn post_json(endpoint: &str, body: &[u8]) -> Result<()> {
+pub(crate) const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
+
+pub(crate) fn post_telemetry_json(endpoint: &str, body: &[u8]) -> Result<()> {
+    post_json_with_timeout(endpoint, body, TELEMETRY_HTTP_TIMEOUT)
+}
+
+fn post_json_with_timeout(endpoint: &str, body: &[u8], timeout: Duration) -> Result<()> {
     if let Some(path) = file_url_path(endpoint)? {
         let mut file = OpenOptions::new()
             .create(true)
@@ -21,7 +28,9 @@ pub fn post_json(endpoint: &str, body: &[u8]) -> Result<()> {
     }
     require_https_or_localhost(endpoint)?;
     ureq::post(endpoint)
-        .timeout(std::time::Duration::from_secs(2))
+        // ureq applies this overall deadline to connection establishment too
+        // when no separate connect timeout overrides it.
+        .timeout(timeout)
         .set("content-type", "application/json")
         .send_bytes(body)
         .map(|_| ())
@@ -148,36 +157,36 @@ pub(crate) fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
 }
 
 pub(crate) fn require_https_or_localhost(url: &str) -> Result<()> {
-    if url.starts_with("https://") {
+    let parsed = Url::parse(url).map_err(|_| anyhow!("invalid endpoint URL"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(anyhow!("endpoint URL must not contain credentials"));
+    }
+    if parsed.host().is_none() {
+        return Err(anyhow!("endpoint URL must contain a host"));
+    }
+    if parsed.scheme() == "https" {
         return Ok(());
     }
-    if let Some(rest) = url.strip_prefix("http://") {
-        let host = rest.split('/').next().unwrap_or_default();
-        if is_localhost_authority(host) {
-            return Ok(());
-        }
+    if parsed.scheme() == "http" && parsed.host().is_some_and(is_localhost_host) {
+        return Ok(());
     }
-    Err(anyhow!("refusing non-HTTPS endpoint: {url}"))
+    Err(anyhow!(
+        "refusing non-HTTPS endpoint; use HTTPS or localhost HTTP"
+    ))
 }
 
-pub(crate) fn is_localhost_authority(authority: &str) -> bool {
-    if authority.contains('@') {
-        return false;
+fn is_localhost_host(host: Host<&str>) -> bool {
+    match host {
+        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        Host::Ipv4(address) => address.is_loopback(),
+        Host::Ipv6(address) => address.is_loopback(),
     }
-    let host = if let Some(rest) = authority.strip_prefix("[::1]") {
-        if rest.is_empty() || rest.starts_with(':') {
-            "[::1]"
-        } else {
-            return false;
-        }
-    } else {
-        authority.split(':').next().unwrap_or_default()
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{net::TcpListener, sync::mpsc, thread};
+
     use super::*;
 
     #[test]
@@ -201,6 +210,36 @@ mod tests {
         require_https_or_localhost("http://[::1]:8080/events").unwrap();
         assert!(require_https_or_localhost("http://example.com/events").is_err());
         assert!(require_https_or_localhost("http://example.com@localhost/events").is_err());
+        assert!(require_https_or_localhost("https://user@example.com/events").is_err());
+        assert!(require_https_or_localhost("https://").is_err());
+    }
+
+    #[test]
+    fn telemetry_http_budget_is_at_most_250_milliseconds() {
+        assert_eq!(TELEMETRY_HTTP_TIMEOUT, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn telemetry_http_request_times_out_when_response_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+
+        let started = Instant::now();
+        let result = post_telemetry_json(&format!("http://{address}/events"), b"{}");
+        let elapsed = started.elapsed();
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "telemetry request took {elapsed:?}"
+        );
     }
 
     #[test]

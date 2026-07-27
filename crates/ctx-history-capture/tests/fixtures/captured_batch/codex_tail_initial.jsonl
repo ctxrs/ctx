@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-17T12:00:00Z","type":"session_meta","payload":{"id":"captured-batch-tail","timestamp":"2026-07-17T12:00:00Z","cwd":"/workspace/characterization","originator":"codex-cli"}}
+{"timestamp":"2026-07-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"tail initial"}]}}

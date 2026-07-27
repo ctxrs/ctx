@@ -1,11 +1,11 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
+use ctx_history_core::platform_security::{
+    restrict_private_directory as restrict_directory, restrict_private_file as restrict_file,
+};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -142,24 +142,12 @@ impl Drop for BlobWriteGuard {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn restrict_private_dir(path: &Path) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    restrict_directory(path)?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub(crate) fn restrict_private_dir(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 pub(crate) fn restrict_private_file(path: &Path) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn restrict_private_file(_path: &Path) -> Result<()> {
+    restrict_file(path)?;
     Ok(())
 }

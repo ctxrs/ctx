@@ -1,4 +1,26 @@
-use super::support::*;
+use crate::provider::importer::{
+    provider_event_import_identity, provider_scoped_source_uuid, provider_session_uuid,
+    provider_source_event_import_identity, provider_source_root_identity, provider_sync_metadata,
+    timestamps,
+};
+use crate::provider::providers::pi::{pi_provider_event_identity_index, PiSessionHeader};
+use crate::tests::support::fixtures::jsonl::jsonl_line;
+use crate::tests::support::paths::{provider_fixture, provider_history_fixture, tempdir};
+use crate::tests::support::provider_state::{
+    fixed_import_options, fixture_options, stored_provider_session_id,
+};
+use crate::{
+    fixture_envelope, import_pi_session_jsonl, import_provider_fixture_jsonl, import_spool,
+    read_jsonl, spool_counts, stable_capture_uuid, CaptureError, PiSessionImportOptions,
+    SpoolWriter,
+};
+use ctx_history_core::{
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event,
+    EventRole, EventType, Fidelity, Session, SessionStatus,
+};
+use ctx_history_store::Store;
+use serde_json::{json, Value};
+use std::fs;
 
 #[test]
 fn spool_writer_closes_tmp_file_atomically_to_jsonl() {
@@ -265,12 +287,16 @@ fn pi_session_import_replays_documented_session_jsonl_and_is_idempotent() {
     assert_eq!(events[4].event_type, EventType::Message);
     assert_eq!(events[4].role, Some(EventRole::Assistant));
     assert_eq!(events[5].event_type, EventType::Summary);
-    assert!(events[3].payload.to_string().contains("cargo test"));
+    assert!(!events[3].payload.to_string().contains("cargo test"));
     assert!(!events[3].payload.to_string().contains("fixture-secret"));
+    let runs = store.runs_for_session(session_id).unwrap();
+    assert!(runs
+        .iter()
+        .any(|run| run.command_preview.as_deref() == Some("cargo test -p ctx-history-capture")));
 }
 
 #[test]
-fn pi_session_import_rejects_header_only_session_jsonl() {
+fn pi_session_import_accepts_header_only_session_jsonl_without_scaffolding() {
     let temp = tempdir();
     let path = temp.path().join("header-only-pi.jsonl");
     fs::write(
@@ -288,10 +314,7 @@ fn pi_session_import_rejects_header_only_session_jsonl() {
     let summary =
         import_pi_session_jsonl(&path, &mut store, PiSessionImportOptions::default()).unwrap();
 
-    assert_eq!(summary.failed, 1);
-    assert!(summary.failures[0]
-        .error
-        .contains("no real message content"));
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
     assert!(store.list_sessions().unwrap().is_empty());
@@ -585,7 +608,7 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
 }
 
 #[test]
-fn pi_session_import_rejects_non_message_only_entries() {
+fn pi_session_import_accepts_non_message_only_entries() {
     let temp = tempdir();
     let fixture = temp.path().join("pi-non-message-only.jsonl");
     fs::write(
@@ -611,17 +634,19 @@ fn pi_session_import_rejects_non_message_only_entries() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1);
-    assert!(summary.failures[0]
-        .error
-        .contains("no real message content"));
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 3);
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-non-message-only");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].event_type, EventType::Summary);
+    assert_eq!(events[1].event_type, EventType::Notice);
+    assert_eq!(events[2].event_type, EventType::Notice);
 }
 
 #[test]
-fn pi_session_import_rejects_tool_only_entries() {
+fn pi_session_import_accepts_tool_only_entries() {
     let temp = tempdir();
     let fixture = temp.path().join("pi-tool-only.jsonl");
     fs::write(
@@ -647,13 +672,15 @@ fn pi_session_import_rejects_tool_only_entries() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 1);
-    assert!(summary.failures[0]
-        .error
-        .contains("no real message content"));
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 3);
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-tool-only");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].event_type, EventType::ToolCall);
+    assert_eq!(events[1].event_type, EventType::ToolOutput);
+    assert_eq!(events[2].event_type, EventType::CommandOutput);
 }
 
 #[test]

@@ -12,7 +12,8 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_run(&self, run: &Run) -> Result<()> {
-        self.conn.execute(
+        self.with_import_batch_write(|| {
+            self.conn.execute(
                 r#"
                 INSERT INTO runs
                 (id, history_record_id, session_id, run_type, status, started_at_ms, ended_at_ms, exit_code, cwd, command_preview, input_blob_id, output_blob_id, created_at_ms, updated_at_ms, source_id, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
@@ -62,11 +63,14 @@ impl Store {
                     serde_json::to_string(&run.sync.metadata)?,
                 ],
             )?;
-        Ok(())
+            self.journal_run_mutated(run.id)?;
+            Ok(())
+        })
     }
 
     pub fn insert_run_if_absent(&self, run: &Run) -> Result<bool> {
-        let changed = self
+        self.with_import_batch_write(|| {
+            let changed = self
                 .conn
                 .prepare_cached(
                     r#"
@@ -98,7 +102,11 @@ impl Store {
                     optional_timestamp_ms(run.sync.deleted_at),
                     serde_json::to_string(&run.sync.metadata)?,
                 ])?;
-        Ok(changed > 0)
+            if changed > 0 {
+                self.journal_run_mutated(run.id)?;
+            }
+            Ok(changed > 0)
+        })
     }
 
     pub fn get_run(&self, id: Uuid) -> Result<Run> {

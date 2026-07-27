@@ -30,7 +30,6 @@ skip() {
 
 run python3 scripts/check-agent-history-contract.py
 run bash scripts/check-sdk-no-publish.sh
-run cargo test -p ctx-protocol -p ctx-sdk
 
 if command -v npm >/dev/null 2>&1 && [ -f sdks/typescript/package.json ]; then
   if [ -f sdks/typescript/package-lock.json ]; then

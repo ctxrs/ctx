@@ -1,0 +1,25 @@
+{
+  "event_id": "c220e8ef-eb0b-43d9-89c8-c64806e87d93",
+  "event_name": "provider_refresh_completed",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "cli",
+  "operation": "refresh",
+  "outcome": "success",
+  "duration_bucket": "lt_5s",
+  "properties": {
+    "provider": "codex",
+    "trigger": "search",
+    "source_mode": "discovered",
+    "change": "changed",
+    "work_remaining": false,
+    "sources_bucket": "1",
+    "sessions_bucket": "2-5",
+    "events_bucket": "6-20",
+    "edges_bucket": "0",
+    "skips_bucket": "0",
+    "rejections_bucket": "0",
+    "failures_bucket": "0",
+    "bytes_bucket": "lt_100kb"
+  }
+}

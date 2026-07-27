@@ -1,0 +1,2 @@
+{"type":"session_meta","sessionId":"complete-qoder","uuid":"qoder-meta","timestamp":"2026-07-21T12:00:00Z","cwd":"/workspace/fixture"}
+{"type":"user","sessionId":"complete-qoder","uuid":"qoder-message","timestamp":"2026-07-21T12:00:01Z","message":{"role":"user","content":"Qoder snowman ☃\nquoted \"body\" and escaped \\\\ path"}}

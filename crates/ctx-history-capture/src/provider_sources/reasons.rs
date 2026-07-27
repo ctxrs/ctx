@@ -1,4 +1,20 @@
+use std::io::ErrorKind;
+
 use ctx_history_core::CaptureProvider;
+
+pub(super) fn path_presence_unknown_reason(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::PermissionDenied => {
+            "the selected provider path could not be inspected because access was denied; fallback was suppressed"
+        }
+        ErrorKind::NotADirectory => {
+            "the selected provider path has an inaccessible or malformed parent; fallback was suppressed"
+        }
+        _ => {
+            "the selected provider path could not be inspected safely; fallback was suppressed"
+        }
+    }
+}
 
 pub(super) fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
     match provider {

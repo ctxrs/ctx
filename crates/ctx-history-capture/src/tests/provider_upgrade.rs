@@ -1,4 +1,19 @@
-use super::support::*;
+use crate::provider::importer::{
+    import_normalized_provider_captures, provider_event_uuid, provider_scoped_source_uuid,
+    provider_session_uuid, provider_source_event_uuid, provider_source_root_identity,
+    provider_source_session_uuid, provider_source_uuid, provider_sync_metadata, timestamps,
+};
+use crate::tests::support::paths::tempdir;
+use crate::tests::support::provider_state::provider_collision_capture;
+use crate::{NormalizedProviderImportOptions, ProviderImportSummary, ProviderNormalizationResult};
+use chrono::{DateTime, Utc};
+use ctx_history_core::{
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
+    Fidelity, Session, SessionStatus,
+};
+use ctx_history_store::Store;
+use rusqlite::Connection;
+use serde_json::json;
 
 #[test]
 fn provider_import_reuses_pre_identity_session_with_exact_source_path_proof() {

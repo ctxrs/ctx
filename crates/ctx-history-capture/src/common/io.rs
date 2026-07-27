@@ -11,7 +11,7 @@ use crate::{CaptureError, ProviderImportSummary, Result, MAX_PROVIDER_JSONL_LINE
 pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     let metadata = fs::symlink_metadata(root)?;
     let file_type = metadata.file_type();
-    if file_type.is_symlink() {
+    if provider_metadata_is_link_like(&metadata) {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: root.to_path_buf(),
             reason: "symlinked provider transcript roots are rejected",
@@ -31,7 +31,14 @@ pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Resu
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if provider_metadata_is_link_like(&metadata) {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path,
+                reason: "linked provider transcript path components are rejected",
+            });
+        }
+        let file_type = metadata.file_type();
         if file_type.is_dir() {
             collect_jsonl_paths(&path, paths)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
@@ -45,7 +52,7 @@ pub(crate) fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Resu
 pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
-    if file_type.is_symlink() {
+    if provider_metadata_is_link_like(&metadata) {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
             reason: "symlinked provider transcript files are rejected",
@@ -69,10 +76,12 @@ pub(crate) fn ensure_provider_path_parents_are_not_symlinks(path: &Path) -> Resu
         if current.as_os_str().is_empty() {
             continue;
         }
-        let Ok(metadata) = fs::symlink_metadata(&current) else {
-            continue;
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
         };
-        if metadata.file_type().is_symlink() {
+        if provider_metadata_is_link_like(&metadata) {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: path.to_path_buf(),
                 reason: "symlinked provider transcript path components are rejected",
@@ -80,6 +89,26 @@ pub(crate) fn ensure_provider_path_parents_are_not_symlinks(path: &Path) -> Resu
         }
     }
     Ok(())
+}
+
+pub(crate) fn path_has_component(path: &Path, expected: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == expected)
+}
+
+pub(crate) fn provider_metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    false
 }
 
 pub(crate) fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str) -> Result<String> {
@@ -217,3 +246,7 @@ pub(crate) fn read_json_file_limited(path: &Path, max_bytes: usize, label: &str)
     let text = read_text_file_limited(path, max_bytes, label)?;
     serde_json::from_str(&text).map_err(CaptureError::from)
 }
+
+#[cfg(test)]
+#[path = "io_tests.rs"]
+mod tests;

@@ -15,28 +15,25 @@ and private relevance evals justify flipping the default.
   cross-device continuity, shared/team memory, admin controls, policy,
   compliance, hosted acceleration, and LLM summaries. The free local CLI should
   stay useful enough to create trust.
-- Daemon maintenance and semantic search are both disabled by default for the
-  prerelease. Advanced users opt into daemon-owned background maintenance with:
+- Daemon maintenance is enabled by default. Users can opt out durably with:
 
   ```toml
   [daemon]
-  enabled = true
+  enabled = false
   ```
 
-- Semantic requires the daemon. The supported prerelease semantic opt-in shape
+- Semantic remains disabled by default and requires the daemon. The supported
+  semantic opt-in shape
   is:
 
   ```toml
-  [daemon]
-  enabled = true
-
   [search]
   semantic = true
   ```
 
 - `CTX_DAEMON_ENABLED=1` and `CTX_SEARCH_SEMANTIC=1` are available as
-  operator/test overrides. `CTX_DISABLE_DAEMON=1` and
-  `CTX_DISABLE_SEMANTIC_SEARCH=1` force them off.
+  operator/test overrides. Explicit daemon opt-outs, `CTX_DAEMON_ENABLED=false`,
+  and `CTX_SEARCH_SEMANTIC=false` force their feature off.
 - Daemon without semantic is valid and useful: it owns lexical incremental
   refresh and can later own additional local query-service work. The semantic
   query-embedding socket is created only when semantic is enabled. Semantic
@@ -74,8 +71,8 @@ and private relevance evals justify flipping the default.
   exactly once, and the new model key prevents pre-migration vectors from being
   counted as E5 sidecar coverage.
 - Config now has `[daemon] enabled = true|false` and
-  `[search] semantic = true|false`. Both are default unset/off for prerelease
-  dogfood, and both have env overrides.
+  `[search] semantic = true|false`. An unset daemon defaults on, while unset
+  semantic search defaults off; both have env overrides.
 - Default search backend resolution is config-aware: lexical by default while
   semantic is off, hybrid by default while semantic is on, and explicit semantic
   fails fast when disabled.
@@ -322,11 +319,9 @@ and private relevance evals justify flipping the default.
   - `[search] semantic = true|false`;
   - `[daemon] enabled = true|false`;
   - `CTX_SEARCH_SEMANTIC`;
-  - `CTX_DISABLE_SEMANTIC_SEARCH`;
   - `CTX_DAEMON_ENABLED`;
-  - `CTX_DISABLE_DAEMON`;
   - default search backend is lexical until semantic is enabled;
-  - daemon maintenance is default off for prerelease;
+  - daemon maintenance is default on while semantic search remains default off;
   - setup/import/search do not write default values to `config.toml`;
   - no public `auto` mode.
 - Remaining product work:

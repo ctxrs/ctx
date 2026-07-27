@@ -1,4 +1,33 @@
-CTX_GATE_DATA = glob([
+load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_rust//rust:defs.bzl", "rustfmt_test")
+load("//tools/bazel:gates.bzl", "non_rust_gate", "real_harness_gate")
+
+filegroup(
+    name = "cloud_removed_build_inputs",
+    srcs = [
+        "Cargo.toml",
+        "//crates/ctx-cli:Cargo.toml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "dev_linux",
+    define_values = {"ctx_dev_linux": "true"},
+    visibility = ["//visibility:public"],
+)
+
+java_binary(
+    name = "bazel-diff",
+    main_class = "com.bazel_diff.Main",
+    runtime_deps = ["@ctx_bazel_diff//jar"],
+    tags = ["manual", "tool"],
+)
+
+# These inputs belong to repository-policy, packaging, documentation, and real
+# harness actions. Rust compilation and Rust tests are deliberately absent:
+# those are represented by rules_rust targets below.
+NON_RUST_GATE_DATA = glob([
     ".bazelignore",
     ".bazelrc",
     ".bazelversion",
@@ -12,31 +41,50 @@ CTX_GATE_DATA = glob([
     "MODULE.bazel",
     "README.md",
     "SECURITY.md",
-    "crates/**",
     "contracts/**",
     "docs/**",
     "plugins/**",
+    "protocol/**",
     "scripts/**",
     "sdks/**",
     "skills/**",
     "tests/**",
-]) + [
+])
+
+CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-search:cargo_package_data",
     "//crates/ctx-history-store:cargo_package_data",
+    "//crates/ctx-pro-host-protocol:cargo_package_data",
     "//crates/ctx-protocol:cargo_package_data",
     "//crates/ctx-sdk:cargo_package_data",
 ]
 
-REAL_HARNESS_DATA = CTX_GATE_DATA + [
-    "//crates/ctx-cli:ctx",
+# Keep the direct-checkout and Bazel package audits on the exact same source
+# surface. The checker owns the path list; these filegroups make those paths
+# available in the sandboxed runfiles tree.
+RELEASE_PACKAGE_AUDIT_DATA = NON_RUST_GATE_DATA + [
+    "//crates/ctx-cli:cargo_package_data",
+    "//crates/ctx-history-capture:cargo_package_data",
+    "//crates/ctx-history-search:cargo_package_data",
 ]
+
+REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
 
 filegroup(
     name = "agent_history_contract_fixtures",
     srcs = glob(["contracts/agent-history-v1/fixtures/*.json"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "telemetry_contract_fixtures",
+    srcs = glob([
+        "contracts/telemetry-v1/*.md",
+        "contracts/telemetry-v1/fixtures/*.json",
+    ]),
     visibility = ["//visibility:public"],
 )
 
@@ -59,258 +107,247 @@ filegroup(
 )
 
 filegroup(
+    name = "complete_content_provider_capabilities",
+    srcs = ["docs/complete-content-provider-capabilities.json"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release_contracts",
+    srcs = [
+        "contracts/release-targets-v1.json",
+        "contracts/release-version-v1.json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "public_test_fixtures",
     srcs = glob(["tests/fixtures/**"]),
     visibility = ["//visibility:public"],
 )
 
-sh_test(
-    name = "cargo_fmt_check",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["cargo_fmt_check"],
-    data = CTX_GATE_DATA,
+filegroup(
+    name = "upgrade_extractor_contract",
+    srcs = ["scripts/test-windows-runtime-upgrade-extractor.ps1"],
+    visibility = ["//visibility:public"],
 )
 
-sh_test(
-    name = "cargo_check",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["cargo_check"],
-    data = CTX_GATE_DATA,
+RUST_FORMAT_TARGETS = [
+    "//crates/ctx-cli:analytics_identity_tests",
+    "//crates/ctx-cli:analytics_tests",
+    "//crates/ctx-cli:analytics_policy_tests",
+    "//crates/ctx-cli:cli_public_help_docs_tests",
+    "//crates/ctx-cli:cloud_removed_tests",
+    "//crates/ctx-cli:custom_root_discovery_tests",
+    "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
+    "//crates/ctx-cli:history_source_plugins_tests",
+    "//crates/ctx-cli:index_tests",
+    "//crates/ctx-cli:integrations_mcp_tests",
+    "//crates/ctx-cli:integrations_tests",
+    "//crates/ctx-cli:mcp_integration_e2e_tests",
+    "//crates/ctx-cli:mcp_telemetry_tests",
+    "//crates/ctx-cli:mcp_tests",
+    "//crates/ctx-cli:native_provider_real_shapes_tests",
+    "//crates/ctx-cli:native_provider_rejections_tests",
+    "//crates/ctx-cli:native_providers_tests",
+    "//crates/ctx-cli:offline_default_tests",
+    "//crates/ctx-cli:pro_host_tests",
+    "//crates/ctx-cli:pro_lifecycle_tests",
+    "//crates/ctx-cli:pro_mcp_tests",
+    "//crates/ctx-cli:pro_release_helper_tests",
+    "//crates/ctx-cli:pro_test_support_tests",
+    "//crates/ctx-cli:search_refresh_tests",
+    "//crates/ctx-cli:search_show_locate_sql_tests",
+    "//crates/ctx-cli:setup_sources_import_tests",
+    "//crates/ctx-cli:skill_tests",
+    "//crates/ctx-cli:slash_command_e2e_tests",
+    "//crates/ctx-cli:unit_tests",
+    "//crates/ctx-cli:upgrade_tests",
+    "//crates/ctx-history-capture:captured_batch_characterization_tests",
+    "//crates/ctx-history-capture:complete_content_jsonl_tests",
+    "//crates/ctx-history-capture:complete_content_sqlite_tests",
+    "//crates/ctx-history-capture:cursor_native_tests",
+    "//crates/ctx-history-capture:structured_complete_content_tests",
+    "//crates/ctx-history-capture:unit_tests",
+    "//crates/ctx-history-core:unit_tests",
+    "//crates/ctx-history-search:unit_tests",
+    "//crates/ctx-history-store:unit_tests",
+    "//crates/ctx-pro-host-protocol:generate_protocol_inventory",
+    "//crates/ctx-pro-host-protocol:unit_tests",
+    "//crates/ctx-protocol:unit_tests",
+    "//crates/ctx-sdk:unit_tests",
+]
+
+rustfmt_test(
+    name = "rustfmt_check",
+    targets = RUST_FORMAT_TARGETS,
 )
 
-sh_test(
-    name = "cargo_clippy",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["cargo_clippy"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "cargo_test_default",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["cargo_test_default"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "cli_contract_tests",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["cli_contract_tests"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "slash_command_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["slash_command_e2e"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "real_harness_codex_skill_e2e",
-    srcs = ["scripts/bazel-test.sh"],
+py_test(
+    name = "rust_target_inventory_check",
+    srcs = ["//tools/bazel:check_rust_target_inventory.py"],
+    main = "//tools/bazel:check_rust_target_inventory.py",
     args = [
-        "real_harness_codex_skill_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+        "$(rootpath //tools/bazel:rust-target-inventory.json)",
+        "$(rootpath Cargo.toml)",
     ],
-    data = REAL_HARNESS_DATA,
+    data = [
+        "Cargo.toml",
+        "//tools/bazel:rust-target-inventory.json",
+    ] + CARGO_WORKSPACE_PACKAGE_DATA,
 )
 
-sh_test(
-    name = "real_harness_gemini_slash_e2e",
-    srcs = ["scripts/bazel-test.sh"],
+py_test(
+    name = "rust_toolchain_pin_check",
+    srcs = ["//tools/bazel:check_rust_toolchain_pins.py"],
+    main = "//tools/bazel:check_rust_toolchain_pins.py",
     args = [
-        "real_harness_gemini_slash_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+        "$(rootpath MODULE.bazel)",
+        "$(rootpath contracts/release-targets-v1.json)",
     ],
-    data = REAL_HARNESS_DATA,
-)
-
-sh_test(
-    name = "real_harness_qwen_slash_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = [
-        "real_harness_qwen_slash_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+    data = [
+        "MODULE.bazel",
+        "contracts/release-targets-v1.json",
     ],
-    data = REAL_HARNESS_DATA,
 )
 
-sh_test(
-    name = "docs_check",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["docs_check"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "mcp_integration_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["mcp_integration_e2e"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "real_harness_codex_mcp_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = [
-        "real_harness_codex_mcp_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+py_test(
+    name = "rust_toolchain_pin_mutation_tests",
+    srcs = [
+        "//tools/bazel:check_rust_toolchain_pins.py",
+        "//tools/bazel:check_rust_toolchain_pins_test.py",
     ],
-    data = REAL_HARNESS_DATA,
-)
-
-sh_test(
-    name = "real_harness_qwen_mcp_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = [
-        "real_harness_qwen_mcp_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+    data = [
+        "MODULE.bazel",
+        "contracts/release-targets-v1.json",
     ],
-    data = REAL_HARNESS_DATA,
+    imports = ["tools/bazel"],
+    main = "//tools/bazel:check_rust_toolchain_pins_test.py",
 )
 
-sh_test(
-    name = "real_harness_claude_mcp_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = [
-        "real_harness_claude_mcp_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+py_test(
+    name = "bazel_affected_mutation_tests",
+    srcs = [
+        "//tools/bazel:select_affected_tests.py",
+        "//tools/bazel:select_affected_tests_test.py",
     ],
-    data = REAL_HARNESS_DATA,
+    imports = ["tools/bazel"],
+    main = "//tools/bazel:select_affected_tests_test.py",
 )
 
-sh_test(
-    name = "real_harness_gemini_mcp_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = [
-        "real_harness_gemini_mcp_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+py_test(
+    name = "release_target_matrix_check",
+    srcs = ["scripts/check-release-target-matrix.py"],
+    main = "scripts/check-release-target-matrix.py",
+    data = [":release_contracts"],
+    tags = ["release-gate"],
+)
+
+py_test(
+    name = "release_target_matrix_tests",
+    srcs = [
+        "scripts/check-release-target-matrix.py",
+        "scripts/tests/check-release-target-matrix-test.py",
     ],
-    data = REAL_HARNESS_DATA,
+    main = "scripts/tests/check-release-target-matrix-test.py",
+    data = [":release_contracts"],
+    tags = ["release-gate"],
 )
 
-sh_test(
-    name = "real_harness_opencode_mcp_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = [
-        "real_harness_opencode_mcp_e2e",
-        "$(rootpath //crates/ctx-cli:ctx)",
+py_test(
+    name = "onnxruntime_sidecar_tools_tests",
+    srcs = ["scripts/tests/onnxruntime-sidecar-tools-test.py"],
+    data = [
+        "scripts/build-onnxruntime-sidecar.sh",
+        "scripts/onnxruntime-sidecar/archive_tool.py",
+        "scripts/onnxruntime-sidecar/build_freebsd_x64.sh",
+        "scripts/onnxruntime-sidecar/build_macos_x64.sh",
+        "scripts/onnxruntime-sidecar/release_manifest.sh",
+        "scripts/onnxruntime-sidecar/source_inputs.sh",
+        "scripts/onnxruntime-sidecar/stage_official.sh",
+        "scripts/onnxruntime-sidecar/validate_runtime.py",
+        "scripts/onnxruntime-sidecar/validate_sidecar.sh",
     ],
-    data = REAL_HARNESS_DATA,
+    main = "scripts/tests/onnxruntime-sidecar-tools-test.py",
+    tags = ["release-gate"],
 )
 
 sh_test(
-    name = "installer_path_smoke",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["installer_path_smoke"],
-    data = CTX_GATE_DATA,
+    name = "cli_build_cfg_parity_check",
+    srcs = ["//tools/bazel:check-cli-build-cfg.sh"],
+    data = [
+        "//crates/ctx-cli:BUILD.bazel",
+        "//crates/ctx-cli:build.rs",
+        "//crates/ctx-cli:test_targets.bzl",
+    ],
 )
 
+non_rust_gate(name = "docs_check", mode = "docs_check", data = NON_RUST_GATE_DATA)
+non_rust_gate(name = "installer_path_smoke", mode = "installer_path_smoke", data = NON_RUST_GATE_DATA)
+non_rust_gate(name = "buildkite_pipeline_check", mode = "buildkite_pipeline_check", data = NON_RUST_GATE_DATA)
+non_rust_gate(name = "release_binary_compat_tests", mode = "release_binary_compat_tests", data = NON_RUST_GATE_DATA)
+non_rust_gate(name = "native_candidate_smoke_tests", mode = "native_candidate_smoke_tests", data = NON_RUST_GATE_DATA)
+non_rust_gate(name = "linux_release_construction_tests", mode = "linux_release_construction_tests", data = NON_RUST_GATE_DATA)
+non_rust_gate(name = "macos_release_signing_tests", mode = "macos_release_signing_tests", data = NON_RUST_GATE_DATA)
 sh_test(
-    name = "buildkite_pipeline_check",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["buildkite_pipeline_check"],
-    data = CTX_GATE_DATA,
+    name = "public_cli_artifact_cleanup_tests",
+    srcs = ["scripts/tests/build-public-cli-artifact-cleanup-test.sh"],
+    data = ["scripts/build-public-cli-artifact.sh"],
+    tags = ["release-gate"],
 )
-
-sh_test(
-    name = "release_binary_compat_tests",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["release_binary_compat_tests"],
-    data = CTX_GATE_DATA,
+non_rust_gate(name = "loc_check", mode = "loc_check", data = NON_RUST_GATE_DATA)
+non_rust_gate(
+    name = "public_control_surface_check",
+    mode = "public_control_surface_check",
+    data = NON_RUST_GATE_DATA + ["//crates/ctx-cli:cargo_package_data"],
 )
-
-sh_test(
-    name = "native_candidate_smoke_tests",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["native_candidate_smoke_tests"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "linux_release_construction_tests",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["linux_release_construction_tests"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "macos_release_signing_tests",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["macos_release_signing_tests"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "loc_check",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["loc_check"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "source_diff_check",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["source_diff_check"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
+non_rust_gate(name = "source_diff_check", mode = "source_diff_check", data = NON_RUST_GATE_DATA)
+non_rust_gate(
     name = "package_audit_fast",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["package_audit_fast"],
-    data = CTX_GATE_DATA,
+    mode = "package_audit_fast",
+    args = ["$(rootpath //crates/ctx-cli:ctx)"],
+    data = RELEASE_PACKAGE_AUDIT_DATA + ["//crates/ctx-cli:ctx"],
 )
-
-sh_test(
+non_rust_gate(
     name = "sdk_contract_checks",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["sdk_contract_checks"],
-    data = CTX_GATE_DATA,
+    mode = "sdk_contract_checks",
+    data = NON_RUST_GATE_DATA + [
+        "//crates/ctx-protocol:cargo_package_data",
+        "//crates/ctx-sdk:cargo_package_data",
+    ],
 )
-
-sh_test(
+non_rust_gate(
     name = "sdk_package_dry_run",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["sdk_package_dry_run"],
-    data = CTX_GATE_DATA,
+    mode = "sdk_package_dry_run",
+    args = [
+        "$(rootpath //tools/bazel:pinned_cargo)",
+        "$(rootpath //tools/bazel:pinned_rustc)",
+        "$(rootpath //tools/bazel:sdk_cargo_vendor_sources)",
+    ],
+    data = NON_RUST_GATE_DATA + CARGO_WORKSPACE_PACKAGE_DATA + [
+        "//tools/bazel:pinned_cargo",
+        "//tools/bazel:pinned_rustc",
+        "//tools/bazel:sdk_cargo_vendor_sources",
+    ],
+    tags = ["release-gate"],
 )
-
-sh_test(
+non_rust_gate(
     name = "package_audit_release",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["package_audit_release"],
-    data = CTX_GATE_DATA,
+    mode = "package_audit_release",
+    args = ["$(rootpath //crates/ctx-cli:ctx)"],
+    data = RELEASE_PACKAGE_AUDIT_DATA + ["//crates/ctx-cli:ctx"],
+    tags = ["release-gate"],
 )
 
-sh_test(
-    name = "fresh_home_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["fresh_home_e2e"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "provider_fixture_e2e",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["provider_fixture_e2e"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "local_transcript_oracle",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["local_transcript_oracle"],
-    data = CTX_GATE_DATA,
-)
-
-sh_test(
-    name = "search_determinism_tests",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["search_determinism_tests"],
-    data = CTX_GATE_DATA,
-)
+real_harness_gate(name = "real_harness_codex_skill_e2e", script_mode = "real_harness_codex_skill_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_gemini_slash_e2e", script_mode = "real_harness_gemini_slash_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_qwen_slash_e2e", script_mode = "real_harness_qwen_slash_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_codex_mcp_e2e", script_mode = "real_harness_codex_mcp_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_qwen_mcp_e2e", script_mode = "real_harness_qwen_mcp_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_claude_mcp_e2e", script_mode = "real_harness_claude_mcp_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_gemini_mcp_e2e", script_mode = "real_harness_gemini_mcp_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
+real_harness_gate(name = "real_harness_opencode_mcp_e2e", script_mode = "real_harness_opencode_mcp_e2e", binary = "//crates/ctx-cli:ctx", data = REAL_HARNESS_DATA)
 
 sh_test(
     name = "native_ctx_binary_smoke",
@@ -325,30 +362,106 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "release_binary_string_audit_tests",
+    srcs = ["scripts/tests/audit-release-binary-strings-test.sh"],
+    data = [
+        "scripts/check-release-binary-strings.sh",
+        "scripts/tests/fixtures/release-binary-strings/protocol-v1-local-runtime.txt",
+        "scripts/tests/fixtures/release-binary-strings/removed-cloud-history.txt",
+    ],
+    tags = ["non-rust-action"],
+)
+
+sh_test(
+    name = "release_source_surface_audit_tests",
+    srcs = ["scripts/tests/audit-release-source-surface-test.sh"],
+    data = [
+        "scripts/check-release-source-surface.sh",
+        "scripts/tests/fixtures/release-source-surface/retained-pro-uninstall/crates/ctx-cli/src/pro/lifecycle_commands.rs",
+        "scripts/tests/fixtures/release-source-surface/retired-command-surfaces/crates/ctx-cli/src/main.rs",
+        "scripts/tests/fixtures/release-source-surface/retired-misplaced-pro-uninstall/crates/ctx-cli/src/pro/other.rs",
+        "scripts/tests/fixtures/release-source-surface/retired-top-level-uninstall/crates/ctx-cli/src/main.rs",
+    ],
+    tags = ["non-rust-action"],
+)
+
+test_suite(name = "cli_contract_tests", tests = [
+    "//crates/ctx-cli:cli_public_help_docs_tests",
+    "//crates/ctx-cli:upgrade_tests",
+])
+test_suite(name = "slash_command_e2e", tests = ["//crates/ctx-cli:slash_command_e2e_tests"])
+test_suite(name = "mcp_integration_e2e", tests = ["//crates/ctx-cli:mcp_integration_e2e_tests"])
+test_suite(name = "fresh_home_e2e", tests = ["//crates/ctx-cli:search_show_locate_sql_tests"])
+test_suite(name = "provider_fixture_e2e", tests = [
+    "//crates/ctx-cli:native_providers_tests",
+    "//crates/ctx-cli:search_show_locate_sql_tests",
+])
+test_suite(name = "local_transcript_oracle", tests = ["//crates/ctx-cli:search_show_locate_sql_tests"])
+test_suite(name = "search_determinism_tests", tests = ["//crates/ctx-history-search:determinism_tests"])
+test_suite(name = "show_complete_content_tests", tests = [
+    "//crates/ctx-cli:complete_content_tests",
+    "//crates/ctx-history-capture:complete_content_tests",
+])
+
+NATIVE_RUST_TESTS = [
+    ":native_ctx_binary_smoke",
+    "//crates/ctx-cli:analytics_tests",
+    "//crates/ctx-cli:analytics_policy_tests",
+    "//crates/ctx-cli:cli_public_help_docs_tests",
+    "//crates/ctx-cli:cloud_removed_tests",
+    "//crates/ctx-cli:custom_root_discovery_tests",
+    "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
+    "//crates/ctx-cli:history_source_plugins_tests",
+    "//crates/ctx-cli:index_tests",
+    "//crates/ctx-cli:integrations_mcp_tests",
+    "//crates/ctx-cli:integrations_tests",
+    "//crates/ctx-cli:mcp_integration_e2e_tests",
+    "//crates/ctx-cli:mcp_tests",
+    "//crates/ctx-cli:native_provider_real_shapes_tests",
+    "//crates/ctx-cli:native_provider_rejections_tests",
+    "//crates/ctx-cli:native_providers_tests",
+    "//crates/ctx-cli:offline_default_tests",
+    "//crates/ctx-cli:pro_host_tests",
+    "//crates/ctx-cli:pro_lifecycle_tests",
+    "//crates/ctx-cli:pro_mcp_tests",
+    "//crates/ctx-cli:pro_release_helper_tests",
+    "//crates/ctx-cli:pro_test_support_tests",
+    "//crates/ctx-cli:search_refresh_tests",
+    "//crates/ctx-cli:search_show_locate_sql_tests",
+    "//crates/ctx-cli:setup_sources_import_tests",
+    "//crates/ctx-cli:skill_tests",
+    "//crates/ctx-cli:slash_command_e2e_tests",
+    "//crates/ctx-cli:unit_tests",
+    "//crates/ctx-cli:upgrade_tests",
+    "//crates/ctx-history-capture:captured_batch_characterization_tests",
+    "//crates/ctx-history-capture:complete_content_jsonl_tests",
+    "//crates/ctx-history-capture:complete_content_sqlite_tests",
+    "//crates/ctx-history-capture:cursor_native_tests",
+    "//crates/ctx-history-capture:structured_complete_content_tests",
+    "//crates/ctx-history-capture:unit_tests",
+    "//crates/ctx-history-core:unit_tests",
+    "//crates/ctx-history-search:determinism_tests",
+    "//crates/ctx-history-search:unit_tests",
+    "//crates/ctx-history-store:unit_tests",
+    "//crates/ctx-pro-host-protocol:conformance_tests",
+    "//crates/ctx-pro-host-protocol:unit_tests",
+    "//crates/ctx-protocol:unit_tests",
+    "//crates/ctx-sdk:unit_tests",
+]
+
 test_suite(
     name = "native_rust_smoke",
     tests = [
         ":native_ctx_binary_smoke",
         "//crates/ctx-history-core:unit_tests",
+        "//crates/ctx-pro-host-protocol:conformance_tests",
         "//crates/ctx-protocol:unit_tests",
         "//crates/ctx-sdk:unit_tests",
     ],
 )
 
-test_suite(
-    name = "native_rust",
-    tests = [
-        ":native_ctx_binary_smoke",
-        "//crates/ctx-cli:unit_tests",
-        "//crates/ctx-history-capture:cursor_native_tests",
-        "//crates/ctx-history-capture:unit_tests",
-        "//crates/ctx-history-core:unit_tests",
-        "//crates/ctx-history-search:unit_tests",
-        "//crates/ctx-history-store:unit_tests",
-        "//crates/ctx-protocol:unit_tests",
-        "//crates/ctx-sdk:unit_tests",
-    ],
-)
+test_suite(name = "native_rust", tests = NATIVE_RUST_TESTS)
 
 test_suite(
     name = "real_harness",
@@ -367,54 +480,34 @@ test_suite(
 test_suite(
     name = "fast",
     tests = [
-        ":cargo_fmt_check",
-        ":cargo_check",
-        ":cli_contract_tests",
-        ":slash_command_e2e",
-        ":docs_check",
-        ":mcp_integration_e2e",
-        ":installer_path_smoke",
         ":buildkite_pipeline_check",
-        ":release_binary_compat_tests",
-        ":native_candidate_smoke_tests",
+        ":bazel_affected_mutation_tests",
+        ":cli_build_cfg_parity_check",
+        ":cli_contract_tests",
+        ":docs_check",
+        ":installer_path_smoke",
         ":linux_release_construction_tests",
         ":loc_check",
         ":macos_release_signing_tests",
+        ":native_candidate_smoke_tests",
         ":native_rust_smoke",
-        ":source_diff_check",
         ":package_audit_fast",
+        ":public_control_surface_check",
+        ":public_cli_artifact_cleanup_tests",
+        ":release_binary_compat_tests",
+        ":release_binary_string_audit_tests",
+        ":release_source_surface_audit_tests",
+        ":release_target_matrix_check",
+        ":release_target_matrix_tests",
+        ":rust_target_inventory_check",
+        ":rust_toolchain_pin_check",
+        ":rust_toolchain_pin_mutation_tests",
+        ":rustfmt_check",
         ":sdk_contract_checks",
+        ":source_diff_check",
     ],
 )
 
-test_suite(
-    name = "presubmit",
-    tests = [
-        ":fast",
-        ":cargo_clippy",
-        ":cargo_test_default",
-        ":native_rust",
-        ":fresh_home_e2e",
-        ":provider_fixture_e2e",
-        ":local_transcript_oracle",
-        ":search_determinism_tests",
-    ],
-)
-
-test_suite(
-    name = "ci",
-    tests = [
-        ":presubmit",
-        ":sdk_package_dry_run",
-        ":package_audit_release",
-    ],
-)
-
-test_suite(
-    name = "smoke",
-    tests = [
-        ":fast",
-        ":fresh_home_e2e",
-        ":provider_fixture_e2e",
-    ],
-)
+test_suite(name = "presubmit", tests = [":fast", ":native_rust"])
+test_suite(name = "ci", tests = [":presubmit", ":sdk_package_dry_run", ":package_audit_release"])
+test_suite(name = "smoke", tests = [":fast", ":fresh_home_e2e", ":provider_fixture_e2e"])

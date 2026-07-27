@@ -15,7 +15,8 @@ Adapters should provide:
 - event type, timestamp, role, text, and metadata when known;
 - touched-file metadata when tool calls, outputs, or native provider fields
   expose file paths;
-- bounded diagnostic previews for failed or timed-out tool/command output;
+- compact typed outcome/evidence and a full-body `ContentRef` for
+  tool/command results when the parser can normalize the complete body;
 - source path plus cursor or line information for citations;
 - clear errors for malformed or unsupported input.
 

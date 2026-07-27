@@ -1,0 +1,970 @@
+use std::{
+    cmp::Ordering,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{anyhow, bail, Context, Result};
+use ctx_history_core::platform_security::{
+    restrict_private_directory, restrict_private_executable, restrict_private_file,
+    verify_private_directory,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use super::artifact_delivery::VerifiedArtifactBundle;
+use super::client::default_helper_path;
+use super::commercial_config::CommercialConfig;
+use super::verified_executable::VerifiedHelperExecutable;
+use lifecycle_manifest::{
+    parse_release_version, validate_manifest_release_trust, verified_manifest,
+    verified_manifest_for_trust, ProInstallMarker, ProManifest, MAX_ARTIFACT_BYTES,
+    MAX_INSTALL_MARKER_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
+};
+#[cfg(test)]
+use lifecycle_manifest::{
+    platform_target, verify_signature_with_key, PRO_RELEASE_STAGING_PUBLIC_KEY_PEM,
+};
+
+const MAX_TRANSACTION_JOURNAL_BYTES: u64 = 16 * 1024;
+
+#[path = "lifecycle_lock.rs"]
+mod lifecycle_lock;
+use lifecycle_lock::{
+    install_marker_path, layout_for_target, previous_helper_path, previous_marker_path,
+    publish_helper_path, publish_marker_path, rollback_helper_stage_path,
+    rollback_marker_stage_path, transaction_helper_path, transaction_journal_next_path,
+    transaction_journal_path, transaction_marker_path, validate_private_directory, LifecycleLock,
+};
+
+#[path = "lifecycle_manifest.rs"]
+pub(super) mod lifecycle_manifest;
+
+#[path = "lifecycle_commands.rs"]
+mod commands;
+pub(crate) use commands::{lifecycle_status_json, run_lifecycle, ProArgs};
+pub(super) use commands::{ProDeletionService, ProLifecycleService, ProManagePlan, ProSetupPlan};
+
+/// A fully downloaded release bundle. Artifact delivery owns construction of
+/// this value; lifecycle only feeds it to the transactional installer.
+#[derive(Debug, Clone)]
+pub(crate) struct ProInstallArgs {
+    artifact: PathBuf,
+    manifest: PathBuf,
+    signature: PathBuf,
+}
+
+impl ProInstallArgs {
+    pub(crate) fn new(artifact: PathBuf, manifest: PathBuf, signature: PathBuf) -> Self {
+        Self {
+            artifact,
+            manifest,
+            signature,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PairIdentity {
+    artifact_size: u64,
+    artifact_sha256: String,
+    marker_sha256: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallTransaction {
+    schema_version: u32,
+    transaction_id: Uuid,
+    state: TransactionState,
+    old: Option<PairIdentity>,
+    new: PairIdentity,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TransactionState {
+    Preparing,
+    Committed,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedPair {
+    identity: PairIdentity,
+    artifact: Vec<u8>,
+    marker: Vec<u8>,
+    manifest: ProManifest,
+}
+
+impl PairIdentity {
+    fn new(artifact: &[u8], marker: &[u8], manifest: &ProManifest) -> Self {
+        Self {
+            artifact_size: artifact.len() as u64,
+            artifact_sha256: format!("{:x}", Sha256::digest(artifact)),
+            marker_sha256: format!("{:x}", Sha256::digest(marker)),
+            version: manifest.version.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Persistence {
+    #[cfg(test)]
+    crash_after: Option<usize>,
+    #[cfg(test)]
+    boundaries: Vec<&'static str>,
+    #[cfg(test)]
+    hard_exit: bool,
+}
+
+impl Persistence {
+    fn boundary(&mut self, name: &'static str) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.boundaries.push(name);
+            if self.crash_after == Some(self.boundaries.len()) {
+                if self.hard_exit {
+                    std::process::exit(86);
+                }
+                bail!("simulated_termination: {name}");
+            }
+        }
+        #[cfg(not(test))]
+        let _ = name;
+        Ok(())
+    }
+}
+
+pub(super) fn validated_installed_helper_path(data_root: &Path) -> Result<PathBuf> {
+    validated_installed_helper(data_root).map(|helper| helper.path().to_path_buf())
+}
+
+pub(super) fn validated_installed_helper(data_root: &Path) -> Result<VerifiedHelperExecutable> {
+    let trust = CommercialConfig::production()?.release_trust;
+    let target = default_helper_path(data_root);
+    let _lifecycle_lock = LifecycleLock::acquire(&target, false)?
+        .ok_or_else(|| anyhow!("pro_not_installed: signed Pro helper is not installed"))?;
+    let pair =
+        reconcile_installation_locked(&target, trust.public_key_pem, &mut Persistence::default())?
+            .ok_or_else(|| anyhow!("pro_not_installed: signed Pro helper is not installed"))?;
+    validate_manifest_release_trust(&pair.manifest, trust)?;
+    let marker_path = install_marker_path(&target)?;
+    let helper = VerifiedHelperExecutable::open(data_root, &target, &marker_path)?;
+    let locked_pair = validate_pair_bytes(
+        helper.read_helper(MAX_ARTIFACT_BYTES)?,
+        helper.read_marker(&marker_path, MAX_INSTALL_MARKER_BYTES)?,
+        trust.public_key_pem,
+    )?;
+    validate_manifest_release_trust(&locked_pair.manifest, trust)?;
+    if locked_pair.identity != pair.identity {
+        bail!("invalid_response: installed Pro helper changed during validation");
+    }
+    Ok(helper)
+}
+
+#[cfg(test)]
+fn validated_installed_helper_path_with_key(
+    data_root: &Path,
+    public_key_pem: &str,
+) -> Result<PathBuf> {
+    let target = default_helper_path(data_root);
+    reconcile_installation(&target, public_key_pem, &mut Persistence::default())?
+        .ok_or_else(|| anyhow!("pro_not_installed: signed Pro helper is not installed"))?;
+    Ok(target)
+}
+
+pub(crate) fn install_verified_bundle(
+    bundle: &VerifiedArtifactBundle,
+    data_root: &Path,
+    trust: lifecycle_manifest::ReleaseTrust,
+) -> Result<serde_json::Value> {
+    let args = bundle.install_args();
+    let target = default_helper_path(data_root);
+    let _lifecycle_lock = LifecycleLock::acquire(&target, true)?
+        .ok_or_else(|| anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
+    let current =
+        reconcile_installation_locked(&target, trust.public_key_pem, &mut Persistence::default())?;
+    if let Some(current) = &current {
+        validate_manifest_release_trust(&current.manifest, trust)?;
+    }
+    let manifest_bytes = read_bounded(&args.manifest, MAX_MANIFEST_BYTES, "manifest")?;
+    let signature = read_bounded(&args.signature, MAX_SIGNATURE_BYTES, "signature")?;
+    let _ = verified_manifest_for_trust(&manifest_bytes, &signature, trust)?;
+    install_with_key_locked(
+        &args,
+        data_root,
+        current.is_some(),
+        trust.public_key_pem,
+        &mut Persistence::default(),
+    )
+}
+
+#[cfg(test)]
+fn install_with_key(
+    args: &ProInstallArgs,
+    data_root: &Path,
+    require_existing: bool,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<serde_json::Value> {
+    let target = default_helper_path(data_root);
+    let _lifecycle_lock = LifecycleLock::acquire(&target, true)?
+        .ok_or_else(|| anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
+    install_with_key_locked(
+        args,
+        data_root,
+        require_existing,
+        public_key_pem,
+        persistence,
+    )
+}
+
+fn install_with_key_locked(
+    args: &ProInstallArgs,
+    data_root: &Path,
+    require_existing: bool,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<serde_json::Value> {
+    let target = default_helper_path(data_root);
+    let current = reconcile_installation_locked(&target, public_key_pem, persistence)?;
+    if require_existing && current.is_none() {
+        bail!("pro_not_installed: install Pro before updating it");
+    }
+    if !require_existing && current.is_some() {
+        bail!("invalid_request: Pro is already installed; use ctx pro update");
+    }
+    let manifest_bytes = read_bounded(&args.manifest, MAX_MANIFEST_BYTES, "manifest")?;
+    let signature = read_bounded(&args.signature, MAX_SIGNATURE_BYTES, "signature")?;
+    let manifest = verified_manifest(&manifest_bytes, &signature, public_key_pem)?;
+    if let Some(current) = &current {
+        validate_update(current, &manifest)?;
+    }
+    let artifact = read_bounded(&args.artifact, MAX_ARTIFACT_BYTES, "artifact")?;
+    if artifact.len() as u64 != manifest.artifact_size {
+        bail!("invalid_response: Pro artifact size does not match signed manifest");
+    }
+    let actual = format!("{:x}", Sha256::digest(&artifact));
+    if !actual.eq_ignore_ascii_case(&manifest.artifact_sha256) {
+        bail!("invalid_response: Pro artifact digest does not match signed manifest");
+    }
+    let marker = ProInstallMarker::new(&manifest_bytes, &signature)?;
+    let marker_bytes = serde_json::to_vec(&marker)
+        .context("invalid_response: encode signed Pro install marker")?;
+    let new_identity = PairIdentity::new(&artifact, &marker_bytes, &manifest);
+    install_transaction_locked(
+        &target,
+        current.as_ref(),
+        &artifact,
+        &marker_bytes,
+        new_identity,
+        public_key_pem,
+        persistence,
+    )?;
+    Ok(json!({
+        "schema_version": 1,
+        "installed": true,
+        "updated": require_existing,
+        "version": manifest.version,
+        "source_commit": manifest.source_commit,
+        "helper_path": target,
+    }))
+}
+
+fn read_bounded(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("invalid_request: inspect {label}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("invalid_request: {label} must be a regular non-symlink file");
+    }
+    if metadata.len() > maximum {
+        bail!("invalid_request: {label} exceeds maximum size {maximum}");
+    }
+    fs::read(path).with_context(|| format!("invalid_request: read {label}"))
+}
+
+fn validate_update(current: &ValidatedPair, next: &ProManifest) -> Result<()> {
+    let current_version = parse_release_version(&current.manifest.version)?;
+    let next_version = parse_release_version(&next.version)?;
+    match next_version.cmp(&current_version) {
+        Ordering::Less => {
+            bail!("invalid_request: Pro update would roll back the installed version")
+        }
+        Ordering::Equal
+            if !next
+                .artifact_sha256
+                .eq_ignore_ascii_case(&current.identity.artifact_sha256) =>
+        {
+            bail!("invalid_request: Pro update reuses a version with different contents")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn install_transaction_locked(
+    target: &Path,
+    current: Option<&ValidatedPair>,
+    artifact: &[u8],
+    marker: &[u8],
+    new_identity: PairIdentity,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<()> {
+    prepare_install_directory(target, persistence)?;
+    let mut transaction = InstallTransaction {
+        schema_version: 1,
+        transaction_id: Uuid::new_v4(),
+        state: TransactionState::Preparing,
+        old: current.map(|pair| pair.identity.clone()),
+        new: new_identity,
+    };
+    write_journal(target, &transaction, persistence)?;
+    durable_write(
+        &transaction_helper_path(target)?,
+        artifact,
+        0o700,
+        persistence,
+        "write_transaction_helper",
+        "chmod_transaction_helper",
+        "fsync_transaction_helper",
+    )?;
+    durable_write(
+        &transaction_marker_path(target)?,
+        marker,
+        0o600,
+        persistence,
+        "write_transaction_marker",
+        "chmod_transaction_marker",
+        "fsync_transaction_marker",
+    )?;
+    sync_install_directory(target, persistence, "fsync_staged_transaction_directory")?;
+    transaction.state = TransactionState::Committed;
+    write_journal(target, &transaction, persistence)?;
+    let installed = reconcile_installation_locked(target, public_key_pem, persistence)?
+        .ok_or_else(|| {
+            anyhow!("invalid_response: committed Pro transaction produced no installed helper")
+        })?;
+    if installed.identity != transaction.new {
+        bail!("invalid_response: committed Pro transaction published the wrong signed pair");
+    }
+    let final_pair = load_pair_at(target, &install_marker_path(target)?, public_key_pem)?
+        .ok_or_else(|| anyhow!("invalid_response: final signed Pro helper pair is missing"))?;
+    if final_pair.identity != transaction.new {
+        bail!("invalid_response: final signed Pro helper pair verification failed");
+    }
+    Ok(())
+}
+
+fn prepare_install_directory(target: &Path, persistence: &mut Persistence) -> Result<()> {
+    let parent = layout_for_target(target)?.bin_dir();
+    match fs::create_dir(&parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).context("invalid_request: create Pro install directory"),
+    }
+    persistence.boundary("create_install_directory")?;
+    protect_install_directory_tree(target)?;
+    persistence.boundary("chmod_install_directory")?;
+    sync_install_directory(target, persistence, "fsync_install_directory")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn durable_write(
+    path: &Path,
+    contents: &[u8],
+    unix_mode: u32,
+    persistence: &mut Persistence,
+    write_boundary: &'static str,
+    chmod_boundary: &'static str,
+    fsync_boundary: &'static str,
+) -> Result<()> {
+    remove_file_if_present(path, persistence, "remove_stale_staging_file")?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(unix_mode);
+    }
+    let mut file = options
+        .open(path)
+        .context("invalid_request: create staged Pro install file")?;
+    if unix_mode & 0o100 != 0 {
+        restrict_private_executable(path)
+            .context("invalid_request: protect staged Pro install executable")?;
+    } else {
+        restrict_private_file(path).context("invalid_request: protect staged Pro install file")?;
+    }
+    file.write_all(contents)
+        .context("invalid_request: write staged Pro install file")?;
+    persistence.boundary(write_boundary)?;
+    persistence.boundary(chmod_boundary)?;
+    file.sync_all()
+        .context("invalid_request: sync staged Pro install file")?;
+    persistence.boundary(fsync_boundary)?;
+    let _ = unix_mode;
+    Ok(())
+}
+
+fn write_journal(
+    target: &Path,
+    transaction: &InstallTransaction,
+    persistence: &mut Persistence,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(transaction)
+        .context("invalid_response: encode Pro transaction journal")?;
+    if bytes.len() as u64 > MAX_TRANSACTION_JOURNAL_BYTES {
+        bail!("invalid_response: Pro transaction journal exceeds maximum size");
+    }
+    let next = transaction_journal_next_path(target)?;
+    durable_write(
+        &next,
+        &bytes,
+        0o600,
+        persistence,
+        "write_transaction_journal",
+        "chmod_transaction_journal",
+        "fsync_transaction_journal",
+    )?;
+    replace_file(&next, &transaction_journal_path(target)?)
+        .context("invalid_request: publish Pro transaction journal")?;
+    persistence.boundary("rename_transaction_journal")?;
+    sync_install_directory(target, persistence, "fsync_transaction_journal_directory")
+}
+
+fn reconcile_installation(
+    target: &Path,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<Option<ValidatedPair>> {
+    let Some(_lifecycle_lock) = LifecycleLock::acquire(target, false)? else {
+        return Ok(None);
+    };
+    reconcile_installation_locked(target, public_key_pem, persistence)
+}
+
+fn reconcile_installation_locked(
+    target: &Path,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<Option<ValidatedPair>> {
+    let Some(parent) = target.parent() else {
+        bail!("invalid_request: Pro install path has no parent");
+    };
+    if !parent.exists() {
+        return Ok(None);
+    }
+    protect_existing_installation(target)?;
+    let journal_path = transaction_journal_path(target)?;
+    if !journal_path.exists() {
+        let current = load_pair_at(target, &install_marker_path(target)?, public_key_pem);
+        let current_was_invalid = current.is_err();
+        if let Ok(Some(pair)) = current {
+            cleanup_transaction_files(target, persistence)?;
+            return Ok(Some(pair));
+        }
+        if let Some(previous) = load_pair_at(
+            &previous_helper_path(target)?,
+            &previous_marker_path(target)?,
+            public_key_pem,
+        )? {
+            publish_current(target, &previous, public_key_pem, persistence)?;
+            cleanup_transaction_files(target, persistence)?;
+            return Ok(Some(previous));
+        }
+        if current_was_invalid {
+            bail!("invalid_response: installed Pro helper and marker do not form a trusted pair");
+        }
+        cleanup_transaction_files(target, persistence)?;
+        return Ok(None);
+    }
+
+    let journal_bytes = read_bounded(
+        &journal_path,
+        MAX_TRANSACTION_JOURNAL_BYTES,
+        "transaction journal",
+    )?;
+    let transaction: InstallTransaction = serde_json::from_slice(&journal_bytes)
+        .context("invalid_response: parse Pro transaction journal")?;
+    validate_transaction(&transaction)?;
+    let old = transaction
+        .old
+        .as_ref()
+        .map(|identity| find_pair(target, identity, public_key_pem))
+        .transpose()?
+        .flatten();
+    let new = find_pair(target, &transaction.new, public_key_pem)?;
+
+    let chosen = if transaction.state == TransactionState::Committed {
+        new.as_ref().or(old.as_ref())
+    } else {
+        old.as_ref()
+    };
+    let Some(chosen) = chosen else {
+        if transaction.old.is_none() && transaction.state == TransactionState::Preparing {
+            remove_current_pair(target, persistence)?;
+            cleanup_transaction_files(target, persistence)?;
+            return Ok(None);
+        }
+        bail!("invalid_response: Pro transaction contains no recoverable signed helper pair");
+    };
+
+    if transaction.state == TransactionState::Committed && chosen.identity == transaction.new {
+        if let Some(old) = old.as_ref() {
+            publish_previous(target, old, public_key_pem, persistence)?;
+        }
+    }
+    publish_current(target, chosen, public_key_pem, persistence)?;
+    let installed = load_pair_at(target, &install_marker_path(target)?, public_key_pem)?
+        .ok_or_else(|| anyhow!("invalid_response: recovered Pro helper pair is missing"))?;
+    cleanup_transaction_files(target, persistence)?;
+    Ok(Some(installed))
+}
+
+fn protect_install_directory_tree(target: &Path) -> Result<()> {
+    let layout = layout_for_target(target)?;
+    let pro = layout.pro_root();
+    let bin = layout.bin_dir();
+    for (directory, label) in [
+        (layout.data_root(), "ctx data root"),
+        (pro.as_path(), "Pro lifecycle root"),
+        (bin.as_path(), "Pro install root"),
+    ] {
+        validate_private_directory(directory, label)?;
+        restrict_private_directory(directory)
+            .context("invalid_request: protect Pro install directory")?;
+        verify_private_directory(directory)
+            .context("invalid_request: verify Pro install directory")?;
+    }
+    Ok(())
+}
+
+fn protect_existing_installation(target: &Path) -> Result<()> {
+    protect_install_directory_tree(target)?;
+    let executables = [
+        target.to_path_buf(),
+        previous_helper_path(target)?,
+        transaction_helper_path(target)?,
+        publish_helper_path(target)?,
+        rollback_helper_stage_path(target)?,
+    ];
+    for path in executables {
+        protect_existing_install_file(&path, true)?;
+    }
+    let files = [
+        install_marker_path(target)?,
+        previous_marker_path(target)?,
+        transaction_journal_path(target)?,
+        transaction_journal_next_path(target)?,
+        transaction_marker_path(target)?,
+        publish_marker_path(target)?,
+        rollback_marker_stage_path(target)?,
+    ];
+    for path in files {
+        protect_existing_install_file(&path, false)?;
+    }
+    Ok(())
+}
+
+fn protect_existing_install_file(path: &Path, executable: bool) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            if executable {
+                restrict_private_executable(path)
+                    .context("invalid_request: protect Pro installation executable")
+            } else {
+                restrict_private_file(path)
+                    .context("invalid_request: protect Pro installation file")
+            }
+        }
+        Ok(_) => bail!("invalid_response: Pro installation path has an unsafe file type"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("invalid_request: inspect Pro installation file"),
+    }
+}
+
+fn validate_transaction(transaction: &InstallTransaction) -> Result<()> {
+    if transaction.schema_version != 1 || transaction.transaction_id.is_nil() {
+        bail!("invalid_response: invalid Pro transaction journal identity");
+    }
+    validate_pair_identity(&transaction.new)?;
+    if let Some(old) = &transaction.old {
+        validate_pair_identity(old)?;
+    }
+    Ok(())
+}
+
+fn validate_pair_identity(identity: &PairIdentity) -> Result<()> {
+    if identity.artifact_size == 0
+        || identity.artifact_size > MAX_ARTIFACT_BYTES
+        || !is_lower_hex_digest(&identity.artifact_sha256)
+        || !is_lower_hex_digest(&identity.marker_sha256)
+        || parse_release_version(&identity.version).is_err()
+    {
+        bail!("invalid_response: invalid Pro transaction pair identity");
+    }
+    Ok(())
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn find_pair(
+    target: &Path,
+    identity: &PairIdentity,
+    public_key_pem: &str,
+) -> Result<Option<ValidatedPair>> {
+    let helper_paths = [
+        target.to_path_buf(),
+        previous_helper_path(target)?,
+        transaction_helper_path(target)?,
+        publish_helper_path(target)?,
+        rollback_helper_stage_path(target)?,
+    ];
+    let marker_paths = [
+        install_marker_path(target)?,
+        previous_marker_path(target)?,
+        transaction_marker_path(target)?,
+        publish_marker_path(target)?,
+        rollback_marker_stage_path(target)?,
+    ];
+    let artifact = helper_paths
+        .iter()
+        .filter_map(|path| read_candidate(path, MAX_ARTIFACT_BYTES).ok().flatten())
+        .find(|bytes| {
+            bytes.len() as u64 == identity.artifact_size
+                && format!("{:x}", Sha256::digest(bytes)) == identity.artifact_sha256
+        });
+    let marker = marker_paths
+        .iter()
+        .filter_map(|path| {
+            read_candidate(path, MAX_INSTALL_MARKER_BYTES)
+                .ok()
+                .flatten()
+        })
+        .find(|bytes| format!("{:x}", Sha256::digest(bytes)) == identity.marker_sha256);
+    let (Some(artifact), Some(marker)) = (artifact, marker) else {
+        return Ok(None);
+    };
+    let pair = validate_pair_bytes(artifact, marker, public_key_pem)?;
+    if pair.identity != *identity {
+        return Ok(None);
+    }
+    Ok(Some(pair))
+}
+
+fn load_pair_at(
+    helper_path: &Path,
+    marker_path: &Path,
+    public_key_pem: &str,
+) -> Result<Option<ValidatedPair>> {
+    let helper = read_candidate(helper_path, MAX_ARTIFACT_BYTES)?;
+    let marker = read_candidate(marker_path, MAX_INSTALL_MARKER_BYTES)?;
+    match (helper, marker) {
+        (None, None) => Ok(None),
+        (Some(helper), Some(marker)) => {
+            validate_pair_bytes(helper, marker, public_key_pem).map(Some)
+        }
+        _ => bail!("invalid_response: Pro helper and marker are incomplete"),
+    }
+}
+
+fn validate_pair_bytes(
+    artifact: Vec<u8>,
+    marker_bytes: Vec<u8>,
+    public_key_pem: &str,
+) -> Result<ValidatedPair> {
+    let marker: ProInstallMarker = serde_json::from_slice(&marker_bytes)
+        .context("invalid_response: parse installed Pro marker")?;
+    let manifest = marker.signed_manifest(public_key_pem)?;
+    let identity = PairIdentity::new(&artifact, &marker_bytes, &manifest);
+    if artifact.len() as u64 != manifest.artifact_size
+        || !identity
+            .artifact_sha256
+            .eq_ignore_ascii_case(&manifest.artifact_sha256)
+    {
+        bail!("invalid_response: installed Pro helper does not match its signed marker");
+    }
+    Ok(ValidatedPair {
+        identity,
+        artifact,
+        marker: marker_bytes,
+        manifest,
+    })
+}
+
+fn read_candidate(path: &Path, maximum: u64) -> Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => bail!("invalid_request: inspect Pro transaction file"),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > maximum {
+        bail!("invalid_response: Pro transaction file is invalid");
+    }
+    fs::read(path)
+        .map(Some)
+        .context("invalid_request: read Pro transaction file")
+}
+
+fn publish_current(
+    target: &Path,
+    pair: &ValidatedPair,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<()> {
+    if load_pair_at(target, &install_marker_path(target)?, public_key_pem)
+        .ok()
+        .flatten()
+        .is_some_and(|current| current.identity == pair.identity)
+    {
+        return Ok(());
+    }
+    publish_pair(
+        target,
+        &install_marker_path(target)?,
+        &publish_helper_path(target)?,
+        &publish_marker_path(target)?,
+        pair,
+        persistence,
+        "write_current_helper_stage",
+        "chmod_current_helper_stage",
+        "fsync_current_helper_stage",
+        "write_current_marker_stage",
+        "chmod_current_marker_stage",
+        "fsync_current_marker_stage",
+        "rename_current_helper",
+        "fsync_current_helper_directory",
+        "rename_current_marker",
+        "fsync_current_marker_directory",
+    )
+}
+
+fn publish_previous(
+    target: &Path,
+    pair: &ValidatedPair,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<()> {
+    let helper = previous_helper_path(target)?;
+    let marker = previous_marker_path(target)?;
+    if load_pair_at(&helper, &marker, public_key_pem)
+        .ok()
+        .flatten()
+        .is_some_and(|previous| previous.identity == pair.identity)
+    {
+        return Ok(());
+    }
+    publish_pair(
+        &helper,
+        &marker,
+        &rollback_helper_stage_path(target)?,
+        &rollback_marker_stage_path(target)?,
+        pair,
+        persistence,
+        "write_rollback_helper_stage",
+        "chmod_rollback_helper_stage",
+        "fsync_rollback_helper_stage",
+        "write_rollback_marker_stage",
+        "chmod_rollback_marker_stage",
+        "fsync_rollback_marker_stage",
+        "rename_rollback_helper",
+        "fsync_rollback_helper_directory",
+        "rename_rollback_marker",
+        "fsync_rollback_marker_directory",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_pair(
+    helper_target: &Path,
+    marker_target: &Path,
+    helper_stage: &Path,
+    marker_stage: &Path,
+    pair: &ValidatedPair,
+    persistence: &mut Persistence,
+    helper_write: &'static str,
+    helper_chmod: &'static str,
+    helper_fsync: &'static str,
+    marker_write: &'static str,
+    marker_chmod: &'static str,
+    marker_fsync: &'static str,
+    helper_rename: &'static str,
+    helper_directory_fsync: &'static str,
+    marker_rename: &'static str,
+    marker_directory_fsync: &'static str,
+) -> Result<()> {
+    durable_write(
+        helper_stage,
+        &pair.artifact,
+        0o700,
+        persistence,
+        helper_write,
+        helper_chmod,
+        helper_fsync,
+    )?;
+    durable_write(
+        marker_stage,
+        &pair.marker,
+        0o600,
+        persistence,
+        marker_write,
+        marker_chmod,
+        marker_fsync,
+    )?;
+    sync_path_directory(
+        helper_target,
+        persistence,
+        "fsync_publish_staging_directory",
+    )?;
+    replace_file(helper_stage, helper_target)
+        .context("invalid_request: publish Pro helper file")?;
+    persistence.boundary(helper_rename)?;
+    sync_path_directory(helper_target, persistence, helper_directory_fsync)?;
+    replace_file(marker_stage, marker_target)
+        .context("invalid_request: publish Pro marker file")?;
+    persistence.boundary(marker_rename)?;
+    sync_path_directory(marker_target, persistence, marker_directory_fsync)
+}
+
+fn remove_current_pair(target: &Path, persistence: &mut Persistence) -> Result<()> {
+    remove_file_if_present(target, persistence, "remove_incomplete_current_helper")?;
+    remove_file_if_present(
+        &install_marker_path(target)?,
+        persistence,
+        "remove_incomplete_current_marker",
+    )?;
+    sync_install_directory(target, persistence, "fsync_removed_current_pair_directory")
+}
+
+fn cleanup_transaction_files(target: &Path, persistence: &mut Persistence) -> Result<()> {
+    for (path, boundary) in [
+        (
+            transaction_journal_next_path(target)?,
+            "remove_transaction_journal_next",
+        ),
+        (
+            transaction_helper_path(target)?,
+            "remove_transaction_helper",
+        ),
+        (
+            transaction_marker_path(target)?,
+            "remove_transaction_marker",
+        ),
+        (publish_helper_path(target)?, "remove_publish_helper"),
+        (publish_marker_path(target)?, "remove_publish_marker"),
+        (
+            rollback_helper_stage_path(target)?,
+            "remove_rollback_helper_stage",
+        ),
+        (
+            rollback_marker_stage_path(target)?,
+            "remove_rollback_marker_stage",
+        ),
+    ] {
+        remove_file_if_present(&path, persistence, boundary)?;
+    }
+    sync_install_directory(target, persistence, "fsync_transaction_cleanup_directory")?;
+    remove_file_if_present(
+        &transaction_journal_path(target)?,
+        persistence,
+        "remove_transaction_journal",
+    )?;
+    sync_install_directory(target, persistence, "fsync_journal_removal_directory")
+}
+
+fn remove_file_if_present(
+    path: &Path,
+    persistence: &mut Persistence,
+    boundary: &'static str,
+) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => persistence.boundary(boundary),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => bail!("invalid_request: remove Pro transaction file"),
+    }
+}
+
+fn sync_install_directory(
+    target: &Path,
+    persistence: &mut Persistence,
+    boundary: &'static str,
+) -> Result<()> {
+    sync_path_directory(target, persistence, boundary)
+}
+
+fn sync_path_directory(
+    path: &Path,
+    persistence: &mut Persistence,
+    boundary: &'static str,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("invalid_request: Pro install path has no parent"))?;
+    #[cfg(not(windows))]
+    let directory =
+        fs::File::open(parent).context("invalid_request: open Pro install directory")?;
+    #[cfg(windows)]
+    let directory = {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent)
+            .context("invalid_request: open Pro install directory")?
+    };
+    directory
+        .sync_all()
+        .context("invalid_request: sync Pro install directory")?;
+    persistence.boundary(boundary)
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both path buffers are NUL-terminated and remain alive for the call.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod tests;

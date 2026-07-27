@@ -3,6 +3,31 @@ mod support;
 #[cfg(unix)]
 use support::*;
 
+#[test]
+fn windows_runtime_extractor_keeps_external_source_contract() {
+    let installer_source = include_str!("../src/upgrade/install.rs");
+    let declaration = "const EXTRACT_SCRIPT: &str = r#\"\n";
+    assert_eq!(
+        installer_source.matches(declaration).count(),
+        1,
+        "the external PowerShell test expects one embedded extractor at upgrade/install.rs"
+    );
+    let extractor = installer_source
+        .split_once(declaration)
+        .unwrap()
+        .1
+        .split_once("\n\"#;")
+        .unwrap()
+        .0;
+    assert!(extractor.contains("[System.IO.Compression.ZipFile]::OpenRead($ArchivePath)"));
+    assert!(extractor.contains("$targetStream.Flush($true)"));
+
+    let external_contract =
+        include_str!("../../../scripts/test-windows-runtime-upgrade-extractor.ps1");
+    assert!(external_contract.contains(r#"..\crates\ctx-cli\src\upgrade\install.rs"#));
+    assert!(external_contract.contains("const EXTRACT_SCRIPT: &str = r#"));
+}
+
 #[cfg(unix)]
 #[test]
 fn upgrade_status_check_and_apply_support_managed_installs() {
@@ -406,6 +431,102 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
         ));
         assert_eq!(applied["status"], "applied", "{injection}={point}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_publication_journal_bytes_keep_the_v1_contract() {
+    #[derive(serde::Serialize)]
+    struct ExpectedJournal<'a> {
+        schema_version: u32,
+        transaction_id: &'a str,
+        phase: &'static str,
+        install_path: &'a Path,
+        paths: Vec<ExpectedJournalPath<'a>>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct ExpectedJournalPath<'a> {
+        label: &'static str,
+        staged: &'a Path,
+        target: &'a Path,
+        backup: &'a Path,
+        kind: &'static str,
+    }
+
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    fs::create_dir_all(&runtime.target).unwrap();
+
+    let _ = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "runtime"),
+    );
+
+    let journal_path = temp.path().join("upgrade-install-transaction.json");
+    let actual = fs::read(&journal_path).unwrap();
+    let journal: Value = serde_json::from_slice(&actual).unwrap();
+    let transaction_id = journal["transaction_id"].as_str().unwrap();
+
+    let runtime_name = runtime.target.file_name().unwrap().to_string_lossy();
+    let runtime_staged = runtime
+        .target
+        .with_file_name(format!(".{runtime_name}.ctx-upgrade-{transaction_id}.new"));
+    let runtime_backup = runtime.target.with_file_name(format!(
+        ".{runtime_name}.ctx-upgrade-{transaction_id}.runtime.previous"
+    ));
+    let binary_name = release.target.file_name().unwrap().to_string_lossy();
+    let binary_staged = release
+        .target
+        .parent()
+        .unwrap()
+        .join(format!(".ctx-upgrade-{transaction_id}.new"));
+    let binary_backup = release.target.with_file_name(format!(
+        ".{binary_name}.ctx-upgrade-{transaction_id}.binary.previous"
+    ));
+    let marker_target = install_marker_path(&release.target);
+    let marker_name = marker_target.file_name().unwrap().to_string_lossy();
+    let marker_staged = release
+        .target
+        .parent()
+        .unwrap()
+        .join(format!(".ctx-upgrade-{transaction_id}.install.json.new"));
+    let marker_backup = marker_target.with_file_name(format!(
+        ".{marker_name}.ctx-upgrade-{transaction_id}.marker.previous"
+    ));
+    let expected = ExpectedJournal {
+        schema_version: 1,
+        transaction_id,
+        phase: "publishing",
+        install_path: &release.target,
+        paths: vec![
+            ExpectedJournalPath {
+                label: "ONNX Runtime sidecar",
+                staged: &runtime_staged,
+                target: &runtime.target,
+                backup: &runtime_backup,
+                kind: "directory",
+            },
+            ExpectedJournalPath {
+                label: "ctx binary",
+                staged: &binary_staged,
+                target: &release.target,
+                backup: &binary_backup,
+                kind: "file",
+            },
+            ExpectedJournalPath {
+                label: "ctx install marker",
+                staged: &marker_staged,
+                target: &marker_target,
+                backup: &marker_backup,
+                kind: "file",
+            },
+        ],
+    };
+    let mut expected_bytes = serde_json::to_vec_pretty(&expected).unwrap();
+    expected_bytes.push(b'\n');
+    assert_eq!(actual, expected_bytes);
 }
 
 #[cfg(unix)]
@@ -1184,6 +1305,7 @@ fn eligible_json_command_spawns_background_upgrade_without_polluting_output() {
     let mut command = ctx_from_binary(&temp, &binary);
     let output = command
         .args(["doctor", "--json"])
+        .env("CTX_UPGRADE_AUTO", "apply")
         .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
         .env(
             "CTX_RELEASE_METADATA_SIGNATURE_URL",

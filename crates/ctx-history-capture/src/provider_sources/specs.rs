@@ -20,18 +20,11 @@ const CODEX_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
-const PI_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".pi", "agent", "sessions"],
-        source_format: "pi_session_jsonl",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".omp", "agent", "sessions"],
-        source_format: "pi_session_jsonl",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
+const PI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".pi", "agent", "sessions"],
+    source_format: "pi_session_jsonl",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
 
 const CLAUDE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".claude", "projects"],
@@ -76,25 +69,11 @@ const CRUSH_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".local", "share", "goose", "sessions", "sessions.db"],
-        source_format: "goose_sessions_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".local",
-            "share",
-            "Block",
-            "goose",
-            "sessions",
-            "sessions.db",
-        ],
-        source_format: "goose_sessions_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
+const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".local", "share", "goose", "sessions", "sessions.db"],
+    source_format: "goose_sessions_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
 
 const WARP_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
@@ -117,58 +96,20 @@ const WARP_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
-const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[
-            ".lingma",
-            "vscode",
-            "sharedClientCache",
-            "cache",
-            "db",
-            "local.db",
-        ],
-        source_format: "lingma_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".lingma",
-            "vscode-insiders",
-            "sharedClientCache",
-            "cache",
-            "db",
-            "local.db",
-        ],
-        source_format: "lingma_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
+const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[
+        ".lingma",
+        "vscode",
+        "sharedClientCache",
+        "cache",
+        "db",
+        "local.db",
+    ],
+    source_format: "lingma_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
 
-pub(super) const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
-const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Trae",
-            "User",
-            "workspaceStorage",
-        ],
-        source_format: TRAE_STATE_VSCDB_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Trae CN",
-            "User",
-            "workspaceStorage",
-        ],
-        source_format: TRAE_STATE_VSCDB_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
+const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const QODER_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".qoder", "projects"],
@@ -231,11 +172,7 @@ const COPILOT_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".factory", "sessions"],
-    source_format: "factory_ai_droid_sessions_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
+const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const QWEN_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".qwen", "projects"],
@@ -294,11 +231,6 @@ const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
         source_format: "openclaw_session_jsonl_tree",
         source_kind: ProviderSourceKind::NativeHistory,
     },
-    ProviderDefaultLocation {
-        path_components: &[".moltbot"],
-        source_format: "openclaw_session_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
 ];
 
 const HERMES_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
@@ -315,11 +247,7 @@ const ASTRBOT_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const SHELLEY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".config", "shelley", "shelley.db"],
-    source_format: "shelley_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
+const SHELLEY_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const CONTINUE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".continue", "sessions"],
@@ -371,17 +299,6 @@ const ROO_DEFAULTS: &[ProviderDefaultLocation] = &[
             "User",
             "globalStorage",
             "rooveterinaryinc.roo-cline",
-        ],
-        source_format: "roo_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code",
-            "User",
-            "globalStorage",
-            "RooVeterinaryInc.roo-cline",
         ],
         source_format: "roo_task_directory_json",
         source_kind: ProviderSourceKind::NativeHistory,

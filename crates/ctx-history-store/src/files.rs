@@ -32,7 +32,8 @@ impl FileTouchScope {
 
 impl Store {
     pub fn upsert_file_touched(&self, file: &FileTouched) -> Result<()> {
-        self.conn.execute(
+        self.with_atomic_write(|| {
+            self.conn.execute(
                 r#"
                 INSERT INTO files_touched
                 (id, history_record_id, run_id, event_id, vcs_workspace_id, path, change_kind, old_path, line_count_delta, confidence, created_at_ms, updated_at_ms, source_id, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
@@ -78,7 +79,9 @@ impl Store {
                     serde_json::to_string(&file.sync.metadata)?,
                 ],
             )?;
-        Ok(())
+            self.journal_file_touch_mutated(file.id)?;
+            Ok(())
+        })
     }
 
     pub fn file_touched_exists(&self, id: Uuid) -> Result<bool> {

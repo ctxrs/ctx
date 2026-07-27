@@ -78,11 +78,23 @@ language toolchain is installed and an isolated `CTX_DATA_ROOT` is provided.
 
 ## Checks
 
-Fast SDK checks:
+Rust SDK tests are native Bazel targets:
+
+```bash
+scripts/bazelw test \
+  //crates/ctx-protocol:unit_tests \
+  //crates/ctx-sdk:unit_tests \
+  --config=test
+```
+
+Contract and non-Rust SDK checks:
 
 ```bash
 ./scripts/check-sdks.sh
 ```
+
+`check-sdks.sh` does not run Rust or Cargo tests; the Bazel targets above are
+the authoritative Rust SDK test path.
 
 Opt-in local smoke:
 
@@ -102,7 +114,8 @@ No-publish guardrail:
 ./scripts/check-sdk-no-publish.sh
 ```
 
-Use strict toolchain mode in CI lanes that provision every language runtime:
+Use strict toolchain mode in CI lanes that provision every non-Rust language
+runtime:
 
 ```bash
 CTX_SDK_STRICT_TOOLCHAINS=1 ./scripts/check-sdks.sh

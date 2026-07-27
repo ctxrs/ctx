@@ -111,7 +111,7 @@ fn fast_search_prefers_messages_and_summaries_in_event_and_session_modes() {
             },
         )
         .unwrap();
-        assert_eq!(packet.results.len(), matching_event_ids.len());
+        assert_eq!(packet.results.len(), matching_event_ids.len() - 1);
         assert!(matches!(
             packet.results[0].why_matched.as_slice(),
             [reason] if reason == "message" || reason == "summary"
@@ -136,9 +136,7 @@ fn fast_search_prefers_messages_and_summaries_in_event_and_session_modes() {
         },
     )
     .unwrap();
-    assert_eq!(tool_only.results.len(), 1);
-    assert_eq!(tool_only.results[0].event_id, Some(matching_event_ids[2]));
-    assert_eq!(tool_only.results[0].why_matched, vec!["tool_output"]);
+    assert!(tool_only.results.is_empty());
 }
 
 #[test]

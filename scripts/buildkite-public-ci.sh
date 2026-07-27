@@ -7,7 +7,7 @@ cd "${repo_root}"
 export CTX_BOOTSTRAP_BAZELISK="${CTX_BOOTSTRAP_BAZELISK:-1}"
 export CTX_BAZELISK_VERSION="${CTX_BAZELISK_VERSION:-v1.29.0}"
 export CTX_GO_VERSION="${CTX_GO_VERSION:-1.22.12}"
-export CTX_RUST_TOOLCHAIN="${CTX_RUST_TOOLCHAIN:-1.88.0}"
+export CTX_RUST_TOOLCHAIN="${CTX_RUST_TOOLCHAIN:-1.97.1}"
 
 check_args=("$@")
 if (( "${#check_args[@]}" == 0 )); then
@@ -120,23 +120,6 @@ install_go() {
   go version
 }
 
-install_rust() {
-  export CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
-  export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
-  export PATH="${CARGO_HOME}/bin:${PATH}"
-
-  if [[ ! -x "${CARGO_HOME}/bin/rustup" ]]; then
-    rustup_installer="$(mktemp "${TMPDIR:-/tmp}/ctx-rustup-init.XXXXXX")"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "${rustup_installer}"
-    sh "${rustup_installer}" -y --profile minimal --default-toolchain none
-    rm -f "${rustup_installer}"
-    export PATH="${CARGO_HOME}/bin:${PATH}"
-  fi
-
-  rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy
-  rustup default "${CTX_RUST_TOOLCHAIN}"
-}
-
 configure_bazelisk() {
   mkdir -p "${HOME}/.cache/bazel-repository" "${HOME}/.local/bin"
   printf 'common --repository_cache=%s\n' "${HOME}/.cache/bazel-repository" > "${HOME}/.bazelrc"
@@ -151,10 +134,6 @@ configure_bazelisk() {
 }
 
 print_tool_versions() {
-  rustc --version
-  cargo --version
-  cargo fmt --version
-  cargo clippy --version
   bazelisk version
   python3 --version
   node --version
@@ -172,7 +151,6 @@ print_tool_versions() {
 init_buildkite_job_tool_env
 install_ubuntu_tools
 install_go
-install_rust
 configure_bazelisk
 print_tool_versions
 bash scripts/check.sh "${check_args[@]}"

@@ -23,9 +23,10 @@ to manage `PATH` yourself.
 
 The install script installs `ctx`, runs the bundled agent-history skill
 installer, and runs `ctx setup` so discovered local history is indexed before it
-exits. If daemon maintenance has been explicitly enabled, that setup run can
-also start the ctx-owned background daemon for native-history freshness and
-semantic catch-up. The skill installer opens an agent picker when interactive;
+exits. Daemon maintenance is enabled by default, so that setup run can also
+start the ctx-owned background daemon for native-history freshness. Semantic
+catch-up remains disabled unless semantic search is explicitly enabled. The
+skill installer opens an agent picker when interactive;
 otherwise it installs the universal `~/.agents/skills` copy plus detected
 agent-specific folders for tools that need them. Use `sh -s -- --no-setup` on
 Unix, or set `CTX_INSTALL_NO_SETUP=1` on Windows, for install-only CI or
@@ -59,11 +60,11 @@ Setup creates the configured ctx data root, initializes SQLite, discovers known
 provider history paths, inventories local history sources, imports discovered
 native provider sources, optimizes the local search index, and prints next
 steps. It does not write `config.toml` for implicit defaults and does not
-execute history-source plugin commands. The default data root is `~/.ctx`. The
-daemon is disabled by default during the prerelease; enable it with
-`ctx daemon enable` when you want daemon-owned background maintenance. Use
-`ctx setup --no-daemon` for a one-run opt-out after daemon maintenance is
-enabled. `ctx setup --catalog-only` and `ctx setup --json` do
+execute history-source plugin commands. The default data root is `~/.ctx`.
+Daemon maintenance is enabled by default. Use `ctx daemon disable` for a durable
+opt-out or `ctx setup --no-daemon` for a one-run opt-out. Existing configurations
+that already set `[daemon] enabled = false` remain disabled after upgrade.
+`ctx setup --catalog-only` and `ctx setup --json` do
 not autostart daemon maintenance.
 
 Use a different root when testing:
@@ -77,11 +78,9 @@ Setup does not write to source repositories, call model APIs, download embedding
 models, or require API keys while semantic search is disabled. If daemon and
 semantic search are explicitly enabled, daemon maintenance may acquire the local
 ONNX Runtime asset and embedding model needed for the installed platform.
-Daemon maintenance is local-only; cloud sync remains disabled and reports
-`network_allowed: false`. Official
-installer-managed binaries can run a signed background auto-upgrade check after
-later successful non-JSON commands other than `ctx status`; that updater does
-not collect provider history.
+ctx has no hosted-history client or `ctx cloud` subcommand. Official
+installer-managed binaries can separately run signed CLI
+upgrade checks; that updater does not collect provider history.
 
 ## 3. See Available Sources
 
@@ -119,7 +118,7 @@ native cursor-resume API. Imports keep valid records when isolated records are
 malformed and report those rejections explicitly. Unreadable or incompatible
 sources still fail without preventing `--all` from importing other sources.
 
-When daemon maintenance is enabled, `ctx import` can start the same ctx-owned
+With default daemon maintenance, `ctx import` can start the same ctx-owned
 background daemon profile after the foreground import finishes.
 The daemon refreshes native history within local budgets and, when semantic is
 enabled, may acquire the local embedding model and perform semantic catch-up.
@@ -165,10 +164,10 @@ session or its subagent work is the history you want to search. Use
 `--refresh off` when you need a strictly read-only query over the existing ctx
 index.
 
-Semantic and hybrid search read existing local sidecar coverage. With semantic
-enabled and default background refresh, search may start the configured daemon
-so the daemon-owned query service can embed the query; `--refresh off` skips
-that autostart. Search does not run semantic catch-up or download embedding
+Default background refresh may start the configured daemon for local history
+freshness. Semantic and hybrid search read existing local sidecar coverage; when
+semantic is enabled, the daemon-owned query service can embed the query.
+`--refresh off` skips daemon autostart. Search does not run semantic catch-up or download embedding
 models. Hybrid uses semantic evidence only after coverage is complete and dirty
 work is drained; until then it falls back to lexical search with a structured
 reason. Explicit semantic search can query partial coverage for diagnostics,
@@ -188,7 +187,42 @@ supported machine-readable retrieval API for scripts and exact field
 extraction. It contains cited snippets and source metadata, but it is retrieved
 source material rather than generated analysis.
 
-## 7. Built-In Docs And Upgrades
+## 7. Optional Local Pro Work Graph
+
+Local Pro is a separately installed paid helper that derives an encrypted work
+graph from canonical local history. Source code, transcripts, and graph facts
+remain local.
+
+```bash
+ctx pro
+ctx locate commit <sha> --json | jq '.results[].resource'
+ctx show commit '<chosen-resource-id>' --json
+ctx blame src/lib.rs --line 42
+ctx timeline file src/lib.rs
+ctx facts commit <sha>
+```
+
+Repositories and worktrees are detected from indexed activity; setup does not
+need a repository path. Query `--repository` accepts a logical repository
+identity such as `forge:github.com/ctxrs/ctx`, rather than a filesystem path.
+Most queries do not need it. When an
+unscoped query has multiple matches, inspect `results[].resource` and pass the chosen opaque
+`resource.id` back as the same kind's value, as above. Do not parse the ID.
+
+Setup, daemon freshness, and graph queries can catch the derived graph up.
+Canonical history is never changed by that work. Query results carry exact
+canonical citations. `facts` and `timeline` can be paged with `--limit` and their returned
+`--cursor`; `show`, `locate`, and `blame` are bounded, unpaged point views. The
+helper uses the platform key store.
+
+Bare `ctx pro` runs the idempotent setup, resume, repair, and graph catch-up
+flow. `ctx pro setup` remains a supported explicit synonym. If setup creates a
+Stripe Checkout session, the command prints its URL, attempts to open it, waits
+for access, and then continues helper installation and materialization in the
+same invocation. `ctx status` does not mutate canonical history or graph data;
+entitlement authorization may advance nonsecret anti-clock-rollback metadata.
+
+## 8. Built-In Docs And Upgrades
 
 ```bash
 ctx docs search "file path"
@@ -204,5 +238,5 @@ available for human shell use.
 
 `ctx upgrade` works for official installer-managed binaries. Source builds,
 `cargo install`, package-manager installs, and copied binaries are treated as
-unmanaged and will not self-upgrade. Use `ctx upgrade disable` or
-`CTX_UPGRADE_OFF=1` to disable managed background auto-upgrade.
+unmanaged and will not self-upgrade. Background auto-upgrade is disabled by
+default; use `ctx upgrade enable` to opt in for a managed binary.

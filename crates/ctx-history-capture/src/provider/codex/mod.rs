@@ -1,6 +1,5 @@
 pub(crate) mod catalog;
 pub(crate) mod events;
-pub(crate) mod fast_import;
 pub(crate) mod history;
 pub(crate) mod session;
 

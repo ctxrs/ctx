@@ -1,10 +1,12 @@
 use ctx_history_core::CaptureProvider;
 
+#[cfg(unix)]
+use super::super::discover_provider_sources;
 use super::super::probes::{default_location_import_probe, BoundedProbe};
-use super::super::{
-    discover_provider_sources, ProviderDefaultLocation, ProviderSourceKind, ProviderSourceStatus,
-};
+use super::super::{ProviderDefaultLocation, ProviderSourceKind, ProviderSourceStatus};
 use super::support::{assert_source_status, tempdir};
+#[cfg(unix)]
+use super::support::{EnvGuard, ENV_LOCK};
 
 #[test]
 fn bounded_probe_reports_budget_exhausted_source_as_unknown() {
@@ -44,7 +46,9 @@ fn default_location_probe_does_not_fallback_to_path_existence_for_unhandled_prov
 fn default_source_probe_reports_unreadable_directory_as_unknown() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
+    let _codex_home = EnvGuard::remove("CODEX_HOME");
     let sessions = temp.path().join(".codex/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     let original_permissions = std::fs::metadata(&sessions).unwrap().permissions();
@@ -76,7 +80,9 @@ fn default_source_probe_reports_unreadable_directory_as_unknown() {
 fn default_source_probe_skips_unreadable_child_directory() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
+    let _codex_home = EnvGuard::remove("CODEX_HOME");
     let sessions = temp.path().join(".codex/sessions");
     let readable = sessions.join("readable");
     let unreadable = sessions.join("unreadable");

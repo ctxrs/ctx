@@ -96,7 +96,7 @@ main() {
     QWEN_HOME="${qwen_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${ctx_bin}" integrations install mcp --agent qwen-code --json > "${install_json}"
   require_contains "${install_json}" '"agent":"qwen-code"'
   require_contains "${install_json}" '"status":"current"'
@@ -117,7 +117,7 @@ main() {
     QWEN_HOME="${qwen_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     OPENAI_API_KEY="sk-ctx-real-harness-fixture" \
     OPENAI_BASE_URL="http://127.0.0.1:${port}/v1" \
     OPENAI_MODEL="${MODEL}" \

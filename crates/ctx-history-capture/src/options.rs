@@ -65,6 +65,8 @@ macro_rules! import_options {
                 pub source_path: Option<PathBuf>,
                 pub imported_at: DateTime<Utc>,
                 pub history_record_id: Option<Uuid>,
+                pub capture_work_limit: crate::CaptureWorkLimit,
+                pub inventory_observation_token: Option<String>,
             }
 
             impl Default for $name {
@@ -74,6 +76,8 @@ macro_rules! import_options {
                         source_path: None,
                         imported_at: utc_now(),
                         history_record_id: None,
+                        capture_work_limit: crate::CaptureWorkLimit::Drain,
+                        inventory_observation_token: None,
                     }
                 }
             }
@@ -137,6 +141,8 @@ pub struct CodexSessionImportOptions {
     pub max_total_bytes: Option<u64>,
     pub fast_event_inserts: bool,
     pub progress: Option<CodexSessionImportProgressCallback>,
+    pub capture_work_limit: crate::CaptureWorkLimit,
+    pub inventory_observation_token: Option<String>,
 }
 
 impl Default for CodexSessionImportOptions {
@@ -150,6 +156,8 @@ impl Default for CodexSessionImportOptions {
             max_total_bytes: None,
             fast_event_inserts: true,
             progress: None,
+            capture_work_limit: crate::CaptureWorkLimit::Drain,
+            inventory_observation_token: None,
         }
     }
 }
@@ -165,6 +173,11 @@ impl std::fmt::Debug for CodexSessionImportOptions {
             .field("max_total_bytes", &self.max_total_bytes)
             .field("fast_event_inserts", &self.fast_event_inserts)
             .field("progress", &self.progress.as_ref().map(|_| "<callback>"))
+            .field("capture_work_limit", &self.capture_work_limit)
+            .field(
+                "inventory_observation_token",
+                &self.inventory_observation_token.as_ref().map(|_| "<token>"),
+            )
             .finish()
     }
 }

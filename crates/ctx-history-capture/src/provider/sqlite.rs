@@ -1,17 +1,21 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
     ops::Deref,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{limits::Limit, Connection, OpenFlags};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use url::Url;
 
 use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::compute_payload_hash;
+use crate::provider_sources::{observe_ordinary_file, OrdinaryFileObservation};
 
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
@@ -108,12 +112,297 @@ pub(crate) fn sqlite_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-pub(crate) fn sqlite_is_too_big(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(ref fail, _)
-            if fail.code == rusqlite::ErrorCode::TooBig
-    )
+/// Temporarily lifts SQLite's value-length limit for metadata-only preflight queries.
+///
+/// The provider limit is restored exactly when this guard is dropped, including while
+/// unwinding. Raw value hydration must run after the guard leaves scope.
+#[must_use = "the SQLite length limit is restored when this guard is dropped"]
+pub(crate) struct SqliteLengthPreflightGuard<'connection> {
+    conn: &'connection Connection,
+    prior_limit: i32,
+}
+
+impl<'connection> SqliteLengthPreflightGuard<'connection> {
+    pub(crate) fn new(conn: &'connection Connection) -> Self {
+        Self {
+            conn,
+            prior_limit: conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, i32::MAX),
+        }
+    }
+}
+
+impl Drop for SqliteLengthPreflightGuard<'_> {
+    fn drop(&mut self) {
+        self.conn
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, self.prior_limit);
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ProviderSqliteFrozenFileMetadata {
+    length: u64,
+    modified: SystemTime,
+    readonly: bool,
+    device: Option<u64>,
+    inode: Option<u64>,
+    change_token: [u8; 32],
+}
+
+impl ProviderSqliteFrozenFileMetadata {
+    fn read(path: &Path, invalid_reason: &'static str) -> Result<Self> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: invalid_reason,
+            });
+        }
+        let observation = observe_ordinary_file(path)?;
+        if metadata.len() != observation.len()
+            || metadata.modified().ok() != Some(observation.modified_at())
+        {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let change_token = sqlite_component_change_token(path, &observation)?;
+        Self::from_metadata(&metadata, change_token)
+    }
+
+    fn read_optional(path: &Path, invalid_reason: &'static str) -> Result<Option<Self>> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+            {
+                Self::read(path, invalid_reason).map(Some)
+            }
+            Ok(_) => Err(CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: invalid_reason,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(CaptureError::Io(error)),
+        }
+    }
+
+    fn from_metadata(metadata: &fs::Metadata, change_token: [u8; 32]) -> Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        if !metadata.file_type().is_file() {
+            return Err(CaptureError::InvalidPayload(
+                "provider SQLite source component is not a regular file".to_owned(),
+            ));
+        }
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified()?,
+            readonly: metadata.permissions().readonly(),
+            #[cfg(unix)]
+            device: Some(metadata.dev()),
+            #[cfg(not(unix))]
+            device: None,
+            #[cfg(unix)]
+            inode: Some(metadata.ino()),
+            #[cfg(not(unix))]
+            inode: None,
+            change_token,
+        })
+    }
+
+    fn revision_component(&self) -> String {
+        let (sign, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
+            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
+            Err(error) => {
+                let duration = error.duration();
+                ('-', duration.as_secs(), duration.subsec_nanos())
+            }
+        };
+        format!(
+            "length={};modified={sign}{seconds}.{nanos:09};readonly={};device={};inode={};change={}",
+            self.length,
+            self.readonly,
+            self.device
+                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            self.inode
+                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            hex_token(&self.change_token),
+        )
+    }
+}
+
+const SQLITE_COMPONENT_TOKEN_DOMAIN: &[u8] = b"ctx-provider-sqlite-component-v1\0";
+const SQLITE_HEADER_BYTES: usize = 100;
+const SQLITE_WAL_HEADER_BYTES: usize = 32;
+const SQLITE_WAL_FRAME_HEADER_BYTES: usize = 24;
+
+pub(crate) fn sqlite_component_change_token(
+    path: &Path,
+    observation: &OrdinaryFileObservation,
+) -> Result<[u8; 32]> {
+    let mut file = open_sqlite_component_without_following(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.len() != observation.len() {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+
+    let prefix_len = usize::try_from(observation.len().min(SQLITE_HEADER_BYTES as u64))
+        .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
+    let mut prefix = vec![0_u8; prefix_len];
+    file.read_exact(&mut prefix)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(SQLITE_COMPONENT_TOKEN_DOMAIN);
+    hasher.update(observation.len().to_le_bytes());
+    hasher.update(observation.token());
+    hasher.update(&prefix);
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("-wal"))
+    {
+        if let Some(frame_header) =
+            sqlite_wal_last_frame_header(&mut file, observation.len(), &prefix)?
+        {
+            hasher.update(frame_header);
+        }
+    }
+
+    let current = observe_ordinary_file(path)?;
+    if &current != observation {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn sqlite_wal_last_frame_header(
+    file: &mut File,
+    length: u64,
+    prefix: &[u8],
+) -> Result<Option<[u8; SQLITE_WAL_FRAME_HEADER_BYTES]>> {
+    if prefix.len() < SQLITE_WAL_HEADER_BYTES {
+        return Ok(None);
+    }
+    let raw_page_size = u32::from_be_bytes(prefix[8..12].try_into().map_err(|_| {
+        CaptureError::InvalidPayload("invalid SQLite WAL page-size header".to_owned())
+    })?);
+    let page_size = match raw_page_size {
+        1 => 65_536_u64,
+        512..=65_536 if raw_page_size.is_power_of_two() => u64::from(raw_page_size),
+        _ => return Ok(None),
+    };
+    let frame_size = page_size.saturating_add(SQLITE_WAL_FRAME_HEADER_BYTES as u64);
+    let frames_bytes = length.saturating_sub(SQLITE_WAL_HEADER_BYTES as u64);
+    if frames_bytes < frame_size || !frames_bytes.is_multiple_of(frame_size) {
+        return Ok(None);
+    }
+
+    file.seek(SeekFrom::Start(length - frame_size))?;
+    let mut header = [0_u8; SQLITE_WAL_FRAME_HEADER_BYTES];
+    file.read_exact(&mut header)?;
+    Ok(Some(header))
+}
+
+#[cfg(unix)]
+fn open_sqlite_component_without_following(path: &Path) -> Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?)
+}
+
+#[cfg(target_os = "windows")]
+fn open_sqlite_component_without_following(path: &Path) -> Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn open_sqlite_component_without_following(path: &Path) -> Result<File> {
+    Ok(File::open(path)?)
+}
+
+fn hex_token(token: &[u8; 32]) -> String {
+    token.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProviderSqliteSourceSnapshot {
+    database: ProviderSqliteFrozenFileMetadata,
+    wal: Option<ProviderSqliteFrozenFileMetadata>,
+    shared_memory: Option<ProviderSqliteFrozenFileMetadata>,
+    rollback_journal: Option<ProviderSqliteFrozenFileMetadata>,
+    source_invalid_reason: &'static str,
+    sidecar_invalid_reason: &'static str,
+}
+
+impl ProviderSqliteSourceSnapshot {
+    pub(crate) fn read(
+        path: &Path,
+        source_invalid_reason: &'static str,
+        sidecar_invalid_reason: &'static str,
+    ) -> Result<Self> {
+        Ok(Self {
+            database: ProviderSqliteFrozenFileMetadata::read(path, source_invalid_reason)?,
+            wal: ProviderSqliteFrozenFileMetadata::read_optional(
+                &sqlite_sidecar_path(path, "-wal"),
+                sidecar_invalid_reason,
+            )?,
+            shared_memory: ProviderSqliteFrozenFileMetadata::read_optional(
+                &sqlite_sidecar_path(path, "-shm"),
+                sidecar_invalid_reason,
+            )?,
+            rollback_journal: ProviderSqliteFrozenFileMetadata::read_optional(
+                &sqlite_sidecar_path(path, "-journal"),
+                sidecar_invalid_reason,
+            )?,
+            source_invalid_reason,
+            sidecar_invalid_reason,
+        })
+    }
+
+    pub(crate) fn revision_component(&self) -> String {
+        format!(
+            "database={};wal={};shm={};journal={}",
+            self.database.revision_component(),
+            optional_sqlite_revision_component(self.wal.as_ref()),
+            optional_sqlite_revision_component(self.shared_memory.as_ref()),
+            optional_sqlite_revision_component(self.rollback_journal.as_ref()),
+        )
+    }
+
+    pub(crate) fn revalidate(&self, path: &Path) -> Result<bool> {
+        match Self::read(
+            path,
+            self.source_invalid_reason,
+            self.sidecar_invalid_reason,
+        ) {
+            Ok(current) => Ok(current == *self),
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn optional_sqlite_revision_component(
+    metadata: Option<&ProviderSqliteFrozenFileMetadata>,
+) -> String {
+    metadata.map_or_else(|| "absent".to_owned(), |value| value.revision_component())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
 }
 
 pub(crate) struct ReadOnlySqliteConnection {
@@ -127,6 +416,19 @@ impl Deref for ReadOnlySqliteConnection {
     fn deref(&self) -> &Self::Target {
         &self.conn
     }
+}
+
+pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<ReadOnlySqliteConnection> {
+    let conn = open_sqlite_readonly_source(path)?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
+        CaptureError::InvalidPayload(format!(
+            "provider SQLite value byte limit is unrepresentable: {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
+        ))
+    })?;
+    conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "query_only", true)?;
+    Ok(conn)
 }
 
 pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
@@ -179,6 +481,22 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
     })
 }
 
+pub(crate) fn with_sqlite_read_snapshot<T>(
+    conn: &Connection,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    // Keep provider snapshots scoped to one bounded read. Callers can release the
+    // snapshot before writing to the ctx Store, even when they reuse the connection.
+    conn.execute_batch("begin")?;
+    let read_result = read();
+    let rollback_result = conn.execute_batch("rollback");
+    match (read_result, rollback_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (_, Err(error)) => Err(CaptureError::from(error)),
+    }
+}
+
 fn sqlite_existing_regular_sidecar_paths(path: &Path) -> Result<Vec<PathBuf>> {
     let mut sidecars = Vec::new();
     for sidecar in sqlite_sidecar_paths(path) {
@@ -227,31 +545,7 @@ fn sqlite_immutable_uri(path: &Path) -> Result<String> {
     Ok(url.to_string())
 }
 
-pub(crate) fn sqlite_row_ids_with_oversized_value(
-    path: &Path,
-    table: &str,
-    id_column: &str,
-    value_column: &str,
-) -> Result<BTreeSet<String>> {
-    let conn = open_sqlite_readonly_source(path)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.pragma_update(None, "query_only", true)?;
-    // This prescan intentionally omits SQLITE_LIMIT_LENGTH: bounded connections
-    // can raise SQLITE_TOOBIG before returning ids, and this query returns ids only.
-    let mut stmt = conn.prepare(&format!(
-        "select {} from {} where length(cast({} as blob)) > ?",
-        sqlite_ident(id_column),
-        sqlite_ident(table),
-        sqlite_ident(value_column),
-    ))?;
-    let rows = stmt.query_map([MAX_PROVIDER_SQLITE_VALUE_BYTES as i64], |row| {
-        row.get::<_, String>(0)
-    })?;
-    rows.collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(CaptureError::from)
-}
-
-pub(crate) fn opencode_schema_fingerprint(conn: &Connection) -> Result<String> {
+pub(crate) fn sqlite_schema_fingerprint(conn: &Connection) -> Result<String> {
     let mut stmt = conn.prepare(
         "select name, sql from sqlite_schema where type in ('table','index') order by name",
     )?;
@@ -266,9 +560,97 @@ pub(crate) fn opencode_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{params, types::Value as SqlValue, Connection};
+    use std::{
+        fs,
+        panic::{catch_unwind, AssertUnwindSafe},
+    };
 
-    use super::{optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet};
+    use rusqlite::{limits::Limit, params, types::Value as SqlValue, Connection};
+
+    use super::{
+        optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet,
+        ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
+    };
+
+    const TEST_LENGTH_LIMIT: i32 = 16 * 1024;
+
+    fn connection_with_test_length_limit() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, TEST_LENGTH_LIMIT);
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+        conn
+    }
+
+    #[test]
+    fn length_preflight_guard_restores_exact_prior_limit_after_success() {
+        let conn = connection_with_test_length_limit();
+        {
+            let _guard = SqliteLengthPreflightGuard::new(&conn);
+            let value: i64 = conn.query_row("SELECT 1", [], |row| row.get(0)).unwrap();
+            assert_eq!(value, 1);
+            assert!(conn.limit(Limit::SQLITE_LIMIT_LENGTH) > TEST_LENGTH_LIMIT);
+        }
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+    }
+
+    #[test]
+    fn length_preflight_guard_restores_exact_prior_limit_after_sqlite_error() {
+        let conn = connection_with_test_length_limit();
+        let result = {
+            let _guard = SqliteLengthPreflightGuard::new(&conn);
+            conn.query_row::<i64, _, _>("SELECT missing FROM missing_table", [], |row| row.get(0))
+        };
+        assert!(result.is_err());
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+    }
+
+    #[test]
+    fn length_preflight_guard_restores_nested_prior_limits() {
+        let conn = connection_with_test_length_limit();
+        let outer_guard = SqliteLengthPreflightGuard::new(&conn);
+        let raised_limit = conn.limit(Limit::SQLITE_LIMIT_LENGTH);
+        assert!(raised_limit > TEST_LENGTH_LIMIT);
+        {
+            let _inner_guard = SqliteLengthPreflightGuard::new(&conn);
+            assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), raised_limit);
+        }
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), raised_limit);
+        drop(outer_guard);
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+    }
+
+    #[test]
+    fn length_preflight_guard_restores_exact_prior_limit_while_unwinding() {
+        let conn = connection_with_test_length_limit();
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = SqliteLengthPreflightGuard::new(&conn);
+            panic!("exercise SQLite length preflight guard drop");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+    }
+
+    #[test]
+    fn provider_sqlite_snapshot_tracks_database_and_sidecars() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let wal = temp.path().join("provider.sqlite-wal");
+        fs::write(&database, b"database-v1").unwrap();
+        fs::write(&wal, b"wal-v1").unwrap();
+
+        let snapshot = ProviderSqliteSourceSnapshot::read(
+            &database,
+            "test database must be regular",
+            "test sidecar must be regular",
+        )
+        .unwrap();
+        assert!(snapshot.revalidate(&database).unwrap());
+        assert!(snapshot.revision_component().contains("database=length=11"));
+        assert!(snapshot.revision_component().contains("wal=length=6"));
+
+        fs::write(&wal, b"wal-v2-with-more-bytes").unwrap();
+        assert!(!snapshot.revalidate(&database).unwrap());
+    }
 
     #[test]
     fn optional_sqlite_casts_normalize_native_text_and_timestamp_shapes() {

@@ -2,6 +2,11 @@ mod support;
 
 use support::*;
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_env = "gnu"
+))]
 fn write_fake_semantic_model_cache(cache_root: &Path) {
     let model_root = cache_root.join("models--intfloat--multilingual-e5-small");
     let snapshot = model_root
@@ -21,6 +26,11 @@ fn write_fake_semantic_model_cache(cache_root: &Path) {
     }
 }
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_env = "gnu"
+))]
 fn remove_semantic_cache_env(command: &mut Command) {
     command.env_remove("CTX_SEMANTIC_CACHE_DIR");
     command.env_remove("FASTEMBED_CACHE_DIR");

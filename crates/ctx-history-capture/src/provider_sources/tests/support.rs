@@ -15,12 +15,8 @@ use super::super::{discover_provider_sources, ProviderSourceStatus};
 pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn tempdir() -> tempfile::TempDir {
-    let temp_root = std::fs::canonicalize(std::env::temp_dir())
-        .expect("system temporary directory should be canonicalizable");
-    tempfile::Builder::new()
-        .prefix("ctx-provider-sources-")
-        .tempdir_in(temp_root)
-        .unwrap()
+    crate::test_support_paths::tempdir()
+        .expect("system temporary directory should support test fixtures")
 }
 
 pub(super) struct EnvGuard {

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "packages": {
+    "ctx": {
+      "manifest": "crates/ctx-cli/Cargo.toml",
+      "targets": {
+        "bin:ctx": "//crates/ctx-cli:ctx",
+        "test:analytics": "//crates/ctx-cli:analytics_tests",
+        "test:analytics_identity": "//crates/ctx-cli:analytics_identity_tests",
+        "test:analytics_policy": "//crates/ctx-cli:analytics_policy_tests",
+        "test:cli_public_help_docs": "//crates/ctx-cli:cli_public_help_docs_tests",
+        "test:cloud_removed": "//crates/ctx-cli:cloud_removed_tests",
+        "test:custom_root_discovery": "//crates/ctx-cli:custom_root_discovery_tests",
+        "test:explicit_path_revision_upgrade": "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
+        "test:history_source_plugins": "//crates/ctx-cli:history_source_plugins_tests",
+        "test:index": "//crates/ctx-cli:index_tests",
+        "test:integrations": "//crates/ctx-cli:integrations_tests",
+        "test:integrations_mcp": "//crates/ctx-cli:integrations_mcp_tests",
+        "test:mcp": "//crates/ctx-cli:mcp_tests",
+        "test:mcp_integration_e2e": "//crates/ctx-cli:mcp_integration_e2e_tests",
+        "test:mcp_telemetry": "//crates/ctx-cli:mcp_telemetry_tests",
+        "test:native_provider_real_shapes": "//crates/ctx-cli:native_provider_real_shapes_tests",
+        "test:native_provider_rejections": "//crates/ctx-cli:native_provider_rejections_tests",
+        "test:native_providers": "//crates/ctx-cli:native_providers_tests",
+        "test:offline_default": "//crates/ctx-cli:offline_default_tests",
+        "test:pro_host": "//crates/ctx-cli:pro_host_tests",
+        "test:pro_lifecycle": "//crates/ctx-cli:pro_lifecycle_tests",
+        "test:pro_mcp": "//crates/ctx-cli:pro_mcp_tests",
+        "test:pro_release_helper": "//crates/ctx-cli:pro_release_helper_tests",
+        "test:pro_test_support": "//crates/ctx-cli:pro_test_support_tests",
+        "test:search_refresh": "//crates/ctx-cli:search_refresh_tests",
+        "test:search_show_locate_sql": "//crates/ctx-cli:search_show_locate_sql_tests",
+        "test:setup_sources_import": "//crates/ctx-cli:setup_sources_import_tests",
+        "test:skill": "//crates/ctx-cli:skill_tests",
+        "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
+        "test:upgrade": "//crates/ctx-cli:upgrade_tests",
+        "custom-build:build-script-build": "//:cli_build_cfg_parity_check"
+      },
+      "native_unit": "//crates/ctx-cli:unit_tests"
+    },
+    "ctx-history-capture": {
+      "manifest": "crates/ctx-history-capture/Cargo.toml",
+      "targets": {
+        "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
+        "test:captured_batch_characterization": "//crates/ctx-history-capture:captured_batch_characterization_tests",
+        "test:complete_content_jsonl": "//crates/ctx-history-capture:complete_content_jsonl_tests",
+        "test:complete_content_sqlite": "//crates/ctx-history-capture:complete_content_sqlite_tests",
+        "test:structured_complete_content": "//crates/ctx-history-capture:structured_complete_content_tests",
+        "test:cursor_native": "//crates/ctx-history-capture:cursor_native_tests"
+      },
+      "native_unit": "//crates/ctx-history-capture:unit_tests"
+    },
+    "ctx-history-core": {
+      "manifest": "crates/ctx-history-core/Cargo.toml",
+      "targets": {"lib:ctx_history_core": "//crates/ctx-history-core:lib"},
+      "native_unit": "//crates/ctx-history-core:unit_tests"
+    },
+    "ctx-history-store": {
+      "manifest": "crates/ctx-history-store/Cargo.toml",
+      "targets": {"lib:ctx_history_store": "//crates/ctx-history-store:lib"},
+      "native_unit": "//crates/ctx-history-store:unit_tests"
+    },
+    "ctx-history-search": {
+      "manifest": "crates/ctx-history-search/Cargo.toml",
+      "targets": {"lib:ctx_history_search": "//crates/ctx-history-search:lib"},
+      "native_unit": "//crates/ctx-history-search:unit_tests",
+      "focused_tests": ["//crates/ctx-history-search:determinism_tests"]
+    },
+    "ctx-pro-host-protocol": {
+      "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",
+      "targets": {
+        "example:generate_protocol_inventory": "//crates/ctx-pro-host-protocol:generate_protocol_inventory",
+        "lib:ctx_pro_host_protocol": "//crates/ctx-pro-host-protocol:lib"
+      },
+      "native_unit": "//crates/ctx-pro-host-protocol:unit_tests",
+      "focused_tests": ["//crates/ctx-pro-host-protocol:conformance_tests"]
+    },
+    "ctx-protocol": {
+      "manifest": "crates/ctx-protocol/Cargo.toml",
+      "targets": {"lib:ctx_protocol": "//crates/ctx-protocol:lib"},
+      "native_unit": "//crates/ctx-protocol:unit_tests"
+    },
+    "ctx-sdk": {
+      "manifest": "crates/ctx-sdk/Cargo.toml",
+      "targets": {"lib:ctx_sdk": "//crates/ctx-sdk:lib"},
+      "native_unit": "//crates/ctx-sdk:unit_tests"
+    }
+  }
+}

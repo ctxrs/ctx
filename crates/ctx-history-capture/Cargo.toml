@@ -1,6 +1,6 @@
 [package]
 name = "ctx-history-capture"
-version = "0.25.0"
+version = "0.26.0"
 description = "Internal provider import adapters for ctx local agent history"
 edition.workspace = true
 license.workspace = true
@@ -12,14 +12,25 @@ publish = false
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+directories.workspace = true
+json5.workspace = true
+jsonc-parser.workspace = true
+libc.workspace = true
+quick-xml.workspace = true
 rmpv.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+toml_edit.workspace = true
 url.workspace = true
 uuid.workspace = true
 zstd.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-store = { path = "../ctx-history-store" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

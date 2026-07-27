@@ -1,52 +1,68 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    path::{Path, PathBuf},
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence, Event,
-    EventRole, EventType, Fidelity, FileTouched, ProviderCaptureEnvelope, ProviderCursorCheckpoint,
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
+    Confidence, Event, Fidelity, FileTouched, ProviderCaptureEnvelope, ProviderCursorCheckpoint,
     ProviderCursorRange, ProviderEventEnvelope, ProviderSessionEnvelope, ProviderSourceEnvelope,
-    ProviderSourceTrust, Session, SessionEdge, SessionEdgeType,
+    ProviderSourceTrust, Session, SessionEdge, SessionEdgeType, SessionStatus,
     PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
-use ctx_history_store::{Store, StoreError};
+use ctx_history_store::{ProviderEventHashAuthority, Store, StoreError};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{compute_payload_hash, stable_capture_uuid};
-
-use crate::provider::file_touches::provider_file_touches_from_event;
+use crate::complete_content::{
+    PersistedCompleteContentLocatorV1, COMPLETE_CONTENT_LOCATOR_METADATA_KEY,
+    RESULT_CONTENT_LOCATOR_METADATA_KEY,
+};
+use crate::compute_payload_hash;
 use crate::{
-    CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext, ProviderCaptureAdapter,
-    ProviderFileTouchedEnvelope, ProviderFixtureLine, ProviderImportFailure, ProviderImportSummary,
+    CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderFileTouchedEnvelope, ProviderFixtureLine, ProviderImportSummary,
     ProviderNormalizationResult, Result,
 };
 
 mod batches;
 mod commands;
 mod cursors;
+mod existing_session;
 mod identity;
 mod ids;
 mod legacy_identity;
+mod normalized;
+mod source_relocation;
 
 #[cfg(test)]
 pub(crate) use batches::import_normalized_provider_captures_in_batches;
-pub(crate) use batches::{resolve_pending_provider_edges_batched, ProviderImportTransaction};
+pub(crate) use batches::{
+    drain_captured_batches, emit_projected_normalization_units, import_captured_batches,
+    project_default_structural_rejection, CapturedBatchCursorFinish, CapturedBatchCursorMode,
+    CapturedBatchProjector, CapturedSourceAdmission, ExistingSessionEventOutcome,
+    ProviderImportTransaction, ProviderProjectionFatal, ProviderProjectionOutput,
+    ProviderProjectionResult,
+};
 pub(crate) use commands::{
-    provider_command_run_from_event, validate_provider_event_for_import, ProviderCommandRunInput,
+    compact_provider_result_payload, provider_command_run_from_event,
+    validate_provider_event_for_import, ProviderCommandRunInput,
 };
 #[cfg(test)]
 pub(crate) use cursors::provider_source_cursor_stream;
+#[cfg(all(test, unix))]
+pub(crate) use cursors::MAX_PROVIDER_PATH_IDENTITY_RAW_BYTES;
 pub(crate) use cursors::{
-    persist_provider_sync_cursor, provider_cursor_stream, provider_source_cursor_range,
-    provider_sync_cursor,
+    captured_batch_cursor_stream, provider_cursor_stream, provider_path_identity,
+    provider_source_cursor_range, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
+    CertifiedProviderCursor,
 };
 pub(crate) use identity::{
-    pi_existing_event_identity_by_entry_id, provider_event_exists, provider_event_import_identity,
-    provider_file_touch_event_id, provider_file_touch_import_id, provider_session_exists_cached,
+    pi_existing_event_identity_by_entry_id,
+    provider_event_import_identity_with_exact_legacy_source, provider_file_touch_event_id,
+    provider_file_touch_import_id, provider_session_exists_cached, ExactLegacySourceEventCandidate,
     ProviderEventImportIdentity,
 };
 pub(crate) use ids::{
@@ -55,9 +71,13 @@ pub(crate) use ids::{
     provider_source_root, provider_source_session_uuid, provider_sync_metadata, timestamps,
 };
 use legacy_identity::legacy_session_matches_source;
+pub(crate) use source_relocation::import_provider_capture_line;
+use source_relocation::{
+    provider_file_touch_source_id, provider_import_source_id, CanonicalProviderSourceOverride,
+};
 
 #[cfg(test)]
-pub(crate) use identity::provider_source_event_import_identity;
+pub(crate) use identity::{provider_event_import_identity, provider_source_event_import_identity};
 #[cfg(test)]
 pub(crate) use ids::provider_source_root_identity;
 #[cfg(test)]
@@ -65,44 +85,6 @@ pub(crate) use ids::{
     provider_event_seq, provider_event_uuid, provider_file_touch_uuid, provider_source_event_seq,
     provider_source_event_uuid, provider_source_uuid,
 };
-
-pub(crate) struct NativeJsonlTreeImport<'a> {
-    pub(crate) path: &'a Path,
-    pub(crate) machine_id: String,
-    pub(crate) source_path: Option<PathBuf>,
-    pub(crate) source_root: Option<PathBuf>,
-    pub(crate) imported_at: DateTime<Utc>,
-    pub(crate) history_record_id: Option<Uuid>,
-}
-
-pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
-    store: &mut Store,
-    request: NativeJsonlTreeImport<'_>,
-    adapter: A,
-) -> Result<ProviderImportSummary> {
-    let source_path = request
-        .source_path
-        .unwrap_or_else(|| request.path.to_path_buf());
-    let normalization = adapter.normalize_path(
-        request.path,
-        &ProviderAdapterContext {
-            machine_id: request.machine_id,
-            source_path: Some(source_path),
-            source_root: request.source_root,
-            imported_at: request.imported_at,
-        },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
-        NormalizedProviderImportOptions {
-            history_record_id: request.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-        },
-    )
-}
 
 pub fn import_normalized_provider_captures(
     store: &mut Store,
@@ -112,198 +94,36 @@ pub fn import_normalized_provider_captures(
     batches::import_normalized_provider_captures(store, normalization, options)
 }
 
-pub(crate) fn import_provider_capture_lines(
-    store: &mut Store,
-    options: NormalizedProviderImportOptions,
-    summary: ProviderImportSummary,
-    captures: Vec<(usize, ProviderCaptureEnvelope)>,
-    files_touched: Vec<(usize, ProviderFileTouchedEnvelope)>,
-) -> Result<ProviderImportSummary> {
-    batches::import_provider_capture_lines(store, options, summary, captures, files_touched)
-}
-
-fn filter_provider_capture_lines_without_real_session_messages(
-    summary: &mut ProviderImportSummary,
-    captures: &mut Vec<(usize, ProviderCaptureEnvelope)>,
-    files_touched: &mut Vec<(usize, ProviderFileTouchedEnvelope)>,
-) {
-    let native_session_keys = captures
-        .iter()
-        .filter_map(|(_, capture)| provider_capture_policy_session_key(capture))
-        .collect::<HashSet<_>>();
-    if native_session_keys.is_empty() {
-        return;
-    }
-
-    let real_session_keys = captures
-        .iter()
-        .filter_map(|(_, capture)| {
-            let key = provider_capture_policy_session_key(capture)?;
-            capture
-                .event
-                .as_ref()
-                .is_some_and(provider_event_is_real_conversation_message)
-                .then_some(key)
-        })
-        .collect::<HashSet<_>>();
-    let rejected_session_keys = native_session_keys
-        .difference(&real_session_keys)
-        .cloned()
-        .collect::<HashSet<_>>();
-    if rejected_session_keys.is_empty() {
-        return;
-    }
-
-    summary.skipped_sessions += rejected_session_keys.len();
-    captures.retain(|(_, capture)| {
-        let Some(key) = provider_capture_policy_session_key(capture) else {
-            return true;
-        };
-        if !rejected_session_keys.contains(&key) {
-            return true;
-        }
-        summary.skipped += 1;
-        if capture.event.is_some() {
-            summary.skipped_events += 1;
-        }
-        false
-    });
-    files_touched.retain(|(_, file)| {
-        let Some(key) = provider_file_touch_policy_session_key(file) else {
-            return true;
-        };
-        if !rejected_session_keys.contains(&key) {
-            return true;
-        }
-        summary.skipped += 1;
-        false
-    });
-
-    if real_session_keys.is_empty() && summary.failed == 0 {
-        summary.failed += 1;
-        summary.failures.push(ProviderImportFailure {
-            line: 0,
-            error: "provider source contained no real conversation message".to_owned(),
-        });
-    }
-}
-
-fn provider_capture_policy_session_key(capture: &ProviderCaptureEnvelope) -> Option<String> {
-    provider_policy_session_key(
-        capture.provider,
-        &capture.source.trust,
-        &capture.source.source_format,
-        &capture.session.provider_session_id,
-        capture.source.raw_source_path.as_deref(),
-    )
-}
-
-fn provider_file_touch_policy_session_key(file: &ProviderFileTouchedEnvelope) -> Option<String> {
-    provider_policy_session_key(
-        file.provider,
-        &ProviderSourceTrust::ProviderNative,
-        &file.source_format,
-        &file.provider_session_id,
-        file.raw_source_path.as_deref(),
-    )
-}
-
-fn provider_policy_session_key(
-    provider: CaptureProvider,
-    trust: &ProviderSourceTrust,
-    source_format: &str,
-    provider_session_id: &str,
-    raw_source_path: Option<&str>,
-) -> Option<String> {
-    if provider == CaptureProvider::Custom
-        || !matches!(
-            trust,
-            ProviderSourceTrust::ProviderNative | ProviderSourceTrust::ProviderExport
-        )
-    {
-        return None;
-    }
-    Some(format!(
-        "{}\0{}\0{}\0{}",
-        provider.as_str(),
-        source_format,
-        provider_session_id,
-        raw_source_path.unwrap_or_default()
-    ))
-}
-
-fn provider_capture_lines_have_real_message(captures: &[(usize, ProviderCaptureEnvelope)]) -> bool {
-    captures
-        .iter()
-        .filter(|(_, capture)| capture.provider != CaptureProvider::Custom)
-        .all(|(_, capture)| {
-            !matches!(
-                capture.source.trust,
-                ProviderSourceTrust::ProviderNative | ProviderSourceTrust::ProviderExport
-            )
-        })
-        || captures.iter().any(|(_, capture)| {
-            capture.provider != CaptureProvider::Custom
-                && matches!(
-                    capture.source.trust,
-                    ProviderSourceTrust::ProviderNative | ProviderSourceTrust::ProviderExport
-                )
-                && capture
-                    .event
-                    .as_ref()
-                    .is_some_and(provider_event_is_real_conversation_message)
-        })
-}
-
-fn provider_event_is_real_conversation_message(event: &ProviderEventEnvelope) -> bool {
-    event.event_type == EventType::Message
-        && matches!(
-            event.role,
-            Some(EventRole::User | EventRole::Assistant | EventRole::System)
-        )
-        && provider_event_payload_has_text(&event.payload)
-}
-
-fn provider_event_payload_has_text(payload: &Value) -> bool {
-    payload
-        .get("text")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            payload
-                .get("body")
-                .and_then(|body| body.get("text"))
-                .and_then(Value::as_str)
-        })
-        .is_some_and(|text| !text.trim().is_empty())
-}
-
 pub(crate) fn import_provider_file_touched_line(
     store: &mut Store,
     file: &ProviderFileTouchedEnvelope,
     options: &NormalizedProviderImportOptions,
+    canonical_source: Option<&CanonicalProviderSourceOverride>,
 ) -> Result<()> {
-    let source_id = provider_scoped_source_uuid(
-        file.provider,
-        &file.provider_session_id,
-        &file.source_format,
-        file.raw_source_path.as_deref(),
-    );
+    let source_id = provider_file_touch_source_id(store, file, canonical_source)?;
     let source_root =
         provider_source_root(file.source_root.as_deref(), file.raw_source_path.as_deref());
-    let source_identity = provider_source_identity(
-        file.provider,
-        &file.source_format,
-        file.source_root.as_deref(),
-        file.raw_source_path.as_deref(),
-        None,
-        &file.metadata,
-    );
+    let source_identity = canonical_source
+        .map(|canonical| canonical.stable_source_identity.clone())
+        .or_else(|| {
+            provider_source_identity(
+                file.provider,
+                &file.source_format,
+                file.source_root.as_deref(),
+                file.raw_source_path.as_deref(),
+                None,
+                &file.metadata,
+            )
+        });
+    let session_source_identity = canonical_source
+        .map(|canonical| canonical.stable_session_identity.as_str())
+        .or(source_identity.as_deref());
     let inferred_session_id = provider_import_session_uuid(
         store,
         file.provider,
         &file.provider_session_id,
         source_id,
-        source_identity.as_deref(),
+        session_source_identity,
     )?;
     let event_id = match file.provider_event_index {
         Some(index) => provider_file_touch_event_id(
@@ -333,6 +153,7 @@ pub(crate) fn import_provider_file_touched_line(
         file.provider,
         &file.provider_session_id,
         source_id,
+        file.provider_event_index,
         file.provider_touch_index,
         session_id == provider_session_uuid(file.provider, &file.provider_session_id),
     )?;
@@ -373,27 +194,14 @@ pub(crate) fn import_provider_file_touched_line(
 pub(crate) struct ProviderImportCaches {
     pub(crate) imported_sessions: BTreeSet<Uuid>,
     pub(crate) processed_sources: BTreeSet<Uuid>,
-    pub(crate) processed_sessions: BTreeSet<Uuid>,
+    pub(crate) processed_sessions: BTreeMap<Uuid, Session>,
+    pub(crate) resolved_existing_sessions: BTreeMap<Uuid, Uuid>,
+    pub(crate) codex_eventless_capture_byte_budgets: BTreeMap<Uuid, usize>,
     pub(crate) imported_edges: BTreeSet<Uuid>,
     pub(crate) processed_edges: BTreeSet<Uuid>,
     pub(crate) session_exists: BTreeMap<Uuid, bool>,
     pub(crate) pi_event_identities_by_entry_id:
         BTreeMap<Uuid, BTreeMap<String, ProviderEventImportIdentity>>,
-    pub(crate) pending_edges: BTreeMap<Uuid, PendingProviderEdge>,
-}
-
-#[derive(Clone)]
-pub(crate) struct PendingProviderEdge {
-    pub(crate) provider_session_id: String,
-    pub(crate) parent_provider_session_id: Option<String>,
-    pub(crate) session_id: Uuid,
-    pub(crate) parent_session_id: Uuid,
-    pub(crate) root_session_id: Option<Uuid>,
-    pub(crate) source_id: Uuid,
-    pub(crate) source_format: String,
-    pub(crate) imported_at: DateTime<Utc>,
-    pub(crate) fidelity: Fidelity,
-    pub(crate) line_number: usize,
 }
 
 pub(crate) fn provider_import_session_uuid(
@@ -455,12 +263,103 @@ fn provider_import_edge_uuid(
     provider_edge_uuid(provider, provider_session_id, edge_kind)
 }
 
-pub(crate) fn import_provider_capture_line(
+fn exact_legacy_source_event_candidate(
+    provider: CaptureProvider,
+    session: &ProviderSessionEnvelope,
+    source: &ProviderSourceEnvelope,
+    event: &ProviderEventEnvelope,
+) -> Option<ExactLegacySourceEventCandidate> {
+    if provider != CaptureProvider::OpenHands
+        || source.source_format != crate::OPENHANDS_FILE_EVENTS_SOURCE_FORMAT
+    {
+        return None;
+    }
+    let candidate = event.metadata.get("legacy_source_event_candidate_v1")?;
+    let raw_source_path = candidate.get("raw_source_path")?.as_str()?;
+    let provider_event_index = candidate.get("provider_event_index")?.as_u64()?;
+    let current_source_path = source.raw_source_path.as_deref()?;
+    if Path::new(current_source_path).parent()? != Path::new(raw_source_path) {
+        return None;
+    }
+    Some(ExactLegacySourceEventCandidate {
+        source_id: provider_scoped_source_uuid(
+            provider,
+            &session.provider_session_id,
+            &source.source_format,
+            Some(raw_source_path),
+        ),
+        provider_event_index,
+    })
+}
+
+struct RelationshipPlaceholder<'a> {
+    id: Uuid,
+    current_session_id: Uuid,
+    provider: CaptureProvider,
+    external_session_id: &'a str,
+    source_format: &'a str,
+    source_identity: Option<&'a str>,
+    source_root: Option<&'a str>,
+    observed_at: DateTime<Utc>,
+}
+
+fn ensure_relationship_placeholder(
+    store: &Store,
+    caches: &mut ProviderImportCaches,
+    summary: &mut ProviderImportSummary,
+    placeholder: RelationshipPlaceholder<'_>,
+) -> Result<()> {
+    if placeholder.id == placeholder.current_session_id
+        || provider_session_exists_cached(store, placeholder.id, &mut caches.session_exists)?
+    {
+        return Ok(());
+    }
+
+    let session = Session {
+        id: placeholder.id,
+        history_record_id: None,
+        parent_session_id: None,
+        root_session_id: None,
+        capture_source_id: None,
+        provider: placeholder.provider,
+        external_session_id: Some(placeholder.external_session_id.to_owned()),
+        external_agent_id: None,
+        agent_type: AgentType::Unknown,
+        role_hint: None,
+        is_primary: false,
+        status: SessionStatus::Imported,
+        transcript_blob_id: None,
+        started_at: placeholder.observed_at,
+        ended_at: None,
+        timestamps: timestamps(placeholder.observed_at),
+        sync: provider_sync_metadata(
+            Fidelity::Partial,
+            json!({
+                "relationship_placeholder": true,
+                "provider_session_id": placeholder.external_session_id,
+                "source_format": placeholder.source_format,
+                "source_identity": placeholder.source_identity,
+                "source_root": placeholder.source_root,
+                "imported_at": placeholder.observed_at,
+            }),
+        ),
+    };
+    if store.insert_session_if_absent(&session)? {
+        caches.imported_sessions.insert(placeholder.id);
+        summary.imported_sessions += 1;
+        summary.imported += 1;
+    }
+    caches.session_exists.insert(placeholder.id, true);
+    Ok(())
+}
+
+pub(crate) fn import_provider_capture_line_with_canonical_source(
     store: &mut Store,
     capture: &ProviderCaptureEnvelope,
     options: &NormalizedProviderImportOptions,
     line_number: usize,
     caches: &mut ProviderImportCaches,
+    canonical_source: Option<&CanonicalProviderSourceOverride>,
 ) -> Result<ProviderImportSummary> {
     if !(PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION
         ..=PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION)
@@ -486,18 +385,19 @@ pub(crate) fn import_provider_capture_line(
         &source.source_format,
         source.raw_source_path.as_deref(),
     );
-    let source_id = stable_capture_uuid(&source_identity_key, "source");
+    let (source_id, source_identity) = provider_import_source_id(
+        store,
+        provider,
+        &session.provider_session_id,
+        source,
+        canonical_source,
+    )?;
+    let session_source_identity = canonical_source
+        .map(|canonical| canonical.stable_session_identity.as_str())
+        .or(source_identity.as_deref());
     let source_root = provider_source_root(
         source.source_root.as_deref(),
         source.raw_source_path.as_deref(),
-    );
-    let source_identity = provider_source_identity(
-        provider,
-        &source.source_format,
-        source.source_root.as_deref(),
-        source.raw_source_path.as_deref(),
-        source.idempotency_key.as_deref(),
-        &source.metadata,
     );
     let source_cursor = provider_source_cursor_range(capture);
     let source_metadata = source.metadata.clone();
@@ -545,41 +445,65 @@ pub(crate) fn import_provider_capture_line(
         provider,
         &session.provider_session_id,
         source_id,
-        source_identity.as_deref(),
+        session_source_identity,
     )?;
     let requested_parent_session_id = session
         .parent_provider_session_id
         .as_ref()
         .map(|id| {
-            provider_import_session_uuid(store, provider, id, source_id, source_identity.as_deref())
+            provider_import_session_uuid(store, provider, id, source_id, session_source_identity)
         })
         .transpose()?;
-    let parent_session_id = match requested_parent_session_id {
-        Some(parent_id)
-            if provider_session_exists_cached(store, parent_id, &mut caches.session_exists)? =>
-        {
-            Some(parent_id)
-        }
-        _ => None,
-    };
-    let requested_root_session_id = session
+    if let (Some(parent_id), Some(parent_external_id)) = (
+        requested_parent_session_id,
+        session.parent_provider_session_id.as_deref(),
+    ) {
+        ensure_relationship_placeholder(
+            store,
+            caches,
+            &mut summary,
+            RelationshipPlaceholder {
+                id: parent_id,
+                current_session_id: session_id,
+                provider,
+                external_session_id: parent_external_id,
+                source_format: &source.source_format,
+                source_identity: session_source_identity,
+                source_root: source_root.as_deref(),
+                observed_at: imported_at,
+            },
+        )?;
+    }
+    let explicit_root_session_id = session
         .root_provider_session_id
         .as_ref()
         .map(|id| {
-            provider_import_session_uuid(store, provider, id, source_id, source_identity.as_deref())
+            provider_import_session_uuid(store, provider, id, source_id, session_source_identity)
         })
-        .transpose()?
-        .or_else(|| requested_parent_session_id.map(|_| session_id));
-    let root_session_id = match requested_root_session_id {
-        Some(root_id)
-            if root_id == session_id
-                || provider_session_exists_cached(store, root_id, &mut caches.session_exists)? =>
-        {
-            Some(root_id)
-        }
-        _ => None,
-    };
-    let process_session = caches.processed_sessions.insert(session_id);
+        .transpose()?;
+    if let (Some(root_id), Some(root_external_id)) = (
+        explicit_root_session_id,
+        session.root_provider_session_id.as_deref(),
+    ) {
+        ensure_relationship_placeholder(
+            store,
+            caches,
+            &mut summary,
+            RelationshipPlaceholder {
+                id: root_id,
+                current_session_id: session_id,
+                provider,
+                external_session_id: root_external_id,
+                source_format: &source.source_format,
+                source_identity: session_source_identity,
+                source_root: source_root.as_deref(),
+                observed_at: imported_at,
+            },
+        )?;
+    }
+    let parent_session_id = requested_parent_session_id;
+    let root_session_id = explicit_root_session_id.or(requested_parent_session_id);
+    let process_session = !caches.processed_sessions.contains_key(&session_id);
     let is_new_session = if process_session {
         !provider_session_exists_cached(store, session_id, &mut caches.session_exists)?
     } else {
@@ -618,8 +542,23 @@ pub(crate) fn import_provider_capture_line(
             }),
         ),
     };
-    if process_session {
+    if let Some(first_session) = caches.processed_sessions.get_mut(&session_id) {
+        // A bounded batch may contain out-of-order events for one session.
+        // Preserve the first normalized envelope exactly, as the prior cache
+        // did, while letting Store observe expanding temporal bounds without a
+        // whole-source pre-scan.
+        first_session.started_at = first_session.started_at.min(normalized_session.started_at);
+        first_session.ended_at = match (first_session.ended_at, normalized_session.ended_at) {
+            (Some(first), Some(next)) => Some(first.max(next)),
+            (first @ Some(_), None) => first,
+            (None, next) => next,
+        };
+        store.upsert_session(first_session)?;
+    } else {
         store.upsert_session(&normalized_session)?;
+        caches
+            .processed_sessions
+            .insert(session_id, normalized_session.clone());
         caches.session_exists.insert(session_id, true);
         if is_new_session && caches.imported_sessions.insert(session_id) {
             summary.imported_sessions += 1;
@@ -634,7 +573,7 @@ pub(crate) fn import_provider_capture_line(
         let edge_id = provider_import_edge_uuid(
             provider,
             &session.provider_session_id,
-            source_identity.as_deref(),
+            session_source_identity,
             session_id,
             "parent_child",
         );
@@ -668,256 +607,227 @@ pub(crate) fn import_provider_capture_line(
                 summary.skipped += 1;
             }
         }
-    } else if requested_parent_session_id.is_some() {
-        let edge_id = provider_import_edge_uuid(
-            provider,
-            &session.provider_session_id,
-            source_identity.as_deref(),
-            session_id,
-            "parent_child",
-        );
-        if let Some(parent_session_id) = requested_parent_session_id {
-            caches
-                .pending_edges
-                .entry(edge_id)
-                .or_insert_with(|| PendingProviderEdge {
-                    provider_session_id: session.provider_session_id.clone(),
-                    parent_provider_session_id: session.parent_provider_session_id.clone(),
-                    session_id,
-                    parent_session_id,
-                    root_session_id: requested_root_session_id,
-                    source_id,
-                    source_format: source.source_format.clone(),
-                    imported_at,
-                    fidelity: session.fidelity,
-                    line_number,
-                });
-        }
     }
 
     if let Some(event) = &capture.event {
-        let payload = event.payload.clone();
-        let event_metadata = event.metadata.clone();
-        let event_hash = event
-            .provider_event_hash
-            .clone()
-            .unwrap_or(compute_payload_hash(&payload)?);
-        let pi_entry_id = event
-            .metadata
-            .get("entry_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty());
-        let legacy_provider_event_index = event
-            .metadata
-            .get("legacy_provider_event_index")
-            .and_then(Value::as_u64)
-            .filter(|_| !(provider == CaptureProvider::Pi && pi_entry_id.is_some()));
-        let provider_event_identity_index = event
-            .metadata
-            .get("provider_event_identity_index")
-            .and_then(Value::as_u64)
-            .unwrap_or(event.provider_event_index);
-        let event_identity = match pi_existing_event_identity_by_entry_id(
+        import_provider_event_for_session(
             store,
-            provider,
-            session_id,
-            pi_entry_id,
-            caches,
-        )? {
-            Some(identity) => identity,
-            None => provider_event_import_identity(
-                store,
-                provider,
-                &session.provider_session_id,
-                source_id,
-                provider_event_identity_index,
-                event.provider_event_index,
-                &event_hash,
-                legacy_provider_event_index,
-                session_id == provider_session_uuid(provider, &session.provider_session_id),
-            )?,
-        };
-        let command_run = provider_command_run_from_event(ProviderCommandRunInput {
-            provider,
-            provider_session_id: &session.provider_session_id,
-            session_id,
-            source_id,
-            run_source_id: event_identity.run_source_id,
-            history_record_id: options.history_record_id,
+            capture,
             event,
-            payload: &payload,
-            event_hash: &event_hash,
-        })?;
-        let normalized_event = Event {
-            id: event_identity.id,
-            seq: event_identity.seq,
-            history_record_id: options.history_record_id,
-            session_id: Some(session_id),
-            run_id: command_run.as_ref().map(|run| run.id),
-            event_type: event.event_type,
-            role: event.role,
-            occurred_at: event.occurred_at,
-            capture_source_id: Some(source_id),
-            payload: json!({
-                "provider": provider.as_str(),
-                "provider_session_id": session.provider_session_id,
-                "provider_event_index": event.provider_event_index,
-                "provider_event_hash": event_hash,
-                "cursor": event.cursor,
-                "artifacts": event.artifacts,
-                "body": payload,
-            }),
-            payload_blob_id: None,
-            dedupe_key: Some(event_identity.dedupe_key.clone()),
-            sync: provider_sync_metadata(
-                event.fidelity,
-                json!({
-                    "provider_session_id": session.provider_session_id,
-                    "provider_event_index": event.provider_event_index,
-                    "provider_event_hash": event_hash,
-                    "cursor": event.cursor,
-                    "source_format": source.source_format,
-                    "source_trust": source.trust,
-                    "fixture_line": line_number,
-                    "imported_at": imported_at,
-                    "event_idempotency_key": event.idempotency_key,
-                    "metadata": event_metadata,
-                }),
-            ),
-        };
-        let was_present = if options.fast_event_inserts {
-            if let Some(run) = &command_run {
-                store.insert_run_if_absent(run)?;
-            }
-            !store.insert_event_if_absent(&normalized_event)?
-        } else {
-            let was_present = provider_event_exists(store, &event_identity.dedupe_key)?;
-            if let Some(run) = &command_run {
-                store.upsert_run(run)?;
-            }
-            match store.upsert_event(&normalized_event) {
-                Ok(_) => {}
-                Err(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows)) => {}
-                Err(StoreError::ProviderEventConflict { .. }) => {
-                    summary.skipped_events += 1;
-                    summary.skipped += 1;
-                    summary.accepted_content_records += 1;
-                    return Ok(summary);
-                }
-                Err(err) => return Err(CaptureError::Store(err)),
-            }
-            was_present
-        };
-        if was_present {
-            summary.skipped_events += 1;
-            summary.skipped += 1;
-        } else {
-            summary.imported_events += 1;
-            summary.imported += 1;
-        }
-    }
-
-    if capture.event.is_some() {
-        summary.accepted_content_records += 1;
+            options,
+            line_number,
+            caches,
+            source_id,
+            session_id,
+            &mut summary,
+        )?;
     }
 
     Ok(summary)
 }
 
-fn resolve_pending_provider_edge(
+#[allow(clippy::too_many_arguments)]
+fn import_provider_event_for_session(
     store: &mut Store,
-    summary: &mut ProviderImportSummary,
+    capture: &ProviderCaptureEnvelope,
+    event: &ProviderEventEnvelope,
+    options: &NormalizedProviderImportOptions,
+    line_number: usize,
     caches: &mut ProviderImportCaches,
-    edge_id: Uuid,
-    edge: PendingProviderEdge,
+    source_id: Uuid,
+    session_id: Uuid,
+    summary: &mut ProviderImportSummary,
 ) -> Result<()> {
-    if caches.processed_edges.contains(&edge_id) {
-        update_session_parent_if_needed(store, &edge, caches)?;
-        return Ok(());
-    }
-    if !provider_session_exists_cached(store, edge.parent_session_id, &mut caches.session_exists)? {
-        summary.skipped_edges += 1;
-        summary.skipped += 1;
-        return Ok(());
-    }
-    let root_session_id = resolve_pending_root_session_id(store, &edge, caches)?;
-    update_session_parent(store, &edge, root_session_id)?;
-    caches.session_exists.insert(edge.session_id, true);
-
-    let was_present = store.session_edge_exists(edge_id)?;
-    let session_edge = SessionEdge {
-        id: edge_id,
-        from_session_id: edge.parent_session_id,
-        to_session_id: edge.session_id,
-        edge_type: SessionEdgeType::ParentChild,
-        confidence: Confidence::Explicit,
-        source_id: Some(edge.source_id),
-        timestamps: timestamps(edge.imported_at),
-        sync: provider_sync_metadata(
-            edge.fidelity,
-            json!({
-                "provider_session_id": edge.provider_session_id,
-                "parent_provider_session_id": edge.parent_provider_session_id,
-                "source_format": edge.source_format,
-                "fixture_line": edge.line_number,
-                "imported_at": edge.imported_at,
-                "deferred_edge_resolution": true,
-            }),
+    let provider = capture.provider;
+    let session = &capture.session;
+    let source = &capture.source;
+    let imported_at = source.observed_at;
+    let payload = event.payload.clone();
+    let mut event_metadata = event.metadata.clone();
+    let source_record_coordinates = take_source_record_coordinates(&mut event_metadata)?;
+    let complete_content_locator = take_complete_content_locator(&mut event_metadata)?;
+    let result_content_locator =
+        take_content_locator(&mut event_metadata, RESULT_CONTENT_LOCATOR_METADATA_KEY)?;
+    let (event_hash, event_hash_authority) = match &event.provider_event_hash {
+        Some(hash) => (hash.clone(), ProviderEventHashAuthority::ProviderSupplied),
+        None => (
+            compute_payload_hash(&payload)?,
+            ProviderEventHashAuthority::NormalizedPayloadFallback,
         ),
     };
-    store.upsert_session_edge(&session_edge)?;
-    caches.processed_edges.insert(edge_id);
-    if !was_present && caches.imported_edges.insert(edge_id) {
-        summary.imported_edges += 1;
-        summary.imported += 1;
-    } else {
-        summary.skipped_edges += 1;
-        summary.skipped += 1;
+    let pi_entry_id = event
+        .metadata
+        .get("entry_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty());
+    let legacy_provider_event_index = event
+        .metadata
+        .get("legacy_provider_event_index")
+        .and_then(Value::as_u64)
+        .filter(|_| !(provider == CaptureProvider::Pi && pi_entry_id.is_some()));
+    let provider_event_identity_index = event
+        .metadata
+        .get("provider_event_identity_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(event.provider_event_index);
+    let existing_pi_entry_identity =
+        pi_existing_event_identity_by_entry_id(store, provider, session_id, pi_entry_id, caches)?;
+    let stable_pi_entry_replay = existing_pi_entry_identity.is_some()
+        && event_hash_authority == ProviderEventHashAuthority::NormalizedPayloadFallback;
+    let event_identity = match existing_pi_entry_identity {
+        Some(identity) => identity,
+        None => provider_event_import_identity_with_exact_legacy_source(
+            store,
+            provider,
+            &session.provider_session_id,
+            source_id,
+            provider_event_identity_index,
+            event.provider_event_index,
+            &event_hash,
+            exact_legacy_source_event_candidate(provider, session, source, event),
+            legacy_provider_event_index,
+            session_id == provider_session_uuid(provider, &session.provider_session_id),
+        )?,
+    };
+    let command_run = provider_command_run_from_event(ProviderCommandRunInput {
+        provider,
+        provider_session_id: &session.provider_session_id,
+        session_id,
+        source_id,
+        run_source_id: event_identity.run_source_id,
+        history_record_id: options.history_record_id,
+        event,
+        payload: &payload,
+        event_hash: &event_hash,
+    })?;
+    let dedupe_key =
+        Store::provider_event_dedupe_key_with_payload_hash(&event_identity.dedupe_key, &event_hash)
+            .unwrap_or_else(|| event_identity.dedupe_key.clone());
+    let mut normalized_metadata = json!({
+        "provider_session_id": session.provider_session_id,
+        "provider_event_index": event.provider_event_index,
+        "provider_event_hash": event_hash,
+        "provider_event_hash_authority": event_hash_authority.as_str(),
+        "cursor": event.cursor,
+        "source_format": source.source_format,
+        "source_trust": source.trust,
+        "fixture_line": line_number,
+        "imported_at": imported_at,
+        "event_idempotency_key": event.idempotency_key,
+        "source_record_ordinal": source_record_coordinates
+            .as_ref()
+            .map(|coordinates| coordinates.0),
+        "source_record_subrecord_index": source_record_coordinates
+            .as_ref()
+            .map(|coordinates| coordinates.1),
+        "metadata": event_metadata,
+    });
+    if let Some(locator) = complete_content_locator {
+        normalized_metadata
+            .as_object_mut()
+            .expect("normalized provider metadata is an object")
+            .insert(COMPLETE_CONTENT_LOCATOR_METADATA_KEY.to_owned(), locator);
     }
-    Ok(())
-}
-
-pub(crate) fn resolve_pending_root_session_id(
-    store: &Store,
-    edge: &PendingProviderEdge,
-    caches: &mut ProviderImportCaches,
-) -> Result<Option<Uuid>> {
-    match edge.root_session_id {
-        Some(root_id)
-            if root_id == edge.session_id
-                || provider_session_exists_cached(store, root_id, &mut caches.session_exists)? =>
-        {
-            Ok(Some(root_id))
+    if let Some(locator) = result_content_locator {
+        if let Some(object) = normalized_metadata.as_object_mut() {
+            object.insert(RESULT_CONTENT_LOCATOR_METADATA_KEY.to_owned(), locator);
         }
-        Some(_) | None => Ok(Some(edge.parent_session_id)),
     }
-}
-
-pub(crate) fn update_session_parent_if_needed(
-    store: &mut Store,
-    edge: &PendingProviderEdge,
-    caches: &mut ProviderImportCaches,
-) -> Result<()> {
-    let root_session_id = resolve_pending_root_session_id(store, edge, caches)?;
-    update_session_parent(store, edge, root_session_id)
-}
-
-pub(crate) fn update_session_parent(
-    store: &mut Store,
-    edge: &PendingProviderEdge,
-    root_session_id: Option<Uuid>,
-) -> Result<()> {
-    let mut session = store.get_session(edge.session_id)?;
-    if session.parent_session_id == Some(edge.parent_session_id)
-        && session.root_session_id == root_session_id
-    {
-        return Ok(());
+    let persisted_payload = compact_provider_result_payload(event.event_type, &payload);
+    let normalized_event = Event {
+        id: event_identity.id,
+        seq: event_identity.seq,
+        history_record_id: options.history_record_id,
+        session_id: Some(session_id),
+        run_id: command_run.as_ref().map(|run| run.id),
+        event_type: event.event_type,
+        role: event.role,
+        occurred_at: event.occurred_at,
+        capture_source_id: Some(source_id),
+        payload: json!({
+            "provider": provider.as_str(),
+            "provider_session_id": session.provider_session_id,
+            "provider_event_index": event.provider_event_index,
+            "provider_event_hash": event_hash,
+            "cursor": event.cursor,
+            "artifacts": event.artifacts,
+            "body": persisted_payload,
+        }),
+        payload_blob_id: None,
+        dedupe_key: Some(dedupe_key),
+        sync: provider_sync_metadata(event.fidelity, normalized_metadata),
+    };
+    if stable_pi_entry_replay {
+        // Pi entry IDs are stable provider identities. An exact entry-ID match
+        // proves a replay of a legacy line-indexed row even when that old row
+        // predates verifiable fallback-hash metadata. Preserve it byte-for-byte.
+    } else {
+        if options.fast_event_inserts {
+            if let Some(run) = &command_run {
+                store.insert_run_if_absent(run)?;
+            }
+        } else if let Some(run) = &command_run {
+            store.upsert_run(run)?;
+        }
     }
-    session.parent_session_id = Some(edge.parent_session_id);
-    session.root_session_id = root_session_id;
-    session.timestamps.updated_at = edge.imported_at;
-    store.upsert_session(&session)?;
+    let was_present = if stable_pi_entry_replay {
+        true
+    } else {
+        !store.reconcile_provider_event(&normalized_event, event_hash_authority)?
+    };
+    if was_present {
+        summary.skipped_events += 1;
+        summary.skipped += 1;
+    } else {
+        summary.imported_events += 1;
+        summary.imported += 1;
+    }
+
+    summary.accepted_content_records += 1;
     Ok(())
+}
+
+fn take_complete_content_locator(metadata: &mut Value) -> Result<Option<Value>> {
+    take_content_locator(metadata, COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
+}
+
+fn take_content_locator(metadata: &mut Value, key: &str) -> Result<Option<Value>> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(value) = object.remove(key) else {
+        return Ok(None);
+    };
+    let locator =
+        PersistedCompleteContentLocatorV1::from_metadata_value(&value).ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "complete content locator annotation is malformed".to_owned(),
+            )
+        })?;
+    Ok(Some(locator.to_metadata_value()))
+}
+
+fn take_source_record_coordinates(metadata: &mut Value) -> Result<Option<(u64, u32)>> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(None);
+    };
+    let ordinal = object.remove("source_record_ordinal");
+    let subrecord = object.remove("source_record_subrecord_index");
+    if ordinal.is_none() && subrecord.is_none() {
+        return Ok(None);
+    }
+    let ordinal = ordinal.and_then(|value| value.as_u64()).ok_or_else(|| {
+        CaptureError::InvalidPayload("source record ordinal annotation is malformed".to_owned())
+    })?;
+    let subrecord = subrecord
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "source record subrecord annotation is malformed".to_owned(),
+            )
+        })?;
+    Ok(Some((ordinal, subrecord)))
 }
 
 pub(crate) fn fixture_line_to_capture(

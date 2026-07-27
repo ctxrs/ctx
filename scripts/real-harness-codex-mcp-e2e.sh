@@ -96,7 +96,7 @@ main() {
     CODEX_HOME="${codex_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${ctx_bin}" integrations install mcp --agent codex --json > "${install_json}"
   require_contains "${install_json}" '"agent":"codex"'
   require_contains "${install_json}" '"status":"current"'
@@ -121,7 +121,7 @@ main() {
     CODEX_HOME="${codex_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     OPENAI_API_KEY="sk-ctx-real-harness-fixture" \
     run "${codex_bin}" exec \
       --skip-git-repo-check \

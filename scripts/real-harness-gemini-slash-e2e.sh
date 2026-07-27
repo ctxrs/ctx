@@ -140,7 +140,7 @@ main() {
       XDG_CONFIG_HOME="${xdg}" \
       QWEN_HOME="${qwen_home}" \
       CTX_DATA_ROOT="${data_root}" \
-      CTX_ANALYTICS_OFF=1 \
+      CTX_ANALYTICS_ENABLED=false \
       run "${ctx_bin}" integrations install slash-commands --agent gemini-cli --project --json
   ) > "${install_json}"
   require_contains "${install_json}" '"agent": "gemini-cli"'
@@ -159,7 +159,7 @@ main() {
       XDG_CONFIG_HOME="${xdg}" \
       QWEN_HOME="${qwen_home}" \
       CTX_DATA_ROOT="${data_root}" \
-      CTX_ANALYTICS_OFF=1 \
+      CTX_ANALYTICS_ENABLED=false \
       PATH="$(dirname "${ctx_bin}"):${PATH}" \
       GEMINI_API_KEY="sk-ctx-real-harness-fixture" \
       GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:${port}" \

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use ctx_history_core::database_path;
 
+use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry, WaitOutcome};
 use crate::config::{self, CONFIG_FILE};
 use crate::output::{compact_json, print_json};
 use crate::progress::format_count;
@@ -74,16 +75,36 @@ struct IndexWaitArgs {
     interval_seconds: u64,
 }
 
-pub(crate) fn run_index(args: IndexArgs, data_root: PathBuf, quiet: bool) -> Result<()> {
+pub(crate) fn run_index(
+    args: IndexArgs,
+    data_root: PathBuf,
+    quiet: bool,
+    telemetry: &mut IndexTelemetry,
+) -> Result<()> {
     match args.command {
-        IndexCommand::Status(args) => run_index_status(args, &data_root, quiet),
-        IndexCommand::Watch(args) => run_index_watch(args, &data_root, quiet),
-        IndexCommand::Wait(args) => run_index_wait(args, &data_root, quiet),
+        IndexCommand::Status(args) => {
+            telemetry.operation = Some(IndexOperation::Status);
+            run_index_status(args, &data_root, quiet, telemetry)
+        }
+        IndexCommand::Watch(args) => {
+            telemetry.operation = Some(IndexOperation::Watch);
+            run_index_watch(args, &data_root, quiet, telemetry)
+        }
+        IndexCommand::Wait(args) => {
+            telemetry.operation = Some(IndexOperation::Wait);
+            run_index_wait(args, &data_root, quiet, telemetry)
+        }
     }
 }
 
-fn run_index_status(args: IndexStatusArgs, data_root: &Path, quiet: bool) -> Result<()> {
+fn run_index_status(
+    args: IndexStatusArgs,
+    data_root: &Path,
+    quiet: bool,
+    telemetry: &mut IndexTelemetry,
+) -> Result<()> {
     let status = index_status_snapshot(data_root)?;
+    record_index_telemetry(telemetry, &status);
     if args.json {
         print_json(status)?;
     } else if !quiet {
@@ -92,10 +113,16 @@ fn run_index_status(args: IndexStatusArgs, data_root: &Path, quiet: bool) -> Res
     Ok(())
 }
 
-fn run_index_watch(args: IndexWatchArgs, data_root: &Path, quiet: bool) -> Result<()> {
+fn run_index_watch(
+    args: IndexWatchArgs,
+    data_root: &Path,
+    quiet: bool,
+    telemetry: &mut IndexTelemetry,
+) -> Result<()> {
     let interval = Duration::from_secs(args.interval_seconds);
     loop {
         let status = index_status_snapshot(data_root)?;
+        record_index_telemetry(telemetry, &status);
         if args.json {
             println!("{}", serde_json::to_string(&status)?);
         } else if !quiet {
@@ -113,14 +140,23 @@ fn run_index_watch(args: IndexWatchArgs, data_root: &Path, quiet: bool) -> Resul
     Ok(())
 }
 
-fn run_index_wait(args: IndexWaitArgs, data_root: &Path, quiet: bool) -> Result<()> {
+fn run_index_wait(
+    args: IndexWaitArgs,
+    data_root: &Path,
+    quiet: bool,
+    telemetry: &mut IndexTelemetry,
+) -> Result<()> {
     let explicit_selection = IndexSelection::from_wait_args(&args);
     let interval = Duration::from_secs(args.interval_seconds);
     let started = Instant::now();
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = explicit_selection.unwrap_or_else(|| IndexSelection::default_for(&status));
+        telemetry.wait_lexical = Some(selection.lexical);
+        telemetry.wait_semantic = Some(selection.semantic);
+        record_index_telemetry(telemetry, &status);
         if index_ready(&status, selection) {
+            telemetry.wait_outcome = Some(WaitOutcome::Ready);
             if args.json {
                 print_json(index_wait_json(status, selection, "ready"))?;
             } else if !quiet {
@@ -129,6 +165,7 @@ fn run_index_wait(args: IndexWaitArgs, data_root: &Path, quiet: bool) -> Result<
             return Ok(());
         }
         if let Some(message) = index_terminal_error(&status, selection) {
+            telemetry.wait_outcome = Some(WaitOutcome::Blocked);
             if args.json {
                 print_json(index_wait_json(status, selection, "blocked"))?;
             }
@@ -138,6 +175,7 @@ fn run_index_wait(args: IndexWaitArgs, data_root: &Path, quiet: bool) -> Result<
             .timeout_seconds
             .is_some_and(|timeout| started.elapsed() >= Duration::from_secs(timeout))
         {
+            telemetry.wait_outcome = Some(WaitOutcome::Timeout);
             if args.json {
                 print_json(index_wait_json(status, selection, "timeout"))?;
             }
@@ -151,6 +189,34 @@ fn run_index_wait(args: IndexWaitArgs, data_root: &Path, quiet: bool) -> Result<
         }
         thread::sleep(interval);
     }
+}
+
+fn record_index_telemetry(telemetry: &mut IndexTelemetry, status: &Value) {
+    telemetry.initialized = Some(bool_at(status, &["initialized"]));
+    telemetry.lexical_state = Some(IndexState::from_safe_summary(&string_at(
+        status,
+        &["lexical", "status"],
+        "unknown",
+    )));
+    telemetry.semantic_state = Some(IndexState::from_safe_summary(&semantic_job_status(status)));
+    telemetry.indexed_items = Some(count_bucket(
+        usize_at(status, &["lexical", "indexed_items"]) as u64,
+    ));
+    telemetry.inventory_units = Some(count_bucket(
+        usize_at(status, &["lexical", "inventory_units"]) as u64,
+    ));
+    telemetry.pending_inventory_units = Some(count_bucket(usize_at(
+        status,
+        &["lexical", "pending_inventory_units"],
+    ) as u64));
+    telemetry.failed_inventory_units = Some(count_bucket(usize_at(
+        status,
+        &["lexical", "failed_inventory_units"],
+    ) as u64));
+    telemetry.stale_inventory_units = Some(count_bucket(usize_at(
+        status,
+        &["lexical", "stale_inventory_units"],
+    ) as u64));
 }
 
 fn index_status_snapshot(data_root: &Path) -> Result<Value> {
@@ -427,6 +493,7 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
 }
 
 fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) -> Value {
+    let local_only = status["local_only"].as_bool().unwrap_or(true);
     compact_json(json!({
         "schema_version": 1,
         "status": wait_status,
@@ -435,7 +502,7 @@ fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) 
             "semantic": selection.semantic,
         },
         "index": status,
-        "local_only": true,
+        "local_only": local_only,
         "read_only": true,
     }))
 }

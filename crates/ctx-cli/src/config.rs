@@ -7,8 +7,10 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
+use crate::deprecated_controls::DeprecatedControls;
+
 pub const CONFIG_FILE: &str = "config.toml";
-pub const DAEMON_DEFAULT_ENABLED: bool = false;
+pub const DAEMON_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
 
 #[derive(Debug, Clone)]
@@ -47,11 +49,13 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             analytics: AnalyticsConfig {
+                // Product analytics are default-on and can be disabled by config or env.
                 enabled: true,
                 endpoint: "https://cli.ctx.rs/functions/v1/analytics".to_owned(),
             },
             upgrade: UpgradeConfig {
-                auto: "apply".to_owned(),
+                // `ctx upgrade` remains available, but background checks are opt-in.
+                auto: "off".to_owned(),
                 channel: "stable".to_owned(),
                 interval: Duration::from_secs(24 * 60 * 60),
                 functions_base: "https://cli.ctx.rs/functions/v1".to_owned(),
@@ -80,6 +84,14 @@ impl AppConfig {
     }
 
     pub fn load(data_root: &Path) -> Result<Self> {
+        let deprecated_controls = DeprecatedControls::detect();
+        Self::load_with_deprecated_controls(data_root, &deprecated_controls)
+    }
+
+    pub(crate) fn load_with_deprecated_controls(
+        data_root: &Path,
+        deprecated_controls: &DeprecatedControls,
+    ) -> Result<Self> {
         let mut config = Self::default();
         let path = data_root.join(CONFIG_FILE);
         match fs::read_to_string(&path) {
@@ -93,7 +105,7 @@ impl AppConfig {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
         }
-        config.apply_env();
+        config.apply_env(deprecated_controls)?;
         Ok(config)
     }
 
@@ -116,9 +128,6 @@ impl AppConfig {
                     let hours = parse_config_u64(key, value)?;
                     self.upgrade.interval = Duration::from_secs(hours.saturating_mul(60 * 60));
                 }
-                "upgrade.interval_seconds" => {
-                    self.upgrade.interval = Duration::from_secs(parse_config_u64(key, value)?);
-                }
                 "upgrade.functions_base" => {
                     self.upgrade.functions_base = parse_non_empty_string(key, value)?;
                 }
@@ -134,34 +143,38 @@ impl AppConfig {
         Ok(())
     }
 
-    fn apply_env(&mut self) {
-        if let Ok(value) = env::var("CTX_ANALYTICS_ENABLED") {
-            if let Some(enabled) = parse_bool_value(&value) {
-                self.analytics.enabled = enabled;
-            }
-        }
-        if env_flag("CTX_ANALYTICS_OFF") || env_flag("CTX_DISABLE_ANALYTICS") {
+    fn apply_env(&mut self, deprecated_controls: &DeprecatedControls) -> Result<()> {
+        let analytics_config_disabled = !self.analytics.enabled;
+        let analytics_enabled_override = env::var("CTX_ANALYTICS_ENABLED")
+            .ok()
+            .and_then(|value| parse_bool_value(&value));
+        let analytics_disabled = analytics_config_disabled
+            || analytics_enabled_override == Some(false)
+            || deprecated_controls.disables_analytics();
+        if analytics_disabled {
             self.analytics.enabled = false;
+        } else if analytics_enabled_override == Some(true) {
+            self.analytics.enabled = true;
         }
         if let Ok(endpoint) = env::var("CTX_ANALYTICS_ENDPOINT") {
             if !endpoint.trim().is_empty() {
                 self.analytics.endpoint = endpoint;
             }
         }
-        if env_flag("CTX_UPGRADE_OFF") || env_flag("CTX_DISABLE_AUTO_UPGRADE") {
-            self.upgrade.auto = "off".to_owned();
-        }
         if let Ok(auto) = env::var("CTX_UPGRADE_AUTO") {
             if !auto.trim().is_empty() {
                 self.upgrade.auto = auto;
             }
         }
-        if let Ok(channel) = env::var("CTX_CHANNEL").or_else(|_| env::var("CTX_UPGRADE_CHANNEL")) {
+        if deprecated_controls.disables_auto_upgrade() {
+            self.upgrade.auto = "off".to_owned();
+        }
+        if let Ok(channel) = env::var("CTX_UPGRADE_CHANNEL") {
             if !channel.trim().is_empty() {
                 self.upgrade.channel = channel;
             }
         }
-        if let Ok(functions_base) = env::var("CTX_FUNCTIONS_BASE") {
+        if let Ok(functions_base) = env::var("CTX_UPGRADE_FUNCTIONS_BASE") {
             if !functions_base.trim().is_empty() {
                 self.upgrade.functions_base = functions_base;
             }
@@ -171,22 +184,24 @@ impl AppConfig {
                 self.upgrade.interval = Duration::from_secs(seconds);
             }
         }
-        if let Ok(value) = env::var("CTX_DAEMON_ENABLED") {
-            if let Some(enabled) = parse_bool_value(&value) {
-                self.daemon.enabled = enabled;
-            }
-        }
-        if env_flag("CTX_DAEMON_OFF") || env_flag("CTX_DISABLE_DAEMON") {
+        let daemon_config_disabled = !self.daemon.enabled;
+        let daemon_enabled_override = env::var("CTX_DAEMON_ENABLED")
+            .ok()
+            .and_then(|value| parse_bool_value(&value));
+        let daemon_disabled = daemon_config_disabled
+            || daemon_enabled_override == Some(false)
+            || deprecated_controls.disables_daemon();
+        if daemon_disabled {
             self.daemon.enabled = false;
+        } else if daemon_enabled_override == Some(true) {
+            self.daemon.enabled = true;
         }
         if let Ok(value) = env::var("CTX_SEARCH_SEMANTIC") {
             if let Some(enabled) = parse_bool_value(&value) {
                 self.search.semantic = Some(enabled);
             }
         }
-        if env_flag("CTX_DISABLE_SEMANTIC_SEARCH") {
-            self.search.semantic = Some(false);
-        }
+        Ok(())
     }
 
     pub fn config_path(data_root: &Path) -> PathBuf {
@@ -413,331 +428,6 @@ fn parse_bool_value(value: &str) -> Option<bool> {
     }
 }
 
-fn env_flag(key: &str) -> bool {
-    env::var_os(key).is_some_and(|value| {
-        let value = value.to_string_lossy();
-        !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off"
-        )
-    })
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        ffi::OsString,
-        sync::{Mutex, MutexGuard},
-    };
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<OsString>)>,
-    }
-
-    impl EnvGuard {
-        fn new(keys: &[&'static str]) -> Self {
-            let lock = ENV_LOCK.lock().unwrap();
-            let saved = keys
-                .iter()
-                .map(|&key| {
-                    let value = env::var_os(key);
-                    env::remove_var(key);
-                    (key, value)
-                })
-                .collect();
-            Self { _lock: lock, saved }
-        }
-
-        fn set(&self, key: &'static str, value: &str) {
-            env::set_var(key, value);
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in &self.saved {
-                match value {
-                    Some(value) => env::set_var(*key, value),
-                    None => env::remove_var(*key),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn parses_day_one_config_values() {
-        let values = parse_toml_subset(
-            r#"
-[analytics]
-enabled = false
-
-[upgrade]
-auto = "off"
-channel = "beta"
-interval_seconds = 60
-
-[daemon]
-enabled = false
-"#,
-        )
-        .unwrap();
-        let mut config = AppConfig::default();
-        assert_eq!(
-            config.analytics.endpoint,
-            "https://cli.ctx.rs/functions/v1/analytics"
-        );
-        assert!(config.analytics.enabled);
-        assert_eq!(config.upgrade.auto, "apply");
-        assert_eq!(config.search.semantic, None);
-        config.apply_values(&values).unwrap();
-        assert!(!config.analytics.enabled);
-        assert_eq!(config.upgrade.auto, "off");
-        assert_eq!(config.upgrade.channel, "beta");
-        assert_eq!(config.upgrade.interval, Duration::from_secs(60));
-        assert!(!config.daemon.enabled);
-        assert_eq!(config.search.semantic, None);
-    }
-
-    #[test]
-    fn search_semantic_is_unset_when_absent() {
-        let values = parse_toml_subset("[upgrade]\nauto = \"off\"\n").unwrap();
-        let mut config = AppConfig::default();
-
-        config.apply_values(&values).unwrap();
-
-        assert_eq!(config.search.semantic, None);
-    }
-
-    #[test]
-    fn parses_search_semantic_true() {
-        let values = parse_toml_subset("[search]\nsemantic = true\n").unwrap();
-        let mut config = AppConfig::default();
-
-        config.apply_values(&values).unwrap();
-
-        assert_eq!(config.search.semantic, Some(true));
-    }
-
-    #[test]
-    fn parses_search_semantic_false() {
-        let values = parse_toml_subset("[search]\nsemantic = false\n").unwrap();
-        let mut config = AppConfig::default();
-
-        config.apply_values(&values).unwrap();
-
-        assert_eq!(config.search.semantic, Some(false));
-    }
-
-    #[test]
-    fn load_without_config_file_uses_defaults() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let config = AppConfig::load(temp.path()).unwrap();
-
-        assert!(config.analytics.enabled);
-        assert_eq!(config.upgrade.auto, "apply");
-        assert_eq!(config.upgrade.channel, "stable");
-        assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
-        assert!(!config.daemon.enabled);
-    }
-
-    #[test]
-    fn load_valid_config_file_applies_values() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            r#"
-[analytics]
-enabled = false
-endpoint = "file:///tmp/ctx-analytics.jsonl"
-
-[upgrade]
-auto = "off"
-channel = "beta"
-interval_hours = 2
-functions_base = "https://example.test/functions/v1"
-
-[daemon]
-enabled = false
-"#,
-        )
-        .unwrap();
-
-        let config = AppConfig::load(temp.path()).unwrap();
-
-        assert!(!config.analytics.enabled);
-        assert_eq!(config.analytics.endpoint, "file:///tmp/ctx-analytics.jsonl");
-        assert_eq!(config.upgrade.auto, "off");
-        assert_eq!(config.upgrade.channel, "beta");
-        assert_eq!(config.upgrade.interval, Duration::from_secs(2 * 60 * 60));
-        assert_eq!(
-            config.upgrade.functions_base,
-            "https://example.test/functions/v1"
-        );
-        assert!(!config.daemon.enabled);
-    }
-
-    #[test]
-    fn set_daemon_enabled_rewrites_or_adds_config_key() {
-        let temp = tempfile::tempdir().unwrap();
-
-        set_daemon_enabled(temp.path(), false).unwrap();
-        let disabled = AppConfig::load(temp.path()).unwrap();
-        assert!(!disabled.daemon.enabled);
-        let text = fs::read_to_string(temp.path().join(CONFIG_FILE)).unwrap();
-        assert!(text.contains("[daemon]"));
-        assert!(text.contains("enabled = false"));
-
-        set_daemon_enabled(temp.path(), true).unwrap();
-        let enabled = AppConfig::load(temp.path()).unwrap();
-        assert!(enabled.daemon.enabled);
-        let text = fs::read_to_string(temp.path().join(CONFIG_FILE)).unwrap();
-        assert!(text.contains("enabled = true"));
-    }
-
-    #[test]
-    fn default_config_is_not_written_for_implicit_defaults() {
-        let temp = tempfile::tempdir().unwrap();
-        write_default_config(temp.path()).unwrap();
-
-        assert!(!temp.path().join(CONFIG_FILE).exists());
-    }
-
-    #[test]
-    fn rejects_invalid_config_booleans() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[analytics]\nenabled = flase\n",
-        )
-        .unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("analytics.enabled"), "{error}");
-        assert!(error.contains("boolean"), "{error}");
-    }
-
-    #[test]
-    fn rejects_invalid_search_semantic_values() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[search]\nsemantic = maybe\n",
-        )
-        .unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("search.semantic"), "{error}");
-        assert!(error.contains("boolean"), "{error}");
-    }
-
-    #[test]
-    fn env_overrides_search_semantic_config() {
-        let env_guard = EnvGuard::new(&["CTX_SEARCH_SEMANTIC", "CTX_DISABLE_SEMANTIC_SEARCH"]);
-        let temp = tempfile::tempdir().unwrap();
-
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[search]\nsemantic = false\n",
-        )
-        .unwrap();
-        env_guard.set("CTX_SEARCH_SEMANTIC", "true");
-        let config = AppConfig::load(temp.path()).unwrap();
-        assert_eq!(config.search.semantic, Some(true));
-
-        fs::write(temp.path().join(CONFIG_FILE), "[search]\nsemantic = true\n").unwrap();
-        env_guard.set("CTX_SEARCH_SEMANTIC", "false");
-        let config = AppConfig::load(temp.path()).unwrap();
-        assert_eq!(config.search.semantic, Some(false));
-
-        env_guard.set("CTX_SEARCH_SEMANTIC", "true");
-        env_guard.set("CTX_DISABLE_SEMANTIC_SEARCH", "1");
-        let config = AppConfig::load(temp.path()).unwrap();
-        assert_eq!(config.search.semantic, Some(false));
-    }
-
-    #[test]
-    fn rejects_invalid_upgrade_auto_values() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[upgrade]\nauto = \"offf\"\n",
-        )
-        .unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("upgrade.auto"), "{error}");
-        assert!(error.contains("\"apply\" or \"off\""), "{error}");
-    }
-
-    #[test]
-    fn rejects_unquoted_upgrade_auto_values() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join(CONFIG_FILE), "[upgrade]\nauto = offf\n").unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("upgrade.auto"), "{error}");
-        assert!(error.contains("quoted string"), "{error}");
-    }
-
-    #[test]
-    fn rejects_invalid_config_numbers() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[upgrade]\ninterval_seconds = nope\n",
-        )
-        .unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("upgrade.interval_seconds"), "{error}");
-        assert!(error.contains("unsigned integer"), "{error}");
-    }
-
-    #[test]
-    fn rejects_malformed_config_lines() {
-        let error = parse_toml_subset("[upgrade]\nthis is not valid\n").unwrap_err();
-        let error = error.to_string();
-
-        assert!(error.contains("invalid config line 2"), "{error}");
-    }
-
-    #[test]
-    fn rejects_unknown_config_keys() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[analytics]\nenabld = false\n",
-        )
-        .unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("unknown config key"), "{error}");
-        assert!(error.contains("analytics.enabld"), "{error}");
-    }
-
-    #[test]
-    fn rejects_unknown_search_config_keys() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(CONFIG_FILE),
-            "[search]\nsemantics = true\n",
-        )
-        .unwrap();
-
-        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-
-        assert!(error.contains("unknown config key"), "{error}");
-        assert!(error.contains("search.semantics"), "{error}");
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

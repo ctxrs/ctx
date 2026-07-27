@@ -1,0 +1,71 @@
+ctx facts
+payload_type: pro_facts
+schema_version: 1
+target.kind: file
+target.value: src/lib.rs
+target.repository: ctxrs/ctx
+target.line: 42
+stale: false
+results: 1
+citations: 2
+pagination.truncated: true
+pagination.next_cursor: cursor-2
+
+1. src/lib.rs:42
+   resource.id: file:1
+   resource.kind: file
+   resource.display: src/lib.rs:42
+   summary: Line provenance
+   occurred_at_ms: 1770000000000
+   facts: 1
+   citations: 1
+
+   fact 1
+      id: fact:1
+      fact_type: vcs_commit
+      subject.id: session:1
+      subject.kind: session
+      subject.display: agent session
+      predicate: produced_commit
+      object.type: resource
+      object.value.id: commit:abc
+      object.value.kind: commit
+      object.value.display: abc123
+      confidence: explicit
+      state: asserted
+      detector_version: commit-v1
+      owning_root_session_id: 44444444-4444-4444-8444-444444444444
+      direct_actor_session_id: 55555555-5555-4555-8555-555555555555
+      citations: 1
+      fact_citation 1
+         observation_id: 11111111-1111-4111-8111-111111111111
+         observation_seq: 9
+         observation_kind: vcs_change
+         session_id: 22222222-2222-4222-8222-222222222222
+         event_id: 33333333-3333-4333-8333-333333333333
+         event_seq: 4
+         source_path: /history/session.jsonl
+         fixture_line: 7
+         source_record_ordinal: 8
+         source_record_subrecord_index: 2
+         source_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+         byte_range.start: 10
+         byte_range.end_exclusive: 42
+   record_citation 1
+      observation_id: 11111111-1111-4111-8111-111111111111
+      observation_seq: 9
+      observation_kind: vcs_change
+      session_id: 22222222-2222-4222-8222-222222222222
+      event_id: 33333333-3333-4333-8333-333333333333
+      event_seq: 4
+      source_path: /history/session.jsonl
+      fixture_line: 7
+      source_record_ordinal: 8
+      source_record_subrecord_index: 2
+      source_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      byte_range.start: 10
+      byte_range.end_exclusive: 42
+
+suggested_next_commands: 2
+1. command: ctx facts file src/lib.rs --repository ctxrs/ctx --line 42
+2. command: ctx timeline file src/lib.rs --repository ctxrs/ctx --line 42
