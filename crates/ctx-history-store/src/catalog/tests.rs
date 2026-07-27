@@ -16,7 +16,8 @@ use super::source_reconciliation::{
     source_import_missing_page_sql, source_import_shadowed_page_sql,
 };
 use crate::catalog::{
-    CatalogIndexedStatus, CatalogSession, SourceImportFile, SourceImportInventoryControl,
+    CatalogIndexedStatus, CatalogSession, InventorySourceByteProgress, SourceImportFile,
+    SourceImportInventoryControl,
 };
 use crate::connection::timestamp_ms;
 use crate::object_store::OBJECTS_DIR;

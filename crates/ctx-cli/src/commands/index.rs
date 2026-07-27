@@ -14,11 +14,12 @@ use ctx_history_core::database_path;
 use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry, WaitOutcome};
 use crate::config::{self, CONFIG_FILE};
 use crate::output::{compact_json, print_json};
-use crate::progress::format_count;
 use crate::semantic::{
     daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
 use crate::store_util::open_existing_store_read_only;
+
+use super::index_dashboard::{color_enabled, terminal_width, IndexDashboard};
 
 #[derive(Debug, Args)]
 pub(crate) struct IndexArgs {
@@ -147,7 +148,10 @@ fn run_index_watch(
 struct IndexWatchOutput<W> {
     writer: W,
     interactive: bool,
+    styled: bool,
     rendered_lines: usize,
+    terminal_width_override: Option<usize>,
+    dashboard: IndexDashboard,
 }
 
 impl<W: io::Write> IndexWatchOutput<W> {
@@ -155,7 +159,22 @@ impl<W: io::Write> IndexWatchOutput<W> {
         Self {
             writer,
             interactive,
+            styled: interactive && color_enabled(),
             rendered_lines: 0,
+            terminal_width_override: None,
+            dashboard: IndexDashboard::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(writer: W, interactive: bool, terminal_width: usize) -> Self {
+        Self {
+            writer,
+            interactive,
+            styled: false,
+            rendered_lines: 0,
+            terminal_width_override: Some(terminal_width),
+            dashboard: IndexDashboard::default(),
         }
     }
 
@@ -166,7 +185,8 @@ impl<W: io::Write> IndexWatchOutput<W> {
     }
 
     fn print_human(&mut self, status: &Value) -> io::Result<()> {
-        let frame = index_watch_human(status);
+        let width = self.terminal_width_override.unwrap_or_else(terminal_width);
+        let frame = self.dashboard.render(status, width, self.styled);
         if !self.interactive {
             writeln!(self.writer, "{frame}")?;
             writeln!(self.writer)?;
@@ -289,6 +309,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         indexed_items,
         indexed_sessions,
         indexed_events,
+        completed_source_bytes,
+        total_source_bytes,
         inventory_units,
         pending_inventory_units,
         failed_inventory_units,
@@ -300,6 +322,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         let indexed_counts = store.indexed_history_counts()?;
         let catalog_counts = store.catalog_session_counts()?;
         let source_import_file_counts = store.source_import_file_counts()?;
+        let source_byte_progress = store.inventory_source_byte_progress()?;
         let inventory_units = catalog_counts
             .total
             .saturating_add(source_import_file_counts.total);
@@ -318,6 +341,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             indexed_counts.items(),
             indexed_counts.sessions,
             indexed_counts.events,
+            source_byte_progress.completed,
+            source_byte_progress.total,
             inventory_units,
             pending_inventory_units,
             failed_inventory_units,
@@ -329,6 +354,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         let semantic_report = semantic_worker_report_cached(data_root, None)?;
         let daemon = daemon_report(data_root, &semantic_report);
         (
+            0,
+            0,
             0,
             0,
             0,
@@ -357,6 +384,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             "indexed_items": indexed_items,
             "indexed_sessions": indexed_sessions,
             "indexed_events": indexed_events,
+            "completed_source_bytes": completed_source_bytes,
+            "total_source_bytes": total_source_bytes,
             "inventory_units": inventory_units,
             "pending_inventory_units": pending_inventory_units,
             "failed_inventory_units": failed_inventory_units,
@@ -437,69 +466,8 @@ fn print_index_status_human(status: &Value) {
 }
 
 fn print_index_watch_human(status: &Value) {
-    println!("{}", index_watch_human(status));
-}
-
-fn index_watch_human(status: &Value) -> String {
-    let lexical_total = usize_at(status, &["lexical", "inventory_units"]);
-    let lexical_pending = usize_at(status, &["lexical", "pending_inventory_units"]);
-    let lexical_done = lexical_total.saturating_sub(lexical_pending);
-    let lexical_sessions = usize_at(status, &["lexical", "indexed_sessions"]);
-    let lexical_items = usize_at(status, &["lexical", "indexed_items"]);
-    let semantic_done = usize_at(status, &["semantic", "coverage", "embedded_items"]);
-    let semantic_total = usize_at(status, &["semantic", "coverage", "searchable_items"]);
-    let lexical_activity = if lexical_pending == 0 {
-        "ready"
-    } else if bool_at(status, &["daemon", "running"]) {
-        "indexing"
-    } else {
-        "waiting for daemon"
-    };
-    let mut lines = vec![format!(
-        "lexical  [{}] {}/{} history files complete",
-        progress_bar(lexical_done, lexical_total),
-        format_count(lexical_done),
-        format_count(lexical_total),
-    )];
-    lines.push(format!(
-        "         {lexical_activity} · {} sessions · {} items",
-        format_count(lexical_sessions),
-        format_count(lexical_items),
-    ));
-    let semantic_status = semantic_job_status(status);
-    if semantic_status == "disabled" {
-        lines.push("semantic disabled".to_owned());
-    } else {
-        lines.push(format!(
-            "semantic [{}] {}/{} items · {} chunks · {}",
-            progress_bar(semantic_done, semantic_total),
-            format_count(semantic_done),
-            format_count(semantic_total),
-            format_count(usize_at(
-                status,
-                &["semantic", "coverage", "embedded_chunks"]
-            )),
-            semantic_status.replace('_', " ")
-        ));
-    }
-    lines.push(format!(
-        "daemon   {}",
-        string_at(status, &["daemon", "status"], "unknown").replace('_', " ")
-    ));
-    let daemon_reason = string_at(status, &["daemon", "reason"], "");
-    if !daemon_reason.is_empty() {
-        lines.push(format!("         {}", daemon_reason.replace('_', " ")));
-    }
-    lines.join("\n")
-}
-
-fn progress_bar(done: usize, total: usize) -> String {
-    const WIDTH: usize = 20;
-    if total == 0 {
-        return "-".repeat(WIDTH);
-    }
-    let filled = done.saturating_mul(WIDTH).saturating_div(total).min(WIDTH);
-    format!("{}{}", "#".repeat(filled), "-".repeat(WIDTH - filled))
+    let mut dashboard = IndexDashboard::default();
+    println!("{}", dashboard.render(status, 80, false));
 }
 
 #[derive(Debug, Clone, Copy)]

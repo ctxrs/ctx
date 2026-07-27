@@ -2,6 +2,7 @@ pub(crate) mod blame;
 pub(crate) mod doctor;
 pub(crate) mod import;
 pub(crate) mod index;
+mod index_dashboard;
 pub(crate) mod locate;
 pub(crate) mod search;
 pub(crate) mod setup;

@@ -1608,7 +1608,7 @@
         "usagesDigest": "CXJoqFjzJjE7AK5LeFyGbSp96mj/VYNUyTFF6wkDxqc=",
         "recordedFileInputs": {
           "@@//crates/ctx-sdk/Cargo.toml": "36d7b44b8415faf5a6b81989f92d421ad145f43a8bf822a08599ebf5c56b2b2c",
-          "@@//crates/ctx-cli/Cargo.toml": "44481e76d8ce133fa577e9913d912f1daba586af9c8e6a867103aca0e7f3ecfc",
+          "@@//crates/ctx-cli/Cargo.toml": "b102591f70db7bdc918ce80e5505af2582a1158571aaa97d717da3ec1ec60e8e",
           "@@//crates/ctx-history-core/Cargo.toml": "f968b8eb395e1ec2fbc6ca0cfeb4511a18af112c8d1069d7ce2737543408d1a3",
           "@@//Cargo.toml": "033ecb5486953f293cd9211420cc62343137aba4ed55262274d1f029f278c6e7",
           "@@//Cargo.lock": "a8a255228b8a99ca8930659020163875b6906e9194f470b544693c0fab5f00d4",

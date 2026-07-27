@@ -428,6 +428,17 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
+pub(crate) fn format_byte_progress(completed: u64, total: u64) -> String {
+    let total = total.max(completed);
+    let (_, total_unit) = scaled_bytes(total);
+    if total_unit == "B" {
+        return format!("{completed} / {total} B");
+    }
+    let completed_value = bytes_in_unit(completed, total_unit);
+    let total_value = bytes_in_unit(total, total_unit);
+    format!("{completed_value:.1} / {total_value:.1} {total_unit}")
+}
+
 fn format_byte_range(completed: u64, total: u64) -> String {
     let (_, total_unit) = scaled_bytes(total);
     if total_unit == "B" {
