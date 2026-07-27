@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,7 +15,9 @@ use tempfile::TempDir;
 use thiserror::Error;
 
 use crate::provider::sqlite::ProviderSqliteSourceSnapshot;
-use crate::{CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES};
+use crate::{
+    complete_content::CompleteContentBodyDigest, CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+};
 
 mod decode;
 mod dto;
@@ -35,7 +37,7 @@ use dto::{
 #[cfg(test)]
 use dto::{
     ZedNativeEvent, ZedNativeMessageIdentity, ZedNativePage, ZedNativeRejection,
-    ZedNativeRejectionKind, ZedNativeSession, ZED_NATIVE_PAGE_MAX_BYTES, ZED_NATIVE_PAGE_MAX_ROWS,
+    ZedNativeRejectionKind, ZedNativeSession, ZED_NATIVE_PAGE_MAX_BYTES, ZED_NATIVE_PAGE_MAX_UNITS,
 };
 use query::scan_zed_native_snapshot;
 
@@ -51,6 +53,18 @@ pub(super) enum ZedNativePathError {
     Io(#[from] io::Error),
     #[error("SQLite error while preparing Zed NativePath source: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("system I/O error during {operation}: {source}")]
+    SystemIo {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("system SQLite error during {operation}: {source}")]
+    SystemSqlite {
+        operation: &'static str,
+        #[source]
+        source: rusqlite::Error,
+    },
     #[error("Zed NativePath source has an unsupported schema: {0}")]
     UnsupportedSchema(String),
 }
@@ -75,6 +89,72 @@ pub(super) fn scan_zed_nativepath(
     sink: &mut dyn ZedNativeSink,
 ) -> ZedNativeResult<ZedNativeScanOutcome> {
     scan_zed_nativepath_with_finalizer(selection, sink, || Ok(()))
+}
+
+pub(super) fn decode_complete_message(
+    row: &super::thread::ZedThreadRow,
+    message_ordinal: u64,
+    record_digest: CompleteContentBodyDigest,
+) -> ZedNativeResult<Option<super::ZedNativePathCompleteMessage>> {
+    let updated_at = super::thread::zed_required_timestamp(&row.updated_at, "updated_at")?;
+    let decoded =
+        match decode::decode_zed_native_payload(&row.id, &row.data_type, &row.data, updated_at)? {
+            decode::ZedDecodeOutcome::Decoded(decoded) => decoded,
+            decode::ZedDecodeOutcome::Rejected(failure) => {
+                return Err(CaptureError::InvalidPayload(failure.reason).into());
+            }
+        };
+    let mut resolved = None;
+    decoded.emit_events(0, &mut |draft| {
+        if draft.message_ordinal != message_ordinal {
+            return Ok(());
+        }
+        let complete_text = draft.body.clone();
+        let event =
+            dto::ZedNativeEvent::from_draft(row.rowid, &row.id, draft, record_digest.clone())?;
+        let provider_event_index = event
+            .native_order
+            .message_ordinal
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(u64::from(event.native_order.sub_ordinal)))
+            .ok_or(CaptureError::SystemInvariant(
+                "Zed provider event index overflowed",
+            ))?;
+        let cursor = event
+            .payload
+            .get("cursor")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(CaptureError::SystemInvariant(
+                "Zed normalized payload has no cursor",
+            ))?
+            .to_owned();
+        resolved = Some(super::ZedNativePathCompleteMessage {
+            provider_event_index,
+            legacy_provider_event_hash: event.legacy_content_hash,
+            cursor,
+            event_type: event.event_type,
+            payload: event.payload,
+            complete_text,
+        });
+        Ok(())
+    })?;
+    Ok(resolved)
+}
+
+pub(super) fn into_capture_error(error: ZedNativePathError) -> CaptureError {
+    match error {
+        ZedNativePathError::Capture(error) => error,
+        ZedNativePathError::Io(error) => CaptureError::Io(error),
+        ZedNativePathError::Sqlite(error) => CaptureError::Sqlite(error),
+        ZedNativePathError::SystemIo { operation, source } => {
+            CaptureError::SystemIo { operation, source }
+        }
+        ZedNativePathError::SystemSqlite { operation, source } => CaptureError::SystemIo {
+            operation,
+            source: io::Error::other(source),
+        },
+        ZedNativePathError::UnsupportedSchema(reason) => CaptureError::UnsupportedSchema(reason),
+    }
 }
 
 fn scan_zed_nativepath_with_finalizer(
@@ -156,7 +236,11 @@ pub(super) fn acquire_immutable_snapshot(path: &Path) -> ZedNativeResult<ZedSnap
         };
         let directory = tempfile::Builder::new()
             .prefix("ctx-zed-nativepath-")
-            .tempdir()?;
+            .tempdir()
+            .map_err(|source| ZedNativePathError::SystemIo {
+                operation: "creating a private Zed SQLite snapshot directory",
+                source,
+            })?;
         let filename =
             path.file_name()
                 .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
@@ -184,7 +268,11 @@ pub(super) fn acquire_immutable_snapshot(path: &Path) -> ZedNativeResult<ZedSnap
         let connection = Connection::open_with_flags(
             &snapshot_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        )
+        .map_err(|source| ZedNativePathError::SystemSqlite {
+            operation: "opening a private Zed SQLite snapshot",
+            source,
+        })?;
         let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
             CaptureError::InvalidPayload(format!(
                 "Zed SQLite value byte limit is unrepresentable: \
@@ -192,8 +280,18 @@ pub(super) fn acquire_immutable_snapshot(path: &Path) -> ZedNativeResult<ZedSnap
             ))
         })?;
         connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "query_only", true)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|source| ZedNativePathError::SystemSqlite {
+                operation: "configuring a private Zed SQLite snapshot",
+                source,
+            })?;
+        connection
+            .pragma_update(None, "query_only", true)
+            .map_err(|source| ZedNativePathError::SystemSqlite {
+                operation: "configuring a private Zed SQLite snapshot",
+                source,
+            })?;
         let physical_locator = fs::canonicalize(path)?.display().to_string();
         let snapshot_revision = observed.revision_component();
         return Ok(ZedSnapshotAcquisition::Acquired(Box::new(
@@ -243,8 +341,23 @@ fn copy_snapshot_component(
         }
         .into());
     }
-    let mut output = File::create(destination)?;
-    io::copy(&mut input, &mut output)?;
+    let mut output = File::create(destination).map_err(|source| ZedNativePathError::SystemIo {
+        operation: "creating a private Zed SQLite snapshot",
+        source,
+    })?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|source| ZedNativePathError::SystemIo {
+                operation: "writing a private Zed SQLite snapshot",
+                source,
+            })?;
+    }
     Ok(())
 }
 

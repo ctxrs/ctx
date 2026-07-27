@@ -13,7 +13,16 @@ filegroup(
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
 )
 
+filegroup(
+    name = "canonical_observation_projection_source",
+    srcs = ["src/canonical_observations/projection.rs"],
+)
+
 RUST_SRCS = glob(["src/**/*.rs"])
+
+HISTORICAL_RELEASE_STORE_FIXTURES = glob(
+    ["testdata/released-stores/*.sqlite.zst"],
+) + ["testdata/released-stores/SHA256SUMS"]
 
 PROD_SRCS = glob(
     ["src/**/*.rs"],
@@ -40,6 +49,7 @@ ctx_rust_test(
     srcs = RUST_SRCS,
     crate_name = "ctx_history_store",
     crate_root = "src/lib.rs",
+    compile_data = HISTORICAL_RELEASE_STORE_FIXTURES,
     edition = crate_edition(),
     aliases = aliases(
         normal_dev = True,

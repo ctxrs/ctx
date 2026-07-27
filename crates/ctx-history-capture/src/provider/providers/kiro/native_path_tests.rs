@@ -8,6 +8,8 @@ use tempfile::TempDir;
 
 const MACHINE: &str = "kiro-nativepath-test-machine";
 const PRIVATE_OUTPUT: &str = "KIRO_PRIVATE_SUCCESS_OUTPUT_MUST_NOT_ENTER_CORE";
+const PRIVATE_PATCH: &str = "KIRO_PRIVATE_PATCH_MUST_NOT_ENTER_CORE";
+const PRIVATE_DIFF: &str = "KIRO_PRIVATE_DIFF_MUST_NOT_ENTER_CORE";
 
 fn create_source() -> (TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -77,6 +79,22 @@ fn history_entry(index: usize) -> Value {
     })
 }
 
+fn tool_entry_with_paths(path_count: usize) -> Value {
+    let files = (0..path_count)
+        .map(|index| json!({"path": format!("/workspace/file-{index}.rs")}))
+        .collect::<Vec<_>>();
+    json!({
+        "assistant": {
+            "ToolUse": {
+                "tool_uses": [{
+                    "name": "write_files",
+                    "input": {"files": files}
+                }]
+            }
+        }
+    })
+}
+
 fn write_v2_conversation(path: &Path, history: Vec<Value>) {
     std::thread::sleep(std::time::Duration::from_millis(5));
     let connection = Connection::open(path).unwrap();
@@ -123,6 +141,11 @@ fn cursor_round_trips_exact_source_and_frontier_authority() {
         terminal: false,
         generation: 3,
         rejected_records: 2,
+        accepted_content_records: 7,
+        rejections: vec![KiroRejection {
+            line: 4,
+            reason: "malformed history".to_owned(),
+        }],
     };
     assert_eq!(
         KiroStoreCursor::decode(&cursor.encode().unwrap()).unwrap(),
@@ -206,6 +229,193 @@ fn malformed_row_is_rejected_without_hiding_valid_sibling() {
     let healthy = scanner.next_page().unwrap().unwrap();
     assert_eq!(healthy.events.len(), 1);
     assert!(healthy.terminal);
+}
+
+#[test]
+fn serialized_core_never_contains_kiro_output_patch_or_diff_bodies() {
+    let (temp, path) = create_source();
+    write_v2_conversation(
+        &path,
+        vec![json!({
+            "assistant": {
+                "ToolUse": {
+                    "tool_uses": [{
+                        "name": "apply_patch",
+                        "input": {
+                            "patch": format!(
+                                "*** Begin Patch\n*** Update File: /workspace/private.txt\n@@\n-{PRIVATE_DIFF}\n+{PRIVATE_PATCH}\n*** End Patch"
+                            ),
+                            "diff": PRIVATE_DIFF,
+                            "output": PRIVATE_OUTPUT,
+                            "nested": {"toolUseResult": PRIVATE_OUTPUT}
+                        },
+                        "result": {"stdout": PRIVATE_OUTPUT}
+                    }]
+                },
+                "tool_results": {
+                    "call": {
+                        "output": PRIVATE_OUTPUT,
+                        "patch": PRIVATE_PATCH,
+                        "diff": PRIVATE_DIFF
+                    }
+                }
+            }
+        })],
+    );
+    let mut store = Store::open(temp.path().join("core.sqlite")).unwrap();
+
+    let summary = import(
+        &path,
+        &mut store,
+        CaptureWorkLimit::Drain,
+        ImportProfile::CoreOnly,
+    );
+    assert_eq!(summary.imported_events, 1);
+    let session = store
+        .session_by_external_session(CaptureProvider::KiroCli, "session")
+        .unwrap()
+        .unwrap();
+    let events = store.events_for_session(session.id).unwrap();
+    let serialized = serde_json::to_string(&(session, events)).unwrap();
+    for private in [PRIVATE_OUTPUT, PRIVATE_PATCH, PRIVATE_DIFF] {
+        assert!(
+            !serialized.contains(private),
+            "serialized Core retained private Kiro field: {private}"
+        );
+    }
+}
+
+#[test]
+fn terminal_no_op_restores_mixed_and_all_invalid_rejection_diagnostics() {
+    let (mixed_temp, mixed_path) = create_source();
+    let connection = Connection::open(&mixed_path).unwrap();
+    connection
+        .execute_batch(
+            "insert into conversations_v2 values ('/bad', 'bad', '{', 1, 1);
+             insert into conversations_v2 values (
+                 '/good', 'good',
+                 '{\"history\":[{\"user\":{\"content\":{\"Prompt\":{\"prompt\":\"healthy\"}}}}]}',
+                 2, 2
+             );",
+        )
+        .unwrap();
+    drop(connection);
+    let mixed_store_path = mixed_temp.path().join("mixed-core.sqlite");
+    let mut mixed_store = Store::open(&mixed_store_path).unwrap();
+    let mixed_first = import(
+        &mixed_path,
+        &mut mixed_store,
+        CaptureWorkLimit::Drain,
+        ImportProfile::CoreOnly,
+    );
+    assert_eq!(mixed_first.failed, 1);
+    assert_eq!(mixed_first.failures.len(), 1);
+    assert!(mixed_first.has_accepted_content());
+    drop(mixed_store);
+
+    let mut mixed_store = Store::open(&mixed_store_path).unwrap();
+    let mixed_no_op = import(
+        &mixed_path,
+        &mut mixed_store,
+        CaptureWorkLimit::Drain,
+        ImportProfile::CoreOnly,
+    );
+    assert_eq!(mixed_no_op.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(mixed_no_op.failed, mixed_first.failed);
+    assert_eq!(mixed_no_op.failures, mixed_first.failures);
+    assert!(mixed_no_op.has_accepted_content());
+
+    let (invalid_temp, invalid_path) = create_source();
+    let connection = Connection::open(&invalid_path).unwrap();
+    connection
+        .execute(
+            "insert into conversations_v2 values ('/bad', 'bad', '{', 1, 1)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let invalid_store_path = invalid_temp.path().join("invalid-core.sqlite");
+    let mut invalid_store = Store::open(&invalid_store_path).unwrap();
+    let invalid_first = import(
+        &invalid_path,
+        &mut invalid_store,
+        CaptureWorkLimit::Drain,
+        ImportProfile::CoreOnly,
+    );
+    assert_eq!(invalid_first.failed, 1);
+    assert_eq!(invalid_first.failures.len(), 1);
+    assert!(!invalid_first.has_accepted_content());
+    drop(invalid_store);
+
+    let mut invalid_store = Store::open(&invalid_store_path).unwrap();
+    let invalid_no_op = import(
+        &invalid_path,
+        &mut invalid_store,
+        CaptureWorkLimit::Drain,
+        ImportProfile::CoreOnly,
+    );
+    assert_eq!(invalid_no_op.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(invalid_no_op.failed, invalid_first.failed);
+    assert_eq!(invalid_no_op.failures, invalid_first.failures);
+    assert!(!invalid_no_op.has_accepted_content());
+}
+
+#[test]
+fn scanner_enforces_exact_64_unit_boundary_and_rejects_oversized_entry() {
+    let (_boundary_temp, boundary_path) = create_source();
+    write_v2_conversation(&boundary_path, vec![tool_entry_with_paths(62)]);
+    let boundary_source = KiroSource::acquire(&boundary_path, boundary_path.clone(), None).unwrap();
+    let mut boundary_scanner = KiroScanner::new(
+        &boundary_source,
+        KiroFrontier::initial(boundary_source.tables),
+        DateTime::<Utc>::UNIX_EPOCH,
+    )
+    .unwrap();
+    let boundary = boundary_scanner.next_page().unwrap().unwrap();
+    assert_eq!(boundary.events.len(), 1);
+    assert_eq!(boundary.events[0].touches.len(), 62);
+    assert!(boundary.rejections.is_empty());
+    assert_eq!(boundary.logical_units(), KIRO_PAGE_MAX_UNITS);
+    assert!(boundary.terminal);
+
+    let (_oversized_temp, oversized_path) = create_source();
+    write_v2_conversation(&oversized_path, vec![tool_entry_with_paths(63)]);
+    let oversized_source =
+        KiroSource::acquire(&oversized_path, oversized_path.clone(), None).unwrap();
+    let mut oversized_scanner = KiroScanner::new(
+        &oversized_source,
+        KiroFrontier::initial(oversized_source.tables),
+        DateTime::<Utc>::UNIX_EPOCH,
+    )
+    .unwrap();
+    let oversized = oversized_scanner.next_page().unwrap().unwrap();
+    assert!(oversized.events.is_empty());
+    assert_eq!(oversized.rejections.len(), 1);
+    assert!(oversized.rejections[0].reason.contains("64-unit bound"));
+    assert!(oversized.logical_units() <= KIRO_PAGE_MAX_UNITS);
+    assert!(oversized.terminal);
+}
+
+#[test]
+fn structural_kiro_schema_failures_are_typed_as_unsupported_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("unsupported.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("create table conversations_v2 (key text, value text);")
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(temp.path().join("core.sqlite")).unwrap();
+
+    assert!(matches!(
+        try_import(
+            &path,
+            &mut store,
+            CaptureWorkLimit::Drain,
+            ImportProfile::CoreOnly,
+        ),
+        Err(CaptureError::UnsupportedSchema(_))
+    ));
 }
 
 #[test]

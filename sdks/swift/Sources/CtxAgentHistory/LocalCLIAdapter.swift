@@ -178,7 +178,7 @@ public struct LocalCLIAdapter: Sendable {
                 command: ctxPath,
                 arguments: finalArguments,
                 cwd: cwd,
-                env: env,
+                env: strictLocalEnvironment,
                 timeout: timeout
             )
         )
@@ -202,7 +202,13 @@ public struct LocalCLIAdapter: Sendable {
 
     public func versionString() throws -> String {
         let result = try runner.run(
-            CommandRequest(command: ctxPath, arguments: ["--version"], cwd: cwd, env: env, timeout: timeout)
+            CommandRequest(
+                command: ctxPath,
+                arguments: ["--version"],
+                cwd: cwd,
+                env: strictLocalEnvironment,
+                timeout: timeout
+            )
         )
         if result.exitCode != 0 {
             throw commandError(result: result, arguments: ["--version"])
@@ -217,6 +223,12 @@ public struct LocalCLIAdapter: Sendable {
         }
         result.append(contentsOf: arguments)
         return result
+    }
+
+    private var strictLocalEnvironment: [String: String] {
+        var environment = env
+        environment["CTX_ANALYTICS_ENABLED"] = "false"
+        return environment
     }
 
     private func commandError(result: CommandResult, arguments: [String]) -> CtxAgentHistorySDKError {

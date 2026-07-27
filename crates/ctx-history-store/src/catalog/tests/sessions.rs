@@ -43,6 +43,43 @@ fn catalog_session_upsert_skips_unchanged_rows() {
 }
 
 #[test]
+fn bounded_catalog_query_stops_after_the_max_plus_one_sentinel() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let sessions = (0..4)
+        .map(|index| {
+            catalog_session(
+                &format!("/home/user/.codex/sessions/{index}.jsonl"),
+                &format!("codex-session-{index}"),
+                index,
+            )
+        })
+        .collect::<Vec<_>>();
+    store.upsert_catalog_sessions(&sessions).unwrap();
+    // If the bounded query decodes beyond LIMIT max+1, this fourth row fails
+    // JSON decoding before the intended cardinality error can be returned.
+    store
+        .conn
+        .execute(
+            "UPDATE catalog_sessions SET metadata_json = '{' WHERE source_path = ?1",
+            [&sessions[3].source_path],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        store.list_catalog_sessions_for_source_bounded(
+            CaptureProvider::Codex,
+            &sessions[0].source_root,
+            2
+        ),
+        Err(StoreError::CatalogSessionLimitExceeded {
+            observed: 3,
+            maximum: 2
+        })
+    ));
+}
+
+#[test]
 fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

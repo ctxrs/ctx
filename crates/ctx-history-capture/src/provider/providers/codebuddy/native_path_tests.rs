@@ -16,8 +16,8 @@ use uuid::Uuid;
 use crate::{
     native_source::NativePosition,
     provider::importer::{
-        provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
-        CertifiedProviderCursor,
+        provider_event_import_identity, provider_path_identity,
+        provider_source_cursor_stream_for_path, BoundedParserCheckpoint, CertifiedProviderCursor,
     },
     test_support_paths::tempdir,
     ImportProfile, OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult,
@@ -96,6 +96,23 @@ fn write_extension_root(root: &Path, records: &[(&str, &[u8])]) -> PathBuf {
         fs::write(session.join(format!("messages/{id}.json")), body).unwrap();
     }
     session
+}
+
+fn codebuddy_events(store: &Store, external_session_id: &str) -> Vec<Event> {
+    let session = store
+        .session_by_external_session(CaptureProvider::CodeBuddy, external_session_id)
+        .unwrap()
+        .unwrap();
+    store.events_for_session(session.id).unwrap()
+}
+
+fn native_message_id(event: &Event) -> &str {
+    event
+        .sync
+        .metadata
+        .pointer("/metadata/native_message_id")
+        .and_then(Value::as_str)
+        .unwrap()
 }
 
 #[test]
@@ -215,6 +232,137 @@ fn cli_nativepath_bounds_restarts_and_heals_an_incomplete_tail() {
 }
 
 #[test]
+fn cli_rewrite_keeps_native_ids_stable_and_updates_mutated_payloads_without_duplicates() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".codebuddy");
+    let path = write_cli_root(
+        &root,
+        &[
+            cli_line("alpha", "user", "message", "alpha before rewrite"),
+            cli_line("beta", "assistant", "message", "beta stable"),
+        ],
+    );
+    let mut store = Store::open(temp.path().join("rewrite.sqlite")).unwrap();
+    let first = import_codebuddy_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(first.imported_events, 2);
+    let before = codebuddy_events(&store, "project-hash/cli-session")
+        .into_iter()
+        .map(|event| (native_message_id(&event).to_owned(), event.id))
+        .collect::<HashMap<_, _>>();
+
+    fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            cli_line("beta", "assistant", "message", "beta stable"),
+            cli_line("alpha", "user", "message", "alpha after rewrite")
+        ),
+    )
+    .unwrap();
+    let rewritten = import_codebuddy_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(rewritten.imported_events, 0);
+    assert_eq!(rewritten.skipped_events, 2);
+    let after = codebuddy_events(&store, "project-hash/cli-session");
+    assert_eq!(after.len(), 2);
+    for event in &after {
+        assert_eq!(Some(&event.id), before.get(native_message_id(event)));
+    }
+    let alpha = after
+        .iter()
+        .find(|event| native_message_id(event) == "alpha")
+        .unwrap();
+    assert!(alpha.payload.to_string().contains("alpha after rewrite"));
+    assert!(!alpha.payload.to_string().contains("alpha before rewrite"));
+    assert_eq!(
+        alpha.sync.metadata["provider_event_hash_authority"],
+        "normalized_payload_fallback"
+    );
+}
+
+#[test]
+fn cli_classifies_messages_metadata_and_rejections_without_searchable_metadata_leakage() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".codebuddy");
+    let path = root.join("projects/project-hash/cli-session.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let metadata_text = "textual metadata must never become a message";
+    fs::write(
+        &path,
+        format!(
+            "{}\n{}\n{{malformed\n",
+            cli_line("metadata", "user", "file-history-snapshot", metadata_text),
+            serde_json::to_string(&json!({
+                "id": "non-text",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "image", "media_type": "image/png", "data": "bounded"}],
+                "timestamp": "2026-07-25T10:00:00Z",
+                "sessionId": "cli-session",
+                "cwd": "/workspace/codebuddy",
+            }))
+            .unwrap()
+        ),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("classification.sqlite")).unwrap();
+    let imported = import_codebuddy_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(imported.imported_events, 1);
+    assert_eq!(imported.failed, 1);
+    assert!(imported.skipped >= 1);
+    let events = codebuddy_events(&store, "project-hash/cli-session");
+    assert_eq!(events.len(), 1);
+    assert_eq!(native_message_id(&events[0]), "non-text");
+    assert_eq!(events[0].event_type, EventType::Message);
+    assert!(!events[0].payload.to_string().contains(metadata_text));
+    assert!(events[0].payload.to_string().contains("image"));
+    assert!(store
+        .search_event_hits(metadata_text, 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        events[0].sync.metadata["source_record_ordinal"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        events[0].sync.metadata["source_record_subrecord_index"].as_u64(),
+        Some(0)
+    );
+
+    let stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::CodeBuddy,
+        CODEBUDDY_SOURCE_FORMAT,
+        &provider_path_identity(&fs::canonicalize(&path).unwrap()).unwrap(),
+    );
+    let stored = store
+        .get_sync_cursor(None, "codebuddy-nativepath-test-machine", &stream)
+        .unwrap()
+        .unwrap();
+    let committed = decode_native_path_committed_cursor(&stored.cursor).unwrap();
+    let cursor = CodeBuddyNativeCursor::decode(committed.provider_cursor()).unwrap();
+    assert_eq!(cursor.accepted_events, 1);
+    assert_eq!(cursor.skipped_metadata, 1);
+    assert_eq!(cursor.rejected_records, 1);
+}
+
+#[test]
 fn extension_nativepath_replays_failures_and_accepts_rewrite_and_truncation() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("extension-root");
@@ -286,7 +434,16 @@ fn extension_nativepath_replays_failures_and_accepts_rewrite_and_truncation() {
     )
     .unwrap();
     assert_eq!(rewritten.failed, 0, "{:?}", rewritten.failures);
-    assert_eq!(rewritten.imported_events, 2);
+    assert_eq!(rewritten.imported_events, 1);
+    assert_eq!(rewritten.skipped_events, 1);
+    let imported_session = store
+        .session_by_external_session(CaptureProvider::CodeBuddy, "project-hash/extension-session")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.events_for_session(imported_session.id).unwrap().len(),
+        2
+    );
 
     fs::write(
         session.join("index.json"),
@@ -305,6 +462,123 @@ fn extension_nativepath_replays_failures_and_accepts_rewrite_and_truncation() {
     .unwrap();
     assert_eq!(truncated.failed, 0, "{:?}", truncated.failures);
     assert_eq!(truncated.work_result(), ProviderImportWorkResult::Changed);
+}
+
+#[test]
+fn extension_message_io_failure_aborts_without_cursor_or_route_mutation() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("extension-root");
+    let message = serde_json::to_vec(&json!({
+        "id": "one",
+        "content": "stable extension message",
+        "createdAt": "2026-07-25T10:00:00Z",
+    }))
+    .unwrap();
+    let session = write_extension_root(&root, &[("one", message.as_slice())]);
+    let mut store = Store::open(temp.path().join("unreadable.sqlite")).unwrap();
+    import_codebuddy_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+    let stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::CodeBuddy,
+        CODEBUDDY_SOURCE_FORMAT,
+        &provider_path_identity(&fs::canonicalize(&session).unwrap()).unwrap(),
+    );
+    let before_cursor = store
+        .get_sync_cursor(None, "codebuddy-nativepath-test-machine", &stream)
+        .unwrap()
+        .unwrap();
+    let before_sources = store.list_capture_sources().unwrap();
+    let before_events = codebuddy_events(&store, "project-hash/extension-session");
+
+    let message_path = session.join("messages/one.json");
+    let retained = session.join("messages/one.retained");
+    fs::rename(&message_path, &retained).unwrap();
+    fs::create_dir(&message_path).unwrap();
+    let error = import_codebuddy_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        ProviderImportOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("regular file"),
+        "unexpected source error: {error}"
+    );
+    assert_eq!(
+        store
+            .get_sync_cursor(None, "codebuddy-nativepath-test-machine", &stream)
+            .unwrap()
+            .unwrap()
+            .cursor,
+        before_cursor.cursor
+    );
+    assert_eq!(store.list_capture_sources().unwrap(), before_sources);
+    assert_eq!(
+        codebuddy_events(&store, "project-hash/extension-session"),
+        before_events
+    );
+}
+
+#[test]
+fn extension_keeps_non_text_messages_and_skips_textual_metadata() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("extension-root");
+    let metadata_text = "extension metadata must not become searchable";
+    let metadata = serde_json::to_vec(&json!({
+        "id": "metadata",
+        "role": "user",
+        "content": metadata_text,
+    }))
+    .unwrap();
+    let non_text = serde_json::to_vec(&json!({
+        "id": "non-text",
+        "role": "assistant",
+        "content": [{"type": "image", "media_type": "image/png", "data": "bounded"}],
+    }))
+    .unwrap();
+    let session = write_extension_root(
+        &root,
+        &[
+            ("metadata", metadata.as_slice()),
+            ("non-text", non_text.as_slice()),
+        ],
+    );
+    fs::write(
+        session.join("index.json"),
+        serde_json::to_vec(&json!({
+            "messages": [
+                {"id": "metadata", "role": "user", "type": "metadata"},
+                {"id": "non-text", "role": "assistant", "type": "message"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("extension-classification.sqlite")).unwrap();
+    let imported = import_codebuddy_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(imported.imported_events, 1);
+    assert!(imported.skipped >= 1);
+    let events = codebuddy_events(&store, "project-hash/extension-session");
+    assert_eq!(events.len(), 1);
+    assert_eq!(native_message_id(&events[0]), "non-text");
+    assert!(events[0].payload.to_string().contains("image"));
+    assert!(!events[0].payload.to_string().contains(metadata_text));
+    assert!(store
+        .search_event_hits(metadata_text, 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -632,8 +906,92 @@ fn released_cursor_is_consumed_only_as_a_migration_input() {
     .unwrap()
     .encode()
     .unwrap();
+    let adapter_context = context(&root);
+    let import_options = ProviderImportOptions::default();
+    let source = discover_sources(&root, &root, &import_options)
+        .unwrap()
+        .sources
+        .into_iter()
+        .next()
+        .unwrap();
+    let initial = initial_cursor(&source, &adapter_context).unwrap();
+    let page = next_cli_page(&source, &initial, &adapter_context).unwrap();
+    let core = page.records[0].classification.core().unwrap();
+    let provider_session_id = core.session.provider_session_id.clone();
+    let raw_source_path = source.canonical_path.display().to_string();
+    let source_id = provider_scoped_source_uuid(
+        CaptureProvider::CodeBuddy,
+        &provider_session_id,
+        CODEBUDDY_SOURCE_FORMAT,
+        Some(&raw_source_path),
+    );
     let mut store = Store::open(temp.path().join("migration.sqlite")).unwrap();
-    let imported_at = context(&root).imported_at;
+    let source_record = capture_source(
+        source_id,
+        &source,
+        &adapter_context,
+        &core.session,
+        &source.proposed_source_identity,
+        &root.display().to_string(),
+    );
+    store.upsert_capture_source(&source_record).unwrap();
+    let session_id = provider_session_uuid(CaptureProvider::CodeBuddy, &provider_session_id);
+    let session = normalized_session(
+        session_id,
+        source_id,
+        &adapter_context,
+        &import_options,
+        &core.session,
+    );
+    store.upsert_session(&session).unwrap();
+    let released_hash = core.event.legacy_provider_event_hash.clone();
+    let released_identity = provider_event_import_identity(
+        &store,
+        CaptureProvider::CodeBuddy,
+        &provider_session_id,
+        source_id,
+        0,
+        0,
+        &released_hash,
+        Some(0),
+        true,
+    )
+    .unwrap();
+    let released_event = Event {
+        id: released_identity.id,
+        seq: released_identity.seq,
+        history_record_id: None,
+        session_id: Some(session_id),
+        run_id: None,
+        event_type: core.event.event_type,
+        role: Some(core.event.role),
+        occurred_at: core.event.occurred_at,
+        capture_source_id: Some(source_id),
+        payload: json!({
+            "provider": CaptureProvider::CodeBuddy.as_str(),
+            "provider_session_id": provider_session_id,
+            "provider_event_index": 0,
+            "provider_event_hash": released_hash,
+            "body": core.event.payload,
+        }),
+        payload_blob_id: None,
+        dedupe_key: Some(released_identity.dedupe_key),
+        sync: provider_sync_metadata(
+            Fidelity::Imported,
+            json!({
+                "provider_session_id": provider_session_id,
+                "provider_event_index": 0,
+                "provider_event_hash": released_hash,
+                "provider_event_hash_authority": "provider_supplied",
+                "source_record_ordinal": null,
+                "source_record_subrecord_index": null,
+                "metadata": core.event.metadata,
+            }),
+        ),
+    };
+    assert!(store.insert_event_if_absent(&released_event).unwrap());
+
+    let imported_at = adapter_context.imported_at;
     store
         .upsert_sync_cursor(&SyncCursor {
             id: Uuid::new_v4(),
@@ -652,11 +1010,23 @@ fn released_cursor_is_consumed_only_as_a_migration_input() {
     let migrated = import_codebuddy_nativepath(
         &root,
         &mut store,
-        context(&root),
+        adapter_context,
         ProviderImportOptions::default(),
     )
     .unwrap();
-    assert_eq!(migrated.imported_events, 1);
+    assert_eq!(migrated.imported_events, 0);
+    assert_eq!(migrated.skipped_events, 1);
+    let events = codebuddy_events(&store, "project-hash/cli-session");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, released_event.id);
+    assert_eq!(
+        events[0].sync.metadata["provider_event_hash_authority"],
+        "normalized_payload_fallback"
+    );
+    assert_eq!(
+        events[0].sync.metadata["source_record_ordinal"].as_u64(),
+        Some(0)
+    );
     let stored = store
         .get_sync_cursor(None, "codebuddy-nativepath-test-machine", &stream)
         .unwrap()

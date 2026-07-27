@@ -66,6 +66,11 @@ pub(crate) enum CommandRoot {
         long_about = "Set up, resume, repair, manage, or remove local ctx Pro. Bare `ctx pro` runs the idempotent setup path; `ctx pro setup` is an explicit synonym. `ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata."
     )]
     Pro(pro::ProArgs),
+    #[command(
+        about = "Refer a developer. Earn $10/month toward your agent bill.",
+        long_about = "Refer a developer. Earn $10/month toward your agent bill.\n\nUp to $120 per friend. Earn $10 for each of the first 12 distinct qualifying paid monthly invoices from a directly attributed subscription. The first two commissions remain pending until invoice 2 settles and its 14-day hold and authoritative reconciliation complete; invoices 3-12 each have their own 14-day hold and reconciliation. Create a codename, view aggregate ledger totals, or set up payouts."
+    )]
+    Referral(pro::ReferralArgs),
     #[command(about = "Show cited agent provenance for committed code or a pull request")]
     Blame(commands::blame::BlameArgs),
     #[command(about = "Run read-only SQL against the local ctx index")]

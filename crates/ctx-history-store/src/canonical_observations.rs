@@ -331,6 +331,61 @@ fn canonical_event_observation_from_row(
     })
 }
 
+pub(crate) fn visit_live_canonical_event_observations(
+    conn: &rusqlite::Connection,
+    mut visit: impl FnMut(CanonicalObservation) -> crate::Result<()>,
+) -> crate::Result<()> {
+    let mut statement = conn.prepare(LIVE_CANONICAL_EVENT_OBSERVATIONS_SQL)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        visit(canonical_event_observation_from_row(row, 0)?)?;
+    }
+    Ok(())
+}
+
+const LIVE_CANONICAL_EVENT_OBSERVATIONS_SQL: &str = r#"
+        SELECT
+            e.id, e.seq, e.occurred_at_ms,
+            COALESCE(e.history_record_id, s.history_record_id, r.history_record_id),
+            e.event_type, e.role, e.payload_json, e.metadata_json,
+            s.id, s.parent_session_id, s.root_session_id,
+            s.external_session_id, s.external_agent_id, s.agent_type,
+            s.role_hint, s.is_primary,
+            r.id, r.run_type, r.status, r.started_at_ms, r.ended_at_ms,
+            r.exit_code, r.cwd, r.command_preview,
+            cs.id, cs.provider, cs.raw_source_path, cs.source_format,
+            cs.source_root, cs.source_identity, cs.cwd
+        FROM events e
+        LEFT JOIN runs r ON r.id = e.run_id AND r.deleted_at_ms IS NULL
+        LEFT JOIN sessions s
+          ON s.id = COALESCE(e.session_id, r.session_id)
+         AND s.deleted_at_ms IS NULL
+        LEFT JOIN capture_sources cs
+          ON cs.id = COALESCE(e.capture_source_id, s.capture_source_id, r.source_id)
+        WHERE e.deleted_at_ms IS NULL
+          AND e.event_type NOT IN ('tool_output', 'command_output')
+        -- Canonical source IDs are non-empty UUID text. Ordering the nullable
+        -- column directly is therefore equivalent to COALESCE(id, ''), while
+        -- allowing idx_events_capture_source_id to stream one source at a time.
+        -- SQLite then sorts only the right-hand terms within that source
+        -- instead of retaining every variable-width payload in one global
+        -- temporary B-tree.
+        ORDER BY e.capture_source_id,
+                 CASE
+                   WHEN json_type(e.metadata_json, '$.source_record_ordinal') = 'integer'
+                    AND json_extract(e.metadata_json, '$.source_record_ordinal') >= 0
+                   THEN json_extract(e.metadata_json, '$.source_record_ordinal')
+                   ELSE 9223372036854775807
+                 END,
+                 CASE
+                   WHEN json_type(e.metadata_json, '$.source_record_subrecord_index') = 'integer'
+                    AND json_extract(e.metadata_json, '$.source_record_subrecord_index') >= 0
+                   THEN json_extract(e.metadata_json, '$.source_record_subrecord_index')
+                   ELSE 9223372036854775807
+                 END,
+                 e.occurred_at_ms, e.seq, e.id
+        "#;
+
 pub(crate) fn canonical_observation_by_coordinate(
     conn: &rusqlite::Connection,
     observation_seq: u64,
@@ -649,5 +704,39 @@ fn canonical_sidecar_citation(
             .and_then(|value| u32::try_from(value).ok()),
         byte_range: json_byte_range(metadata),
         source_sha256: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+
+    #[test]
+    fn journal_baseline_scan_uses_source_index_and_avoids_a_global_wide_row_sort() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let mut statement = store
+            .conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {LIVE_CANONICAL_EVENT_OBSERVATIONS_SQL}"
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_events_capture_source_id")),
+            "journal baseline must stream through the source index: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|step| !step.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "journal baseline must not globally sort full canonical rows: {plan:?}"
+        );
     }
 }

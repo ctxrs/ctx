@@ -5,6 +5,8 @@ use uuid::Uuid;
 use crate::{ErrorClass, ProtocolError, PROJECTION_CONTRACT_VERSION, PROTOCOL_FINGERPRINT};
 
 pub const MAX_JOURNAL_RECORDS_PER_BATCH: usize = 512;
+pub const MAX_JOURNAL_CONTEXT_RECORDS: usize = 64;
+pub const MAX_JOURNAL_CONTEXT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_JOURNAL_EVIDENCE_PER_RECORD: usize = 32;
 pub const MAX_JOURNAL_IDENTITY_BYTES: usize = 4 * 1024;
@@ -13,7 +15,7 @@ pub const MAX_AUTHORIZED_REPOSITORY_ROOT_BYTES: usize = 4 * 1024;
 pub const MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES: usize = 256 * 1024;
 /// The complete JSON `HostEnvelope` carrying one journal request is capped at
 /// four MiB, independently of the larger generic framing limit.
-pub const MAX_JOURNAL_SYNC_ENVELOPE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_JOURNAL_SYNC_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const JOURNAL_INITIAL_DIGEST_DOMAIN: &[u8] = b"ctx-pro-journal-initial-v1\0";
 const JOURNAL_RECORD_DIGEST_DOMAIN: &[u8] = b"ctx-pro-journal-record-v1\0";
 
@@ -220,6 +222,16 @@ impl JournalRecord {
     }
 }
 
+/// Bounded, transient look-behind ending exactly at the helper's durable
+/// checkpoint. Context records are detector input only: they never advance the
+/// helper checkpoint or count as accepted records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalContextWindow {
+    pub base_checkpoint: JournalCheckpoint,
+    pub records: Vec<JournalRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JournalSyncRequest {
@@ -229,6 +241,7 @@ pub struct JournalSyncRequest {
     pub projection_contract_version: u32,
     pub contract_fingerprint: String,
     pub prior_checkpoint: JournalCheckpoint,
+    pub context: JournalContextWindow,
     /// Immutable terminal checkpoint captured in the same Store read transaction
     /// as every record in this request.
     pub frozen_through: JournalCheckpoint,
@@ -265,6 +278,7 @@ impl JournalSyncRequest {
             ));
         }
         self.prior_checkpoint.validate()?;
+        self.context.base_checkpoint.validate()?;
         self.frozen_through.validate()?;
         validate_authorized_repository_roots(&self.authorized_repository_roots)?;
         if self.prior_checkpoint.position.generation != self.frozen_through.position.generation
@@ -273,6 +287,16 @@ impl JournalSyncRequest {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
                 "journal checkpoints do not describe one forward-moving generation",
+            ));
+        }
+        if self.context.base_checkpoint.position.generation
+            != self.prior_checkpoint.position.generation
+            || self.context.base_checkpoint.position.sequence
+                > self.prior_checkpoint.position.sequence
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "journal context is not a suffix of the prior checkpoint generation",
             ));
         }
         match self.mode {
@@ -297,6 +321,67 @@ impl JournalSyncRequest {
             return Err(ProtocolError::new(
                 ErrorClass::Corrupt,
                 "sequence-zero journal checkpoint has the wrong generation digest",
+            ));
+        }
+        if self.context.base_checkpoint.position.sequence == 0
+            && self.context.base_checkpoint.cumulative_digest
+                != initial_journal_digest(self.context.base_checkpoint.position.generation)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "sequence-zero journal context has the wrong generation digest",
+            ));
+        }
+        if self.context.records.len() > MAX_JOURNAL_CONTEXT_RECORDS {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                format!(
+                    "journal context has {} records; maximum is {}",
+                    self.context.records.len(),
+                    MAX_JOURNAL_CONTEXT_RECORDS
+                ),
+            ));
+        }
+        let context_bytes = serde_json::to_vec(&self.context.records)
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "journal context encoding failed",
+                )
+            })?
+            .len();
+        if context_bytes > MAX_JOURNAL_CONTEXT_BYTES {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                format!(
+                    "journal context has {context_bytes} bytes; maximum is {MAX_JOURNAL_CONTEXT_BYTES}"
+                ),
+            ));
+        }
+        let mut context_sequence = self.context.base_checkpoint.position.sequence;
+        let mut context_digest = self.context.base_checkpoint.cumulative_digest.as_str();
+        for record in &self.context.records {
+            context_sequence = context_sequence.checked_add(1).ok_or_else(|| {
+                ProtocolError::new(ErrorClass::Sequence, "journal context sequence overflowed")
+            })?;
+            if record.generation != self.prior_checkpoint.position.generation
+                || record.sequence != context_sequence
+                || record.sequence > self.prior_checkpoint.position.sequence
+            {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "journal context records are not a contiguous prior-checkpoint suffix",
+                ));
+            }
+            record.validate(context_digest)?;
+            context_digest = &record.cumulative_digest;
+        }
+        if context_sequence != self.prior_checkpoint.position.sequence
+            || context_digest != self.prior_checkpoint.cumulative_digest
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "journal context does not end at the exact prior checkpoint",
             ));
         }
         if self.records.len() > MAX_JOURNAL_RECORDS_PER_BATCH {

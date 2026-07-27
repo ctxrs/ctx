@@ -64,7 +64,6 @@ pub(crate) fn source_from_admitted(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attach_native_path_locators(
     event_type: EventType,
-    payload: &mut Value,
     metadata: &mut Value,
     row: &Value,
     line_number: usize,
@@ -73,7 +72,6 @@ pub(super) fn attach_native_path_locators(
     byte_end_exclusive: u64,
     source_revision: &str,
     path_identity: &str,
-    result_body: Option<&str>,
 ) -> Result<()> {
     if byte_start >= byte_end_exclusive {
         return Err(CaptureError::SystemInvariant(
@@ -87,7 +85,6 @@ pub(super) fn attach_native_path_locators(
             {
                 attach_locator(
                     metadata,
-                    VerifiedContentRole::MessageBody,
                     &text,
                     &native_record_id,
                     record_bytes,
@@ -99,43 +96,12 @@ pub(super) fn attach_native_path_locators(
             }
         }
     }
-    if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
-        if let Some(content) =
-            result_body.filter(|content| content.len() <= COMPLETE_CONTENT_MAX_BODY_BYTES)
-        {
-            let native_record_id = row
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("line-{line_number}"));
-            if attach_locator(
-                metadata,
-                VerifiedContentRole::ResultBody,
-                content,
-                &native_record_id,
-                record_bytes,
-                byte_start,
-                byte_end_exclusive,
-                source_revision,
-                path_identity,
-            )? {
-                let content_ref = ContentRef::from_bytes(content.as_bytes()).ok_or(
-                    CaptureError::SystemInvariant(
-                        "OpenClaw result ContentRef exceeded the complete-content limit",
-                    ),
-                )?;
-                payload["result_content_ref"] = serde_json::to_value(content_ref)?;
-            }
-        }
-    }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn attach_locator(
     metadata: &mut Value,
-    role: VerifiedContentRole,
     content: &str,
     native_record_id: &str,
     record_bytes: &[u8],
@@ -148,7 +114,7 @@ fn attach_locator(
         CaptureProvider::OpenClaw,
         OPENCLAW_SOURCE_FORMAT,
         CompleteContentSourceFamily::Jsonl,
-        role,
+        VerifiedContentRole::MessageBody,
     ) else {
         return Ok(false);
     };
@@ -162,7 +128,7 @@ fn attach_locator(
         path_identity,
     );
     let Some(locator) = VerifiedContentLocatorV1::new(
-        role,
+        VerifiedContentRole::MessageBody,
         profile,
         content_ref,
         CompleteContentSourceFamily::Jsonl,

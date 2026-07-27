@@ -42,6 +42,15 @@ impl Store {
     ) -> Result<()> {
         let metadata_json = serde_json::to_string(&session.metadata)?;
         self.with_atomic_write(|| {
+            if catalog_source_observation_already_indexed(
+                self,
+                session,
+                &metadata_json,
+                file_sha256,
+                event_count,
+            )? {
+                return Ok(());
+            }
             let changed = self.conn.execute(
                 r#"
                     UPDATE catalog_sessions
@@ -141,6 +150,58 @@ impl Store {
             require_exact_catalog_observation_completion(session, "failed", changed)
         })
     }
+}
+
+fn catalog_source_observation_already_indexed(
+    store: &Store,
+    session: &CatalogSession,
+    metadata_json: &str,
+    file_sha256: Option<&str>,
+    event_count: Option<u64>,
+) -> Result<bool> {
+    store
+        .conn
+        .query_row(
+            r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM catalog_sessions
+                    WHERE provider = ?1
+                      AND source_root = ?2
+                      AND source_path = ?3
+                      AND source_format = ?4
+                      AND file_size_bytes = ?5
+                      AND file_modified_at_ms = ?6
+                      AND cataloged_at_ms = ?7
+                      AND metadata_json = ?8
+                      AND is_stale = 0
+                      AND indexed_file_size_bytes = ?5
+                      AND indexed_file_modified_at_ms = ?6
+                      AND indexed_status = ?9
+                      AND indexed_error IS NULL
+                      AND indexed_event_count IS ?10
+                      AND last_imported_file_size_bytes = ?5
+                      AND last_imported_file_modified_at_ms = ?6
+                      AND last_imported_file_sha256 IS ?11
+                      AND last_imported_event_count IS ?10
+                )
+                "#,
+            params![
+                session.provider.as_str(),
+                session.source_root,
+                session.source_path,
+                session.source_format,
+                capped_i64(session.file_size_bytes),
+                session.file_modified_at_ms,
+                session.cataloged_at_ms,
+                metadata_json,
+                CatalogIndexedStatus::Indexed.as_str(),
+                event_count.map(capped_i64),
+                file_sha256,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn require_exact_catalog_observation_completion(

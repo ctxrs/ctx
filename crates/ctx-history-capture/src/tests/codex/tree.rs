@@ -5,8 +5,9 @@ use crate::tests::support::provider_state::{
 #[cfg(unix)]
 use crate::{import_codex_session_jsonl, CaptureError, ProviderImportSummary};
 use crate::{import_codex_session_paths, import_codex_session_tree, CodexSessionImportOptions};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{AgentType, CaptureProvider};
 use ctx_history_store::Store;
+use rusqlite::Connection;
 use std::fs;
 use std::sync::Arc;
 
@@ -55,6 +56,72 @@ fn codex_session_tree_defers_cross_file_child_edges_until_parent_is_known() {
     let child = store.get_session(child_id).unwrap();
     assert_eq!(child.parent_session_id, Some(parent_id));
     assert_eq!(child.root_session_id, Some(parent_id));
+}
+
+#[test]
+fn codex_session_tree_omits_unavailable_parent_authority() {
+    let temp = tempdir();
+    let fixture = temp.path().join("sessions");
+    fs::create_dir_all(&fixture).unwrap();
+    fs::write(
+        fixture.join("orphan-child.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-07-26T20:00:00Z\",\"type\":\"session_meta\",",
+            "\"payload\":{\"id\":\"00000000-0000-7000-8000-000000000020\",",
+            "\"timestamp\":\"2026-07-26T20:00:00Z\",\"cwd\":\"/workspace\",",
+            "\"source\":{\"subagent\":{\"thread_spawn\":{",
+            "\"parent_thread_id\":\"00000000-0000-7000-8000-000000000099\",",
+            "\"depth\":1}}}}}\n",
+            "{\"timestamp\":\"2026-07-26T20:00:01Z\",\"type\":\"response_item\",",
+            "\"payload\":{\"type\":\"message\",\"role\":\"assistant\",",
+            "\"content\":[{\"type\":\"output_text\",",
+            "\"text\":\"orphan_authority_search_marker\"}]}}\n"
+        ),
+    )
+    .unwrap();
+    let db_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&db_path).unwrap();
+
+    let summary = import_codex_session_tree(
+        &fixture,
+        &mut store,
+        CodexSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-07-26T20:01:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_edges, 0);
+    let child_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::Codex,
+        "00000000-0000-7000-8000-000000000020",
+    );
+    let child = store.get_session(child_id).unwrap();
+    assert_eq!(child.parent_session_id, None);
+    assert_eq!(child.root_session_id, Some(child_id));
+    assert_eq!(child.agent_type, AgentType::Primary);
+    let hits = store
+        .search_event_hits("orphan_authority_search_marker", 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, Some(child_id));
+    drop(store);
+
+    let connection = Connection::open(db_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

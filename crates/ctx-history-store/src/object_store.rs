@@ -12,10 +12,8 @@ use uuid::Uuid;
 use crate::{Result, StoreError};
 
 pub(crate) const OBJECTS_DIR: &str = "objects";
-pub(crate) const SPOOL_DIR: &str = "spool";
 const LEGACY_HISTORY_DIR_NAME: &str = "work-record";
 pub(crate) const LEGACY_BLOBS_DIR: &str = "blobs";
-const LEGACY_INBOX_DIR: &str = "inbox";
 
 pub(crate) fn migrate_legacy_history_layout(data_root: &Path) -> Result<bool> {
     let legacy_dir = data_root.join(LEGACY_HISTORY_DIR_NAME);
@@ -45,20 +43,12 @@ pub(crate) fn migrate_legacy_history_layout(data_root: &Path) -> Result<bool> {
         legacy_dir.join(OBJECTS_DIR),
         legacy_dir.join(LEGACY_BLOBS_DIR),
     ];
-    let spool_candidates = [
-        legacy_dir.join(SPOOL_DIR),
-        legacy_dir.join(LEGACY_INBOX_DIR),
-    ];
-    if multiple_existing_paths(&object_candidates) || multiple_existing_paths(&spool_candidates) {
+    if multiple_existing_paths(&object_candidates) {
         return Ok(false);
     }
 
     if let Some(object_source) = unique_existing_path(&object_candidates) {
         push_legacy_move(&mut moves, object_source, data_root.join(OBJECTS_DIR));
-    }
-
-    if let Some(spool_source) = unique_existing_path(&spool_candidates) {
-        push_legacy_move(&mut moves, spool_source, data_root.join(SPOOL_DIR));
     }
 
     if moves.is_empty() || moves.iter().any(|(_, dest)| dest.exists()) {

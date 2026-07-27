@@ -537,7 +537,7 @@ fn apply_upgrade(
                         attempt_id: Some(recovery_attempt_id),
                     });
                     }
-                    if cfg!(debug_assertions)
+                    if crate::upgrade::test_harness_enabled()
                         && env_flag("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS")
                     {
                         return Err(anyhow!("stopped after interrupted install recovery"));

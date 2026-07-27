@@ -30,6 +30,8 @@
     "skips_bucket": "0",
     "rejections_bucket": "0",
     "failures_bucket": "0",
-    "bytes_bucket": "lt_100kb"
+    "bytes_bucket": "lt_100kb",
+    "cpu_duration_bucket": "lt_1s",
+    "observed_process_peak_rss_bucket": "100mb-1gb"
   }
 }

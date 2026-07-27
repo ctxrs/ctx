@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{ContentRef, EventRole, EventType};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
@@ -16,6 +17,7 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct CursorNativeOrder {
     pub(crate) semantic_ordinal: u64,
+    pub(crate) physical_ordinal: u64,
     pub(crate) part_ordinal: u32,
 }
 
@@ -56,7 +58,18 @@ pub(crate) struct CursorNativeEvent {
     pub(crate) role: EventRole,
     pub(crate) occurred_at: Option<DateTime<Utc>>,
     pub(crate) body: CursorEventBody,
+    pub(crate) text_retention: Option<Value>,
+    pub(crate) complete_content_ref: Option<ContentRef>,
+    pub(crate) record_byte_start: u64,
+    pub(crate) record_byte_end_exclusive: u64,
+    pub(crate) record_sha256: [u8; 32],
     pub(crate) provider_event_hash: String,
+}
+
+impl CursorNativeEvent {
+    pub(crate) fn legacy_provider_event_index(&self) -> Option<u64> {
+        (self.native_order.part_ordinal == 0).then_some(self.native_order.physical_ordinal)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +99,10 @@ pub(crate) struct CursorPublicationPage {
     /// Exact certified parser position after this page, including physical
     /// progress through deliberately excluded records and rejections.
     pub(crate) next_checkpoint: CursorCheckpoint,
+    /// Total retained events represented by `next_checkpoint`. This is
+    /// authoritative even when a pre-record frontier deliberately replays
+    /// siblings from an interrupted semantic record.
+    pub(crate) retained_event_count: u64,
     pub(crate) rejected_records: u64,
     pub(crate) rejections: Vec<CursorRecordRejection>,
     pub(crate) events: Vec<CursorNativeEvent>,
@@ -124,6 +141,7 @@ pub(super) struct CursorPageBuffer<'a> {
     retained_bytes: usize,
     expected_checkpoint: CursorCheckpoint,
     next_checkpoint: CursorCheckpoint,
+    retained_event_count: u64,
     rejected_records: u64,
     rejections: Vec<CursorRecordRejection>,
     stats: CursorPageStats,
@@ -140,6 +158,7 @@ impl<'a> CursorPageBuffer<'a> {
             serialized_bytes: CURSOR_PUBLICATION_PAGE_ENVELOPE_BYTES,
             retained_bytes: 0,
             next_checkpoint: expected_checkpoint.clone(),
+            retained_event_count: 0,
             expected_checkpoint,
             rejected_records: 0,
             rejections: Vec::new(),
@@ -151,6 +170,7 @@ impl<'a> CursorPageBuffer<'a> {
         &mut self,
         event: CursorNativeEvent,
         next_checkpoint: &CursorCheckpoint,
+        retained_event_count: u64,
         rejected_records: u64,
         rejections: &[CursorRecordRejection],
     ) -> Result<()> {
@@ -182,6 +202,7 @@ impl<'a> CursorPageBuffer<'a> {
             .saturating_add(retained_event_bytes(&event));
         self.events.push(event);
         self.next_checkpoint.clone_from(next_checkpoint);
+        self.retained_event_count = retained_event_count;
         self.rejected_records = rejected_records;
         self.rejections = rejections.to_vec();
         Ok(())
@@ -190,10 +211,12 @@ impl<'a> CursorPageBuffer<'a> {
     pub(super) fn finish(
         mut self,
         final_checkpoint: CursorCheckpoint,
+        retained_event_count: u64,
         rejected_records: u64,
         rejections: &[CursorRecordRejection],
     ) -> Result<CursorPageStats> {
         self.next_checkpoint = final_checkpoint;
+        self.retained_event_count = retained_event_count;
         self.rejected_records = rejected_records;
         self.rejections = rejections.to_vec();
         if !self.events.is_empty() || self.expected_checkpoint != self.next_checkpoint {
@@ -221,6 +244,7 @@ impl<'a> CursorPageBuffer<'a> {
         let result = self.sink.stage_cursor_page(CursorPublicationPage {
             expected_checkpoint: self.expected_checkpoint.clone(),
             next_checkpoint: next_checkpoint.clone(),
+            retained_event_count: self.retained_event_count,
             rejected_records: self.rejected_records,
             rejections: self.rejections.clone(),
             events,
@@ -285,18 +309,22 @@ pub(super) fn project_cursor_record(
         .enumerate()
         .map(|(part_ordinal, part)| {
             let part_ordinal = u32::try_from(part_ordinal).unwrap_or(u32::MAX);
-            let (event_type, role, body) = match part {
+            let (event_type, role, body, text_retention, complete_content_ref) = match part {
                 CursorSafePart::BodyFree { event_type, role } => {
-                    (*event_type, *role, CursorEventBody::None)
+                    (*event_type, *role, CursorEventBody::None, None, None)
                 }
                 CursorSafePart::Text {
                     event_type,
                     role,
                     text,
+                    text_retention,
+                    complete_content_ref,
                 } => (
                     *event_type,
                     *role,
                     CursorEventBody::Text { text: text.clone() },
+                    Some(text_retention.clone()),
+                    complete_content_ref.clone(),
                 ),
                 CursorSafePart::ToolUse {
                     role,
@@ -311,6 +339,8 @@ pub(super) fn project_cursor_record(
                         tool_name: tool_name.clone(),
                         input_paths: input_paths.clone(),
                     },
+                    None,
+                    None,
                 ),
             };
             let encoded =
@@ -322,12 +352,18 @@ pub(super) fn project_cursor_record(
                 },
                 native_order: CursorNativeOrder {
                     semantic_ordinal: record.semantic_ordinal,
+                    physical_ordinal: record.physical_ordinal,
                     part_ordinal,
                 },
                 event_type,
                 role,
                 occurred_at: record.timestamp.as_deref().and_then(parse_rfc3339_utc),
                 body,
+                text_retention,
+                complete_content_ref,
+                record_byte_start: record.byte_start,
+                record_byte_end_exclusive: record.byte_end_exclusive,
+                record_sha256: record.record_sha256,
                 provider_event_hash: format!("{:x}", Sha256::digest(encoded)),
             })
         })

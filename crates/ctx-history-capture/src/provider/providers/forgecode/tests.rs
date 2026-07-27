@@ -9,20 +9,35 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_store::Store;
+use ctx_history_core::{CaptureProvider, EntityTimestamps, SyncCursor};
+use ctx_history_store::{
+    decode_native_path_committed_cursor, ProviderSourceLocatorObservation, Store,
+};
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::{
-    ImportProfile, OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult,
-    ProOutputProgress, ProOutputSink, ProOutputSinkError, ProviderAdapterContext,
-    ProviderImportOptions,
+    complete_content::{
+        VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+    },
+    native_source::NativePosition,
+    provider::importer::{
+        provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
+        CertifiedProviderCursor,
+    },
+    CaptureWorkLimit, ImportProfile, OutputSourceIdentity, ProOutputMaterializationPage,
+    ProOutputPageResult, ProOutputProgress, ProOutputSink, ProOutputSinkError,
+    ProviderAdapterContext, ProviderImportOptions, FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
 use super::{
     import_forgecode_nativepath,
-    nativepath::source::{
-        discover_forgecode_source, ForgeCodeDiscovery, ForgeCodeFrontier, ForgeCodeScanner,
+    nativepath::{
+        legacy_source_revision,
+        source::{
+            discover_forgecode_source, ForgeCodeDiscovery, ForgeCodeFrontier, ForgeCodeScanner,
+        },
     },
 };
 
@@ -123,6 +138,178 @@ fn malformed_row_is_bounded_and_does_not_hide_healthy_sibling() {
 }
 
 #[test]
+fn invalid_utf8_rows_are_rejected_between_healthy_siblings() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    let conn = Connection::open(&source_path).unwrap();
+    create_schema(&conn);
+    insert_row(
+        &conn,
+        "healthy-before",
+        Some(&json!({"messages": [text_message("before")]}).to_string()),
+        None,
+    );
+    insert_invalid_utf8_rows(&conn);
+    insert_row(
+        &conn,
+        "healthy-after",
+        Some(&json!({"messages": [text_message("after")]}).to_string()),
+        None,
+    );
+    drop(conn);
+    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+
+    let summary = import_core(&source_path, &mut store).unwrap();
+
+    assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.failures.len(), 6);
+    assert!(summary
+        .failures
+        .iter()
+        .all(|failure| failure.error.contains("is not valid UTF-8")));
+    assert_eq!(event_count(&store), 2);
+}
+
+#[test]
+fn three_mib_success_output_is_counted_once_and_replayed_only_to_pro() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    let output = "o".repeat(3 * 1024 * 1024);
+    write_source(
+        &source_path,
+        "conversation-three-mib",
+        json!([success_output(&output), text_message("healthy-core")]),
+    );
+    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+
+    let summary = import_core(&source_path, &mut store).unwrap();
+    assert_eq!(summary.imported_events, 1);
+    assert!(summary.failures.is_empty());
+
+    let sink = Arc::new(RecordingSink::default());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::ProReplayOnly(sink.clone()),
+        ..Default::default()
+    };
+
+    let replay =
+        import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options)
+            .unwrap();
+
+    assert!(replay.failures.is_empty());
+    let contents = sink.contents.lock().unwrap();
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0].len(), output.len());
+    assert_eq!(contents[0], output.as_bytes());
+    assert!(store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .flat_map(|session| store.events_for_session(session.id).unwrap())
+        .all(|event| !event.payload.to_string().contains(&output[..128])));
+}
+
+#[test]
+fn four_mib_output_boundary_is_accepted_and_larger_output_is_rejected() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    let accepted = "a".repeat(4 * 1024 * 1024);
+    let rejected = "r".repeat(4 * 1024 * 1024 + 1);
+    let conn = Connection::open(&source_path).unwrap();
+    create_schema(&conn);
+    insert_row(
+        &conn,
+        "accepted-boundary",
+        Some(
+            &json!({
+                "messages": [success_output(&accepted), text_message("accepted-sibling")]
+            })
+            .to_string(),
+        ),
+        None,
+    );
+    insert_row(
+        &conn,
+        "rejected-boundary",
+        Some(
+            &json!({
+                "messages": [success_output(&rejected), text_message("rejected-sibling")]
+            })
+            .to_string(),
+        ),
+        None,
+    );
+    insert_row(
+        &conn,
+        "healthy-after-boundaries",
+        Some(&json!({"messages": [text_message("healthy-after")]}).to_string()),
+        None,
+    );
+    drop(conn);
+    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let sink = Arc::new(RecordingSink::default());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::CoreAndPro(sink.clone()),
+        ..Default::default()
+    };
+
+    let summary =
+        import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options)
+            .unwrap();
+
+    assert_eq!(summary.imported_events, 3);
+    assert_eq!(summary.failures.len(), 1);
+    assert!(summary.failures[0].error.contains("transient-output limit"));
+    let contents = sink.contents.lock().unwrap();
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0].len(), accepted.len());
+    assert_eq!(contents[0], accepted.as_bytes());
+    assert_eq!(event_count(&store), 3);
+}
+
+#[test]
+fn oversized_singleton_message_is_rejected_and_later_row_survives() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    let conn = Connection::open(&source_path).unwrap();
+    create_schema(&conn);
+    insert_row(
+        &conn,
+        &"oversized-singleton-identity".repeat(20_000),
+        Some(
+            &json!({
+                "messages": [success_output(&"x".repeat(4 * 1024 * 1024))]
+            })
+            .to_string(),
+        ),
+        None,
+    );
+    insert_row(
+        &conn,
+        "healthy-after-oversized",
+        Some(&json!({"messages": [text_message("healthy-after")]}).to_string()),
+        None,
+    );
+    drop(conn);
+    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let sink = Arc::new(RecordingSink::default());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::CoreAndPro(sink.clone()),
+        ..Default::default()
+    };
+
+    let summary =
+        import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options)
+            .unwrap();
+
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.failures.len(), 1);
+    assert!(summary.failures[0].error.contains("retained-page limit"));
+    assert!(sink.contents.lock().unwrap().is_empty());
+    assert_eq!(event_count(&store), 1);
+}
+
+#[test]
 fn core_replay_append_rewrite_and_disappearance_are_idempotent() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let source_root = directory.path().join("forge-root");
@@ -166,6 +353,165 @@ fn core_replay_append_rewrite_and_disappearance_are_idempotent() {
         crate::ProviderImportWorkResult::Changed
     );
     let replay = import_core(&source_root, &mut store).unwrap();
+    assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
+}
+
+#[test]
+fn restart_resumes_the_committed_message_frontier_without_duplicates() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    write_source(
+        &source_path,
+        "conversation-restart",
+        Value::Array(
+            (0..20)
+                .map(|index| text_message(&format!("restart-{index}")))
+                .collect(),
+        ),
+    );
+    let store_path = directory.path().join("ctx.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    let first = import_forgecode_nativepath(
+        &source_path,
+        &mut store,
+        context(&source_path),
+        ProviderImportOptions {
+            capture_work_limit: CaptureWorkLimit::OneSafeGroup,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(first.work_remaining);
+    assert_eq!(event_count(&store), 16);
+    drop(store);
+
+    let mut store = Store::open(&store_path).unwrap();
+    let resumed = import_core(&source_path, &mut store).unwrap();
+    assert_eq!(resumed.imported_events, 4);
+    assert_eq!(event_count(&store), 20);
+    drop(store);
+
+    let mut store = Store::open(&store_path).unwrap();
+    let replay = import_core(&source_path, &mut store).unwrap();
+    assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(event_count(&store), 20);
+}
+
+#[test]
+fn deleted_custom_sqlite_filenames_retire_exact_routes_after_restart() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_paths = [
+        directory.path().join("forge-history.sqlite"),
+        directory.path().join("forge-history"),
+        directory.path().join("FORGE-HISTORY.DB"),
+    ];
+    let store_path = directory.path().join("ctx.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    for (index, source_path) in source_paths.iter().enumerate() {
+        write_source(
+            source_path,
+            &format!("custom-filename-{index}"),
+            json!([text_message(&format!("custom-{index}"))]),
+        );
+        let imported = import_core(source_path, &mut store).unwrap();
+        assert_eq!(imported.imported_events, 1);
+    }
+    assert_eq!(event_count(&store), source_paths.len());
+    for source_path in &source_paths {
+        fs::remove_file(source_path).unwrap();
+    }
+    drop(store);
+
+    let mut store = Store::open(&store_path).unwrap();
+    for source_path in &source_paths {
+        let retired = import_core(source_path, &mut store).unwrap();
+        assert_eq!(
+            retired.work_result(),
+            crate::ProviderImportWorkResult::Changed
+        );
+        let replay = import_core(source_path, &mut store).unwrap();
+        assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
+    }
+    assert_eq!(event_count(&store), source_paths.len());
+}
+
+#[test]
+fn released_policy_five_route_can_retire_before_nativepath_replay() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    write_source(
+        &source_path,
+        "released-delete",
+        json!([text_message("released")]),
+    );
+    let source = live_source(&source_path);
+    let source_revision = legacy_source_revision(&source);
+    let canonical_path = fs::canonicalize(&source_path).unwrap();
+    let path_identity = provider_path_identity(&canonical_path).unwrap();
+    let stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::ForgeCode,
+        FORGECODE_SQLITE_SOURCE_FORMAT,
+        &path_identity,
+    );
+    let canonical_source_identity = "released-forgecode-canonical".to_owned();
+    let imported_at = context(&source_path).imported_at;
+    let store_path = directory.path().join("ctx.sqlite");
+    let store = Store::open(&store_path).unwrap();
+    store
+        .reconcile_provider_source_locator(&ProviderSourceLocatorObservation {
+            provider: CaptureProvider::ForgeCode,
+            source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
+            machine_id: "forgecode-nativepath-test".to_owned(),
+            locator_identity: format!("forgecode-sqlite:{path_identity}"),
+            cursor_stream: stream.clone(),
+            proposed_source_identity: canonical_source_identity,
+            raw_source_path: Some(canonical_path.display().to_string()),
+            source_revision: source_revision.clone(),
+            observed_at_ms: imported_at.timestamp_millis(),
+        })
+        .unwrap();
+    let released_cursor = CertifiedProviderCursor::new(
+        source_revision,
+        1,
+        5,
+        NativePosition::new("forgecode-conversation-rowid-v1", vec![0]).unwrap(),
+        BoundedParserCheckpoint::from_serializable(&()).unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    store
+        .upsert_sync_cursor(&SyncCursor {
+            id: Uuid::new_v4(),
+            team_id: None,
+            device_id: "forgecode-nativepath-test".to_owned(),
+            stream: stream.clone(),
+            cursor: released_cursor,
+            last_synced_at: Some(imported_at),
+            timestamps: EntityTimestamps {
+                created_at: imported_at,
+                updated_at: imported_at,
+            },
+        })
+        .unwrap();
+    drop(store);
+    fs::remove_file(&source_path).unwrap();
+
+    let mut store = Store::open(&store_path).unwrap();
+    let retired = import_core(&source_path, &mut store).unwrap();
+    assert_eq!(
+        retired.work_result(),
+        crate::ProviderImportWorkResult::Changed
+    );
+    let committed = store
+        .get_sync_cursor(None, "forgecode-nativepath-test", &stream)
+        .unwrap()
+        .unwrap();
+    assert!(decode_native_path_committed_cursor(&committed.cursor).is_ok());
+    drop(store);
+
+    let mut store = Store::open(&store_path).unwrap();
+    let replay = import_core(&source_path, &mut store).unwrap();
     assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
 }
 
@@ -281,12 +627,69 @@ fn truncated_message_keeps_the_existing_verified_source_locator() {
 }
 
 #[test]
+fn core_never_persists_result_body_content() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let source_path = directory.path().join(".forge.db");
+    let long_message = "m".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 1);
+    write_source(
+        &source_path,
+        "conversation-no-core-result-locator",
+        json!([
+            text_message(&long_message),
+            success_output(SUCCESS_SENTINEL),
+            failed_output("forgecode-failed-output-body-must-stay-out-of-core")
+        ]),
+    );
+    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let sink = Arc::new(RecordingSink::default());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::CoreAndPro(sink.clone()),
+        ..Default::default()
+    };
+    import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options).unwrap();
+
+    let events = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .flat_map(|session| store.events_for_session(session.id).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| {
+        event
+            .sync
+            .metadata
+            .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
+            .and_then(VerifiedContentLocatorsV1::from_metadata_value)
+            .and_then(|locators| {
+                locators
+                    .locator(VerifiedContentRole::MessageBody)
+                    .map(|_| ())
+            })
+            .is_some()
+    }));
+    for event in &events {
+        let encoded = serde_json::to_string(event).unwrap();
+        assert!(!encoded.contains(SUCCESS_SENTINEL));
+        assert!(!encoded.contains("forgecode-failed-output-body-must-stay-out-of-core"));
+    }
+    let contents = sink.contents.lock().unwrap();
+    assert_eq!(contents.len(), 2);
+    assert!(contents
+        .iter()
+        .any(|content| content == SUCCESS_SENTINEL.as_bytes()));
+    assert!(contents
+        .iter()
+        .any(|content| { content == b"forgecode-failed-output-body-must-stay-out-of-core" }));
+}
+
+#[test]
 fn missing_root_resolves_to_the_canonical_database_locator() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let missing_root = directory.path().join("missing-forge-root");
     match discover_forgecode_source(&missing_root).unwrap() {
-        ForgeCodeDiscovery::Missing(path) => {
-            assert_eq!(path, missing_root.join(".forge.db"));
+        ForgeCodeDiscovery::Missing(missing) => {
+            assert_eq!(missing.preferred_path, missing_root.join(".forge.db"));
         }
         ForgeCodeDiscovery::Live(_) => panic!("missing root was discovered as live"),
     }
@@ -449,6 +852,30 @@ fn insert_row(
     .unwrap();
 }
 
+fn insert_invalid_utf8_rows(conn: &Connection) {
+    conn.execute_batch(
+        "INSERT INTO conversations VALUES
+            (CAST(X'80' AS TEXT), 'test', 7, '{\"messages\":[]}',
+             '2026-01-01T00:00:00Z', NULL, NULL);
+         INSERT INTO conversations VALUES
+            ('bad-title', CAST(X'80' AS TEXT), 7, '{\"messages\":[]}',
+             '2026-01-01T00:00:00Z', NULL, NULL);
+         INSERT INTO conversations VALUES
+            ('bad-context', 'test', 7, CAST(X'80' AS TEXT),
+             '2026-01-01T00:00:00Z', NULL, NULL);
+         INSERT INTO conversations VALUES
+            ('bad-created', 'test', 7, '{\"messages\":[]}',
+             CAST(X'80' AS TEXT), NULL, NULL);
+         INSERT INTO conversations VALUES
+            ('bad-updated', 'test', 7, '{\"messages\":[]}',
+             '2026-01-01T00:00:00Z', CAST(X'80' AS TEXT), NULL);
+         INSERT INTO conversations VALUES
+            ('bad-metrics', 'test', 7, '{\"messages\":[]}',
+             '2026-01-01T00:00:00Z', NULL, CAST(X'80' AS TEXT));",
+    )
+    .unwrap();
+}
+
 fn replace_messages(path: &Path, messages: Value) {
     let conn = Connection::open(path).unwrap();
     conn.execute(
@@ -473,6 +900,21 @@ fn success_output(text: &str) -> Value {
                 "call_id": "call-success",
                 "output": {
                     "is_error": false,
+                    "values": [{"text": text}]
+                }
+            }
+        }
+    })
+}
+
+fn failed_output(text: &str) -> Value {
+    json!({
+        "message": {
+            "tool": {
+                "name": "shell",
+                "call_id": "call-failure",
+                "output": {
+                    "is_error": true,
                     "values": [{"text": text}]
                 }
             }

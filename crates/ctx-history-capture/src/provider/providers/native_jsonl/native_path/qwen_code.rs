@@ -20,33 +20,27 @@ use crate::{
         native_ingestion::{
             process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
             NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,
+            NATIVE_INGESTION_PAGE_MAX_BYTES,
         },
         normalization::{provider_output_event_is_failure, provider_role, provider_value_text},
     },
-    stable_capture_uuid, CaptureError, CaptureWorkLimit, ImportProfile, OutputAssociations,
-    OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
-    OutputSourceIdentity, OutputSourceLocator, ProOutputObservation, ProOutputProgress,
-    ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition, ProviderImportSummary,
+    stable_capture_uuid, CaptureError, ImportProfile, OutputAssociations, OutputNativeCoordinate,
+    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceIdentity,
+    OutputSourceLocator, ProOutputObservation, ProOutputProgress, ProOutputSink,
+    ProOutputSinkError, ProOutputSourceDisposition, ProviderImportSummary,
     ProviderImportWorkResult, Result, QWEN_CODE_SOURCE_FORMAT,
 };
 
 use super::super::result_content::{NativeJsonlResultExtractionError, NativeJsonlResultSubrecord};
 use super::{
-    committed_direct_jsonl_replay_authority, decode_direct_jsonl_cursor,
-    decode_direct_jsonl_native_cursor, direct_jsonl_checkpoint_is_covered_by,
-    encode_direct_jsonl_cursor, open_direct_jsonl_pages, publish_direct_jsonl_group,
-    reader::{direct_jsonl_source_revision, observe_file},
-    DirectJsonlCheckpoint, DirectJsonlCursorDecode, DirectJsonlOutput, DirectJsonlPage,
-    DirectJsonlPendingPage, DirectJsonlPublicationContext, DirectJsonlScanOutcome,
+    committed_direct_jsonl_replay_authority, decode_direct_jsonl_native_cursor,
+    direct_jsonl_checkpoint_is_covered_by, encode_direct_jsonl_cursor, open_direct_jsonl_pages,
+    reader::direct_jsonl_source_revision, DirectJsonlCheckpoint, DirectJsonlOutput,
     DirectJsonlSourceChange, NativePathJsonlTreeImport,
 };
 
 const QWEN_CODE_MISSING_REASON: &str =
     "no Qwen Code chat JSONL transcripts found under projects/*/chats";
-const QWEN_CODE_GROUP_MAX_PAGES: usize = 32;
-const QWEN_CODE_GROUP_MAX_SOURCES: usize = 64;
-const QWEN_CODE_GROUP_MAX_BYTES: usize = 6 * 1024 * 1024;
-const QWEN_CODE_GROUP_MAX_ESTIMATED_MUTATIONS: usize = 3_000;
 const QWEN_CODE_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const QWEN_CODE_OUTPUT_PARSER_REVISION: &str = "qwen-code-direct-native-jsonl-v1";
 
@@ -79,7 +73,18 @@ pub(crate) fn import_qwen_code_nativepath_tree(
             &configured_source_root,
             request.imported_at,
             sink.as_deref(),
-        );
+        )?;
+        replay_missing_outputs_or_mark_behind(
+            &known_routes,
+            &live_inventory.paths,
+            &configured_source_root,
+            if live_inventory.root_missing {
+                ProviderSourceRouteRetirementReason::RootMissing
+            } else {
+                ProviderSourceRouteRetirementReason::SourceMissing
+            },
+            sink.as_deref(),
+        )?;
         return Ok(ProviderImportSummary::default());
     }
 
@@ -90,18 +95,27 @@ pub(crate) fn import_qwen_code_nativepath_tree(
                 reason: QWEN_CODE_MISSING_REASON,
             });
         }
-        return retire_missing_routes(
+        let reason = if live_inventory.root_missing {
+            ProviderSourceRouteRetirementReason::RootMissing
+        } else {
+            ProviderSourceRouteRetirementReason::SourceMissing
+        };
+        let summary = retire_missing_routes(
             store,
             &request.machine_id,
             request.imported_at,
             &known_routes,
             &live_inventory.paths,
-            if live_inventory.root_missing {
-                ProviderSourceRouteRetirementReason::RootMissing
-            } else {
-                ProviderSourceRouteRetirementReason::SourceMissing
-            },
-        );
+            reason,
+        )?;
+        replay_missing_outputs_or_mark_behind(
+            &known_routes,
+            &live_inventory.paths,
+            &configured_source_root,
+            reason,
+            sink.as_deref(),
+        )?;
+        return Ok(summary);
     }
 
     let mut summary = import_qwen_code_core(
@@ -136,7 +150,14 @@ pub(crate) fn import_qwen_code_nativepath_tree(
         &configured_source_root,
         request.imported_at,
         sink.as_deref(),
-    );
+    )?;
+    replay_missing_outputs_or_mark_behind(
+        &known_routes,
+        &live_inventory.paths,
+        &configured_source_root,
+        ProviderSourceRouteRetirementReason::SourceMissing,
+        sink.as_deref(),
+    )?;
     Ok(summary)
 }
 
@@ -182,261 +203,12 @@ fn import_qwen_code_core(
     store: &mut Store,
     request: NativePathJsonlTreeImport<'_>,
 ) -> Result<ProviderImportSummary> {
-    let configured_source_root = request
-        .source_root
-        .clone()
-        .or(request.source_path.clone())
-        .unwrap_or_else(|| request.path.to_path_buf());
-    let committed_store = Store::open_read_only(store.path())?;
-    let bulk_guard = store.begin_event_search_bulk_mode()?;
-    let context = DirectJsonlPublicationContext {
-        provider: CaptureProvider::QwenCode,
-        source_format: QWEN_CODE_SOURCE_FORMAT,
-        machine_id: &request.machine_id,
-        source_root: &configured_source_root,
-        imported_at: request.imported_at,
-        history_record_id: request.history_record_id,
-        inventory_observation_token: request.inventory_observation_token.as_deref(),
-    };
-    let mut accumulator = QwenCodeGroupAccumulator::new(
+    super::import_direct_native_jsonl_tree_core(
         store,
-        &committed_store,
-        &bulk_guard,
-        context,
-        request.capture_work_limit,
-    );
-    let mut visited = 0_usize;
-    let operation = super::super::traversal::visit_jsonl_tree_files(
-        request.path,
-        &qwen_code_file_is_selected,
-        &mut |path| {
-            visited = visited.saturating_add(1);
-            if accumulator.stopped() {
-                return Ok(());
-            }
-            if let Some(token) = request.inventory_observation_token.as_deref() {
-                if crate::observe_ordinary_file(path)?.token_hex() != token {
-                    return Err(CaptureError::SourceChangedDuringCapture);
-                }
-            }
-            let observation = observe_file(path)?;
-            let canonical_path = std::fs::canonicalize(path)?;
-            let path_identity = provider_path_identity(&canonical_path)?;
-            let stream = provider_source_cursor_stream_for_path(
-                CaptureProvider::QwenCode,
-                QWEN_CODE_SOURCE_FORMAT,
-                &path_identity,
-            );
-            let stored = accumulator
-                .store()
-                .get_sync_cursor(None, &request.machine_id, &stream)?;
-            let previous = stored
-                .as_ref()
-                .map(|cursor| {
-                    decode_direct_jsonl_cursor(
-                        &cursor.cursor,
-                        CaptureProvider::QwenCode,
-                        QWEN_CODE_SOURCE_FORMAT,
-                        &canonical_path,
-                        &observation,
-                    )
-                })
-                .transpose()?
-                .and_then(|decoded| match decoded {
-                    DirectJsonlCursorDecode::Native(checkpoint)
-                    | DirectJsonlCursorDecode::Migrated(checkpoint) => Some(checkpoint),
-                    DirectJsonlCursorDecode::Reset => None,
-                });
-            let mut reader = open_direct_jsonl_pages(
-                CaptureProvider::QwenCode,
-                QWEN_CODE_SOURCE_FORMAT,
-                &canonical_path,
-                Some(configured_source_root.clone()),
-                request.imported_at,
-                false,
-                previous.as_ref(),
-            )?;
-            let mut emitted_page = false;
-            while let Some(page) = reader.next_page()? {
-                emitted_page = true;
-                accumulator.push(DirectJsonlPendingPage {
-                    path: canonical_path.clone(),
-                    page,
-                })?;
-                if accumulator.stopped() {
-                    break;
-                }
-            }
-            if !accumulator.stopped() && !emitted_page {
-                if let Some(outcome) = reader.outcome() {
-                    if outcome.source_change == DirectJsonlSourceChange::Unchanged {
-                        accumulator.record_unchanged(outcome);
-                    } else {
-                        accumulator.push(DirectJsonlPendingPage {
-                            path: canonical_path,
-                            page: observation_only_page(outcome.checkpoint.clone()),
-                        })?;
-                    }
-                }
-            }
-            Ok(())
-        },
-    );
-    let operation = operation.and_then(|_| accumulator.finish());
-    let stopped = accumulator.stopped();
-    drop(accumulator);
-    let finish = store
-        .finish_event_search_bulk_mode(&bulk_guard)
-        .map_err(CaptureError::from);
-    match (operation, finish) {
-        (Ok(mut summary), Ok(())) => {
-            if visited == 0 {
-                return Err(CaptureError::InvalidProviderTranscriptPath {
-                    path: request.path.to_path_buf(),
-                    reason: QWEN_CODE_MISSING_REASON,
-                });
-            }
-            if stopped {
-                summary.work_remaining = true;
-            }
-            Ok(summary)
-        }
-        (_, Err(error)) => Err(error),
-        (Err(error), Ok(())) => Err(error),
-    }
-}
-
-fn observation_only_page(checkpoint: DirectJsonlCheckpoint) -> DirectJsonlPage {
-    DirectJsonlPage {
-        expected_checkpoint: checkpoint.clone(),
-        next_checkpoint: checkpoint.clone(),
-        events: Vec::new(),
-        outputs: Vec::new(),
-        rejections: Vec::new(),
-        logical_units: 1,
-        conservative_serialized_bytes: 2 * 1024,
-        terminal: checkpoint.terminal,
-    }
-}
-
-struct QwenCodeGroupAccumulator<'a> {
-    store: &'a mut Store,
-    committed_store: &'a Store,
-    bulk_guard: &'a ctx_history_store::EventSearchBulkGuard,
-    context: DirectJsonlPublicationContext<'a>,
-    work_limit: CaptureWorkLimit,
-    pages: Vec<DirectJsonlPendingPage>,
-    bytes: usize,
-    estimated_mutations: usize,
-    sources: BTreeSet<PathBuf>,
-    summary: ProviderImportSummary,
-    stopped: bool,
-}
-
-impl<'a> QwenCodeGroupAccumulator<'a> {
-    fn new(
-        store: &'a mut Store,
-        committed_store: &'a Store,
-        bulk_guard: &'a ctx_history_store::EventSearchBulkGuard,
-        context: DirectJsonlPublicationContext<'a>,
-        work_limit: CaptureWorkLimit,
-    ) -> Self {
-        Self {
-            store,
-            committed_store,
-            bulk_guard,
-            context,
-            work_limit,
-            pages: Vec::new(),
-            bytes: 0,
-            estimated_mutations: 0,
-            sources: BTreeSet::new(),
-            summary: ProviderImportSummary::default(),
-            stopped: false,
-        }
-    }
-
-    fn store(&self) -> &Store {
-        self.store
-    }
-
-    fn stopped(&self) -> bool {
-        self.stopped
-    }
-
-    fn record_unchanged(&mut self, outcome: &DirectJsonlScanOutcome) {
-        let sessions = usize::from(outcome.checkpoint.session.is_some());
-        let events = usize::try_from(outcome.accepted_events).unwrap_or(usize::MAX);
-        self.summary.skipped_sessions = self.summary.skipped_sessions.saturating_add(sessions);
-        self.summary.skipped_events = self.summary.skipped_events.saturating_add(events);
-        self.summary.skipped = self
-            .summary
-            .skipped
-            .saturating_add(sessions)
-            .saturating_add(events);
-    }
-
-    fn push(&mut self, pending: DirectJsonlPendingPage) -> Result<()> {
-        let next_sources = self.sources.len() + usize::from(!self.sources.contains(&pending.path));
-        let next_bytes = self
-            .bytes
-            .saturating_add(pending.page.conservative_serialized_bytes);
-        let page_mutations = pending
-            .page
-            .events
-            .iter()
-            .map(|event| 1_usize.saturating_add(event.touches.len()))
-            .sum::<usize>()
-            .saturating_add(4);
-        let next_mutations = self.estimated_mutations.saturating_add(page_mutations);
-        if !self.pages.is_empty()
-            && (self.pages.len() >= QWEN_CODE_GROUP_MAX_PAGES
-                || next_sources > QWEN_CODE_GROUP_MAX_SOURCES
-                || next_bytes > QWEN_CODE_GROUP_MAX_BYTES
-                || next_mutations > QWEN_CODE_GROUP_MAX_ESTIMATED_MUTATIONS)
-        {
-            self.flush()?;
-            if self.stopped {
-                return Ok(());
-            }
-        }
-        self.bytes = self
-            .bytes
-            .saturating_add(pending.page.conservative_serialized_bytes);
-        self.estimated_mutations = self.estimated_mutations.saturating_add(page_mutations);
-        self.sources.insert(pending.path.clone());
-        self.pages.push(pending);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        if self.pages.is_empty() {
-            return Ok(());
-        }
-        let pages = std::mem::take(&mut self.pages);
-        let summary = publish_direct_jsonl_group(
-            self.store,
-            self.committed_store,
-            self.bulk_guard,
-            &self.context,
-            &pages,
-        )?;
-        self.summary.merge_from(summary);
-        self.bytes = 0;
-        self.estimated_mutations = 0;
-        self.sources.clear();
-        if self.work_limit == CaptureWorkLimit::OneSafeGroup {
-            self.stopped = true;
-        }
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<ProviderImportSummary> {
-        if !self.stopped {
-            self.flush()?;
-        }
-        Ok(std::mem::take(&mut self.summary))
-    }
+        request,
+        CaptureProvider::QwenCode,
+        QWEN_CODE_SOURCE_FORMAT,
+    )
 }
 
 #[derive(Clone)]
@@ -623,18 +395,11 @@ fn replay_outputs_or_mark_behind(
     source_root: &Path,
     imported_at: DateTime<Utc>,
     sink: Option<&dyn ProOutputSink>,
-) {
+) -> Result<()> {
     let Some(sink) = sink else {
-        return;
+        return Ok(());
     };
-    if let Err(error) =
-        replay_qwen_code_outputs(store, machine_id, paths, source_root, imported_at, sink)
-    {
-        sink.mark_behind(ProOutputSinkError::new(
-            "qwen_code_nativepath_output_replay",
-            error.to_string(),
-        ));
-    }
+    replay_qwen_code_outputs(store, machine_id, paths, source_root, imported_at, sink)
 }
 
 fn replay_qwen_code_outputs(
@@ -646,35 +411,46 @@ fn replay_qwen_code_outputs(
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
     for path in paths {
-        let authority = committed_direct_jsonl_replay_authority(
-            store,
-            machine_id,
-            CaptureProvider::QwenCode,
-            QWEN_CODE_SOURCE_FORMAT,
-            path,
-        )?;
-        let locator_identity = provider_path_identity(path)?;
-        let source = OutputSourceIdentity {
-            provider: CaptureProvider::QwenCode.as_str().to_owned(),
-            namespace_id: source_root.display().to_string(),
-            source_id: locator_identity.clone(),
-        };
-        let progress = match sink.observe_source(&source) {
-            Ok(progress) => progress,
-            Err(error) => {
-                sink.mark_behind(error);
-                continue;
+        let replay = (|| {
+            let authority = committed_direct_jsonl_replay_authority(
+                store,
+                machine_id,
+                CaptureProvider::QwenCode,
+                QWEN_CODE_SOURCE_FORMAT,
+                path,
+            )?;
+            let locator_identity = provider_path_identity(path)?;
+            let source = OutputSourceIdentity {
+                provider: CaptureProvider::QwenCode.as_str().to_owned(),
+                namespace_id: source_root.display().to_string(),
+                source_id: locator_identity.clone(),
+            };
+            let progress = match sink.observe_source(&source) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    sink.mark_behind(error);
+                    return Ok(());
+                }
+            };
+            replay_qwen_code_source(
+                path,
+                imported_at,
+                sink,
+                source,
+                locator_identity,
+                progress,
+                &authority,
+            )
+        })();
+        if let Err(error) = replay {
+            if super::driver::capture_error_is_systemic(&error) {
+                return Err(error);
             }
-        };
-        replay_qwen_code_source(
-            path,
-            imported_at,
-            sink,
-            source,
-            locator_identity,
-            progress,
-            &authority,
-        )?;
+            sink.mark_behind(ProOutputSinkError::new(
+                "qwen_code_nativepath_output_source",
+                bounded_output_diagnostic(path, &error),
+            ));
+        }
     }
     Ok(())
 }
@@ -725,10 +501,13 @@ fn replay_qwen_code_source(
         progress,
         source_change,
         can_resume,
+        &observed_revision,
         sink.materializer_revision(),
     )?;
 
+    let mut emitted_page = false;
     while let Some(page) = reader.next_page()? {
+        emitted_page = true;
         if !direct_jsonl_checkpoint_is_covered_by(authority, &page.next_checkpoint) {
             return Err(CaptureError::InvalidPayload(
                 "Qwen Code output replay advanced beyond committed Core authority".to_owned(),
@@ -743,7 +522,11 @@ fn replay_qwen_code_source(
             .collect::<Vec<_>>();
         let accounting = NativePageAccounting {
             logical_units: page.logical_units.max(1),
-            conservative_serialized_bytes: page.conservative_serialized_bytes,
+            // Replay adds the source-root namespace and exact path locator to
+            // the reader-owned payload. These pages are dispatched singly, so
+            // certify the full bounded replay allowance rather than reuse the
+            // smaller Core projection claim.
+            conservative_serialized_bytes: NATIVE_INGESTION_PAGE_MAX_BYTES,
         };
         let output = NativeProOutputPage {
             inventory_generation: sink.inventory_generation(),
@@ -783,6 +566,41 @@ fn replay_qwen_code_source(
             "Qwen Code output replay outcome exceeded committed Core authority".to_owned(),
         ));
     }
+    if !emitted_page {
+        let next_safe_frontier = safe_frontier(&outcome.checkpoint)?;
+        if output_state.prior_terminal
+            && output_state.disposition == ProOutputSourceDisposition::AppendOrResume
+            && output_state.expected_sink_frontier.as_ref() == Some(&next_safe_frontier)
+        {
+            return Ok(());
+        }
+        let expected_frontier = next_safe_frontier.clone();
+        let output = NativeProOutputPage {
+            inventory_generation: sink.inventory_generation(),
+            source: output_state.source,
+            source_epoch: output_state.source_epoch,
+            observed_revision,
+            parser_revision: QWEN_CODE_OUTPUT_PARSER_REVISION.to_owned(),
+            materializer_revision: sink.materializer_revision().to_owned(),
+            disposition: output_state.disposition,
+            expected_prior_source_epoch: output_state.expected_source_epoch,
+            expected_prior_frontier: output_state.expected_sink_frontier,
+            observations: Vec::new(),
+        };
+        let replay = NativeProReplayPage::new_with_source_identity(
+            NativeSourceIdentity::new(CaptureProvider::QwenCode.as_str(), &locator_identity),
+            expected_frontier,
+            next_safe_frontier,
+            true,
+            NativePageAccounting {
+                logical_units: 1,
+                conservative_serialized_bytes: 64 * 1024,
+            },
+            output,
+        )
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        let _ = process_pro_replay_only(replay, sink);
+    }
     Ok(())
 }
 
@@ -792,6 +610,7 @@ struct QwenCodeOutputState {
     expected_source_epoch: Option<u64>,
     expected_sink_frontier: Option<NativeSafeFrontier>,
     disposition: ProOutputSourceDisposition,
+    prior_terminal: bool,
 }
 
 impl QwenCodeOutputState {
@@ -800,6 +619,7 @@ impl QwenCodeOutputState {
         progress: Option<ProOutputProgress>,
         source_change: DirectJsonlSourceChange,
         can_resume: bool,
+        observed_revision: &str,
         materializer_revision: &str,
     ) -> Result<Self> {
         let Some(progress) = progress else {
@@ -809,6 +629,7 @@ impl QwenCodeOutputState {
                 expected_source_epoch: None,
                 expected_sink_frontier: None,
                 disposition: ProOutputSourceDisposition::NewSource,
+                prior_terminal: false,
             });
         };
         let prior_frontier = progress
@@ -818,6 +639,7 @@ impl QwenCodeOutputState {
             .transpose()
             .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
         let rewrite = !can_resume
+            || progress.observed_revision != observed_revision
             || progress.materializer_revision != materializer_revision
             || matches!(
                 source_change,
@@ -845,8 +667,141 @@ impl QwenCodeOutputState {
             } else {
                 ProOutputSourceDisposition::AppendOrResume
             },
+            prior_terminal: progress.terminal,
         })
     }
+}
+
+fn replay_missing_outputs_or_mark_behind(
+    known_routes: &[KnownQwenCodeRoute],
+    live_paths: &BTreeSet<PathBuf>,
+    source_root: &Path,
+    reason: ProviderSourceRouteRetirementReason,
+    sink: Option<&dyn ProOutputSink>,
+) -> Result<()> {
+    let Some(sink) = sink else {
+        return Ok(());
+    };
+    for route in known_routes
+        .iter()
+        .filter(|route| !live_paths.contains(&route.path))
+    {
+        let source = OutputSourceIdentity {
+            provider: CaptureProvider::QwenCode.as_str().to_owned(),
+            namespace_id: source_root.display().to_string(),
+            source_id: route.locator_identity.clone(),
+        };
+        let progress = match sink.observe_source(&source) {
+            Ok(progress) => progress,
+            Err(error) => {
+                sink.mark_behind(error);
+                continue;
+            }
+        };
+        if let Err(error) = replay_missing_output_source(route, reason, source, progress, sink) {
+            sink.mark_behind(ProOutputSinkError::new(
+                "qwen_code_nativepath_missing_output_source",
+                bounded_output_diagnostic(&route.path, &error),
+            ));
+            if super::driver::capture_error_is_systemic(&error) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn replay_missing_output_source(
+    route: &KnownQwenCodeRoute,
+    reason: ProviderSourceRouteRetirementReason,
+    source: OutputSourceIdentity,
+    progress: Option<ProOutputProgress>,
+    sink: &dyn ProOutputSink,
+) -> Result<()> {
+    let observed_revision = format!(
+        "qwen-code-source-unavailable-v1:{}:{}",
+        route.source_revision,
+        qwen_missing_reason(reason)
+    );
+    let next_frontier = NativeSafeFrontier::new(
+        QWEN_CODE_OUTPUT_FRONTIER_VERSION,
+        serde_json::to_vec(&json!({
+            "kind": "qwen-code-source-unavailable-v1",
+            "locator_identity": route.locator_identity,
+            "reason": qwen_missing_reason(reason),
+        }))?,
+    )
+    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let prior_frontier = progress
+        .as_ref()
+        .and_then(|progress| progress.cursor.as_ref())
+        .map(|cursor| NativeSafeFrontier::new(cursor.version, cursor.payload.clone()))
+        .transpose()
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    if progress.as_ref().is_some_and(|progress| {
+        progress.terminal
+            && progress.observed_revision == observed_revision
+            && progress.parser_revision == QWEN_CODE_OUTPUT_PARSER_REVISION
+            && progress.materializer_revision == sink.materializer_revision()
+            && prior_frontier.as_ref() == Some(&next_frontier)
+    }) {
+        return Ok(());
+    }
+    let (source_epoch, expected_source_epoch, disposition) = match progress.as_ref() {
+        Some(progress) => (
+            progress
+                .source_epoch
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Qwen Code missing output source epoch exhausted",
+                ))?,
+            Some(progress.source_epoch),
+            ProOutputSourceDisposition::Rewrite,
+        ),
+        None => (0, None, ProOutputSourceDisposition::NewSource),
+    };
+    let replay = NativeProReplayPage::new_with_source_identity(
+        NativeSourceIdentity::new(CaptureProvider::QwenCode.as_str(), &route.locator_identity),
+        prior_frontier
+            .clone()
+            .unwrap_or_else(|| next_frontier.clone()),
+        next_frontier,
+        true,
+        NativePageAccounting {
+            logical_units: 1,
+            conservative_serialized_bytes: 64 * 1024,
+        },
+        NativeProOutputPage {
+            inventory_generation: sink.inventory_generation(),
+            source,
+            source_epoch,
+            observed_revision,
+            parser_revision: QWEN_CODE_OUTPUT_PARSER_REVISION.to_owned(),
+            materializer_revision: sink.materializer_revision().to_owned(),
+            disposition,
+            expected_prior_source_epoch: expected_source_epoch,
+            expected_prior_frontier: prior_frontier,
+            observations: Vec::new(),
+        },
+    )
+    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let _ = process_pro_replay_only(replay, sink);
+    Ok(())
+}
+
+fn qwen_missing_reason(reason: ProviderSourceRouteRetirementReason) -> &'static str {
+    match reason {
+        ProviderSourceRouteRetirementReason::SourceMissing => "source_missing",
+        ProviderSourceRouteRetirementReason::RootMissing => "root_missing",
+        ProviderSourceRouteRetirementReason::Replaced => "replaced",
+    }
+}
+
+fn bounded_output_diagnostic(path: &Path, error: &CaptureError) -> String {
+    format!("{}: {error}", path.display())
+        .chars()
+        .take(1_024)
+        .collect()
 }
 
 fn safe_frontier(checkpoint: &DirectJsonlCheckpoint) -> Result<NativeSafeFrontier> {
@@ -871,7 +826,7 @@ fn output_observation(
         coordinate: OutputNativeCoordinate {
             unit_key: format!("{}:{}", output.raw_ordinal, output.sub_ordinal),
             native_sequence: output.raw_ordinal,
-            native_record_id: output.call_id.clone(),
+            native_record_id: output.native_record_id.clone(),
             source_record_ordinal: Some(output.raw_ordinal),
             source_record_subrecord_index: Some(output.sub_ordinal),
             byte_start: Some(output.byte_start),
@@ -948,1003 +903,13 @@ fn retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> Stri
     digest.update(format!("{:?}", retirement.reason).as_bytes());
     format!("qwen-code-nativepath-retirement-v1:{:x}", digest.finalize())
 }
-
-pub(super) fn qwen_code_header_session_id(value: &Value) -> Option<String> {
-    value
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_owned)
-}
-
-pub(super) fn qwen_code_header_cwd(value: &Value) -> Option<String> {
-    value
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.trim().is_empty())
-        .map(str::to_owned)
-}
-
-pub(super) fn qwen_code_event_type(value: &Value) -> EventType {
-    match value.get("type").and_then(Value::as_str) {
-        Some("user" | "assistant") if qwen_code_content_has(value, "tool_use") => {
-            EventType::ToolCall
-        }
-        Some("tool_result") => EventType::ToolOutput,
-        Some("user" | "assistant") => EventType::Message,
-        Some("system") => EventType::Notice,
-        _ if value.get("toolCallResult").is_some() => EventType::ToolOutput,
-        _ => EventType::Notice,
-    }
-}
-
-pub(super) fn qwen_code_role(value: &Value) -> EventRole {
-    provider_role(
-        value
-            .pointer("/message/role")
-            .or_else(|| value.get("type"))
-            .and_then(Value::as_str),
-    )
-}
-
-pub(super) fn qwen_code_event_text(value: &Value) -> String {
-    value
-        .pointer("/message/content")
-        .or_else(|| value.get("message"))
-        .and_then(provider_value_text)
-        .or_else(|| value.get("toolCallResult").and_then(provider_value_text))
-        .or_else(|| value.get("content").and_then(provider_value_text))
-        .unwrap_or_default()
-}
-
-pub(super) fn qwen_code_model(value: &Value) -> Option<Value> {
-    value
-        .get("model")
-        .cloned()
-        .or_else(|| value.pointer("/message/model").cloned())
-}
-
-fn qwen_code_content_has(value: &Value, expected: &str) -> bool {
-    value
-        .pointer("/message/content")
-        .or_else(|| value.get("content"))
-        .and_then(Value::as_array)
-        .is_some_and(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
-        })
-}
-
-pub(super) fn enumerate_qwen_code_results(
-    value: &Value,
-) -> std::result::Result<Vec<NativeJsonlResultSubrecord<'_>>, NativeJsonlResultExtractionError> {
-    if value.get("type").and_then(Value::as_str) != Some("tool_result")
-        && value.get("toolCallResult").is_none()
-    {
-        return Ok(Vec::new());
-    }
-    if reject_redacted(value).is_err() {
-        let count = result_block_count(value.pointer("/message/content"))?.max(1);
-        return (0..count)
-            .map(|index| {
-                Ok(NativeJsonlResultSubrecord {
-                    subrecord_index: u32::try_from(index)
-                        .map_err(|_| NativeJsonlResultExtractionError::InvalidShape)?,
-                    content: None,
-                    call_id: None,
-                    tool_name: None,
-                    outcome: unknown_result_outcome(),
-                })
-            })
-            .collect();
-    }
-    let blocks = enumerate_content_block_results(value.pointer("/message/content"), value)?;
-    if !blocks.is_empty() {
-        return Ok(blocks);
-    }
-    if let Some(result) = value.get("toolCallResult") {
-        reject_redacted(result)?;
-        return Ok(vec![NativeJsonlResultSubrecord {
-            subrecord_index: 0,
-            content: extract_result_ref(Some(result), &["output", "content", "text"])?,
-            call_id: native_result_identity(result).or_else(|| native_result_identity(value)),
-            tool_name: native_result_tool_name(result).or_else(|| native_result_tool_name(value)),
-            outcome: native_result_outcome_with_record(result, value),
-        }]);
-    }
-    Ok(vec![NativeJsonlResultSubrecord {
-        subrecord_index: 0,
-        content: extract_result_ref(value.get("content"), &[])?,
-        call_id: native_result_identity(value),
-        tool_name: native_result_tool_name(value),
-        outcome: native_result_outcome(value),
-    }])
-}
-
-fn enumerate_content_block_results<'a>(
-    content: Option<&'a Value>,
-    record: &'a Value,
-) -> std::result::Result<Vec<NativeJsonlResultSubrecord<'a>>, NativeJsonlResultExtractionError> {
-    let Some(content) = content else {
-        return Ok(Vec::new());
-    };
-    content
-        .as_array()
-        .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-        .enumerate()
-        .map(|(index, block)| {
-            let (content, redacted) =
-                match extract_result_ref(Some(block), &["content", "output", "text"]) {
-                    Ok(content) => (content, false),
-                    Err(NativeJsonlResultExtractionError::Redacted) => (None, true),
-                    Err(error) => return Err(error),
-                };
-            Ok(NativeJsonlResultSubrecord {
-                subrecord_index: u32::try_from(index)
-                    .map_err(|_| NativeJsonlResultExtractionError::InvalidShape)?,
-                content,
-                call_id: (!redacted).then(|| native_result_identity(block)).flatten(),
-                tool_name: (!redacted)
-                    .then(|| native_result_tool_name(block))
-                    .flatten(),
-                outcome: if redacted {
-                    unknown_result_outcome()
-                } else {
-                    native_result_outcome_with_record(block, record)
-                },
-            })
-        })
-        .collect()
-}
-
-fn result_block_count(
-    content: Option<&Value>,
-) -> std::result::Result<usize, NativeJsonlResultExtractionError> {
-    let Some(content) = content else {
-        return Ok(0);
-    };
-    Ok(content
-        .as_array()
-        .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-        .count())
-}
-
-fn extract_result_ref<'a>(
-    value: Option<&'a Value>,
-    object_fields: &[&str],
-) -> std::result::Result<Option<&'a str>, NativeJsonlResultExtractionError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    reject_redacted(value)?;
-    match value {
-        Value::String(text) => Ok(Some(text)),
-        Value::Null => Ok(None),
-        Value::Object(object) => {
-            for field in object_fields {
-                if let Some(selected) = object.get(*field) {
-                    return match selected {
-                        Value::String(text) => Ok(Some(text)),
-                        Value::Null => Ok(None),
-                        _ => Err(NativeJsonlResultExtractionError::InvalidShape),
-                    };
-                }
-            }
-            Ok(None)
-        }
-        Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
-            Err(NativeJsonlResultExtractionError::InvalidShape)
-        }
-    }
-}
-
-fn native_result_identity(value: &Value) -> Option<&str> {
-    [
-        "call_id",
-        "callId",
-        "tool_call_id",
-        "toolCallId",
-        "tool_use_id",
-        "toolUseId",
-        "id",
-    ]
-    .into_iter()
-    .find_map(|key| value.get(key).and_then(Value::as_str))
-}
-
-fn native_result_tool_name(value: &Value) -> Option<&str> {
-    ["tool_name", "toolName", "name", "tool"]
-        .into_iter()
-        .find_map(|key| value.get(key).and_then(Value::as_str))
-}
-
-fn native_result_outcome_with_record(subrecord: &Value, record: &Value) -> OutputOutcomeMetadata {
-    let mut outcome = native_result_outcome(subrecord);
-    if outcome.outcome == OutputOutcome::Unknown {
-        outcome = native_result_outcome(record);
-    }
-    outcome
-}
-
-fn native_result_outcome(value: &Value) -> OutputOutcomeMetadata {
-    let timeout = native_result_has_timeout(value);
-    let failure = provider_output_event_is_failure(value);
-    let success = native_result_has_success(value);
-    OutputOutcomeMetadata {
-        outcome: if timeout {
-            OutputOutcome::Timeout
-        } else if failure {
-            OutputOutcome::Failure
-        } else if success {
-            OutputOutcome::Success
-        } else {
-            OutputOutcome::Unknown
-        },
-        exit_code: native_result_i64(value, &["exit_code", "exitCode"])
-            .and_then(|code| i32::try_from(code).ok()),
-        duration_ms: native_result_u64(value, &["duration_ms", "durationMs", "duration"]),
-    }
-}
-
-fn unknown_result_outcome() -> OutputOutcomeMetadata {
-    OutputOutcomeMetadata {
-        outcome: OutputOutcome::Unknown,
-        exit_code: None,
-        duration_ms: None,
-    }
-}
-
-fn native_result_has_timeout(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(native_result_has_timeout),
-        Value::Object(values) => {
-            values.iter().any(|(key, value)| {
-                matches!(normalized_result_key(key).as_str(), "timeout" | "timedout")
-                    && value.as_bool().unwrap_or(false)
-            }) || values.values().any(native_result_has_timeout)
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
-    }
-}
-
-fn native_result_has_success(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(native_result_has_success),
-        Value::Object(values) => {
-            values.iter().any(|(key, value)| {
-                let key = normalized_result_key(key);
-                (matches!(key.as_str(), "success" | "ok") && value.as_bool() == Some(true))
-                    || (key == "exitcode" && value.as_i64() == Some(0))
-                    || (key == "statuscode"
-                        && value
-                            .as_i64()
-                            .is_some_and(|code| (200..400).contains(&code)))
-                    || (matches!(key.as_str(), "iserror" | "timedout" | "timeout")
-                        && value.as_bool() == Some(false))
-                    || (matches!(key.as_str(), "status" | "state" | "outcome")
-                        && value.as_str().is_some_and(|status| {
-                            matches!(
-                                status.trim().to_ascii_lowercase().as_str(),
-                                "success"
-                                    | "succeeded"
-                                    | "complete"
-                                    | "completed"
-                                    | "ok"
-                                    | "passed"
-                            )
-                        }))
-            }) || values.values().any(native_result_has_success)
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
-    }
-}
-
-fn native_result_i64(value: &Value, expected_keys: &[&str]) -> Option<i64> {
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .find_map(|value| native_result_i64(value, expected_keys)),
-        Value::Object(values) => values
-            .iter()
-            .find_map(|(key, value)| {
-                expected_keys
-                    .iter()
-                    .any(|expected| key == expected)
-                    .then(|| value.as_i64())
-                    .flatten()
-            })
-            .or_else(|| {
-                values
-                    .values()
-                    .find_map(|value| native_result_i64(value, expected_keys))
-            }),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
-    }
-}
-
-fn native_result_u64(value: &Value, expected_keys: &[&str]) -> Option<u64> {
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .find_map(|value| native_result_u64(value, expected_keys)),
-        Value::Object(values) => values
-            .iter()
-            .find_map(|(key, value)| {
-                expected_keys
-                    .iter()
-                    .any(|expected| key == expected)
-                    .then(|| value.as_u64())
-                    .flatten()
-            })
-            .or_else(|| {
-                values
-                    .values()
-                    .find_map(|value| native_result_u64(value, expected_keys))
-            }),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
-    }
-}
-
-fn normalized_result_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn reject_redacted(value: &Value) -> std::result::Result<(), NativeJsonlResultExtractionError> {
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-    let flag_is_redacted = ["redacted", "is_redacted", "isRedacted"]
-        .iter()
-        .filter_map(|field| object.get(*field))
-        .any(|flag| flag.as_bool() != Some(false));
-    let state_is_redacted = ["status", "state"]
-        .iter()
-        .filter_map(|field| object.get(*field).and_then(Value::as_str))
-        .any(|state| matches!(state, "redacted" | "output-redacted"));
-    if flag_is_redacted || state_is_redacted {
-        Err(NativeJsonlResultExtractionError::Redacted)
-    } else {
-        Ok(())
-    }
-}
+#[path = "qwen_code_records.rs"]
+mod records;
+pub(super) use records::{
+    enumerate_qwen_code_results, qwen_code_event_text, qwen_code_event_type, qwen_code_header_cwd,
+    qwen_code_header_session_id, qwen_code_model, qwen_code_role,
+};
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        io::Write,
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Mutex,
-        },
-    };
-
-    use crate::{ProOutputMaterializationPage, ProOutputPageResult, ProviderImportFailure};
-
-    use super::*;
-
-    const MACHINE: &str = "qwen-code-nativepath-test-machine";
-    const SUCCESS_BODY: &str = "QWEN_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
-
-    #[test]
-    fn production_lifecycle_covers_restart_append_rewrite_truncation_replacement_and_loss() {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let root = temp.path().join(".qwen/projects");
-        let transcript = transcript_path(&root);
-        write_transcript(
-            &transcript,
-            &[
-                message("qwen-life", "fresh-user", "user", "fresh-user"),
-                tool_call("qwen-life", "fresh-call"),
-            ],
-        );
-        let store_path = temp.path().join("work.sqlite");
-        let mut store = Store::open(&store_path).unwrap();
-
-        let fresh = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(fresh.imported_sessions, 1);
-        assert_eq!(fresh.imported_events, 2);
-        let session = qwen_session(&store, "qwen-life");
-        assert!(session.is_primary);
-        assert!(session.parent_session_id.is_none());
-        assert!(session.root_session_id.is_none());
-        let original_events = store.events_for_session(session.id).unwrap();
-        assert_eq!(original_events.len(), 2);
-        let routed_event = original_events[0].id;
-        assert!(store
-            .authorized_source_route_for_event(routed_event)
-            .is_ok());
-
-        let previous = checkpoint(&store, &transcript);
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Unchanged
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-
-        drop(store);
-        let mut store = Store::open(&store_path).unwrap();
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        append_record(
-            &transcript,
-            &message("qwen-life", "append", "assistant", "append-assistant"),
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Append
-        );
-        let append = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(append.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(append.imported_events, 1);
-
-        let previous = checkpoint(&store, &transcript);
-        write_transcript(
-            &transcript,
-            &[
-                message(
-                    "qwen-life",
-                    "rewrite-user",
-                    "user",
-                    &"rewrite-user-content-".repeat(24),
-                ),
-                message(
-                    "qwen-life",
-                    "rewrite-assistant",
-                    "assistant",
-                    &"rewrite-assistant-content-".repeat(24),
-                ),
-            ],
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Rewrite
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        write_transcript(
-            &transcript,
-            &[message("qwen-life", "short", "user", "short")],
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Truncation
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        let replacement = transcript.with_extension("replacement");
-        write_transcript(
-            &replacement,
-            &[message(
-                "qwen-life",
-                "replacement",
-                "user",
-                "replacement-generation",
-            )],
-        );
-        fs::rename(&replacement, &transcript).unwrap();
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Replacement
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        fs::remove_file(&transcript).unwrap();
-        let source_missing = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(
-            source_missing.work_result(),
-            ProviderImportWorkResult::Changed
-        );
-        assert!(store
-            .authorized_source_route_for_event(routed_event)
-            .is_err());
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-
-        write_transcript(
-            &transcript,
-            &[message(
-                "qwen-life",
-                "reappeared",
-                "user",
-                "reappeared-generation",
-            )],
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-        let reappeared_event = store
-            .events_for_session(qwen_session(&store, "qwen-life").id)
-            .unwrap()
-            .into_iter()
-            .find(|event| {
-                serde_json::to_string(event)
-                    .unwrap()
-                    .contains("reappeared-generation")
-            })
-            .unwrap()
-            .id;
-        assert!(store
-            .authorized_source_route_for_event(reappeared_event)
-            .is_ok());
-
-        fs::remove_dir_all(&root).unwrap();
-        let root_missing = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(
-            root_missing.work_result(),
-            ProviderImportWorkResult::Changed
-        );
-        assert!(store
-            .authorized_source_route_for_event(reappeared_event)
-            .is_err());
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-    }
-
-    #[test]
-    fn core_commits_before_failed_pro_and_later_output_replay_is_independent() {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let root = temp.path().join(".qwen/projects");
-        let transcript = transcript_path(&root);
-        write_transcript(
-            &transcript,
-            &[
-                message("qwen-core-first", "core-first", "user", "core-first"),
-                tool_call("qwen-core-first", "call-with-output"),
-                tool_result("qwen-core-first", "result-with-output", SUCCESS_BODY, false),
-            ],
-        );
-        let store_path = temp.path().join("core.sqlite");
-        let mut store = Store::open(&store_path).unwrap();
-        let failing_sink = Arc::new(RecordingSink::new(store_path.clone(), true));
-
-        let fresh = import(
-            &root,
-            &mut store,
-            ImportProfile::CoreAndPro(failing_sink.clone()),
-        );
-        assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-        assert!(failing_sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert_eq!(failing_sink.behind.load(Ordering::SeqCst), 1);
-        let core_events = store
-            .events_for_session(qwen_session(&store, "qwen-core-first").id)
-            .unwrap();
-        assert_eq!(core_events.len(), 2);
-        assert!(core_events.iter().all(|event| !matches!(
-            event.event_type,
-            EventType::ToolOutput | EventType::CommandOutput
-        )));
-        assert!(!serde_json::to_string(&core_events)
-            .unwrap()
-            .contains(SUCCESS_BODY));
-
-        let replay_sink = Arc::new(RecordingSink::new(store_path.clone(), false));
-        let replay = import(
-            &root,
-            &mut store,
-            ImportProfile::ProReplayOnly(replay_sink.clone()),
-        );
-        assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
-        assert!(replay_sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert!(replay_sink.pages.load(Ordering::SeqCst) > 0);
-        assert_eq!(replay_sink.outputs.load(Ordering::SeqCst), 1);
-        let pages_after_replay = replay_sink.pages.load(Ordering::SeqCst);
-        assert_eq!(
-            import(
-                &root,
-                &mut store,
-                ImportProfile::ProReplayOnly(replay_sink.clone()),
-            )
-            .work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-        assert_eq!(replay_sink.pages.load(Ordering::SeqCst), pages_after_replay);
-
-        let pro_only_path = temp.path().join("pro-only.sqlite");
-        let mut pro_only_store = Store::open(&pro_only_path).unwrap();
-        let pro_only_sink = Arc::new(RecordingSink::new(pro_only_path, false));
-        assert_eq!(
-            import(
-                &root,
-                &mut pro_only_store,
-                ImportProfile::ProReplayOnly(pro_only_sink.clone()),
-            )
-            .work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-        assert!(pro_only_store.list_sessions().unwrap().is_empty());
-        assert!(!pro_only_sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert_eq!(pro_only_sink.pages.load(Ordering::SeqCst), 0);
-        assert_eq!(pro_only_sink.outputs.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn malformed_record_and_incomplete_tail_resume_at_the_exact_safe_frontier() {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let root = temp.path().join(".qwen/projects");
-        let transcript = transcript_path(&root);
-        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        let first =
-            serde_json::to_vec(&message("qwen-partial", "first", "user", "first-valid")).unwrap();
-        let second = serde_json::to_vec(&message(
-            "qwen-partial",
-            "second",
-            "assistant",
-            "second-valid",
-        ))
-        .unwrap();
-        let tail = serde_json::to_vec(&message(
-            "qwen-partial",
-            "tail",
-            "assistant",
-            "completed-after-retry",
-        ))
-        .unwrap();
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&first);
-        bytes.push(b'\n');
-        bytes.extend_from_slice(b"{malformed-json}\n");
-        bytes.extend_from_slice(&second);
-        bytes.push(b'\n');
-        bytes.extend_from_slice(&tail[..tail.len() - 1]);
-        fs::write(&transcript, bytes).unwrap();
-
-        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let first_import = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(first_import.imported_sessions, 1);
-        assert_eq!(first_import.imported_events, 2);
-        assert_eq!(first_import.failed, 1);
-        assert!(matches!(
-            first_import.failures.as_slice(),
-            [ProviderImportFailure { line: 2, .. }]
-        ));
-        let partial_checkpoint = checkpoint(&store, &transcript);
-        assert!(!partial_checkpoint.terminal);
-        assert!(
-            partial_checkpoint.complete_prefix_end < partial_checkpoint.source_observation.length
-        );
-
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap();
-        file.write_all(b"}\n").unwrap();
-        drop(file);
-        assert_eq!(
-            classify(&transcript, &root, &partial_checkpoint),
-            DirectJsonlSourceChange::Append
-        );
-        let completed = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(completed.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(completed.imported_events, 1);
-        assert_eq!(completed.failed, 0);
-        let rendered = serde_json::to_string(
-            &store
-                .events_for_session(qwen_session(&store, "qwen-partial").id)
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(rendered.contains("completed-after-retry"));
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::NoOp
-        );
-    }
-
-    #[test]
-    fn provider_owned_parser_preserves_result_precedence_redaction_and_failure_policy() {
-        let successful = tool_result(
-            "qwen-parser",
-            "successful",
-            "higher-priority-content",
-            false,
-        );
-        let results = enumerate_qwen_code_results(&successful).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].content, Some("higher-priority-content"));
-        assert_eq!(results[0].call_id, Some("call-1"));
-        assert_eq!(results[0].tool_name, None);
-        assert_eq!(results[0].outcome.outcome, OutputOutcome::Success);
-
-        let redacted = json!({
-            "type": "tool_result",
-            "sessionId": "qwen-parser",
-            "redacted": true,
-            "message": {
-                "role": "tool",
-                "content": [
-                    {"type": "tool_result", "content": "must-not-escape"},
-                    {"type": "tool_result", "content": "must-not-escape-either"}
-                ]
-            }
-        });
-        let redacted_results = enumerate_qwen_code_results(&redacted).unwrap();
-        assert_eq!(redacted_results.len(), 2);
-        assert!(redacted_results
-            .iter()
-            .all(|result| result.content.is_none()));
-
-        let failed = tool_result(
-            "qwen-parser",
-            "failed",
-            "diagnostic-retained-by-core-policy",
-            true,
-        );
-        let failed_results = enumerate_qwen_code_results(&failed).unwrap();
-        assert_eq!(failed_results[0].outcome.outcome, OutputOutcome::Failure);
-        assert_eq!(
-            qwen_code_event_type(&failed),
-            ctx_history_core::EventType::ToolOutput
-        );
-    }
-
-    struct RecordingSink {
-        store_path: PathBuf,
-        fail_pages: AtomicBool,
-        progress: Mutex<Option<ProOutputProgress>>,
-        pages: AtomicUsize,
-        outputs: AtomicUsize,
-        behind: AtomicUsize,
-        saw_core_before_page: AtomicBool,
-    }
-
-    impl RecordingSink {
-        fn new(store_path: PathBuf, fail_pages: bool) -> Self {
-            Self {
-                store_path,
-                fail_pages: AtomicBool::new(fail_pages),
-                progress: Mutex::new(None),
-                pages: AtomicUsize::new(0),
-                outputs: AtomicUsize::new(0),
-                behind: AtomicUsize::new(0),
-                saw_core_before_page: AtomicBool::new(false),
-            }
-        }
-    }
-
-    impl ProOutputSink for RecordingSink {
-        fn inventory_generation(&self) -> u64 {
-            1
-        }
-
-        fn materializer_revision(&self) -> &str {
-            "qwen-code-nativepath-test-materializer-v1"
-        }
-
-        fn observe_source(
-            &self,
-            _source: &OutputSourceIdentity,
-        ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
-            Ok(self.progress.lock().unwrap().clone())
-        }
-
-        fn materialize_page(
-            &self,
-            page: ProOutputMaterializationPage,
-        ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
-            let core = Store::open_read_only(&self.store_path)
-                .map_err(|error| ProOutputSinkError::new("test_store", error.to_string()))?;
-            if !core
-                .list_sessions()
-                .map_err(|error| ProOutputSinkError::new("test_sessions", error.to_string()))?
-                .is_empty()
-            {
-                self.saw_core_before_page.store(true, Ordering::SeqCst);
-            }
-            self.pages.fetch_add(1, Ordering::SeqCst);
-            self.outputs
-                .fetch_add(page.observations.len(), Ordering::SeqCst);
-            if self.fail_pages.load(Ordering::SeqCst) {
-                return Err(ProOutputSinkError::new(
-                    "injected_qwen_output_failure",
-                    "injected output materialization failure",
-                ));
-            }
-            let committed_cursor = page.next_safe_cursor.clone();
-            *self.progress.lock().unwrap() = Some(ProOutputProgress {
-                source_epoch: page.source_epoch,
-                observed_revision: page.observed_revision.clone(),
-                cursor: Some(committed_cursor.clone()),
-                parser_revision: page.parser_revision.clone(),
-                materializer_revision: page.materializer_revision.clone(),
-                terminal: page.terminal,
-            });
-            Ok(ProOutputPageResult {
-                source_epoch: page.source_epoch,
-                committed_cursor,
-                accepted_outputs: u32::try_from(page.observations.len()).unwrap(),
-                materialized_facts: 0,
-                replayed: false,
-            })
-        }
-
-        fn mark_behind(&self, _error: ProOutputSinkError) {
-            self.behind.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    fn import(
-        root: &Path,
-        store: &mut Store,
-        import_profile: ImportProfile,
-    ) -> ProviderImportSummary {
-        import_qwen_code_nativepath_tree(
-            store,
-            NativePathJsonlTreeImport {
-                path: root,
-                machine_id: MACHINE.to_owned(),
-                source_path: Some(root.to_path_buf()),
-                source_root: None,
-                imported_at: "2026-07-25T12:00:00Z".parse().unwrap(),
-                history_record_id: None,
-                capture_work_limit: CaptureWorkLimit::Drain,
-                inventory_observation_token: None,
-                import_profile,
-            },
-        )
-        .unwrap()
-    }
-
-    fn qwen_session(store: &Store, provider_session_id: &str) -> ctx_history_core::Session {
-        store
-            .list_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| {
-                session.provider == CaptureProvider::QwenCode
-                    && session.external_session_id.as_deref() == Some(provider_session_id)
-            })
-            .unwrap()
-    }
-
-    fn transcript_path(root: &Path) -> PathBuf {
-        root.join("sanitized-workspace/chats/qwen-life.jsonl")
-    }
-
-    fn message(session_id: &str, id: &str, kind: &str, content: &str) -> Value {
-        json!({
-            "uuid": id,
-            "sessionId": session_id,
-            "timestamp": "2026-07-25T12:00:01Z",
-            "type": kind,
-            "cwd": "/workspace/qwen",
-            "message": {
-                "role": kind,
-                "content": [{"type": "text", "text": content}]
-            },
-            "model": "qwen3-coder",
-        })
-    }
-
-    fn tool_call(session_id: &str, id: &str) -> Value {
-        json!({
-            "uuid": id,
-            "sessionId": session_id,
-            "timestamp": "2026-07-25T12:00:02Z",
-            "type": "assistant",
-            "cwd": "/workspace/qwen",
-            "message": {
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "call-1",
-                    "name": "Write",
-                    "input": {"path": "src/qwen.txt", "content": "proof"}
-                }]
-            },
-            "model": "qwen3-coder",
-        })
-    }
-
-    fn tool_result(session_id: &str, id: &str, result: &str, is_error: bool) -> Value {
-        json!({
-            "uuid": id,
-            "sessionId": session_id,
-            "timestamp": "2026-07-25T12:00:03Z",
-            "type": "tool_result",
-            "cwd": "/workspace/qwen",
-            "message": {
-                "role": "tool",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": "call-1",
-                    "content": result,
-                    "is_error": is_error
-                }]
-            },
-            "toolCallResult": {
-                "tool": "Write",
-                "path": "src/qwen.txt",
-                "output": "lower-priority-output",
-                "is_error": is_error
-            },
-            "model": "qwen3-coder",
-        })
-    }
-
-    fn write_transcript(path: &Path, records: &[Value]) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut bytes = Vec::new();
-        for record in records {
-            serde_json::to_writer(&mut bytes, record).unwrap();
-            bytes.push(b'\n');
-        }
-        fs::write(path, bytes).unwrap();
-    }
-
-    fn append_record(path: &Path, record: &Value) {
-        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
-        serde_json::to_writer(&mut file, record).unwrap();
-        file.write_all(b"\n").unwrap();
-    }
-
-    fn checkpoint(store: &Store, path: &Path) -> DirectJsonlCheckpoint {
-        let canonical = fs::canonicalize(path).unwrap();
-        let locator = provider_path_identity(&canonical).unwrap();
-        let stream = provider_source_cursor_stream_for_path(
-            CaptureProvider::QwenCode,
-            QWEN_CODE_SOURCE_FORMAT,
-            &locator,
-        );
-        let cursor = store
-            .get_sync_cursor(None, MACHINE, &stream)
-            .unwrap()
-            .unwrap();
-        decode_direct_jsonl_native_cursor(
-            &cursor.cursor,
-            CaptureProvider::QwenCode,
-            QWEN_CODE_SOURCE_FORMAT,
-        )
-        .unwrap()
-    }
-
-    fn classify(
-        path: &Path,
-        root: &Path,
-        previous: &DirectJsonlCheckpoint,
-    ) -> DirectJsonlSourceChange {
-        open_direct_jsonl_pages(
-            CaptureProvider::QwenCode,
-            QWEN_CODE_SOURCE_FORMAT,
-            path,
-            Some(root.to_path_buf()),
-            "2026-07-25T12:01:00Z".parse().unwrap(),
-            false,
-            Some(previous),
-        )
-        .unwrap()
-        .source_change()
-    }
-}
+#[path = "qwen_code_tests.rs"]
+mod tests;

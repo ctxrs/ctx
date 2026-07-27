@@ -89,8 +89,14 @@ _route_analysis_test = rule(
 
 def release_route_analysis_test_suite(name):
     """Instantiates probes that force each owned route transition to analyze."""
-    _plain_executable(name = "_release_route_test_packager")
-    _plain_executable(name = "_release_route_test_inventory")
+    _plain_executable(
+        name = "_release_route_test_packager",
+        tags = ["manual", "release-gate"],
+    )
+    _plain_executable(
+        name = "_release_route_test_inventory",
+        tags = ["manual", "release-gate"],
+    )
     route_specs = {
         "linux_x64": struct(
             constraints = ["@platforms//cpu:x86_64", "@platforms//os:linux"],
@@ -142,6 +148,7 @@ def release_route_analysis_test_suite(name):
             name = probe_name,
             constraint_values = spec.constraints,
             expect_windows_gnu = spec.windows_gnu,
+            tags = ["manual", "release-gate"],
             windows_gnu_value = select({
                 "//tools/bazel:windows_gnu_toolchain": "true",
                 "//conditions:default": "false",

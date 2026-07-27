@@ -28,8 +28,13 @@ fn buckets_cover_boundaries() {
         (1_048_576, BytesBucket::OneToTenMb),
         (10_485_760, BytesBucket::TenToOneHundredMb),
         (104_857_600, BytesBucket::OneHundredMbToOneGb),
-        (1_073_741_824, BytesBucket::OneToTenGb),
-        (10_737_418_240, BytesBucket::TenToOneHundredGb),
+        (1_073_741_824, BytesBucket::OneToTwoGb),
+        (2_147_483_648, BytesBucket::TwoToFiveGb),
+        (5_368_709_120, BytesBucket::FiveToTenGb),
+        (10_737_418_240, BytesBucket::TenToTwentyFiveGb),
+        (26_843_545_600, BytesBucket::TwentyFiveToFiftyGb),
+        (53_687_091_200, BytesBucket::FiftyToOneHundredGb),
+        (75_161_927_680, BytesBucket::FiftyToOneHundredGb),
         (107_374_182_400, BytesBucket::OverOneHundredGb),
     ] {
         assert_eq!(bytes_bucket(value), expected);
@@ -200,6 +205,10 @@ fn durable_family_serialization_matches_public_goldens() {
                     work_remaining: false,
                     retired_records: Some(count_bucket(0)),
                     counts: ProviderRefreshCountsV1::new(1, 12, 3, 8, 0, 0, 0, 0, 2048),
+                    performance: Some(ProviderRefreshPerformanceV1::new(
+                        Duration::from_millis(800),
+                        Some(512 * 1024 * 1024),
+                    )),
                 },
             )),
             include_str!(
@@ -254,4 +263,87 @@ fn durable_family_serialization_matches_public_goldens() {
             "script_family": "posix",
         })
     );
+}
+
+#[test]
+fn selected_telemetry_contract_inventory_hashes_match_the_running_public_source() {
+    use sha2::{Digest, Sha256};
+
+    let provenance: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../contracts/telemetry-v1/source-provenance.json"
+    ))
+    .unwrap();
+    assert_eq!(provenance["repository"], "ctxrs/ctx");
+    assert_eq!(
+        provenance["base_commit"],
+        "53dcec94d0e4c0aa6be22bce95b3daffd0c537dc"
+    );
+    assert_eq!(provenance["provenance_kind"], "content_addressed_candidate");
+    assert_eq!(
+        provenance["scope"],
+        "selected_typed_telemetry_contract_inventory"
+    );
+    assert!(
+        provenance.get("state").is_none(),
+        "content provenance must not claim a transient worktree state"
+    );
+    let files = provenance["files"].as_object().unwrap();
+    let sources = [
+        (
+            "crates/ctx-cli/src/analytics/operation.rs",
+            include_bytes!("operation.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/daemon.rs",
+            include_bytes!("daemon.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/mcp.rs",
+            include_bytes!("mcp.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/runtime.rs",
+            include_bytes!("runtime.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/pro.rs",
+            include_bytes!("pro.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/buckets.rs",
+            include_bytes!("buckets.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/provider.rs",
+            include_bytes!("provider.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/product.rs",
+            include_bytes!("product.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/analytics/sender.rs",
+            include_bytes!("sender.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/upgrade/command.rs",
+            include_bytes!("../upgrade/command.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/upgrade/command/daemon.rs",
+            include_bytes!("../upgrade/command/daemon.rs").as_slice(),
+        ),
+        (
+            "crates/ctx-cli/src/upgrade/state.rs",
+            include_bytes!("../upgrade/state.rs").as_slice(),
+        ),
+    ];
+    assert_eq!(files.len(), sources.len());
+    for (path, source) in sources {
+        let digest = Sha256::digest(source)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(files[path], digest, "stale telemetry provenance for {path}");
+    }
 }

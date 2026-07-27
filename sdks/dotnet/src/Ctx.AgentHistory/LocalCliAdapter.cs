@@ -8,6 +8,8 @@ namespace Ctx.AgentHistory;
 /// <summary>Local-only agent-history-v1 transport backed by the ctx CLI.</summary>
 public sealed class LocalCliAdapter : IAgentHistoryTransport
 {
+    private const string AnalyticsEnabledEnvironment = "CTX_ANALYTICS_ENABLED";
+
     public LocalCliAdapter(LocalAgentHistoryConfig? config = null)
     {
         Config = config ?? new LocalAgentHistoryConfig();
@@ -130,6 +132,7 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
                 }
             }
         }
+        startInfo.Environment[AnalyticsEnabledEnvironment] = "false";
 
         using var process = new Process { StartInfo = startInfo };
         try

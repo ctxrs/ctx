@@ -7,6 +7,8 @@ import (
 	"os/exec"
 )
 
+const analyticsEnabledEnvironment = "CTX_ANALYTICS_ENABLED"
+
 // LocalCLIAdapter executes agent-history-v1 operations through the local ctx binary.
 type LocalCLIAdapter struct {
 	path     string
@@ -71,6 +73,7 @@ func (a *LocalCLIAdapter) Do(ctx context.Context, op Operation) ([]byte, error) 
 	if a.dataRoot != "" {
 		env = append(env, "CTX_DATA_ROOT="+a.dataRoot)
 	}
+	env = append(env, analyticsEnabledEnvironment+"=false")
 	result := a.runner.Run(ctx, a.path, args, env)
 	if result.Err != nil {
 		kind := ErrorKindCommandFailed

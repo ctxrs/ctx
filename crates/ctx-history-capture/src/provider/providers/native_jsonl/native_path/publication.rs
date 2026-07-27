@@ -10,8 +10,7 @@ use ctx_history_core::{
 };
 use ctx_history_store::{
     CanonicalActor, EventSearchBulkGuard, NativePathCursorSetClassification,
-    NativePathCursorTransition, NativePathGroupAccounting, ProviderEventHashAuthority,
-    ProviderSourceLocatorObservation, Store,
+    NativePathCursorTransition, NativePathGroupAccounting, ProviderSourceLocatorObservation, Store,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -20,9 +19,10 @@ use uuid::Uuid;
 use crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY;
 use crate::provider::importer::{
     provider_event_import_identity_with_exact_legacy_source, provider_file_touch_import_id,
-    provider_import_session_uuid, provider_path_identity, provider_scoped_source_identity_key,
-    provider_source_cursor_stream_for_path, provider_source_identity, provider_sync_metadata,
-    timestamps,
+    provider_import_session_uuid, provider_native_event_import_identity_migrating_legacy_hash,
+    provider_path_identity, provider_scoped_source_identity_key,
+    provider_source_cursor_stream_for_path, provider_source_event_import_identity,
+    provider_source_identity, provider_sync_metadata, timestamps,
 };
 use crate::{
     stable_capture_uuid, CaptureError, ProviderImportSummary, ProviderImportWorkResult, Result,
@@ -236,7 +236,13 @@ pub(crate) fn publish_direct_jsonl_group(
             })
             .transpose()?;
         if let Some(session) = &resolved_session {
-            let existed = committed_store.get_session(session.id).is_ok();
+            let existed_as_materialized =
+                committed_store
+                    .get_session(session.id)
+                    .ok()
+                    .is_some_and(|existing| {
+                        existing.role_hint.as_deref() != Some("relationship_placeholder")
+                    });
             if let Some(parent_id) = session.parent_session_id {
                 if committed_store.get_session(parent_id).is_err() {
                     group.upsert_session(&relationship_placeholder(
@@ -253,7 +259,7 @@ pub(crate) fn publish_direct_jsonl_group(
                 }
             }
             group.upsert_session(session)?;
-            if existed {
+            if existed_as_materialized {
                 summary.skipped_sessions = summary.skipped_sessions.saturating_add(1);
                 summary.skipped = summary.skipped.saturating_add(1);
             } else {
@@ -559,21 +565,13 @@ fn publish_event(
     event: &DirectJsonlEvent,
     summary: &mut ProviderImportSummary,
 ) -> Result<()> {
-    let identity = provider_event_import_identity_with_exact_legacy_source(
+    let identity = direct_jsonl_event_publication_identity(
         committed_store,
-        context.provider,
-        session.external_session_id.as_deref().unwrap_or_default(),
+        context,
         source_id,
-        event.provider_event_index,
-        event.provider_event_sequence_index,
-        &event.provider_event_hash,
-        None,
-        Some(event.raw_ordinal),
-        session_id
-            == crate::provider::importer::provider_session_uuid(
-                context.provider,
-                session.external_session_id.as_deref().unwrap_or_default(),
-            ),
+        session_id,
+        session,
+        event,
     )?;
     let mut provider_metadata = event.metadata.clone();
     let verified_locators = provider_metadata
@@ -588,7 +586,8 @@ fn publish_event(
         "provider_session_id": session.external_session_id,
         "provider_event_index": event.provider_event_index,
         "provider_event_hash": event.provider_event_hash,
-        "provider_event_hash_authority": "provider_supplied",
+        "provider_event_hash_authority": "normalized_payload_fallback",
+        "legacy_provider_event_hash": event.legacy_provider_event_hash,
         "cursor": event.cursor,
         "source_format": context.source_format,
         "source_trust": "provider_native",
@@ -627,7 +626,18 @@ fn publish_event(
         dedupe_key: Some(dedupe_key),
         sync: provider_sync_metadata(Fidelity::Imported, sync_metadata),
     };
-    if group.reconcile_provider_event(&normalized, ProviderEventHashAuthority::ProviderSupplied)? {
+    let inserted = group.reconcile_provider_event_migrating_exact_legacy_provider_hash(
+        &normalized,
+        &event.legacy_provider_event_hash,
+    )?;
+    let native_identity =
+        provider_source_event_import_identity(source_id, event.provider_event_index, "");
+    group.bind_event_identity_alias(
+        native_identity.id,
+        normalized.id,
+        context.imported_at.timestamp_millis(),
+    )?;
+    if inserted {
         summary.imported_events = summary.imported_events.saturating_add(1);
         summary.imported = summary.imported.saturating_add(1);
     } else {
@@ -688,6 +698,111 @@ fn publish_event(
         })?;
     }
     Ok(())
+}
+
+fn direct_jsonl_event_publication_identity(
+    committed_store: &Store,
+    context: &DirectJsonlPublicationContext<'_>,
+    source_id: Uuid,
+    session_id: Uuid,
+    session: &Session,
+    event: &DirectJsonlEvent,
+) -> Result<crate::provider::importer::ProviderEventImportIdentity> {
+    let provider_session_id = session.external_session_id.as_deref().unwrap_or_default();
+    let allow_legacy_provider_identity = session_id
+        == crate::provider::importer::provider_session_uuid(context.provider, provider_session_id);
+    let current = provider_event_import_identity_with_exact_legacy_source(
+        committed_store,
+        context.provider,
+        provider_session_id,
+        source_id,
+        event.provider_event_index,
+        event.provider_event_sequence_index,
+        &event.provider_event_hash,
+        None,
+        None,
+        allow_legacy_provider_identity,
+    )?;
+    match committed_store.get_event(current.id) {
+        Ok(_) => return Ok(current),
+        Err(ctx_history_store::StoreError::NotFound(_)) => {}
+        Err(error) => return Err(CaptureError::Store(error)),
+    }
+
+    let released = provider_native_event_import_identity_migrating_legacy_hash(
+        committed_store,
+        context.provider,
+        provider_session_id,
+        source_id,
+        event.provider_event_index,
+        event.provider_event_sequence_index,
+        &event.provider_event_hash,
+        event.legacy_provider_event_index,
+        &event.legacy_provider_event_hash,
+        allow_legacy_provider_identity,
+    )?;
+    if released.id == current.id {
+        return Ok(current);
+    }
+    match committed_store.get_event(released.id) {
+        Ok(existing)
+            if exact_released_direct_jsonl_event(&existing, context, source_id, session, event) =>
+        {
+            Ok(released)
+        }
+        Ok(_) | Err(ctx_history_store::StoreError::NotFound(_)) => Ok(current),
+        Err(error) => Err(CaptureError::Store(error)),
+    }
+}
+
+fn exact_released_direct_jsonl_event(
+    existing: &Event,
+    context: &DirectJsonlPublicationContext<'_>,
+    source_id: Uuid,
+    session: &Session,
+    incoming: &DirectJsonlEvent,
+) -> bool {
+    let metadata = &existing.sync.metadata;
+    let stored_hash = metadata.get("provider_event_hash").and_then(Value::as_str);
+    let hash_authority = metadata
+        .get("provider_event_hash_authority")
+        .and_then(Value::as_str);
+    let ordinal_matches = metadata
+        .get("source_record_ordinal")
+        .and_then(Value::as_u64)
+        .or_else(|| metadata.get("provider_event_index").and_then(Value::as_u64))
+        == Some(incoming.legacy_provider_event_index);
+    let subrecord_matches = metadata
+        .get("source_record_subrecord_index")
+        .and_then(Value::as_u64)
+        .map_or(incoming.sub_ordinal == 0, |stored| {
+            stored == u64::from(incoming.sub_ordinal)
+        });
+    let exact_hash_matches = match hash_authority {
+        Some("provider_supplied") => {
+            stored_hash == Some(incoming.legacy_provider_event_hash.as_str())
+        }
+        Some("normalized_payload_fallback") => {
+            stored_hash == Some(incoming.provider_event_hash.as_str())
+        }
+        _ => false,
+    };
+    existing.capture_source_id == Some(source_id)
+        && existing.session_id == Some(session.id)
+        && metadata.get("provider_session_id").and_then(Value::as_str)
+            == session.external_session_id.as_deref()
+        && metadata.get("source_format").and_then(Value::as_str) == Some(context.source_format)
+        && ordinal_matches
+        && subrecord_matches
+        && metadata.get("cursor").and_then(Value::as_str) == Some(incoming.cursor.as_str())
+        && exact_hash_matches
+        && existing.dedupe_key.as_deref().is_some_and(|dedupe_key| {
+            stored_hash.is_some_and(|stored_hash| {
+                Store::provider_event_dedupe_key_with_payload_hash(dedupe_key, stored_hash)
+                    .as_deref()
+                    == Some(dedupe_key)
+            })
+        })
 }
 
 fn native_source_id(

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
 use ctx_history_core::ContentRef;
-use serde_json::json;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -42,31 +42,6 @@ fn released_structured_locator_value(
     value.extend_from_slice(provider);
     value.extend_from_slice(&ordinal.to_be_bytes());
     value.extend_from_slice(&subrecord.to_be_bytes());
-    value.extend_from_slice(&u16::try_from(native_id.len()).unwrap().to_be_bytes());
-    value.extend_from_slice(native_id);
-    value
-}
-
-#[allow(clippy::too_many_arguments)]
-fn released_structured_result_locator_value(
-    provider: CaptureProvider,
-    ordinal: u64,
-    source_subrecord: u32,
-    history_item: u32,
-    tool_state: u32,
-    native_id: &str,
-) -> Vec<u8> {
-    let provider = provider.as_str().as_bytes();
-    let native_id = native_id.as_bytes();
-    let mut value =
-        Vec::with_capacity(4 + 1 + provider.len() + 8 + 4 + 4 + 4 + 2 + native_id.len());
-    value.extend_from_slice(b"SR\0\x01");
-    value.push(u8::try_from(provider.len()).unwrap());
-    value.extend_from_slice(provider);
-    value.extend_from_slice(&ordinal.to_be_bytes());
-    value.extend_from_slice(&source_subrecord.to_be_bytes());
-    value.extend_from_slice(&history_item.to_be_bytes());
-    value.extend_from_slice(&tool_state.to_be_bytes());
     value.extend_from_slice(&u16::try_from(native_id.len()).unwrap().to_be_bytes());
     value.extend_from_slice(native_id);
     value
@@ -114,7 +89,12 @@ fn try_request(
     let event_id = Uuid::new_v4();
     let path = broker_test_path(path);
     let source_root = source_root.map(broker_test_path);
-    let source_access = SourceAccessBroker::new().admit(
+    let source_locator = CompleteContentSourceLocator::new(
+        STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
+        released_structured_locator_value(provider, ordinal, subrecord, native_id),
+    )
+    .unwrap();
+    let source_access = SourceAccessBroker::new().admit_for_source_locators(
         AuthorizedSourceRoute {
             source_id: Uuid::new_v4(),
             provider,
@@ -129,6 +109,7 @@ fn try_request(
                 sha256: Some(digest_bytes(record_bytes)),
             },
         },
+        std::slice::from_ref(&source_locator),
         event_id,
     )?;
     Ok(CompleteMessageRequest {
@@ -145,13 +126,7 @@ fn try_request(
         )
         .unwrap()
         .to_owned(),
-        source_locator: Some(
-            CompleteContentSourceLocator::new(
-                STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
-                released_structured_locator_value(provider, ordinal, subrecord, native_id),
-            )
-            .unwrap(),
-        ),
+        source_locator: Some(source_locator),
         provider_session_id: Some(provider_session_id.to_owned()),
         source_record_ordinal: ordinal,
         source_record_subrecord_index: subrecord,
@@ -163,61 +138,6 @@ fn try_request(
         indexed_text: text.chars().take(indexed_limit_chars).collect(),
         indexed_limit_chars,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn result_request(
-    provider: CaptureProvider,
-    path: &Path,
-    ordinal: u64,
-    subrecord: u32,
-    native_id: &str,
-    record_bytes: &[u8],
-    content: &str,
-) -> ResultContentRequest {
-    let event_id = Uuid::new_v4();
-    let path = broker_test_path(path);
-    let source_access = SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: Uuid::new_v4(),
-                provider,
-                source_format: format_for(provider).to_owned(),
-                family: CompleteContentSourceFamily::Structured,
-                raw_source_path: path.clone(),
-                source_root: path.parent().map(Path::to_path_buf),
-                source_identity: Some(format!("test:{}", provider.as_str())),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            event_id,
-        )
-        .unwrap();
-    ResultContentRequest {
-        event_id,
-        provider,
-        source_format: format_for(provider).to_owned(),
-        source_access,
-        source_family: CompleteContentSourceFamily::Structured,
-        content_profile: verified_content_profile(
-            provider,
-            format_for(provider),
-            CompleteContentSourceFamily::Structured,
-            VerifiedContentRole::ResultBody,
-        )
-        .unwrap()
-        .to_owned(),
-        source_locator: CompleteContentSourceLocator::new(
-            STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
-            released_structured_locator_value(provider, ordinal, subrecord, native_id),
-        )
-        .unwrap(),
-        source_record_ordinal: ordinal,
-        source_record_subrecord_index: subrecord,
-        expected_native_record_id: native_id.to_owned(),
-        expected_record_digest: CompleteContentBodyDigest::parse(digest_bytes(record_bytes))
-            .unwrap(),
-        expected_content_ref: ContentRef::from_bytes(content.as_bytes()).unwrap(),
-    }
 }
 
 fn broker_test_path(path: &Path) -> std::path::PathBuf {
@@ -243,6 +163,32 @@ fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, bytes).unwrap();
+}
+
+fn write_sparse_oversized_sibling(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.set_len(
+        u64::try_from(super::verification::STRUCTURED_MAX_COMPOUND_FILE_BYTES)
+            .unwrap()
+            .saturating_add(1),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn write_unreadable_sibling(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    write(path, b"unreadable sibling");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o0)).unwrap();
 }
 
 #[test]
@@ -292,163 +238,6 @@ fn decodes_released_structured_locator_versions() {
     assert_eq!(
         decode_structured_locator(&message).unwrap(),
         (CaptureProvider::RovoDev, 9, 3, "native-12".to_owned())
-    );
-
-    let result = released_structured_result_locator_value(
-        CaptureProvider::Continue,
-        11,
-        2,
-        7,
-        4,
-        "history-7:tool-4:result",
-    );
-    assert_eq!(
-        decode_structured_result_locator(&result).unwrap(),
-        (
-            CaptureProvider::Continue,
-            11,
-            2,
-            7,
-            4,
-            "history-7:tool-4:result".to_owned(),
-        )
-    );
-}
-
-#[test]
-fn resolves_exact_structured_result_subrecords() {
-    let directory = TempDir::new().unwrap();
-    let content = "structured result λ\nsecond line";
-    let rovo_bytes = serde_json::to_vec(&json!({
-        "message_history": [{
-            "id": "rovo-result-1",
-            "role": "user",
-            "content": [{"type": "tool_result", "content": content}]
-        }]
-    }))
-    .unwrap();
-    let rovo_path = directory.path().join("session_context.json");
-    write(&rovo_path, &rovo_bytes);
-
-    let mut request = result_request(
-        CaptureProvider::RovoDev,
-        &rovo_path,
-        0,
-        0,
-        "rovo-result-1",
-        &rovo_bytes,
-        content,
-    );
-    let resolved = ResultContentResolver::resolve_results(
-        &StructuredCompleteContentResolver::new(),
-        std::slice::from_ref(&request),
-    );
-    assert_eq!(resolved[0].as_ref().unwrap().content, content);
-
-    let mut wrong_subrecord = request.clone();
-    wrong_subrecord.source_record_subrecord_index = 1;
-    assert_eq!(
-        ResultContentResolver::resolve_results(
-            &StructuredCompleteContentResolver::new(),
-            &[wrong_subrecord]
-        )[0]
-        .as_ref()
-        .unwrap_err()
-        .kind,
-        CompleteContentErrorKind::ContentVerificationFailed
-    );
-
-    fs::write(&rovo_path, b"{\"message_history\":[]}").unwrap();
-    request.source_access = SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: Uuid::new_v4(),
-                provider: request.provider,
-                source_format: request.source_format.clone(),
-                family: CompleteContentSourceFamily::Structured,
-                raw_source_path: rovo_path.clone(),
-                source_root: rovo_path.parent().map(Path::to_path_buf),
-                source_identity: Some("test:rovo-dev".to_owned()),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            request.event_id,
-        )
-        .unwrap();
-    assert_eq!(
-        ResultContentResolver::resolve_results(
-            &StructuredCompleteContentResolver::new(),
-            &[request]
-        )[0]
-        .as_ref()
-        .unwrap_err()
-        .kind,
-        CompleteContentErrorKind::SourceChanged
-    );
-}
-
-#[test]
-fn resolves_openhands_and_task_json_results_by_native_record_identity() {
-    let directory = TempDir::new().unwrap();
-    let openhands_content = "OpenHands stdout\n";
-    let openhands_bytes = serde_json::to_vec(&json!({
-        "id": "openhands-result-1",
-        "timestamp": "2026-07-22T12:00:00Z",
-        "kind": "ObservationEvent",
-        "source": "environment",
-        "observation": {
-            "kind": "ExecuteBashObservation",
-            "content": openhands_content
-        }
-    }))
-    .unwrap();
-    let openhands_path = directory
-        .path()
-        .join("profile/v1_conversations/session/events/result.json");
-    write(&openhands_path, &openhands_bytes);
-    let openhands = result_request(
-        CaptureProvider::OpenHands,
-        &openhands_path,
-        17,
-        0,
-        "openhands-result-1",
-        &openhands_bytes,
-        openhands_content,
-    );
-    assert_eq!(
-        ResultContentResolver::resolve_results(
-            &StructuredCompleteContentResolver::new(),
-            &[openhands]
-        )[0]
-        .as_ref()
-        .unwrap()
-        .content,
-        openhands_content
-    );
-
-    let task_content = "task command output";
-    let raw_record = format!(
-        r#"{{"id":"task-result-1","type":"command","text":{}}}"#,
-        serde_json::to_string(task_content).unwrap()
-    );
-    let task_file = format!("[\n {raw_record}\n]").into_bytes();
-    let task_path = directory.path().join("tasks/cline/ui_messages.json");
-    write(&task_path, &task_file);
-    let task = result_request(
-        CaptureProvider::Cline,
-        &task_path,
-        4,
-        0,
-        "cline-task:ui_messages:task-result-1",
-        raw_record.as_bytes(),
-        task_content,
-    );
-    assert_eq!(
-        ResultContentResolver::resolve_results(&StructuredCompleteContentResolver::new(), &[task])
-            [0]
-        .as_ref()
-        .unwrap()
-        .content,
-        task_content
     );
 }
 
@@ -702,6 +491,251 @@ fn resolves_one_file_and_compound_provider_families() {
 }
 
 #[test]
+fn rovodev_exact_route_ignores_duplicate_and_oversized_siblings_and_rejects_mutation() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("rovodev");
+    let path = root.join("session_context.json");
+    let backup = root.join("backup/session_context.json");
+    let text = "RovoDev exact source";
+    let bytes = serde_json::to_vec(&json!({
+        "message_history": [{"id": "rovodev-exact-1", "content": text}]
+    }))
+    .unwrap();
+    write(&path, &bytes);
+    write(&backup, &bytes);
+    write_sparse_oversized_sibling(&root.join("oversized-backup.json"));
+    #[cfg(unix)]
+    write_unreadable_sibling(&root.join("unreadable-backup.json"));
+
+    assert_eq!(
+        resolve_one_message(request(
+            CaptureProvider::RovoDev,
+            &path,
+            Some(&root),
+            "rovodev-exact",
+            0,
+            0,
+            "rovodev-exact-1",
+            &bytes,
+            text,
+        ))
+        .text,
+        text
+    );
+
+    write(
+        &path,
+        br#"{"message_history":[{"id":"rovodev-exact-1","content":"mutated"}]}"#,
+    );
+    let mutated = request(
+        CaptureProvider::RovoDev,
+        &path,
+        Some(&root),
+        "rovodev-exact",
+        0,
+        0,
+        "rovodev-exact-1",
+        &bytes,
+        text,
+    );
+    assert_eq!(
+        StructuredCompleteContentResolver::new()
+            .resolve(&[mutated])
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        try_request(
+            CaptureProvider::RovoDev,
+            &path,
+            Some(&root),
+            "rovodev-exact",
+            0,
+            0,
+            "rovodev-exact-1",
+            &bytes,
+            text,
+        )
+        .unwrap_err()
+        .kind,
+        CompleteContentErrorKind::SourceMissing
+    );
+}
+
+#[test]
+fn openhands_exact_route_ignores_duplicate_and_oversized_siblings_and_rejects_mutation() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("openhands");
+    let path = root.join("v1_conversations/session/events/event-1.json");
+    let backup = root.join("v1_conversations/session/events/backup/event-1.json");
+    let text = "OpenHands exact source";
+    let bytes = serde_json::to_vec(&json!({
+        "id": "openhands-exact-1",
+        "timestamp": "2026-07-22T12:00:00Z",
+        "kind": "MessageEvent",
+        "llm_message": {"role": "assistant", "content": text}
+    }))
+    .unwrap();
+    write(&path, &bytes);
+    write(&backup, &bytes);
+    write_sparse_oversized_sibling(&root.join("oversized-backup.json"));
+    #[cfg(unix)]
+    write_unreadable_sibling(&root.join("unreadable-backup.json"));
+
+    assert_eq!(
+        resolve_one_message(request(
+            CaptureProvider::OpenHands,
+            &path,
+            Some(&root),
+            "openhands-exact",
+            0,
+            0,
+            "openhands-exact-1",
+            &bytes,
+            text,
+        ))
+        .text,
+        text
+    );
+
+    write(
+        &path,
+        br#"{"id":"openhands-exact-1","kind":"MessageEvent","llm_message":{"role":"assistant","content":"mutated"}}"#,
+    );
+    let mutated = request(
+        CaptureProvider::OpenHands,
+        &path,
+        Some(&root),
+        "openhands-exact",
+        0,
+        0,
+        "openhands-exact-1",
+        &bytes,
+        text,
+    );
+    assert_eq!(
+        StructuredCompleteContentResolver::new()
+            .resolve(&[mutated])
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        try_request(
+            CaptureProvider::OpenHands,
+            &path,
+            Some(&root),
+            "openhands-exact",
+            0,
+            0,
+            "openhands-exact-1",
+            &bytes,
+            text,
+        )
+        .unwrap_err()
+        .kind,
+        CompleteContentErrorKind::SourceMissing
+    );
+}
+
+#[test]
+fn codebuddy_locator_freezes_only_the_exact_message_file() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("codebuddy");
+    let session = root.join("project/session");
+    let path = session.join("messages/message-7.json");
+    let backup = session.join("backup/message-7.json");
+    let text = "CodeBuddy exact source";
+    let bytes = serde_json::to_vec(&json!({
+        "message": {"content": text}
+    }))
+    .unwrap();
+    write(&path, &bytes);
+    write(&backup, &bytes);
+    write_sparse_oversized_sibling(&session.join("messages/oversized.json"));
+    #[cfg(unix)]
+    write_unreadable_sibling(&session.join("messages/unreadable.json"));
+
+    assert_eq!(
+        resolve_one_message(request(
+            CaptureProvider::CodeBuddy,
+            &session,
+            Some(&root),
+            "codebuddy-session",
+            7,
+            0,
+            "codebuddy-session:message-7",
+            &bytes,
+            text,
+        ))
+        .text,
+        text
+    );
+
+    write(&path, br#"{"message":{"content":"mutated"}}"#);
+    let mut mutated = request(
+        CaptureProvider::CodeBuddy,
+        &session,
+        Some(&root),
+        "codebuddy-session",
+        7,
+        0,
+        "codebuddy-session:message-7",
+        &bytes,
+        text,
+    );
+    mutated.expected_hash_authority = CompleteContentHashAuthority::NormalizedPayloadFallback;
+    mutated.expected_provider_event_hash =
+        crate::compute_payload_hash(&serde_json::from_slice::<Value>(&bytes).unwrap()).unwrap();
+    assert_eq!(
+        StructuredCompleteContentResolver::new()
+            .resolve(&[mutated])
+            .unwrap_err()
+            .kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    write(&path.join("duplicate.json"), &bytes);
+    assert_eq!(
+        try_request(
+            CaptureProvider::CodeBuddy,
+            &session,
+            Some(&root),
+            "codebuddy-session",
+            7,
+            0,
+            "codebuddy-session:message-7",
+            &bytes,
+            text,
+        )
+        .unwrap_err()
+        .kind,
+        CompleteContentErrorKind::ContentVerificationFailed
+    );
+    fs::remove_dir_all(&path).unwrap();
+    assert_eq!(
+        try_request(
+            CaptureProvider::CodeBuddy,
+            &session,
+            Some(&root),
+            "codebuddy-session",
+            7,
+            0,
+            "codebuddy-session:message-7",
+            &bytes,
+            text,
+        )
+        .unwrap_err()
+        .kind,
+        CompleteContentErrorKind::SourceMissing
+    );
+}
+
+#[test]
 fn openhands_recovery_matches_authoritative_current_and_legacy_decoding() {
     let directory = TempDir::new().unwrap();
     let cases = [
@@ -896,18 +930,18 @@ fn resolves_bounded_record_from_compound_file_larger_than_body_limit() {
 #[test]
 fn follows_verified_custom_root_moves_and_real_json5_profile_roots() {
     let directory = TempDir::new().unwrap();
-    let old_path = directory.path().join("old/session_context.json");
+    let old_path = directory.path().join("old/session.json");
     let moved_root = directory.path().join("new/custom-profile/insiders");
-    let moved_path = moved_root.join("session_context.json");
+    let moved_path = moved_root.join("session.json");
     let text = "moved source still verifies exactly";
     let bytes = serde_json::to_vec(&json!({
-        "message_history": [{"id": "moved-1", "role": "user", "content": text}]
+        "history": [{"id": "moved-1", "message": {"role": "user", "content": text}}]
     }))
     .unwrap();
     write(&moved_path, &bytes);
     assert_eq!(
         resolve_one_message(request(
-            CaptureProvider::RovoDev,
+            CaptureProvider::Continue,
             &old_path,
             Some(&moved_root),
             "moved-session",
@@ -930,7 +964,7 @@ fn follows_verified_custom_root_moves_and_real_json5_profile_roots() {
     write(&profile, profile_text.as_bytes());
     assert_eq!(
         resolve_one_message(request(
-            CaptureProvider::RovoDev,
+            CaptureProvider::Continue,
             &profile,
             None,
             "moved-session",
@@ -949,10 +983,10 @@ fn follows_verified_custom_root_moves_and_real_json5_profile_roots() {
 fn parses_xml_profile_roots_and_rejects_doctype_entities() {
     let directory = TempDir::new().unwrap();
     let profile_root = directory.path().join("profile & insiders");
-    let source = profile_root.join("session_context.json");
+    let source = profile_root.join("session.json");
     let text = "XML-selected complete body";
     let bytes = serde_json::to_vec(&json!({
-        "message_history": [{"id": "xml-1", "content": text}]
+        "history": [{"id": "xml-1", "message": {"role": "user", "content": text}}]
     }))
     .unwrap();
     write(&source, &bytes);
@@ -967,7 +1001,7 @@ fn parses_xml_profile_roots_and_rejects_doctype_entities() {
     );
     assert_eq!(
         resolve_one_message(request(
-            CaptureProvider::RovoDev,
+            CaptureProvider::Continue,
             &profile,
             None,
             "xml-session",
@@ -986,7 +1020,7 @@ fn parses_xml_profile_roots_and_rejects_doctype_entities() {
         br#"<!DOCTYPE x [<!ENTITY root "/tmp">]><profiles><path>&root;</path></profiles>"#,
     );
     let failure = try_request(
-        CaptureProvider::RovoDev,
+        CaptureProvider::Continue,
         &profile,
         None,
         "xml-session",
@@ -1143,17 +1177,17 @@ fn multi_message_resolution_is_all_or_nothing() {
 #[test]
 fn enforces_file_depth_entry_and_deadline_bounds() {
     let directory = TempDir::new().unwrap();
-    let path = directory.path().join("root/session_context.json");
+    let path = directory.path().join("root/session.json");
     let text = "bounded structured message";
     let bytes = serde_json::to_vec(&json!({
-        "message_history": [{"id": "bounded-1", "content": text}]
+        "history": [{"id": "bounded-1", "message": {"role": "user", "content": text}}]
     }))
     .unwrap();
     write(&path, &bytes);
     write(&directory.path().join("root/unrelated.json"), b"{}");
     let request_value = || {
         request(
-            CaptureProvider::RovoDev,
+            CaptureProvider::Continue,
             &directory.path().join("root"),
             None,
             "bounded-session",
@@ -1174,14 +1208,14 @@ fn enforces_file_depth_entry_and_deadline_bounds() {
         CompleteContentErrorKind::ContentTooLarge
     );
 
-    let nested = directory.path().join("nested/a/b/session_context.json");
+    let nested = directory.path().join("nested/a/b/session.json");
     write(&nested, &bytes);
     let depth_limited = StructuredCompleteContentResolver::with_bounds(StructuredBounds {
         max_depth: 0,
         ..base
     });
     let depth_request = request(
-        CaptureProvider::RovoDev,
+        CaptureProvider::Continue,
         &directory.path().join("nested"),
         None,
         "bounded-session",
@@ -1294,13 +1328,13 @@ fn rejects_root_replacement_after_capability_admission() {
     let replacement = directory.path().join("replacement-root");
     let text = "original root content";
     let bytes = serde_json::to_vec(&json!({
-        "message_history": [{"id": "root-race", "content": text}]
+        "history": [{"id": "root-race", "message": {"role": "user", "content": text}}]
     }))
     .unwrap();
-    write(&root.join("session_context.json"), &bytes);
+    write(&root.join("session.json"), &bytes);
     write(
-        &replacement.join("session_context.json"),
-        br#"{"message_history":[{"id":"root-race","content":"replacement"}]}"#,
+        &replacement.join("session.json"),
+        br#"{"history":[{"id":"root-race","message":{"role":"user","content":"replacement"}}]}"#,
     );
     let root_for_hook = broker_test_path(&root);
     let moved_for_hook = broker_test_path(&moved);
@@ -1314,7 +1348,7 @@ fn rejects_root_replacement_after_capability_admission() {
         }
     });
     let failure = try_request(
-        CaptureProvider::RovoDev,
+        CaptureProvider::Continue,
         &root,
         None,
         "root-race-session",
@@ -1337,10 +1371,10 @@ fn rejects_ancestor_replacement_after_root_capability_admission() {
     let root = parent.join("root");
     let text = "original ancestor content";
     let bytes = serde_json::to_vec(&json!({
-        "message_history": [{"id": "ancestor-race", "content": text}]
+        "history": [{"id": "ancestor-race", "message": {"role": "user", "content": text}}]
     }))
     .unwrap();
-    write(&root.join("session_context.json"), &bytes);
+    write(&root.join("session.json"), &bytes);
     let root_for_hook = broker_test_path(&root);
     let parent_for_hook = broker_test_path(&parent);
     let moved_for_hook = broker_test_path(&moved_parent);
@@ -1349,14 +1383,14 @@ fn rejects_ancestor_replacement_after_root_capability_admission() {
         if !fired && stage == StructuredAdmissionTestStage::RootOpened && path == root_for_hook {
             fs::rename(&parent_for_hook, &moved_for_hook).unwrap();
             write(
-                &parent_for_hook.join("root/session_context.json"),
-                br#"{"message_history":[{"id":"ancestor-race","content":"replacement"}]}"#,
+                &parent_for_hook.join("root/session.json"),
+                br#"{"history":[{"id":"ancestor-race","message":{"role":"user","content":"replacement"}}]}"#,
             );
             fired = true;
         }
     });
     let failure = try_request(
-        CaptureProvider::RovoDev,
+        CaptureProvider::Continue,
         &root,
         None,
         "ancestor-race-session",
@@ -1375,18 +1409,18 @@ fn rejects_ancestor_replacement_after_root_capability_admission() {
 fn rejects_child_replacement_after_descriptor_relative_open() {
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("root");
-    let target = root.join("session_context.json");
+    let target = root.join("session.json");
     let moved = root.join("moved-original.json");
     let replacement = directory.path().join("replacement.json");
     let text = "original child content";
     let bytes = serde_json::to_vec(&json!({
-        "message_history": [{"id": "child-race", "content": text}]
+        "history": [{"id": "child-race", "message": {"role": "user", "content": text}}]
     }))
     .unwrap();
     write(&target, &bytes);
     write(
         &replacement,
-        br#"{"message_history":[{"id":"child-race","content":"replacement"}]}"#,
+        br#"{"history":[{"id":"child-race","message":{"role":"user","content":"replacement"}}]}"#,
     );
     let target_for_hook = broker_test_path(&target);
     let moved_for_hook = broker_test_path(&moved);
@@ -1400,7 +1434,7 @@ fn rejects_child_replacement_after_descriptor_relative_open() {
         }
     });
     let failure = try_request(
-        CaptureProvider::RovoDev,
+        CaptureProvider::Continue,
         &root,
         None,
         "child-race-session",

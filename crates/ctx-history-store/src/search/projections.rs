@@ -8,6 +8,7 @@ mod query;
 mod semantic_document;
 mod snapshot;
 mod storage;
+mod validation;
 
 pub use identity::{EventEmbeddingDocument, EventSearchHit};
 pub use snapshot::SemanticProjectionSnapshot;
@@ -24,5 +25,10 @@ pub(crate) use storage::{
     populate_event_search_projection_from_query, rebuild_event_search_lookup_projection,
     rebuild_search_projection, record_scriptgram_table_ready,
     refresh_semantic_searchable_item_stats, upsert_event_search_projection_for_event,
-    upsert_record_search_projection, EventSearchProjectionCapabilities,
+    upsert_record_search_projection, EventSearchProjectionCapabilities, SearchProjectionCounts,
+};
+#[cfg(test)]
+pub(crate) use validation::v47_projection_event_scan_query;
+pub(crate) use validation::{
+    prepare_v47_search_projection_tables, search_projection_is_exactly_canonical,
 };

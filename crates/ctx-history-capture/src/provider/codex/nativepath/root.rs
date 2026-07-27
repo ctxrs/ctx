@@ -1,33 +1,59 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_core::CaptureProvider;
-use ctx_history_store::{ProviderSourceRouteRetirementReason, Store};
+use ctx_history_store::{EventSearchBulkGuard, ProviderSourceRouteRetirementReason, Store};
 
+use super::vertical::{
+    publication::CodexNativeRootPublication, CodexNativeCommittedDelta, CodexNativeTerminalReport,
+    CodexNativeVerticalError,
+};
 use super::{
-    discover_codex_catalog_sources, prepare_codex_native_output_replay,
-    prepare_codex_native_source, retire_codex_native_source_route,
-    retire_replaced_codex_native_source_route, CodexCatalogSource, CodexNativeOutputReplay,
-    CodexNativePreparedSource, CodexNativeRootGroup, CodexNativeSourceAdmission,
-    CodexNativeStoreOptions,
+    discover_codex_catalog_sources, finish_pending_codex_native_retirement,
+    prepare_codex_native_output_replay, prepare_codex_native_producer_task,
+    retire_codex_native_source_route, retire_replaced_codex_native_source_route,
+    run_codex_bounded_producers, CodexCatalogSource, CodexNativeOutputReplay,
+    CodexNativeProducerStep, CodexNativeRootGroup, CodexNativeStoreOptions,
+    CodexOrderedProducerItem, CodexProducerConfig,
 };
 use crate::{
-    provider::codex::catalog::{catalog_codex_session_files, catalog_codex_session_tree},
+    provider::codex::catalog::{
+        catalog_codex_session_files, catalog_codex_session_tree, ensure_catalog_source_bound,
+    },
     summaries::MAX_RETAINED_PROVIDER_FAILURES,
-    CaptureError, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CaptureError, CatalogSummary, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, ImportProfile, ProOutputSinkError, ProviderImportFailure,
     ProviderImportSummary, Result,
 };
 
+mod ordering;
+
+use ordering::parent_first;
+
 const MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES: usize = 192;
+struct PendingCodexRootWindow {
+    source: CodexCatalogSource,
+    source_done: bool,
+    delta: CodexNativeCommittedDelta,
+    report: Option<CodexNativeTerminalReport>,
+}
 
 pub(crate) fn import_codex_native_session_root(
     root: &Path,
     store: &mut Store,
     options: CodexSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
+    import_codex_native_session_root_with_catalog(root, store, options).map(|(_, summary)| summary)
+}
+
+pub(crate) fn import_codex_native_session_root_with_catalog(
+    root: &Path,
+    store: &mut Store,
+    options: CodexSessionImportOptions,
+) -> Result<(CatalogSummary, ProviderImportSummary)> {
     let source_root = options.source_path.as_deref().unwrap_or(root).to_path_buf();
     if !root.exists() {
-        return retire_missing_root(&source_root, store, &options);
+        return retire_missing_root(&source_root, store, &options)
+            .map(|summary| (CatalogSummary::default(), summary));
     }
     let catalog = catalog_codex_session_tree(
         root,
@@ -44,20 +70,29 @@ pub(crate) fn import_codex_native_session_root(
         skipped_sessions: catalog.skipped_sessions,
         skipped: catalog.skipped_sessions,
         failed: catalog.failed_sessions,
-        failures: catalog.failures,
+        failures: catalog.failures.clone(),
         ..ProviderImportSummary::default()
     };
     import_cataloged_root(&source_root, store, &options, &mut summary)?;
-    Ok(summary)
+    Ok((catalog, summary))
 }
 
 pub(crate) fn import_codex_native_session_files(
     paths: Vec<PathBuf>,
     store: &mut Store,
-    mut options: CodexSessionImportOptions,
+    options: CodexSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
+    import_codex_native_session_files_with_catalog(paths, store, options)
+        .map(|(_, summary)| summary)
+}
+
+pub(crate) fn import_codex_native_session_files_with_catalog(
+    paths: Vec<PathBuf>,
+    store: &mut Store,
+    mut options: CodexSessionImportOptions,
+) -> Result<(CatalogSummary, ProviderImportSummary)> {
     if paths.is_empty() {
-        return Ok(ProviderImportSummary::default());
+        return Ok((CatalogSummary::default(), ProviderImportSummary::default()));
     }
     let source_root = options
         .source_path
@@ -80,11 +115,11 @@ pub(crate) fn import_codex_native_session_files(
         skipped_sessions: catalog.skipped_sessions,
         skipped: catalog.skipped_sessions,
         failed: catalog.failed_sessions,
-        failures: catalog.failures,
+        failures: catalog.failures.clone(),
         ..ProviderImportSummary::default()
     };
     import_cataloged_root(&source_root, store, &options, &mut summary)?;
-    Ok(summary)
+    Ok((catalog, summary))
 }
 
 fn import_cataloged_root(
@@ -94,8 +129,15 @@ fn import_cataloged_root(
     summary: &mut ProviderImportSummary,
 ) -> Result<()> {
     let root = source_root.display().to_string();
-    let sessions = store.list_catalog_sessions_for_source(CaptureProvider::Codex, &root)?;
+    let sessions = store.list_catalog_sessions_for_source_bounded(
+        CaptureProvider::Codex,
+        &root,
+        super::super::catalog::CODEX_CATALOG_MAX_SOURCES,
+    )?;
+    ensure_catalog_source_bound(sessions.len())?;
     let discovery = discover_codex_catalog_sources(&sessions);
+    #[cfg(codex_nativepath_qualification)]
+    super::qualification::observe_catalog_sources(source_root, &discovery.sources);
     let mut live_sources = discovery
         .sources
         .iter()
@@ -139,7 +181,6 @@ fn import_cataloged_root(
                 }),
         );
 
-    let mut output_replays = Vec::<CodexNativeOutputReplay>::new();
     let output_sink = match &options.import_profile {
         ImportProfile::CoreAndPro(sink) | ImportProfile::ProReplayOnly(sink) => Some(sink.as_ref()),
         ImportProfile::CoreOnly => None,
@@ -157,7 +198,8 @@ fn import_cataloged_root(
                 native_options.clone(),
                 sink.as_ref(),
             ) {
-                Ok(replay) => replay_output(replay, sink.as_ref()),
+                Ok(replay) => replay_output(replay, sink.as_ref())?,
+                Err(error) if native_error_is_fatal(&error) => return Err(native_error(error)),
                 Err(error) => sink.mark_behind(ProOutputSinkError::new(
                     "codex_nativepath_output_prepare",
                     error.to_string(),
@@ -171,7 +213,6 @@ fn import_cataloged_root(
     let mut completed_files = 0_usize;
     let mut completed_bytes = 0_u64;
     let import = (|| -> Result<()> {
-        let mut pending_group = CodexNativeRootGroup::default();
         let native_options = CodexNativeStoreOptions {
             machine_id: options.machine_id.clone(),
             imported_at: options.imported_at,
@@ -191,31 +232,49 @@ fn import_cataloged_root(
                 summary.skipped = summary.skipped.saturating_add(1);
             }
         }
+
+        let mut tasks = Vec::with_capacity(live_sources.len());
         for source in live_sources {
-            let source_bytes = source
-                .source_path
-                .metadata()
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            if retire_replaced_codex_native_source_route(
+            let source_bytes = source_bytes(&source);
+            if let Err(error) =
+                finish_pending_codex_native_retirement(store, &bulk_guard, &source, &native_options)
+            {
+                if native_error_is_fatal(&error) {
+                    return Err(native_error(error));
+                }
+                summary.failed = summary.failed.saturating_add(1);
+                summary.failures.push(ProviderImportFailure {
+                    line: 0,
+                    error: error.to_string(),
+                });
+                completed_files = completed_files.saturating_add(1);
+                completed_bytes = completed_bytes.saturating_add(source_bytes);
+                continue;
+            }
+            if let Err(error) = retire_replaced_codex_native_source_route(
                 store,
                 &bulk_guard,
                 &source,
                 &native_options,
-            )
-            .map_err(native_error)?
-            {
-                publish_pending_group(store, &bulk_guard, &mut pending_group)?;
-            }
-            let replay_source = source.clone();
-            let prepared = match prepare_codex_native_source(
-                store,
-                CodexNativeSourceAdmission::Live(source),
-                native_options.clone(),
-                output_sink,
             ) {
-                Ok(prepared) => prepared,
+                if native_error_is_fatal(&error) {
+                    return Err(native_error(error));
+                }
+                summary.failed = summary.failed.saturating_add(1);
+                summary.failures.push(ProviderImportFailure {
+                    line: 0,
+                    error: error.to_string(),
+                });
+                completed_files = completed_files.saturating_add(1);
+                completed_bytes = completed_bytes.saturating_add(source_bytes);
+                continue;
+            }
+            match prepare_codex_native_producer_task(store, source, native_options.clone()) {
+                Ok(task) => tasks.push(task),
                 Err(error) => {
+                    if native_error_is_fatal(&error) {
+                        return Err(native_error(error));
+                    }
                     summary.failed = summary.failed.saturating_add(1);
                     summary.failures.push(ProviderImportFailure {
                         line: 0,
@@ -223,117 +282,240 @@ fn import_cataloged_root(
                     });
                     completed_files = completed_files.saturating_add(1);
                     completed_bytes = completed_bytes.saturating_add(source_bytes);
-                    report_import_progress(
-                        options,
-                        total_files,
-                        total_bytes,
-                        completed_files,
-                        completed_bytes,
-                        summary,
-                        false,
-                    );
-                    continue;
                 }
-            };
-            match prepared {
-                CodexNativePreparedSource::Noop(noop) => {
-                    summary.skipped_sessions = summary.skipped_sessions.saturating_add(1);
-                    summary.skipped = summary.skipped.saturating_add(1);
-                    summary.skipped_events =
-                        summary.skipped_events.saturating_add(noop.skipped_events);
-                    if noop.terminal {
-                        completed_catalog_sources.insert(
-                            replay_source.source_path.display().to_string(),
-                            noop.retained_events,
-                        );
-                    }
-                    if let Some(sink) = output_sink {
-                        match prepare_codex_native_output_replay(
+            }
+        }
+
+        let mut prior_chunk_publication = None;
+        let mut completed_native_sessions = std::collections::BTreeSet::<String>::new();
+        let mut pending_group = CodexNativeRootGroup::default();
+        let mut pending_windows = Vec::<PendingCodexRootWindow>::new();
+        let produced =
+            run_codex_bounded_producers(tasks, CodexProducerConfig::for_host(), |item| {
+                match item {
+                    CodexOrderedProducerItem::Step { source, step, .. } => match step {
+                        CodexNativeProducerStep::Noop(noop) => {
+                            flush_pending_codex_root_group(
+                                store,
+                                &bulk_guard,
+                                &native_options,
+                                options,
+                                total_files,
+                                total_bytes,
+                                &mut pending_group,
+                                &mut pending_windows,
+                                &mut prior_chunk_publication,
+                                &mut completed_catalog_sources,
+                                &mut completed_native_sessions,
+                                &mut completed_files,
+                                &mut completed_bytes,
+                                summary,
+                                output_sink,
+                            )?;
+                            prior_chunk_publication = None;
+                            summary.skipped_sessions = summary.skipped_sessions.saturating_add(1);
+                            summary.skipped = summary.skipped.saturating_add(1);
+                            summary.skipped_events =
+                                summary.skipped_events.saturating_add(noop.skipped_events);
+                            summary.accepted_content_records =
+                                summary.accepted_content_records.saturating_add(
+                                    usize::try_from(noop.retained_events).unwrap_or(usize::MAX),
+                                );
+                            record_native_rejections(
+                                summary,
+                                &source,
+                                noop.rejected_records,
+                                noop.rejections,
+                            );
+                            if noop.terminal && noop.committed_authority {
+                                completed_catalog_sources.insert(
+                                    source.source_path.display().to_string(),
+                                    noop.retained_events,
+                                );
+                                if let Some(native_session_id) =
+                                    source.catalog_native_session_id.as_ref()
+                                {
+                                    completed_native_sessions.insert(native_session_id.clone());
+                                }
+                            }
+                            if noop.terminal && noop.committed_authority {
+                                if let Some(sink) = output_sink {
+                                    match prepare_codex_native_output_replay(
+                                        store,
+                                        source.clone(),
+                                        native_options.clone(),
+                                        sink,
+                                    ) {
+                                        Ok(replay) => replay_output(replay, sink)?,
+                                        Err(error) if native_error_is_fatal(&error) => {
+                                            return Err(native_error(error));
+                                        }
+                                        Err(error) => sink.mark_behind(ProOutputSinkError::new(
+                                            "codex_nativepath_output_prepare",
+                                            error.to_string(),
+                                        )),
+                                    }
+                                }
+                            }
+                            complete_source_progress(
+                                options,
+                                total_files,
+                                total_bytes,
+                                &source,
+                                &mut completed_files,
+                                &mut completed_bytes,
+                                summary,
+                            );
+                        }
+                        CodexNativeProducerStep::Window {
+                            mut chunk,
+                            source_done,
+                            mut delta,
+                            report,
+                        } => {
+                            let pending_parent = source
+                                .catalog_parent_native_session_id
+                                .as_ref()
+                                .is_some_and(|parent| {
+                                    pending_windows.iter().any(|pending| {
+                                        pending.source_done
+                                            && pending.source.catalog_native_session_id.as_ref()
+                                                == Some(parent)
+                                    })
+                                });
+                            if source
+                                .catalog_parent_native_session_id
+                                .as_ref()
+                                .is_some_and(|parent| {
+                                    !completed_native_sessions.contains(parent) && !pending_parent
+                                })
+                            {
+                                chunk.detach_parent_lineage();
+                                delta.imported_edges = 0;
+                            }
+                            if let Some(prior) = &prior_chunk_publication {
+                                chunk
+                                    .bind_exact_expected_cursor(prior)
+                                    .map_err(native_error)?;
+                                prior_chunk_publication = None;
+                            }
+                            let chunk = match pending_group.try_push(chunk) {
+                                Ok(()) => None,
+                                Err(chunk) => {
+                                    flush_pending_codex_root_group(
+                                        store,
+                                        &bulk_guard,
+                                        &native_options,
+                                        options,
+                                        total_files,
+                                        total_bytes,
+                                        &mut pending_group,
+                                        &mut pending_windows,
+                                        &mut prior_chunk_publication,
+                                        &mut completed_catalog_sources,
+                                        &mut completed_native_sessions,
+                                        &mut completed_files,
+                                        &mut completed_bytes,
+                                        summary,
+                                        output_sink,
+                                    )?;
+                                    Some(chunk)
+                                }
+                            };
+                            if let Some(mut chunk) = chunk {
+                                if let Some(prior) = &prior_chunk_publication {
+                                    chunk
+                                        .bind_exact_expected_cursor(prior)
+                                        .map_err(native_error)?;
+                                    prior_chunk_publication = None;
+                                }
+                                pending_group.try_push(chunk).map_err(|_| {
+                                    CaptureError::SystemInvariant(
+                                        "certified Codex window exceeds empty root group bounds",
+                                    )
+                                })?;
+                            }
+                            pending_windows.push(PendingCodexRootWindow {
+                                source,
+                                source_done,
+                                delta,
+                                report,
+                            });
+                        }
+                    },
+                    CodexOrderedProducerItem::Failed { source, error, .. } => {
+                        flush_pending_codex_root_group(
                             store,
-                            replay_source,
-                            native_options.clone(),
-                            sink,
-                        ) {
-                            Ok(replay) => output_replays.push(replay),
-                            Err(error) => sink.mark_behind(ProOutputSinkError::new(
-                                "codex_nativepath_output_prepare",
-                                error.to_string(),
-                            )),
+                            &bulk_guard,
+                            &native_options,
+                            options,
+                            total_files,
+                            total_bytes,
+                            &mut pending_group,
+                            &mut pending_windows,
+                            &mut prior_chunk_publication,
+                            &mut completed_catalog_sources,
+                            &mut completed_native_sessions,
+                            &mut completed_files,
+                            &mut completed_bytes,
+                            summary,
+                            output_sink,
+                        )?;
+                        prior_chunk_publication = None;
+                        if native_error_is_fatal(&error) {
+                            return Err(native_error(error));
                         }
-                    }
-                }
-                CodexNativePreparedSource::Publication(mut publication) => {
-                    let rejected = publication.rejected_records;
-                    let rejections = std::mem::take(&mut publication.rejections);
-                    let imported_events = publication.imported_events;
-                    let imported_edges = publication.imported_edges;
-                    let skipped_events = publication.skipped_events;
-                    let terminal = publication.terminal;
-                    let retained_events = publication.retained_events;
-                    let (chunks, output_replay) =
-                        publication.into_root_parts().map_err(native_error)?;
-                    if let Some(output_replay) = output_replay {
-                        output_replays.push(output_replay);
-                    }
-                    let split_source = chunks.len() > 1;
-                    for chunk in chunks {
-                        if split_source || !chunk.terminal() {
-                            publish_pending_group(store, &bulk_guard, &mut pending_group)?;
-                            let mut isolated = CodexNativeRootGroup::default();
-                            isolated.try_push(chunk).map_err(|_| {
-                                CaptureError::SystemInvariant(
-                                    "certified Codex source chunk exceeds root group bounds",
-                                )
-                            })?;
-                            isolated.publish(store, &bulk_guard).map_err(native_error)?;
-                            continue;
-                        }
-                        if let Err(chunk) = pending_group.try_push(chunk) {
-                            publish_pending_group(store, &bulk_guard, &mut pending_group)?;
-                            pending_group.try_push(chunk).map_err(|_| {
-                                CaptureError::SystemInvariant(
-                                    "certified Codex source chunk exceeds empty root group bounds",
-                                )
-                            })?;
-                        }
-                    }
-                    summary.imported_sessions = summary.imported_sessions.saturating_add(1);
-                    summary.imported = summary.imported.saturating_add(1);
-                    summary.imported_events =
-                        summary.imported_events.saturating_add(imported_events);
-                    summary.imported_edges = summary.imported_edges.saturating_add(imported_edges);
-                    summary.skipped_events = summary
-                        .skipped_events
-                        .saturating_add(skipped_events)
-                        .saturating_add(rejected);
-                    record_native_rejections(summary, &replay_source, rejected, rejections);
-                    if terminal {
-                        completed_catalog_sources.insert(
-                            replay_source.source_path.display().to_string(),
-                            retained_events,
+                        summary.failed = summary.failed.saturating_add(1);
+                        summary.failures.push(ProviderImportFailure {
+                            line: 0,
+                            error: error.to_string(),
+                        });
+                        complete_source_progress(
+                            options,
+                            total_files,
+                            total_bytes,
+                            &source,
+                            &mut completed_files,
+                            &mut completed_bytes,
+                            summary,
                         );
                     }
                 }
-            }
-            // Progress is a committed-state contract: when a caller asks for
-            // it, flush the bounded source group before exposing its counters.
-            // Imports without a callback retain cross-source group coalescing.
-            if options.progress.is_some() {
-                publish_pending_group(store, &bulk_guard, &mut pending_group)?;
-            }
-            completed_files = completed_files.saturating_add(1);
-            completed_bytes = completed_bytes.saturating_add(source_bytes);
-            report_import_progress(
+                Ok(())
+            });
+        // A producer/consumer error may follow already ordered, prepared work.
+        // Preserve the former per-window commit semantics by flushing that work,
+        // but do not retry a group whose publication was already attempted and
+        // failed after ownership moved into the Store.
+        if !pending_group.is_empty() {
+            flush_pending_codex_root_group(
+                store,
+                &bulk_guard,
+                &native_options,
                 options,
                 total_files,
                 total_bytes,
-                completed_files,
-                completed_bytes,
+                &mut pending_group,
+                &mut pending_windows,
+                &mut prior_chunk_publication,
+                &mut completed_catalog_sources,
+                &mut completed_native_sessions,
+                &mut completed_files,
+                &mut completed_bytes,
                 summary,
-                false,
-            );
+                output_sink,
+            )?;
+        } else if produced.is_ok() && !pending_windows.is_empty() {
+            return Err(CaptureError::SystemInvariant(
+                "Codex pending publication metadata outlived its group",
+            ));
         }
-        publish_pending_group(store, &bulk_guard, &mut pending_group)?;
+        produced.map(|stats| {
+            #[cfg(codex_nativepath_qualification)]
+            super::qualification::observe_producer_stats(stats);
+            #[cfg(not(codex_nativepath_qualification))]
+            let _ = stats;
+        })?;
         Ok(())
     })();
     let finish = store.finish_event_search_bulk_mode(&bulk_guard);
@@ -349,11 +531,6 @@ fn import_cataloged_root(
             )?;
         }
     }
-    if let Some(sink) = output_sink {
-        for replay in output_replays {
-            replay_output(replay, sink);
-        }
-    }
     report_import_progress(
         options,
         total_files,
@@ -364,6 +541,149 @@ fn import_cataloged_root(
         true,
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_pending_codex_root_group(
+    store: &mut Store,
+    bulk_guard: &EventSearchBulkGuard,
+    native_options: &CodexNativeStoreOptions,
+    options: &CodexSessionImportOptions,
+    total_files: usize,
+    total_bytes: u64,
+    pending_group: &mut CodexNativeRootGroup,
+    pending_windows: &mut Vec<PendingCodexRootWindow>,
+    prior_chunk_publication: &mut Option<CodexNativeRootPublication>,
+    completed_catalog_sources: &mut std::collections::BTreeMap<String, u64>,
+    completed_native_sessions: &mut std::collections::BTreeSet<String>,
+    completed_files: &mut usize,
+    completed_bytes: &mut u64,
+    summary: &mut ProviderImportSummary,
+    output_sink: Option<&dyn crate::ProOutputSink>,
+) -> Result<()> {
+    if pending_windows.is_empty() {
+        if !pending_group.is_empty() {
+            return Err(CaptureError::SystemInvariant(
+                "Codex pending publication metadata is empty",
+            ));
+        }
+        return Ok(());
+    }
+    if pending_group.is_empty() {
+        return Err(CaptureError::SystemInvariant(
+            "Codex pending publication group is empty",
+        ));
+    }
+    let continuation = pending_windows
+        .last()
+        .is_some_and(|pending| !pending.source_done);
+    let publication = std::mem::take(pending_group)
+        .publish(store, bulk_guard)
+        .map_err(native_error)?;
+    summary.imported_events = summary
+        .imported_events
+        .saturating_add(publication.imported_events);
+    summary.skipped_events = summary
+        .skipped_events
+        .saturating_add(publication.skipped_events);
+
+    for pending in pending_windows.drain(..) {
+        summary.imported_sessions = summary
+            .imported_sessions
+            .saturating_add(pending.delta.imported_sessions);
+        summary.imported = summary
+            .imported
+            .saturating_add(pending.delta.imported_sessions);
+        summary.imported_edges = summary
+            .imported_edges
+            .saturating_add(pending.delta.imported_edges);
+        if !pending.source_done {
+            continue;
+        }
+        finish_pending_codex_native_retirement(store, bulk_guard, &pending.source, native_options)
+            .map_err(native_error)?;
+        let report = pending.report.ok_or(CaptureError::SystemInvariant(
+            "terminal Codex producer window omitted its report",
+        ))?;
+        summary.skipped_events = summary
+            .skipped_events
+            .saturating_add(report.skipped_events)
+            .saturating_add(report.rejected_records);
+        record_native_rejections(
+            summary,
+            &pending.source,
+            report.rejected_records,
+            report.rejections,
+        );
+        if report.terminal {
+            completed_catalog_sources.insert(
+                pending.source.source_path.display().to_string(),
+                report.retained_events,
+            );
+            if let Some(native_session_id) = pending.source.catalog_native_session_id.as_ref() {
+                completed_native_sessions.insert(native_session_id.clone());
+            }
+            if let Some(sink) = output_sink {
+                match prepare_codex_native_output_replay(
+                    store,
+                    pending.source.clone(),
+                    native_options.clone(),
+                    sink,
+                ) {
+                    Ok(replay) => replay_output(replay, sink)?,
+                    Err(error) if native_error_is_fatal(&error) => {
+                        return Err(native_error(error));
+                    }
+                    Err(error) => sink.mark_behind(ProOutputSinkError::new(
+                        "codex_nativepath_output_prepare",
+                        error.to_string(),
+                    )),
+                }
+            }
+        }
+        complete_source_progress(
+            options,
+            total_files,
+            total_bytes,
+            &pending.source,
+            completed_files,
+            completed_bytes,
+            summary,
+        );
+    }
+    *prior_chunk_publication = continuation.then_some(publication);
+    Ok(())
+}
+
+fn source_bytes(source: &CodexCatalogSource) -> u64 {
+    source
+        .source_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_source_progress(
+    options: &CodexSessionImportOptions,
+    total_files: usize,
+    total_bytes: u64,
+    source: &CodexCatalogSource,
+    completed_files: &mut usize,
+    completed_bytes: &mut u64,
+    summary: &ProviderImportSummary,
+) {
+    *completed_files = (*completed_files).saturating_add(1);
+    *completed_bytes = (*completed_bytes).saturating_add(source_bytes(source));
+    report_import_progress(
+        options,
+        total_files,
+        total_bytes,
+        *completed_files,
+        *completed_bytes,
+        summary,
+        false,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,22 +714,30 @@ fn report_import_progress(
     });
 }
 
-fn replay_output(replay: CodexNativeOutputReplay, sink: &dyn crate::ProOutputSink) {
-    match replay.replay(sink) {
-        Ok(results) => {
-            for result in results {
-                if let Err(failure) = result {
-                    sink.mark_behind(ProOutputSinkError::new(
-                        "codex_nativepath_output_page",
-                        format!("{failure:?}"),
-                    ));
-                }
+fn replay_output(
+    mut replay: CodexNativeOutputReplay,
+    sink: &dyn crate::ProOutputSink,
+) -> Result<()> {
+    loop {
+        match replay.next_page(sink) {
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(failure))) => {
+                sink.mark_behind(ProOutputSinkError::new(
+                    "codex_nativepath_output_page",
+                    format!("{failure:?}"),
+                ));
+                return Ok(());
+            }
+            Ok(None) => return Ok(()),
+            Err(error) if native_error_is_fatal(&error) => return Err(native_error(error)),
+            Err(error) => {
+                sink.mark_behind(ProOutputSinkError::new(
+                    "codex_nativepath_output_replay",
+                    error.to_string(),
+                ));
+                return Ok(());
             }
         }
-        Err(error) => sink.mark_behind(ProOutputSinkError::new(
-            "codex_nativepath_output_replay",
-            error.to_string(),
-        )),
     }
 }
 
@@ -419,7 +747,12 @@ fn retire_missing_root(
     options: &CodexSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
     let root = source_root.display().to_string();
-    let sessions = store.list_catalog_sessions_for_source(CaptureProvider::Codex, &root)?;
+    let sessions = store.list_catalog_sessions_for_source_bounded(
+        CaptureProvider::Codex,
+        &root,
+        super::super::catalog::CODEX_CATALOG_MAX_SOURCES,
+    )?;
+    ensure_catalog_source_bound(sessions.len())?;
     let discovery = discover_codex_catalog_sources(&sessions);
     let bulk_guard = store.begin_event_search_bulk_mode()?;
     let native_options = CodexNativeStoreOptions {
@@ -449,46 +782,6 @@ fn retire_missing_root(
     let summary = retire?;
     finish?;
     Ok(summary)
-}
-
-fn parent_first(sources: &mut Vec<CodexCatalogSource>) {
-    let mut remaining = std::mem::take(sources);
-    remaining.sort_by(|left, right| left.source_path.cmp(&right.source_path));
-    let mut ordered = Vec::with_capacity(remaining.len());
-    while !remaining.is_empty() {
-        let known = ordered
-            .iter()
-            .filter_map(|source: &CodexCatalogSource| source.catalog_native_session_id.as_deref())
-            .collect::<std::collections::BTreeSet<_>>();
-        let ready = remaining.iter().position(|source| {
-            source
-                .catalog_parent_native_session_id
-                .as_deref()
-                .is_none_or(|parent| {
-                    known.contains(parent)
-                        || !remaining.iter().any(|candidate| {
-                            candidate.catalog_native_session_id.as_deref() == Some(parent)
-                        })
-                })
-        });
-        let index = ready.unwrap_or(0);
-        ordered.push(remaining.remove(index));
-    }
-    *sources = ordered;
-}
-
-fn publish_pending_group(
-    store: &Store,
-    bulk_guard: &ctx_history_store::EventSearchBulkGuard,
-    pending: &mut CodexNativeRootGroup,
-) -> Result<()> {
-    if pending.is_empty() {
-        return Ok(());
-    }
-    std::mem::take(pending)
-        .publish(store, bulk_guard)
-        .map(|_| ())
-        .map_err(native_error)
 }
 
 fn common_root(paths: &[PathBuf]) -> PathBuf {
@@ -572,40 +865,18 @@ fn bounded_rejection_source_label(source: &CodexCatalogSource) -> String {
     }
 }
 
-fn native_error(error: impl std::fmt::Display) -> CaptureError {
-    CaptureError::InvalidPayload(format!("Codex NativePath import failed: {error}"))
+fn native_error(error: CodexNativeVerticalError) -> CaptureError {
+    match error {
+        CodexNativeVerticalError::Capture(error) => error,
+        CodexNativeVerticalError::Store(error) => CaptureError::Store(error),
+        error => CaptureError::InvalidPayload(format!("Codex NativePath import failed: {error}")),
+    }
+}
+
+fn native_error_is_fatal(error: &CodexNativeVerticalError) -> bool {
+    error.requires_immediate_propagation()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejection_source_label_is_path_free_escaped_and_bounded() {
-        let source = CodexCatalogSource {
-            source_root: "/private/source/root".to_owned(),
-            source_path: Path::new("/private/source/root/2026/07").join(format!(
-                "rollout\n{}-secret.jsonl",
-                "x".repeat(MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES * 2)
-            )),
-            cataloged_at_ms: 0,
-            catalog_observation: super::super::CodexFileObservation {
-                len: 0,
-                modified_at_ms: 0,
-                change_token: [0; 32],
-            },
-            catalog_native_session_id: None,
-            catalog_parent_native_session_id: None,
-            catalog_root_native_session_id: None,
-        };
-        let label = bounded_rejection_source_label(&source);
-
-        assert!(label.len() <= MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES);
-        assert!(!label.contains("/private/source/root"));
-        assert!(label.contains("2026"));
-        assert!(label.contains("rollout"));
-        assert!(!label.contains('\n'));
-        assert!(label.contains("\\n"));
-        assert!(label.ends_with("..."));
-    }
-}
+#[path = "root/tests.rs"]
+mod tests;

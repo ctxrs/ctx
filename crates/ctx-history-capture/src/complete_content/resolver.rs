@@ -37,31 +37,6 @@ pub struct CompleteMessageRequest {
     pub indexed_limit_chars: usize,
 }
 
-/// Local source coordinates required to re-read one normalized result body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultContentRequest {
-    pub event_id: Uuid,
-    pub provider: CaptureProvider,
-    pub source_format: String,
-    pub source_access: BrokeredSourceAccess,
-    pub source_family: CompleteContentSourceFamily,
-    pub content_profile: String,
-    pub source_locator: CompleteContentSourceLocator,
-    pub source_record_ordinal: u64,
-    pub source_record_subrecord_index: u32,
-    pub expected_native_record_id: String,
-    pub expected_record_digest: CompleteContentBodyDigest,
-    pub expected_content_ref: ContentRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedResultContent {
-    pub event_id: Uuid,
-    pub content: String,
-    pub content_ref: ContentRef,
-    pub verification: SourceVerification,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceVerification {
     pub source_identity_verified: bool,
@@ -215,94 +190,6 @@ pub trait CompleteContentResolver: Send + Sync {
         &self,
         requests: &[CompleteMessageRequest],
     ) -> Result<Vec<CompleteMessage>, CompleteContentError>;
-}
-
-/// Provider-family boundary for transient, per-item result hydration.
-pub trait ResultContentResolver: Send + Sync {
-    fn family(&self) -> CompleteContentSourceFamily;
-
-    fn supports(&self, provider: CaptureProvider, source_format: &str) -> bool;
-
-    fn resolve_results(
-        &self,
-        requests: &[ResultContentRequest],
-    ) -> Vec<Result<ResolvedResultContent, CompleteContentError>>;
-}
-
-#[derive(Default)]
-pub struct ResultContentResolverRegistry {
-    resolvers: Vec<Arc<dyn ResultContentResolver>>,
-}
-
-impl ResultContentResolverRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register<R>(&mut self, resolver: R)
-    where
-        R: ResultContentResolver + 'static,
-    {
-        self.resolvers.push(Arc::new(resolver));
-    }
-
-    pub fn resolve(
-        &self,
-        requests: &[ResultContentRequest],
-    ) -> Vec<Result<ResolvedResultContent, CompleteContentError>> {
-        let Some(first) = requests.first() else {
-            return Vec::new();
-        };
-        let invalid = requests.iter().any(|request| {
-            request.provider != first.provider
-                || request.source_format != first.source_format
-                || request.source_access != first.source_access
-                || request.source_family != first.source_family
-                || !verified_content_route_matches(
-                    &request.content_profile,
-                    request.provider,
-                    &request.source_format,
-                    request.source_family,
-                    VerifiedContentRole::ResultBody,
-                    request.source_locator.kind(),
-                )
-        }) || requests.windows(2).any(|requests| {
-            (
-                requests[0].source_record_ordinal,
-                requests[0].source_record_subrecord_index,
-            ) >= (
-                requests[1].source_record_ordinal,
-                requests[1].source_record_subrecord_index,
-            )
-        });
-        if invalid {
-            return result_errors(requests, CompleteContentErrorKind::HydrationUnsupported);
-        }
-        let Some(resolver) = self.resolvers.iter().find(|resolver| {
-            resolver.family() == first.source_family
-                && resolver.supports(first.provider, &first.source_format)
-        }) else {
-            return result_errors(requests, CompleteContentErrorKind::HydrationUnsupported);
-        };
-        let results = resolver.resolve_results(requests);
-        if results.len() != requests.len() {
-            return result_errors(
-                requests,
-                CompleteContentErrorKind::ContentVerificationFailed,
-            );
-        }
-        results
-    }
-}
-
-fn result_errors(
-    requests: &[ResultContentRequest],
-    kind: CompleteContentErrorKind,
-) -> Vec<Result<ResolvedResultContent, CompleteContentError>> {
-    requests
-        .iter()
-        .map(|request| Err(CompleteContentError::new(kind, request.event_id)))
-        .collect()
 }
 
 #[derive(Default)]

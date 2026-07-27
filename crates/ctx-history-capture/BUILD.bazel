@@ -1,7 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
-load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
 load("//tools/bazel:gates.bzl", "loc_check_inputs")
 
 package(default_visibility = ["//visibility:public"])
@@ -11,6 +11,17 @@ loc_check_inputs(name = "loc_check_inputs")
 filegroup(
     name = "cargo_package_data",
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+filegroup(
+    name = "provider_architecture_sources",
+    srcs = glob(
+        [
+            "src/provider/**/*.rs",
+            "src/provider_sources/**/*.rs",
+        ],
+        exclude = RUST_PROD_SRC_EXCLUDES,
+    ),
 )
 
 COMMON_RUSTC_ENV = {
@@ -42,6 +53,76 @@ rust_library(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
+rust_library(
+    name = "qualification_lib",
+    srcs = PROD_SRCS,
+    crate_name = "ctx_history_capture",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + CTX_HISTORY_CAPTURE_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_env_files = ["qualification-stamp.env"],
+    rustc_flags = ["--cfg=codex_nativepath_qualification"],
+    stamp = 1,
+    tags = [
+        "local",
+        "manual",
+        "qualification",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+ctx_rust_binary(
+    name = "codex_nativepath_qualification",
+    srcs = ["qualification/codex_nativepath.rs"],
+    crate_name = "codex_nativepath_qualification",
+    crate_root = "qualification/codex_nativepath.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        ":qualification_lib",
+        "//crates/ctx-history-store:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    tags = [
+        "local",
+        "manual",
+        "qualification",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+ctx_rust_test(
+    name = "codex_nativepath_qualification_tests",
+    srcs = ["qualification/codex_nativepath.rs"],
+    crate_name = "codex_nativepath_qualification_tests",
+    crate_root = "qualification/codex_nativepath.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":qualification_lib",
+        "//crates/ctx-history-store:lib",
+    ],
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    tags = [
+        "local",
+        "manual",
+        "qualification",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
@@ -50,6 +131,8 @@ ctx_rust_test(
     compile_data = [
         "//:provider_support_matrix",
         "//:public_test_fixtures",
+        "//crates/ctx-cli:native_dispatch_source",
+        "//crates/ctx-history-store:canonical_observation_projection_source",
     ],
     edition = crate_edition(),
     aliases = aliases(
@@ -57,12 +140,65 @@ ctx_rust_test(
         proc_macro_dev = True,
     ),
     data = [
+        "//:provider_support_matrix",
         "//:public_test_fixtures",
-    ] + glob(["tests/fixtures/codex_result_digest_reuse/**"]),
+        ":provider_architecture_sources",
+        "//crates/ctx-cli:provider_import_architecture_sources",
+    ],
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
     ) + CTX_HISTORY_CAPTURE_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "crush_identity_storage_tests",
+    srcs = ["tests/crush_identity_storage.rs"],
+    crate_name = "crush_identity_storage",
+    crate_root = "tests/crush_identity_storage.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-store:lib",
+    ],
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "opencode_nativepath_release_blockers_tests",
+    srcs = ["tests/opencode_nativepath_release_blockers.rs"],
+    crate_name = "opencode_nativepath_release_blockers",
+    crate_root = "tests/opencode_nativepath_release_blockers.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-store:lib",
+    ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,

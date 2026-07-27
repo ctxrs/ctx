@@ -310,7 +310,7 @@ pub(crate) fn run_status(
                         action
                             .get("price")
                             .and_then(Value::as_str)
-                            .unwrap_or("$15/month"),
+                            .unwrap_or("$20/month"),
                         action
                             .get("command")
                             .and_then(Value::as_str)
@@ -431,6 +431,30 @@ pub(crate) fn malformed_config_failure(json_output: bool) -> Result<()> {
         );
     } else {
         eprintln!("local_usage_config_unavailable: local usage configuration could not be read");
+    }
+    Err(crate::dispatch::rendered_cli_error())
+}
+
+pub(crate) fn removed_cloud_config_failure(json_output: bool) -> Result<()> {
+    if json_output {
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "schema_version": 1,
+                "error": {
+                    "code": "removed_config_key",
+                    "config_key": "cloud.mode",
+                    "message": "cloud history configuration is no longer supported",
+                },
+                "local_only": true,
+                "read_only": true,
+            }))
+            .expect("removed-cloud status errors contain only static JSON")
+        );
+    } else {
+        eprintln!(
+            "removed_config_key: cloud.mode is no longer supported; remove it from config.toml"
+        );
     }
     Err(crate::dispatch::rendered_cli_error())
 }

@@ -15,6 +15,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::authorization::InstallationChallengeSigner;
 
+mod anonymous_trial;
 #[cfg(target_os = "macos")]
 #[rustfmt::skip]
 mod macos;
@@ -43,7 +44,9 @@ const RECORD_ID_PREFIX: &str = "cv2-";
 const RECORD_ID_HEX_BYTES: usize = 64;
 const RECORD_ID_DOMAIN: &[u8] = b"ctx\0credential-vault\0record-id\0v2\0";
 const WORKOS_SCHEMA_VERSION: u16 = 1;
-const ANONYMOUS_TRIAL_SCHEMA_VERSION: u16 = 1;
+
+pub(crate) use anonymous_trial::AnonymousTrialMaterial;
+use anonymous_trial::{decode, encode, store_state};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CredentialVaultNamespace {
@@ -222,83 +225,6 @@ impl WorkOsSessionMaterial {
 impl fmt::Debug for WorkOsSessionMaterial {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("WorkOsSessionMaterial([REDACTED])")
-    }
-}
-
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AnonymousTrialMaterial {
-    schema_version: u16,
-    access_token: String,
-    trial_deadline_unix: i64,
-    #[serde(default)]
-    refresh_not_before_unix: Option<i64>,
-}
-
-impl AnonymousTrialMaterial {
-    pub(crate) fn new(
-        access_token: String,
-        trial_deadline_unix: i64,
-    ) -> Result<Self, CredentialVaultError> {
-        let value = Self {
-            schema_version: ANONYMOUS_TRIAL_SCHEMA_VERSION,
-            access_token,
-            trial_deadline_unix,
-            refresh_not_before_unix: None,
-        };
-        value.validate().map(|()| value)
-    }
-
-    pub(crate) fn access_token(&self) -> &str {
-        &self.access_token
-    }
-
-    pub(crate) const fn trial_deadline_unix(&self) -> i64 {
-        self.trial_deadline_unix
-    }
-
-    pub(crate) const fn refresh_not_before_unix(&self) -> Option<i64> {
-        self.refresh_not_before_unix
-    }
-
-    pub(crate) fn with_access_token(
-        mut self,
-        access_token: String,
-    ) -> Result<Self, CredentialVaultError> {
-        self.access_token = access_token;
-        self.refresh_not_before_unix = None;
-        self.validate().map(|()| self)
-    }
-
-    pub(crate) fn with_refresh_not_before_unix(
-        mut self,
-        value: Option<i64>,
-    ) -> Result<Self, CredentialVaultError> {
-        self.refresh_not_before_unix = value;
-        self.validate().map(|()| self)
-    }
-
-    fn validate(&self) -> Result<(), CredentialVaultError> {
-        if self.schema_version != ANONYMOUS_TRIAL_SCHEMA_VERSION
-            || self.access_token.len() < 16
-            || invalid_secret(&self.access_token)
-            || self.access_token.bytes().any(|byte| {
-                !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
-            })
-            || self.trial_deadline_unix <= 0
-            || self
-                .refresh_not_before_unix
-                .is_some_and(|value| value < 0 || value > self.trial_deadline_unix)
-        {
-            return Err(CredentialVaultError::Corrupt);
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for AnonymousTrialMaterial {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AnonymousTrialMaterial([REDACTED])")
     }
 }
 
@@ -514,6 +440,14 @@ impl PlatformCredentialVault {
         store_record(&self.backend, &self.record_ids, record)
     }
 
+    pub(crate) fn store_anonymous_trial_state(
+        &self,
+        entitlement: BoundedSignedEntitlement,
+        trial: AnonymousTrialMaterial,
+    ) -> Result<(), CredentialVaultError> {
+        store_state(&self.backend, &self.record_ids, entitlement, trial)
+    }
+
     pub(crate) fn delete(&self, kind: CredentialRecordKind) -> Result<(), CredentialVaultError> {
         self.backend.delete(self.record_ids.get(kind))
     }
@@ -566,7 +500,7 @@ fn load_record<B: CredentialVaultBackend>(
             decode_workos(bytes.as_slice()).map(CredentialRecord::WorkOsSession)
         }
         CredentialRecordKind::AnonymousTrial => {
-            decode_anonymous_trial(bytes.as_slice()).map(CredentialRecord::AnonymousTrial)
+            decode(bytes.as_slice()).map(CredentialRecord::AnonymousTrial)
         }
         CredentialRecordKind::InstallationSigningKey => {
             let seed = bytes
@@ -592,16 +526,11 @@ fn store_record<B: CredentialVaultBackend>(
 ) -> Result<(), CredentialVaultError> {
     let bytes = match record {
         CredentialRecord::WorkOsSession(value) => encode_workos(value)?,
-        CredentialRecord::AnonymousTrial(value) => encode_anonymous_trial(value)?,
+        CredentialRecord::AnonymousTrial(value) => encode(value)?,
         CredentialRecord::InstallationSigningKey(value) => {
             SecretBytes::new(value.expose().to_vec())?
         }
-        CredentialRecord::SignedEntitlement(value) => {
-            validate_entitlement(value.as_inner())?;
-            SecretBytes::new(
-                serde_json::to_vec(value.as_inner()).map_err(|_| CredentialVaultError::Corrupt)?,
-            )?
-        }
+        CredentialRecord::SignedEntitlement(value) => encode_entitlement(value)?,
     };
     backend.store(record_ids.get(record.kind()), bytes.as_slice())
 }
@@ -621,17 +550,13 @@ fn decode_workos(bytes: &[u8]) -> Result<WorkOsSessionMaterial, CredentialVaultE
     value.validate().map(|()| value)
 }
 
-fn encode_anonymous_trial(
-    value: &AnonymousTrialMaterial,
+fn encode_entitlement(
+    value: &BoundedSignedEntitlement,
 ) -> Result<SecretBytes, CredentialVaultError> {
-    value.validate()?;
-    SecretBytes::new(serde_json::to_vec(value).map_err(|_| CredentialVaultError::Corrupt)?)
-}
-
-fn decode_anonymous_trial(bytes: &[u8]) -> Result<AnonymousTrialMaterial, CredentialVaultError> {
-    let value: AnonymousTrialMaterial =
-        serde_json::from_slice(bytes).map_err(|_| CredentialVaultError::Corrupt)?;
-    value.validate().map(|()| value)
+    validate_entitlement(value.as_inner())?;
+    SecretBytes::new(
+        serde_json::to_vec(value.as_inner()).map_err(|_| CredentialVaultError::Corrupt)?,
+    )
 }
 
 fn validate_entitlement(value: &SignedEntitlement) -> Result<(), CredentialVaultError> {
@@ -800,18 +725,6 @@ mod tests {
                 Err(CredentialVaultError::InvalidRecordId)
             );
         }
-    }
-
-    #[test]
-    fn anonymous_trial_material_is_bounded_and_round_trips() {
-        let value = AnonymousTrialMaterial::new("a".repeat(32), 2_000).unwrap();
-        let encoded = encode_anonymous_trial(&value).unwrap();
-        let decoded = decode_anonymous_trial(encoded.as_slice()).unwrap();
-        assert_eq!(decoded.access_token(), "a".repeat(32));
-        assert_eq!(decoded.trial_deadline_unix(), 2_000);
-        assert_eq!(decoded.refresh_not_before_unix(), None);
-        assert!(AnonymousTrialMaterial::new("short".to_owned(), 2_000).is_err());
-        assert!(AnonymousTrialMaterial::new("a".repeat(32), 0).is_err());
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

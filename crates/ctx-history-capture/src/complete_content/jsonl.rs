@@ -16,20 +16,21 @@ use crate::provider::codex::events::{
     codex_content_text, codex_message_event, codex_session_line_timestamp,
 };
 use crate::provider::providers::native_jsonl::{
-    native_jsonl_event_id, native_jsonl_event_text, native_jsonl_event_type,
-    native_jsonl_normalized_payload, qoder_complete_content_message_record,
+    direct_jsonl_complete_message_provider_event_hash, native_jsonl_event_id,
+    native_jsonl_event_text, native_jsonl_event_type, native_jsonl_normalized_payload,
+    qoder_complete_content_message_record,
 };
 use crate::{
     compute_payload_hash, CODEBUDDY_SOURCE_FORMAT, CODEX_SESSION_SOURCE_FORMAT,
-    JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT,
-    OPENCLAW_SOURCE_FORMAT,
+    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+    KIMI_CODE_CLI_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
 };
 
 mod junie;
 mod mux;
-mod results;
 
 pub(crate) use junie::valid_junie_record_set_locator;
+pub(crate) use mux::{mux_record_locator, MUX_LOCATOR_KIND};
 
 pub const JSONL_COMPLETE_CONTENT_LOCATOR_KIND: &str = "jsonl-range-v1";
 /// Exact routes use a distinct kind because the legacy range locator deliberately
@@ -221,7 +222,8 @@ fn validate_batch(requests: &[CompleteMessageRequest]) -> Result<(), CompleteCon
             || request.source_format != first.source_format
             || request.source_access != first.source_access
             || request.source_access.family() != CompleteContentSourceFamily::Jsonl
-            || request.source_record_subrecord_index != 0
+            || (request.provider != CaptureProvider::Cursor
+                && request.source_record_subrecord_index != 0)
         {
             return Err(error(
                 request,
@@ -258,6 +260,29 @@ fn resolve_record(
 ) -> Result<CompleteMessage, CompleteContentError> {
     let value = serde_json::from_slice::<Value>(record)
         .map_err(|_| error(request, CompleteContentErrorKind::ContentVerificationFailed))?;
+    if request.provider == CaptureProvider::Cursor
+        && request.source_format == CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT
+    {
+        let (text, native_record_id, provider_event_hash) =
+            crate::provider::providers::cursor::cursor_complete_content_message_record(
+                &value,
+                request.source_record_ordinal,
+                request.source_record_subrecord_index,
+                &request.indexed_text,
+            )
+            .ok_or_else(|| error(request, CompleteContentErrorKind::ContentVerificationFailed))?;
+        if request.expected_native_record_id.as_deref() != Some(native_record_id.as_str())
+            || request.expected_hash_authority
+                != CompleteContentHashAuthority::NormalizedPayloadFallback
+            || request.expected_provider_event_hash != provider_event_hash
+        {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        }
+        return CompleteMessage::verified(request, text, SourceVerification::VERIFIED);
+    }
     let line_number = usize::try_from(request.source_record_ordinal)
         .ok()
         .and_then(|ordinal| ordinal.checked_add(1))
@@ -286,16 +311,13 @@ fn complete_message_text_and_id(
     line_number: usize,
 ) -> Option<(String, String)> {
     if provider == CaptureProvider::Codex && source_format == CODEX_SESSION_SOURCE_FORMAT {
-        let payload = value.get("payload")?;
-        if value.get("type").and_then(Value::as_str) != Some("response_item")
-            || payload.get("type").and_then(Value::as_str) != Some("message")
-            || !matches!(
-                payload.get("role").and_then(Value::as_str),
-                Some("user" | "assistant" | "developer" | "system")
-            )
-        {
+        if value.get("type").and_then(Value::as_str) != Some("response_item") {
             return None;
         }
+        let payload = value.get("payload")?;
+        let fallback = DateTime::<Utc>::from_timestamp(0, 0)?;
+        let timestamp = codex_session_line_timestamp(value, fallback).ok()?;
+        codex_message_event(payload, line_number, timestamp)?;
         let text = payload.get("content").and_then(codex_content_text)?;
         return Some((text, format!("line-{line_number}")));
     }
@@ -390,6 +412,34 @@ fn verify_provider_event_hash(
             expected.as_deref() == Some(request.expected_provider_event_hash.as_str())
         }
         CompleteContentHashAuthority::NormalizedPayloadFallback => {
+            if matches!(
+                request.provider,
+                CaptureProvider::Antigravity
+                    | CaptureProvider::CopilotCli
+                    | CaptureProvider::FactoryAiDroid
+                    | CaptureProvider::Gemini
+                    | CaptureProvider::Qoder
+                    | CaptureProvider::QwenCode
+                    | CaptureProvider::Tabnine
+                    | CaptureProvider::Windsurf
+            ) {
+                let observed = direct_jsonl_complete_message_provider_event_hash(
+                    request.provider,
+                    &request.source_format,
+                    value,
+                    request.source_record_ordinal,
+                    line_number,
+                );
+                return if observed.as_deref() == Some(request.expected_provider_event_hash.as_str())
+                {
+                    Ok(())
+                } else {
+                    Err(error(
+                        request,
+                        CompleteContentErrorKind::ContentVerificationFailed,
+                    ))
+                };
+            }
             let normalized = normalized_message_payload(
                 request.provider,
                 &request.source_format,
@@ -418,6 +468,9 @@ fn normalized_message_payload(
     value: &Value,
     line_number: usize,
 ) -> Option<Value> {
+    if provider == CaptureProvider::CodeBuddy && source_format == CODEBUDDY_SOURCE_FORMAT {
+        return Some(value.clone());
+    }
     if provider == CaptureProvider::Codex && source_format == CODEX_SESSION_SOURCE_FORMAT {
         let fallback = DateTime::<Utc>::from_timestamp(0, 0)?;
         let timestamp = codex_session_line_timestamp(value, fallback).ok()?;
@@ -448,6 +501,9 @@ fn normalized_message_payload(
             )
             .payload,
         );
+    }
+    if provider == CaptureProvider::KimiCodeCli && source_format == KIMI_CODE_CLI_SOURCE_FORMAT {
+        return crate::provider::providers::kimi::kimi_complete_content_normalized_payload(value);
     }
     if provider == CaptureProvider::Junie && source_format == JUNIE_SESSION_EVENTS_SOURCE_FORMAT {
         let prompt = value.get("prompt").and_then(Value::as_str)?;

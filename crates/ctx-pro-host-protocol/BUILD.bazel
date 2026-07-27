@@ -49,7 +49,9 @@ rust_library(
 
 ctx_rust_binary(
     name = "generate_protocol_inventory",
-    srcs = ["examples/generate_protocol_inventory.rs"],
+    srcs = ["examples/generate_protocol_inventory.rs"] + glob(
+        ["examples/generate_protocol_inventory/**/*.rs"],
+    ),
     crate_name = "generate_protocol_inventory",
     crate_root = "examples/generate_protocol_inventory.rs",
     edition = crate_edition(),

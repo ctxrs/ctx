@@ -247,6 +247,7 @@ mod tests {
              must advance the epoch, and no excluded column may spuriously advance it"
         );
         assert!(!trigger_matrix["events"].contains("metadata_json"));
+        assert!(trigger_matrix["sessions"].contains("metadata_json"));
         assert!(trigger_matrix["capture_sources"].contains("metadata_json"));
     }
 

@@ -14,6 +14,17 @@ use tempfile::tempdir;
 
 use super::query::ZED_THREAD_ID_MAX_BYTES;
 use super::*;
+use crate::{
+    complete_content::{
+        source_access::{AuthorizedSourceRoute, SourceAccessBroker},
+        sqlite::SqliteCompleteContentResolver,
+        CompleteContentErrorKind, CompleteContentHashAuthority, CompleteContentResolver,
+        CompleteContentSourceFamily, CompleteMessageRequest, SourceSnapshot,
+        VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+    },
+    PROVIDER_MAX_TEXT_CHARS, ZED_THREADS_SQLITE_SOURCE_FORMAT,
+};
+use ctx_history_core::CaptureProvider;
 
 #[derive(Default)]
 struct CollectingSink {
@@ -54,8 +65,8 @@ impl CollectingSink {
 struct DiscardingSink {
     pages: u64,
     rows: u64,
-    max_page_rows: usize,
-    max_page_bytes: usize,
+    max_page_units: usize,
+    max_page_encoded_bytes: usize,
 }
 
 #[derive(Default)]
@@ -158,8 +169,10 @@ impl ZedNativeSink for DiscardingSink {
         self.rows = self
             .rows
             .saturating_add(u64::try_from(page.row_count()).unwrap_or(u64::MAX));
-        self.max_page_rows = self.max_page_rows.max(page.row_count());
-        self.max_page_bytes = self.max_page_bytes.max(page.estimated_bytes);
+        self.max_page_units = self.max_page_units.max(page.publication_units());
+        self.max_page_encoded_bytes = self
+            .max_page_encoded_bytes
+            .max(serde_json::to_vec(&page).map_or(usize::MAX, |encoded| encoded.len()));
         Ok(())
     }
 }
@@ -236,6 +249,23 @@ fn output_message(call_id: &str, input_path: &str, output_body: &str, is_error: 
     })
 }
 
+fn result_only_message(call_id: &str, output_body: &str) -> Value {
+    json!({
+        "Agent": {
+            "content": [],
+            "tool_results": {
+                call_id: {
+                    "tool_name": "read_file",
+                    "tool_use_id": call_id,
+                    "is_error": false,
+                    "content": [{"Text": output_body}],
+                    "output": {"status": "ok"}
+                }
+            }
+        }
+    })
+}
+
 fn encode_thread(payload: &Value, data_type: &str) -> Vec<u8> {
     let json = serde_json::to_vec(payload).unwrap();
     match data_type {
@@ -292,6 +322,76 @@ fn scan(path: &Path) -> (ZedNativeGenerationAuthority, CollectingSink) {
     let mut sink = CollectingSink::default();
     let outcome = scan_zed_nativepath(&ZedNativeSourceSelection::exact(path), &mut sink).unwrap();
     (complete(outcome), sink)
+}
+
+fn adapter_context(path: &Path, machine_id: &str) -> crate::ProviderAdapterContext {
+    crate::ProviderAdapterContext {
+        machine_id: machine_id.to_owned(),
+        source_path: Some(path.to_path_buf()),
+        source_root: None,
+        imported_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    }
+}
+
+fn complete_message_request(
+    path: &Path,
+    event: &ctx_history_core::Event,
+) -> CompleteMessageRequest {
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let locator = locators.locator(VerifiedContentRole::MessageBody).unwrap();
+    let event_id = event.id;
+    let source_access = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: event.capture_source_id.unwrap(),
+                provider: CaptureProvider::Zed,
+                source_format: ZED_THREADS_SQLITE_SOURCE_FORMAT.to_owned(),
+                family: CompleteContentSourceFamily::Sqlite,
+                raw_source_path: path.to_path_buf(),
+                source_root: path.parent().map(Path::to_path_buf),
+                source_identity: Some("zed-nativepath-complete-test".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            event_id,
+        )
+        .unwrap();
+    CompleteMessageRequest {
+        event_id,
+        provider: CaptureProvider::Zed,
+        source_format: ZED_THREADS_SQLITE_SOURCE_FORMAT.to_owned(),
+        source_access,
+        source_family: Some(CompleteContentSourceFamily::Sqlite),
+        content_profile: locator.content_profile().to_owned(),
+        source_locator: locator.source_locator(),
+        provider_session_id: event
+            .sync
+            .metadata
+            .get("provider_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        source_record_ordinal: event.sync.metadata["source_record_ordinal"]
+            .as_u64()
+            .unwrap(),
+        source_record_subrecord_index: event.sync.metadata["source_record_subrecord_index"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap(),
+        expected_provider_event_hash: event.sync.metadata["provider_event_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expected_hash_authority: CompleteContentHashAuthority::NormalizedPayloadFallback,
+        expected_native_record_id: Some(locator.native_record_id().to_owned()),
+        expected_record_digest: Some(locator.record_sha256().clone()),
+        expected_content_ref: Some(locator.content_ref().clone()),
+        indexed_text: event.payload["text"].as_str().unwrap().to_owned(),
+        indexed_limit_chars: PROVIDER_MAX_TEXT_CHARS,
+    }
 }
 
 #[test]
@@ -762,8 +862,9 @@ fn multi_megabyte_thread_id_is_rejected_before_materialization_and_sibling_survi
     );
     assert!(sink.rejections()[0].reason.len() < 256);
     assert!(sink.pages.iter().all(|page| {
-        page.row_count() <= ZED_NATIVE_PAGE_MAX_ROWS
+        page.publication_units() <= ZED_NATIVE_PAGE_MAX_UNITS
             && page.estimated_bytes <= ZED_NATIVE_PAGE_MAX_BYTES
+            && serde_json::to_vec(page).unwrap().len() <= page.estimated_bytes
     }));
 }
 
@@ -1245,90 +1346,70 @@ fn duplicate_key_and_non_object_results_are_discarded_without_losing_conversatio
     }
 }
 
+#[path = "tests/scale.rs"]
+mod scale;
+
 #[test]
 fn local_scale_scan_is_bounded_and_never_materializes_result_surfaces() {
-    const THREADS: usize = 80;
-    const MESSAGES_PER_THREAD: usize = 100;
-
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("threads.db");
-    let mut connection = new_database(&path);
-    let transaction = connection.transaction().unwrap();
-    for thread_index in 0..THREADS {
-        let id = format!("thread-{thread_index:04}");
-        let mut messages = Vec::with_capacity(MESSAGES_PER_THREAD);
-        for message_index in 0..MESSAGES_PER_THREAD {
-            let sequence = thread_index * MESSAGES_PER_THREAD + message_index;
-            if message_index % 10 == 9 {
-                messages.push(output_message(
-                    &format!("call-{sequence:08}"),
-                    &format!("src/scale-{sequence:08}.rs"),
-                    &format!("CTX-ZED-SCALE-OUTPUT-{sequence:08} /result-only/{sequence:08}.txt"),
-                    false,
-                ));
-            } else if message_index % 2 == 0 {
-                messages.push(user(
-                    &format!("user-{sequence:08}"),
-                    &format!("user message {sequence:08}"),
-                ));
-            } else {
-                messages.push(assistant(&format!("assistant message {sequence:08}")));
-            }
-        }
-        insert_thread(
-            &transaction,
-            &id,
-            (thread_index > 0).then_some("thread-0000"),
-            if thread_index % 2 == 0 {
-                "json"
-            } else {
-                "zstd"
-            },
-            &thread(messages),
-        );
-    }
-    transaction.commit().unwrap();
-    drop(connection);
-
-    let (authority, sink) = scan(&path);
-
-    assert_eq!(authority.counters.native_thread_rows, THREADS as u64);
-    assert_eq!(
-        authority.counters.retained_events,
-        (THREADS * MESSAGES_PER_THREAD) as u64
-    );
-    assert_eq!(
-        authority.counters.output.native_results_observed,
-        (THREADS * (MESSAGES_PER_THREAD / 10)) as u64
-    );
-    assert_eq!(authority.counters.output.result_events_created, 0);
-    assert_eq!(authority.counters.output.result_hashes_created, 0);
-    assert_eq!(authority.counters.output.result_previews_created, 0);
-    assert_eq!(authority.counters.output.result_file_touches_created, 0);
-    assert!(sink.pages.len() > 1);
-    assert!(sink.pages.iter().all(|page| {
-        page.row_count() <= ZED_NATIVE_PAGE_MAX_ROWS
-            && page.estimated_bytes <= ZED_NATIVE_PAGE_MAX_BYTES
-    }));
-    assert!(sink.events().iter().all(|event| {
-        !event.body.contains("CTX-ZED-SCALE-OUTPUT")
-            && !event.preview.contains("CTX-ZED-SCALE-OUTPUT")
-            && event
-                .safe_file_touches
-                .iter()
-                .all(|path| !path.contains("result-only"))
-    }));
+    scale::local_scale_scan_is_bounded_and_never_materializes_result_surfaces();
 }
 
 #[test]
-fn large_thread_id_event_amplification_streams_through_bounded_pages() {
-    const MESSAGES: usize = ZED_NATIVE_PAGE_MAX_ROWS + 1;
+fn sixty_five_session_event_touch_units_split_acquisition_pages() {
+    const EVENTS: usize = ZED_NATIVE_PAGE_MAX_UNITS.div_ceil(2);
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let connection = new_database(&path);
-    let thread_id = format!("amplification-{}", "t".repeat(4 * 1024));
-    assert!(thread_id.len().saturating_mul(MESSAGES) > ZED_NATIVE_PAGE_MAX_BYTES);
+    let messages = (0..EVENTS)
+        .map(|index| {
+            output_message(
+                &format!("call-{index:03}"),
+                &format!("src/acquisition-{index:03}.rs"),
+                "output-only",
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    insert_thread(
+        &connection,
+        "unit-accounting-thread",
+        None,
+        "json",
+        &thread(messages),
+    );
+    drop(connection);
+
+    let (authority, sink) = scan(&path);
+    assert_eq!(authority.counters.sessions_retained, 1);
+    assert_eq!(authority.counters.retained_events, EVENTS as u64);
+    assert_eq!(authority.counters.retained_file_touches, EVENTS as u64);
+    assert_eq!(
+        sink.pages
+            .iter()
+            .map(ZedNativePage::publication_units)
+            .collect::<Vec<_>>(),
+        vec![ZED_NATIVE_PAGE_MAX_UNITS - 1, 2]
+    );
+    assert!(sink.pages.iter().all(|page| {
+        page.publication_units() <= ZED_NATIVE_PAGE_MAX_UNITS
+            && page.estimated_bytes <= ZED_NATIVE_PAGE_MAX_BYTES
+            && serde_json::to_vec(page).unwrap().len() <= page.estimated_bytes
+    }));
+}
+
+#[test]
+fn large_thread_id_event_amplification_splits_before_page_byte_limit() {
+    const MESSAGES: usize = ZED_NATIVE_PAGE_MAX_UNITS - 1;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let connection = new_database(&path);
+    let thread_id = format!(
+        "amplification-{}",
+        "t".repeat(ZED_THREAD_ID_MAX_BYTES - "amplification-".len())
+    );
+    assert_eq!(thread_id.len(), ZED_THREAD_ID_MAX_BYTES);
     let messages = (0..MESSAGES)
         .map(|_| assistant("bounded"))
         .collect::<Vec<_>>();
@@ -1344,13 +1425,13 @@ fn large_thread_id_event_amplification_streams_through_bounded_pages() {
     assert_eq!(authority.counters.retained_events, MESSAGES as u64);
     assert_eq!(sink.rows, MESSAGES as u64 + 1);
     assert!(sink.pages > 1);
-    assert!(sink.max_page_rows <= ZED_NATIVE_PAGE_MAX_ROWS);
-    assert!(sink.max_page_bytes <= ZED_NATIVE_PAGE_MAX_BYTES);
+    assert!(sink.max_page_units <= ZED_NATIVE_PAGE_MAX_UNITS);
+    assert!(sink.max_page_encoded_bytes <= ZED_NATIVE_PAGE_MAX_BYTES);
 }
 
 #[test]
 fn more_than_one_publication_page_uses_bounded_output_index() {
-    const THREADS: usize = ZED_NATIVE_PAGE_MAX_ROWS + 1;
+    const THREADS: usize = ZED_NATIVE_PAGE_MAX_UNITS + 1;
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("threads.db");
@@ -1377,8 +1458,8 @@ fn more_than_one_publication_page_uses_bounded_output_index() {
     assert!(authority.counters.candidate_page_queries < 32);
     assert!(sink.pages > 1);
     assert_eq!(sink.rows, THREADS as u64);
-    assert!(sink.max_page_rows <= ZED_NATIVE_PAGE_MAX_ROWS);
-    assert!(sink.max_page_bytes <= ZED_NATIVE_PAGE_MAX_BYTES);
+    assert!(sink.max_page_units <= ZED_NATIVE_PAGE_MAX_UNITS);
+    assert!(sink.max_page_encoded_bytes <= ZED_NATIVE_PAGE_MAX_BYTES);
 
     let index_path = authority.output_index.path().to_path_buf();
     let exact = Connection::open_with_flags(
@@ -1395,250 +1476,5 @@ fn more_than_one_publication_page_uses_bounded_output_index() {
     assert!(!index_path.exists());
 }
 
-#[test]
-fn nativepath_store_publication_is_core_first_resumable_and_idempotent() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("threads.db");
-    let connection = new_database(&path);
-    insert_thread(
-        &connection,
-        "root-thread",
-        None,
-        "json",
-        &thread(vec![user("root-user", "root prompt")]),
-    );
-    insert_thread(
-        &connection,
-        "child-thread",
-        Some("root-thread"),
-        "json",
-        &thread(vec![output_message(
-            "call-child",
-            "src/child.rs",
-            "CTX-ZED-PRO-ONLY-SENTINEL",
-            false,
-        )]),
-    );
-    drop(connection);
-
-    let store_path = directory.path().join("store.sqlite");
-    let mut store = ctx_history_store::Store::open(&store_path).unwrap();
-    let context = crate::ProviderAdapterContext {
-        machine_id: "zed-nativepath-test-machine".to_owned(),
-        source_path: Some(path.clone()),
-        source_root: None,
-        imported_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    };
-    let options = crate::ProviderImportOptions {
-        capture_work_limit: crate::CaptureWorkLimit::OneSafeGroup,
-        ..crate::ProviderImportOptions::default()
-    };
-
-    let first = import_zed_nativepath(&path, &mut store, context.clone(), options.clone()).unwrap();
-    assert!(first.work_remaining);
-    assert_eq!(store.list_sessions().unwrap().len(), 2);
-    drop(store);
-
-    let mut store = ctx_history_store::Store::open(&store_path).unwrap();
-    let second =
-        import_zed_nativepath(&path, &mut store, context.clone(), options.clone()).unwrap();
-    assert!(!second.work_remaining);
-    let sessions = store.list_sessions().unwrap();
-    let root = sessions
-        .iter()
-        .find(|session| session.external_session_id.as_deref() == Some("root-thread"))
-        .unwrap();
-    let child = sessions
-        .iter()
-        .find(|session| session.external_session_id.as_deref() == Some("child-thread"))
-        .unwrap();
-    assert_eq!(child.parent_session_id, Some(root.id));
-    assert_eq!(child.root_session_id, Some(root.id));
-    let child_events = store.events_for_session(child.id).unwrap();
-    assert_eq!(child_events.len(), 1);
-    assert_eq!(
-        child_events[0].event_type,
-        ctx_history_core::EventType::ToolCall
-    );
-    assert!(!serde_json::to_string(&child_events[0].payload)
-        .unwrap()
-        .contains("CTX-ZED-PRO-ONLY-SENTINEL"));
-
-    let replay = import_zed_nativepath(&path, &mut store, context, options).unwrap();
-    assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
-    assert_eq!(store.list_sessions().unwrap().len(), 2);
-    assert_eq!(store.events_for_session(child.id).unwrap().len(), 1);
-}
-
-#[test]
-fn nativepath_missing_source_retires_once_without_deleting_core_history() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("threads.db");
-    let connection = new_database(&path);
-    insert_thread(
-        &connection,
-        "retained-thread",
-        None,
-        "json",
-        &thread(vec![user("retained-user", "retained prompt")]),
-    );
-    drop(connection);
-
-    let mut store = ctx_history_store::Store::open(directory.path().join("store.sqlite")).unwrap();
-    let context = crate::ProviderAdapterContext {
-        machine_id: "zed-retirement-test-machine".to_owned(),
-        source_path: Some(path.clone()),
-        source_root: None,
-        imported_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    };
-    import_zed_nativepath(
-        &path,
-        &mut store,
-        context.clone(),
-        crate::ProviderImportOptions::default(),
-    )
-    .unwrap();
-    fs::remove_file(&path).unwrap();
-
-    let retired = import_zed_nativepath(
-        &path,
-        &mut store,
-        context.clone(),
-        crate::ProviderImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        retired.work_result(),
-        crate::ProviderImportWorkResult::Changed
-    );
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
-
-    let replay = import_zed_nativepath(
-        &path,
-        &mut store,
-        context,
-        crate::ProviderImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
-}
-
-#[test]
-fn later_pro_activation_replays_exact_outputs_without_republishing_core() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("threads.db");
-    let connection = new_database(&path);
-    insert_thread(
-        &connection,
-        "output-thread",
-        None,
-        "json",
-        &thread(vec![output_message(
-            "output-call",
-            "src/output.rs",
-            "CTX-ZED-LATER-PRO-SENTINEL",
-            false,
-        )]),
-    );
-    drop(connection);
-
-    let mut store = ctx_history_store::Store::open(directory.path().join("store.sqlite")).unwrap();
-    let context = crate::ProviderAdapterContext {
-        machine_id: "zed-output-replay-test-machine".to_owned(),
-        source_path: Some(path.clone()),
-        source_root: None,
-        imported_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    };
-    import_zed_nativepath(
-        &path,
-        &mut store,
-        context.clone(),
-        crate::ProviderImportOptions::default(),
-    )
-    .unwrap();
-    let session = store
-        .session_by_external_session(ctx_history_core::CaptureProvider::Zed, "output-thread")
-        .unwrap()
-        .unwrap();
-    let core = store.events_for_session(session.id).unwrap();
-    assert_eq!(core.len(), 1);
-    assert!(!serde_json::to_string(&core[0].payload)
-        .unwrap()
-        .contains("CTX-ZED-LATER-PRO-SENTINEL"));
-
-    let sink = Arc::new(RecordingProSink::default());
-    let replay_options = crate::ProviderImportOptions {
-        import_profile: crate::ImportProfile::ProReplayOnly(sink.clone()),
-        ..crate::ProviderImportOptions::default()
-    };
-    let replay =
-        import_zed_nativepath(&path, &mut store, context.clone(), replay_options.clone()).unwrap();
-    assert_eq!(replay.work_result(), crate::ProviderImportWorkResult::NoOp);
-    let output = sink.content.lock().unwrap();
-    assert_eq!(output.len(), 1);
-    assert!(String::from_utf8_lossy(&output[0]).contains("CTX-ZED-LATER-PRO-SENTINEL"));
-    drop(output);
-    assert_eq!(store.events_for_session(session.id).unwrap().len(), 1);
-
-    import_zed_nativepath(&path, &mut store, context, replay_options).unwrap();
-    assert_eq!(sink.content.lock().unwrap().len(), 1);
-    assert_eq!(store.events_for_session(session.id).unwrap().len(), 1);
-}
-
-#[test]
-fn pro_failure_marks_only_output_behind_after_core_commit() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("threads.db");
-    let connection = new_database(&path);
-    insert_thread(
-        &connection,
-        "pro-failure-thread",
-        None,
-        "json",
-        &thread(vec![output_message(
-            "failing-call",
-            "src/failing.rs",
-            "CTX-ZED-FAILED-PRO-SENTINEL",
-            false,
-        )]),
-    );
-    drop(connection);
-
-    let mut store = ctx_history_store::Store::open(directory.path().join("store.sqlite")).unwrap();
-    let sink = Arc::new(FailingProSink::default());
-    let summary = import_zed_nativepath(
-        &path,
-        &mut store,
-        crate::ProviderAdapterContext {
-            machine_id: "zed-pro-failure-test-machine".to_owned(),
-            source_path: Some(path.clone()),
-            source_root: None,
-            imported_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        },
-        crate::ProviderImportOptions {
-            import_profile: crate::ImportProfile::CoreAndPro(sink.clone()),
-            ..crate::ProviderImportOptions::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(
-        summary.work_result(),
-        crate::ProviderImportWorkResult::Changed
-    );
-    assert_eq!(sink.behind.load(Ordering::SeqCst), 1);
-    let session = store
-        .session_by_external_session(ctx_history_core::CaptureProvider::Zed, "pro-failure-thread")
-        .unwrap()
-        .unwrap();
-    assert_eq!(store.events_for_session(session.id).unwrap().len(), 1);
-}
+#[path = "tests/store.rs"]
+mod store;

@@ -1,12 +1,14 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use tempfile::TempDir;
 
+use ctx_history_store::NATIVE_PATH_MAX_MUTATION_UNITS;
+
 use super::{
     dto::{ZedNativeEvent, ZedNativePage, ZedNativeSession, ZedNativeSink},
     ZedNativePathError, ZedNativeResult,
 };
 
-const ZED_STAGING_BATCH_CANDIDATES: i64 = 1_024;
+const ZED_STAGING_BATCH_CANDIDATES: i64 = NATIVE_PATH_MAX_MUTATION_UNITS as i64;
 const ZED_STAGING_MAX_RELATIONSHIP_DEPTH: i64 = 1_024;
 
 pub(super) struct ZedNativeStaging {
@@ -31,11 +33,16 @@ impl ZedNativeStaging {
     pub(super) fn new() -> ZedNativeResult<Self> {
         let directory = tempfile::Builder::new()
             .prefix("ctx-zed-nativepath-stage-")
-            .tempdir()?;
+            .tempdir()
+            .map_err(|source| ZedNativePathError::SystemIo {
+                operation: "creating Zed NativePath staging",
+                source,
+            })?;
         let path = directory.path().join("stage.sqlite");
-        let connection = Connection::open(path)?;
-        connection.execute_batch(
-            "PRAGMA journal_mode=OFF;
+        let connection = Connection::open(path).map_err(staging_sqlite)?;
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=OFF;
              PRAGMA synchronous=OFF;
              PRAGMA temp_store=FILE;
              CREATE TABLE staged_sessions (
@@ -55,7 +62,8 @@ impl ZedNativeStaging {
                  ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
                  reason TEXT NOT NULL
              );",
-        )?;
+            )
+            .map_err(staging_sqlite)?;
         Ok(Self {
             connection,
             _directory: directory,
@@ -78,10 +86,13 @@ impl ZedNativeStaging {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut statement = self
             .connection
-            .prepare("SELECT reason FROM staged_rejections ORDER BY ordinal LIMIT ?1")?;
-        let rows = statement.query_map([limit], |row| row.get::<_, String>(0))?;
+            .prepare("SELECT reason FROM staged_rejections ORDER BY ordinal LIMIT ?1")
+            .map_err(staging_sqlite)?;
+        let rows = statement
+            .query_map([limit], |row| row.get::<_, String>(0))
+            .map_err(staging_sqlite)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(ZedNativePathError::from)
+            .map_err(staging_sqlite)
     }
 
     pub(super) fn session_relationship(
@@ -115,14 +126,16 @@ impl ZedNativeStaging {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(ZedNativePathError::from)
+            .map_err(staging_sqlite)
     }
 
     pub(super) fn validate_relationships(&self) -> ZedNativeResult<()> {
         let total = self.session_count()?;
-        let reachable = self.connection.query_row(
-            &format!(
-                "WITH RECURSIVE session_tree(thread_id, depth) AS (
+        let reachable = self
+            .connection
+            .query_row(
+                &format!(
+                    "WITH RECURSIVE session_tree(thread_id, depth) AS (
                      SELECT child.thread_id, 0
                      FROM staged_sessions child
                      WHERE child.parent_thread_id IS NULL
@@ -138,10 +151,11 @@ impl ZedNativeStaging {
                      WHERE parent.depth < {ZED_STAGING_MAX_RELATIONSHIP_DEPTH}
                  )
                  SELECT COUNT(*) FROM session_tree"
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
+                ),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(staging_sqlite)?;
         if u64::try_from(reachable).unwrap_or_default() != total {
             return Err(ZedNativePathError::UnsupportedSchema(
                 "Zed thread relationships contain a cycle or exceed the bounded depth".to_owned(),
@@ -161,8 +175,10 @@ impl ZedNativeStaging {
                 "Zed staged session cursor exceeds SQLite limits".to_owned(),
             )
         })?;
-        let mut statement = self.connection.prepare(&format!(
-            "WITH RECURSIVE session_tree(
+        let mut statement = self
+            .connection
+            .prepare(&format!(
+                "WITH RECURSIVE session_tree(
                  thread_id, effective_parent_thread_id, root_thread_id, depth
              ) AS (
                  SELECT child.thread_id, NULL, child.thread_id, 0
@@ -186,16 +202,23 @@ impl ZedNativeStaging {
              JOIN staged_sessions staged ON staged.thread_id = tree.thread_id
              ORDER BY tree.depth, tree.thread_id COLLATE BINARY
              LIMIT {ZED_STAGING_BATCH_CANDIDATES} OFFSET ?1"
-        ))?;
-        let mut rows = statement.query([offset])?;
+            ))
+            .map_err(staging_sqlite)?;
+        let mut rows = statement.query([offset]).map_err(staging_sqlite)?;
         let mut batch = Vec::new();
         let mut mutation_units = 2_usize;
         let mut bytes = 0_usize;
-        while let Some(row) = rows.next()? {
-            let payload: String = row.get(0)?;
-            let parent_thread_id: Option<String> = row.get(1)?;
-            let root_thread_id: String = row.get(2)?;
-            let estimated_bytes = usize::try_from(row.get::<_, i64>(3)?).unwrap_or(usize::MAX);
+        while let Some(row) = rows.next().map_err(staging_sqlite)? {
+            let (payload, parent_thread_id, root_thread_id, estimated_bytes) = (|| {
+                Ok::<_, rusqlite::Error>((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })()
+            .map_err(staging_sqlite)?;
+            let estimated_bytes = usize::try_from(estimated_bytes).unwrap_or(usize::MAX);
             let units = if parent_thread_id.is_some() { 4 } else { 3 };
             if !batch.is_empty()
                 && (mutation_units.saturating_add(units) > max_mutation_units
@@ -208,8 +231,11 @@ impl ZedNativeStaging {
                     "one Zed session exceeds the bounded Store publication group".to_owned(),
                 ));
             }
-            let session = serde_json::from_str(&payload)
-                .map_err(|error| ZedNativePathError::Capture(crate::CaptureError::Json(error)))?;
+            let session = serde_json::from_str(&payload).map_err(|_| {
+                ZedNativePathError::Capture(crate::CaptureError::SystemInvariant(
+                    "Zed staged session JSON is invalid",
+                ))
+            })?;
             mutation_units = mutation_units.saturating_add(units);
             bytes = bytes.saturating_add(estimated_bytes);
             batch.push(ZedStagedSession {
@@ -233,22 +259,33 @@ impl ZedNativeStaging {
                 "Zed staged event cursor exceeds SQLite limits".to_owned(),
             )
         })?;
-        let mut statement = self.connection.prepare(&format!(
-            "SELECT ordinal, payload_json, estimated_bytes, mutation_units
+        let mut statement = self
+            .connection
+            .prepare(&format!(
+                "SELECT ordinal, payload_json, estimated_bytes, mutation_units
              FROM staged_events
              WHERE ordinal > ?1
              ORDER BY ordinal
              LIMIT {ZED_STAGING_BATCH_CANDIDATES}"
-        ))?;
-        let mut rows = statement.query([after_ordinal])?;
+            ))
+            .map_err(staging_sqlite)?;
+        let mut rows = statement.query([after_ordinal]).map_err(staging_sqlite)?;
         let mut batch = Vec::new();
         let mut mutation_units = 2_usize;
         let mut bytes = 0_usize;
-        while let Some(row) = rows.next()? {
-            let ordinal = u64::try_from(row.get::<_, i64>(0)?).unwrap_or(u64::MAX);
-            let payload: String = row.get(1)?;
-            let estimated_bytes = usize::try_from(row.get::<_, i64>(2)?).unwrap_or(usize::MAX);
-            let units = usize::try_from(row.get::<_, i64>(3)?).unwrap_or(usize::MAX);
+        while let Some(row) = rows.next().map_err(staging_sqlite)? {
+            let (ordinal, payload, estimated_bytes, units) = (|| {
+                Ok::<_, rusqlite::Error>((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })()
+            .map_err(staging_sqlite)?;
+            let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
+            let estimated_bytes = usize::try_from(estimated_bytes).unwrap_or(usize::MAX);
+            let units = usize::try_from(units).unwrap_or(usize::MAX);
             if !batch.is_empty()
                 && (mutation_units.saturating_add(units) > max_mutation_units
                     || bytes.saturating_add(estimated_bytes) > max_bytes)
@@ -260,8 +297,11 @@ impl ZedNativeStaging {
                     "one Zed event exceeds the bounded Store publication group".to_owned(),
                 ));
             }
-            let event = serde_json::from_str(&payload)
-                .map_err(|error| ZedNativePathError::Capture(crate::CaptureError::Json(error)))?;
+            let event = serde_json::from_str(&payload).map_err(|_| {
+                ZedNativePathError::Capture(crate::CaptureError::SystemInvariant(
+                    "Zed staged event JSON is invalid",
+                ))
+            })?;
             mutation_units = mutation_units.saturating_add(units);
             bytes = bytes.saturating_add(estimated_bytes);
             batch.push(ZedStagedEvent {
@@ -276,57 +316,78 @@ impl ZedNativeStaging {
 
 impl ZedNativeSink for ZedNativeStaging {
     fn push_page(&mut self, page: ZedNativePage) -> ZedNativeResult<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.connection.transaction().map_err(staging_sqlite)?;
         for session in page.sessions {
-            let payload = serde_json::to_string(&session)
-                .map_err(|error| ZedNativePathError::Capture(crate::CaptureError::Json(error)))?;
+            let payload = serde_json::to_string(&session).map_err(|_| {
+                ZedNativePathError::Capture(crate::CaptureError::SystemInvariant(
+                    "Zed session cannot be serialized for staging",
+                ))
+            })?;
             let payload_bytes = i64::try_from(payload.len()).unwrap_or(i64::MAX);
-            transaction.execute(
-                "INSERT INTO staged_sessions
+            transaction
+                .execute(
+                    "INSERT INTO staged_sessions
                      (thread_id, parent_thread_id, payload_json, estimated_bytes)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    session.thread_id,
-                    session.parent_thread_id,
-                    payload,
-                    payload_bytes,
-                ],
-            )?;
+                    params![
+                        session.thread_id,
+                        session.parent_thread_id,
+                        payload,
+                        payload_bytes,
+                    ],
+                )
+                .map_err(staging_sqlite)?;
         }
         for event in page.events {
-            let payload = serde_json::to_string(&event)
-                .map_err(|error| ZedNativePathError::Capture(crate::CaptureError::Json(error)))?;
+            let payload = serde_json::to_string(&event).map_err(|_| {
+                ZedNativePathError::Capture(crate::CaptureError::SystemInvariant(
+                    "Zed event cannot be serialized for staging",
+                ))
+            })?;
             let payload_bytes = i64::try_from(payload.len()).unwrap_or(i64::MAX);
             let mutation_units = 1_usize.saturating_add(event.safe_file_touches.len());
-            transaction.execute(
-                "INSERT INTO staged_events
+            transaction
+                .execute(
+                    "INSERT INTO staged_events
                      (payload_json, estimated_bytes, mutation_units)
                 VALUES (?1, ?2, ?3)",
-                params![
-                    payload,
-                    payload_bytes,
-                    i64::try_from(mutation_units).unwrap_or(i64::MAX),
-                ],
-            )?;
+                    params![
+                        payload,
+                        payload_bytes,
+                        i64::try_from(mutation_units).unwrap_or(i64::MAX),
+                    ],
+                )
+                .map_err(staging_sqlite)?;
         }
         for rejection in page.rejections {
-            transaction.execute(
-                "INSERT INTO staged_rejections (reason) VALUES (?1)",
-                [rejection.reason],
-            )?;
+            transaction
+                .execute(
+                    "INSERT INTO staged_rejections (reason) VALUES (?1)",
+                    [rejection.reason],
+                )
+                .map_err(staging_sqlite)?;
         }
-        transaction.commit()?;
+        transaction.commit().map_err(staging_sqlite)?;
         Ok(())
     }
 }
 
 fn count_rows(connection: &Connection, table: &str) -> ZedNativeResult<u64> {
-    let count = connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-        row.get::<_, i64>(0)
-    })?;
+    let count = connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(staging_sqlite)?;
     u64::try_from(count).map_err(|_| {
         ZedNativePathError::UnsupportedSchema(format!(
             "Zed staging table {table} has an invalid row count"
         ))
     })
+}
+
+fn staging_sqlite(source: rusqlite::Error) -> ZedNativePathError {
+    ZedNativePathError::SystemSqlite {
+        operation: "using Zed NativePath staging",
+        source,
+    }
 }

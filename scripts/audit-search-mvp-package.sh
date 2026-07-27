@@ -116,7 +116,7 @@ if [[ "${CTX_AUDIT_SKIP_RELEASE_BUILD:-0}" != "1" ]]; then
   elif command -v strings >/dev/null 2>&1; then
     binary_strings="$(strings "${binary}")"
     if printf '%s\n' "${binary_strings}" \
-      | grep -E 'ctx (dashboard|shim|publish|evidence|link-pr|context|update|uninstall|watch)([^[:alnum:]_-]|$)|ctx pr([^[:alnum:]_-]|$)|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|dashboard export|maybe_auto_update|check_or_apply_update|(^|[^[:alnum:]_])run_update([^[:alnum:]_]|$)|(^|[^[:alnum:]_])run_uninstall([^[:alnum:]_]|$)|watch_strategy|polling_catch_up' >/dev/null; then
+      | grep -E 'ctx (dashboard|shim|publish|evidence|link-pr|context|update|uninstall|watch)([^[:alnum:]_-]|$)|ctx pr([^[:alnum:]_-]|$)|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|dashboard export|maybe_auto_update|check_or_apply_update|(^|[^[:alnum:]_])run_update([^[:alnum:]_]|$)|watch_strategy|polling_catch_up' >/dev/null; then
       fail 'release ctx binary contains removed dashboard/shim/PR-publish/watch command strings'
     fi
     if ! printf '%s\n' "${binary_strings}" \

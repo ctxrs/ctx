@@ -16,7 +16,7 @@ use super::{
 };
 use crate::canonical_observations::{
     canonical_observation_by_coordinate, canonical_observation_by_coordinate_including_deleted,
-    canonical_semantic_digest, CanonicalObservation,
+    canonical_semantic_digest, visit_live_canonical_event_observations, CanonicalObservation,
 };
 use crate::native_path_group::{NATIVE_PATH_MAX_JOURNAL_BYTES, NATIVE_PATH_MAX_JOURNAL_RECORDS};
 use crate::{Result, StoreError};
@@ -247,57 +247,31 @@ pub(super) fn append_baseline(conn: &rusqlite::Connection) -> Result<()> {
     let mut state = active_state(conn)?.ok_or(StoreError::ProjectionJournalInactive)?;
     let mut chunk = Vec::new();
     let mut chunk_record_bytes = 0_usize;
-    for kind in [
-        JournalEntityKind::Event,
-        JournalEntityKind::FileTouch,
-        JournalEntityKind::VcsChange,
-    ] {
+    visit_live_canonical_event_observations(conn, |observation| {
+        let id = observation.observation_id;
+        let prepared = prepare_live_observation(JournalEntityKind::Event, id, observation)?;
+        append_baseline_record(
+            conn,
+            &mut state,
+            JournalEntityKind::Event,
+            id,
+            prepared,
+            &mut chunk,
+            &mut chunk_record_bytes,
+        )
+    })?;
+    for kind in [JournalEntityKind::FileTouch, JournalEntityKind::VcsChange] {
         for id in live_entity_ids(conn, kind)? {
             let prepared = prepare_entity(conn, kind, id)?;
-            let sequence = state.high_water_sequence.checked_add(1).ok_or_else(|| {
-                StoreError::InvalidProjectionJournalData("journal sequence overflow".to_owned())
-            })?;
-            let cumulative_digest = record_chain_digest(
-                &state.cumulative_digest,
-                state.generation,
-                sequence,
+            append_baseline_record(
+                conn,
+                &mut state,
                 kind,
                 id,
-                1,
-                RecordDigestFields {
-                    operation: prepared.operation,
-                    payload_sha256: &prepared.payload_sha256,
-                    evidence_json: &prepared.evidence_json,
-                    provenance_json: &prepared.provenance_json,
-                },
+                prepared,
+                &mut chunk,
+                &mut chunk_record_bytes,
             )?;
-            let record = projection_record(
-                state.generation,
-                sequence,
-                kind,
-                id,
-                1,
-                &prepared,
-                cumulative_digest.clone(),
-            )?;
-            let record_bytes = serde_json::to_vec(&record)?.len();
-            let next_chunk_bytes = 2_usize
-                .saturating_add(chunk_record_bytes)
-                .saturating_add(record_bytes)
-                .saturating_add(chunk.len());
-            if !chunk.is_empty()
-                && (chunk.len() == super::pages::PROJECTION_JOURNAL_CHUNK_SIZE
-                    || next_chunk_bytes > PROJECTION_JOURNAL_MAX_PAGE_BYTES)
-            {
-                insert_record_chunk(conn, &chunk)?;
-                chunk.clear();
-                chunk_record_bytes = 0;
-            }
-            persist_entity_state(conn, state.generation, kind, id, 1, &prepared)?;
-            chunk_record_bytes = chunk_record_bytes.saturating_add(record_bytes);
-            chunk.push(record);
-            state.high_water_sequence = sequence;
-            state.cumulative_digest = cumulative_digest;
         }
     }
     if !chunk.is_empty() {
@@ -314,6 +288,62 @@ pub(super) fn append_baseline(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+fn append_baseline_record(
+    conn: &rusqlite::Connection,
+    state: &mut super::ActiveState,
+    kind: JournalEntityKind,
+    id: Uuid,
+    prepared: PreparedEntity,
+    chunk: &mut Vec<ProjectionJournalRecord>,
+    chunk_record_bytes: &mut usize,
+) -> Result<()> {
+    let sequence = state.high_water_sequence.checked_add(1).ok_or_else(|| {
+        StoreError::InvalidProjectionJournalData("journal sequence overflow".to_owned())
+    })?;
+    let cumulative_digest = record_chain_digest(
+        &state.cumulative_digest,
+        state.generation,
+        sequence,
+        kind,
+        id,
+        1,
+        RecordDigestFields {
+            operation: prepared.operation,
+            payload_sha256: &prepared.payload_sha256,
+            evidence_json: &prepared.evidence_json,
+            provenance_json: &prepared.provenance_json,
+        },
+    )?;
+    let record = projection_record(
+        state.generation,
+        sequence,
+        kind,
+        id,
+        1,
+        &prepared,
+        cumulative_digest.clone(),
+    )?;
+    let record_bytes = serde_json::to_vec(&record)?.len();
+    let next_chunk_bytes = 2_usize
+        .saturating_add(*chunk_record_bytes)
+        .saturating_add(record_bytes)
+        .saturating_add(chunk.len());
+    if !chunk.is_empty()
+        && (chunk.len() == super::pages::PROJECTION_JOURNAL_CHUNK_SIZE
+            || next_chunk_bytes > PROJECTION_JOURNAL_MAX_PAGE_BYTES)
+    {
+        insert_record_chunk(conn, chunk)?;
+        chunk.clear();
+        *chunk_record_bytes = 0;
+    }
+    persist_entity_state(conn, state.generation, kind, id, 1, &prepared)?;
+    *chunk_record_bytes = chunk_record_bytes.saturating_add(record_bytes);
+    chunk.push(record);
+    state.high_water_sequence = sequence;
+    state.cumulative_digest = cumulative_digest;
+    Ok(())
+}
+
 fn persist_entity_state(
     conn: &rusqlite::Connection,
     generation: u64,
@@ -322,7 +352,7 @@ fn persist_entity_state(
     revision: u64,
     prepared: &PreparedEntity,
 ) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO projection_journal_entities
              (generation, entity_kind, stable_entity_id, entity_revision,
               content_digest)
@@ -330,14 +360,14 @@ fn persist_entity_state(
          ON CONFLICT(generation, entity_kind, stable_entity_id) DO UPDATE SET
              entity_revision = excluded.entity_revision,
              content_digest = excluded.content_digest",
-        params![
-            to_i64(generation, "generation")?,
-            kind.as_str(),
-            id.to_string(),
-            to_i64(revision, "revision")?,
-            prepared.content_digest,
-        ],
-    )?;
+    )?
+    .execute(params![
+        to_i64(generation, "generation")?,
+        kind.as_str(),
+        id.to_string(),
+        to_i64(revision, "revision")?,
+        prepared.content_digest,
+    ])?;
     Ok(())
 }
 
@@ -377,7 +407,7 @@ fn prepare_entity(
 ) -> Result<PreparedEntity> {
     let kind_name = kind.as_str();
     let current = canonical_observation_by_coordinate(conn, 0, kind_name, id).optional()?;
-    let Some(mut observation) = current else {
+    let Some(observation) = current else {
         let previous =
             canonical_observation_by_coordinate_including_deleted(conn, 0, kind_name, id)
                 .optional()?;
@@ -413,8 +443,15 @@ fn prepare_entity(
         });
     };
 
-    sanitize_observation(&mut observation)?;
+    prepare_live_observation(kind, id, observation)
+}
 
+fn prepare_live_observation(
+    kind: JournalEntityKind,
+    id: Uuid,
+    mut observation: CanonicalObservation,
+) -> Result<PreparedEntity> {
+    sanitize_observation(&mut observation)?;
     let evidence = evidence_identities(&observation);
     let provenance = provenance_identity(kind, id, &observation);
     let canonical_payload_json = canonical_json(&observation)?;

@@ -6,7 +6,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
-    Confidence, Event, Fidelity, FileChangeKind, FileTouched, Session, SessionStatus, SyncCursor,
+    Confidence, Event, EventType, Fidelity, FileChangeKind, FileTouched, Session, SessionStatus,
+    SyncCursor,
 };
 use ctx_history_store::{
     EventSearchBulkGuard, NativePathCursorSetClassification, NativePathCursorTransition,
@@ -19,6 +20,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::complete_content::{
+    attach_verified_content_locator, jsonl::EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
+    verified_content_address_supported, verified_content_profile, CompleteContentBodyDigest,
+    CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentRole,
+};
 use crate::provider::{
     importer::{
         provider_event_import_identity_with_exact_legacy_source, provider_file_touch_import_id,
@@ -27,23 +33,27 @@ use crate::provider::{
         provider_sync_metadata, timestamps,
     },
     providers::cursor::{
-        discover_cursor_transcripts, freeze_cursor_source, resolve_cursor_missing_sources,
-        scan_cursor_source_into, CursorCheckpoint, CursorCompletedExactInventory,
-        CursorFrozenSource, CursorKnownSource, CursorMissingSourceDisposition, CursorNativeEvent,
-        CursorNativeSession, CursorPriorObservation, CursorPublicationPage, CursorPublicationSink,
-        CursorReadOutcome, CursorRecordRejection, CursorSourceObservation, CursorTranscriptPath,
+        cursor_complete_content_source_revision, discover_cursor_transcripts, freeze_cursor_source,
+        resolve_cursor_missing_sources, scan_cursor_source_into, CursorCheckpoint,
+        CursorCompletedExactInventory, CursorFrozenSource, CursorKnownSource,
+        CursorMissingSourceDisposition, CursorNativeEvent, CursorNativeSession,
+        CursorPriorObservation, CursorPublicationPage, CursorPublicationSink, CursorReadOutcome,
+        CursorRecordRejection, CursorSourceObservation, CursorTranscriptPath,
     },
 };
 use crate::{
     stable_capture_uuid, CaptureError, CaptureWorkLimit, ProOutputSink, ProOutputSinkError,
     ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult, Result,
-    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
 };
 
 use super::NativePathJsonlTreeImport;
 
 const CURSOR_NATIVE_CURSOR_VERSION: u32 = 1;
 const CURSOR_PUBLICATION_DOMAIN: &[u8] = b"ctx-cursor-nativepath-publication-v1\0";
+const CURSOR_EXACT_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] =
+    b"ctx-complete-content-source-revision-v1\0";
+const CURSOR_EXACT_PATH_IDENTITY_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-path-identity-v1\0";
 const CURSOR_MISSING_TRANSCRIPTS_REASON: &str =
     "no Cursor agent transcript JSONL files found under projects/*/agent-transcripts";
 const CURSOR_GROUP_MAX_PAGES: usize = 32;
@@ -158,6 +168,18 @@ pub(crate) fn import_cursor_nativepath_tree(
             let stored = accumulator
                 .store
                 .get_sync_cursor(None, &request.machine_id, &stream)?;
+            let stored = match stored {
+                Some(cursor) => Some(cursor),
+                None => accumulator.store.get_sync_cursor(
+                    None,
+                    &request.machine_id,
+                    &provider_source_cursor_stream_for_path(
+                        CaptureProvider::Cursor,
+                        LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+                        &frozen.observation().locator_identity,
+                    ),
+                )?,
+            };
             let prior_wire = stored
                 .as_ref()
                 .map(|cursor| decode_cursor_native_cursor(&cursor.cursor))
@@ -168,14 +190,9 @@ pub(crate) fn import_cursor_nativepath_tree(
                 observation: wire.observation.clone(),
                 checkpoint: wire.checkpoint.clone(),
             });
-            let prior_retained = prior_wire
-                .as_ref()
-                .map_or(0, |wire| wire.retained_event_count);
             let mut sink = CursorAccumulatorSink {
                 accumulator: &mut accumulator,
                 frozen: frozen.clone(),
-                prior_retained,
-                retained_event_count: prior_retained,
             };
             let outcome = scan_cursor_source_into(&frozen, prior.as_ref(), &mut sink)?;
             drop(sink);
@@ -192,16 +209,16 @@ pub(crate) fn import_cursor_nativepath_tree(
                 }
                 CursorReadOutcome::Generation(generation) => {
                     for rejection in &generation.rejections.samples {
-                        accumulator.summary.record_failure(ProviderImportFailure {
-                            line: usize::try_from(rejection.physical_line)
-                                .unwrap_or(usize::MAX)
-                                .saturating_add(1),
-                            error: cursor_rejection_message(
-                                rejection.kind,
-                                rejection.observed_bytes,
-                            ),
-                        });
+                        accumulator.record_rejection_sample(
+                            rejection.physical_line,
+                            rejection.kind,
+                            rejection.observed_bytes,
+                        );
                     }
+                    accumulator.record_unsampled_rejections(
+                        generation.rejections.total,
+                        generation.rejections.samples.len(),
+                    );
                 }
             }
         }
@@ -494,8 +511,6 @@ fn retire_cursor_route(
 struct CursorAccumulatorSink<'a, 'store> {
     accumulator: &'a mut CursorGroupAccumulator<'store>,
     frozen: CursorFrozenSource,
-    prior_retained: u64,
-    retained_event_count: u64,
 }
 
 impl CursorPublicationSink for CursorAccumulatorSink<'_, '_> {
@@ -507,21 +522,12 @@ impl CursorPublicationSink for CursorAccumulatorSink<'_, '_> {
         if self.accumulator.stopped {
             return Ok(());
         }
-        if page.expected_checkpoint.next_byte_offset == 0
-            && page.expected_checkpoint.next_semantic_ordinal == 0
-        {
-            self.retained_event_count = 0;
-        } else if self.retained_event_count == 0 {
-            self.retained_event_count = self.prior_retained;
-        }
-        self.retained_event_count = self
-            .retained_event_count
-            .saturating_add(page.events.len() as u64);
+        let retained_event_count = page.retained_event_count;
         self.accumulator.push(CursorPendingPage {
             transcript: self.frozen.transcript().clone(),
             observation: self.frozen.observation().clone(),
             page,
-            retained_event_count: self.retained_event_count,
+            retained_event_count,
         })
     }
 
@@ -648,14 +654,36 @@ impl<'a> CursorGroupAccumulator<'a> {
             .saturating_add(usize::try_from(events).unwrap_or(usize::MAX));
         if let Some(wire) = wire {
             for rejection in &wire.rejections {
-                self.summary.record_failure(ProviderImportFailure {
-                    line: usize::try_from(rejection.physical_line)
-                        .unwrap_or(usize::MAX)
-                        .saturating_add(1),
-                    error: cursor_rejection_message(rejection.kind, rejection.observed_bytes),
-                });
+                self.record_rejection_sample(
+                    rejection.physical_line,
+                    rejection.kind,
+                    rejection.observed_bytes,
+                );
             }
+            self.record_unsampled_rejections(wire.rejected_records, wire.rejections.len());
         }
+    }
+
+    fn record_rejection_sample(
+        &mut self,
+        physical_line: u64,
+        kind: crate::provider::providers::cursor::CursorRejectionKind,
+        observed_bytes: u64,
+    ) {
+        self.summary.record_failure(ProviderImportFailure {
+            line: usize::try_from(physical_line)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            error: cursor_rejection_message(kind, observed_bytes),
+        });
+    }
+
+    fn record_unsampled_rejections(&mut self, total: u64, sampled: usize) {
+        let unsampled = total.saturating_sub(sampled as u64);
+        self.summary.failed = self
+            .summary
+            .failed
+            .saturating_add(usize::try_from(unsampled).unwrap_or(usize::MAX));
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -687,595 +715,14 @@ impl<'a> CursorGroupAccumulator<'a> {
         Ok(std::mem::take(&mut self.summary))
     }
 }
+#[path = "cursor_provider_publication.rs"]
+mod publication;
+use publication::{
+    cursor_event_touch_count, cursor_rejection_message, cursor_retirement_publication_id,
+    cursor_source_revision, decode_cursor_native_cursor, encode_cursor_native_cursor,
+    provider_sync_cursor, publish_cursor_group,
+};
 
-fn publish_cursor_group(
-    store: &mut Store,
-    committed_store: &Store,
-    bulk_guard: &EventSearchBulkGuard,
-    context: &CursorPublicationContext<'_>,
-    pages: &[CursorPendingPage],
-) -> Result<ProviderImportSummary> {
-    let source_paths = pages
-        .iter()
-        .map(|pending| pending.observation.path.clone())
-        .collect::<BTreeSet<_>>();
-    for path in &source_paths {
-        revalidate_cursor_source(pages, path)?;
-    }
-
-    let mut transitions = Vec::with_capacity(source_paths.len());
-    for path in &source_paths {
-        let pending = pages
-            .iter()
-            .rev()
-            .find(|pending| &pending.observation.path == path)
-            .expect("Cursor pending source exists");
-        let stream = provider_source_cursor_stream_for_path(
-            CaptureProvider::Cursor,
-            CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-            &pending.observation.locator_identity,
-        );
-        let stored = store.get_sync_cursor(None, context.machine_id, &stream)?;
-        let provider_cursor = encode_cursor_native_cursor(
-            &pending.observation.proposed_source_identity,
-            &pending.observation,
-            &pending.page.next_checkpoint,
-            pending.retained_event_count,
-            pending.page.rejected_records,
-            &pending.page.rejections,
-        )?;
-        transitions.push(NativePathCursorTransition::new(
-            stored.as_ref().map(|cursor| cursor.cursor.clone()),
-            provider_sync_cursor(
-                context.machine_id,
-                stream,
-                provider_cursor,
-                context.imported_at,
-            ),
-        ));
-    }
-    let publication_id = cursor_publication_id(pages, &transitions);
-    let retained_bytes = pages.iter().fold(0_usize, |total, pending| {
-        total.saturating_add(pending.page.serialized_bytes)
-    });
-    let accounting =
-        NativePathGroupAccounting::new(pages.len(), source_paths.len(), retained_bytes)?;
-    let admission = store.admit_event_search_bulk_group(bulk_guard)?;
-    let mut group = store.begin_native_path_publication_group(admission, accounting)?;
-    if matches!(
-        group.classify_cursor_set(&publication_id, &transitions)?,
-        NativePathCursorSetClassification::AllNextSameGroup { .. }
-    ) {
-        group.commit()?;
-        let mut summary = ProviderImportSummary::default();
-        summary.set_work_result(ProviderImportWorkResult::NoOp);
-        return Ok(summary);
-    }
-
-    let mut summary = ProviderImportSummary::default();
-    let mut resolved = BTreeMap::new();
-    for path in &source_paths {
-        let pending = pages
-            .iter()
-            .rev()
-            .find(|pending| &pending.observation.path == path)
-            .expect("Cursor pending source exists");
-        let raw_source_path = path.display().to_string();
-        let source_root = context.source_root.display().to_string();
-        let stream = provider_source_cursor_stream_for_path(
-            CaptureProvider::Cursor,
-            CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-            &pending.observation.locator_identity,
-        );
-        let source_revision = cursor_source_revision(&pending.observation);
-        let resolution =
-            group.reconcile_provider_source_locator(&ProviderSourceLocatorObservation {
-                provider: CaptureProvider::Cursor,
-                source_format: CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned(),
-                machine_id: context.machine_id.to_owned(),
-                locator_identity: pending.observation.locator_identity.clone(),
-                cursor_stream: stream,
-                proposed_source_identity: pending.observation.proposed_source_identity.clone(),
-                raw_source_path: Some(raw_source_path.clone()),
-                source_revision: source_revision.clone(),
-                observed_at_ms: context.imported_at.timestamp_millis(),
-            })?;
-        let native_session_id = &pending.observation.native_session_id;
-        let source_id = committed_store
-            .capture_source_by_canonical_identity_session(
-                CaptureProvider::Cursor,
-                CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                context.machine_id,
-                &resolution.canonical_source_identity,
-                native_session_id,
-            )?
-            .map(|source| source.id)
-            .unwrap_or_else(|| {
-                provider_scoped_source_uuid(
-                    CaptureProvider::Cursor,
-                    native_session_id,
-                    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                    Some(&raw_source_path),
-                )
-            });
-        let session_fact = cursor_session_fact(pending);
-        group.upsert_capture_source(&cursor_capture_source(
-            context,
-            session_fact.as_ref(),
-            source_id,
-            &raw_source_path,
-            &source_root,
-            &resolution.canonical_source_identity,
-            &source_revision,
-        ))?;
-        group.bind_capture_source_provider_route(source_id, &resolution.route_binding())?;
-        let session = session_fact
-            .as_ref()
-            .map(|fact| {
-                cursor_session(
-                    committed_store,
-                    context,
-                    fact,
-                    source_id,
-                    &resolution.canonical_source_identity,
-                )
-            })
-            .transpose()?;
-        if let Some(session) = &session {
-            let existed = committed_store.get_session(session.id).is_ok();
-            group.upsert_session(session)?;
-            if existed {
-                summary.skipped_sessions = summary.skipped_sessions.saturating_add(1);
-                summary.skipped = summary.skipped.saturating_add(1);
-            } else {
-                summary.imported_sessions = summary.imported_sessions.saturating_add(1);
-                summary.imported = summary.imported.saturating_add(1);
-            }
-        }
-        resolved.insert(path.clone(), ResolvedCursorSource { source_id, session });
-    }
-
-    for pending in pages {
-        let source =
-            resolved
-                .get(&pending.observation.path)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Cursor publication lost its resolved source",
-                ))?;
-        for event in &pending.page.events {
-            let session = source
-                .session
-                .as_ref()
-                .ok_or(CaptureError::SystemInvariant(
-                    "Cursor retained event has no canonical session",
-                ))?;
-            publish_cursor_event(
-                &mut group,
-                committed_store,
-                context,
-                source.source_id,
-                session,
-                event,
-                &mut summary,
-            )?;
-        }
-    }
-
-    for path in &source_paths {
-        revalidate_cursor_source(pages, path)?;
-    }
-    group.prepare_journal_checkpoint()?;
-    group.publish_cursor_set()?;
-    group.commit()?;
-    summary.set_work_result(ProviderImportWorkResult::Changed);
-    Ok(summary)
-}
-
-fn cursor_session_fact(pending: &CursorPendingPage) -> Option<CursorNativeSession> {
-    let checkpoint = &pending.page.next_checkpoint.session;
-    let has_session = !pending.page.events.is_empty()
-        || checkpoint.started_at.is_some()
-        || checkpoint.title.is_some();
-    has_session.then(|| CursorNativeSession {
-        native_session_id: pending.observation.native_session_id.clone(),
-        project: pending.transcript.project().to_path_buf(),
-        started_at: checkpoint.started_at,
-        ended_at: checkpoint.ended_at,
-        title: checkpoint.title.clone(),
-    })
-}
-
-fn cursor_capture_source(
-    context: &CursorPublicationContext<'_>,
-    session: Option<&CursorNativeSession>,
-    source_id: Uuid,
-    raw_source_path: &str,
-    source_root: &str,
-    source_identity: &str,
-    source_revision: &str,
-) -> CaptureSource {
-    CaptureSource {
-        id: source_id,
-        descriptor: CaptureSourceDescriptor {
-            kind: CaptureSourceKind::ProviderImport,
-            provider: CaptureProvider::Cursor,
-            machine_id: context.machine_id.to_owned(),
-            process_id: None,
-            cwd: None,
-            raw_source_path: Some(raw_source_path.to_owned()),
-            source_format: Some(CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned()),
-            source_root: Some(source_root.to_owned()),
-            source_identity: Some(source_identity.to_owned()),
-            external_session_id: session.map(|session| session.native_session_id.clone()),
-        },
-        started_at: session
-            .and_then(|session| session.started_at)
-            .unwrap_or(context.imported_at),
-        ended_at: session.and_then(|session| session.ended_at),
-        sync: provider_sync_metadata(
-            Fidelity::Imported,
-            json!({
-                "provider_session_id": session.map(|session| &session.native_session_id),
-                "source_format": CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                "source_trust": "provider_native",
-                "source_identity": source_identity,
-                "source_revision": source_revision,
-                "source_identity_key": session.map(|session| {
-                    provider_scoped_source_identity_key(
-                        CaptureProvider::Cursor,
-                        &session.native_session_id,
-                        CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                        Some(raw_source_path),
-                    )
-                }),
-            }),
-        ),
-    }
-}
-
-fn cursor_session(
-    committed_store: &Store,
-    context: &CursorPublicationContext<'_>,
-    fact: &CursorNativeSession,
-    source_id: Uuid,
-    source_identity: &str,
-) -> Result<Session> {
-    let id = provider_import_session_uuid(
-        committed_store,
-        CaptureProvider::Cursor,
-        &fact.native_session_id,
-        source_id,
-        Some(source_identity),
-    )?;
-    Ok(Session {
-        id,
-        history_record_id: context.history_record_id,
-        parent_session_id: None,
-        root_session_id: None,
-        capture_source_id: Some(source_id),
-        provider: CaptureProvider::Cursor,
-        external_session_id: Some(fact.native_session_id.clone()),
-        external_agent_id: None,
-        agent_type: AgentType::Primary,
-        role_hint: Some("primary".to_owned()),
-        is_primary: true,
-        status: SessionStatus::Imported,
-        transcript_blob_id: None,
-        started_at: fact.started_at.unwrap_or(context.imported_at),
-        ended_at: fact.ended_at,
-        timestamps: timestamps(context.imported_at),
-        sync: provider_sync_metadata(
-            Fidelity::Imported,
-            json!({
-                "provider_session_id": fact.native_session_id,
-                "project": fact.project,
-                "title": fact.title,
-                "source_format": CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-            }),
-        ),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn publish_cursor_event(
-    group: &mut ctx_history_store::NativePathPublicationGroup<'_>,
-    committed_store: &Store,
-    context: &CursorPublicationContext<'_>,
-    source_id: Uuid,
-    session: &Session,
-    event: &CursorNativeEvent,
-    summary: &mut ProviderImportSummary,
-) -> Result<()> {
-    let provider_event_index = cursor_event_index(event)?;
-    let identity = provider_event_import_identity_with_exact_legacy_source(
-        committed_store,
-        CaptureProvider::Cursor,
-        session.external_session_id.as_deref().unwrap_or_default(),
-        source_id,
-        provider_event_index,
-        provider_event_index,
-        &event.provider_event_hash,
-        None,
-        Some(event.native_order.semantic_ordinal),
-        session.id
-            == crate::provider::importer::provider_session_uuid(
-                CaptureProvider::Cursor,
-                session.external_session_id.as_deref().unwrap_or_default(),
-            ),
-    )?;
-    let dedupe_key = Store::provider_event_dedupe_key_with_payload_hash(
-        &identity.dedupe_key,
-        &event.provider_event_hash,
-    )
-    .unwrap_or(identity.dedupe_key);
-    let occurred_at = event.occurred_at.unwrap_or(session.started_at);
-    let normalized = Event {
-        id: identity.id,
-        seq: identity.seq,
-        history_record_id: context.history_record_id,
-        session_id: Some(session.id),
-        run_id: None,
-        event_type: event.event_type,
-        role: Some(event.role),
-        occurred_at,
-        capture_source_id: Some(source_id),
-        payload: json!({
-            "provider": CaptureProvider::Cursor.as_str(),
-            "provider_session_id": session.external_session_id,
-            "provider_event_index": provider_event_index,
-            "provider_event_hash": event.provider_event_hash,
-            "native_identity": event.identity.provider_identity(),
-            "body": event.body,
-            "artifacts": [],
-        }),
-        payload_blob_id: None,
-        dedupe_key: Some(dedupe_key),
-        sync: provider_sync_metadata(
-            Fidelity::Imported,
-            json!({
-                "provider_session_id": session.external_session_id,
-                "provider_event_index": provider_event_index,
-                "provider_event_hash": event.provider_event_hash,
-                "provider_event_hash_authority": "provider_supplied",
-                "source_format": CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                "source_trust": "provider_native",
-                "cursor": event.identity.provider_identity(),
-                "fixture_line": event.native_order.semantic_ordinal.saturating_add(1),
-                "source_record_ordinal": event.native_order.semantic_ordinal,
-                "source_record_subrecord_index": event.native_order.part_ordinal,
-                "native_identity": event.identity.provider_identity(),
-            }),
-        ),
-    };
-    if group.reconcile_provider_event(&normalized, ProviderEventHashAuthority::ProviderSupplied)? {
-        summary.imported_events = summary.imported_events.saturating_add(1);
-        summary.imported = summary.imported.saturating_add(1);
-    } else {
-        summary.skipped_events = summary.skipped_events.saturating_add(1);
-        summary.skipped = summary.skipped.saturating_add(1);
-    }
-    summary.accepted_content_records = summary.accepted_content_records.saturating_add(1);
-
-    if let crate::provider::providers::cursor::CursorEventBody::ToolCall { input_paths, .. } =
-        &event.body
-    {
-        for (touch_ordinal, path) in input_paths.iter().enumerate() {
-            let packed_touch = event
-                .native_order
-                .semantic_ordinal
-                .checked_mul(u64::from(u16::MAX) + 1)
-                .and_then(|base| base.checked_add(touch_ordinal as u64))
-                .ok_or(CaptureError::SystemInvariant(
-                    "Cursor file-touch identity overflowed",
-                ))?;
-            let id = provider_file_touch_import_id(
-                committed_store,
-                CaptureProvider::Cursor,
-                session.external_session_id.as_deref().unwrap_or_default(),
-                source_id,
-                Some(provider_event_index),
-                packed_touch,
-                session.id
-                    == crate::provider::importer::provider_session_uuid(
-                        CaptureProvider::Cursor,
-                        session.external_session_id.as_deref().unwrap_or_default(),
-                    ),
-            )?;
-            group.upsert_file_touched(&FileTouched {
-                id,
-                history_record_id: context.history_record_id,
-                run_id: None,
-                event_id: Some(normalized.id),
-                vcs_workspace_id: None,
-                path: path.clone(),
-                change_kind: Some(FileChangeKind::Unknown),
-                old_path: None,
-                line_count_delta: None,
-                confidence: Confidence::Explicit,
-                timestamps: timestamps(occurred_at),
-                source_id: Some(source_id),
-                sync: provider_sync_metadata(
-                    Fidelity::Imported,
-                    json!({
-                        "provider": CaptureProvider::Cursor.as_str(),
-                        "provider_session_id": session.external_session_id,
-                        "provider_event_index": provider_event_index,
-                        "source_format": CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                    }),
-                ),
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn cursor_event_index(event: &CursorNativeEvent) -> Result<u64> {
-    if event.native_order.part_ordinal == 0 {
-        return Ok(event.native_order.semantic_ordinal);
-    }
-    event
-        .native_order
-        .semantic_ordinal
-        .checked_mul(u64::from(u16::MAX) + 1)
-        .and_then(|index| index.checked_add(u64::from(event.native_order.part_ordinal)))
-        .map(|index| index | (1_u64 << 63))
-        .ok_or(CaptureError::SystemInvariant(
-            "Cursor provider event identity index overflowed",
-        ))
-}
-
-fn cursor_event_touch_count(event: &CursorNativeEvent) -> usize {
-    match &event.body {
-        crate::provider::providers::cursor::CursorEventBody::ToolCall { input_paths, .. } => {
-            input_paths.len()
-        }
-        _ => 0,
-    }
-}
-
-fn revalidate_cursor_source(pages: &[CursorPendingPage], path: &Path) -> Result<()> {
-    let pending = pages
-        .iter()
-        .find(|pending| pending.observation.path == path)
-        .expect("Cursor pending source exists");
-    let frozen = freeze_cursor_source(&pending.transcript)?;
-    if frozen.observation() != &pending.observation {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    frozen.revalidate()
-}
-
-fn cursor_source_revision(observation: &CursorSourceObservation) -> String {
-    format!(
-        "cursor-nativepath-strong-v1:length={};sha256={};modified={}:{}.{:09};readonly={};device={};inode={}",
-        observation.length,
-        hex_digest(observation.content_sha256),
-        if observation.modified.before_epoch { '-' } else { '+' },
-        observation.modified.seconds,
-        observation.modified.nanos,
-        observation.readonly,
-        observation
-            .file_identity
-            .map_or_else(|| "none".to_owned(), |identity| identity.device.to_string()),
-        observation
-            .file_identity
-            .map_or_else(|| "none".to_owned(), |identity| identity.inode.to_string()),
-    )
-}
-
-fn encode_cursor_native_cursor(
-    canonical_source_identity: &str,
-    observation: &CursorSourceObservation,
-    checkpoint: &CursorCheckpoint,
-    retained_event_count: u64,
-    rejected_records: u64,
-    rejections: &[CursorRecordRejection],
-) -> Result<String> {
-    Ok(serde_json::to_string(&CursorNativeCursorWire {
-        version: CURSOR_NATIVE_CURSOR_VERSION,
-        kind: "cursor-nativepath".to_owned(),
-        canonical_source_identity: canonical_source_identity.to_owned(),
-        observation: observation.clone(),
-        checkpoint: checkpoint.clone(),
-        retained_event_count,
-        rejected_records,
-        rejections: rejections.to_vec(),
-    })?)
-}
-
-fn decode_cursor_native_cursor(
-    encoded_store_cursor: &str,
-) -> Result<Option<CursorNativeCursorWire>> {
-    let encoded = ctx_history_store::decode_native_path_committed_cursor(encoded_store_cursor)
-        .map(|cursor| cursor.provider_cursor().to_owned())
-        .unwrap_or_else(|_| encoded_store_cursor.to_owned());
-    let Ok(wire) = serde_json::from_str::<CursorNativeCursorWire>(&encoded) else {
-        return Ok(None);
-    };
-    Ok((wire.version == CURSOR_NATIVE_CURSOR_VERSION
-        && wire.kind == "cursor-nativepath"
-        && wire.checkpoint.schema_version == CursorCheckpoint::SCHEMA_VERSION
-        && wire.checkpoint.parser_revision == CursorCheckpoint::PARSER_REVISION)
-        .then_some(wire))
-}
-
-fn provider_sync_cursor(
-    machine_id: &str,
-    stream: String,
-    cursor: String,
-    observed_at: DateTime<Utc>,
-) -> SyncCursor {
-    SyncCursor {
-        id: stable_capture_uuid(
-            &format!(
-                "provider-cursor:{}:{}:{}",
-                CaptureProvider::Cursor.as_str(),
-                machine_id,
-                stream
-            ),
-            "provider-sync-cursor",
-        ),
-        team_id: None,
-        device_id: machine_id.to_owned(),
-        stream,
-        cursor,
-        last_synced_at: Some(observed_at),
-        timestamps: timestamps(observed_at),
-    }
-}
-
-fn cursor_publication_id(
-    pages: &[CursorPendingPage],
-    transitions: &[NativePathCursorTransition],
-) -> String {
-    let mut digest = Sha256::new();
-    digest.update(CURSOR_PUBLICATION_DOMAIN);
-    digest.update((pages.len() as u64).to_be_bytes());
-    for pending in pages {
-        digest.update(pending.observation.content_sha256);
-        digest.update(pending.page.expected_checkpoint.prefix.sha256);
-        digest.update(pending.page.next_checkpoint.prefix.sha256);
-    }
-    for transition in transitions {
-        digest.update(transition.key().stream().as_bytes());
-        if let Some(expected) = transition.expected_cursor() {
-            digest.update((expected.len() as u64).to_be_bytes());
-            digest.update(expected.as_bytes());
-        }
-        digest.update((transition.next().cursor.len() as u64).to_be_bytes());
-        digest.update(transition.next().cursor.as_bytes());
-    }
-    format!("cursor-nativepath-v1:{:x}", digest.finalize())
-}
-
-fn cursor_retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-cursor-nativepath-route-retirement-v1\0");
-    digest.update(retirement.provider.as_str().as_bytes());
-    digest.update(retirement.source_format.as_bytes());
-    digest.update(retirement.machine_id.as_bytes());
-    digest.update(retirement.locator_identity.as_bytes());
-    digest.update(retirement.cursor_stream.as_bytes());
-    digest.update(retirement.expected_canonical_source_identity.as_bytes());
-    digest.update(retirement.expected_source_revision.as_bytes());
-    digest.update(format!("{:?}", retirement.reason).as_bytes());
-    format!("cursor-nativepath-retirement-v1:{:x}", digest.finalize())
-}
-
-fn hex_digest(digest: [u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn cursor_rejection_message(
-    kind: crate::provider::providers::cursor::CursorRejectionKind,
-    observed_bytes: u64,
-) -> String {
-    let reason = match kind {
-        crate::provider::providers::cursor::CursorRejectionKind::MalformedJson => "malformed JSONL",
-        crate::provider::providers::cursor::CursorRejectionKind::Oversized => "oversized JSONL",
-        crate::provider::providers::cursor::CursorRejectionKind::UnsupportedShape => {
-            "unsupported JSONL shape"
-        }
-    };
-    format!("Cursor {reason} record ({observed_bytes} bytes)")
-}
+#[cfg(test)]
+#[path = "cursor_provider_tests.rs"]
+mod tests;

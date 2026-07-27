@@ -321,6 +321,17 @@ def main() -> None:
     unique(behaviors, "behaviors")
     unique(config_keys, "config keys")
     unique(env_vars, "environment variables")
+    rejected_config_keys = contract.get("rejected_config_keys")
+    if (
+        not isinstance(rejected_config_keys, list)
+        or not rejected_config_keys
+        or any(not isinstance(key, str) or not key for key in rejected_config_keys)
+    ):
+        fail("rejected_config_keys must be a non-empty string list")
+    unique(rejected_config_keys, "rejected config keys")
+    overlap = sorted(set(config_keys).intersection(rejected_config_keys))
+    if overlap:
+        fail("rejected config keys overlap canonical controls: " + ", ".join(overlap))
 
     config_source = config_path.read_text(encoding="utf-8")
     runtime_defaults = extract_empty_config_defaults(config_source)
@@ -346,10 +357,11 @@ def main() -> None:
     # apply_env. Scan the complete production config module so helper-owned
     # variables are inventoried while any undocumented literal still fails.
     implemented_env = set(re.findall(r'"(CTX_[A-Z0-9_]+)"', config_source))
-    if implemented_keys != set(config_keys):
+    contract_keys = set(config_keys).union(rejected_config_keys)
+    if implemented_keys != contract_keys:
         fail(
             "config keys differ from contract: "
-            f"implemented={sorted(implemented_keys)} contract={sorted(config_keys)}"
+            f"implemented={sorted(implemented_keys)} contract={sorted(contract_keys)}"
         )
     if implemented_env != set(env_vars):
         fail(

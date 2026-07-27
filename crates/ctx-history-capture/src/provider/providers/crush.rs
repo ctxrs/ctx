@@ -3,9 +3,7 @@ use std::path::Path;
 use ctx_history_store::Store;
 
 use crate::native_source::NativeSqliteValue;
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-};
+use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
 
 mod capture;
 mod native_path;
@@ -16,7 +14,7 @@ mod source;
 mod tests;
 
 pub(super) const CRUSH_CAPTURE_REVISION: u32 = 3;
-pub(super) const CRUSH_POLICY_REVISION: u32 = 5;
+pub(super) const CRUSH_POLICY_REVISION: u32 = 6;
 
 pub(crate) fn load_crush_message_values(
     conn: &rusqlite::Connection,
@@ -44,32 +42,8 @@ pub(crate) fn load_crush_message_values_schema(conn: &rusqlite::Connection) -> R
 
 pub(crate) fn crush_complete_message(
     values: &[NativeSqliteValue],
-) -> Result<(String, String, String)> {
+) -> Result<(String, String, String, String)> {
     projection::crush_complete_message(values)
-}
-
-pub(crate) fn crush_result_record(
-    conn: &rusqlite::Connection,
-    rowid: i64,
-) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
-    let Some(values) = capture::crush_message_values_at_rowid(conn, rowid)? else {
-        return Ok(None);
-    };
-    let child = projection::decode_message_child(&values)?;
-    let parts =
-        serde_json::from_str::<serde_json::Value>(&child.message.parts).map_err(|error| {
-            CaptureError::InvalidPayload(format!(
-                "Crush result parts are no longer valid JSON: {error}"
-            ))
-        })?;
-    let content = projection::crush_normalized_result_content(&parts).ok_or_else(|| {
-        CaptureError::InvalidPayload("Crush row is no longer a supported result".to_owned())
-    })?;
-    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
-        values,
-        native_record_id: child.message.id,
-        content,
-    }))
 }
 
 pub(crate) fn import_crush_nativepath(

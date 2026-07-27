@@ -131,7 +131,11 @@ pub(super) fn goose_session_expressions(
         GooseSqlFieldExpressions::same(format!("CAST({alias}.id AS TEXT)")),
         goose_optional_field(columns, alias, "name", "NULL"),
         goose_optional_field(columns, alias, "description", "NULL"),
-        goose_optional_field(columns, alias, "user_set_name", "0"),
+        GooseSqlFieldExpressions::same(if columns.contains("user_set_name") {
+            format!("coalesce({alias}.user_set_name, 0)")
+        } else {
+            "0".to_owned()
+        }),
         goose_optional_field(columns, alias, "session_type", "NULL"),
         goose_optional_field(columns, alias, "working_dir", "NULL"),
         goose_optional_field(columns, alias, "created_at", "NULL"),
@@ -143,7 +147,11 @@ pub(super) fn goose_session_expressions(
         goose_optional_field(columns, alias, "accumulated_total_tokens", "NULL"),
         goose_optional_field(columns, alias, "accumulated_input_tokens", "NULL"),
         goose_optional_field(columns, alias, "accumulated_output_tokens", "NULL"),
-        goose_optional_field(columns, alias, "accumulated_cost", "NULL"),
+        GooseSqlFieldExpressions::same(if columns.contains("accumulated_cost") {
+            format!("cast({alias}.accumulated_cost as real)")
+        } else {
+            "NULL".to_owned()
+        }),
         goose_optional_field(columns, alias, "provider_name", "NULL"),
         goose_optional_field(columns, alias, "model_config_json", "NULL"),
         goose_optional_field(columns, alias, "goose_mode", "NULL"),
@@ -333,9 +341,12 @@ impl GooseNativeSchema {
             )
         })?;
         if schema_version != GOOSE_NATIVE_SCHEMA_VERSION {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Goose NativePath supports schema version {GOOSE_NATIVE_SCHEMA_VERSION}, found {schema_version}"
-            )));
+            let unsupported = u32::try_from(schema_version).map_err(|_| {
+                CaptureError::InvalidPayload(format!(
+                    "Goose NativePath schema version {schema_version} is outside the supported version domain"
+                ))
+            })?;
+            return Err(CaptureError::UnsupportedSchemaVersion(unsupported));
         }
         let user_version =
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
@@ -378,6 +389,67 @@ impl GooseNativeSchema {
 
     pub(super) fn message_metadata_expression(&self, alias: &str) -> String {
         goose_qualified_optional_column(&self.message_columns, alias, "metadata_json", "NULL")
+    }
+
+    pub(super) fn session_storage_class_predicate(&self, alias: &str) -> String {
+        let mut predicates = vec![format!("typeof({alias}.id) = 'text'")];
+        for column in [
+            "name",
+            "description",
+            "session_type",
+            "working_dir",
+            "created_at",
+            "updated_at",
+            "extension_data",
+            "provider_name",
+            "model_config_json",
+            "goose_mode",
+            "archived_at",
+            "project_id",
+        ] {
+            if self.session_columns.contains(column) {
+                predicates.push(format!("typeof({alias}.{column}) in ('null', 'text')"));
+            }
+        }
+        for column in [
+            "user_set_name",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+            "accumulated_total_tokens",
+            "accumulated_input_tokens",
+            "accumulated_output_tokens",
+        ] {
+            if self.session_columns.contains(column) {
+                predicates.push(format!("typeof({alias}.{column}) in ('null', 'integer')"));
+            }
+        }
+        if self.session_columns.contains("accumulated_cost") {
+            predicates.push(format!(
+                "typeof({alias}.accumulated_cost) in ('null', 'integer', 'real')"
+            ));
+        }
+        predicates.join(" and ")
+    }
+
+    pub(super) fn message_storage_class_predicate(&self, alias: &str) -> String {
+        let mut predicates = vec![
+            format!("typeof({alias}.id) = 'integer'"),
+            format!("typeof({alias}.session_id) = 'text'"),
+            format!("typeof({alias}.role) = 'text'"),
+            format!("typeof({alias}.content_json) = 'text'"),
+        ];
+        for column in ["message_id", "timestamp", "tokens", "metadata_json"] {
+            if self.message_columns.contains(column) {
+                predicates.push(format!("typeof({alias}.{column}) in ('null', 'text')"));
+            }
+        }
+        if self.message_columns.contains("created_timestamp") {
+            predicates.push(format!(
+                "typeof({alias}.created_timestamp) in ('null', 'integer')"
+            ));
+        }
+        predicates.join(" and ")
     }
 }
 

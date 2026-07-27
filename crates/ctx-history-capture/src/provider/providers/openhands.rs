@@ -17,7 +17,6 @@ pub(crate) use event::openhands_result_content;
 #[allow(unused_imports)]
 pub(crate) use event::{decode_openhands_event, decode_openhands_event_value};
 pub(crate) use nativepath::import_openhands_nativepath;
-pub(crate) const OPENHANDS_RESULT_CONTENT_PROFILE: &str = "openhands.result-body.v1";
 
 fn openhands_bounded_derived_text(value: String, field: &str) -> Result<String> {
     const MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024;
@@ -50,7 +49,7 @@ pub(crate) fn seed_c213_openhands_terminal_cursor(
     let position = NativePosition::new("openhands-event-file-v1", 1_u64.to_be_bytes().to_vec())
         .map_err(|error| crate::CaptureError::InvalidPayload(error.to_string()))?;
     let cursor = CertifiedProviderCursor::new(
-        source.source_revision(None),
+        source.cursor_revision(None),
         2,
         1,
         position,

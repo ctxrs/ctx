@@ -1164,14 +1164,7 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
         assert_eq!(refresh["trigger"], "import");
         assert_eq!(refresh["source_mode"], "explicit_path");
         assert_eq!(refresh["change"], expected_change);
-        assert_eq!(
-            refresh["content_evidence"],
-            if expected_change == "no_op" {
-                "none"
-            } else {
-                "accepted"
-            }
-        );
+        assert_eq!(refresh["content_evidence"], "accepted");
         assert_eq!(refresh["refresh_result"], "complete");
         assert_eq!(
             refresh["core_result"],
@@ -1203,6 +1196,8 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
             "rejections_bucket",
             "failures_bucket",
             "bytes_bucket",
+            "cpu_duration_bucket",
+            "observed_process_peak_rss_bucket",
         ] {
             assert!(refresh[bucket].as_str().is_some(), "missing {bucket}");
         }
@@ -1222,6 +1217,9 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
             "error",
             "error_message",
             "duration_ms",
+            "cpu_duration_ms",
+            "peak_rss_bytes",
+            "observed_process_peak_rss_bytes",
         ] {
             assert!(
                 !refresh.contains_key(forbidden),

@@ -4,7 +4,11 @@ use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
 use crate::native_source::NativeSqliteValue;
-use crate::{CaptureError, Result};
+use crate::provider::normalization::{
+    provider_capped_json, provider_policy_body, provider_policy_event_text,
+    provider_result_identifier_evidence, provider_result_outcome_evidence,
+};
+use crate::{compute_payload_hash, CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
 use super::normalization::{
     opencode_event_text, opencode_event_type, opencode_message_part_role,
@@ -124,19 +128,21 @@ impl OpenCodeLogicalRow {
     }
 }
 
-pub(crate) fn opencode_complete_message(
+pub(crate) fn opencode_complete_message_with_normalized_hash(
     values: &[NativeSqliteValue],
     dialect: &OpenCodeSqliteDialect,
-) -> Result<(String, String, String)> {
+) -> Result<(String, String, String, String)> {
     if values.len() != 14 {
-        return Err(CaptureError::InvalidPayload(
-            "OpenCode complete-content row has an invalid value count".into(),
-        ));
+        return Err(CaptureError::InvalidPayload(format!(
+            "{} complete-content row has an invalid value count",
+            dialect.display_name
+        )));
     }
     if opencode_integer_value(values, 1)? == 0 {
-        return Err(CaptureError::InvalidPayload(
-            "OpenCode complete-content row has no verified parent".into(),
-        ));
+        return Err(CaptureError::InvalidPayload(format!(
+            "{} complete-content row has no verified parent",
+            dialect.display_name
+        )));
     }
     let session_id = opencode_text_value(values, 3)?.to_owned();
     let time_created = opencode_integer_value(values, 7)?;
@@ -152,16 +158,62 @@ pub(crate) fn opencode_complete_message(
     };
     let projected = logical.message_row()?;
     let message = projected.row.event.ok_or_else(|| {
-        CaptureError::InvalidPayload("OpenCode row does not emit a message".into())
+        CaptureError::InvalidPayload(format!(
+            "{} row does not emit a message",
+            dialect.display_name
+        ))
     })?;
     let event_type = opencode_event_type(&message.entry_type, &projected.data);
     if event_type != EventType::Message {
-        return Err(CaptureError::InvalidPayload(
-            "OpenCode row is not an ordinary message".into(),
-        ));
+        return Err(CaptureError::InvalidPayload(format!(
+            "{} row is not an ordinary message",
+            dialect.display_name
+        )));
     }
     let text = opencode_event_text(&message.entry_type, &projected.data, event_type, dialect);
-    Ok((session_id, message.id, text))
+    let normalized_body = if logical.source_table == OpenCodeCapturedShape::MessagePart.label() {
+        serde_json::from_str::<Value>(&logical.part_data).map_err(|error| {
+            CaptureError::InvalidPayload(format!(
+                "invalid JSON in message part {}: {error}",
+                logical.part_id
+            ))
+        })?
+    } else {
+        projected.data
+    };
+    let payload = opencode_normalized_message_payload(
+        opencode_text_value(values, 2)?,
+        &text,
+        &normalized_body,
+    );
+    let normalized_payload_hash = compute_payload_hash(&payload)?;
+    Ok((session_id, message.id, text, normalized_payload_hash))
+}
+
+pub(super) fn opencode_normalized_message_payload(
+    message_identity: &str,
+    complete_text: &str,
+    body: &Value,
+) -> Value {
+    let event_type = EventType::Message;
+    let retained = provider_policy_event_text(event_type, complete_text, body);
+    let payload = json!({
+        "entry_type": "message",
+        "message_id": message_identity,
+        "text": retained.text,
+        "text_retention": retained.retention.as_json(),
+        "result_evidence": provider_result_identifier_evidence(
+            event_type,
+            complete_text,
+            body,
+        ),
+        "result_outcome": provider_result_outcome_evidence(event_type, body),
+        "body": provider_capped_json(
+            &provider_policy_body(event_type, body),
+            PROVIDER_MAX_PREVIEW_CHARS,
+        ),
+    });
+    crate::provider::importer::compact_provider_result_payload(event_type, &payload)
 }
 
 pub(super) fn opencode_text_value(values: &[NativeSqliteValue], index: usize) -> Result<&str> {

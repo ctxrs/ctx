@@ -260,6 +260,7 @@ for record in records:
 
     assert!(stderr.contains("import failed"), "{stderr}");
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sync_cursors"), 0);
     assert_eq!(
         sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
         0
@@ -407,7 +408,8 @@ for record in records:
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sync_cursors"), 0);
     assert_eq!(
         sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
-        0
+        0,
+        "{report:#}"
     );
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sessions"), 0);
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM events"), 0);
@@ -455,9 +457,15 @@ for record in records:
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sessions"), 1);
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM events"), 1);
     let cursor: String = conn
-        .query_row("SELECT cursor FROM sync_cursors", [], |row| row.get(0))
+        .query_row(
+            "SELECT cursor FROM sync_cursors
+             WHERE stream LIKE 'provider:custom:retryplugin:%'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert_eq!(cursor, "valid-advance");
+    assert!(cursor.contains("valid-advance"), "{cursor}");
+    assert!(!cursor.contains("invalid-advance"), "{cursor}");
 }
 
 #[test]
@@ -544,6 +552,26 @@ fn import_history_source_plugin_is_searchable_and_receives_cursor() {
     assert_eq!(first["totals"]["imported_sessions"], 1);
     assert_eq!(first["totals"]["imported_events"], 1);
     assert_eq!(first["sources"][0]["history_source"], "hermes/default");
+
+    let store = ctx_history_store::Store::open_read_only(temp.path().join("work.sqlite")).unwrap();
+    let projected = store
+        .search_event_hits("hermes plugin initial marker", 5)
+        .unwrap();
+    assert_eq!(projected.len(), 1, "{projected:#?}");
+    assert_eq!(
+        projected[0].history_source.as_deref(),
+        Some("hermes/default")
+    );
+    assert_eq!(
+        projected[0].history_source_plugin.as_deref(),
+        Some("hermes")
+    );
+    assert_eq!(projected[0].provider_key.as_deref(), Some("hermes"));
+    assert_eq!(projected[0].source_id.as_deref(), Some("default"));
+    assert_eq!(
+        projected[0].source_format.as_deref(),
+        Some("hermes-history-v1")
+    );
 
     let initial = json_output(ctx(&temp).args([
         "search",

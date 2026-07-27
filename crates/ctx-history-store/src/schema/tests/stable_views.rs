@@ -138,7 +138,9 @@ fn v47_stable_events_expose_sparse_failure_without_transitional_result_schema() 
     let RawSqlValue::Text { value, .. } = &rows.rows[0][2] else {
         panic!("failure payload is not text");
     };
-    assert!(value.contains("retained sparse failure"));
+    assert!(value.contains("\"result_outcome\":\"failure\""));
+    assert!(value.contains("\"exit_code\":1"));
+    assert!(!value.contains("retained sparse failure"));
     assert!(!value.contains("successful output must be absent"));
 }
 

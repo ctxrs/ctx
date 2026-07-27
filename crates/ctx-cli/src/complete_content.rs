@@ -7,7 +7,8 @@ use ctx_history_capture::complete_content::{
     AuthorizedSourceRoute, BrokeredSourceAccess, CompleteContentError, CompleteContentErrorKind,
     CompleteContentHashAuthority, CompleteContentResolverRegistry, CompleteMessageRequest,
     SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorsV1, VerifiedContentRole,
-    COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+    COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS, COMPLETE_CONTENT_MAX_ADMITTED_SOURCES,
+    COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
 use ctx_history_core::{CaptureProvider, Event, EventRole, EventType};
 use ctx_history_store::Store;
@@ -97,6 +98,12 @@ pub(crate) struct ResolvedEventContent {
 pub(crate) struct ResolvedContent {
     requested: ContentPolicy,
     events: BTreeMap<Uuid, ResolvedEventContent>,
+}
+
+struct AdmittedSource {
+    route: AuthorizedSourceRoute,
+    catalog_source_revision: String,
+    access: BrokeredSourceAccess,
 }
 
 impl ResolvedContent {
@@ -209,7 +216,7 @@ pub(crate) fn resolve_event_contents_with_registry(
     }
 
     let mut grouped = BTreeMap::<Uuid, Vec<CompleteMessageRequest>>::new();
-    let mut admitted = preadmit_nanoclaw_sources(store, events)?;
+    let admitted = preadmit_exact_sources(store, events, &resolved, output_limit_bytes)?;
     for event in events {
         let (indexed_text, indexed_limit_chars) = match message_retention(event) {
             MessageRetention::Complete => continue,
@@ -225,13 +232,8 @@ pub(crate) fn resolve_event_contents_with_registry(
                 ));
             }
         };
-        let request = complete_message_request(
-            store,
-            event,
-            indexed_text,
-            indexed_limit_chars,
-            &mut admitted,
-        )?;
+        let request =
+            complete_message_request(store, event, indexed_text, indexed_limit_chars, &admitted)?;
         let source_id = event.capture_source_id.ok_or_else(|| {
             CompleteContentError::new(CompleteContentErrorKind::HydrationUnsupported, event.id)
         })?;
@@ -285,32 +287,86 @@ pub(crate) fn resolve_event_contents_with_registry(
     })
 }
 
-fn preadmit_nanoclaw_sources(
+fn preadmit_exact_sources(
     store: &Store,
     events: &[&Event],
-) -> Result<BTreeMap<Uuid, BrokeredSourceAccess>, CompleteContentError> {
-    let mut selections = BTreeMap::new();
+    resolved: &BTreeMap<Uuid, ResolvedEventContent>,
+    output_limit_bytes: usize,
+) -> Result<BTreeMap<Uuid, AdmittedSource>, CompleteContentError> {
+    let mut selections = BTreeMap::<
+        Uuid,
+        (
+            AuthorizedSourceRoute,
+            String,
+            Uuid,
+            Vec<ctx_history_capture::complete_content::CompleteContentSourceLocator>,
+        ),
+    >::new();
+    let mut source_order = Vec::new();
+    let mut expected_output_bytes = 0_u64;
     for event in events {
-        if !matches!(message_retention(event), MessageRetention::Eligible { .. }) {
-            continue;
-        }
-        let Some(persisted) = event
-            .sync
-            .metadata
-            .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
-            .and_then(VerifiedContentLocatorsV1::from_metadata_value)
-            .and_then(|locators| locators.locator(VerifiedContentRole::MessageBody).cloned())
-        else {
-            continue;
+        let persisted = match message_retention(event) {
+            MessageRetention::Eligible { .. } => event
+                .sync
+                .metadata
+                .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
+                .and_then(VerifiedContentLocatorsV1::from_metadata_value)
+                .and_then(|locators| locators.locator(VerifiedContentRole::MessageBody).cloned())
+                .ok_or_else(|| {
+                    CompleteContentError::new(
+                        CompleteContentErrorKind::HydrationUnsupported,
+                        event.id,
+                    )
+                })?,
+            MessageRetention::IneligibleTruncated => {
+                return Err(CompleteContentError::new(
+                    CompleteContentErrorKind::HydrationUnsupported,
+                    event.id,
+                ));
+            }
+            MessageRetention::Complete | MessageRetention::PolicyBounded => {
+                let bytes = resolved
+                    .get(&event.id)
+                    .map(|content| content.text.len())
+                    .ok_or_else(|| {
+                        CompleteContentError::new(
+                            CompleteContentErrorKind::ContentVerificationFailed,
+                            event.id,
+                        )
+                    })?;
+                expected_output_bytes = expected_output_bytes
+                    .checked_add(u64::try_from(bytes).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        CompleteContentError::new(
+                            CompleteContentErrorKind::ContentTooLarge,
+                            event.id,
+                        )
+                    })?;
+                if expected_output_bytes > u64::try_from(output_limit_bytes).unwrap_or(u64::MAX) {
+                    return Err(CompleteContentError::new(
+                        CompleteContentErrorKind::ContentTooLarge,
+                        event.id,
+                    ));
+                }
+                continue;
+            }
         };
+        expected_output_bytes = expected_output_bytes
+            .checked_add(persisted.content_ref().byte_len())
+            .ok_or_else(|| {
+                CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event.id)
+            })?;
+        if expected_output_bytes > u64::try_from(output_limit_bytes).unwrap_or(u64::MAX) {
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::ContentTooLarge,
+                event.id,
+            ));
+        }
         let route = store
             .authorized_source_route_for_event(event.id)
             .map_err(|_| {
                 CompleteContentError::new(CompleteContentErrorKind::HydrationUnsupported, event.id)
             })?;
-        if route.provider() != CaptureProvider::NanoClaw {
-            continue;
-        }
         let source_id = route.capture_source_id();
         if event.capture_source_id != Some(source_id) {
             return Err(CompleteContentError::new(
@@ -324,30 +380,96 @@ fn preadmit_nanoclaw_sources(
         let source = store.get_capture_source(source_id).map_err(|_| {
             CompleteContentError::new(CompleteContentErrorKind::HydrationUnsupported, event.id)
         })?;
-        let authorized = AuthorizedSourceRoute {
-            source_id,
-            provider: route.provider(),
-            source_format: route.source_format().to_owned(),
-            family: persisted.family(),
-            raw_source_path: route.path().to_path_buf(),
-            source_root: current_source_root(&source, route.path()),
-            source_identity: Some(route.canonical_source_identity().to_owned()),
-            source_snapshot: source_snapshot(&source.sync.metadata),
-        };
-        let entry = selections
-            .entry(source_id)
-            .or_insert_with(|| (authorized, event.id, Vec::new()));
-        entry.2.push(locator);
+        if !verified_content_route_matches(
+            persisted.content_profile(),
+            route.provider(),
+            route.source_format(),
+            persisted.family(),
+            VerifiedContentRole::MessageBody,
+            persisted.kind(),
+        ) {
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::HydrationUnsupported,
+                event.id,
+            ));
+        }
+        let authorized = authorized_source_route(&route, &source, persisted.family());
+        if let Some((existing, source_revision, _, _)) = selections.get(&source_id) {
+            if existing != &authorized || source_revision != route.source_revision() {
+                return Err(CompleteContentError::new(
+                    CompleteContentErrorKind::SourceChanged,
+                    event.id,
+                ));
+            }
+        } else {
+            if selections.len() == COMPLETE_CONTENT_MAX_ADMITTED_SOURCES {
+                return Err(CompleteContentError::new(
+                    CompleteContentErrorKind::ContentTooLarge,
+                    event.id,
+                ));
+            }
+            source_order.push(source_id);
+            selections.insert(
+                source_id,
+                (
+                    authorized,
+                    route.source_revision().to_owned(),
+                    event.id,
+                    Vec::new(),
+                ),
+            );
+        }
+        let entry = selections.get_mut(&source_id).expect("inserted above");
+        entry.3.push(locator);
     }
 
-    selections
-        .into_iter()
-        .map(|(source_id, (route, event_id, locators))| {
-            SourceAccessBroker::new()
-                .admit_for_source_locators(route, &locators, event_id)
-                .map(|access| (source_id, access))
-        })
-        .collect()
+    let broker = SourceAccessBroker::new();
+    let mut prepared = BTreeMap::new();
+    let mut snapshot_bytes = 0_u64;
+    for source_id in &source_order {
+        let (route, _, event_id, _) = selections.get(source_id).expect("ordered selection");
+        let admission = broker.prepare(route.clone(), *event_id)?;
+        include_snapshot_reservation(
+            &mut snapshot_bytes,
+            admission.reserved_snapshot_bytes(),
+            *event_id,
+        )?;
+        prepared.insert(*source_id, admission);
+    }
+
+    let mut admitted = BTreeMap::new();
+    for source_id in source_order {
+        let (route, catalog_source_revision, _event_id, locators) =
+            selections.remove(&source_id).expect("ordered selection");
+        let prepared = prepared.remove(&source_id).expect("prepared admission");
+        let access = broker.admit_prepared_for_source_locators(prepared, &locators)?;
+        admitted.insert(
+            source_id,
+            AdmittedSource {
+                route,
+                catalog_source_revision,
+                access,
+            },
+        );
+    }
+    Ok(admitted)
+}
+
+fn include_snapshot_reservation(
+    aggregate: &mut u64,
+    source_bytes: u64,
+    event_id: Uuid,
+) -> Result<(), CompleteContentError> {
+    *aggregate = aggregate.checked_add(source_bytes).ok_or_else(|| {
+        CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id)
+    })?;
+    if *aggregate > COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::ContentTooLarge,
+            event_id,
+        ));
+    }
+    Ok(())
 }
 
 fn complete_message_request(
@@ -355,7 +477,7 @@ fn complete_message_request(
     event: &Event,
     indexed_text: String,
     indexed_limit_chars: usize,
-    admitted: &mut BTreeMap<Uuid, BrokeredSourceAccess>,
+    admitted: &BTreeMap<Uuid, AdmittedSource>,
 ) -> Result<CompleteMessageRequest, CompleteContentError> {
     let fail = |kind| CompleteContentError::new(kind, event.id);
     let locators = event
@@ -366,6 +488,9 @@ fn complete_message_request(
         .ok_or_else(|| fail(CompleteContentErrorKind::HydrationUnsupported))?;
     let persisted = locators
         .locator(VerifiedContentRole::MessageBody)
+        .ok_or_else(|| fail(CompleteContentErrorKind::HydrationUnsupported))?;
+    let source_locator = persisted
+        .source_locator()
         .ok_or_else(|| fail(CompleteContentErrorKind::HydrationUnsupported))?;
     let route = store
         .authorized_source_route_for_event(event.id)
@@ -388,25 +513,15 @@ fn complete_message_request(
     ) {
         return Err(fail(CompleteContentErrorKind::HydrationUnsupported));
     }
-    let source_access = if let Some(access) = admitted.get(&source_id) {
-        access.clone()
-    } else {
-        let access = SourceAccessBroker::new().admit(
-            AuthorizedSourceRoute {
-                source_id,
-                provider: route.provider(),
-                source_format: source_format.clone(),
-                family: persisted.family(),
-                raw_source_path: route.path().to_path_buf(),
-                source_root: current_source_root(&source, route.path()),
-                source_identity: Some(route.canonical_source_identity().to_owned()),
-                source_snapshot: source_snapshot(&source.sync.metadata),
-            },
-            event.id,
-        )?;
-        admitted.insert(source_id, access.clone());
-        access
-    };
+    let authorized = authorized_source_route(&route, &source, persisted.family());
+    let admitted = admitted
+        .get(&source_id)
+        .filter(|admitted| {
+            admitted.route == authorized
+                && admitted.catalog_source_revision == route.source_revision()
+        })
+        .ok_or_else(|| fail(CompleteContentErrorKind::SourceChanged))?;
+    let source_access = admitted.access.clone();
     let expected_hash_authority =
         match metadata_string(&event.sync.metadata, "provider_event_hash_authority").as_deref() {
             Some("provider_supplied") => CompleteContentHashAuthority::ProviderSupplied,
@@ -422,7 +537,7 @@ fn complete_message_request(
         source_access,
         source_family: Some(persisted.family()),
         content_profile: persisted.content_profile().to_owned(),
-        source_locator: persisted.source_locator(),
+        source_locator: Some(source_locator),
         provider_session_id: event
             .session_id
             .and_then(|id| store.get_session(id).ok())
@@ -444,6 +559,23 @@ fn complete_message_request(
         indexed_text,
         indexed_limit_chars,
     })
+}
+
+fn authorized_source_route(
+    route: &ctx_history_store::AuthorizedSourceRoute,
+    source: &ctx_history_core::CaptureSource,
+    family: ctx_history_capture::complete_content::CompleteContentSourceFamily,
+) -> AuthorizedSourceRoute {
+    AuthorizedSourceRoute {
+        source_id: route.capture_source_id(),
+        provider: route.provider(),
+        source_format: route.source_format().to_owned(),
+        family,
+        raw_source_path: route.path().to_path_buf(),
+        source_root: current_source_root(source, route.path()),
+        source_identity: Some(route.canonical_source_identity().to_owned()),
+        source_snapshot: source_snapshot(&source.sync.metadata),
+    }
 }
 
 fn complete_message_route_is_available(store: &Store, event: &Event) -> bool {
@@ -502,6 +634,7 @@ fn message_retention(event: &Event) -> MessageRetention {
         return MessageRetention::PolicyBounded;
     }
     for (retention_pointer, text_pointer) in [
+        ("/text_retention", "/body"),
         ("/body/text_retention", "/body/text"),
         ("/body/body/text_retention", "/body/body/text"),
         ("/text_retention", "/text"),

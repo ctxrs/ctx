@@ -15,15 +15,11 @@ use super::{
     CompleteContentHashAuthority, CompleteContentSourceFamily, CompleteContentSourceLocator,
     CompleteMessage, CompleteMessageRequest, JsonlRange, SourceVerification, VerifiedContentRole,
 };
-use crate::complete_content::{
-    verified_content_route_matches, ResolvedResultContent, ResultContentRequest,
-};
-use crate::provider::providers::mux::{
-    mux_event_id, mux_event_text, mux_event_type, mux_result_content,
-};
+use crate::complete_content::verified_content_route_matches;
+use crate::provider::providers::mux::{mux_event_id, mux_event_text, mux_event_type};
 use crate::MUX_SOURCE_FORMAT;
 
-pub(super) const MUX_LOCATOR_KIND: &str = "mux-record-v1";
+pub(crate) const MUX_LOCATOR_KIND: &str = "mux-record-v1";
 const MUX_LOCATOR_BYTES: usize = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +29,6 @@ enum MuxAddress {
 }
 
 impl MuxAddress {
-    #[cfg(test)]
     fn encode(self) -> [u8; MUX_LOCATOR_BYTES] {
         let (tag, range) = match self {
             Self::Chat(range) => (1, range),
@@ -47,7 +42,8 @@ impl MuxAddress {
         };
         let mut encoded = [0_u8; MUX_LOCATOR_BYTES];
         encoded[0] = tag;
-        encoded[1..].copy_from_slice(&range.encode());
+        encoded[1..9].copy_from_slice(&range.byte_start.to_be_bytes());
+        encoded[9..].copy_from_slice(&range.byte_end_exclusive.to_be_bytes());
         encoded
     }
 
@@ -64,6 +60,24 @@ impl MuxAddress {
             _ => None,
         }
     }
+}
+
+pub(crate) fn mux_record_locator(
+    is_partial: bool,
+    byte_start: u64,
+    byte_end_exclusive: u64,
+) -> Option<CompleteContentSourceLocator> {
+    let address = if is_partial {
+        (byte_start == 0).then_some(MuxAddress::Partial {
+            byte_len: byte_end_exclusive,
+        })?
+    } else {
+        MuxAddress::Chat(JsonlRange {
+            byte_start,
+            byte_end_exclusive,
+        })
+    };
+    CompleteContentSourceLocator::new(MUX_LOCATOR_KIND, address.encode().to_vec())
 }
 
 pub(crate) fn valid_mux_locator(value: &[u8]) -> bool {
@@ -104,45 +118,6 @@ pub(super) fn resolve_messages(
     }
     first.source_access.revalidate_jsonl(first.event_id)?;
     Ok(messages)
-}
-
-pub(super) fn resolve_results(
-    requests: &[ResultContentRequest],
-) -> Vec<Result<ResolvedResultContent, CompleteContentError>> {
-    let group = resolve_result_group(requests);
-    match group {
-        Ok(results) => results,
-        Err(error) => requests
-            .iter()
-            .map(|request| Err(CompleteContentError::new(error.kind, request.event_id)))
-            .collect(),
-    }
-}
-
-fn resolve_result_group(
-    requests: &[ResultContentRequest],
-) -> Result<Vec<Result<ResolvedResultContent, CompleteContentError>>, CompleteContentError> {
-    if requests.is_empty() {
-        return Ok(Vec::new());
-    }
-    validate_result_requests(requests)?;
-    let mut results = Vec::with_capacity(requests.len());
-    for request in requests {
-        let resolved = read_mux_record(
-            &request.source_access,
-            request.event_id,
-            &request.source_format,
-            &request.source_locator,
-            request.source_record_ordinal,
-            &request.expected_record_digest,
-        )
-        .and_then(|record| resolve_result_record(request, &record));
-        results.push(resolved);
-    }
-    requests[0]
-        .source_access
-        .revalidate_jsonl(requests[0].event_id)?;
-    Ok(results)
 }
 
 fn validate_message_requests(
@@ -189,50 +164,6 @@ fn validate_message_requests(
             .source_locator
             .as_ref()
             .and_then(MuxAddress::decode)
-            .is_some_and(|address| matches!(address, MuxAddress::Partial { .. }))
-            && request.source_record_ordinal != 0
-        {
-            return Err(CompleteContentError::new(
-                CompleteContentErrorKind::ContentVerificationFailed,
-                request.event_id,
-            ));
-        }
-        prior = Some(position);
-    }
-    Ok(())
-}
-
-fn validate_result_requests(requests: &[ResultContentRequest]) -> Result<(), CompleteContentError> {
-    let first = &requests[0];
-    let mut prior = None;
-    for request in requests {
-        let position = (
-            request.source_record_ordinal,
-            request.source_record_subrecord_index,
-        );
-        if request.provider != CaptureProvider::Mux
-            || request.source_format != first.source_format
-            || request.source_access != first.source_access
-            || request.source_access.family() != CompleteContentSourceFamily::Jsonl
-            || request.source_family != CompleteContentSourceFamily::Jsonl
-            || !mux_locator_kind_supported(&request.source_format, request.source_locator.kind())
-            || !verified_content_route_matches(
-                &request.content_profile,
-                request.provider,
-                &request.source_format,
-                request.source_family,
-                VerifiedContentRole::ResultBody,
-                request.source_locator.kind(),
-            )
-            || request.source_record_subrecord_index != 0
-            || prior.is_some_and(|prior| prior >= position)
-        {
-            return Err(CompleteContentError::new(
-                CompleteContentErrorKind::ContentVerificationFailed,
-                request.event_id,
-            ));
-        }
-        if MuxAddress::decode(&request.source_locator)
             .is_some_and(|address| matches!(address, MuxAddress::Partial { .. }))
             && request.source_record_ordinal != 0
         {
@@ -323,51 +254,6 @@ fn resolve_message_record(
         mux_event_text(&value, EventType::Message),
         SourceVerification::VERIFIED,
     )
-}
-
-fn resolve_result_record(
-    request: &ResultContentRequest,
-    record: &[u8],
-) -> Result<ResolvedResultContent, CompleteContentError> {
-    let value = parse_record(record, request.event_id)?;
-    if !matches!(
-        mux_event_type(&value),
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        return Err(CompleteContentError::new(
-            CompleteContentErrorKind::ContentVerificationFailed,
-            request.event_id,
-        ));
-    }
-    let line_number = mux_line_number(request.source_record_ordinal, request.event_id)?;
-    let native_record_id = mux_native_record_id(
-        &value,
-        line_number,
-        matches!(
-            MuxAddress::decode(&request.source_locator),
-            Some(MuxAddress::Partial { .. })
-        ),
-    );
-    let content = mux_result_content(&value).ok_or_else(|| {
-        CompleteContentError::new(
-            CompleteContentErrorKind::ContentVerificationFailed,
-            request.event_id,
-        )
-    })?;
-    if request.expected_native_record_id != native_record_id
-        || !request.expected_content_ref.verifies(content.as_bytes())
-    {
-        return Err(CompleteContentError::new(
-            CompleteContentErrorKind::ContentVerificationFailed,
-            request.event_id,
-        ));
-    }
-    Ok(ResolvedResultContent {
-        event_id: request.event_id,
-        content,
-        content_ref: request.expected_content_ref.clone(),
-        verification: SourceVerification::VERIFIED,
-    })
 }
 
 fn parse_record(record: &[u8], event_id: uuid::Uuid) -> Result<Value, CompleteContentError> {

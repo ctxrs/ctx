@@ -33,7 +33,7 @@ use crate::{
 
 const SNAPSHOT_MAX_COMPONENT_DATABASES: usize = 256;
 const SNAPSHOT_MAX_FILES: usize = (SNAPSHOT_MAX_COMPONENT_DATABASES + 1) * 4;
-const SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+pub(super) const SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(5);
 const SQLITE_SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 

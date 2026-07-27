@@ -99,6 +99,9 @@
       }
     }
   ],
+  "rejected_config_keys": [
+    "cloud.mode"
+  ],
   "retired_controls": [
     "CTX_CHANNEL",
     "CTX_FUNCTIONS_BASE",

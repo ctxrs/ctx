@@ -9,8 +9,10 @@ use super::protocol_validity::{
 use super::support::{nonnegative_u64, to_i64};
 use super::{
     active_state, checkpoint, ActiveState, JournalOperation, JournalPosition,
-    ProjectionJournalRecord, ProjectionJournalSnapshot, EMPTY_SHA256, PROJECTION_CONTRACT_VERSION,
-    PROJECTION_JOURNAL_MAX_PAGE_BYTES, PROJECTION_JOURNAL_PAGE_SIZE,
+    ProjectionJournalContextWindow, ProjectionJournalRecord, ProjectionJournalSnapshot,
+    EMPTY_SHA256, PROJECTION_CONTRACT_VERSION, PROJECTION_JOURNAL_CONTEXT_MAX_BYTES,
+    PROJECTION_JOURNAL_CONTEXT_RECORDS, PROJECTION_JOURNAL_MAX_PAGE_BYTES,
+    PROJECTION_JOURNAL_PAGE_SIZE,
 };
 use crate::{Result, Store, StoreError, CANONICAL_PROJECTION_SCHEMA_IDENTITY, SCHEMA_VERSION};
 
@@ -61,6 +63,7 @@ fn snapshot(
             active_generation: state.generation,
         });
     }
+    let context = read_context_window(conn, &state, after.sequence)?;
     let records = read_records(conn, &state, after.sequence)?;
     let next_position = records
         .last()
@@ -76,11 +79,180 @@ fn snapshot(
         canonical_schema_identity: CANONICAL_PROJECTION_SCHEMA_IDENTITY.to_owned(),
         projection_contract_version: PROJECTION_CONTRACT_VERSION,
         frozen_through: checkpoint(&state),
+        context,
         authorized_repository_roots: authorized_repository_roots(conn)?,
         has_more: next_position.sequence < state.high_water_sequence,
         records,
         next_position,
     })
+}
+
+pub(super) fn projection_context_available(
+    conn: &rusqlite::Connection,
+    state: &ActiveState,
+    through: u64,
+) -> Result<bool> {
+    match read_context_window(conn, state, through) {
+        Ok(_) => Ok(true),
+        // Missing retained context is recoverable from canonical Store rows by
+        // starting a fresh generation. Preserve unrelated SQLite/JSON failures
+        // rather than disguising them as ordinary helper loss.
+        Err(StoreError::InvalidProjectionJournalData(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn read_context_window(
+    conn: &rusqlite::Connection,
+    state: &ActiveState,
+    through: u64,
+) -> Result<ProjectionJournalContextWindow> {
+    if through == 0 {
+        return Ok(ProjectionJournalContextWindow {
+            base_checkpoint: super::JournalCheckpoint {
+                position: JournalPosition {
+                    generation: state.generation,
+                    sequence: 0,
+                },
+                contract_fingerprint: state.contract_fingerprint.clone(),
+                cumulative_digest: generation_digest(state.generation, &state.contract_fingerprint),
+            },
+            records: Vec::new(),
+        });
+    }
+    let context_records = u64::try_from(PROJECTION_JOURNAL_CONTEXT_RECORDS).unwrap_or(u64::MAX);
+    let oldest_allowed = through.saturating_sub(context_records);
+
+    let mut statement = conn.prepare(
+        "SELECT first_sequence, last_sequence, record_count, uncompressed_bytes, records_zstd
+         FROM projection_journal_chunks
+         WHERE generation = ?1 AND last_sequence > ?2 AND first_sequence <= ?3
+         ORDER BY first_sequence DESC",
+    )?;
+    let rows = statement.query_map(
+        params![
+            to_i64(state.generation, "generation")?,
+            to_i64(oldest_allowed, "oldest context sequence")?,
+            to_i64(through, "context terminal sequence")?,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        },
+    )?;
+    let mut records_reversed = Vec::new();
+    let mut encoded_bytes = 2_usize;
+    let mut expected_reverse_sequence = through;
+    'chunks: for row in rows {
+        let (first, last, count, uncompressed_bytes, encoded) = row?;
+        let first = nonnegative_u64(first, "chunk first sequence")?;
+        let last = nonnegative_u64(last, "chunk last sequence")?;
+        let count = nonnegative_u64(count, "chunk record count")?;
+        let uncompressed_bytes = nonnegative_u64(uncompressed_bytes, "chunk bytes")?;
+        let chunk_records = decode_record_chunk(&encoded)?;
+        if chunk_records.len() as u64 != count
+            || serde_json::to_vec(&chunk_records)?.len() as u64 != uncompressed_bytes
+            || chunk_records.first().map(|record| record.sequence) != Some(first)
+            || chunk_records.last().map(|record| record.sequence) != Some(last)
+        {
+            return Err(StoreError::InvalidProjectionJournalData(format!(
+                "journal context chunk metadata mismatch at {}/{first}-{last}",
+                state.generation
+            )));
+        }
+        for record in chunk_records.into_iter().rev() {
+            if record.sequence > through {
+                continue;
+            }
+            if record.sequence <= oldest_allowed {
+                break 'chunks;
+            }
+            if record.sequence != expected_reverse_sequence {
+                return Err(StoreError::InvalidProjectionJournalData(format!(
+                    "journal context is not reverse-contiguous at {}/{expected_reverse_sequence}",
+                    state.generation
+                )));
+            }
+            let record_bytes = serde_json::to_vec(&record)?.len();
+            let candidate_bytes = json_array_encoded_bytes_after_push(
+                encoded_bytes,
+                records_reversed.len(),
+                record_bytes,
+            );
+            if candidate_bytes > PROJECTION_JOURNAL_CONTEXT_MAX_BYTES {
+                break 'chunks;
+            }
+            encoded_bytes = candidate_bytes;
+            records_reversed.push(record);
+            expected_reverse_sequence = expected_reverse_sequence.saturating_sub(1);
+        }
+    }
+    if records_reversed.is_empty()
+        || records_reversed.first().map(|record| record.sequence) != Some(through)
+    {
+        return Err(StoreError::InvalidProjectionJournalData(format!(
+            "journal context is incomplete at {}/{through}",
+            state.generation
+        )));
+    }
+    records_reversed.reverse();
+    let records = records_reversed;
+    let base_sequence = records
+        .first()
+        .and_then(|record| record.sequence.checked_sub(1))
+        .ok_or_else(|| {
+            StoreError::InvalidProjectionJournalData(
+                "journal context cannot derive its base sequence".to_owned(),
+            )
+        })?;
+    let base_digest = if base_sequence == 0 {
+        generation_digest(state.generation, &state.contract_fingerprint)
+    } else {
+        digest_at_position(conn, state, base_sequence)?
+    };
+    let base_checkpoint = super::JournalCheckpoint {
+        position: JournalPosition {
+            generation: state.generation,
+            sequence: base_sequence,
+        },
+        contract_fingerprint: state.contract_fingerprint.clone(),
+        cumulative_digest: base_digest.clone(),
+    };
+    let mut expected_sequence = base_sequence.saturating_add(1);
+    let mut prior_digest = base_digest;
+    for record in &records {
+        validate_persisted_record(record, state.generation, expected_sequence, &prior_digest)?;
+        prior_digest.clone_from(&record.cumulative_digest);
+        expected_sequence = expected_sequence.saturating_add(1);
+    }
+    if expected_sequence != through.saturating_add(1)
+        || prior_digest != digest_at_position(conn, state, through)?
+        || serde_json::to_vec(&records)?.len() > PROJECTION_JOURNAL_CONTEXT_MAX_BYTES
+    {
+        return Err(StoreError::InvalidProjectionJournalData(format!(
+            "journal context is incomplete or overbound at {}/{through}",
+            state.generation
+        )));
+    }
+    Ok(ProjectionJournalContextWindow {
+        base_checkpoint,
+        records,
+    })
+}
+
+pub(super) fn json_array_encoded_bytes_after_push(
+    current_bytes: usize,
+    item_count: usize,
+    item_bytes: usize,
+) -> usize {
+    current_bytes
+        .saturating_add(usize::from(item_count > 0))
+        .saturating_add(item_bytes)
 }
 
 pub(super) fn digest_at_position(
@@ -164,7 +336,7 @@ fn read_records(
         },
     )?;
     let mut records = Vec::new();
-    let mut encoded_bytes = 0_usize;
+    let mut encoded_bytes = 2_usize;
     let mut expected_sequence = after.saturating_add(1);
     let mut page_limited = false;
     'chunks: for row in rows {
@@ -192,14 +364,16 @@ fn read_records(
                 break 'chunks;
             }
             let record_bytes = serde_json::to_vec(&record)?.len();
+            let candidate_bytes =
+                json_array_encoded_bytes_after_push(encoded_bytes, records.len(), record_bytes);
             if records.len() == PROJECTION_JOURNAL_PAGE_SIZE
-                || encoded_bytes.saturating_add(record_bytes) > PROJECTION_JOURNAL_MAX_PAGE_BYTES
+                || candidate_bytes > PROJECTION_JOURNAL_MAX_PAGE_BYTES
             {
                 page_limited = true;
                 break 'chunks;
             }
             validate_persisted_record(&record, state.generation, expected_sequence, &prior_digest)?;
-            encoded_bytes += record_bytes;
+            encoded_bytes = candidate_bytes;
             prior_digest = record.cumulative_digest.clone();
             records.push(record);
             expected_sequence = expected_sequence.saturating_add(1);

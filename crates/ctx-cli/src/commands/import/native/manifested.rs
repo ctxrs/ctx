@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use ctx_history_capture::{
     CaptureError, CaptureWorkLimit, CodexSessionImportProgressCallback, ImportProfile,
-    ProviderImportFailure, ProviderImportSummary,
+    ProviderImportFailure, ProviderImportSummary, ProviderImportTerminalOutcome,
 };
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::{SourceImportFile, Store, StoreError};
@@ -117,7 +117,6 @@ fn import_manifested_source_page(
             pending_context.source,
             &pending_context.input_path,
             progress.clone(),
-            false,
             true,
             &SourcePreinventory::None,
             capture_work_limit,
@@ -164,6 +163,14 @@ fn import_manifested_source_page(
                 if failure_scope == ImportFailureScope::System {
                     return Ok(ManifestImportPageControl::SystemFailure(err));
                 }
+                if err.chain().any(|cause| {
+                    matches!(
+                        cause.downcast_ref::<CaptureError>(),
+                        Some(CaptureError::ProviderSource { .. })
+                    )
+                }) {
+                    return Err(err);
+                }
                 summary.failed += 1;
                 summary
                     .failures
@@ -185,6 +192,9 @@ fn manifested_rejection_has_terminal_cursor(
     provider: CaptureProvider,
     summary: &ProviderImportSummary,
 ) -> bool {
+    if summary.terminal_outcome() == ProviderImportTerminalOutcome::CoreCursorCommitted {
+        return true;
+    }
     // OpenHands manifests one complete event file per certified cursor stream.
     // An Ok result means its singleton cursor CAS and source revalidation
     // committed, even when projection retained deterministic record rejections.

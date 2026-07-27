@@ -13,9 +13,6 @@ use uuid::Uuid;
 use super::super::{map_io_error, CompleteContentError, CompleteContentErrorKind, FrozenFile};
 use super::content_error;
 
-#[cfg(target_os = "windows")]
-use super::super::SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES;
-
 #[cfg(unix)]
 pub(super) struct AdmittedRoot {
     file: File,
@@ -115,25 +112,32 @@ impl AdmittedFile {
     ) -> Result<(), CompleteContentError> {
         #[cfg(unix)]
         {
-            super::super::copy_bounded_handle(&self.file, destination, event_id)
+            super::super::copy_bounded_handle(&self.file, destination, self.frozen.length, event_id)
         }
         #[cfg(target_os = "windows")]
         {
+            let metadata = self
+                .file
+                .metadata()
+                .map_err(|cause| map_io_error(event_id, cause))?;
+            if metadata.len() != self.frozen.length {
+                return Err(content_error(
+                    event_id,
+                    CompleteContentErrorKind::SourceChanged,
+                ));
+            }
             let admitted = super::super::windows::AdmittedWindowsFile {
                 file: self
                     .file
                     .try_clone()
                     .map_err(|cause| map_io_error(event_id, cause))?,
-                metadata: self
-                    .file
-                    .metadata()
-                    .map_err(|cause| map_io_error(event_id, cause))?,
+                metadata,
                 identity: self.identity.clone(),
             };
             super::super::windows::copy_bounded_handle(
                 &admitted,
                 destination,
-                SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
+                self.frozen.length,
                 event_id,
             )
         }

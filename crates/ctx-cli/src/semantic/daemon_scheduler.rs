@@ -117,7 +117,7 @@ pub(super) fn run_daemon_once_with_activity(
 
     let (did_work, failed) = (
         history_refresh_did_work || semantic_did_work || pro_materialization_did_work,
-        daemon_job_failed(&history_refresh_job) || daemon_job_failed(&semantic_job),
+        daemon_history_job_failed(&history_refresh_job) || daemon_job_failed(&semantic_job),
     );
 
     let semantic_report = semantic_worker_report_for_daemon(data_root);
@@ -168,7 +168,7 @@ fn daemon_history_freshness(
     job: &Value,
     backoff: bool,
 ) -> DaemonHistoryFreshnessV1 {
-    if daemon_job_failed(job) {
+    if daemon_history_job_failed(job) {
         return DaemonHistoryFreshnessV1::Failed;
     }
     if backoff {
@@ -336,6 +336,15 @@ pub(super) fn daemon_run_start_mode(args: &DaemonRunArgs) -> DaemonStartModeArg 
 
 pub(super) fn daemon_job_failed(value: &Value) -> bool {
     value.get("status").and_then(Value::as_str) == Some("failed")
+}
+
+pub(super) fn daemon_history_job_failed(value: &Value) -> bool {
+    daemon_job_failed(value)
+        || value.get("totals").is_some_and(|totals| {
+            ["failed_sources", "rejected_records"]
+                .into_iter()
+                .any(|key| totals.get(key).and_then(Value::as_u64).unwrap_or(0) > 0)
+        })
 }
 
 pub(super) fn write_daemon_job_status_unless_deadline_skip(

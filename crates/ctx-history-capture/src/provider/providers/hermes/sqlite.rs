@@ -3,6 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Statement};
 
 use crate::provider::{
+    native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES,
     normalization::{provider_nonnegative_i64_to_u64, provider_required_timestamp_seconds},
     sqlite::SqliteLengthPreflightGuard,
 };
@@ -102,6 +103,7 @@ pub(super) enum HermesNativeRecord {
     Message {
         row: HermesMessageRow,
         values: Vec<HermesSqliteValue>,
+        prepared: Option<super::HermesPreparedCoreMessage>,
     },
     Rejected(String),
 }
@@ -113,6 +115,13 @@ pub(super) struct HermesNativeRow {
     pub(super) next_frontier: HermesFrontier,
     pub(super) observed_bytes: usize,
     pub(super) record: HermesNativeRecord,
+}
+
+impl HermesNativeRow {
+    pub(super) fn replace_with_rejection(&mut self, reason: String) {
+        self.observed_bytes = rejection_owned_bytes(&reason);
+        self.record = HermesNativeRecord::Rejected(reason);
+    }
 }
 
 pub(super) fn hermes_session_candidate_sql(
@@ -150,8 +159,8 @@ pub(super) fn hermes_message_candidate_sql(
         format!(" where {}", predicates.join(" and "))
     };
     format!(
-        "select m.rowid, {retained_bytes}, {storage_error} \
-         from messages m join sessions s on s.id = m.session_id{where_clause} \
+        "select m.rowid, {retained_bytes}, {storage_error}, m.role = 'tool' \
+         from messages m{where_clause} \
          order by m.rowid limit 1"
     )
 }
@@ -213,7 +222,7 @@ impl<'connection> HermesRowReader<'connection> {
 
     pub(super) fn next(&mut self, frontier: HermesFrontier) -> Result<Option<HermesNativeRow>> {
         if frontier.phase == HermesPhase::Sessions {
-            let after = (frontier.rowid != i64::MIN).then_some(frontier.rowid);
+            let after = (frontier.next_ordinal != 0).then_some(frontier.rowid);
             if let Some(candidate) = self.session_candidate(after)? {
                 return self.hydrate(candidate, frontier.next_ordinal).map(Some);
             }
@@ -236,6 +245,7 @@ impl<'connection> HermesRowReader<'connection> {
                     rowid: row.get(0)?,
                     retained_bytes: row.get(1)?,
                     storage_error_code: row.get(2)?,
+                    indivisible: true,
                 })
             };
             match after {
@@ -257,6 +267,7 @@ impl<'connection> HermesRowReader<'connection> {
                     rowid: row.get(0)?,
                     retained_bytes: row.get(1)?,
                     storage_error_code: row.get(2)?,
+                    indivisible: row.get::<_, i64>(3)? != 0,
                 })
             };
             match after {
@@ -277,34 +288,49 @@ impl<'connection> HermesRowReader<'connection> {
             ))?,
             rowid: candidate.rowid,
         };
-        let observed_bytes = candidate.observed_bytes()?;
+        let mut observed_bytes = candidate.observed_bytes()?;
         let locator = HermesLocator {
             phase: candidate.phase,
             rowid: candidate.rowid,
         };
-        if observed_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES {
+        let hydration_limit_exceeded = observed_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES;
+        let native_page_limit_exceeded =
+            observed_bytes > NATIVE_INGESTION_PAGE_MAX_BYTES && candidate.indivisible;
+        if hydration_limit_exceeded || native_page_limit_exceeded {
+            let limit = if hydration_limit_exceeded {
+                MAX_PROVIDER_SQLITE_VALUE_BYTES
+            } else {
+                NATIVE_INGESTION_PAGE_MAX_BYTES
+            };
+            let label = if hydration_limit_exceeded {
+                "hydration"
+            } else {
+                "NativePath page"
+            };
+            let reason = format!(
+                "Hermes {:?} row {} is an indivisible {}-byte record and exceeds the {}-byte {label} limit",
+                candidate.phase,
+                candidate.rowid,
+                observed_bytes,
+                limit
+            );
             return Ok(HermesNativeRow {
                 ordinal,
                 locator,
                 next_frontier,
-                observed_bytes: 0,
-                record: HermesNativeRecord::Rejected(format!(
-                    "Hermes {:?} row {} exceeds the {}-byte hydration limit",
-                    candidate.phase, candidate.rowid, MAX_PROVIDER_SQLITE_VALUE_BYTES
-                )),
+                observed_bytes: rejection_owned_bytes(&reason),
+                record: HermesNativeRecord::Rejected(reason),
             });
         }
         if candidate.storage_error_code != 0 {
+            let reason =
+                storage_error_reason(&self.schema, candidate.phase, candidate.storage_error_code)?;
             return Ok(HermesNativeRow {
                 ordinal,
                 locator,
                 next_frontier,
-                observed_bytes: 0,
-                record: HermesNativeRecord::Rejected(storage_error_reason(
-                    &self.schema,
-                    candidate.phase,
-                    candidate.storage_error_code,
-                )?),
+                observed_bytes: rejection_owned_bytes(&reason),
+                record: HermesNativeRecord::Rejected(reason),
             });
         }
         let record = match candidate.phase {
@@ -317,14 +343,34 @@ impl<'connection> HermesRowReader<'connection> {
                 let values = self
                     .session_hydration
                     .query_row([candidate.rowid], |row| layout.capture_values(row, 0))?;
-                HermesNativeRecord::Session(decode_hermes_session(&self.schema, &values, 0)?)
+                let row = decode_hermes_session(&self.schema, &values, 0)?;
+                let validation = provider_required_timestamp_seconds(
+                    row.started_at,
+                    "Hermes session started_at",
+                )
+                .and_then(|_| {
+                    row.ended_at
+                        .map(|ended_at| {
+                            provider_required_timestamp_seconds(ended_at, "Hermes session ended_at")
+                                .map(|_| ())
+                        })
+                        .transpose()
+                        .map(|_| ())
+                });
+                match validation {
+                    Ok(()) => HermesNativeRecord::Session(row),
+                    Err(CaptureError::InvalidPayload(reason)) => {
+                        HermesNativeRecord::Rejected(reason)
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             HermesPhase::Messages => {
                 let layout = self.schema.messages();
-                let values = self
+                let mut values = self
                     .message_hydration
                     .query_row([candidate.rowid], |row| layout.capture_values(row, 0))?;
-                let row = decode_hermes_message(&self.schema, &values)?;
+                let mut row = decode_hermes_message(&self.schema, &values)?;
                 let validation = provider_nonnegative_i64_to_u64(row.id, "Hermes message id")
                     .and_then(|_| {
                         provider_required_timestamp_seconds(
@@ -334,7 +380,35 @@ impl<'connection> HermesRowReader<'connection> {
                         .map(|_| ())
                     });
                 match validation {
-                    Ok(()) => HermesNativeRecord::Message { row, values },
+                    Ok(()) => {
+                        let prepared = (observed_bytes > NATIVE_INGESTION_PAGE_MAX_BYTES)
+                            .then(|| super::prepare_hermes_core_message(&row, ordinal, &values))
+                            .transpose()?;
+                        if let Some(prepared) = prepared.as_ref() {
+                            observed_bytes = prepared
+                                .owned_bytes()
+                                .saturating_add(row.session_id.len())
+                                .saturating_add(row.role.len())
+                                .saturating_add(256);
+                            row.content = None;
+                            row.tool_call_id = None;
+                            row.tool_calls = None;
+                            row.tool_name = None;
+                            row.finish_reason = None;
+                            row.reasoning = None;
+                            row.reasoning_content = None;
+                            row.reasoning_details = None;
+                            row.codex_reasoning_items = None;
+                            row.codex_message_items = None;
+                            row.platform_message_id = None;
+                            values.clear();
+                        }
+                        HermesNativeRecord::Message {
+                            row,
+                            values,
+                            prepared,
+                        }
+                    }
                     Err(CaptureError::InvalidPayload(reason)) => {
                         HermesNativeRecord::Rejected(reason)
                     }
@@ -352,6 +426,11 @@ impl<'connection> HermesRowReader<'connection> {
     }
 }
 
+fn rejection_owned_bytes(reason: &str) -> usize {
+    // Ordinal, locator, frontier, record tag, and the length-prefixed reason.
+    (8 + 9 + HERMES_FRONTIER_BYTES + 1 + 8).saturating_add(reason.len())
+}
+
 fn with_length_preflight<T>(
     conn: &Connection,
     query: impl FnOnce() -> rusqlite::Result<T>,
@@ -365,6 +444,7 @@ struct HermesCandidate {
     rowid: i64,
     retained_bytes: i64,
     storage_error_code: i64,
+    indivisible: bool,
 }
 
 impl HermesCandidate {

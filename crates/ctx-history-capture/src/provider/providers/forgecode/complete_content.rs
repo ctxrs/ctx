@@ -14,9 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     complete_content::{
-        attach_verified_content_locator, sqlite::SqliteResultRecord, verified_content_profile,
-        CompleteContentBodyDigest, CompleteContentSourceFamily, VerifiedContentLocatorV1,
-        VerifiedContentRole,
+        attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
+        CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentRole,
     },
     native_source::{NativeLocator, NativeSqliteValue},
     provider::sqlite::{
@@ -27,8 +26,7 @@ use crate::{
 };
 
 use super::event::{
-    forgecode_event_type, forgecode_message_parts, forgecode_message_text,
-    forgecode_normalized_result_content, ForgeCodeNativeEvent,
+    forgecode_event_type, forgecode_message_parts, forgecode_message_text, ForgeCodeNativeEvent,
 };
 use crate::FORGECODE_SQLITE_SOURCE_FORMAT;
 
@@ -149,28 +147,6 @@ fn forgecode_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBodyD
     }
     CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize()))
         .expect("SHA-256 formatter must return a valid digest")
-}
-
-pub(crate) fn forgecode_result_record(
-    conn: &Connection,
-    rowid: i64,
-    subrecord: u32,
-) -> Result<Option<SqliteResultRecord>> {
-    let Some(values) = values_at_rowid(conn, rowid)? else {
-        return Ok(None);
-    };
-    let (_, context) = conversation_identity_and_context(&values)?;
-    let entry = conversation_message(context.as_deref(), subrecord, "result")?;
-    let parts = forgecode_message_parts(&entry);
-    let content = forgecode_normalized_result_content(parts.body).ok_or_else(|| {
-        CaptureError::InvalidPayload("ForgeCode row is no longer a supported result".to_owned())
-    })?;
-    let native_record_id = crate::compute_payload_hash(&entry)?;
-    Ok(Some(SqliteResultRecord {
-        values,
-        native_record_id,
-        content,
-    }))
 }
 
 pub(crate) fn forgecode_complete_message(

@@ -21,6 +21,9 @@ const MACHINE: &str = "auggie-nativepath-test-machine";
 const IMPORTED_AT: &str = "2026-07-25T12:00:00Z";
 const REQUEST_SUCCESS_BODY: &str = "AUGGIE_REQUEST_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
 const SUCCESS_BODY: &str = "AUGGIE_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
+const TOOL_OUTPUT_BODY: &str = "AUGGIE_TOOL_OUTPUT_BODY_MUST_NOT_ENTER_CORE";
+const UNKNOWN_BODY: &str = "AUGGIE_UNKNOWN_BODY_MUST_NOT_ENTER_CORE_OR_PRO";
+const NUMERIC_BODY: &str = "AUGGIE_NUMERIC_BODY_MUST_NOT_ENTER_CORE_OR_PRO";
 
 fn import(
     root: &Path,
@@ -278,6 +281,132 @@ fn corrupt_rewrite_preserves_committed_core_until_retry() {
 }
 
 #[test]
+fn multi_file_record_rejection_preserves_exact_routes_and_imports_valid_siblings() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let first = root.join("first.json");
+    let second = root.join("nested/second.json");
+    write_session(
+        &first,
+        "auggie-first",
+        vec![exchange("first", "first request", "first response")],
+    );
+    write_session(
+        &second,
+        "auggie-second",
+        vec![exchange("second", "second request", "second response")],
+    );
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let initial = import(
+        &root,
+        &mut store,
+        ImportProfile::CoreOnly,
+        crate::CaptureWorkLimit::Drain,
+    );
+    assert_eq!(initial.imported_sessions, 2);
+    assert_eq!(initial.imported_events, 4);
+
+    let first_session = store
+        .session_by_external_session(CaptureProvider::Auggie, "auggie-first")
+        .unwrap()
+        .unwrap();
+    let second_session = store
+        .session_by_external_session(CaptureProvider::Auggie, "auggie-second")
+        .unwrap()
+        .unwrap();
+    let first_event = store.events_for_session(first_session.id).unwrap()[0].id;
+    let second_event = store.events_for_session(second_session.id).unwrap()[0].id;
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(first_event)
+            .unwrap()
+            .path(),
+        fs::canonicalize(&first).unwrap()
+    );
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(second_event)
+            .unwrap()
+            .path(),
+        fs::canonicalize(&second).unwrap()
+    );
+
+    fs::write(&first, b"{\"sessionId\":\"auggie-first\"").unwrap();
+    write_session(
+        &second,
+        "auggie-second",
+        vec![
+            exchange("second", "second request", "second response"),
+            exchange("second-append", "append request", "append response"),
+        ],
+    );
+    let mixed = import(
+        &root,
+        &mut store,
+        ImportProfile::CoreOnly,
+        crate::CaptureWorkLimit::Drain,
+    );
+    assert_eq!(mixed.failed, 1);
+    assert_eq!(mixed.imported_events, 2);
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(first_event)
+            .unwrap()
+            .path(),
+        fs::canonicalize(&first).unwrap()
+    );
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(second_event)
+            .unwrap()
+            .path(),
+        fs::canonicalize(&second).unwrap()
+    );
+}
+
+#[test]
+fn parse_error_classification_only_localizes_invalid_payloads() {
+    let mut summary = ProviderImportSummary::default();
+    native_path::record_auggie_source_parse_error(
+        &mut summary,
+        7,
+        CaptureError::InvalidPayload("deterministic malformed record".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.failures[0].line, 7);
+
+    assert!(matches!(
+        native_path::record_auggie_source_parse_error(
+            &mut summary,
+            8,
+            CaptureError::SourceChangedDuringCapture,
+        ),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
+    assert!(matches!(
+        native_path::record_auggie_source_parse_error(
+            &mut summary,
+            9,
+            CaptureError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected source I/O failure",
+            )),
+        ),
+        Err(CaptureError::Io(_))
+    ));
+    assert!(matches!(
+        native_path::record_auggie_source_parse_error(
+            &mut summary,
+            10,
+            CaptureError::SystemInvariant("injected invariant failure"),
+        ),
+        Err(CaptureError::SystemInvariant("injected invariant failure"))
+    ));
+    assert_eq!(summary.failed, 1);
+}
+
+#[test]
 fn one_safe_group_resumes_bounded_pages_and_repairs_late_relationships() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("sessions");
@@ -416,13 +545,26 @@ fn output_failure_never_rolls_back_core_and_later_pro_replay_is_independent() {
                     }
                 ],
                 "response_nodes": [
-                    {"text_node": {"content": "core response"}},
+                    {"type": 0, "text_node": {"content": "core response"}},
                     {
                         "type": "tool_result",
                         "call_id": "call-1",
                         "is_error": false,
                         "content": SUCCESS_BODY,
-                    }
+                    },
+                    {
+                        "type": "tool_output",
+                        "call_id": "call-2",
+                        "content": TOOL_OUTPUT_BODY,
+                    },
+                    {
+                        "type": "future_node",
+                        "content": UNKNOWN_BODY,
+                    },
+                    {
+                        "type": 71,
+                        "content": NUMERIC_BODY,
+                    },
                 ]
             },
             "finishedAt": "2026-07-25T11:01:00Z",
@@ -448,6 +590,9 @@ fn output_failure_never_rolls_back_core_and_later_pro_replay_is_independent() {
     let rendered = serde_json::to_string(&store.events_for_session(session.id).unwrap()).unwrap();
     assert!(!rendered.contains(SUCCESS_BODY));
     assert!(!rendered.contains(REQUEST_SUCCESS_BODY));
+    assert!(!rendered.contains(TOOL_OUTPUT_BODY));
+    assert!(!rendered.contains(UNKNOWN_BODY));
+    assert!(!rendered.contains(NUMERIC_BODY));
 
     let replay = import(
         &root,
@@ -468,6 +613,57 @@ fn output_failure_never_rolls_back_core_and_later_pro_replay_is_independent() {
         .unwrap()
         .iter()
         .any(|body| body == REQUEST_SUCCESS_BODY.as_bytes()));
+    assert!(sink
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|body| body == TOOL_OUTPUT_BODY.as_bytes()));
+    assert!(!sink
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|body| body == UNKNOWN_BODY.as_bytes()));
+    assert!(!sink
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|body| body == NUMERIC_BODY.as_bytes()));
+}
+
+#[test]
+fn certified_node_text_requires_an_exact_native_text_shape() {
+    let exact = json!([
+        {"text_node": {"content": "legacy text"}},
+        {"type": 0, "text_node": {"content": "snake text"}},
+        {"type": 0, "textNode": {"content": "camel text"}},
+    ]);
+    assert_eq!(
+        auggie_nodes_text(Some(&exact)),
+        Some("legacy text\nsnake text\ncamel text".to_owned())
+    );
+
+    for rejected in [
+        json!([{"type": "text", "text_node": {"content": "unknown string kind"}}]),
+        json!([{"type": 71, "text_node": {"content": NUMERIC_BODY}}]),
+        json!([{"type": 0, "content": "generic content"}]),
+        json!([{"type": 0, "text_node": {"content": 71}}]),
+        json!([{
+            "type": 0,
+            "text_node": {"content": "apparently text"},
+            "output": TOOL_OUTPUT_BODY,
+        }]),
+    ] {
+        assert_eq!(auggie_nodes_text(Some(&rejected)), None);
+    }
+
+    assert_eq!(auggie_request_text(&json!({"message": UNKNOWN_BODY})), None);
+    assert_eq!(
+        auggie_response_text(&json!({"response": UNKNOWN_BODY})),
+        None
+    );
 }
 
 #[test]

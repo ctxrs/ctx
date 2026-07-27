@@ -52,10 +52,9 @@ impl ZedDecodedThread {
     }
 }
 
-pub(crate) struct ZedDecodedEvent<'a> {
+pub(crate) struct ZedDecodedEvent {
     pub(crate) event: ZedCoreEventDraft,
     pub(crate) complete_text: String,
-    pub(crate) message: &'a Value,
 }
 
 pub(crate) struct ZedCoreEventDraft {
@@ -97,7 +96,7 @@ impl<'a> ZedNativeEvent<'a> {
         }
     }
 
-    pub(crate) fn decode(self) -> Result<ZedDecodedEvent<'a>> {
+    pub(crate) fn decode(self) -> Result<ZedDecodedEvent> {
         zed_message_event(
             self.provider_session_id,
             self.message,
@@ -110,7 +109,6 @@ impl<'a> ZedNativeEvent<'a> {
         .map(|(event, complete_text)| ZedDecodedEvent {
             event,
             complete_text,
-            message: self.message,
         })
     }
 }

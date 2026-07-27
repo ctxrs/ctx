@@ -7,15 +7,27 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_store::Store;
+use ctx_history_core::{
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event,
+    EventRole, EventType, Fidelity, Session, SessionStatus, SyncCursor,
+};
+use ctx_history_store::{ProviderSourceLocatorObservation, Store};
 use rusqlite::{params, Connection};
+use serde_json::{json, Value};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 use super::import_warp_nativepath;
 use crate::{
-    ImportProfile, ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress,
-    ProOutputSink, ProOutputSinkError, ProviderAdapterContext, ProviderImportOptions,
-    ProviderImportWorkResult,
+    provider::importer::{
+        provider_path_identity, provider_scoped_source_uuid,
+        provider_source_cursor_stream_for_path, provider_source_event_import_identity,
+        provider_source_identity, provider_source_session_uuid, provider_sync_metadata, timestamps,
+        BoundedParserCheckpoint, CertifiedProviderCursor,
+    },
+    CaptureWorkLimit, ImportProfile, ProOutputMaterializationPage, ProOutputPageResult,
+    ProOutputProgress, ProOutputSink, ProOutputSinkError, ProviderAdapterContext,
+    ProviderImportOptions, ProviderImportWorkResult, WARP_SQLITE_SOURCE_FORMAT,
 };
 
 fn field(number: u32, payload: &[u8]) -> Vec<u8> {
@@ -154,6 +166,282 @@ fn update_task(path: &std::path::Path, task: Vec<u8>, modified_at: &str) {
             params![task, modified_at],
         )
         .unwrap();
+}
+
+fn seed_released_warp_store(
+    store: &mut Store,
+    source_path: &std::path::Path,
+    context: &ProviderAdapterContext,
+) -> (Uuid, Uuid, Uuid) {
+    let raw_source_path = source_path.canonicalize().unwrap().display().to_string();
+    let source_root = context
+        .source_root
+        .as_deref()
+        .unwrap()
+        .display()
+        .to_string();
+    let canonical_source_identity = provider_source_identity(
+        CaptureProvider::Warp,
+        WARP_SQLITE_SOURCE_FORMAT,
+        Some(&source_root),
+        Some(&raw_source_path),
+        None,
+        &Value::Null,
+    )
+    .unwrap();
+    let source_id = provider_scoped_source_uuid(
+        CaptureProvider::Warp,
+        "conversation-1",
+        WARP_SQLITE_SOURCE_FORMAT,
+        Some(&raw_source_path),
+    );
+    let source_revision =
+        "warp-sqlite-snapshot-v1:capture=5;policy=7;schema=released-fixture".to_owned();
+    store
+        .upsert_capture_source(&CaptureSource {
+            id: source_id,
+            descriptor: CaptureSourceDescriptor {
+                kind: CaptureSourceKind::ProviderImport,
+                provider: CaptureProvider::Warp,
+                machine_id: context.machine_id.clone(),
+                process_id: None,
+                cwd: None,
+                raw_source_path: Some(raw_source_path.clone()),
+                source_format: Some(WARP_SQLITE_SOURCE_FORMAT.to_owned()),
+                source_root: Some(source_root.clone()),
+                source_identity: Some(canonical_source_identity.clone()),
+                external_session_id: Some("conversation-1".to_owned()),
+            },
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+            ended_at: None,
+            sync: provider_sync_metadata(
+                Fidelity::Imported,
+                json!({"source_revision": source_revision}),
+            ),
+        })
+        .unwrap();
+    let path_identity = provider_path_identity(source_path).unwrap();
+    let cursor_stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::Warp,
+        WARP_SQLITE_SOURCE_FORMAT,
+        &path_identity,
+    );
+    let route = store
+        .reconcile_provider_source_locator(&ProviderSourceLocatorObservation {
+            provider: CaptureProvider::Warp,
+            source_format: WARP_SQLITE_SOURCE_FORMAT.to_owned(),
+            machine_id: context.machine_id.clone(),
+            locator_identity: format!("warp-sqlite:{path_identity}"),
+            cursor_stream: cursor_stream.clone(),
+            proposed_source_identity: canonical_source_identity.clone(),
+            raw_source_path: Some(raw_source_path.clone()),
+            source_revision: source_revision.clone(),
+            observed_at_ms: 0,
+        })
+        .unwrap();
+    store
+        .bind_capture_source_provider_route(source_id, &route.route_binding())
+        .unwrap();
+
+    let session_id = provider_source_session_uuid(&canonical_source_identity, "conversation-1");
+    store
+        .upsert_session(&Session {
+            id: session_id,
+            history_record_id: None,
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: Some(source_id),
+            provider: CaptureProvider::Warp,
+            external_session_id: Some("conversation-1".to_owned()),
+            external_agent_id: Some("warp-agent".to_owned()),
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+            ended_at: None,
+            timestamps: timestamps(DateTime::<Utc>::UNIX_EPOCH),
+            sync: provider_sync_metadata(Fidelity::Imported, json!({})),
+        })
+        .unwrap();
+    let identity = provider_source_event_import_identity(source_id, 0, "message-1");
+    let event_id = identity.id;
+    store
+        .upsert_event(&Event {
+            id: identity.id,
+            seq: identity.seq,
+            history_record_id: None,
+            session_id: Some(session_id),
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::User),
+            occurred_at: DateTime::<Utc>::UNIX_EPOCH,
+            capture_source_id: Some(source_id),
+            payload: json!({
+                "provider": "warp",
+                "provider_session_id": "conversation-1",
+                "provider_event_index": 0,
+                "provider_event_hash": "message-1",
+                "text": "hello from Warp",
+                "body": {"text": "hello from Warp", "message_index": 0},
+                "artifacts": [],
+            }),
+            payload_blob_id: None,
+            dedupe_key: Some(identity.dedupe_key),
+            sync: provider_sync_metadata(
+                Fidelity::Imported,
+                json!({
+                    "provider_session_id": "conversation-1",
+                    "provider_event_index": 0,
+                    "provider_event_hash": "message-1",
+                    "provider_event_hash_authority": "provider_supplied",
+                    "metadata": {"event_path": raw_source_path},
+                }),
+            ),
+        })
+        .unwrap();
+    let released_cursor = CertifiedProviderCursor::new(
+        source_revision,
+        5,
+        7,
+        crate::native_source::NativePosition::new("warp-conversation-task-keyset-v4", vec![0])
+            .unwrap(),
+        BoundedParserCheckpoint::from_serializable(&()).unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    store
+        .upsert_sync_cursor(&SyncCursor {
+            id: Uuid::new_v4(),
+            team_id: None,
+            device_id: context.machine_id.clone(),
+            stream: cursor_stream,
+            cursor: released_cursor,
+            last_synced_at: None,
+            timestamps: timestamps(DateTime::<Utc>::UNIX_EPOCH),
+        })
+        .unwrap();
+    (source_id, session_id, event_id)
+}
+
+#[test]
+fn released_warp_unchanged_source_migrates_in_place() {
+    let directory = tempdir().unwrap();
+    let source_path = directory.path().join("warp-released.sqlite");
+    create_source(&source_path);
+    let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
+    let context = ProviderAdapterContext {
+        machine_id: "warp-released-test".to_owned(),
+        source_path: Some(source_path.clone()),
+        source_root: Some(directory.path().to_path_buf()),
+        imported_at: DateTime::<Utc>::UNIX_EPOCH,
+    };
+    let (_, released_session_id, released_event_id) =
+        seed_released_warp_store(&mut store, &source_path, &context);
+
+    let first = import_warp_nativepath(
+        &source_path,
+        &mut store,
+        context.clone(),
+        ProviderImportOptions {
+            capture_work_limit: CaptureWorkLimit::OneSafeGroup,
+            ..ProviderImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(first.work_remaining);
+    assert_eq!(
+        store.events_for_session(released_session_id).unwrap().len(),
+        1
+    );
+    let summary = import_warp_nativepath(
+        &source_path,
+        &mut store,
+        context,
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    let events = store.events_for_session(released_session_id).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, released_event_id);
+    assert_eq!(events[0].payload["text"], "hello from Warp");
+    assert_eq!(events[0].payload["text_retention"]["mode"], "bounded");
+    assert_eq!(
+        events[0].sync.metadata["provider_event_hash_authority"],
+        "normalized_payload_fallback"
+    );
+    assert!(store
+        .authorized_source_route_for_event(released_event_id)
+        .is_ok());
+
+    update_task(
+        &source_path,
+        text_task(&[(
+            "message-1",
+            "rewritten after released cutover",
+            1_782_259_200,
+        )]),
+        "2026-07-24 12:00:02",
+    );
+    let context = ProviderAdapterContext {
+        machine_id: "warp-released-test".to_owned(),
+        source_path: Some(source_path.clone()),
+        source_root: Some(directory.path().to_path_buf()),
+        imported_at: DateTime::<Utc>::UNIX_EPOCH,
+    };
+    import_warp_nativepath(
+        &source_path,
+        &mut store,
+        context,
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+    let events = store.events_for_session(released_session_id).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, released_event_id);
+    assert_eq!(
+        events[0].payload["text"],
+        "rewritten after released cutover"
+    );
+}
+
+#[test]
+fn released_warp_missing_source_retires_before_cutover() {
+    let directory = tempdir().unwrap();
+    let source_path = directory.path().join("warp-released-missing.sqlite");
+    create_source(&source_path);
+    let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
+    let context = ProviderAdapterContext {
+        machine_id: "warp-released-missing-test".to_owned(),
+        source_path: Some(source_path.clone()),
+        source_root: Some(directory.path().to_path_buf()),
+        imported_at: DateTime::<Utc>::UNIX_EPOCH,
+    };
+    let (_, released_session_id, released_event_id) =
+        seed_released_warp_store(&mut store, &source_path, &context);
+    fs::remove_file(&source_path).unwrap();
+
+    let summary = import_warp_nativepath(
+        &source_path,
+        &mut store,
+        context,
+        ProviderImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(
+        store.events_for_session(released_session_id).unwrap().len(),
+        1
+    );
+    assert!(store
+        .authorized_source_route_for_event(released_event_id)
+        .is_err());
 }
 
 #[test]

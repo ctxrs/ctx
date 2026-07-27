@@ -86,6 +86,121 @@ fn production_nativepath_covers_restart_rewrite_corruption_and_disappearance() {
 }
 
 #[test]
+fn in_conversation_rename_preserves_identities_and_current_route_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    let original_path = event_path(&root, "conversation-rename", "0001-action.json");
+    write_event(&original_path, file_action_event());
+    let store_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let original_source = store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.descriptor.provider == CaptureProvider::OpenHands)
+        .unwrap();
+    let original_session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.provider == CaptureProvider::OpenHands)
+        .unwrap();
+    let original_event = provider_events(&store).pop().unwrap();
+    let original_touch = store
+        .export_archive()
+        .unwrap()
+        .files_touched
+        .into_iter()
+        .find(|touch| touch.source_id == Some(original_source.id))
+        .unwrap();
+    let original_physical_fingerprint =
+        original_source.sync.metadata["physical_source_fingerprint"].clone();
+    let original_cursor_revision = original_source.sync.metadata["cursor_revision"].clone();
+
+    let renamed_path = event_path(&root, "conversation-rename", "renamed-action.json");
+    fs::rename(&original_path, &renamed_path).unwrap();
+    let renamed = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(renamed.work_result(), ProviderImportWorkResult::Changed);
+
+    let sources = store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .filter(|source| source.descriptor.provider == CaptureProvider::OpenHands)
+        .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].id, original_source.id);
+    assert_eq!(
+        sources[0].descriptor.raw_source_path.as_deref(),
+        fs::canonicalize(&renamed_path).unwrap().to_str()
+    );
+    assert_eq!(
+        sources[0].sync.metadata["physical_source_fingerprint"],
+        original_physical_fingerprint
+    );
+    assert_ne!(
+        sources[0].sync.metadata["cursor_revision"],
+        original_cursor_revision
+    );
+    assert_eq!(
+        store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.provider == CaptureProvider::OpenHands)
+            .unwrap()
+            .id,
+        original_session.id
+    );
+    assert_eq!(provider_events(&store), vec![original_event.clone()]);
+    let touches = store
+        .export_archive()
+        .unwrap()
+        .files_touched
+        .into_iter()
+        .filter(|touch| touch.source_id == Some(original_source.id))
+        .collect::<Vec<_>>();
+    assert_eq!(touches, vec![original_touch.clone()]);
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(original_event.id)
+            .unwrap()
+            .path(),
+        fs::canonicalize(&renamed_path).unwrap()
+    );
+
+    drop(store);
+    let mut store = Store::open(&store_path).unwrap();
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+    assert_eq!(provider_events(&store), vec![original_event]);
+    assert_eq!(
+        store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .into_iter()
+            .filter(|touch| touch.source_id == Some(original_source.id))
+            .collect::<Vec<_>>(),
+        vec![original_touch]
+    );
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(provider_events(&store)[0].id)
+            .unwrap()
+            .path(),
+        fs::canonicalize(renamed_path).unwrap()
+    );
+}
+
+#[test]
 fn core_commits_before_independent_output_replay_and_later_activation() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("profile");
@@ -195,6 +310,21 @@ fn successful_output_event(content: &str) -> Value {
             "kind": "ExecuteBashObservation",
             "content": content,
             "exit_code": 0,
+        },
+    })
+}
+
+fn file_action_event() -> Value {
+    json!({
+        "id": "rename-action-id",
+        "timestamp": "2026-07-25T12:00:00Z",
+        "kind": "ActionEvent",
+        "source": "agent",
+        "action": {
+            "kind": "FileEditorAction",
+            "command": "write",
+            "path": "src/renamed.rs",
+            "thought": "preserve this exact event and touch"
         },
     })
 }

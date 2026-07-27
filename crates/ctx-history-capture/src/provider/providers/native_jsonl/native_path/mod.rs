@@ -47,10 +47,10 @@ pub(crate) use publication::{
 };
 pub(crate) use qoder::import_qoder_nativepath_tree;
 pub(crate) use qoder_parser::qoder_complete_content_message_record;
-pub(crate) use qwen_code::{
-    import_qwen_code_nativepath_tree, qwen_code_event_identity, qwen_code_file_is_selected,
+pub(crate) use qwen_code::{import_qwen_code_nativepath_tree, qwen_code_file_is_selected};
+pub(crate) use reader::{
+    direct_jsonl_complete_message_provider_event_hash, open_direct_jsonl_pages,
 };
-pub(crate) use reader::open_direct_jsonl_pages;
 pub(crate) use tabnine::import_tabnine_nativepath_tree;
 pub(crate) use windsurf::{
     import_windsurf_nativepath_tree, windsurf_event_role, windsurf_event_text, windsurf_event_type,

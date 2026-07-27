@@ -5,7 +5,10 @@ use ctx_history_core::{
     FileTouched, Run, RunStatus, RunType, Session, SessionHistoryArchive, SessionStatus,
     SyncMetadata, VcsChange, VcsChangeKind, VcsHost, VcsKind, VcsWorkspace,
 };
-use rusqlite::Connection;
+use rusqlite::{
+    hooks::{AuthAction, Authorization},
+    Connection,
+};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -138,6 +141,9 @@ fn sqlite_family_bytes(path: &std::path::Path) -> u64 {
         .sum()
 }
 
+#[path = "tests/context.rs"]
+mod context;
+
 #[test]
 fn activation_is_deterministic_and_free_users_have_no_rows() {
     let entity_id = Uuid::parse_str("018fe2e4-2266-7000-8000-000000000001").unwrap();
@@ -174,6 +180,77 @@ fn activation_is_deterministic_and_free_users_have_no_rows() {
         snapshots.push(snapshot);
     }
     assert_eq!(snapshots[0], snapshots[1]);
+}
+
+#[test]
+fn many_source_noop_exact_state_checks_never_read_retained_chunks() {
+    let (_temp, store) = open_store();
+    store
+        .upsert_event(&event(Uuid::new_v4(), 1, json!({"body": "high water"})))
+        .unwrap();
+    let high_water = store.activate_projection_journal(FINGERPRINT).unwrap();
+
+    store
+        .conn
+        .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Read {
+                    table_name: "projection_journal_chunks",
+                    ..
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }));
+    // Model one journal readiness/checkpoint validation for every source in a
+    // large unchanged Codex root. The authorizer makes any retained-record
+    // decode fail, so this also prevents an accidental O(sources * journal)
+    // regression in the no-op path.
+    for _ in 0..4_096 {
+        assert_eq!(store.projection_journal_checkpoint().unwrap(), high_water);
+        assert!(store
+            .verify_projection_journal_checkpoint(&high_water)
+            .unwrap());
+    }
+    let mut forged = high_water;
+    forged.cumulative_digest = "f".repeat(64);
+    assert!(!store.verify_projection_journal_checkpoint(&forged).unwrap());
+    store
+        .conn
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>);
+}
+
+#[test]
+fn retained_interior_checkpoint_verification_fails_closed_when_its_chunk_is_missing() {
+    let (_temp, store) = open_store();
+    store
+        .upsert_event(&event(Uuid::new_v4(), 1, json!({"body": "first"})))
+        .unwrap();
+    store
+        .upsert_event(&event(Uuid::new_v4(), 2, json!({"body": "second"})))
+        .unwrap();
+    let high_water = store.activate_projection_journal(FINGERPRINT).unwrap();
+    let snapshot = store.projection_journal_snapshot(None).unwrap();
+    let interior = record_checkpoint(&snapshot.records[0]);
+    assert!(store
+        .verify_projection_journal_checkpoint(&interior)
+        .unwrap());
+
+    store
+        .conn
+        .execute("DELETE FROM projection_journal_chunks", [])
+        .unwrap();
+
+    assert!(store
+        .verify_projection_journal_checkpoint(&high_water)
+        .unwrap());
+    assert!(matches!(
+        store.verify_projection_journal_checkpoint(&interior),
+        Err(StoreError::InvalidProjectionJournalData(_))
+    ));
 }
 
 #[test]
@@ -222,310 +299,6 @@ fn semantic_epoch_and_projection_journal_commit_or_roll_back_together() {
             .expect("committed event journal record")
             .stable_entity_id,
         searchable.id
-    );
-}
-
-#[test]
-fn pages_are_count_bounded_frozen_and_contiguous() {
-    let (_temp, store) = open_store();
-    let total = PROJECTION_JOURNAL_PAGE_SIZE as u128 + 6;
-    for value in 1_u128..=total {
-        let id = Uuid::from_u128(value);
-        store
-            .upsert_event(&event(id, value as u64, json!({"body": value})))
-            .unwrap();
-    }
-    let checkpoint = store.activate_projection_journal(FINGERPRINT).unwrap();
-    assert_eq!(checkpoint.position.sequence, total as u64);
-
-    let first = store.projection_journal_snapshot(None).unwrap();
-    assert_eq!(first.records.len(), PROJECTION_JOURNAL_PAGE_SIZE);
-    assert_eq!(first.records.first().unwrap().sequence, 1);
-    assert_eq!(
-        first.records.last().unwrap().sequence,
-        PROJECTION_JOURNAL_PAGE_SIZE as u64
-    );
-    assert!(first.has_more);
-    assert_eq!(first.frozen_through, checkpoint);
-
-    let second = store
-        .projection_journal_snapshot(Some(first.next_position))
-        .unwrap();
-    assert_eq!(second.records.len(), 6);
-    assert_eq!(
-        second.records.first().unwrap().sequence,
-        PROJECTION_JOURNAL_PAGE_SIZE as u64 + 1
-    );
-    assert_eq!(second.records.last().unwrap().sequence, total as u64);
-    assert!(!second.has_more);
-    assert_eq!(second.frozen_through, checkpoint);
-    assert!(matches!(
-        store.projection_journal_snapshot(Some(JournalPosition {
-            generation: checkpoint.position.generation,
-            sequence: total as u64 + 1,
-        })),
-        Err(StoreError::StaleProjectionJournalPosition { .. })
-    ));
-}
-
-#[test]
-fn acknowledgements_atomically_prune_only_the_committed_prefix() {
-    let (_temp, store) = open_store();
-    for value in 1_u128..=70 {
-        store
-            .upsert_event(&event(
-                Uuid::from_u128(value),
-                value as u64,
-                json!({"body": value}),
-            ))
-            .unwrap();
-    }
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let first = store.projection_journal_snapshot(None).unwrap();
-    assert_eq!(first.records.len(), 70);
-    // The read page is larger than the durable 64-record chunks. A partial
-    // helper acknowledgement must still prune only the fully committed chunk.
-    let first_ack = record_checkpoint(&first.records[63]);
-    store.acknowledge_projection_journal(&first_ack).unwrap();
-    assert_eq!(
-        store
-            .conn
-            .query_row(
-                "SELECT COALESCE(SUM(record_count), 0) FROM projection_journal_chunks",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        6
-    );
-    let retained = store.projection_journal_snapshot(None).unwrap();
-    assert_eq!(retained.records.len(), 6);
-    assert_eq!(retained.records[0].sequence, 65);
-    assert!(matches!(
-        store.projection_journal_snapshot(Some(JournalPosition {
-            generation: first_ack.position.generation,
-            sequence: first_ack.position.sequence - 1,
-        })),
-        Err(StoreError::StaleProjectionJournalPosition { .. })
-    ));
-    store.acknowledge_projection_journal(&first_ack).unwrap();
-
-    let final_ack = record_checkpoint(retained.records.last().unwrap());
-    store.acknowledge_projection_journal(&final_ack).unwrap();
-    assert_eq!(
-        store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM projection_journal_chunks",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
-    let empty = store.projection_journal_snapshot(None).unwrap();
-    assert!(empty.records.is_empty());
-    assert_eq!(empty.next_position, final_ack.position);
-
-    store
-        .upsert_event(&event(Uuid::from_u128(71), 71, json!({"body": 71})))
-        .unwrap();
-    let delta = store.projection_journal_snapshot(None).unwrap();
-    assert_eq!(delta.records.len(), 1);
-    assert_eq!(delta.records[0].sequence, 71);
-}
-
-#[test]
-fn reconciliation_recovers_ack_crashes_and_helper_loss_from_canonical_store() {
-    let (_temp, store) = open_store();
-    for value in 1_u128..=3 {
-        store
-            .upsert_event(&event(
-                Uuid::from_u128(value),
-                value as u64,
-                json!({"body": value}),
-            ))
-            .unwrap();
-    }
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let baseline = store.projection_journal_snapshot(None).unwrap();
-    let partial = record_checkpoint(&baseline.records[1]);
-    let complete = record_checkpoint(&baseline.records[2]);
-    store.acknowledge_projection_journal(&partial).unwrap();
-
-    store.begin_immediate_batch().unwrap();
-    store.acknowledge_projection_journal(&complete).unwrap();
-    assert_eq!(
-        store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM projection_journal_chunks",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
-    store.rollback_batch().unwrap();
-    assert_eq!(
-        store
-            .projection_journal_snapshot(None)
-            .unwrap()
-            .records
-            .len(),
-        1
-    );
-
-    let same_generation = store.reconcile_projection_journal(Some(&complete)).unwrap();
-    assert_eq!(same_generation.position, complete.position);
-    assert!(store
-        .projection_journal_snapshot(None)
-        .unwrap()
-        .records
-        .is_empty());
-
-    let regenerated = store.reconcile_projection_journal(None).unwrap();
-    assert_eq!(regenerated.position.generation, 2);
-    assert_eq!(regenerated.position.sequence, 3);
-    let rebuilt = store.projection_journal_snapshot(None).unwrap();
-    assert_eq!(rebuilt.records.len(), 3);
-    assert_eq!(
-        store
-            .conn
-            .query_row(
-                "SELECT COUNT(DISTINCT generation) FROM projection_journal_entities",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
-}
-
-#[test]
-fn acknowledgement_does_not_invalidate_an_existing_wal_reader() {
-    let (temp, writer) = open_store();
-    for value in 1_u128..=4 {
-        writer
-            .upsert_event(&event(
-                Uuid::from_u128(value),
-                value as u64,
-                json!({"body": value}),
-            ))
-            .unwrap();
-    }
-    writer.activate_projection_journal(FINGERPRINT).unwrap();
-    let reader = Store::open(temp.path().join("ctx.db")).unwrap();
-    reader.conn.execute_batch("BEGIN").unwrap();
-    let frozen = reader.projection_journal_snapshot(None).unwrap();
-    let complete = record_checkpoint(frozen.records.last().unwrap());
-    writer.acknowledge_projection_journal(&complete).unwrap();
-    assert_eq!(
-        reader
-            .conn
-            .query_row(
-                "SELECT COALESCE(SUM(record_count), 0) FROM projection_journal_chunks",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        4
-    );
-    reader.conn.execute_batch("ROLLBACK").unwrap();
-    assert_eq!(
-        writer
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM projection_journal_chunks",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
-}
-
-#[test]
-fn forged_acknowledgements_fail_without_pruning() {
-    let (_temp, store) = open_store();
-    store
-        .upsert_event(&event(Uuid::new_v4(), 1, json!({"body": "one"})))
-        .unwrap();
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    let snapshot = store.projection_journal_snapshot(None).unwrap();
-    let mut forged = record_checkpoint(&snapshot.records[0]);
-    forged.cumulative_digest = "f".repeat(64);
-    assert!(matches!(
-        store.acknowledge_projection_journal(&forged),
-        Err(StoreError::InvalidProjectionJournalData(_))
-    ));
-    assert_eq!(
-        store
-            .projection_journal_snapshot(None)
-            .unwrap()
-            .records
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn acknowledged_journal_storage_is_bounded_and_reused_by_deltas() {
-    let (temp, store) = open_store();
-    let db_path = temp.path().join("ctx.db");
-    let repeated = "deterministic journal compression corpus ".repeat(64);
-    for value in 1_u128..=512 {
-        store
-            .upsert_event(&event(
-                Uuid::from_u128(value),
-                value as u64,
-                json!({"body": repeated, "ordinal": value}),
-            ))
-            .unwrap();
-    }
-    store.checkpoint_wal_truncate_required().unwrap();
-    let canonical_bytes = sqlite_family_bytes(&db_path);
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    store.checkpoint_wal_truncate_required().unwrap();
-    let activation_bytes = sqlite_family_bytes(&db_path);
-    let activation_growth = activation_bytes.saturating_sub(canonical_bytes);
-    assert!(
-        activation_growth.saturating_mul(100) <= canonical_bytes.saturating_mul(25),
-        "activation growth {activation_growth} exceeds 25% of canonical {canonical_bytes}"
-    );
-
-    loop {
-        let page = store.projection_journal_snapshot(None).unwrap();
-        if page.records.is_empty() {
-            break;
-        }
-        let acknowledged = record_checkpoint(page.records.last().unwrap());
-        store.acknowledge_projection_journal(&acknowledged).unwrap();
-    }
-    store.checkpoint_wal_truncate_required().unwrap();
-    let acknowledged_bytes = sqlite_family_bytes(&db_path);
-    assert!(
-        acknowledged_bytes
-            .saturating_sub(canonical_bytes)
-            .saturating_mul(100)
-            <= canonical_bytes.saturating_mul(25),
-        "acknowledged storage exceeds 25% of canonical Store"
-    );
-
-    for value in 1_u128..=52 {
-        store
-            .upsert_event(&event(
-                Uuid::from_u128(value),
-                value as u64,
-                json!({"body": repeated, "ordinal": value, "revision": 2}),
-            ))
-            .unwrap();
-    }
-    store.checkpoint_wal_truncate_required().unwrap();
-    let delta_bytes = sqlite_family_bytes(&db_path).saturating_sub(acknowledged_bytes);
-    assert!(
-        delta_bytes.saturating_mul(100) <= canonical_bytes.saturating_mul(10),
-        "incremental journal storage {delta_bytes} exceeds 10% of canonical {canonical_bytes}"
     );
 }
 
@@ -663,7 +436,7 @@ fn nested_deactivation_rollback_restores_cached_activity_before_later_mutations(
 }
 
 #[test]
-fn import_batch_event_and_run_writes_match_standalone_and_roll_back_together() {
+fn atomic_event_and_run_writes_match_standalone_and_roll_back_together() {
     let (_standalone_temp, standalone) = open_store();
     let (_batched_temp, batched) = open_store();
     let run_id = Uuid::new_v4();
@@ -683,10 +456,13 @@ fn import_batch_event_and_run_writes_match_standalone_and_roll_back_together() {
     standalone.upsert_run(&execution).unwrap();
     standalone.upsert_event(&value).unwrap();
 
-    batched.begin_import_batch().unwrap();
-    batched.upsert_run(&execution).unwrap();
-    batched.upsert_event(&value).unwrap();
-    batched.commit_import_batch().unwrap();
+    batched
+        .with_atomic_write(|| {
+            batched.upsert_run(&execution)?;
+            batched.upsert_event(&value)?;
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(
         standalone.get_run(run_id).unwrap(),
@@ -712,10 +488,12 @@ fn import_batch_event_and_run_writes_match_standalone_and_roll_back_together() {
     value.seq = 2;
     value.run_id = Some(rolled_back_run_id);
     value.payload = json!({"text": "import-batch-rollback-oracle"});
-    batched.begin_import_batch().unwrap();
-    batched.upsert_run(&execution).unwrap();
-    batched.upsert_event(&value).unwrap();
-    batched.rollback_import_batch().unwrap();
+    let rollback: crate::Result<()> = batched.with_atomic_write(|| {
+        batched.upsert_run(&execution)?;
+        batched.upsert_event(&value)?;
+        Err(StoreError::Sql(rusqlite::Error::InvalidQuery))
+    });
+    assert!(rollback.is_err());
 
     assert!(batched.get_run(rolled_back_run_id).is_err());
     assert!(batched.get_event(rolled_back_event_id).is_err());
@@ -726,7 +504,7 @@ fn import_batch_event_and_run_writes_match_standalone_and_roll_back_together() {
 }
 
 #[test]
-fn import_batch_inactive_journal_cache_observes_later_activation() {
+fn atomic_write_inactive_journal_cache_observes_later_activation() {
     let (_temp, store) = open_store();
     let before_activation_id = Uuid::new_v4();
     let after_activation_id = Uuid::new_v4();
@@ -735,22 +513,24 @@ fn import_batch_inactive_journal_cache_observes_later_activation() {
     execution.session_id = None;
     execution.source_id = None;
 
-    store.begin_import_batch().unwrap();
     store
-        .upsert_event(&event(
-            before_activation_id,
-            1,
-            json!({"body": "before activation"}),
-        ))
+        .with_atomic_write(|| {
+            store.upsert_event(&event(
+                before_activation_id,
+                1,
+                json!({"body": "before activation"}),
+            ))?;
+            store.activate_projection_journal(FINGERPRINT)?;
+            store.upsert_run(&execution)?;
+            let mut after_activation =
+                event(after_activation_id, 2, json!({"body": "after activation"}));
+            after_activation.run_id = Some(run_id);
+            store.upsert_event(&after_activation)?;
+            execution.command_preview = Some("updated command".to_owned());
+            store.upsert_run(&execution)?;
+            Ok(())
+        })
         .unwrap();
-    store.activate_projection_journal(FINGERPRINT).unwrap();
-    store.upsert_run(&execution).unwrap();
-    let mut after_activation = event(after_activation_id, 2, json!({"body": "after activation"}));
-    after_activation.run_id = Some(run_id);
-    store.upsert_event(&after_activation).unwrap();
-    execution.command_preview = Some("updated command".to_owned());
-    store.upsert_run(&execution).unwrap();
-    store.commit_import_batch().unwrap();
 
     let snapshot = store.projection_journal_snapshot(None).unwrap();
     let before_records = snapshot

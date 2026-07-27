@@ -43,19 +43,15 @@ fn admit_jsonl(
 fn resolver_requests_are_path_free() {
     let source = include_str!("../resolver.rs");
     let request_start = source.find("pub struct CompleteMessageRequest").unwrap();
-    let result_start = source.find("pub struct ResultContentRequest").unwrap();
-    let request = &source[request_start..result_start];
-    let result_end = source[result_start..]
-        .find("pub struct ResolvedResultContent")
-        .map(|offset| result_start + offset)
+    let request_end = source[request_start..]
+        .find("pub struct SourceVerification")
+        .map(|offset| request_start + offset)
         .unwrap();
-    let result = &source[result_start..result_end];
-    for declaration in [request, result] {
-        assert!(!declaration.contains("PathBuf"));
-        assert!(!declaration.contains("raw_source_path"));
-        assert!(!declaration.contains("source_root"));
-        assert!(declaration.contains("BrokeredSourceAccess"));
-    }
+    let request = &source[request_start..request_end];
+    assert!(!request.contains("PathBuf"));
+    assert!(!request.contains("raw_source_path"));
+    assert!(!request.contains("source_root"));
+    assert!(request.contains("BrokeredSourceAccess"));
 }
 
 #[test]
@@ -84,6 +80,57 @@ fn authorized_route_debug_omits_paths_roots_and_identity() {
     ] {
         assert!(!debug.contains(secret), "debug output leaked {secret}");
     }
+
+    let prepared = SourceAccessBroker::new()
+        .prepare(route, Uuid::new_v4())
+        .unwrap();
+    let debug = format!("{prepared:?}");
+    assert!(debug.contains("PreparedSourceAdmission"));
+    assert!(debug.contains("reserved_snapshot_bytes"));
+    for secret in [
+        "/secret/provider/session.jsonl",
+        "/secret/provider",
+        "secret-source-identity",
+    ] {
+        assert!(!debug.contains(secret), "prepared debug leaked {secret}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sqlite_snapshot_reservation_counts_sidecars_and_rejects_a_changed_total() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let wal = temp.path().join("state.db-wal");
+    let shm = temp.path().join("state.db-shm");
+    fs::write(&path, b"main").unwrap();
+    fs::write(&wal, b"wal-bytes").unwrap();
+    fs::write(&shm, b"shm").unwrap();
+    let event_id = Uuid::new_v4();
+    let route = AuthorizedSourceRoute {
+        source_id: Uuid::new_v4(),
+        provider: CaptureProvider::Crush,
+        source_format: "crush_sqlite".to_owned(),
+        family: CompleteContentSourceFamily::Sqlite,
+        raw_source_path: path,
+        source_root: Some(temp.path().to_path_buf()),
+        source_identity: Some("sqlite-source".to_owned()),
+        source_snapshot: SourceSnapshot::default(),
+    };
+    let broker = SourceAccessBroker::new();
+
+    let prepared = broker.prepare(route, event_id).unwrap();
+    let reserved = prepared.reserved_snapshot_bytes();
+    assert_eq!(
+        reserved,
+        u64::try_from(b"main".len() + b"wal-bytes".len() + b"shm".len()).unwrap()
+    );
+
+    fs::write(&wal, b"wal-bytes-grew").unwrap();
+    let error = broker
+        .admit_prepared_for_source_locators(prepared, &[])
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
 }
 
 #[test]

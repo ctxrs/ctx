@@ -611,6 +611,46 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
 }
 
 #[test]
+fn setup_wait_imports_discovered_codex_prompt_history() {
+    let temp = tempdir();
+    let history = temp.path().join(".codex/history.jsonl");
+    fs::create_dir_all(history.parent().unwrap()).unwrap();
+    fs::write(
+        &history,
+        concat!(
+            r#"{"session_id":"prompt-setup-session","ts":1784371200,"text":"prompt history setup refresh oracle"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    assert_eq!(setup["mode"], "ready");
+    assert_eq!(setup["inventory"]["sources"], 1);
+    assert_eq!(setup["inventory"]["units"], 1);
+    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
+    assert_eq!(setup["import"]["totals"]["imported_sessions"], 1);
+    assert_eq!(setup["import"]["totals"]["imported_events"], 1);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "prompt history setup refresh oracle",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "prompt history setup refresh oracle",
+        1,
+        "message",
+    );
+}
+
+#[test]
 fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
@@ -833,7 +873,7 @@ fn progress_json_setup_does_not_autostart_or_nudge_daemon() {
 }
 
 #[test]
-fn human_setup_starts_a_reported_daemon_process() {
+fn human_setup_without_sources_starts_daemon_without_claiming_background_indexing() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
 
@@ -850,7 +890,194 @@ fn human_setup_starts_a_reported_daemon_process() {
         .clone();
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
+        stdout.contains("ctx is initialized; no local history was indexed"),
+        "{stdout}"
+    );
+    assert!(
         stdout.contains("background maintenance handoff is verified"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("indexing is queued"), "{stdout}");
+    assert!(
+        !stdout.contains("queued your local agent history"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  ctx sources"), "{stdout}");
+    assert!(stdout.contains("  ctx import --all"), "{stdout}");
+    assert!(
+        !stdout.contains("  ctx search \"test failure\""),
+        "{stdout}"
+    );
+
+    let running = json_output(ctx(&temp).args(["daemon", "status", "--json"]));
+    assert_eq!(running["daemon"]["status"], "running", "{running:#}");
+    assert_eq!(running["daemon"]["running"], true, "{running:#}");
+    assert_eq!(running["daemon"]["trigger_command"], "setup", "{running:#}");
+    assert_eq!(running["daemon"]["start_mode"], "auto", "{running:#}");
+    let pid = running["daemon"]["pid"].as_u64().unwrap() as u32;
+    assert_daemon_process_running(pid);
+
+    let completed = wait_for_daemon_status(&temp, "completed", false, "setup");
+    assert_eq!(completed["daemon"]["pid"], pid, "{completed:#}");
+    assert!(completed["daemon"]["last_error"].is_null(), "{completed:#}");
+    let lock: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
+    assert_eq!(lock["pid"], pid, "{lock:#}");
+    assert_eq!(lock["released"], true, "{lock:#}");
+}
+
+#[test]
+fn daemon_once_rejections_return_nonzero_with_actionable_json() {
+    let temp = tempdir();
+    let binary = copied_ctx_binary(&temp);
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::copy(
+        provider_history_fixture("codex-malformed-session.jsonl"),
+        sessions.join("rollout-malformed.jsonl"),
+    )
+    .unwrap();
+    ctx_from_binary(&temp, &binary)
+        .args([
+            "setup",
+            "--catalog-only",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+
+    let output = ctx_from_binary(&temp, &binary)
+        .args(["daemon", "run", "--once", "--force", "--json"])
+        .env("CTX_UPGRADE_AUTO", "off")
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let daemon: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(daemon["status"], "failed", "{daemon:#}");
+    assert_eq!(
+        daemon["jobs"]["history_refresh"]["status"], "completed",
+        "{daemon:#}"
+    );
+    assert_eq!(
+        daemon["jobs"]["history_refresh"]["totals"]["rejected_records"], 1,
+        "{daemon:#}"
+    );
+    assert_eq!(
+        daemon["last_error"],
+        "history refresh rejected 1 record; run `ctx import --all --no-daemon` for rejection details",
+        "{daemon:#}"
+    );
+    assert!(
+        stderr.contains("history refresh rejected 1 record"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ctx import --all --no-daemon"), "{stderr}");
+
+    let lock: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
+    assert_eq!(lock["released"], true, "{lock:#}");
+}
+
+#[test]
+fn daemon_once_refreshes_discovered_codex_prompt_history() {
+    let temp = tempdir();
+    let binary = copied_ctx_binary(&temp);
+    let history = temp.path().join(".codex/history.jsonl");
+    fs::create_dir_all(history.parent().unwrap()).unwrap();
+    fs::write(
+        &history,
+        concat!(
+            r#"{"session_id":"prompt-daemon-session","ts":1784371200,"text":"prompt history daemon refresh oracle"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    ctx_from_binary(&temp, &binary)
+        .args([
+            "setup",
+            "--catalog-only",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+
+    let daemon = json_output(
+        ctx_from_binary(&temp, &binary)
+            .args(["daemon", "run", "--once", "--force", "--json"])
+            .env("CTX_UPGRADE_AUTO", "off"),
+    );
+    assert_eq!(daemon["status"], "completed", "{daemon:#}");
+    assert_eq!(
+        daemon["jobs"]["history_refresh"]["status"], "completed",
+        "{daemon:#}"
+    );
+    assert_eq!(
+        daemon["jobs"]["history_refresh"]["totals"]["imported_sessions"], 1,
+        "{daemon:#}"
+    );
+    assert_eq!(
+        daemon["jobs"]["history_refresh"]["totals"]["imported_events"], 1,
+        "{daemon:#}"
+    );
+
+    let search = json_output(ctx_from_binary(&temp, &binary).args([
+        "search",
+        "prompt history daemon refresh oracle",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "prompt history daemon refresh oracle",
+        1,
+        "message",
+    );
+}
+
+#[test]
+fn human_wait_setup_starts_daemon_after_foreground_import() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let binary = copied_ctx_binary(&temp);
+
+    let output = ctx_from_binary(&temp, &binary)
+        .args(["setup", "--wait", "--progress", "none"])
+        .env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2")
+        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
+        .env("CTX_UPGRADE_AUTO", "off")
+        .env_remove("CI")
+        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("ctx local agent history search is ready"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("background maintenance handoff is verified"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("indexing is queued"), "{stdout}");
+    assert!(
+        !stdout.contains("queued your local agent history"),
         "{stdout}"
     );
 
@@ -865,6 +1092,11 @@ fn human_setup_starts_a_reported_daemon_process() {
     let completed = wait_for_daemon_status(&temp, "completed", false, "setup");
     assert_eq!(completed["daemon"]["pid"], pid);
     assert!(completed["daemon"]["finished_at_ms"].as_i64().unwrap() > 0);
+    assert!(completed["daemon"]["last_error"].is_null(), "{completed:#}");
+    let lock: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
+    assert_eq!(lock["pid"], pid, "{lock:#}");
+    assert_eq!(lock["released"], true, "{lock:#}");
 }
 
 #[test]
@@ -940,7 +1172,7 @@ fn setup_inventories_whole_source_sqlite_providers() {
 }
 
 #[test]
-fn clean_multisource_setup_with_hermes_bounds_wal_through_final_optimization() {
+fn clean_multisource_setup_with_hermes_bounds_wal_through_final_maintenance() {
     let temp = tempdir();
     write_large_codex_setup_sessions(&temp, 40, 4, 4 * 1024);
     write_large_hermes_setup_db(&temp, 130, 8 * 1024);

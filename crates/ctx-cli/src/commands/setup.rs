@@ -53,37 +53,22 @@ pub(crate) fn run_setup(
 
     fs::create_dir_all(&data_root)?;
     let db_path = database_path(data_root.clone());
-    let store = Store::open(&db_path)?;
-    let config_path = data_root.join(CONFIG_FILE);
-    config::write_default_config(&data_root)?;
-    let sources = discovered_sources();
-    let progress_arg = setup_progress_arg(args.progress, quiet);
-    let progress = ProgressReporter::new(progress_arg, args.json, "setup", 0);
     let machine_readable_output = args.json || args.progress == ProgressArg::Json;
     let daemon_suppression_reason = daemon_autostart_suppression_reason();
     let daemon_backgrounding_enabled = config.daemon.enabled
         && !args.no_daemon
         && (machine_readable_output || daemon_suppression_reason.is_none());
-    let daemon_autostart_requested =
-        daemon_backgrounding_enabled && !args.catalog_only && !machine_readable_output;
-    let daemon_autostart_reason = if args.catalog_only {
-        Some("catalog_only")
-    } else if args.no_daemon {
-        Some("explicit_opt_out")
-    } else if !config.daemon.enabled {
-        Some("daemon_disabled")
-    } else if machine_readable_output {
-        Some("machine_readable_output")
-    } else if daemon_suppression_reason.is_some() {
-        daemon_suppression_reason
-    } else {
-        None
-    };
     let foreground_import = !args.catalog_only && (args.wait || !daemon_backgrounding_enabled);
+    let inventory_store = setup_inventory_store(&db_path, args.catalog_only || !foreground_import)?;
+    let config_path = data_root.join(CONFIG_FILE);
+    config::write_default_config(&data_root)?;
+    let sources = discovered_sources();
+    let progress_arg = setup_progress_arg(args.progress, quiet);
+    let progress = ProgressReporter::new(progress_arg, args.json, "setup", 0);
     let mut inventory_only = None;
-    let import_report = if args.catalog_only || !foreground_import {
+    let import_report = if let Some(store) = inventory_store.as_ref() {
         progress.message("inventorying", "Preparing local history...");
-        let inventory = inventory_available_sources(&store, &sources)?;
+        let inventory = inventory_available_sources(store, &sources)?;
         progress.done(
             "inventorying",
             format!(
@@ -97,7 +82,6 @@ pub(crate) fn run_setup(
         inventory_only = Some(inventory);
         None
     } else {
-        drop(store);
         let import_args = ImportArgs {
             provider: None,
             path: None,
@@ -173,6 +157,21 @@ pub(crate) fn run_setup(
         && !args.catalog_only
         && !foreground_import
         && (pending_inventory_units > 0 || (semantic_enabled && semantic_supported));
+    let daemon_autostart_requested =
+        daemon_backgrounding_enabled && !args.catalog_only && !machine_readable_output;
+    let daemon_autostart_reason = if args.catalog_only {
+        Some("catalog_only")
+    } else if args.no_daemon {
+        Some("explicit_opt_out")
+    } else if !config.daemon.enabled {
+        Some("daemon_disabled")
+    } else if machine_readable_output {
+        Some("machine_readable_output")
+    } else if daemon_suppression_reason.is_some() {
+        daemon_suppression_reason
+    } else {
+        None
+    };
     telemetry.mode = Some(if args.catalog_only {
         SetupMode::CatalogOnly
     } else if foreground_import || !background_indexing_enabled {
@@ -307,9 +306,12 @@ pub(crate) fn run_setup(
                 println!("  ctx index watch");
                 println!("  ctx search \"test failure\"");
                 println!("  ctx status");
-            } else if !foreground_import {
+            } else if !foreground_import && setup_has_indexed_content(indexed_items) {
                 println!("  ctx search \"test failure\"");
                 println!("  ctx status");
+            } else if !foreground_import {
+                println!("  ctx sources");
+                println!("  ctx import --all");
             } else if setup_has_indexed_content(indexed_items) {
                 println!("  ctx search \"test failure\"");
                 println!("  ctx show event <event-id> --window 3");
@@ -328,6 +330,14 @@ pub(crate) fn run_setup(
         bail!("all setup import sources failed");
     }
     Ok(())
+}
+
+fn setup_inventory_store(db_path: &Path, inventory_required: bool) -> Result<Option<Store>> {
+    if inventory_required {
+        Ok(Some(Store::open(db_path)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn setup_progress_arg(progress: ProgressArg, quiet: bool) -> ProgressArg {
@@ -728,6 +738,39 @@ mod setup_estimate_tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn fresh_foreground_setup_enters_import_before_store_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("work.sqlite");
+
+        let store = setup_inventory_store(&db_path, false).unwrap();
+        assert!(store.is_none());
+        assert!(
+            !db_path.exists(),
+            "fresh setup target must remain absent at foreground import entry"
+        );
+
+        Store::open(&db_path).unwrap();
+        let store = setup_inventory_store(&db_path, false).unwrap();
+        assert!(store.is_none());
+        assert!(
+            db_path.exists(),
+            "foreground setup must preserve an existing Store"
+        );
+    }
+
+    #[test]
+    fn setup_inventory_modes_open_and_persist_store() {
+        for mode in ["catalog_only", "background"] {
+            let temp = tempfile::tempdir().unwrap();
+            let db_path = temp.path().join("work.sqlite");
+
+            let store = setup_inventory_store(&db_path, true).unwrap();
+            assert!(store.is_some(), "{mode} must open the Store");
+            assert!(db_path.exists(), "{mode} must persist the Store");
+        }
+    }
 
     #[test]
     fn analytics_preflight_is_disabled_without_running_the_query() {

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::FileChangeKind;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::file_touches::{
@@ -17,7 +18,7 @@ use crate::{
     PROVIDER_MAX_TEXT_CHARS,
 };
 
-use super::schema::{GooseMessageRow, GooseSessionRow};
+use super::schema::GooseSessionRow;
 use super::stream::{GooseRetainedContentClass, GooseRetainedMessage};
 
 pub(super) struct GooseOutputProjection {
@@ -32,13 +33,6 @@ fn goose_output_outcome_label(outcome: OutputOutcome) -> &'static str {
         OutputOutcome::Timeout => "timeout",
         OutputOutcome::Unknown => "unknown",
     }
-}
-
-pub(super) fn goose_message_identity(message: &GooseMessageRow) -> String {
-    message
-        .message_id
-        .clone()
-        .unwrap_or_else(|| format!("row-{}", message.id))
 }
 
 pub(super) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
@@ -388,6 +382,29 @@ pub(super) struct GooseNativeEvent {
     pub(super) metadata_json: Option<String>,
     pub(super) retained_content_bytes: u64,
     pub(super) file_touches: Vec<GooseNativeFileTouch>,
+}
+
+pub(super) fn goose_event_payload_hash(event: &GooseNativeEvent) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-goose-nativepath-canonical-event-v1\0");
+    digest.update(event.native_order.to_le_bytes());
+    digest.update(event.native_identity.as_bytes());
+    digest.update(event.provider_message_identity.as_bytes());
+    digest.update(event.session_identity.as_bytes());
+    digest.update(event.role.as_bytes());
+    digest.update(event.content.to_string().as_bytes());
+    digest.update(event.searchable_text.as_bytes());
+    digest.update(event.created_timestamp.unwrap_or_default().to_le_bytes());
+    if let Some(timestamp) = &event.timestamp {
+        digest.update(timestamp.as_bytes());
+    }
+    if let Some(tokens) = &event.tokens_json {
+        digest.update(tokens.as_bytes());
+    }
+    if let Some(metadata) = &event.metadata_json {
+        digest.update(metadata.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

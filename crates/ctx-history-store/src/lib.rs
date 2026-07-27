@@ -3,6 +3,7 @@ mod artifacts;
 mod bulk_search;
 mod canonical_observations;
 mod catalog;
+mod cold_store;
 mod connection;
 mod error;
 mod events;
@@ -38,6 +39,10 @@ pub use catalog::{
     CatalogCounts, CatalogIndexedStatus, CatalogSession, CatalogSourceIndexState,
     IndexedHistoryCounts, SourceImportFile, SourceImportFileCounts, SourceImportInventoryControl,
 };
+#[doc(hidden)]
+pub use cold_store::{
+    ColdStoreBuild, ColdStoreBuildCounts, ColdStoreBuildReceipt, ColdStoreBuildTimings,
+};
 pub use error::{Result, StoreError};
 pub use events::ProviderEventHashAuthority;
 pub use files::FileTouchScope;
@@ -53,8 +58,10 @@ pub use native_path_group::{
 };
 pub use projection_journal::{
     JournalCheckpoint, JournalEntityKind, JournalEvidenceIdentity, JournalOperation,
-    JournalPosition, JournalProvenanceIdentity, ProjectionJournalRecord, ProjectionJournalSnapshot,
-    PROJECTION_CONTRACT_VERSION, PROJECTION_JOURNAL_MAX_PAGE_BYTES, PROJECTION_JOURNAL_PAGE_SIZE,
+    JournalPosition, JournalProvenanceIdentity, ProjectionJournalContextWindow,
+    ProjectionJournalRecord, ProjectionJournalSnapshot, PROJECTION_CONTRACT_VERSION,
+    PROJECTION_JOURNAL_CONTEXT_MAX_BYTES, PROJECTION_JOURNAL_CONTEXT_RECORDS,
+    PROJECTION_JOURNAL_MAX_PAGE_BYTES, PROJECTION_JOURNAL_PAGE_SIZE,
     PROJECTION_JOURNAL_RECORD_MAX_BYTES,
 };
 pub use raw_sql::{
@@ -107,12 +114,13 @@ pub struct Store {
     // epoch. Nested guards and one-use admissions are valid only in that epoch.
     event_search_bulk_epoch: Arc<AtomicU64>,
     batch_depth: Cell<usize>,
-    import_batch_depth: Cell<usize>,
+    connection_quarantined: Cell<bool>,
     event_search_projection_capabilities:
         Cell<Option<search::projections::EventSearchProjectionCapabilities>>,
     projection_journal_active_in_batch: Cell<Option<bool>>,
     projection_journal_group_collector: RefCell<Option<projection_journal::GroupJournalCollector>>,
     native_path_group_token: Cell<Option<uuid::Uuid>>,
+    native_cold_load_active: Cell<bool>,
     native_path_mutation_scope: Arc<AtomicBool>,
     native_path_group_poisoned: Arc<AtomicBool>,
     native_path_transaction_control_scope: Cell<bool>,

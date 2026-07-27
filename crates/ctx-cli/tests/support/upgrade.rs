@@ -19,7 +19,7 @@ use flate2::{write::GzEncoder, Compression};
 #[cfg(unix)]
 use tar::{Builder as TarBuilder, EntryType, Header};
 
-use super::{copied_ctx_binary, file_url};
+use super::{copied_binary, copied_ctx_binary, file_url};
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -457,12 +457,32 @@ pub(crate) fn managed_candidate(temp: &TempDir, install_attempt_id: &str) -> Pat
 }
 
 #[cfg(unix)]
+pub(crate) fn managed_candidate_from_binary(
+    temp: &TempDir,
+    source: &Path,
+    install_attempt_id: &str,
+) -> PathBuf {
+    let copied = copied_binary(temp, source);
+    finish_managed_candidate(temp, copied, "candidate-bin", install_attempt_id)
+}
+
+#[cfg(unix)]
 pub(crate) fn managed_candidate_in(
     temp: &TempDir,
     directory: &str,
     install_attempt_id: &str,
 ) -> PathBuf {
     let copied = copied_ctx_binary(temp);
+    finish_managed_candidate(temp, copied, directory, install_attempt_id)
+}
+
+#[cfg(unix)]
+fn finish_managed_candidate(
+    temp: &TempDir,
+    copied: PathBuf,
+    directory: &str,
+    install_attempt_id: &str,
+) -> PathBuf {
     let bin_dir = temp.path().join(directory);
     let target = bin_dir.join("ctx");
     fs::create_dir(&bin_dir).unwrap();

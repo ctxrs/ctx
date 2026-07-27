@@ -13,6 +13,8 @@ import java.util.concurrent.TimeUnit;
 
 /** agent-history-v1 transport backed by a local ctx CLI. */
 public final class LocalCliAdapter implements AgentHistoryTransport {
+    private static final String ANALYTICS_ENABLED_ENV = "CTX_ANALYTICS_ENABLED";
+
     private final LocalCliConfig config;
     private final CommandRunner runner;
 
@@ -72,6 +74,7 @@ public final class LocalCliAdapter implements AgentHistoryTransport {
         if (config.dataRoot() != null && !config.dataRoot().isEmpty()) {
             env.put("CTX_DATA_ROOT", config.dataRoot());
         }
+        env.put(ANALYTICS_ENABLED_ENV, "false");
         CommandRequest request = new CommandRequest(
                 command,
                 new ArrayList<>(args),

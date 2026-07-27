@@ -20,6 +20,7 @@ pub(super) struct WarpDecodedMessage {
     pub(super) message_id: Option<String>,
     pub(super) request_id: Option<String>,
     pub(super) occurred_at: Option<DateTime<Utc>>,
+    pub(super) legacy_indexed: bool,
     pub(super) payload: WarpDecodedMessagePayload,
 }
 
@@ -168,6 +169,7 @@ fn decode_warp_native_message(
             message_id,
             request_id: None,
             occurred_at: None,
+            legacy_indexed: false,
             payload: WarpDecodedMessagePayload::Excluded,
         });
     };
@@ -177,6 +179,7 @@ fn decode_warp_native_message(
             message_id,
             request_id: None,
             occurred_at: None,
+            legacy_indexed: false,
             payload: WarpDecodedMessagePayload::Excluded,
         });
     }
@@ -210,6 +213,7 @@ fn decode_warp_native_message(
             message_id,
             request_id,
             occurred_at,
+            legacy_indexed: true,
             payload: decoded_payload,
         });
     }
@@ -283,6 +287,7 @@ fn decode_warp_native_message(
         request_id,
         occurred_at,
         message_ordinal,
+        legacy_indexed: tool_call || !body.is_empty(),
         payload: WarpDecodedMessagePayload::Retained(WarpRetainedMessage {
             event_type,
             role,

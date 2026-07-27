@@ -5,8 +5,9 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::schema::ddl::table_exists;
 use crate::schema::rebuild::sanitize_v44_result_event_payloads;
 use crate::schema::semantic_projection_epoch::install as install_semantic_projection_epoch;
-use crate::search::projections::rebuild_search_projection;
 use crate::{Result, StoreError, FINAL_SCHEMA_IDENTITY};
+
+use super::v47_provider_session_repair::refresh_result_event_search_projection;
 
 const PRE_SOURCE_BACKED_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v2";
 const PRE_VERIFIED_CONTENT_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v3";
@@ -343,7 +344,7 @@ pub(super) fn migrate_final_v47_source_backed_results(conn: &Connection) -> Resu
     let migration = (|| -> Result<()> {
         crate::projection_journal::reset_for_canonical_schema_rewrite(conn)?;
         sanitize_v44_result_event_payloads(conn)?;
-        rebuild_search_projection(conn)?;
+        refresh_result_event_search_projection(conn)?;
         let updated = conn.execute(
             "UPDATE ctx_store_schema_identity SET schema_identity = ?1
              WHERE singleton = 1 AND schema_version = 47 AND schema_identity = ?2",

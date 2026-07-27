@@ -235,274 +235,116 @@ fn persisted_locator_rejects_unknown_fields_duplicates_and_invalid_profiles() {
 }
 
 #[test]
-fn route_registry_exactly_covers_matrix_formats_roles_platforms_and_contracts() {
-    use std::{collections::HashSet, str::FromStr};
+fn locator_wire_has_one_message_role_and_rejects_removed_result_vocabulary() {
+    assert_eq!(VERIFIED_CONTENT_LOCATORS_MAX_ENTRIES, 1);
+    assert_eq!(
+        serde_json::to_value(VerifiedContentRole::MessageBody).unwrap(),
+        serde_json::json!("message_body")
+    );
+    assert!(
+        serde_json::from_value::<VerifiedContentRole>(serde_json::json!("result_body")).is_err()
+    );
 
-    let matrix: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../docs/provider-support-matrix.json"
-    ))
+    let mut address = [0_u8; 16];
+    address[8..].copy_from_slice(&1_u64.to_be_bytes());
+    let locator = VerifiedContentLocatorV1::new(
+        VerifiedContentRole::MessageBody,
+        "codex.message-body.v1",
+        ContentRef::from_bytes(b"body").unwrap(),
+        CompleteContentSourceFamily::Jsonl,
+        "jsonl-range-v1",
+        &address,
+        "id",
+        CompleteContentBodyDigest::from_text("record"),
+    )
     .unwrap();
-    let mut expected = HashSet::new();
-    for provider in matrix["providers"].as_array().unwrap() {
-        let capture_provider =
-            CaptureProvider::from_str(provider["capture_provider"].as_str().unwrap()).unwrap();
-        for path in provider["implemented_paths"].as_array().unwrap() {
-            let source_format = path["source_format"].as_str().unwrap().to_owned();
-            for role in [
-                VerifiedContentRole::MessageBody,
-                VerifiedContentRole::ResultBody,
-            ] {
-                assert!(expected.insert((capture_provider, source_format.clone(), role)));
-            }
-        }
-    }
-    assert_eq!(expected.len(), 42 * 2);
-
-    let actual = VERIFIED_CONTENT_ROUTES
-        .iter()
-        .map(|route| (route.provider, route.source_format.to_owned(), route.role))
-        .collect::<HashSet<_>>();
-    assert_eq!(actual.len(), VERIFIED_CONTENT_ROUTES.len());
-    assert_eq!(actual, expected);
-    assert!(actual.contains(&(
-        CaptureProvider::Codex,
-        "codex_history_jsonl".to_owned(),
-        VerifiedContentRole::MessageBody
-    )));
-    assert_eq!(
-        VERIFIED_CONTENT_ROUTES
-            .iter()
-            .filter(|route| {
-                route.provider != CaptureProvider::Codex
-                    && route.role == VerifiedContentRole::ResultBody
-            })
-            .count(),
-        40
-    );
-
-    for route in VERIFIED_CONTENT_ROUTES {
-        let platforms = route
-            .platform_dispositions
-            .iter()
-            .map(|disposition| disposition.platform)
-            .collect::<HashSet<_>>();
-        assert_eq!(
-            platforms,
-            VERIFIED_CONTENT_RELEASE_PLATFORMS.into_iter().collect()
-        );
-        let status = route.platform_dispositions[0].status;
-        assert!(route
-            .platform_dispositions
-            .iter()
-            .all(|disposition| disposition.status == status));
-        if status == VerifiedContentRouteStatus::Supported {
-            assert!(!route.contracts.is_empty());
-        } else {
-            assert!(route.contracts.is_empty());
-            assert!(route
-                .platform_dispositions
-                .iter()
-                .all(|disposition| !disposition.reason.is_empty()));
-        }
-        assert!(route.contracts.iter().all(|contract| {
-            !contract.content_profile.is_empty()
-                && !contract.locator_kind.is_empty()
-                && !contract.fixture_reference.is_empty()
-        }));
-    }
-
-    let contract_routes = VERIFIED_CONTENT_ROUTES
-        .iter()
-        .flat_map(|route| {
-            route.contracts.iter().map(move |contract| {
-                (
-                    route.provider,
-                    route.source_format,
-                    route.role,
-                    contract.family,
-                    contract.locator_kind,
-                )
-            })
-        })
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        contract_routes.len(),
-        VERIFIED_CONTENT_ROUTES
-            .iter()
-            .map(|route| route.contracts.len())
-            .sum::<usize>()
-    );
-    let content_profiles = VERIFIED_CONTENT_ROUTES
-        .iter()
-        .flat_map(|route| {
-            route
-                .contracts
-                .iter()
-                .map(|contract| contract.content_profile)
-        })
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        content_profiles.len(),
-        VERIFIED_CONTENT_ROUTES
-            .iter()
-            .map(|route| route.contracts.len())
-            .sum::<usize>()
-    );
-
-    const NATIVE_RESULT_FIXTURES: [(&str, &str); 5] = [
-        (
-            "provider::providers::native_jsonl::native_path::gemini::tests::gemini_production_nativepath_core_first_failure_isolated_and_replay_catches_up_idempotently",
-            include_str!("../provider/providers/native_jsonl/native_path/gemini.rs"),
-        ),
-        (
-            "provider::providers::native_jsonl::native_path::tabnine::tests::production_is_core_first_with_independent_pro_replay",
-            include_str!("../provider/providers/native_jsonl/native_path/tabnine.rs"),
-        ),
-        (
-            "provider::providers::native_jsonl::native_path::copilot::tests::production_is_core_first_with_independent_pro_replay",
-            include_str!("../provider/providers/native_jsonl/native_path/copilot.rs"),
-        ),
-        (
-            "provider::providers::native_jsonl::native_path::factory_ai_droid::tests::production_is_core_first_and_pro_failure_is_independent",
-            include_str!("../provider/providers/native_jsonl/native_path/factory_ai_droid.rs"),
-        ),
-        (
-            "provider::providers::native_jsonl::native_path::qwen_code::tests::core_commits_before_failed_pro_and_later_output_replay_is_independent",
-            include_str!("../provider/providers/native_jsonl/native_path/qwen_code.rs"),
-        ),
-    ];
-    for (fixture_reference, source) in NATIVE_RESULT_FIXTURES {
-        let test_name = fixture_reference.rsplit("::").next().unwrap();
-        assert!(source.contains(&format!("fn {test_name}")));
-        assert_eq!(
-            VERIFIED_CONTENT_ROUTES
-                .iter()
-                .flat_map(|route| route.contracts)
-                .filter(|contract| contract.fixture_reference == fixture_reference)
-                .count(),
-            1
-        );
-    }
-    assert!(VERIFIED_CONTENT_ROUTES
-        .iter()
-        .flat_map(|route| route.contracts)
-        .all(|contract| !contract.fixture_reference.contains("result_locator_tests")));
+    let mut value = VerifiedContentLocatorsV1::singleton(locator)
+        .unwrap()
+        .to_metadata_value();
+    let duplicate = value["locators"][0].clone();
+    value["locators"].as_array_mut().unwrap().push(duplicate);
+    assert!(VerifiedContentLocatorsV1::from_metadata_value(&value).is_none());
 }
 
 #[test]
-fn no_separate_result_cohort_has_explicit_message_routes_without_result_routes() {
+fn route_registry_exactly_covers_matrix_formats_with_message_routes() {
     use std::{collections::HashSet, str::FromStr};
-
-    let expected = [
-        CaptureProvider::KiroCli,
-        CaptureProvider::Antigravity,
-        CaptureProvider::Windsurf,
-        CaptureProvider::CodeBuddy,
-        CaptureProvider::Auggie,
-        CaptureProvider::NanoClaw,
-        CaptureProvider::AstrBot,
-        CaptureProvider::Lingma,
-        CaptureProvider::Trae,
-        CaptureProvider::Qoder,
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
-    assert_eq!(expected.len(), 10);
 
     let matrix: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../docs/provider-support-matrix.json"
     ))
     .unwrap();
-    for provider in &expected {
-        let matrix_provider = matrix["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| {
-                CaptureProvider::from_str(entry["capture_provider"].as_str().unwrap()).unwrap()
-                    == *provider
-            })
-            .unwrap();
-        let matrix_formats = matrix_provider["implemented_paths"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|path| path["source_format"].as_str().unwrap())
-            .collect::<HashSet<_>>();
-
-        let message_routes = VERIFIED_CONTENT_ROUTES
-            .iter()
-            .filter(|route| {
-                route.provider == *provider && route.role == VerifiedContentRole::MessageBody
-            })
-            .collect::<Vec<_>>();
-        let result_routes = VERIFIED_CONTENT_ROUTES
-            .iter()
-            .filter(|route| {
-                route.provider == *provider && route.role == VerifiedContentRole::ResultBody
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            message_routes
-                .iter()
-                .map(|route| route.source_format)
-                .collect::<HashSet<_>>(),
-            matrix_formats
-        );
-        assert_eq!(
-            result_routes
-                .iter()
-                .map(|route| route.source_format)
-                .collect::<HashSet<_>>(),
-            matrix_formats
-        );
-        assert!(message_routes.iter().all(|route| {
-            !route.contracts.is_empty()
-                && route
-                    .platform_dispositions
-                    .iter()
-                    .all(|disposition| disposition.status == VerifiedContentRouteStatus::Supported)
-        }));
-        assert!(result_routes.iter().all(|route| {
-            route.contracts.is_empty()
-                && route
-                    .platform_dispositions
-                    .iter()
-                    .all(|disposition| disposition.status == VerifiedContentRouteStatus::NotNeeded)
-        }));
-    }
-
-    let actual = VERIFIED_CONTENT_ROUTES
+    let expected = matrix["providers"]
+        .as_array()
+        .unwrap()
         .iter()
-        .filter(|route| route.role == VerifiedContentRole::ResultBody)
-        .map(|route| route.provider)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .filter(|provider| {
-            let message_routes = VERIFIED_CONTENT_ROUTES
+        .flat_map(|provider| {
+            let capture_provider =
+                CaptureProvider::from_str(provider["capture_provider"].as_str().unwrap()).unwrap();
+            provider["implemented_paths"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .filter(|route| {
-                    route.provider == *provider && route.role == VerifiedContentRole::MessageBody
-                })
-                .collect::<Vec<_>>();
-            !message_routes.is_empty()
-                && message_routes.iter().all(|route| {
-                    !route.contracts.is_empty()
-                        && route.platform_dispositions.iter().all(|disposition| {
-                            disposition.status == VerifiedContentRouteStatus::Supported
-                        })
-                })
-                && VERIFIED_CONTENT_ROUTES.iter().all(|route| {
-                    route.provider != *provider
-                        || route.role != VerifiedContentRole::ResultBody
-                        || route.platform_dispositions.iter().all(|disposition| {
-                            disposition.status == VerifiedContentRouteStatus::NotNeeded
-                        })
+                .map(move |path| {
+                    (
+                        capture_provider,
+                        path["source_format"].as_str().unwrap().to_owned(),
+                    )
                 })
         })
         .collect::<HashSet<_>>();
+    let actual = VERIFIED_CONTENT_ROUTES
+        .iter()
+        .map(|route| {
+            assert_eq!(route.role, VerifiedContentRole::MessageBody);
+            (route.provider, route.source_format.to_owned())
+        })
+        .collect::<HashSet<_>>();
     assert_eq!(actual, expected);
+    assert_eq!(actual.len(), VERIFIED_CONTENT_ROUTES.len());
+}
+
+#[test]
+fn active_core_complete_content_sources_forbid_result_hydration_surfaces() {
+    const SOURCES: &[(&str, &str)] = &[
+        ("locator", include_str!("locator.rs")),
+        ("resolver", include_str!("resolver.rs")),
+        ("routes", include_str!("registry/routes.rs")),
+        ("jsonl", include_str!("jsonl.rs")),
+        ("sqlite", include_str!("sqlite.rs")),
+        ("structured", include_str!("structured.rs")),
+        (
+            "warp provider",
+            include_str!("../provider/providers/warp.rs"),
+        ),
+        (
+            "openclaw writer",
+            include_str!("../provider/providers/openclaw/complete_content.rs"),
+        ),
+        (
+            "mistral writer",
+            include_str!("../provider/providers/mistral_vibe/native_path.rs"),
+        ),
+        (
+            "canonical projection",
+            include_str!("../../../ctx-history-store/src/canonical_observations/projection.rs"),
+        ),
+    ];
+    for (name, source) in SOURCES {
+        for forbidden in [
+            "ResultBody",
+            "ResultContentRequest",
+            "ResultContentResolver",
+            "ResolvedResultContent",
+            "\"result_content_ref\"",
+            "warp_result_content_at",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} still exposes {forbidden}"
+            );
+        }
+    }
 }
 
 #[test]

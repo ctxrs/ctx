@@ -10,6 +10,7 @@ import {
   CtxUnsupportedError,
   CtxValidationError,
   AGENT_HISTORY_V1_VERSION,
+  LocalCliAdapter,
   createHostedAgentHistoryClient,
   createLocalAgentHistoryClient,
 } from "../src/index.js";
@@ -82,6 +83,30 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
       ],
     ],
   );
+});
+
+test("forces analytics off after ambient and user environment merging", async () => {
+  const original = process.env.CTX_ANALYTICS_ENABLED;
+  process.env.CTX_ANALYTICS_ENABLED = "true";
+  try {
+    const adapter = new LocalCliAdapter({
+      ctxPath: process.execPath,
+      env: { CTX_ANALYTICS_ENABLED: "true" },
+    });
+    const result = await adapter.execute(
+      ["-e", "process.stdout.write(process.env.CTX_ANALYTICS_ENABLED ?? '')"],
+      { env: { CTX_ANALYTICS_ENABLED: "true" } },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "false");
+  } finally {
+    if (original === undefined) {
+      delete process.env.CTX_ANALYTICS_ENABLED;
+    } else {
+      process.env.CTX_ANALYTICS_ENABLED = original;
+    }
+  }
 });
 
 test("builds search flags and normalizes nested CLI search output", async () => {

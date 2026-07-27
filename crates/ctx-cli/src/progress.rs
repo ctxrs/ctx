@@ -7,12 +7,9 @@ use std::{
 use clap::ValueEnum;
 use serde_json::json;
 
-use ctx_history_capture::{
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, ProviderImportSummary,
-};
+use ctx_history_capture::{CodexSessionImportProgress, CodexSessionImportProgressCallback};
 use ctx_history_core::CaptureProvider;
 
-use crate::commands::import::{source_error_reason, SourceStats};
 use crate::provider_sources::SourceInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -22,12 +19,6 @@ pub(crate) enum ProgressArg {
     Json,
     None,
 }
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct SourceProgressSnapshot {
-    pub(crate) completed_bytes: u64,
-    pub(crate) total_bytes: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressRenderMode {
     None,
@@ -203,116 +194,6 @@ impl ProgressReporter {
         }))
     }
 
-    pub(crate) fn parallel_codex_import_callback(
-        &self,
-        source: &SourceInfo,
-        source_index: usize,
-        source_states: Arc<Mutex<Vec<SourceProgressSnapshot>>>,
-    ) -> Option<CodexSessionImportProgressCallback> {
-        if !self.is_enabled() || source.provider != CaptureProvider::Codex {
-            return None;
-        }
-        let reporter = self.clone();
-        let provider = source.provider.as_str().to_owned();
-        Some(Arc::new(move |progress: CodexSessionImportProgress| {
-            let (completed_bytes, total_bytes) = {
-                let mut states = source_states
-                    .lock()
-                    .expect("parallel progress state poisoned");
-                if let Some(state) = states.get_mut(source_index) {
-                    state.total_bytes = state.total_bytes.max(progress.total_bytes);
-                    state.completed_bytes = progress
-                        .completed_bytes
-                        .min(state.total_bytes.max(progress.completed_bytes));
-                }
-                aggregate_source_progress(&states)
-            };
-            reporter.emit(ProgressLine {
-                phase: "indexing",
-                message: provider.clone(),
-                completed_bytes,
-                total_bytes: reporter.total_bytes.max(total_bytes).max(completed_bytes),
-                completed_files: Some(progress.completed_files),
-                total_files: Some(progress.total_files),
-                imported_events: Some(progress.imported_events),
-                done: progress.done,
-                force: progress.done,
-            });
-        }))
-    }
-
-    pub(crate) fn parallel_source_done(
-        &self,
-        source: &SourceInfo,
-        source_index: usize,
-        source_states: &Arc<Mutex<Vec<SourceProgressSnapshot>>>,
-        stats: SourceStats,
-        summary: &ProviderImportSummary,
-    ) {
-        if !self.is_enabled() {
-            return;
-        }
-        let (completed_bytes, total_bytes) = {
-            let mut states = source_states
-                .lock()
-                .expect("parallel progress state poisoned");
-            if let Some(state) = states.get_mut(source_index) {
-                state.total_bytes = state.total_bytes.max(stats.bytes);
-                state.completed_bytes = state.total_bytes;
-            }
-            aggregate_source_progress(&states)
-        };
-        self.emit(ProgressLine {
-            phase: "indexing",
-            message: format!("imported {}", source.provider.as_str()),
-            completed_bytes,
-            total_bytes: self.total_bytes.max(total_bytes).max(completed_bytes),
-            completed_files: Some(stats.files),
-            total_files: Some(stats.files),
-            imported_events: Some(summary.imported_events),
-            done: true,
-            force: true,
-        });
-    }
-
-    pub(crate) fn parallel_source_failed(
-        &self,
-        source: &SourceInfo,
-        source_index: usize,
-        source_states: &Arc<Mutex<Vec<SourceProgressSnapshot>>>,
-        stats: SourceStats,
-        error: &str,
-    ) {
-        if !self.is_enabled() {
-            return;
-        }
-        let (completed_bytes, total_bytes) = {
-            let mut states = source_states
-                .lock()
-                .expect("parallel progress state poisoned");
-            if let Some(state) = states.get_mut(source_index) {
-                state.total_bytes = state.total_bytes.max(stats.bytes);
-                state.completed_bytes = state.total_bytes;
-            }
-            aggregate_source_progress(&states)
-        };
-        self.emit(ProgressLine {
-            phase: "indexing",
-            message: format!(
-                "skipped {}: {}",
-                source.provider.as_str(),
-                source_error_reason(source, error)
-            ),
-            completed_bytes,
-            total_bytes: self.total_bytes.max(total_bytes).max(completed_bytes),
-            completed_files: Some(stats.files),
-            total_files: Some(stats.files),
-            imported_events: Some(0),
-            done: true,
-            force: true,
-        });
-    }
-
     fn emit(&self, line: ProgressLine) {
         let mut state = self.state.lock().expect("progress state poisoned");
         let now = Instant::now();
@@ -366,18 +247,6 @@ impl ProgressReporter {
             }
         }
     }
-}
-
-fn aggregate_source_progress(states: &[SourceProgressSnapshot]) -> (u64, u64) {
-    states
-        .iter()
-        .fold((0u64, 0u64), |(completed, total), state| {
-            let source_total = state.total_bytes.max(state.completed_bytes);
-            (
-                completed.saturating_add(state.completed_bytes.min(source_total)),
-                total.saturating_add(source_total),
-            )
-        })
 }
 
 struct ProgressLine {

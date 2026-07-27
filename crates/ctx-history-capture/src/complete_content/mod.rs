@@ -1,9 +1,7 @@
 //! Bounded, read-only recovery of complete message bodies from provider sources.
 //!
 //! The Store and CLI own selection and policy. Provider-family implementations
-//! own native source parsing. Complete-message batches are all-or-nothing;
-//! result-content batches may omit individually unverifiable records after the
-//! shared source itself has been opened and frozen successfully.
+//! own native source parsing. Complete-message batches are all-or-nothing.
 
 pub mod jsonl;
 mod locator;
@@ -30,11 +28,12 @@ pub use registry::{
 };
 pub use resolver::{
     CompleteContentError, CompleteContentErrorKind, CompleteContentResolver,
-    CompleteContentResolverRegistry, CompleteMessage, CompleteMessageRequest,
-    ResolvedResultContent, ResultContentRequest, ResultContentResolver,
-    ResultContentResolverRegistry, SourceVerification,
+    CompleteContentResolverRegistry, CompleteMessage, CompleteMessageRequest, SourceVerification,
 };
-pub use source_access::{AuthorizedSourceRoute, BrokeredSourceAccess, SourceAccessBroker};
+pub use source_access::{
+    AuthorizedSourceRoute, BrokeredSourceAccess, PreparedSourceAdmission, SourceAccessBroker,
+    COMPLETE_CONTENT_MAX_ADMITTED_SOURCES, COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES,
+};
 
 #[cfg(test)]
 mod tests;

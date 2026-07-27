@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     normalize::{estimated_output_bytes, estimated_rejection_bytes},
-    ClineCertifiedPage, ClinePageFrontier, ClineTransientOutputPayload,
+    ClineCertifiedPage, ClinePageFrontier, ClineTaskIdentityOrigin, ClineTransientOutputPayload,
 };
 
 const CLINE_NATIVE_FRONTIER_VERSION: u32 = 1;
@@ -38,7 +38,18 @@ pub(super) enum ClineNativePageAdapterError {
 #[derive(Debug)]
 pub(super) struct ClineAdaptedPage {
     pub(crate) core: NativePublicationPage<ClineCertifiedPage>,
-    pub(crate) output: Option<NativeProReplayPage>,
+    pub(crate) output: Option<ClinePendingOutput>,
+}
+
+#[derive(Debug)]
+pub(super) struct ClinePendingOutput {
+    source_key: Box<str>,
+    source_identity: NativeSourceIdentity,
+    observed_revision: String,
+    expected_frontier: NativeSafeFrontier,
+    next_safe_frontier: NativeSafeFrontier,
+    terminal: bool,
+    transient: Option<ClineTransientOutputPayload>,
 }
 
 #[derive(Debug)]
@@ -94,19 +105,36 @@ impl<'a> ClineNativePageAdapter<'a> {
             core_accounting,
             page,
         )?;
-        let output = self.adapt_output(
-            &source_key,
-            source_identity.clone(),
-            source_revision,
+        let output = self.sink.map(|_| ClinePendingOutput {
+            source_key,
+            source_identity: source_identity.clone(),
+            observed_revision: source_revision,
             expected_frontier,
             next_safe_frontier,
-            core.terminal,
+            terminal: core.terminal,
             transient,
-        )?;
+        });
         Ok(ClineAdaptedPage {
             core: NativePublicationPage::new(source_identity, core),
             output,
         })
+    }
+
+    /// This is intentionally separate from `adapt`: callers must publish or
+    /// verify Core before this method is allowed to observe Pro state.
+    pub(super) fn adapt_output_after_core(
+        &mut self,
+        pending: ClinePendingOutput,
+    ) -> Result<Option<NativeProReplayPage>, ClineNativePageAdapterError> {
+        self.adapt_output(
+            &pending.source_key,
+            pending.source_identity,
+            pending.observed_revision,
+            pending.expected_frontier,
+            pending.next_safe_frontier,
+            pending.terminal,
+            pending.transient,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -353,10 +381,25 @@ pub(crate) struct ClineNativeStoreCursor {
     pub(crate) terminal: bool,
     pub(crate) generation: u64,
     pub(crate) rejected_records: u64,
+    #[serde(default)]
+    pub(crate) task_identity: Option<String>,
+    #[serde(default)]
+    pub(crate) task_identity_origin: Option<u8>,
+    #[serde(default)]
+    pub(crate) task_identity_aliases: Vec<String>,
 }
 
 impl ClineNativeStoreCursor {
-    pub(crate) const VERSION: u32 = 1;
+    pub(crate) const VERSION: u32 = 2;
+    pub(crate) const LEGACY_VERSION: u32 = 1;
+
+    pub(crate) fn task_origin(&self) -> Option<ClineTaskIdentityOrigin> {
+        match self.task_identity_origin {
+            Some(0) => Some(ClineTaskIdentityOrigin::TaskMetadata),
+            Some(1) => Some(ClineTaskIdentityOrigin::DirectoryNameDegraded),
+            _ => None,
+        }
+    }
 
     pub(crate) fn encode(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -386,6 +429,9 @@ mod tests {
             terminal: true,
             generation: 3,
             rejected_records: 2,
+            task_identity: Some("task".to_owned()),
+            task_identity_origin: Some(0),
+            task_identity_aliases: vec!["old-task".to_owned()],
         };
         let encoded = cursor.encode().expect("encode");
         assert_eq!(
@@ -404,5 +450,29 @@ mod tests {
             output_safe_frontier(&cursor),
             Err(ClineNativePageAdapterError::InvalidOutputFrontier)
         ));
+    }
+
+    #[test]
+    fn legacy_v1_cursor_decodes_for_one_way_authority_upgrade() {
+        let encoded = serde_json::json!({
+            "version": 1,
+            "provider": "roo-code",
+            "source_identity": "source",
+            "source_revision": "revision",
+            "frontier": {
+                "version": 1,
+                "next_native_index": 0,
+                "prefix_semantic_sha256": vec![0; 32],
+            },
+            "terminal": false,
+            "generation": 0,
+            "rejected_records": 0,
+        })
+        .to_string();
+        let cursor = ClineNativeStoreCursor::decode(&encoded).expect("legacy cursor");
+        assert_eq!(cursor.version, ClineNativeStoreCursor::LEGACY_VERSION);
+        assert!(cursor.task_identity.is_none());
+        assert!(cursor.task_identity_origin.is_none());
+        assert!(cursor.task_identity_aliases.is_empty());
     }
 }

@@ -4,6 +4,7 @@
 //! `ctx` CLI and adapts its private JSON into the public `agent-history-v1` envelope.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -51,6 +52,7 @@ pub enum AgentHistoryBackend {
 pub struct LocalBackendConfig {
     pub ctx_binary: PathBuf,
     pub data_root: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
     pub timeout: Duration,
 }
 
@@ -59,6 +61,7 @@ impl Default for LocalBackendConfig {
         Self {
             ctx_binary: PathBuf::from("ctx"),
             data_root: None,
+            env: BTreeMap::new(),
             timeout: Duration::from_secs(30),
         }
     }
@@ -434,9 +437,11 @@ fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, A
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.envs(&config.env);
     if let Some(data_root) = &config.data_root {
         command.env("CTX_DATA_ROOT", data_root);
     }
+    command.env("CTX_ANALYTICS_ENABLED", "false");
     let mut child = command.spawn().map_err(|err| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::BackendUnavailable,
@@ -692,6 +697,59 @@ mod tests {
     }
 
     #[test]
+    fn local_backend_forces_analytics_off_after_ambient_and_user_env() {
+        const HELPER_ENV: &str = "CTX_SDK_ANALYTICS_PRIVACY_TEST";
+
+        if std::env::var_os(HELPER_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .arg("local_backend_forces_analytics_off_after_ambient_and_user_env")
+                .arg("--nocapture")
+                .env(HELPER_ENV, "1")
+                .env("CTX_ANALYTICS_ENABLED", "true")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "strict-local helper failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        assert_eq!(
+            std::env::var("CTX_ANALYTICS_ENABLED").as_deref(),
+            Ok("true")
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("ctx-fake");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+set -eu
+if [ "${CTX_ANALYTICS_ENABLED:-}" != "false" ]; then
+  echo "network analytics were enabled" >&2
+  exit 99
+fi
+printf '%s\n' '{"initialized":true,"local_only":true}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let client = AgentHistoryClient::local(LocalBackendConfig {
+            ctx_binary: script,
+            data_root: None,
+            env: BTreeMap::from([("CTX_ANALYTICS_ENABLED".to_owned(), "true".to_owned())]),
+            timeout: Duration::from_secs(5),
+        });
+
+        let status = client.status().unwrap().status.unwrap();
+        assert!(status.local_only);
+    }
+
+    #[test]
     fn builds_search_cli_arguments_without_running_for_public_options() {
         let options = SearchOptions {
             query: Some("agent history".to_owned()),
@@ -736,6 +794,7 @@ exit 2
         let client = AgentHistoryClient::local(LocalBackendConfig {
             ctx_binary: script,
             data_root: Some(temp.path().to_path_buf()),
+            env: BTreeMap::new(),
             timeout: Duration::from_secs(5),
         });
 
@@ -831,6 +890,7 @@ exit 2
         let client = AgentHistoryClient::local(LocalBackendConfig {
             ctx_binary: PathBuf::from("/definitely/missing/ctx"),
             data_root: None,
+            env: BTreeMap::new(),
             timeout: Duration::from_secs(1),
         });
 
@@ -879,6 +939,7 @@ exit 2
         let client = AgentHistoryClient::local(LocalBackendConfig {
             ctx_binary: script,
             data_root: Some(data_root.clone()),
+            env: BTreeMap::new(),
             timeout: Duration::from_secs(5),
         });
 
