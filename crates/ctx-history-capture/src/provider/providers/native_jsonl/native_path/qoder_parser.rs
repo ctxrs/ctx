@@ -73,6 +73,22 @@ pub(super) fn qoder_event_text(value: &Value, event_type: EventType) -> String {
         .unwrap_or_default()
 }
 
+pub(crate) fn qoder_complete_content_message_record(
+    value: &Value,
+    line_number: usize,
+) -> Option<(String, String)> {
+    let event_type = qoder_event_type(value);
+    if event_type != EventType::Message {
+        return None;
+    }
+    Some((
+        qoder_event_text(value, event_type),
+        qoder_event_identity(value)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("line-{line_number}")),
+    ))
+}
+
 pub(super) fn qoder_model(value: &Value) -> Option<Value> {
     value
         .get("model")

@@ -1793,11 +1793,9 @@ fn page_receipts_restart_without_prefix_reparse_and_later_pro_replay_is_independ
 
     let mut scanner =
         ClaudeNativeScanner::new(source.clone(), None, ClaudeNativeProfile::CoreOnly).unwrap();
-    let first = loop {
-        match scanner.next_page().unwrap().unwrap() {
-            ClaudeNativeOwnedPage::Core(page) => break *page,
-            ClaudeNativeOwnedPage::Pro(_) => unreachable!(),
-        }
+    let first = match scanner.next_page().unwrap().unwrap() {
+        ClaudeNativeOwnedPage::Core(page) => *page,
+        ClaudeNativeOwnedPage::Pro(_) => unreachable!(),
     };
     let failed_receipt = first.receipt();
     assert_eq!(failed_receipt, first.receipt());
@@ -2031,11 +2029,9 @@ fn each_emitted_page_is_certified_and_later_source_mutation_blocks_completion() 
     let source = discover_session(&projects, "certification");
     let mut scanner =
         ClaudeNativeScanner::new(source, None, ClaudeNativeProfile::CoreOnly).unwrap();
-    let first = loop {
-        match scanner.next_page().unwrap().unwrap() {
-            ClaudeNativeOwnedPage::Core(page) => break *page,
-            ClaudeNativeOwnedPage::Pro(_) => unreachable!(),
-        }
+    let first = match scanner.next_page().unwrap().unwrap() {
+        ClaudeNativeOwnedPage::Core(page) => *page,
+        ClaudeNativeOwnedPage::Pro(_) => unreachable!(),
     };
     assert_eq!(first.logical_units, 64);
     assert_eq!(

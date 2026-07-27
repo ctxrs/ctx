@@ -211,6 +211,8 @@ pub(super) fn optional_column<'a>(
 /// Adds the bounded local-only locator only when the canonical message text was
 /// actually truncated. NativePath publishers call this while the exact logical
 /// SQLite row and complete text are still available.
+// These arguments are the persisted locator contract and should remain explicit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attach_sqlite_complete_content_locator(
     provider: CaptureProvider,
     source_format: &str,

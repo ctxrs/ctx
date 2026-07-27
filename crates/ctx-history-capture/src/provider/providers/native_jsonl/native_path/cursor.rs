@@ -2,15 +2,17 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::CaptureProvider;
-use ctx_history_store::decode_native_path_committed_cursor;
+use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use serde::{Deserialize, Serialize};
 
-use crate::provider::importer::CertifiedProviderCursor;
+use crate::provider::importer::{
+    provider_path_identity, provider_source_cursor_stream_for_path, CertifiedProviderCursor,
+};
 use crate::released_jsonl_cursor::released_jsonl_position_offset;
 use crate::{CaptureError, Result};
 
 use super::{
-    reader::{direct_jsonl_prefix_sha256, direct_jsonl_source_revision},
+    reader::{direct_jsonl_prefix_sha256, direct_jsonl_source_revision, observe_file},
     DirectJsonlCheckpoint, DirectJsonlFileObservation, DirectJsonlSession,
     DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
@@ -118,6 +120,83 @@ pub(crate) fn decode_direct_jsonl_native_cursor(
         && wire.kind == "direct-native-jsonl"
         && wire.checkpoint.is_supported_for(provider, source_format))
     .then_some(wire.checkpoint)
+}
+
+pub(crate) fn committed_direct_jsonl_replay_authority(
+    store: &Store,
+    machine_id: &str,
+    provider: CaptureProvider,
+    source_format: &str,
+    path: &Path,
+) -> Result<DirectJsonlCheckpoint> {
+    let canonical_path = std::fs::canonicalize(path)?;
+    let locator_identity = provider_path_identity(&canonical_path)?;
+    let stream = provider_source_cursor_stream_for_path(provider, source_format, &locator_identity);
+    let stored = store
+        .get_sync_cursor(None, machine_id, &stream)?
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(format!(
+                "{} output replay requires committed terminal NativePath Core",
+                provider.as_str()
+            ))
+        })?;
+    let committed = decode_native_path_committed_cursor(&stored.cursor).map_err(|_| {
+        CaptureError::InvalidPayload(format!(
+            "{} output replay requires a Store-committed NativePath Core cursor",
+            provider.as_str()
+        ))
+    })?;
+    let checkpoint =
+        decode_direct_jsonl_native_cursor(committed.provider_cursor(), provider, source_format)
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload(format!(
+                    "{} output replay requires committed direct-JSONL Core authority",
+                    provider.as_str()
+                ))
+            })?;
+    let live_observation = observe_file(&canonical_path)?;
+    if !checkpoint.terminal
+        || checkpoint.source_path != canonical_path
+        || checkpoint.source_observation != live_observation
+        || checkpoint.complete_prefix_end != live_observation.length
+    {
+        return Err(CaptureError::InvalidPayload(format!(
+            "{} output replay source does not exactly match committed terminal Core authority",
+            provider.as_str()
+        )));
+    }
+    let live_prefix_sha256 =
+        direct_jsonl_prefix_sha256(&canonical_path, checkpoint.complete_prefix_end)?;
+    if live_prefix_sha256 != checkpoint.complete_prefix_sha256
+        || observe_file(&canonical_path)? != live_observation
+    {
+        return Err(CaptureError::InvalidPayload(format!(
+            "{} output replay content does not match committed terminal Core authority",
+            provider.as_str()
+        )));
+    }
+    Ok(checkpoint)
+}
+
+pub(crate) fn direct_jsonl_checkpoint_is_covered_by(
+    authority: &DirectJsonlCheckpoint,
+    candidate: &DirectJsonlCheckpoint,
+) -> bool {
+    authority.version == candidate.version
+        && authority.parser_revision == candidate.parser_revision
+        && authority.policy_revision == candidate.policy_revision
+        && authority.provider == candidate.provider
+        && authority.source_format == candidate.source_format
+        && authority.source_path == candidate.source_path
+        && authority.source_observation == candidate.source_observation
+        && authority.complete_prefix_end >= candidate.complete_prefix_end
+        && authority.next_raw_ordinal >= candidate.next_raw_ordinal
+        && authority.accepted_events >= candidate.accepted_events
+        && authority.accepted_file_touches >= candidate.accepted_file_touches
+        && authority.rejected_records >= candidate.rejected_records
+        && (authority.complete_prefix_end != candidate.complete_prefix_end
+            || authority.complete_prefix_sha256 == candidate.complete_prefix_sha256)
+        && (!candidate.terminal || authority.terminal)
 }
 
 pub(crate) fn direct_jsonl_cursor_matches_publication(

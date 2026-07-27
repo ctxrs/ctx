@@ -118,10 +118,13 @@ fn provider_fixtures_preserve_unicode_and_escaping() {
     for (provider, source_format, fixture, line_index, expected) in FIXTURES {
         let line = fixture.lines().nth(*line_index).unwrap();
         let value: Value = serde_json::from_str(line).unwrap();
-        let (text, _) =
+        let (text, native_record_id) =
             complete_message_text_and_id(*provider, source_format, &value, line_index + 1)
                 .unwrap_or_else(|| panic!("missing fixture message for {provider:?}"));
         assert_eq!(&text, expected, "provider {provider:?}");
+        if *provider == CaptureProvider::Qoder {
+            assert_eq!(native_record_id, "qoder-message");
+        }
     }
 }
 

@@ -68,6 +68,7 @@ impl WarpNativePreparedSource {
 
 pub(in super::super) enum WarpNativePreparationOutcome {
     ExactNoOp {
+        #[allow(dead_code)]
         inputs: Box<WarpNativePreparationInputs>,
         persisted_state: Box<WarpNativePersistedState>,
     },
@@ -223,6 +224,7 @@ pub(in super::super) fn scan_prepared_warp_nativepath(
     )
 }
 
+#[allow(dead_code)]
 pub(super) fn scan_warp_nativepath(
     path: &Path,
     sink: &mut dyn WarpNativeSink,
@@ -230,6 +232,7 @@ pub(super) fn scan_warp_nativepath(
     scan_warp_nativepath_with_profile(path, WarpNativeProfile::CoreOnly, sink)
 }
 
+#[allow(dead_code)]
 pub(super) fn scan_warp_nativepath_with_profile(
     path: &Path,
     profile: WarpNativeProfile,
@@ -238,6 +241,7 @@ pub(super) fn scan_warp_nativepath_with_profile(
     scan_warp_nativepath_with_certification_hook(path, profile, sink, || Ok(()))
 }
 
+#[allow(dead_code)]
 fn scan_warp_nativepath_with_certification_hook(
     path: &Path,
     profile: WarpNativeProfile,

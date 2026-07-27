@@ -83,7 +83,11 @@ Reads local storage state and returns:
 - `config_path`;
 - `indexed_items`;
 - `indexed_sources`;
+- `indexed_sessions`;
+- `indexed_events`;
 - `inventory_units`;
+- `inventory_source_bytes`, null when the data root is uninitialized;
+- `lexical_index_estimate_seconds`, null when the data root is uninitialized;
 - `pending_inventory_units`;
 - `failed_inventory_units`;
 - `stale_inventory_units`;
@@ -99,7 +103,10 @@ Reads local storage state and returns:
 - `stale_source_import_files`;
 - `semantic`;
 - `daemon`;
+- `upgrade`;
 - `pro`, using the path-safe Local Pro status shape;
+- `local_usage`;
+- `local_usage_action`, null unless `--usage enable|disable|reset` was used;
 - `local_only: true`;
 - `read_only: true`.
 
@@ -107,7 +114,41 @@ For status, `read_only: true` means the command does not mutate canonical
 history or local Pro graph data. When Pro is installed, entitlement
 authorization may advance nonsecret anti-clock-rollback security metadata in
 the operating-system key store; that metadata is outside both data stores and
-does not change this stable field.
+does not change this stable field. Usage `summary` and `detail` are also excluded
+from local usage counting: they do not create or update `usage.sqlite`.
+Usage control modes return a separate action-focused JSON shape with
+`read_only: false` and do not read Core status.
+
+`local_usage` has `schema_version: 1`, `enabled`, `state`,
+`definition_version`, and `retention_days: 400`. `state` is `disabled`, `empty`,
+`ready`, or `error`. Ready/empty reports include `summary`:
+
+- `first_day_utc` and `last_day_utc`;
+- `active_days` and the bounded `ctx_versions` dimension;
+- `calls`, `successful_calls`, and `failed_calls`;
+- `result_bearing_calls`, `empty_calls`, and `not_applicable_calls`;
+- content-free `result_count` and `citation_count`;
+- `mcp_response_bytes`, the exact serialized delivered JSON-RPC line bytes,
+  including its newline;
+- `pro_blame`, with `produced_attribution_requests`,
+  `possible_or_reference_only_requests`,
+  `no_confident_attribution_requests`, and `error_requests`, plus exact typed
+  `file`/`commit`/`pull_request` breakdowns.
+
+The three result classes reconcile to `calls`; failures are currently
+`not_applicable`. `mcp_response_bytes` is transport volume, never tokens,
+savings, or model context. `ctx status --usage detail --json` also includes
+`details.by_operation[]`, grouped by `ctx_version`, `surface`, and closed
+`operation`, plus `details.duration_buckets[]`.
+
+An unavailable store omits `summary` and returns only stable content-free
+`error.code`/`error.message` values; it never returns zero as a substitute and
+never serializes the raw SQLite/config cause or data-root path. Disabled
+operation creates no sidecar. Successful enable/disable controls report
+`persisted_enabled`, `effective_enabled`, and `environment_override`; reset
+reports `store_state: "cleared"|"missing"`. A failed JSON control exits nonzero
+with a parseable, content-free `usage_control_failed` or `usage_reset_failed`
+error. Reset is logical deletion, not forensic secure erasure.
 
 `semantic` reports semantic sidecar and background-worker state. Fields listed
 as nullable may be omitted when unavailable:
@@ -763,15 +804,25 @@ The `pro` object in `ctx status --json` has `schema_version: 2`,
 `state`, `installed`, `ready`, `materialized`, `helper_version`,
 `protocol_version`, `capabilities`, `error_code`, `access_state`,
 `refresh_after_unix`, `access_deadline_unix`, `grace_deadline_unix`, and a typed
-`next_action`. Access fields are null when access cannot be determined. The
+`next_action`. `ctx status` adds nullable `conversion_action`. Access fields are
+null when access cannot be determined. The
 generic `state` remains helper/graph readiness; `access_state` is independently
 `trial`, `active`, `canceling_paid`, `offline_grace`, or `locked`.
 After an uninstall that deliberately preserves local Pro data, `state` is
 `uninstalled_data_preserved` and `next_action.reason` is
 `restore_preserved_pro_data`; a first-use installation remains `not_setup` with
 `helper_missing`.
-The same path-safe shape is returned by the MCP `pro_status` tool.
-`ctx doctor --json` also embeds that shape under `pro`.
+The same base path-safe shape is returned by the MCP `pro_status` tool and
+embedded by `ctx doctor --json` under `pro`. MCP `pro_status` also adds
+`conversion_action` and `local_usage`; doctor does not.
+
+`conversion_action` is `pro_monthly_conversion` at `"$15/month"` for `trial`
+or an unpriced `pro_restore_access` for `locked`, both pointing to
+`ctx pro manage`. The restore action includes `graph_preserved: true` and
+`reason: "access_locked"`. It is null for paid `active`,
+`canceling_paid`, and `offline_grace` states and does not replace `next_action`.
+MCP `pro_status` also embeds the compact `local_usage` report; neither field is
+added to blame results or citations.
 
 `ctx pro --json` and its explicit synonym `ctx pro setup --json` both run the
 idempotent setup path, report operation `setup`, and return the
@@ -781,18 +832,22 @@ idempotent setup path, report operation `setup`, and return the
 and `pro_uninstall` payload types respectively.
 Materialization is an internal,
 idempotent part of setup, daemon freshness, and blame catch-up.
-The `pro_manage` payload includes `portal_url`, `browser_opened`, and the same
-nonsecret access state/deadline fields. A locked account preserves canonical
-history, encrypted derived data, and keys; successful resubscription followed
-by `ctx pro` restores access.
+The `pro_manage` payload includes `portal_url`, `browser_opened`, the compact
+`local_usage` report, `conversion_action`, and the same nonsecret access
+state/deadline fields. A locked account preserves canonical history, encrypted
+derived data, and keys; successful resubscription followed by `ctx pro`
+restores access. JSON mode never invokes a browser opener and always reports
+`browser_opened: false`.
 `pro_uninstall` reports `helper_removed`, `local_pro_data` (`preserved`,
 `deleted`, or `absent`), `canonical_history_preserved`, and `next_action`.
 Explicit `--delete-data` reports `local_pro_data: "deleted"` only after the
 authoritative local Pro inventory has been verified absent. JSON callers must
 provide one of the two data-choice flags and are never prompted. Missing,
 never-Pro, and already-empty roots report `absent` with `next_action: null` and
-do not create a Pro root or preservation marker. `absent` means no graph-family
-file existed at deletion time; an initialized or helper-present root can still
+do not create a Pro root or preservation marker. This is a Pro-state-only no-op
+contract: the eligible foreground `pro_uninstall` operation may still create or
+increment default-on Core `usage.sqlite`. `absent` means no graph-family file
+existed at deletion time; an initialized or helper-present root can still
 delete and verify root-scoped credentials and graph-key records before
 returning that classification. Corrupt credential inventory fails before any
 deletion and emits no success payload. An interrupted deletion retains

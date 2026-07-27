@@ -6,14 +6,16 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event,
-    EventRole, EventType, Fidelity, Session, SessionStatus, SyncCursor,
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
+    Confidence, Event, EventRole, EventType, Fidelity, FileTouched, Session, SessionStatus,
+    SyncCursor,
 };
 use ctx_history_store::{
     decode_native_path_committed_cursor, EventSearchBulkGuard, NativePathCursorSetClassification,
     NativePathCursorTransition, NativePathGroupAccounting, ProviderEventHashAuthority,
     ProviderSourceLocatorObservation, ProviderSourceRouteRetirement,
     ProviderSourceRouteRetirementDisposition, ProviderSourceRouteRetirementReason, Store,
+    NATIVE_PATH_MAX_MUTATION_UNITS,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -22,10 +24,12 @@ use uuid::Uuid;
 use crate::{
     provider::{
         importer::{
-            provider_event_import_identity_with_exact_legacy_source, provider_import_session_uuid,
-            provider_path_identity, provider_scoped_source_identity_key,
-            provider_scoped_source_uuid, provider_source_cursor_stream_for_path,
-            provider_source_identity, provider_sync_metadata, timestamps, CertifiedProviderCursor,
+            provider_event_import_identity_with_exact_legacy_source, provider_file_touch_import_id,
+            provider_import_session_uuid, provider_path_identity,
+            provider_scoped_source_identity_key, provider_scoped_source_uuid,
+            provider_source_cursor_stream_for_path, provider_source_identity,
+            provider_sync_metadata, timestamps, CertifiedProviderCursor,
+            ProviderEventImportIdentity,
         },
         native_ingestion::{
             process_pro_replay_only, NativeIngestionPage, NativePublicationPage,
@@ -37,6 +41,7 @@ use crate::{
     Result, CONTINUE_CLI_SOURCE_FORMAT,
 };
 
+use super::normalize::CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT;
 use super::{
     discover_continue_root, prepare_continue_discovery_with_profile, ContinueEventKind,
     ContinueEventRole, ContinueEventRow, ContinueIndexObservation, ContinueIndexSnapshot,
@@ -49,6 +54,10 @@ const CONTINUE_PAGE_PUBLICATION_DOMAIN: &[u8] = b"ctx-continue-nativepath-core-p
 const CONTINUE_TERMINAL_PUBLICATION_DOMAIN: &[u8] =
     b"ctx-continue-nativepath-terminal-reconciliation-v1\0";
 const CONTINUE_RETIREMENT_PUBLICATION_DOMAIN: &[u8] = b"ctx-continue-nativepath-retirement-v1\0";
+const CONTINUE_RETIRED_FILE_TOUCH_PATH: &str = "__ctx_retired_continue_file_touch__";
+// resolve_source performs four mutations and publishing the cursor performs
+// one. Event reconciliation and touch upserts are accounted below.
+const CONTINUE_CORE_PAGE_FIXED_MUTATION_UNITS: usize = 5;
 
 #[derive(Clone)]
 struct ContinuePublicationSource {
@@ -70,6 +79,13 @@ impl From<&ContinuePreparedSource> for ContinuePublicationSource {
 struct ResolvedContinueSource {
     source_id: Uuid,
     session: Session,
+}
+
+struct ContinueEventPublication<'event> {
+    event: &'event ContinueEventRow,
+    provider_event_index: u64,
+    identity: ProviderEventImportIdentity,
+    touch_ids: Vec<Uuid>,
 }
 
 #[derive(Clone)]
@@ -156,7 +172,7 @@ pub(crate) fn import_continue_nativepath_history(
         let mut summary = ProviderImportSummary::default();
         let mut changed_groups = 0_usize;
 
-        while let Some(outcome) = preparation.next() {
+        for outcome in preparation.by_ref() {
             match outcome.map_err(map_native_error)? {
                 ContinueSourceOutcome::Page(page) => {
                     if let Some(source) = page.source.as_deref() {
@@ -261,6 +277,9 @@ pub(crate) fn import_continue_nativepath_history(
     }
 }
 
+// Publication needs the certified source, cursor, Store, and import policy
+// authorities together; grouping them would obscure their ownership.
+#[allow(clippy::too_many_arguments)]
 fn publish_core_page(
     store: &mut Store,
     committed_store: &Store,
@@ -739,39 +758,11 @@ fn publish_events(
     events: &[ContinueEventRow],
     summary: &mut ProviderImportSummary,
 ) -> Result<()> {
-    for event in events {
-        let provider_event_index =
-            event
-                .identity
-                .history_ordinal
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Continue event index is exhausted",
-                ))?;
-        let identity = provider_event_import_identity_with_exact_legacy_source(
-            committed_store,
-            CaptureProvider::Continue,
-            resolved
-                .session
-                .external_session_id
-                .as_deref()
-                .unwrap_or_default(),
-            resolved.source_id,
-            provider_event_index,
-            provider_event_index,
-            &event.content_hash,
-            None,
-            Some(provider_event_index),
-            resolved.session.id
-                == crate::provider::importer::provider_session_uuid(
-                    CaptureProvider::Continue,
-                    resolved
-                        .session
-                        .external_session_id
-                        .as_deref()
-                        .unwrap_or_default(),
-                ),
-        )?;
+    let publications = prepare_event_publications(committed_store, resolved, events)?;
+    for publication in publications {
+        let event = publication.event;
+        let provider_event_index = publication.provider_event_index;
+        let identity = publication.identity;
         let dedupe_key = Store::provider_event_dedupe_key_with_payload_hash(
             &identity.dedupe_key,
             &event.content_hash,
@@ -848,8 +839,189 @@ fn publish_events(
             summary.skipped = summary.skipped.saturating_add(1);
         }
         summary.accepted_content_records = summary.accepted_content_records.saturating_add(1);
+        for (touch, id) in event
+            .file_touches
+            .iter()
+            .zip(publication.touch_ids.iter().copied())
+        {
+            group.upsert_file_touched(&FileTouched {
+                id,
+                history_record_id: options.history_record_id,
+                run_id: None,
+                event_id: Some(normalized.id),
+                vcs_workspace_id: None,
+                path: touch.path.clone(),
+                change_kind: touch.change_kind,
+                old_path: touch.old_path.clone(),
+                line_count_delta: None,
+                confidence: touch.confidence,
+                timestamps: timestamps(occurred_at),
+                source_id: Some(resolved.source_id),
+                sync: provider_sync_metadata(
+                    Fidelity::Imported,
+                    json!({
+                        "provider": CaptureProvider::Continue.as_str(),
+                        "provider_session_id": resolved.session.external_session_id,
+                        "provider_event_index": provider_event_index,
+                        "source_format": CONTINUE_CLI_SOURCE_FORMAT,
+                        "metadata": touch.metadata,
+                    }),
+                ),
+            })?;
+        }
+        for id in publication.touch_ids[event.file_touches.len()..]
+            .iter()
+            .copied()
+        {
+            let retired_at = resolved.session.timestamps.updated_at;
+            let mut sync = provider_sync_metadata(
+                Fidelity::Imported,
+                json!({
+                    "provider": CaptureProvider::Continue.as_str(),
+                    "provider_session_id": resolved.session.external_session_id,
+                    "provider_event_index": provider_event_index,
+                    "source_format": CONTINUE_CLI_SOURCE_FORMAT,
+                    "retired_by": "continue_file_touch_rewrite",
+                }),
+            );
+            sync.deleted_at = Some(retired_at);
+            group.upsert_file_touched(&FileTouched {
+                id,
+                history_record_id: options.history_record_id,
+                run_id: None,
+                event_id: Some(normalized.id),
+                vcs_workspace_id: None,
+                path: CONTINUE_RETIRED_FILE_TOUCH_PATH.to_owned(),
+                change_kind: None,
+                old_path: None,
+                line_count_delta: None,
+                confidence: Confidence::Unknown,
+                timestamps: timestamps(retired_at),
+                source_id: Some(resolved.source_id),
+                sync,
+            })?;
+        }
     }
     Ok(())
+}
+
+fn prepare_event_publications<'event>(
+    committed_store: &Store,
+    resolved: &ResolvedContinueSource,
+    events: &'event [ContinueEventRow],
+) -> Result<Vec<ContinueEventPublication<'event>>> {
+    let provider_session_id = resolved
+        .session
+        .external_session_id
+        .as_deref()
+        .unwrap_or_default();
+    let allow_legacy_provider_identity = resolved.session.id
+        == crate::provider::importer::provider_session_uuid(
+            CaptureProvider::Continue,
+            provider_session_id,
+        );
+    let mut mutation_units = CONTINUE_CORE_PAGE_FIXED_MUTATION_UNITS;
+    let mut publications = Vec::with_capacity(events.len());
+    for event in events {
+        let provider_event_index =
+            event
+                .identity
+                .history_ordinal
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Continue event index is exhausted",
+                ))?;
+        let identity = provider_event_import_identity_with_exact_legacy_source(
+            committed_store,
+            CaptureProvider::Continue,
+            provider_session_id,
+            resolved.source_id,
+            provider_event_index,
+            provider_event_index,
+            &event.content_hash,
+            None,
+            Some(provider_event_index),
+            allow_legacy_provider_identity,
+        )?;
+        let mut touch_ids = Vec::new();
+        for touch_index in 0..=CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT {
+            let id = continue_file_touch_id(
+                committed_store,
+                resolved,
+                provider_event_index,
+                touch_index,
+            )?;
+            if !committed_store.file_touched_exists(id)? {
+                break;
+            }
+            if touch_index == CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "stored Continue event {provider_event_index} exceeds the {} file-touch \
+                     transaction bound",
+                    CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT
+                )));
+            }
+            touch_ids.push(id);
+        }
+        while touch_ids.len() < event.file_touches.len() {
+            touch_ids.push(continue_file_touch_id(
+                committed_store,
+                resolved,
+                provider_event_index,
+                touch_ids.len(),
+            )?);
+        }
+        mutation_units = mutation_units
+            .checked_add(1_usize.saturating_add(touch_ids.len()))
+            .ok_or(CaptureError::SystemInvariant(
+                "Continue publication mutation accounting overflowed",
+            ))?;
+        publications.push(ContinueEventPublication {
+            event,
+            provider_event_index,
+            identity,
+            touch_ids,
+        });
+    }
+    if mutation_units > NATIVE_PATH_MAX_MUTATION_UNITS {
+        return Err(CaptureError::InvalidPayload(format!(
+            "Continue page requires {mutation_units} Store mutation units, exceeding the \
+             {NATIVE_PATH_MAX_MUTATION_UNITS} unit transaction bound"
+        )));
+    }
+    Ok(publications)
+}
+
+fn continue_file_touch_id(
+    committed_store: &Store,
+    resolved: &ResolvedContinueSource,
+    provider_event_index: u64,
+    touch_index: usize,
+) -> Result<Uuid> {
+    let packed_touch_index = provider_event_index
+        .checked_mul(u64::from(u16::MAX) + 1)
+        .and_then(|base| base.checked_add(u64::try_from(touch_index).ok()?))
+        .ok_or(CaptureError::SystemInvariant(
+            "Continue file-touch identity overflowed",
+        ))?;
+    let provider_session_id = resolved
+        .session
+        .external_session_id
+        .as_deref()
+        .unwrap_or_default();
+    provider_file_touch_import_id(
+        committed_store,
+        CaptureProvider::Continue,
+        provider_session_id,
+        resolved.source_id,
+        Some(provider_event_index),
+        packed_touch_index,
+        resolved.session.id
+            == crate::provider::importer::provider_session_uuid(
+                CaptureProvider::Continue,
+                provider_session_id,
+            ),
+    )
 }
 
 fn already_committed_summary(
@@ -1192,6 +1364,7 @@ mod tests {
         },
     };
 
+    use ctx_history_store::{RawSqlOptions, RawSqlValue};
     use serde_json::json;
 
     use crate::{
@@ -1292,6 +1465,41 @@ mod tests {
         .unwrap();
     }
 
+    fn write_touch_session(path: &Path, touch_paths: &[String]) {
+        let mut patch = String::from("*** Begin Patch\n");
+        for touch_path in touch_paths {
+            patch.push_str(&format!("*** Update File: {touch_path}\n"));
+        }
+        patch.push_str("*** End Patch\n");
+        fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "sessionId": "touch-stable",
+                "title": "Touch rewrite",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "history": [{
+                    "id": "touch-event",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"role": "assistant", "content": ""},
+                    "toolCallStates": [{
+                        "toolCallId": "touch-call",
+                        "toolCall": {
+                            "id": "touch-call",
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "arguments": patch,
+                            }
+                        },
+                        "status": "done",
+                    }],
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn import(root: &Path, store: &mut Store) -> Result<ProviderImportSummary> {
         import_with_profile(root, store, ImportProfile::CoreOnly)
     }
@@ -1323,6 +1531,22 @@ mod tests {
             .unwrap()
             .into_iter()
             .flat_map(|session| store.events_for_session(session.id).unwrap())
+            .collect()
+    }
+
+    fn visible_touch_paths(store: &Store) -> Vec<String> {
+        store
+            .raw_sql_query(
+                "SELECT path FROM ctx_files_touched ORDER BY path",
+                RawSqlOptions::default(),
+            )
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| match row.into_iter().next().unwrap() {
+                RawSqlValue::Text { value, .. } => value,
+                value => panic!("expected text file-touch path, got {value:?}"),
+            })
             .collect()
     }
 
@@ -1546,5 +1770,74 @@ mod tests {
         assert!(store
             .authorized_source_route_for_event(first_events[0].id)
             .is_ok());
+    }
+
+    #[test]
+    fn oversized_touch_event_is_rejected_before_store_publication() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("continue");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("session.json");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let oversized = (0..=CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT)
+            .map(|index| format!("src/oversized-{index}.rs"))
+            .collect::<Vec<_>>();
+
+        write_touch_session(&source, &oversized);
+        let rejected = import(&root, &mut store).unwrap();
+        assert_eq!(rejected.failed, 1);
+        assert!(store.list_sessions().unwrap().is_empty());
+        assert!(events(&store).is_empty());
+        assert!(visible_touch_paths(&store).is_empty());
+
+        write_touch_session(&source, &["src/bounded.rs".to_owned()]);
+        let bounded = import(&root, &mut store).unwrap();
+        assert_eq!(bounded.work_result(), ProviderImportWorkResult::Changed);
+        assert_eq!(visible_touch_paths(&store), ["src/bounded.rs"]);
+    }
+
+    #[test]
+    fn touch_only_rewrite_retires_surplus_touch_without_stale_blame() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("continue");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("session.json");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let first_paths = ["src/one.rs".to_owned(), "src/two.rs".to_owned()];
+
+        write_touch_session(&source, &first_paths);
+        assert_eq!(
+            import(&root, &mut store).unwrap().work_result(),
+            ProviderImportWorkResult::Changed
+        );
+        let first_event = events(&store).pop().unwrap();
+        let first_hash = first_event.payload["provider_event_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(visible_touch_paths(&store), ["src/one.rs", "src/two.rs"]);
+        assert!(!first_event.payload.to_string().contains("src/one.rs"));
+
+        write_touch_session(&source, &["src/one.rs".to_owned()]);
+        assert_eq!(
+            import(&root, &mut store).unwrap().work_result(),
+            ProviderImportWorkResult::Changed
+        );
+        let rewritten_event = events(&store).pop().unwrap();
+        assert_eq!(rewritten_event.id, first_event.id);
+        assert_ne!(
+            rewritten_event.payload["provider_event_hash"]
+                .as_str()
+                .unwrap(),
+            first_hash
+        );
+        assert_eq!(visible_touch_paths(&store), ["src/one.rs"]);
+        assert!(store.file_touch_scope("src/two.rs").unwrap().is_empty());
+        assert!(store
+            .file_touch_scope("src/one.rs")
+            .unwrap()
+            .event_ids
+            .contains(&rewritten_event.id));
+        assert!(!rewritten_event.payload.to_string().contains("src/one.rs"));
     }
 }

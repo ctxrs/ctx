@@ -151,7 +151,13 @@ fn human_native_import_starts_a_reported_daemon_process() {
 #[test]
 fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
     let temp = tempdir();
-    let fixture = custom_history_fixture("basic.jsonl");
+    let fixture = temp.path().join("basic.jsonl");
+    fs::write(
+        &fixture,
+        fs::read(custom_history_fixture("basic.jsonl")).unwrap(),
+    )
+    .unwrap();
+    let fixture = fixture.to_str().unwrap().to_owned();
 
     let first = json_output(ctx(&temp).args([
         "import",
@@ -196,7 +202,8 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["imported_edges"], 0);
-    assert_eq!(second["totals"]["skipped"], 6);
+    assert_eq!(second["totals"]["skipped"], 0, "{second:#}");
+    assert_eq!(second["totals"]["change"], "no_op", "{second:#}");
 }
 
 #[test]
@@ -268,9 +275,14 @@ fn all_invalid_custom_import_cleans_up_and_retries_after_source_is_fixed() {
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
         sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
-        0
+        0,
+        "{report:#}"
     );
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sync_cursors"), 0);
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM sync_cursors"),
+        1,
+        "{report:#}"
+    );
     drop(conn);
 
     fs::write(&fixture, records("0")).unwrap();
@@ -361,11 +373,11 @@ fn import_all_discovers_and_imports_providers_together() {
     );
     let pi_home = temp.path().join(".pi/agent/sessions/--workspace-example--");
     fs::create_dir_all(&pi_home).unwrap();
-    fs::copy(
-        provider_history_fixture("pi-session.jsonl"),
-        pi_home.join("2026-06-24T12-00-00-000Z_pi-session-docs-1.jsonl"),
-    )
-    .unwrap();
+    write_pi_session_jsonl(
+        &pi_home.join("2026-06-24T12-00-00-000Z_pi-session-docs-1.jsonl"),
+        "pi-session-docs-1",
+        "Inspect the provider metadata rows.",
+    );
 
     let output = ctx(&temp)
         .args(["import", "--all", "--json", "--progress", "json"])

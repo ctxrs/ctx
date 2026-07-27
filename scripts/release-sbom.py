@@ -10,8 +10,12 @@ import os
 from pathlib import Path
 import re
 import stat
-import tomllib
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 HEX_40 = re.compile(r"[0-9a-f]{40}")
@@ -128,9 +132,10 @@ def target_package_identities(
         identity = package_identity(package)
         name, version, source = identity
         if source:
-            by_crate_repository.setdefault(f"crates__{name}-{version}", []).append(
-                identity
-            )
+            repository_version = version.replace("+", "-")
+            by_crate_repository.setdefault(
+                f"crates__{name}-{repository_version}", []
+            ).append(identity)
         else:
             workspace_by_name.setdefault(name, []).append(identity)
 
@@ -144,7 +149,10 @@ def target_package_identities(
                 )
             selected.add(candidates[0])
             continue
-        workspace_match = re.match(r"(?:@@?ctx_search)?//crates/([^/:]+)", label)
+        workspace_match = re.match(
+            r"(?:(?:@@?ctx_search)|@@)?//crates/([^/:]+)",
+            label,
+        )
         if workspace_match is not None:
             directory = workspace_match.group(1)
             name = root_package if directory == "ctx-cli" else directory
@@ -238,11 +246,11 @@ def cargo_materials(
         for item in package_dependencies:
             try:
                 dependency_refs.append(parse_dependency(item, packages, refs))
-            except KeyError as error:
-                raise ValueError(
-                    f"target dependency inventory omits a dependency of "
-                    f"{identity[0]} {identity[1]}: {item}"
-                ) from error
+            except KeyError:
+                # Cargo.lock records dependencies for every cfg target, while
+                # the Bazel inventory is the configured release action graph.
+                # Omitted packages therefore represent non-target edges.
+                continue
         dependencies.append({"ref": refs[identity], "dependsOn": sorted(dependency_refs)})
 
     roots = [

@@ -9,10 +9,14 @@ use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
-use serde_json::value::RawValue;
+use serde_json::{value::RawValue, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    provider::file_touches::{
+        visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
+    },
     provider_sources::{observe_ordinary_file, open_ordinary_file_without_following},
     OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
     OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation,
@@ -23,9 +27,9 @@ use super::{
     normalize::{
         estimated_event_bytes, estimated_output_bytes, ClineCatalogEntry, ClineEventComponent,
         ClineEventContext, ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity,
-        ClineItemCheckpoint, ClineItemRejection, ClineItemRejectionKind, ClineMetadataCheckpoint,
-        ClineNativeItemKey, ClineNativeProfile, ClinePublicationStats, ClineSessionRow,
-        ClineSparseOutputDiagnostic, ClineTaskIdentity, ClineTaskIdentityOrigin,
+        ClineFileTouch, ClineItemCheckpoint, ClineItemRejection, ClineItemRejectionKind,
+        ClineMetadataCheckpoint, ClineNativeItemKey, ClineNativeProfile, ClinePublicationStats,
+        ClineSessionRow, ClineSparseOutputDiagnostic, ClineTaskIdentity, ClineTaskIdentityOrigin,
         CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_MAX_FAILURE_PREVIEW_BYTES,
         CLINE_NATIVE_MAX_REJECTIONS, CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES,
         CLINE_NATIVE_PAGE_MAX_UNITS, CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES,
@@ -1508,7 +1512,6 @@ fn parse_item(
             );
         }
     };
-
     let failure_rows = projection
         .outputs
         .iter()
@@ -1523,7 +1526,10 @@ fn parse_item(
         .rows
         .len()
         .saturating_add(projection.outputs.len())
-        .saturating_add(failure_rows);
+        .saturating_add(failure_rows)
+        .saturating_add(projection.rows.iter().fold(0_usize, |count, row| {
+            count.saturating_add(row.file_touches.len())
+        }));
     if potential_units > max_item_units {
         return rejected_item_with_key(
             component,
@@ -1890,12 +1896,10 @@ fn parse_api_block<'a>(
             &mut projection.outputs,
         )?;
     } else if is_call {
-        projection.rows.push(ClineEventRow::tool_call(
-            context,
-            row_sub_index,
-            block.call_id,
-            block.name,
-        ));
+        let file_touches = extract_file_touches(raw_block)?;
+        let mut row = ClineEventRow::tool_call(context, row_sub_index, block.call_id, block.name);
+        row.attach_file_touches(file_touches);
+        projection.rows.push(row);
     } else if is_text && retain_text {
         if let Some(body) = block
             .retained_body()
@@ -1913,6 +1917,37 @@ fn parse_api_block<'a>(
         }
     }
     Ok(())
+}
+
+fn extract_file_touches(
+    raw_call: &RawValue,
+) -> Result<Vec<ClineFileTouch>, (ClineItemRejectionKind, String)> {
+    let raw_value = serde_json::from_str::<Value>(raw_call.get())
+        .map_err(|error| (ClineItemRejectionKind::MalformedRecord, error.to_string()))?;
+    let mut file_touches = Vec::new();
+    let outcome = visit_provider_file_touch_drafts_with_limit(
+        &raw_value,
+        true,
+        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        |(_, touch)| -> std::result::Result<(), ()> {
+            file_touches.push(ClineFileTouch {
+                path: touch.path.into_boxed_str(),
+                old_path: touch.old_path.map(String::into_boxed_str),
+                change_kind: touch.change_kind,
+                confidence: touch.confidence,
+                metadata: touch.metadata,
+            });
+            Ok(())
+        },
+    )
+    .unwrap_or_else(|()| unreachable!("the file-touch collector is infallible"));
+    if outcome.limit_exceeded() {
+        return Err((
+            ClineItemRejectionKind::UnsupportedShape,
+            PROVIDER_FILE_TOUCH_LIMIT_REJECTION.to_owned(),
+        ));
+    }
+    Ok(file_touches)
 }
 
 #[allow(clippy::too_many_arguments)]

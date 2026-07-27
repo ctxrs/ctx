@@ -25,7 +25,10 @@ mod telemetry;
 mod text;
 
 use input::{read_mcp_input_line, McpInputLine};
-use pro::{pro_blame_tool, tool_pro_blame, tool_pro_status, MCP_BLAME_MAX_OUTPUT_BYTES};
+use pro::{
+    pro_blame_tool, required_blame_target, tool_pro_blame, tool_pro_status,
+    MCP_BLAME_MAX_OUTPUT_BYTES,
+};
 use response::{
     error_response, invalid_request_response, invalid_tool_request, json_rpc_error,
     success_response, tool_error_result, tool_result,
@@ -49,6 +52,7 @@ use super::{
 use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use crate::commands::search::resolve_search_backend;
 use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
+use crate::local_usage::{McpInvocation, McpUsageRecorder};
 use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
 use crate::semantic::{
     daemon_report, search_packet_with_backend, semantic_worker_report_cached,
@@ -91,6 +95,7 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
     let mut telemetry = McpTelemetry::start(data_root.clone());
+    let mut usage_recorder = McpUsageRecorder::start(data_root.clone());
     let started = Instant::now();
     let mut initialized = false;
 
@@ -100,6 +105,7 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
         &mut stdout,
         &mut initialized,
         &mut telemetry,
+        &mut usage_recorder,
     );
     let (reason, outcome) = match &result {
         Ok(()) => (McpStopReasonV1::Eof, Outcome::Success),
@@ -120,6 +126,7 @@ fn serve_stdio_loop(
     stdout: &mut impl Write,
     initialized: &mut bool,
     telemetry: &mut McpTelemetry,
+    usage_recorder: &mut McpUsageRecorder,
 ) -> std::result::Result<(), McpServeFailure> {
     loop {
         let input = read_mcp_input_line(stdin).map_err(|error| McpServeFailure {
@@ -130,7 +137,7 @@ fn serve_stdio_loop(
             return Ok(());
         };
         let request_started = Instant::now();
-        let (handled, descriptor) = match input {
+        let (handled, descriptor, usage_invocation) = match input {
             McpInputLine::Line(line) => {
                 let line = line.trim();
                 if line.is_empty() {
@@ -139,7 +146,9 @@ fn serve_stdio_loop(
                 match serde_json::from_str::<Value>(line) {
                     Ok(message) => {
                         let descriptor = RequestDescriptor::from_message(&message);
-                        (handle_message(message, data_root, initialized), descriptor)
+                        let (handled, usage_invocation) =
+                            handle_message(message, data_root, initialized);
+                        (handled, descriptor, usage_invocation)
                     }
                     Err(err) => (
                         McpHandled::plain(Some(error_response(
@@ -149,6 +158,7 @@ fn serve_stdio_loop(
                             Some(json!({ "error": err.to_string() })),
                         ))),
                         RequestDescriptor::InvalidJson,
+                        None,
                     ),
                 }
             }
@@ -160,6 +170,7 @@ fn serve_stdio_loop(
                     Some(json!({ "error": "MCP message is not valid UTF-8" })),
                 ))),
                 RequestDescriptor::InvalidUtf8,
+                None,
             ),
             McpInputLine::TooLarge => (
                 McpHandled::plain(Some(error_response(
@@ -171,6 +182,7 @@ fn serve_stdio_loop(
                     })),
                 ))),
                 RequestDescriptor::LineTooLarge,
+                None,
             ),
         };
         let McpHandled {
@@ -211,12 +223,21 @@ fn serve_stdio_loop(
                     error: error.into(),
                 }
             })?;
-            telemetry.record_delivered(descriptor, Some(&response), request_started.elapsed());
+            let duration = request_started.elapsed();
+            if let Some(invocation) = usage_invocation {
+                let serialized_response_bytes = encoded.len().saturating_add(1);
+                usage_recorder.record_delivered(
+                    invocation,
+                    &response,
+                    duration,
+                    serialized_response_bytes,
+                );
+            }
+            telemetry.record_delivered(descriptor, Some(&response), duration);
             if let Some(event) = pro_event {
                 telemetry.submit_pro_event(event);
             }
         } else {
-            debug_assert!(pro_event.is_none());
             telemetry.record_delivered(descriptor, None, request_started.elapsed());
         }
     }
@@ -226,17 +247,23 @@ fn handle_message(
     message: Value,
     data_root: &Path,
     initialized: &mut bool,
-) -> McpHandled<Option<Value>> {
+) -> (McpHandled<Option<Value>>, Option<McpInvocation>) {
     let Some(object) = message.as_object() else {
-        return McpHandled::plain(Some(error_response(
-            Value::Null,
-            -32600,
-            "Invalid Request",
+        return (
+            McpHandled::plain(Some(error_response(
+                Value::Null,
+                -32600,
+                "Invalid Request",
+                None,
+            ))),
             None,
-        )));
+        );
     };
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return McpHandled::plain(Some(invalid_request_response(object.get("id"))));
+        return (
+            McpHandled::plain(Some(invalid_request_response(object.get("id")))),
+            None,
+        );
     }
     let bound_complete_content = is_complete_content_tool_call(&message);
     let bound_blame = is_blame_tool_call(&message);
@@ -245,46 +272,61 @@ fn handle_message(
         .and_then(|object| object.get("id"))
         .cloned();
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return McpHandled::plain(Some(invalid_request_response(id.as_ref())));
+        return (
+            McpHandled::plain(Some(invalid_request_response(id.as_ref()))),
+            None,
+        );
     };
     if matches!(
         id,
         Some(Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_))
     ) {
-        return McpHandled::plain(Some(invalid_request_response(None)));
+        return (
+            McpHandled::plain(Some(invalid_request_response(None))),
+            None,
+        );
     }
     let Some(id) = id else {
         if method == "notifications/initialized" {
             *initialized = true;
         }
-        return McpHandled::plain(None);
+        return (McpHandled::plain(None), None);
     };
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     if !params.is_object() {
-        return McpHandled::plain(Some(error_response(
-            id,
-            -32602,
-            "Invalid params",
-            Some(json!({ "error": "params must be an object" })),
-        )));
+        return (
+            McpHandled::plain(Some(error_response(
+                id,
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": "params must be an object" })),
+            ))),
+            None,
+        );
     }
     if method != "initialize" && !*initialized {
-        return McpHandled::plain(Some(error_response(
-            id,
-            -32002,
-            "Server not initialized",
-            Some(json!({ "error": "send initialize before calling ctx MCP tools" })),
-        )));
+        return (
+            McpHandled::plain(Some(error_response(
+                id,
+                -32002,
+                "Server not initialized",
+                Some(json!({ "error": "send initialize before calling ctx MCP tools" })),
+            ))),
+            None,
+        );
     }
-    let result = match method {
+    let (result, usage_invocation) = match method {
         "initialize" => {
             *initialized = true;
-            Ok(McpHandled::plain(initialize_result(&params)))
+            (Ok(McpHandled::plain(initialize_result(&params))), None)
         }
-        "ping" => Ok(McpHandled::plain(json!({}))),
-        "tools/list" => Ok(McpHandled::plain(json!({ "tools": tool_definitions() }))),
+        "ping" => (Ok(McpHandled::plain(json!({}))), None),
+        "tools/list" => (
+            Ok(McpHandled::plain(json!({ "tools": tool_definitions() }))),
+            None,
+        ),
         "tools/call" => handle_tools_call(params, data_root),
-        _ => Err(json_rpc_error(-32601, "Method not found", None)),
+        _ => (Err(json_rpc_error(-32601, "Method not found", None)), None),
     };
     let response_id = id.clone();
     let McpHandled {
@@ -309,20 +351,23 @@ fn handle_message(
             }
         }),
     };
-    McpHandled {
-        value: Some(if bound_complete_content {
-            bound_complete_content_mcp_response(
-                response,
-                response_id,
-                MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-            )
-        } else if bound_blame {
-            bound_blame_mcp_response(response, response_id, MCP_BLAME_MAX_OUTPUT_BYTES)
-        } else {
-            response
-        }),
-        pro_event,
-    }
+    (
+        McpHandled {
+            value: Some(if bound_complete_content {
+                bound_complete_content_mcp_response(
+                    response,
+                    response_id,
+                    MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+                )
+            } else if bound_blame {
+                bound_blame_mcp_response(response, response_id, MCP_BLAME_MAX_OUTPUT_BYTES)
+            } else {
+                response
+            }),
+            pro_event,
+        },
+        usage_invocation,
+    )
 }
 
 fn initialize_result(params: &Value) -> Value {
@@ -353,35 +398,52 @@ fn negotiate_protocol_version(params: &Value) -> &'static str {
         .unwrap_or(MCP_PROTOCOL_VERSION)
 }
 
-fn handle_tools_call(params: Value, data_root: &Path) -> Result<McpHandled<Value>, Value> {
-    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
-        json_rpc_error(
-            -32602,
-            "Invalid params",
-            Some(json!({ "error": "tools/call requires params.name" })),
-        )
-    })?;
+fn handle_tools_call(
+    params: Value,
+    data_root: &Path,
+) -> (Result<McpHandled<Value>, Value>, Option<McpInvocation>) {
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return (
+            Err(json_rpc_error(
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": "tools/call requires params.name" })),
+            )),
+            None,
+        );
+    };
+    let Some(allowed_arguments) = allowed_tool_arguments(name) else {
+        return (
+            Err(json_rpc_error(
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": format!("unknown tool {name}") })),
+            )),
+            None,
+        );
+    };
+    let mut invocation =
+        McpInvocation::recognized(name).expect("allowed MCP tools have local usage operations");
     let arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
-        return Err(json_rpc_error(
-            -32602,
-            "Invalid params",
-            Some(json!({ "error": "tools/call params.arguments must be an object" })),
-        ));
+        return (
+            Err(json_rpc_error(
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": "tools/call params.arguments must be an object" })),
+            )),
+            Some(invocation),
+        );
     }
 
-    let Some(allowed_arguments) = allowed_tool_arguments(name) else {
-        return Err(json_rpc_error(
-            -32602,
-            "Invalid params",
-            Some(json!({ "error": format!("unknown tool {name}") })),
-        ));
-    };
     if let Err(error) = validate_argument_keys(&arguments, allowed_arguments) {
-        return Ok(McpHandled::plain(tool_error_result(error)));
+        return (
+            Ok(McpHandled::plain(tool_error_result(error))),
+            Some(invocation),
+        );
     }
 
     let handled = match name {
@@ -392,17 +454,26 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<McpHandled<Value
         "show_session" => McpHandled::plain(tool_show_session(&arguments, data_root)),
         "show_event" => McpHandled::plain(tool_show_event(&arguments, data_root)),
         "pro_status" => tool_pro_status(data_root),
-        "blame" => tool_pro_blame(&arguments, data_root),
+        "blame" => {
+            let parsed_target = required_blame_target(&arguments);
+            if let Ok(target) = &parsed_target {
+                invocation.bind_blame_target(target);
+            }
+            tool_pro_blame(&arguments, data_root, parsed_target)
+        }
         _ => unreachable!("known tool was validated above"),
     };
 
-    Ok(McpHandled {
-        value: match handled.value {
-            Ok(value) => tool_result(value),
-            Err(err) => tool_error_result(err),
-        },
-        pro_event: handled.pro_event,
-    })
+    (
+        Ok(McpHandled {
+            value: match handled.value {
+                Ok(value) => tool_result(value),
+                Err(err) => tool_error_result(err),
+            },
+            pro_event: handled.pro_event,
+        }),
+        Some(invocation),
+    )
 }
 
 fn tool_status(data_root: &Path) -> Result<Value> {

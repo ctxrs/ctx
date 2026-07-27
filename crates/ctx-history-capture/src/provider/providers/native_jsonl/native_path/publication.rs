@@ -149,6 +149,13 @@ pub(crate) fn publish_direct_jsonl_group(
             &final_checkpoint.source_observation,
             context.inventory_observation_token,
         );
+        let session_fact = final_checkpoint.session.as_ref();
+        if session_fact.is_none() {
+            // A malformed, headerless, or empty source has no canonical Core
+            // owner. Its path-scoped cursor and bounded rejection summary are
+            // durable, but it must not create or rebind capture-source state.
+            continue;
+        }
         let raw_source_path = path.display().to_string();
         let source_root = context.source_root.display().to_string();
         let locator_identity = provider_path_identity(path)?;
@@ -180,7 +187,6 @@ pub(crate) fn publish_direct_jsonl_group(
                 source_revision: source_revision.clone(),
                 observed_at_ms: context.imported_at.timestamp_millis(),
             })?;
-        let session_fact = final_checkpoint.session.as_ref();
         let source_id = match session_fact {
             Some(session) => committed_store
                 .capture_source_by_canonical_identity_session(
@@ -283,6 +289,17 @@ pub(crate) fn publish_direct_jsonl_group(
     }
 
     for pending in pages {
+        for rejection in &pending.page.rejections {
+            summary.record_failure(crate::ProviderImportFailure {
+                line: usize::try_from(rejection.raw_ordinal)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1),
+                error: rejection.reason.clone(),
+            });
+        }
+        if pending.page.events.is_empty() {
+            continue;
+        }
         let source = resolved
             .get(&pending.path)
             .ok_or(CaptureError::SystemInvariant(
@@ -303,14 +320,6 @@ pub(crate) fn publish_direct_jsonl_group(
                 event,
                 &mut summary,
             )?;
-        }
-        for rejection in &pending.page.rejections {
-            summary.record_failure(crate::ProviderImportFailure {
-                line: usize::try_from(rejection.raw_ordinal)
-                    .unwrap_or(usize::MAX)
-                    .saturating_add(1),
-                error: rejection.reason.clone(),
-            });
         }
     }
 

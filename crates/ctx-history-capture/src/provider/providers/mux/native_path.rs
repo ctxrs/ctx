@@ -203,7 +203,6 @@ struct MuxPreparedPage {
     next: MuxFrontier,
     terminal: bool,
     deferred_incomplete: bool,
-    source_bytes: usize,
     previous_rejected_records: u64,
     rejected_records: u64,
     first_failure: Option<MuxFailureWire>,
@@ -303,11 +302,7 @@ pub(crate) fn import_mux_native_path(
                 };
                 if core_output_ready {
                     if let Some(sink) = options.import_profile.sink() {
-                        if let Err(error) = replay_source_outputs(&plan, &context, sink.as_ref()) {
-                            sink.mark_behind(crate::ProOutputSinkError::new(
-                                "mux_output_replay",
-                                error.to_string(),
-                            ));
+                        if replay_source_outputs(&plan, &context, sink.as_ref())? {
                             summary.record_failure(ProviderImportFailure {
                                 line: 0,
                                 error: "Mux Pro output replay is behind Core".to_owned(),
@@ -437,19 +432,14 @@ fn plan_source(
                 ));
             }
             generation = wire.generation;
-            if !wire.retired
+            let can_resume = (!wire.retired
                 && wire.source_revision == source_revision
-                && prefix_matches(&path, &observation, &wire.frontier)?
-            {
-                initial_frontier = wire.frontier.clone();
-                accepted_events = wire.accepted_events;
-                rejected_records = wire.rejected_records;
-                first_failure.clone_from(&wire.first_failure);
-            } else if !wire.retired
-                && kind == MuxStreamKind::Chat
-                && wire.metadata_revision == metadata_revision
-                && prefix_matches(&path, &observation, &wire.frontier)?
-            {
+                && prefix_matches(&path, &observation, &wire.frontier)?)
+                || (!wire.retired
+                    && kind == MuxStreamKind::Chat
+                    && wire.metadata_revision == metadata_revision
+                    && prefix_matches(&path, &observation, &wire.frontier)?);
+            if can_resume {
                 initial_frontier = wire.frontier.clone();
                 accepted_events = wire.accepted_events;
                 rejected_records = wire.rejected_records;
@@ -848,7 +838,6 @@ fn read_core_page(
                     reader.seek(SeekFrom::Start(record.start))?;
                     *hasher = record_hasher;
                     offset = record.start;
-                    source_bytes = source_bytes.saturating_sub(record.observed_bytes);
                     physical_records = physical_records.saturating_sub(1);
                     rejected_records = rejected_before_record;
                     first_failure = failure_before_record;
@@ -915,7 +904,6 @@ fn read_core_page(
         next,
         terminal,
         deferred_incomplete,
-        source_bytes,
         previous_rejected_records,
         rejected_records,
         first_failure,
@@ -1230,7 +1218,10 @@ fn publish_core_page(
         expected_store_cursor.map(|cursor| cursor.cursor.clone()),
         next,
     );
-    let accounting = NativePathGroupAccounting::new(1, 1, page.source_bytes.saturating_add(1024))?;
+    // A drained oversized record contributes to source progress but is rejected
+    // before publication. Account for the bounded retained page, not raw bytes
+    // that will never enter the transaction.
+    let accounting = NativePathGroupAccounting::new(1, 1, MUX_PAGE_MAX_BYTES.saturating_add(1024))?;
     let admission = store.admit_event_search_bulk_group(bulk_guard)?;
     let mut publication = store.begin_native_path_publication_group(admission, accounting)?;
     let publication_id = core_publication_id(plan, page);
@@ -1731,18 +1722,35 @@ fn replay_source_outputs(
     plan: &MuxSourcePlan,
     context: &ProviderAdapterContext,
     sink: &dyn ProOutputSink,
-) -> Result<()> {
+) -> Result<bool> {
     let output_source = OutputSourceIdentity {
         provider: CaptureProvider::Mux.as_str().to_owned(),
         namespace_id: plan.canonical_source_identity.clone(),
         source_id: plan.path_identity.clone(),
     };
-    let progress = sink
-        .observe_source(&output_source)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let output_plan = MuxOutputPlan::new(plan, sink, progress.as_ref())?;
+    let progress = match sink.observe_source(&output_source) {
+        Ok(progress) => progress,
+        Err(_) => {
+            sink.mark_behind(crate::ProOutputSinkError::new(
+                "mux_output_progress",
+                "Mux Pro output progress is unavailable",
+            ));
+            return Ok(true);
+        }
+    };
+    let output_plan = match MuxOutputPlan::new(plan, sink, progress.as_ref()) {
+        Ok(plan) => plan,
+        Err(_) => {
+            sink.mark_behind(crate::ProOutputSinkError::new(
+                "mux_output_progress",
+                "Mux Pro output progress is invalid",
+            ));
+            return Ok(true);
+        }
+    };
     if output_plan.noop {
-        return revalidate_source(plan);
+        revalidate_source(plan)?;
+        return Ok(false);
     }
     let mut session =
         mux_bounded_session_metadata(&plan.source, &plan.metadata_revision, context.imported_at)?;
@@ -1763,8 +1771,26 @@ fn replay_source_outputs(
         else {
             break;
         };
-        let next_safe_frontier = safe_frontier(&page.next)?;
-        let expected_frontier = safe_frontier(&page.expected)?;
+        let next_safe_frontier = match safe_frontier(&page.next) {
+            Ok(frontier) => frontier,
+            Err(_) => {
+                sink.mark_behind(crate::ProOutputSinkError::new(
+                    "mux_output_page",
+                    "Mux Pro output page is invalid",
+                ));
+                return Ok(true);
+            }
+        };
+        let expected_frontier = match safe_frontier(&page.expected) {
+            Ok(frontier) => frontier,
+            Err(_) => {
+                sink.mark_behind(crate::ProOutputSinkError::new(
+                    "mux_output_page",
+                    "Mux Pro output page is invalid",
+                ));
+                return Ok(true);
+            }
+        };
         let estimated_output_bytes =
             page.observations
                 .iter()
@@ -1787,7 +1813,7 @@ fn replay_source_outputs(
             expected_prior_frontier: expected_sink_frontier.clone(),
             observations: page.observations,
         };
-        let replay = NativeProReplayPage::new(
+        let replay = match NativeProReplayPage::new(
             expected_frontier,
             next_safe_frontier.clone(),
             page.terminal,
@@ -1796,15 +1822,20 @@ fn replay_source_outputs(
                 conservative_serialized_bytes: estimated_output_bytes,
             },
             output,
-        )
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        ) {
+            Ok(replay) => replay,
+            Err(_) => {
+                sink.mark_behind(crate::ProOutputSinkError::new(
+                    "mux_output_page",
+                    "Mux Pro output page is invalid",
+                ));
+                return Ok(true);
+            }
+        };
         revalidate_source(plan)?;
-        process_pro_replay_only(replay, sink).map_err(|failure| {
-            CaptureError::InvalidPayload(format!(
-                "Mux output page failed: {:?}",
-                failure.output_error
-            ))
-        })?;
+        if process_pro_replay_only(replay, sink).is_err() {
+            return Ok(true);
+        }
         frontier = page.next;
         expected_sink_frontier = Some(next_safe_frontier);
         expected_source_epoch = Some(output_plan.source_epoch);
@@ -1813,7 +1844,8 @@ fn replay_source_outputs(
             break;
         }
     }
-    revalidate_source(plan)
+    revalidate_source(plan)?;
+    Ok(false)
 }
 
 struct MuxOutputPlan {

@@ -880,6 +880,11 @@ fn build_upgrade_plan(
         &fallback_current_version,
         &mut warnings,
     )?;
+    if snapshot.marker.staging_dogfood {
+        return Err(anyhow!(
+            "this staging dogfood ctx installation is isolated from release upgrades"
+        ));
+    }
     let current_version = snapshot.marker.version.clone();
     let managed = warnings.is_empty();
     let path = path_diagnostics(&snapshot.marker.install_path, &current_version);

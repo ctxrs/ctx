@@ -115,7 +115,9 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     .unwrap();
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 2);
+    // NativePath accounting is source-scoped: parent chat, parent partial,
+    // and child chat each publish one accepted session projection.
+    assert_eq!(first.imported_sessions, 3);
     assert_eq!(first.imported_events, 4);
     assert_eq!(first.imported_edges, 1);
 
@@ -125,7 +127,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     assert_event_type_count(&parent_events, EventType::Message, 2);
     assert_event_type_count(&parent_events, EventType::ToolCall, 1);
     assert_event_type_count(&parent_events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&parent_events);
+    assert_events_have_provider_citations(&store, &parent_events);
     let parent_rendered = serde_json::to_string(&parent_events).unwrap();
     assert!(parent_rendered.contains("mux jsonl oracle prompt"));
     assert!(parent_rendered.contains("mux partial response still searchable"));
@@ -139,7 +141,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     assert_eq!(child_events.len(), 1);
     assert_event_type_count(&child_events, EventType::Message, 1);
     assert_event_type_count(&child_events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&child_events);
+    assert_events_have_provider_citations(&store, &child_events);
     assert!(!serde_json::to_string(&child_events)
         .unwrap()
         .contains("src/mux_child_oracle.txt"));
@@ -161,6 +163,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
         &fixture,
         &mut store,
         MuxImportOptions {
+            machine_id: "test-machine".into(),
             source_path: Some(fixture.clone()),
             ..MuxImportOptions::default()
         },
@@ -206,10 +209,10 @@ fn native_mux_rejects_oversized_chat_record_and_keeps_valid_siblings() {
     .unwrap();
 
     assert_structural_oversize_failure(&summary, 2);
-    assert_eq!(summary.skipped, 2);
-    assert_eq!(summary.skipped_sessions, 2);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.skipped_sessions, 0);
     assert_eq!(summary.skipped_events, 0);
-    assert_eq!(summary.imported_sessions, 2);
+    assert_eq!(summary.imported_sessions, 3);
     assert_eq!(summary.imported_events, 4);
     assert!(store
         .search_event_hits("mux jsonl oracle prompt", 10)
@@ -285,7 +288,7 @@ fn native_rovodev_fixture_imports_searches_reimports_and_file_touches() {
     let events = store.events_for_session(session_id).unwrap();
     assert_event_type_count(&events, EventType::ToolCall, 1);
     assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
     assert_eq!(
         events[0].sync.metadata["source_format"].as_str(),
         Some("rovodev_session_json_tree")

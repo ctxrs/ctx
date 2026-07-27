@@ -344,10 +344,12 @@ pub(in super::super) struct WarpNativeProOutputPage {
 }
 
 impl WarpNativeProOutputPage {
+    #[allow(dead_code)]
     pub(in super::super) fn row_count(&self) -> usize {
         self.outputs.len().saturating_add(self.rejections.len())
     }
 
+    #[allow(dead_code)]
     pub(in super::super) fn logical_unit_count(&self) -> usize {
         self.logical_units
     }
@@ -385,6 +387,7 @@ impl WarpNativePage {
             .saturating_add(self.rejections.len())
     }
 
+    #[allow(dead_code)]
     pub(in super::super) fn logical_unit_count(&self) -> usize {
         self.logical_units
     }
@@ -465,6 +468,7 @@ pub(in super::super) struct WarpNativeSourceAuthority {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum WarpNativeIncompleteReason {
+    #[allow(dead_code)]
     SnapshotCertificationRace,
 }
 
@@ -481,6 +485,7 @@ pub(in super::super) struct WarpNativeIncomplete {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in super::super) enum WarpNativeScanOutcome {
     Complete(WarpNativeSourceAuthority),
+    #[allow(dead_code)]
     Incomplete(WarpNativeIncomplete),
 }
 
@@ -1154,9 +1159,9 @@ fn hash_event(hasher: &mut Sha256, event: &WarpNativeEvent) -> Result<()> {
     );
     hash_text(hasher, &event.body)?;
     hash_text(hasher, &event.content_hash)?;
-    hash_text(hasher, event.source_record_digest.as_str())?;
     if let Some(content_ref) = &event.complete_content_ref {
         hasher.update([1]);
+        hash_text(hasher, event.source_record_digest.as_str())?;
         hash_text(hasher, content_ref.sha256())?;
         hasher.update(content_ref.byte_len().to_le_bytes());
     } else {

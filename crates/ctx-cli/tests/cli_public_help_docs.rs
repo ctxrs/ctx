@@ -79,6 +79,26 @@ fn help_exposes_session_retrieval_commands() {
 }
 
 #[test]
+fn status_help_exposes_one_bounded_local_usage_control() {
+    let temp = tempdir();
+    let output = ctx(&temp)
+        .args(["status", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+
+    assert!(help.contains("--usage <USAGE>"), "{help}");
+    for value in ["summary", "detail", "enable", "disable", "reset"] {
+        assert!(help.contains(value), "missing {value} in\n{help}");
+    }
+    assert!(!help.contains("dashboard"), "{help}");
+    assert!(!help.contains("tokens saved"), "{help}");
+}
+
+#[test]
 fn show_help_exposes_explicit_content_fidelity() {
     let temp = tempdir();
     for target in ["session", "event"] {

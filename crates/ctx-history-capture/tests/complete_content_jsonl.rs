@@ -15,11 +15,11 @@ use ctx_history_capture::{
     import_antigravity_cli_history, import_codebuddy_history, import_kimi_code_cli_history,
     import_mistral_vibe_history, import_openclaw_history, AntigravityCliImportOptions,
     CodeBuddyImportOptions, KimiCodeCliImportOptions, MistralVibeImportOptions,
-    OpenClawImportOptions,
+    OpenClawImportOptions, ProviderImportWorkResult,
 };
 use ctx_history_core::{CaptureProvider, ContentRef};
 use ctx_history_store::{RawSqlOptions, RawSqlValue, Store};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -76,6 +76,84 @@ fn provider_cursor_rows(store: &Store) -> Vec<(String, String, String)> {
             (device_id, stream, cursor)
         })
         .collect()
+}
+
+fn provider_cursor_payload_rows(store: &Store) -> Vec<(String, String)> {
+    provider_cursor_rows(store)
+        .into_iter()
+        .map(|(_, stream, cursor)| {
+            let envelope = serde_json::from_str::<Value>(&cursor).unwrap();
+            let provider_cursor = envelope["provider_cursor"].as_str().unwrap().to_owned();
+            (stream, provider_cursor)
+        })
+        .collect()
+}
+
+type ProviderEventIdentity = (Uuid, Option<Uuid>, Option<Uuid>, Option<String>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProviderIdentitySnapshot {
+    sources: Vec<(Uuid, Option<String>, Option<String>)>,
+    sessions: Vec<(Uuid, Option<Uuid>, Option<String>)>,
+    events: Vec<ProviderEventIdentity>,
+}
+
+fn provider_identity_snapshot(
+    store: &Store,
+    provider: CaptureProvider,
+) -> ProviderIdentitySnapshot {
+    let mut sources = store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .filter(|source| source.descriptor.provider == provider)
+        .map(|source| {
+            (
+                source.id,
+                source.descriptor.source_identity,
+                source.descriptor.external_session_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|source| source.0);
+
+    let provider_sessions = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|session| session.provider == provider)
+        .collect::<Vec<_>>();
+    let mut sessions = provider_sessions
+        .iter()
+        .map(|session| {
+            (
+                session.id,
+                session.capture_source_id,
+                session.external_session_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|session| session.0);
+
+    let mut events = provider_sessions
+        .iter()
+        .flat_map(|session| store.events_for_session(session.id).unwrap())
+        .map(|event| {
+            (
+                event.id,
+                event.session_id,
+                event.capture_source_id,
+                event.dedupe_key,
+            )
+        })
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.0);
+
+    ProviderIdentitySnapshot {
+        sources,
+        sessions,
+        events,
+    }
 }
 
 struct Fixture {
@@ -770,6 +848,35 @@ fn persisted_request_for_provider(
             source.descriptor.source_identity.clone(),
             snapshot,
         );
+        let (source_record_ordinal, source_record_subrecord_index) =
+            if provider == CaptureProvider::CodeBuddy {
+                assert_eq!(
+                    event.sync.metadata.get("source_record_ordinal"),
+                    Some(&Value::Null),
+                    "CodeBuddy typed NativePath fixture must not claim a legacy source ordinal"
+                );
+                assert_eq!(
+                    event.sync.metadata.get("source_record_subrecord_index"),
+                    Some(&Value::Null),
+                    "CodeBuddy typed NativePath fixture must not claim a legacy subrecord index"
+                );
+                assert_eq!(
+                    event.sync.metadata["fixture_line"].as_u64(),
+                    Some(1),
+                    "CodeBuddy matrix fixture is exactly one JSONL record"
+                );
+                (0, 0)
+            } else {
+                (
+                    event.sync.metadata["source_record_ordinal"]
+                        .as_u64()
+                        .unwrap(),
+                    event.sync.metadata["source_record_subrecord_index"]
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap(),
+                )
+            };
         return CompleteMessageRequest {
             event_id: event.id,
             provider,
@@ -779,12 +886,8 @@ fn persisted_request_for_provider(
             content_profile: persisted.content_profile().to_owned(),
             source_locator: persisted.source_locator(),
             provider_session_id: session.external_session_id,
-            source_record_ordinal: event.sync.metadata["source_record_ordinal"]
-                .as_u64()
-                .unwrap(),
-            source_record_subrecord_index: event.sync.metadata["source_record_subrecord_index"]
-                .as_u64()
-                .unwrap() as u32,
+            source_record_ordinal,
+            source_record_subrecord_index,
             expected_provider_event_hash: event.sync.metadata["provider_event_hash"]
                 .as_str()
                 .unwrap()
@@ -947,44 +1050,49 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
         })
         .collect::<Vec<_>>();
     let stable_cursors = provider_cursor_rows(&store);
+    let stable_provider_cursors = provider_cursor_payload_rows(&store);
+    let stable_mistral_identity = provider_identity_snapshot(&store, CaptureProvider::MistralVibe);
     assert_eq!(stable_cursors.len(), 4);
 
-    import_codebuddy_history(
-        &codebuddy_root,
-        &mut store,
-        CodeBuddyImportOptions {
-            source_path: Some(codebuddy_root.clone()),
-            ..CodeBuddyImportOptions::default()
-        },
-    )
-    .unwrap();
-    import_mistral_vibe_history(
-        &mistral_root,
-        &mut store,
-        MistralVibeImportOptions {
-            source_path: Some(mistral_root.clone()),
-            ..MistralVibeImportOptions::default()
-        },
-    )
-    .unwrap();
-    import_openclaw_history(
-        &openclaw_root,
-        &mut store,
-        OpenClawImportOptions {
-            source_path: Some(openclaw_root.clone()),
-            ..OpenClawImportOptions::default()
-        },
-    )
-    .unwrap();
-    import_kimi_code_cli_history(
-        &kimi_root,
-        &mut store,
-        KimiCodeCliImportOptions {
-            source_path: Some(kimi_root.clone()),
-            ..KimiCodeCliImportOptions::default()
-        },
-    )
-    .unwrap();
+    let reimport_all = |store: &mut Store| {
+        import_codebuddy_history(
+            &codebuddy_root,
+            store,
+            CodeBuddyImportOptions {
+                source_path: Some(codebuddy_root.clone()),
+                ..CodeBuddyImportOptions::default()
+            },
+        )
+        .unwrap();
+        import_mistral_vibe_history(
+            &mistral_root,
+            store,
+            MistralVibeImportOptions {
+                source_path: Some(mistral_root.clone()),
+                ..MistralVibeImportOptions::default()
+            },
+        )
+        .unwrap();
+        import_openclaw_history(
+            &openclaw_root,
+            store,
+            OpenClawImportOptions {
+                source_path: Some(openclaw_root.clone()),
+                ..OpenClawImportOptions::default()
+            },
+        )
+        .unwrap();
+        import_kimi_code_cli_history(
+            &kimi_root,
+            store,
+            KimiCodeCliImportOptions {
+                source_path: Some(kimi_root.clone()),
+                ..KimiCodeCliImportOptions::default()
+            },
+        )
+        .unwrap();
+    };
+    reimport_all(&mut store);
     assert_eq!(provider_cursor_rows(&store), stable_cursors);
 
     for (device_id, stream, _) in provider_cursor_rows(&store) {
@@ -992,22 +1100,90 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
             .get_sync_cursor(None, &device_id, &stream)
             .unwrap()
             .unwrap();
-        let mut wire: serde_json::Value = serde_json::from_str(&cursor.cursor).unwrap();
-        wire["o"] = json!(4);
-        cursor.cursor = serde_json::to_string(&wire).unwrap();
+        let mut envelope = serde_json::from_str::<Value>(&cursor.cursor).unwrap();
+        assert_eq!(envelope["version"].as_u64(), Some(1));
+        let provider_cursor = envelope["provider_cursor"].as_str().unwrap();
+        let mut provider_wire = serde_json::from_str::<Value>(provider_cursor).unwrap();
+        if stream.starts_with("provider:codebuddy:") {
+            assert_eq!(provider_wire["version"].as_u64(), Some(1));
+            assert_eq!(provider_wire["shape"].as_str(), Some("cli"));
+            provider_wire["source_revision"] = json!("stale-codebuddy-source-revision");
+        } else if stream.starts_with("provider:mistral_vibe:") {
+            assert_eq!(provider_wire["version"].as_u64(), Some(1));
+            assert_eq!(
+                provider_wire["kind"].as_str(),
+                Some("mistral-vibe-nativepath")
+            );
+            assert_eq!(
+                provider_wire["checkpoint"]["capture_revision"].as_u64(),
+                Some(4)
+            );
+            assert_eq!(
+                provider_wire["checkpoint"]["policy_revision"].as_u64(),
+                Some(8)
+            );
+            provider_wire["checkpoint"]["policy_revision"] = json!(7);
+        } else if stream.starts_with("provider:openclaw:") {
+            assert_eq!(provider_wire["version"].as_u64(), Some(1));
+            assert_eq!(
+                provider_wire["kind"].as_str(),
+                Some("openclaw-nativepath-jsonl")
+            );
+            assert_eq!(
+                provider_wire["checkpoint"]["parser_revision"].as_u64(),
+                Some(1)
+            );
+            assert_eq!(
+                provider_wire["checkpoint"]["policy_revision"].as_u64(),
+                Some(1)
+            );
+            provider_wire["checkpoint"]["policy_revision"] = json!(0);
+        } else if stream.starts_with("provider:kimi_code_cli:") {
+            assert_eq!(provider_wire["v"].as_u64(), Some(1));
+            assert_eq!(provider_wire["p"].as_u64(), Some(5));
+            assert_eq!(provider_wire["o"].as_u64(), Some(7));
+            provider_wire["o"] = json!(6);
+        } else {
+            panic!("unexpected four-provider cursor stream: {stream}");
+        }
+        envelope["provider_cursor"] = Value::String(serde_json::to_string(&provider_wire).unwrap());
+        cursor.cursor = serde_json::to_string(&envelope).unwrap();
         store.upsert_sync_cursor(&cursor).unwrap();
     }
 
-    import_codebuddy_history(
-        &codebuddy_root,
-        &mut store,
-        CodeBuddyImportOptions {
-            source_path: Some(codebuddy_root.clone()),
-            ..CodeBuddyImportOptions::default()
-        },
-    )
-    .unwrap();
-    import_mistral_vibe_history(
+    assert_ne!(provider_cursor_rows(&store), stable_cursors);
+    reimport_all(&mut store);
+    let repaired_provider_cursors = provider_cursor_payload_rows(&store);
+    assert_eq!(
+        repaired_provider_cursors.len(),
+        stable_provider_cursors.len()
+    );
+    for ((stream, repaired), (stable_stream, stable)) in repaired_provider_cursors
+        .iter()
+        .zip(&stable_provider_cursors)
+    {
+        assert_eq!(stream, stable_stream);
+        if stream.starts_with("provider:mistral_vibe:") {
+            let repaired = serde_json::from_str::<Value>(repaired).unwrap();
+            let stable = serde_json::from_str::<Value>(stable).unwrap();
+            assert_eq!(repaired["checkpoint"]["policy_revision"].as_u64(), Some(8));
+            assert_eq!(
+                repaired["checkpoint"]["generation"], stable["checkpoint"]["generation"],
+                "Mistral Vibe policy upgrade must preserve the source generation"
+            );
+        }
+        assert_eq!(
+            repaired, stable,
+            "policy repair did not reconstruct the canonical cursor for {stream}"
+        );
+    }
+    assert_eq!(
+        provider_identity_snapshot(&store, CaptureProvider::MistralVibe),
+        stable_mistral_identity,
+        "Mistral Vibe locator repair must not add or replace sources, sessions, or events"
+    );
+    let upgraded_cursors = provider_cursor_rows(&store);
+    let no_op = import_mistral_vibe_history(
         &mistral_root,
         &mut store,
         MistralVibeImportOptions {
@@ -1016,45 +1192,23 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
         },
     )
     .unwrap();
-    import_openclaw_history(
-        &openclaw_root,
-        &mut store,
-        OpenClawImportOptions {
-            source_path: Some(openclaw_root.clone()),
-            ..OpenClawImportOptions::default()
-        },
-    )
-    .unwrap();
-    import_kimi_code_cli_history(
-        &kimi_root,
-        &mut store,
-        KimiCodeCliImportOptions {
-            source_path: Some(kimi_root.clone()),
-            ..KimiCodeCliImportOptions::default()
-        },
-    )
-    .unwrap();
-    let mut policy_revisions = provider_cursor_rows(&store)
-        .iter()
-        .map(|(_, _, cursor)| {
-            let wire = serde_json::from_str::<serde_json::Value>(cursor).unwrap();
-            wire.get("provider_cursor")
-                .and_then(serde_json::Value::as_str)
-                .map(|provider_cursor| {
-                    serde_json::from_str::<serde_json::Value>(provider_cursor).unwrap()
-                        ["checkpoint"]["policy_revision"]
-                        .as_u64()
-                        .unwrap()
-                })
-                .unwrap_or_else(|| wire["o"].as_u64().unwrap())
-        })
-        .collect::<Vec<_>>();
-    policy_revisions.sort_unstable();
-    assert_eq!(policy_revisions, vec![5, 6, 6, 7]);
+    assert_eq!(no_op.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(provider_cursor_rows(&store), upgraded_cursors);
+    reimport_all(&mut store);
+    assert_eq!(provider_cursor_rows(&store), upgraded_cursors);
+    assert_eq!(
+        provider_identity_snapshot(&store, CaptureProvider::MistralVibe),
+        stable_mistral_identity
+    );
+
     for (provider, event_id, locator_value) in stable_events {
         let rebuilt = persisted_request_for_provider(&store, provider);
-        assert_eq!(rebuilt.event_id, event_id);
-        assert_eq!(rebuilt.source_locator.unwrap().value(), locator_value);
+        assert_eq!(rebuilt.event_id, event_id, "provider {provider:?}");
+        assert_eq!(
+            rebuilt.source_locator.unwrap().value(),
+            locator_value,
+            "provider {provider:?}"
+        );
     }
 
     for (provider, expected) in [
@@ -1067,7 +1221,9 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
         assert!(JsonlCompleteContentResolver::new().supports(provider, &request.source_format));
         let recovered = JsonlCompleteContentResolver::new()
             .resolve(std::slice::from_ref(&request))
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("complete-content recovery failed for {provider:?}: {error:?}")
+            });
         assert_eq!(recovered[0].text, expected, "provider {provider:?}");
         if provider == CaptureProvider::CodeBuddy {
             let mut malformed = request.clone();

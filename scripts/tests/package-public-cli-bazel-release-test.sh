@@ -19,6 +19,7 @@ runfiles="${test_root}/runfiles"
 route_runfiles="${runfiles}/_main/ctx_release_routes/linux-x64"
 mkdir -p \
   "${repo}/scripts" \
+  "${repo}/scripts/release" \
   "${repo}/contracts" \
   "${repo}/crates/ctx-cli" \
   "${repo}/tests/fixtures/custom-history-jsonl" \
@@ -33,6 +34,11 @@ cp "${source_root}/scripts/write-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/check-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/install-public-cli-candidate.py" "${repo}/scripts/"
 cp "${source_root}/scripts/release-sbom.py" "${repo}/scripts/"
+cp "${source_root}/scripts/release/public-cli-bazel-build-info.py" \
+  "${repo}/scripts/release/"
+cp "${source_root}/scripts/release/linux-bazel-release.Dockerfile" \
+  "${repo}/scripts/release/"
+cp "${source_root}/.bazelversion" "${repo}/.bazelversion"
 cp "${source_root}/Cargo.lock" "${repo}/Cargo.lock"
 cp "${source_root}/MODULE.bazel" "${repo}/MODULE.bazel"
 cp "${source_root}/MODULE.bazel.lock" "${repo}/MODULE.bazel.lock"
@@ -163,6 +169,10 @@ PY
 chmod 0755 "${artifact}"
 build_info="${repo}/inputs/linux-x64.build-info.json"
 builder_digest="sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982"
+builder_recipe_sha256="$(
+  sha256sum "${repo}/scripts/release/linux-bazel-release.Dockerfile" \
+    | awk '{print $1}'
+)"
 
 python3 "${repo}/scripts/write-public-cli-build-info.py" \
   --output "${build_info}" \
@@ -176,7 +186,7 @@ python3 "${repo}/scripts/write-public-cli-build-info.py" \
   --expected-builder-base "${builder_digest}" \
   --actual-builder-base "${builder_digest}" \
   --builder-image-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-  --builder-recipe-sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  --builder-recipe-sha256 "${builder_recipe_sha256}" \
   --runtime-image-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" \
   --inspector-image-id "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" \
   --linux-builder-image "docker.io/library/ubuntu:22.04@${builder_digest}" \
@@ -188,6 +198,35 @@ python3 "${repo}/scripts/write-public-cli-build-info.py" \
   --static-status passed \
   --local-runtime-status passed \
   --local-runtime-authority authoritative
+python3 - "${build_info}" "${repo}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+value = json.loads(path.read_bytes())
+value["build_system"] = "bazel"
+value["release_version"] = "0.26.0"
+value["bazel"] = {
+    "module_file_sha256": hashlib.sha256(
+        (repo / "MODULE.bazel").read_bytes()
+    ).hexdigest(),
+    "module_lock_sha256": hashlib.sha256(
+        (repo / "MODULE.bazel.lock").read_bytes()
+    ).hexdigest(),
+    "release_target_matrix_sha256": hashlib.sha256(
+        (repo / "contracts/release-targets-v1.json").read_bytes()
+    ).hexdigest(),
+    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-10)",
+    "version": (repo / ".bazelversion").read_text(encoding="ascii").strip(),
+}
+path.write_text(
+    json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
 
 ln -s "${artifact}" "${route_runfiles}/artifact"
 ln -s "${repo}/inputs/rustc" "${route_runfiles}/rustc"
@@ -238,6 +277,32 @@ python3 -I "${repo}/scripts/release-sbom.py" verify \
   --sbom "${repo}/out-success/ctx.cdx.json" >/dev/null
 test "$(sha256sum "${repo}/out-success/ctx" | awk '{print $1}')" \
   = "$(cat "${repo}/out-success/ctx.sha256")"
+
+bad_bazel_build_info="${repo}/inputs/linux-x64.bad-bazel.build-info.json"
+python3 - "${build_info}" "${bad_bazel_build_info}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+value = json.loads(source.read_bytes())
+value["bazel"]["module_lock_sha256"] = "f" * 64
+destination.write_text(
+    json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+accepted_build_info="${build_info}"
+build_info="${bad_bazel_build_info}"
+if package --output-dir out-bad-bazel-build-info \
+  >"${test_root}/bad-bazel.stdout" 2>"${test_root}/bad-bazel.stderr"; then
+  echo "mismatched Bazel build-info unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq 'does not match the exact source, version, target, toolchain' \
+  "${test_root}/bad-bazel.stderr"
+build_info="${accepted_build_info}"
 
 if package --output-dir out-duplicate \
   --declared-artifact-runfile ctx_release_routes/linux-x64/artifact \

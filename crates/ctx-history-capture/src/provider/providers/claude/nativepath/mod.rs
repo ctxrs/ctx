@@ -21,26 +21,16 @@ pub(crate) use source::{
 pub(crate) use vertical::import_claude_nativepath_projects;
 
 #[cfg(test)]
-pub(crate) use checkpoint::{ChangeSignal, ClaudeNativeFrontier};
+pub(crate) use checkpoint::ChangeSignal;
 #[cfg(test)]
-pub(crate) use reader::{
-    parse_session, ClaudeNativePageIdentity, ClaudeNativePageReceipt,
-    ClaudeNativeProOutputPageIdentity, ClaudeNativeProOutputPageReceipt, ClaudePageCertificate,
-    IncompleteTail, ParseOutput,
-};
+pub(crate) use reader::{parse_session, ParseOutput};
 #[cfg(test)]
 pub(crate) use rows::{
-    ClaudeEventIdentity, ClaudeFileTouch, ClaudeNativeOrder, ClaudeOutputOutcome,
-    ClaudePhysicalLocator, ClaudeRowPage, ClaudeSparseOutputDiagnostic, ParseStats,
-    RecordRejection, RejectionKind, RejectionSummary, ToolCallRequest, CLAUDE_MAX_PAGE_BYTES,
-    CLAUDE_MAX_PAGE_ROWS, CLAUDE_MAX_REJECTION_SAMPLES,
+    ClaudeOutputOutcome, ClaudePhysicalLocator, RecordRejection, RejectionKind,
+    CLAUDE_MAX_PAGE_BYTES, CLAUDE_MAX_PAGE_ROWS, CLAUDE_MAX_REJECTION_SAMPLES,
 };
 #[cfg(test)]
-pub(crate) use source::{
-    authoritative_deletion_candidates, ClaudeDeletionCandidate, ClaudeDiscovery,
-    ClaudeDiscoveryStats, ClaudeFileFingerprint, ClaudeInventoryCertificate, ClaudeSessionKey,
-    ClaudeSourceLifecycle,
-};
+pub(crate) use source::{authoritative_deletion_candidates, ClaudeSourceLifecycle};
 
 #[cfg(test)]
 mod tests;

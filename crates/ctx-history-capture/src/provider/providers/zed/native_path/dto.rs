@@ -220,6 +220,7 @@ impl fmt::Debug for ZedNativeOutputIndex {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) struct ZedNativeGenerationAuthority {
     pub(super) source_complete: bool,
     pub(super) zero_native_rows: bool,
@@ -252,6 +253,7 @@ pub(crate) struct ZedNativeIncomplete {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) enum ZedNativeScanOutcome {
     Complete(Box<ZedNativeGenerationAuthority>),
     Incomplete(Box<ZedNativeIncomplete>),

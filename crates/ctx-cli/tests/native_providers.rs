@@ -80,9 +80,14 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "{first:#}"
         );
         if stored_provider == "mux" {
+            let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
             assert_eq!(
-                first["totals"]["imported_sessions"], 2,
-                "manifested Mux files must reuse one source-scoped parent session: {first:#}"
+                sqlite_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'mux'"
+                ),
+                2,
+                "manifested Mux files must reuse one canonical source-scoped parent session"
             );
         }
 
@@ -135,11 +140,13 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         default_query,
         "--provider",
         "mimo-code",
+        "--refresh",
+        "wait",
         "--json",
     ]));
     let freshness_mode = search["freshness"]["mode"].as_str().unwrap();
-    assert!(
-        matches!(freshness_mode, "auto" | "background"),
+    assert_eq!(
+        freshness_mode, "wait",
         "unexpected freshness mode in {search:#}"
     );
     assert_eq!(search["freshness"]["status"], "completed");
@@ -154,7 +161,8 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         search["freshness"]["totals"]["imported_events"]
             .as_u64()
             .unwrap()
-            >= 1
+            >= 1,
+        "expected MiMo refresh events in {search:#}"
     );
     assert_search_provider_oracle(&search, "mimocode", default_query, 1, "message");
 
@@ -1578,14 +1586,14 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "cline_task_directory_json"
     );
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_eq!(imported["totals"]["imported_events"], 4);
     assert_eq!(imported["totals"]["rejected_records"], 0);
 
     let second =
         json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped_events"], 3);
+    assert_eq!(second["totals"]["skipped_events"], 0);
 
     let search =
         json_output(ctx(&temp).args(["search", "parser note", "--provider", "cline", "--json"]));
@@ -1607,7 +1615,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "roo_task_directory_json"
     );
     assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 5);
+    assert_eq!(imported["totals"]["imported_events"], 6);
     assert_eq!(imported["totals"]["rejected_records"], 0);
 
     let search = json_output(ctx(&temp).args([

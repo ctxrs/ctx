@@ -17,7 +17,7 @@ use crate::provider::codex::events::{
 };
 use crate::provider::providers::native_jsonl::{
     native_jsonl_event_id, native_jsonl_event_text, native_jsonl_event_type,
-    native_jsonl_normalized_payload,
+    native_jsonl_normalized_payload, qoder_complete_content_message_record,
 };
 use crate::{
     compute_payload_hash, CODEBUDDY_SOURCE_FORMAT, CODEX_SESSION_SOURCE_FORMAT,
@@ -334,6 +334,9 @@ fn complete_message_text_and_id(
     }
     if provider == CaptureProvider::KimiCodeCli && source_format == KIMI_CODE_CLI_SOURCE_FORMAT {
         return crate::provider::providers::kimi::kimi_complete_content_record(value, line_number);
+    }
+    if provider == CaptureProvider::Qoder && source_format == crate::QODER_SOURCE_FORMAT {
+        return qoder_complete_content_message_record(value, line_number);
     }
     if provider == CaptureProvider::Junie && source_format == JUNIE_SESSION_EVENTS_SOURCE_FORMAT {
         if value.get("kind").and_then(Value::as_str) != Some("UserPromptEvent") {

@@ -509,6 +509,9 @@ impl JunieStoreCursor {
     }
 }
 
+// Keep the decoded native cursor inline with its stored sync cursor: this short-lived
+// planning value mirrors the persisted cursor variants and is consumed immediately.
+#[allow(clippy::large_enum_variant)]
 enum CursorOrigin {
     Fresh,
     Native {
@@ -792,7 +795,7 @@ struct ParsedTurn {
 }
 
 fn timestamp(millis: i64) -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or_else(|| DateTime::<Utc>::UNIX_EPOCH)
+    DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
 fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn> {
@@ -1400,7 +1403,7 @@ fn output_failure_event(
             "exit_code": step.exit_code,
             "duration_ms": step.duration_ms,
             "timed_out": timed_out,
-            "result_outcome": if timed_out { "failure" } else { "failure" },
+            "result_outcome": "failure",
         }),
         metadata: json!({
             "source": "junie_step_details",
@@ -2039,9 +2042,11 @@ fn import_core_source(
         && plan.cursor.observed_length == observation.events_file.length
         && plan.cursor.frontier.offset == observation.events_file.length
     {
-        let mut summary = ProviderImportSummary::default();
-        summary.skipped_sessions = 1;
-        summary.skipped = 1;
+        let mut summary = ProviderImportSummary {
+            skipped_sessions: 1,
+            skipped: 1,
+            ..ProviderImportSummary::default()
+        };
         summary.set_work_result(ProviderImportWorkResult::NoOp);
         return Ok(summary);
     }

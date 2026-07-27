@@ -183,6 +183,9 @@ enum CrushStoredCursor {
     ReleasedLegacy,
 }
 
+// Native SQLite row shapes are intentionally decoded into one page-owned
+// value; boxing the larger message variant would add allocation per row.
+#[allow(clippy::large_enum_variant)]
 enum CrushNativeRow {
     Session {
         row: CrushSessionRow,

@@ -1,6 +1,11 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    os::unix::fs::symlink,
+    ffi::OsStr,
+    fs::OpenOptions,
+    io::{BufRead as _, BufReader, Write as _},
+    os::unix::fs::{symlink, OpenOptionsExt as _},
+    path::{Path, PathBuf},
+    process::{Child, ChildStdout, Command, Stdio},
     sync::{Arc, Barrier, Mutex},
 };
 
@@ -15,6 +20,12 @@ use super::super::{
     ENTITLEMENT_SCHEMA_VERSION, PROTOCOL_VERSION,
 };
 use super::*;
+
+const HELPER_MODE_ENV: &str = "CTX_TEST_LINUX_CREDENTIAL_VAULT_HELPER";
+const HELPER_RESULT_ENV: &str = "CTX_TEST_LINUX_CREDENTIAL_VAULT_RESULT";
+const HELPER_DATA_ROOT_ENV: &str = "CTX_TEST_LINUX_CREDENTIAL_VAULT_DATA_ROOT";
+const HELPER_TEST_NAME: &str =
+    "pro::credential_vault::linux::tests::platform_credential_vault_subprocess_helper";
 
 #[derive(Debug, Clone, Copy)]
 enum AdapterMode {
@@ -251,6 +262,139 @@ fn no_dbus_adapter_persists_all_public_activation_records_in_file_vault() -> any
         assert_eq!(metadata.nlink(), 1);
     }
     Ok(())
+}
+
+#[test]
+fn live_session_bus_without_provider_selects_persistent_file_vault() -> anyhow::Result<()> {
+    let bus = TestSessionBus::start()?;
+    let root = test_root();
+    let results = test_root();
+    let first = results.path().join("first");
+    let second = results.path().join("second");
+    run_platform_helper(root.path(), &first, &bus.address)?;
+    run_platform_helper(root.path(), &second, &bus.address)?;
+    assert_eq!(fs::read(first)?, fs::read(second)?);
+    assert_eq!(
+        fs::read(root.path().join("pro").join(BACKEND_MARKER))?,
+        FILE_SELECTION
+    );
+    Ok(())
+}
+
+#[test]
+fn platform_credential_vault_subprocess_helper() -> anyhow::Result<()> {
+    if std::env::var_os(HELPER_MODE_ENV).as_deref() != Some(OsStr::new("load-or-store")) {
+        return Ok(());
+    }
+    let data_root = std::env::var_os(HELPER_DATA_ROOT_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("missing credential-vault helper data root"))?;
+    let result_path = std::env::var_os(HELPER_RESULT_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("missing credential-vault helper result path"))?;
+    let record_id = ids(CredentialVaultNamespace::Production)
+        .get(CredentialRecordKind::InstallationSigningKey)
+        .to_owned();
+    let secret = PlatformBackend::production(&data_root).load_or_store(&record_id, &[0x47; 32])?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .open(result_path)?;
+    output.write_all(secret.as_slice())?;
+    output.sync_all()?;
+    Ok(())
+}
+
+fn run_platform_helper(
+    data_root: &Path,
+    result_path: &Path,
+    bus_address: &str,
+) -> anyhow::Result<()> {
+    let runtime_dir = result_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing credential-vault helper runtime directory"))?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg(HELPER_TEST_NAME)
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(HELPER_MODE_ENV, "load-or-store")
+        .env(HELPER_DATA_ROOT_ENV, data_root)
+        .env(HELPER_RESULT_ENV, result_path)
+        .env("DBUS_SESSION_BUS_ADDRESS", bus_address)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .spawn()?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "credential-vault helper exited with {status}"
+        ));
+    }
+    Ok(())
+}
+
+struct TestSessionBus {
+    child: Child,
+    _stdout: ChildStdout,
+    _root: tempfile::TempDir,
+    address: String,
+}
+
+impl TestSessionBus {
+    fn start() -> anyhow::Result<Self> {
+        let root = test_root();
+        let config = root.path().join("session.conf");
+        fs::write(
+            &config,
+            br#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <keep_umask/>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"#,
+        )?;
+        let mut child = Command::new("dbus-daemon")
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--nopidfile", "--print-address=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("dbus-daemon did not expose stdout"))?;
+        let mut address = String::new();
+        BufReader::new(&mut stdout).read_line(&mut address)?;
+        let address = address.trim().to_owned();
+        if address.is_empty() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::anyhow!("dbus-daemon returned an empty address"));
+        }
+        Ok(Self {
+            child,
+            _stdout: stdout,
+            _root: root,
+            address,
+        })
+    }
+}
+
+impl Drop for TestSessionBus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 #[test]

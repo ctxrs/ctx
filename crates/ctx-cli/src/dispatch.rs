@@ -1,4 +1,4 @@
-use std::{env, process::ExitCode, time::Instant};
+use std::{env, io::Write as _, process::ExitCode, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -20,12 +20,12 @@ use crate::{
         show::run_show,
         sources::run_sources,
         sql::run_sql,
-        status::run_status,
+        status::{malformed_config_failure, run_status, run_usage_action},
     },
     complete_content,
     config::AppConfig,
     deprecated_controls::DeprecatedControls,
-    docs, integrations, mcp,
+    docs, integrations, local_usage, mcp,
     output::{LocateFormat, OutputFormat, SqlFormat},
     pro, semantic, upgrade,
 };
@@ -34,10 +34,20 @@ use crate::{
 #[error("JSON error was already rendered")]
 struct RenderedJsonError;
 
+#[derive(Debug, thiserror::Error)]
+#[error("CLI error was already rendered")]
+pub(crate) struct RenderedCliError;
+
+pub(crate) fn rendered_cli_error() -> anyhow::Error {
+    RenderedCliError.into()
+}
+
 pub(crate) fn run() -> ExitCode {
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) if error.is::<RenderedJsonError>() => ExitCode::FAILURE,
+        Err(error) if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() => {
+            ExitCode::FAILURE
+        }
         Err(error) => {
             eprintln!("Error: {error:?}");
             ExitCode::FAILURE
@@ -55,9 +65,10 @@ pub(crate) fn run_cli() -> Result<()> {
         }
     }
     let json_output = command_json_output(&cli.command);
-    let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
-    let mut analytics_draft = ClientOperationDraft::from_command(&cli.command, json_output);
-    let mut provider_refreshes = ProviderRefreshCollector::default();
+    let usage_control_action = matches!(
+        &cli.command,
+        CommandRoot::Status(args) if args.usage.modifies_state()
+    );
     let quiet = quiet_output(cli.quiet);
     let data_root = cli
         .data_root
@@ -65,14 +76,31 @@ pub(crate) fn run_cli() -> Result<()> {
         .map(Ok)
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root")?;
+    if usage_control_action {
+        let CommandRoot::Status(args) = cli.command else {
+            unreachable!("usage controls are status commands");
+        };
+        return run_usage_action(args.usage, &data_root, args.json, quiet);
+    }
+    let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
+    let mut analytics_draft = ClientOperationDraft::from_command(&cli.command, json_output);
+    let mut local_usage_draft = local_usage::CliUsage::from_command(&cli.command);
+    let mut provider_refreshes = ProviderRefreshCollector::default();
     let mut config =
         match AppConfig::load_with_deprecated_controls(&data_root, &deprecated_controls) {
             Ok(config) => config,
+            Err(_) if command_is_usage_status_report(&cli.command) => {
+                return malformed_config_failure(json_output);
+            }
             Err(_) if command_can_report_malformed_config(&cli.command) => {
                 // Daemon status reads retained lifecycle/config-reload state. Keep
                 // that diagnostic available when the malformed file is itself the
                 // reload failure being diagnosed; ordinary commands remain strict.
-                AppConfig::default()
+                let mut fallback = AppConfig::default();
+                fallback.analytics.enabled = false;
+                fallback.local_usage.enabled =
+                    crate::config::resolve_local_usage_control(&data_root).effective_on_startup();
+                fallback
             }
             Err(error) => return Err(error),
         };
@@ -155,7 +183,9 @@ pub(crate) fn run_cli() -> Result<()> {
             &config,
         ),
         CommandRoot::Pro(args) => pro::run_lifecycle(args, data_root.clone()),
-        CommandRoot::Blame(args) => crate::commands::blame::run(args, data_root.clone()),
+        CommandRoot::Blame(args) => {
+            crate::commands::blame::run(args, data_root.clone(), &mut local_usage_draft)
+        }
         CommandRoot::Sql(args) => run_sql(
             args,
             data_root.clone(),
@@ -199,6 +229,34 @@ pub(crate) fn run_cli() -> Result<()> {
         ),
     };
     let duration = started.elapsed();
+    let rendered_error = if let Err(error) = &result {
+        if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
+            Some(RenderedCliError.into())
+        } else if json_output {
+            if let Some(error) =
+                error.downcast_ref::<ctx_history_capture::complete_content::CompleteContentError>()
+            {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&complete_content::complete_content_error_json(error))?
+                );
+                Some(RenderedJsonError.into())
+            } else {
+                eprintln!("Error: {error:?}");
+                Some(RenderedCliError.into())
+            }
+        } else {
+            eprintln!("Error: {error:?}");
+            Some(RenderedCliError.into())
+        }
+    } else {
+        None
+    };
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    if let Some(operation) = local_usage_draft.completed(result.is_ok(), duration) {
+        local_usage::record_best_effort(&data_root, config.local_usage.enabled, operation);
+    }
     let mut events = provider_refreshes.finish();
     if let Some(draft) = analytics_draft {
         if draft.should_emit() {
@@ -211,18 +269,8 @@ pub(crate) fn run_cli() -> Result<()> {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
-    if json_output {
-        if let Err(error) = &result {
-            if let Some(error) =
-                error.downcast_ref::<ctx_history_capture::complete_content::CompleteContentError>()
-            {
-                eprintln!(
-                    "{}",
-                    serde_json::to_string(&complete_content::complete_content_error_json(error))?
-                );
-                return Err(RenderedJsonError.into());
-            }
-        }
+    if let Some(error) = rendered_error {
+        return Err(error);
     }
     result
 }
@@ -316,6 +364,13 @@ fn command_can_report_malformed_config(command: &CommandRoot) -> bool {
         CommandRoot::Daemon(crate::DaemonArgs {
             command: DaemonCommand::Status(_),
         })
+    ) || matches!(command, CommandRoot::Mcp(_))
+}
+
+fn command_is_usage_status_report(command: &CommandRoot) -> bool {
+    matches!(
+        command,
+        CommandRoot::Status(args) if !args.usage.modifies_state()
     )
 }
 

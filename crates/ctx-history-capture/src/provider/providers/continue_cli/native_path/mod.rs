@@ -43,6 +43,9 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+// Provider-facing error names intentionally retain their shared Source prefix
+// so discovery failures remain unambiguous at call sites.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Error)]
 pub(crate) enum ContinueNativePathError {
     #[error("failed to access Continue source `{path}`: {message}")]

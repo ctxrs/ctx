@@ -41,6 +41,8 @@ use identity::FrozenFile;
 use std::io::Read;
 
 #[cfg(test)]
+// Retain the race-injection seam for focused source-revalidation tests.
+#[allow(unused_imports)]
 pub(crate) use nanoclaw_snapshot::set_before_source_set_revalidation as set_nanoclaw_before_source_set_revalidation;
 
 #[cfg(target_os = "windows")]

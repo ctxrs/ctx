@@ -366,7 +366,7 @@ fn import_one_source(
                     options,
                     path,
                     &cursor_stream,
-                    &scanner.source_revision().to_owned(),
+                    scanner.source_revision(),
                     &core_state,
                     page,
                 )?;

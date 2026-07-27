@@ -762,9 +762,11 @@ fn register_sqlite_vec_auto_extension() -> Result<()> {
 }
 
 #[cfg(test)]
+type BeforeSqliteOpenHook = Box<dyn FnOnce(&Path) -> Result<()>>;
+
+#[cfg(test)]
 thread_local! {
-    static BEFORE_SQLITE_OPEN_HOOK:
-        std::cell::RefCell<Option<Box<dyn FnOnce(&Path) -> Result<()>>>> =
+    static BEFORE_SQLITE_OPEN_HOOK: std::cell::RefCell<Option<BeforeSqliteOpenHook>> =
         const { std::cell::RefCell::new(None) };
 }
 

@@ -47,6 +47,9 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env("CTX_DATA_ROOT", temp.path());
     command.env("HOME", temp.path());
     command.env("CTX_ANALYTICS_ENABLED", "false");
+    // Existing integration tests do not exercise local usage unless they opt in
+    // explicitly. This keeps their temporary roots and output expectations stable.
+    command.env("CTX_LOCAL_USAGE_ENABLED", "false");
     for name in [
         "CTX_ANALYTICS_OFF",
         "CTX_DISABLE_ANALYTICS",

@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -18,9 +18,22 @@ use crate::{
     ProviderImportOptions,
 };
 
-fn fixture_events() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/provider-history/junie/sessions/session-260607-100000-acme/events.jsonl")
+const FIXTURE_INDEX: &[u8] = include_bytes!(
+    "../../../../../../../tests/fixtures/provider-history/junie/sessions/index.jsonl"
+);
+const FIXTURE_EVENTS: &[u8] = include_bytes!(
+    "../../../../../../../tests/fixtures/provider-history/junie/sessions/session-260607-100000-acme/events.jsonl"
+);
+
+fn write_fixture(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("materialized fixture");
+}
+
+fn materialized_fixture_events() -> (tempfile::TempDir, PathBuf) {
+    let temp = crate::test_support_paths::tempdir().expect("temporary directory");
+    let path = temp.path().join("events.jsonl");
+    write_fixture(&path, FIXTURE_EVENTS);
+    (temp, path)
 }
 
 fn initial_frontier() -> Frontier {
@@ -47,7 +60,7 @@ fn initial_frontier() -> Frontier {
 
 #[test]
 fn successful_output_is_transient_and_absent_from_core_rows() {
-    let path = fixture_events();
+    let (_fixture, path) = materialized_fixture_events();
     let first = parse_turn(&path, &initial_frontier()).expect("first safe turn");
     assert_eq!(first.rows.len(), 1);
     assert!(first.outputs.is_empty());
@@ -76,7 +89,7 @@ fn successful_output_is_transient_and_absent_from_core_rows() {
 
 #[test]
 fn output_only_event_indexes_still_advance_the_core_frontier() {
-    let path = fixture_events();
+    let (_fixture, path) = materialized_fixture_events();
     let first = parse_turn(&path, &initial_frontier()).expect("first safe turn");
     let second = parse_turn(
         &path,
@@ -98,7 +111,7 @@ fn output_only_event_indexes_still_advance_the_core_frontier() {
 
 #[test]
 fn pending_output_page_replay_is_bound_to_the_exact_turn() {
-    let path = fixture_events();
+    let (_fixture, path) = materialized_fixture_events();
     let first = parse_turn(&path, &initial_frontier()).expect("first safe turn");
     let frontier = Frontier {
         offset: first.end_offset,
@@ -140,7 +153,7 @@ fn pending_output_page_replay_is_bound_to_the_exact_turn() {
 fn append_after_a_pending_terminal_turn_does_not_change_its_replay() {
     let temp = crate::test_support_paths::tempdir().expect("temporary directory");
     let path = temp.path().join("events.jsonl");
-    fs::copy(fixture_events(), &path).expect("fixture events");
+    write_fixture(&path, FIXTURE_EVENTS);
     let first = parse_turn(&path, &initial_frontier()).expect("first safe turn");
     let turn_frontier = Frontier {
         offset: first.end_offset,
@@ -191,14 +204,9 @@ fn native_store_path_is_idempotent_and_handles_append_rewrite_and_deletion() {
     let session_id = "session-260607-100000-acme";
     let session_dir = root.join(session_id);
     fs::create_dir_all(&session_dir).expect("session directory");
-    fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/provider-history/junie/sessions/index.jsonl"),
-        root.join("index.jsonl"),
-    )
-    .expect("fixture index");
+    write_fixture(&root.join("index.jsonl"), FIXTURE_INDEX);
     let events_path = session_dir.join("events.jsonl");
-    fs::copy(fixture_events(), &events_path).expect("fixture events");
+    write_fixture(&events_path, FIXTURE_EVENTS);
 
     let context = ProviderAdapterContext {
         machine_id: "junie-nativepath-test-machine".to_owned(),
@@ -387,13 +395,8 @@ fn pro_failure_does_not_roll_back_core_and_later_activation_replays_output() {
     let root = temp.path().join("sessions");
     let session_dir = root.join("session-260607-100000-acme");
     fs::create_dir_all(&session_dir).expect("session directory");
-    fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/provider-history/junie/sessions/index.jsonl"),
-        root.join("index.jsonl"),
-    )
-    .expect("fixture index");
-    fs::copy(fixture_events(), session_dir.join("events.jsonl")).expect("fixture events");
+    write_fixture(&root.join("index.jsonl"), FIXTURE_INDEX);
+    write_fixture(&session_dir.join("events.jsonl"), FIXTURE_EVENTS);
     let store_path = temp.path().join("history.sqlite");
     let mut store = Store::open(&store_path).expect("store");
     let context = ProviderAdapterContext {

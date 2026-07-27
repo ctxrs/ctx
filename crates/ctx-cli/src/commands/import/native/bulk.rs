@@ -31,7 +31,8 @@ pub(super) fn import_one_source_inner_at_path(
     // that whole bounded source operation. Provider groups retain their own
     // event/FTS/cursor transactions and source revalidation, while nested bulk
     // guards become in-memory depth counts instead of repeated durable
-    // maintenance handoffs.
+    // maintenance handoffs. Store epochs bind every nested publication to the
+    // one live outer lock, so this applies uniformly to every provider.
     let codex_catalog_noop = !full_rescan
         && source.provider == CaptureProvider::Codex
         && input_path.is_dir()
@@ -41,13 +42,7 @@ pub(super) fn import_one_source_inner_at_path(
                 &source.path.display().to_string(),
             )?
             .is_empty();
-    // Codex NativePath owns the real bulk guard around every Core publication.
-    // Acquiring one here as well would leave the provider with a nested guard
-    // (no lock connection, depth two), which strict group admission correctly
-    // rejects. Replay-only work does not enter the provider's Core guard.
-    let codex_nativepath_owns_bulk_guard = source.provider == CaptureProvider::Codex
-        && !matches!(import_profile, ImportProfile::ProReplayOnly(_));
-    let bulk_guard = (!codex_catalog_noop && !codex_nativepath_owns_bulk_guard)
+    let bulk_guard = (!codex_catalog_noop)
         .then(|| store.begin_event_search_bulk_mode())
         .transpose()?;
     let import_result = NativeSourceRun::new(

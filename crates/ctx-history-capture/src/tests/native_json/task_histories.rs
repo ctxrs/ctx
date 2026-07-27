@@ -43,7 +43,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     assert_eq!(cline_events.len(), 4);
     assert_event_type_count(&cline_events, EventType::ToolCall, 1);
     assert_event_type_count(&cline_events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&cline_events);
+    assert_events_have_provider_citations(&store, &cline_events);
     assert_search_hits_provider(
         &store,
         "Write a short parser note for Cline task JSON support.",
@@ -73,8 +73,8 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     .unwrap();
     assert_eq!(cline_second.imported_sessions, 0);
     assert_eq!(cline_second.imported_events, 0);
-    assert_eq!(cline_second.skipped_sessions, 1);
-    assert_eq!(cline_second.skipped_events, 4);
+    assert_eq!(cline_second.skipped_sessions, 0);
+    assert_eq!(cline_second.skipped_events, 0);
 
     let roo = provider_history_fixture("roo/storage");
     let roo_first = import_roo_task_json_history(
@@ -96,7 +96,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     assert_eq!(roo_events.len(), 4);
     assert_event_type_count(&roo_events, EventType::ToolCall, 1);
     assert_event_type_count(&roo_events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&roo_events);
+    assert_events_have_provider_citations(&store, &roo_events);
     assert_search_hits_provider(
         &store,
         "Add a Roo Code task JSON import smoke test.",
@@ -130,8 +130,8 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     .unwrap();
     assert_eq!(roo_second.imported_sessions, 0);
     assert_eq!(roo_second.imported_events, 0);
-    assert_eq!(roo_second.skipped_sessions, 2);
-    assert_eq!(roo_second.skipped_events, 6);
+    assert_eq!(roo_second.skipped_sessions, 0);
+    assert_eq!(roo_second.skipped_events, 0);
 }
 #[test]
 fn native_task_json_all_invalid_file_reports_rejection() {
@@ -234,7 +234,7 @@ fn native_roo_non_array_message_history_rejects_no_real_message() {
     assert_eq!(summary.imported_events, 0);
     assert!(summary.failures[0]
         .error
-        .contains("no real conversation message"));
+        .contains("not a top-level JSON array"));
     assert!(store
         .search_event_hits("roo non-array history should not import", 10)
         .unwrap()

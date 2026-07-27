@@ -172,8 +172,7 @@ fn clean_auto_coreml_canary_then_inference_failure_retries_provisioned_cpu() {
     };
     run_semantic_contract_canary(&mut canary).unwrap();
     assert_eq!(canary.calls, ["query", "passage"]);
-    let first_error =
-        Err::<&'static str, _>(anyhow!("forced Core ML inference failure")).unwrap_err();
+    let first_error = anyhow!("forced Core ML inference failure");
     assert!(first_error.to_string().contains("inference failure"));
 
     let coreml_called = std::cell::Cell::new(false);

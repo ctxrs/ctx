@@ -191,6 +191,11 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
         adapter: &context,
         options: &options,
     };
+    let output_authority = super::output::ZedOutputReplayAuthority::new(
+        &publication.canonical_source_identity,
+        &publication.source_revision,
+        publication.authority,
+    );
 
     if options.import_profile.is_replay_only() {
         if !plan.cursor.terminal
@@ -208,13 +213,7 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
         super::output::replay_zed_outputs_or_mark_behind(
             publication.path,
             &staging,
-            publication.authority.output_index.path(),
-            &publication.canonical_source_identity,
-            &publication.source_revision,
-            &publication.authority.snapshot_revision,
-            &publication.authority.capability_digest,
-            &publication.authority.source_integrity_digest,
-            &publication.authority.core_generation_digest,
+            &output_authority,
             options.import_profile.sink(),
         );
         return Ok(ProviderImportSummary::default());
@@ -235,13 +234,7 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
         super::output::replay_zed_outputs_or_mark_behind(
             publication.path,
             &staging,
-            publication.authority.output_index.path(),
-            &publication.canonical_source_identity,
-            &publication.source_revision,
-            &publication.authority.snapshot_revision,
-            &publication.authority.capability_digest,
-            &publication.authority.source_integrity_digest,
-            &publication.authority.core_generation_digest,
+            &output_authority,
             options.import_profile.sink(),
         );
     } else if options.capture_work_limit == CaptureWorkLimit::OneSafeGroup {

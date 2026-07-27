@@ -11,8 +11,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use ctx_history_capture::{
-    provider_source_spec, CaptureError, CatalogSummary, ImportProfile, ProviderImportSummary,
-    ProviderImportWorkResult,
+    provider_source_spec, CaptureError, CaptureWorkLimit, CatalogSummary, ImportProfile,
+    ProviderImportSummary, ProviderImportWorkResult,
 };
 use ctx_history_core::database_path;
 use ctx_history_store::{SourceImportFile, Store, StoreError};
@@ -136,7 +136,9 @@ impl CanonicalProSourceProgression for crate::pro::ProOutputImport {
 /// committed change or returned an error after possibly committing one or more
 /// NativePath pages. A successful no-op cannot have advanced the journal and is
 /// skipped. Output-Pro remains independently replayable.
-pub(crate) fn progress_canonical_pro_after_core_source_attempt<P: CanonicalProSourceProgression>(
+pub(crate) fn progress_canonical_pro_after_core_source_attempt<
+    P: CanonicalProSourceProgression + ?Sized,
+>(
     pro_output: Option<&mut P>,
     successful_summary: Option<&ProviderImportSummary>,
 ) {
@@ -148,6 +150,62 @@ pub(crate) fn progress_canonical_pro_after_core_source_attempt<P: CanonicalProSo
     if let Some(pro_output) = pro_output {
         pro_output.progress_to_committed_core_frontier();
     }
+}
+
+/// Runs custom-history NativePath imports one committed Core group at a time.
+/// Foreground callers still drain the source, while background callers retain
+/// their one-group scheduling bound. Bounded attempts also give terminal
+/// upstream-cursor commits an independent bulk-search lifecycle.
+///
+/// Each bounded attempt advances canonical Pro after Core returns, including
+/// errors that may follow a durable Core commit. Successful no-ops skip the
+/// frontier check. The progression contract is intentionally best-effort, so
+/// neither canonical-Pro nor output-Pro failure can replace the Core result.
+pub(crate) fn import_custom_history_with_canonical_pro_progression<
+    P: CanonicalProSourceProgression + ?Sized,
+    F,
+>(
+    requested_work_limit: CaptureWorkLimit,
+    pro_output: Option<&mut P>,
+    mut import_attempt: F,
+) -> Result<ProviderImportSummary>
+where
+    F: FnMut(CaptureWorkLimit) -> Result<ProviderImportSummary>,
+{
+    let attempt_work_limit = CaptureWorkLimit::OneSafeGroup;
+    let drain_bounded_attempts = requested_work_limit == CaptureWorkLimit::Drain;
+    let mut pro_output = pro_output;
+    let mut aggregate = None::<ProviderImportSummary>;
+
+    loop {
+        let result = import_attempt(attempt_work_limit);
+        progress_canonical_pro_after_core_source_attempt(
+            pro_output.as_deref_mut(),
+            result.as_ref().ok(),
+        );
+        let mut summary = result?;
+        let work_remaining = summary.work_remaining;
+        if let Some(aggregate) = aggregate.as_mut() {
+            // Validation failures describe the complete input and repeat on
+            // every bounded parse. Keep the latest snapshot while merging
+            // only page-local Core accounting.
+            let failed = summary.failed;
+            let failures = std::mem::take(&mut summary.failures);
+            summary.failed = 0;
+            aggregate.work_remaining = false;
+            aggregate.merge_from(summary);
+            aggregate.failed = failed;
+            aggregate.failures = failures;
+            aggregate.work_remaining = work_remaining;
+        } else {
+            aggregate = Some(summary);
+        }
+        if !drain_bounded_attempts || !work_remaining {
+            break;
+        }
+    }
+
+    Ok(aggregate.unwrap_or_default())
 }
 
 pub(crate) fn resume_mode_name(resume: bool) -> &'static str {
@@ -260,17 +318,11 @@ pub(crate) enum SourcePreinventory {
 }
 
 impl SourcePreinventory {
-    pub(crate) fn codex_session_catalog(&self) -> Option<&CatalogSummary> {
-        match self {
-            Self::CodexSessionCatalog(summary) => Some(summary),
-            Self::None | Self::SourceImportManifest | Self::SourceRoot(_) => None,
-        }
-    }
-
     pub(crate) fn source_root_file(&self) -> Option<&SourceImportFile> {
         match self {
             Self::SourceRoot(file) => Some(file),
-            Self::None | Self::CodexSessionCatalog(_) | Self::SourceImportManifest => None,
+            Self::CodexSessionCatalog(_catalog) => None,
+            Self::None | Self::SourceImportManifest => None,
         }
     }
 }
@@ -477,6 +529,8 @@ fn run_import_internal_with_pro_output(
         ProviderRefreshSourceMode::Discovered
     };
 
+    let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
+
     if let Some(format) = args.format {
         return run_explicit_format_import(ExplicitFormatImportContext {
             args,
@@ -487,10 +541,10 @@ fn run_import_internal_with_pro_output(
             provider_refreshes,
             refresh_trigger,
             options,
+            pro_output,
         });
     }
 
-    let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
     let requests = import_requests(args)?;
     let plugin_requests = history_source_plugin_import_requests(
         args,
@@ -624,6 +678,9 @@ fn run_import_internal_with_pro_output(
             &plugin_source,
             &data_root,
             args.reset_cursor,
+            CaptureWorkLimit::Drain,
+            &import_profile,
+            pro_output.as_mut(),
         ) {
             Ok((summary, stats)) => {
                 totals.add(&summary, &stats);
@@ -1214,15 +1271,27 @@ fn complete_pro_output_inventory(
 #[cfg(test)]
 mod pro_output_inventory_tests {
     use super::*;
+    use std::io::Cursor;
+
+    use ctx_history_capture::{
+        import_custom_history_jsonl_v1_reader, CustomHistoryJsonlV1ImportOptions,
+    };
+    use serde_json::json;
+    use tempfile::tempdir;
 
     #[derive(Default)]
     struct TestCanonicalProProgression {
         frontier_checks: usize,
+        fail: bool,
+        behind: bool,
     }
 
     impl CanonicalProSourceProgression for TestCanonicalProProgression {
         fn progress_to_committed_core_frontier(&mut self) {
             self.frontier_checks += 1;
+            if self.fail {
+                self.behind = true;
+            }
         }
     }
 
@@ -1233,12 +1302,16 @@ mod pro_output_inventory_tests {
 
     #[test]
     fn failed_or_incomplete_inventory_cannot_finish() {
-        let mut failed = ImportTotals::default();
-        failed.failed_sources = 1;
+        let failed = ImportTotals {
+            failed_sources: 1,
+            ..ImportTotals::default()
+        };
         assert!(!output_inventory_can_finish(true, &failed));
 
-        let mut incomplete = ImportTotals::default();
-        incomplete.capture_work_remaining = true;
+        let incomplete = ImportTotals {
+            capture_work_remaining: true,
+            ..ImportTotals::default()
+        };
         assert!(!output_inventory_can_finish(true, &incomplete));
         assert!(!output_inventory_can_finish(
             false,
@@ -1258,5 +1331,162 @@ mod pro_output_inventory_tests {
         progress_canonical_pro_after_core_source_attempt(Some(&mut progression), None);
 
         assert_eq!(progression.frontier_checks, 2);
+    }
+
+    #[test]
+    fn custom_foreground_import_progresses_each_bounded_core_page() {
+        let mut progression = TestCanonicalProProgression::default();
+        let mut attempts = 0_usize;
+        let mut work_limits = Vec::new();
+
+        let summary = import_custom_history_with_canonical_pro_progression(
+            CaptureWorkLimit::Drain,
+            Some(&mut progression),
+            |work_limit| {
+                work_limits.push(work_limit);
+                attempts += 1;
+                let mut summary = ProviderImportSummary::default();
+                summary.imported = 1;
+                summary.work_remaining = attempts == 1;
+                Ok(summary)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            work_limits,
+            vec![
+                CaptureWorkLimit::OneSafeGroup,
+                CaptureWorkLimit::OneSafeGroup
+            ]
+        );
+        assert_eq!(progression.frontier_checks, 2);
+        assert_eq!(summary.imported, 2);
+        assert!(!summary.work_remaining);
+    }
+
+    #[test]
+    fn custom_nativepath_multi_page_import_progresses_after_each_core_page() {
+        let temp = tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let mut records = vec![
+            json!({
+                "record_type": "manifest",
+                "schema_version": "ctx-history-jsonl-v1",
+            })
+            .to_string(),
+            json!({
+                "record_type": "source",
+                "source_id": "multi-page",
+                "provider_key": "multi-page-agent",
+                "source_format": "multi-page-v1",
+            })
+            .to_string(),
+            json!({
+                "record_type": "session",
+                "source_id": "multi-page",
+                "session_id": "session",
+                "started_at": "2026-07-25T12:00:00Z",
+            })
+            .to_string(),
+        ];
+        records.extend((0_u64..130).map(|event_index| {
+            json!({
+                "record_type": "event",
+                "source_id": "multi-page",
+                "session_id": "session",
+                "event_index": event_index,
+                "event_type": "message",
+                "role": "assistant",
+                "occurred_at": "2026-07-25T12:00:01Z",
+                "payload": {"text": format!("event {event_index}")},
+            })
+            .to_string()
+        }));
+        let input = records.join("\n");
+        let options = CustomHistoryJsonlV1ImportOptions {
+            source_path: Some(temp.path().join("multi-page.jsonl")),
+            ..CustomHistoryJsonlV1ImportOptions::default()
+        };
+        let mut progression = TestCanonicalProProgression::default();
+
+        let summary = import_custom_history_with_canonical_pro_progression(
+            CaptureWorkLimit::Drain,
+            Some(&mut progression),
+            |capture_work_limit| {
+                import_custom_history_jsonl_v1_reader(
+                    Cursor::new(input.as_bytes()),
+                    &mut store,
+                    CustomHistoryJsonlV1ImportOptions {
+                        capture_work_limit,
+                        ..options.clone()
+                    },
+                )
+                .map_err(anyhow::Error::from)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 130);
+        assert!(progression.frontier_checks > 1);
+        assert!(!summary.work_remaining);
+    }
+
+    #[test]
+    fn custom_import_no_op_skips_canonical_pro_progression() {
+        let mut progression = TestCanonicalProProgression::default();
+
+        let summary = import_custom_history_with_canonical_pro_progression(
+            CaptureWorkLimit::Drain,
+            Some(&mut progression),
+            |work_limit| {
+                assert_eq!(work_limit, CaptureWorkLimit::OneSafeGroup);
+                Ok(ProviderImportSummary::default())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.work_result(), ProviderImportWorkResult::NoOp);
+        assert_eq!(progression.frontier_checks, 0);
+    }
+
+    #[test]
+    fn custom_import_preserves_core_success_when_pro_progression_fails() {
+        let mut progression = TestCanonicalProProgression {
+            fail: true,
+            ..TestCanonicalProProgression::default()
+        };
+
+        let summary = import_custom_history_with_canonical_pro_progression(
+            CaptureWorkLimit::Drain,
+            Some(&mut progression),
+            |_| {
+                let mut summary = ProviderImportSummary::default();
+                summary.imported = 1;
+                Ok(summary)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.imported, 1);
+        assert_eq!(progression.frontier_checks, 1);
+        assert!(progression.behind);
+    }
+
+    #[test]
+    fn custom_import_checks_canonical_frontier_after_failed_core_attempt() {
+        let mut progression = TestCanonicalProProgression::default();
+
+        let error = import_custom_history_with_canonical_pro_progression(
+            CaptureWorkLimit::Drain,
+            Some(&mut progression),
+            |_| Err(anyhow!("injected post-commit failure")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected post-commit failure");
+        assert_eq!(progression.frontier_checks, 1);
     }
 }

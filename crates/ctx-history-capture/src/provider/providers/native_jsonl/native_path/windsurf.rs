@@ -33,7 +33,8 @@ use crate::{
 };
 
 use super::{
-    decode_direct_jsonl_native_cursor, encode_direct_jsonl_cursor,
+    committed_direct_jsonl_replay_authority, decode_direct_jsonl_native_cursor,
+    direct_jsonl_checkpoint_is_covered_by, encode_direct_jsonl_cursor,
     import_direct_native_jsonl_tree_core, open_direct_jsonl_pages,
     reader::direct_jsonl_source_revision, DirectJsonlCheckpoint, DirectJsonlOutput,
     DirectJsonlSourceChange, NativePathJsonlTreeImport,
@@ -211,6 +212,8 @@ pub(crate) fn import_windsurf_nativepath_tree(
 
     if request.import_profile.is_replay_only() {
         replay_outputs_or_mark_behind(
+            store,
+            &request.machine_id,
             &live_inventory.paths,
             &configured_source_root,
             request.imported_at,
@@ -267,6 +270,8 @@ pub(crate) fn import_windsurf_nativepath_tree(
         ProviderSourceRouteRetirementReason::SourceMissing,
     )?);
     replay_outputs_or_mark_behind(
+        store,
+        &request.machine_id,
         &live_inventory.paths,
         &configured_source_root,
         request.imported_at,
@@ -487,6 +492,8 @@ fn retire_route(
 }
 
 fn replay_outputs_or_mark_behind(
+    store: &Store,
+    machine_id: &str,
     paths: &BTreeSet<PathBuf>,
     source_root: &Path,
     imported_at: DateTime<Utc>,
@@ -495,7 +502,9 @@ fn replay_outputs_or_mark_behind(
     let Some(sink) = sink else {
         return;
     };
-    if let Err(error) = replay_windsurf_outputs(paths, source_root, imported_at, sink) {
+    if let Err(error) =
+        replay_windsurf_outputs(store, machine_id, paths, source_root, imported_at, sink)
+    {
         sink.mark_behind(ProOutputSinkError::new(
             "windsurf_nativepath_output_replay",
             error.to_string(),
@@ -504,12 +513,21 @@ fn replay_outputs_or_mark_behind(
 }
 
 fn replay_windsurf_outputs(
+    store: &Store,
+    machine_id: &str,
     paths: &BTreeSet<PathBuf>,
     source_root: &Path,
     imported_at: DateTime<Utc>,
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
     for path in paths {
+        let authority = committed_direct_jsonl_replay_authority(
+            store,
+            machine_id,
+            CaptureProvider::Windsurf,
+            WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
+            path,
+        )?;
         let locator_identity = provider_path_identity(path)?;
         let source = OutputSourceIdentity {
             provider: CaptureProvider::Windsurf.as_str().to_owned(),
@@ -523,7 +541,15 @@ fn replay_windsurf_outputs(
                 continue;
             }
         };
-        replay_windsurf_source(path, imported_at, sink, source, locator_identity, progress)?;
+        replay_windsurf_source(
+            path,
+            imported_at,
+            sink,
+            source,
+            locator_identity,
+            progress,
+            &authority,
+        )?;
     }
     Ok(())
 }
@@ -535,6 +561,7 @@ fn replay_windsurf_source(
     output_source: OutputSourceIdentity,
     locator_identity: String,
     progress: Option<ProOutputProgress>,
+    authority: &DirectJsonlCheckpoint,
 ) -> Result<()> {
     let progress_cursor = progress
         .as_ref()
@@ -566,8 +593,11 @@ fn replay_windsurf_source(
         true,
         previous,
     )?;
+    if reader.observation() != &authority.source_observation {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
     let source_change = reader.source_change();
-    let observed_revision = direct_jsonl_source_revision(reader.observation());
+    let observed_revision = direct_jsonl_source_revision(&authority.source_observation);
     let mut output_state = WindsurfOutputState::new(
         output_source,
         progress,
@@ -577,6 +607,11 @@ fn replay_windsurf_source(
     )?;
 
     while let Some(page) = reader.next_page()? {
+        if !direct_jsonl_checkpoint_is_covered_by(authority, &page.next_checkpoint) {
+            return Err(CaptureError::InvalidPayload(
+                "Windsurf output replay advanced beyond committed Core authority".to_owned(),
+            ));
+        }
         let expected_frontier = safe_frontier(&page.expected_checkpoint)?;
         let next_safe_frontier = safe_frontier(&page.next_checkpoint)?;
         let observations = page
@@ -610,11 +645,21 @@ fn replay_windsurf_source(
         )
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
         if process_pro_replay_only(replay, sink).is_err() {
-            break;
+            return Ok(());
         }
         output_state.expected_source_epoch = Some(output_state.source_epoch);
         output_state.expected_sink_frontier = Some(next_safe_frontier);
         output_state.disposition = ProOutputSourceDisposition::AppendOrResume;
+    }
+    let outcome = reader.outcome().ok_or(CaptureError::SystemInvariant(
+        "Windsurf output replay reader completed without an outcome",
+    ))?;
+    if !outcome.checkpoint.terminal
+        || !direct_jsonl_checkpoint_is_covered_by(authority, &outcome.checkpoint)
+    {
+        return Err(CaptureError::InvalidPayload(
+            "Windsurf output replay outcome exceeded committed Core authority".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -978,7 +1023,8 @@ mod tests {
         assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
         assert!(pro_only_store.list_sessions().unwrap().is_empty());
         assert!(!pro_only_sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert!(pro_only_sink.pages.load(Ordering::SeqCst) > 0);
+        assert_eq!(pro_only_sink.pages.load(Ordering::SeqCst), 0);
+        assert_eq!(pro_only_sink.outputs.load(Ordering::SeqCst), 0);
     }
 
     struct RecordingSink {

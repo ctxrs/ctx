@@ -12,9 +12,13 @@ use super::{
 };
 use crate::{
     provider::codex::catalog::{catalog_codex_session_files, catalog_codex_session_tree},
-    CaptureError, CodexSessionCatalogOptions, CodexSessionImportOptions, ImportProfile,
-    ProOutputSinkError, ProviderImportFailure, ProviderImportSummary, Result,
+    summaries::MAX_RETAINED_PROVIDER_FAILURES,
+    CaptureError, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, ImportProfile, ProOutputSinkError, ProviderImportFailure,
+    ProviderImportSummary, Result,
 };
+
+const MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES: usize = 192;
 
 pub(crate) fn import_codex_native_session_root(
     root: &Path,
@@ -99,6 +103,16 @@ fn import_cataloged_root(
         .cloned()
         .collect::<Vec<_>>();
     parent_first(&mut live_sources);
+    let total_files = live_sources.len();
+    let total_bytes = live_sources.iter().fold(0_u64, |total, source| {
+        total.saturating_add(
+            source
+                .source_path
+                .metadata()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+    });
     let missing_sources = discovery
         .sources
         .iter()
@@ -154,6 +168,8 @@ fn import_cataloged_root(
     }
     let bulk_guard = store.begin_event_search_bulk_mode()?;
     let mut completed_catalog_sources = std::collections::BTreeMap::<String, u64>::new();
+    let mut completed_files = 0_usize;
+    let mut completed_bytes = 0_u64;
     let import = (|| -> Result<()> {
         let mut pending_group = CodexNativeRootGroup::default();
         let native_options = CodexNativeStoreOptions {
@@ -176,6 +192,11 @@ fn import_cataloged_root(
             }
         }
         for source in live_sources {
+            let source_bytes = source
+                .source_path
+                .metadata()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
             if retire_replaced_codex_native_source_route(
                 store,
                 &bulk_guard,
@@ -200,6 +221,17 @@ fn import_cataloged_root(
                         line: 0,
                         error: error.to_string(),
                     });
+                    completed_files = completed_files.saturating_add(1);
+                    completed_bytes = completed_bytes.saturating_add(source_bytes);
+                    report_import_progress(
+                        options,
+                        total_files,
+                        total_bytes,
+                        completed_files,
+                        completed_bytes,
+                        summary,
+                        false,
+                    );
                     continue;
                 }
             };
@@ -230,8 +262,9 @@ fn import_cataloged_root(
                         }
                     }
                 }
-                CodexNativePreparedSource::Publication(publication) => {
+                CodexNativePreparedSource::Publication(mut publication) => {
                     let rejected = publication.rejected_records;
+                    let rejections = std::mem::take(&mut publication.rejections);
                     let imported_events = publication.imported_events;
                     let imported_edges = publication.imported_edges;
                     let skipped_events = publication.skipped_events;
@@ -273,16 +306,7 @@ fn import_cataloged_root(
                         .skipped_events
                         .saturating_add(skipped_events)
                         .saturating_add(rejected);
-                    if rejected > 0 {
-                        summary.failed = summary.failed.saturating_add(rejected);
-                        summary.failures.push(ProviderImportFailure {
-                            line: 0,
-                            error: format!(
-                                "Codex NativePath rejected {rejected} structurally invalid record(s) from {}",
-                                replay_source.source_path.display()
-                            ),
-                        });
-                    }
+                    record_native_rejections(summary, &replay_source, rejected, rejections);
                     if terminal {
                         completed_catalog_sources.insert(
                             replay_source.source_path.display().to_string(),
@@ -291,6 +315,23 @@ fn import_cataloged_root(
                     }
                 }
             }
+            // Progress is a committed-state contract: when a caller asks for
+            // it, flush the bounded source group before exposing its counters.
+            // Imports without a callback retain cross-source group coalescing.
+            if options.progress.is_some() {
+                publish_pending_group(store, &bulk_guard, &mut pending_group)?;
+            }
+            completed_files = completed_files.saturating_add(1);
+            completed_bytes = completed_bytes.saturating_add(source_bytes);
+            report_import_progress(
+                options,
+                total_files,
+                total_bytes,
+                completed_files,
+                completed_bytes,
+                summary,
+                false,
+            );
         }
         publish_pending_group(store, &bulk_guard, &mut pending_group)?;
         Ok(())
@@ -313,7 +354,44 @@ fn import_cataloged_root(
             replay_output(replay, sink);
         }
     }
+    report_import_progress(
+        options,
+        total_files,
+        total_bytes,
+        completed_files,
+        completed_bytes,
+        summary,
+        true,
+    );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_import_progress(
+    options: &CodexSessionImportOptions,
+    total_files: usize,
+    total_bytes: u64,
+    completed_files: usize,
+    completed_bytes: u64,
+    summary: &ProviderImportSummary,
+    done: bool,
+) {
+    let Some(callback) = &options.progress else {
+        return;
+    };
+    callback(CodexSessionImportProgress {
+        source_path: options.source_path.clone(),
+        total_files,
+        total_bytes,
+        completed_files,
+        completed_bytes,
+        imported_sessions: summary.imported_sessions,
+        imported_events: summary.imported_events,
+        imported_edges: summary.imported_edges,
+        skipped: summary.skipped,
+        failed: summary.failed,
+        done,
+    });
 }
 
 fn replay_output(replay: CodexNativeOutputReplay, sink: &dyn crate::ProOutputSink) {
@@ -426,6 +504,108 @@ fn common_root(paths: &[PathBuf]) -> PathBuf {
     root
 }
 
+fn record_native_rejections(
+    summary: &mut ProviderImportSummary,
+    source: &CodexCatalogSource,
+    rejected: usize,
+    rejections: Vec<super::reader::CodexRecordRejection>,
+) {
+    summary.failed = summary.failed.saturating_add(rejected);
+    let source_label = bounded_rejection_source_label(source);
+    let remaining = MAX_RETAINED_PROVIDER_FAILURES.saturating_sub(summary.failures.len());
+    for rejection in rejections.into_iter().take(rejected.min(remaining)) {
+        summary.failures.push(ProviderImportFailure {
+            line: rejection_line(rejection.raw_ordinal),
+            error: format!(
+                concat!(
+                    "Codex NativePath rejected record from source \"{}\" ",
+                    "at raw ordinal {} (bytes {}..{}): {}"
+                ),
+                source_label,
+                rejection.raw_ordinal,
+                rejection.start_byte,
+                rejection.end_byte,
+                rejection.reason,
+            ),
+        });
+    }
+}
+
+fn rejection_line(raw_ordinal: u64) -> usize {
+    usize::try_from(raw_ordinal)
+        .ok()
+        .and_then(|ordinal| ordinal.checked_add(1))
+        .unwrap_or(usize::MAX)
+}
+
+fn bounded_rejection_source_label(source: &CodexCatalogSource) -> String {
+    let root = Path::new(&source.source_root);
+    let candidate = source
+        .source_path
+        .strip_prefix(root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(Path::as_os_str)
+        .or_else(|| source.source_path.file_name());
+    let Some(candidate) = candidate else {
+        return "<unnamed-codex-source>".to_owned();
+    };
+    let rendered = candidate.to_string_lossy();
+    let mut label = String::new();
+    let mut truncated = false;
+    'characters: for character in rendered.chars() {
+        for escaped in character.escape_default() {
+            if label.len() >= MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES.saturating_sub(3) {
+                truncated = true;
+                break 'characters;
+            }
+            label.push(escaped);
+        }
+    }
+    if truncated {
+        label.push_str("...");
+    }
+    if label.is_empty() {
+        "<unnamed-codex-source>".to_owned()
+    } else {
+        label
+    }
+}
+
 fn native_error(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(format!("Codex NativePath import failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejection_source_label_is_path_free_escaped_and_bounded() {
+        let source = CodexCatalogSource {
+            source_root: "/private/source/root".to_owned(),
+            source_path: Path::new("/private/source/root/2026/07").join(format!(
+                "rollout\n{}-secret.jsonl",
+                "x".repeat(MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES * 2)
+            )),
+            cataloged_at_ms: 0,
+            catalog_observation: super::super::CodexFileObservation {
+                len: 0,
+                modified_at_ms: 0,
+                change_token: [0; 32],
+            },
+            catalog_native_session_id: None,
+            catalog_parent_native_session_id: None,
+            catalog_root_native_session_id: None,
+        };
+        let label = bounded_rejection_source_label(&source);
+
+        assert!(label.len() <= MAX_CODEX_REJECTION_SOURCE_LABEL_BYTES);
+        assert!(!label.contains("/private/source/root"));
+        assert!(label.contains("2026"));
+        assert!(label.contains("rollout"));
+        assert!(!label.contains('\n'));
+        assert!(label.contains("\\n"));
+        assert!(label.ends_with("..."));
+    }
 }

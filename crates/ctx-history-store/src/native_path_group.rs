@@ -278,6 +278,7 @@ struct NativePathSourceRetirementPreview {
 pub struct NativePathPublicationGroup<'store> {
     store: &'store Store,
     token: Uuid,
+    bulk_epoch: u64,
     coordinator: NativePathGroupAccounting,
     attempted_mutation_units: usize,
     core_bound_value_bytes: usize,
@@ -305,7 +306,7 @@ impl Store {
             return Err(StoreError::NativePathGroupAlreadyActive);
         }
         coordinator.validate()?;
-        self.consume_event_search_bulk_group_admission(admission)?;
+        let bulk_epoch = self.consume_event_search_bulk_group_admission(admission)?;
         if !self.conn.is_autocommit() || self.batch_depth.get() != 0 {
             return Err(StoreError::NativePathGroupRequiresAutocommit);
         }
@@ -352,6 +353,7 @@ impl Store {
         Ok(NativePathPublicationGroup {
             store: self,
             token,
+            bulk_epoch,
             coordinator,
             attempted_mutation_units: 0,
             core_bound_value_bytes: 0,
@@ -1056,7 +1058,8 @@ impl NativePathPublicationGroup<'_> {
     fn ensure_open(&mut self) -> Result<()> {
         if self.finished
             || self.store.native_path_group_token.get() != Some(self.token)
-            || self.store.event_search_bulk_depth.load(Ordering::SeqCst) != 1
+            || self.store.event_search_bulk_depth.load(Ordering::SeqCst) == 0
+            || self.store.event_search_bulk_epoch.load(Ordering::SeqCst) != self.bulk_epoch
         {
             self.store.poison_native_path_group();
             return Err(StoreError::NativePathGroupPoisoned);

@@ -31,79 +31,56 @@ impl<'source> KiroScanner<'source> {
             return Ok(None);
         }
         self.source.revalidate()?;
-        loop {
-            let expected = self.frontier.clone();
-            let candidate = self.next_candidate()?;
-            let Some(candidate) = candidate else {
+        let expected = self.frontier.clone();
+        let candidate = self.next_candidate()?;
+        let Some(candidate) = candidate else {
+            self.emitted_terminal = true;
+            let next = self.frontier.clone();
+            return Ok(Some(KiroCorePage::terminal_empty(expected, next)));
+        };
+        if let Some(reason) = candidate.rejection_reason() {
+            self.hash_rejected_candidate(&candidate, reason);
+            self.complete_candidate(candidate.phase, candidate.rowid)?;
+            let terminal = !self.has_more()?;
+            if terminal {
                 self.emitted_terminal = true;
-                let next = self.frontier.clone();
-                return Ok(Some(KiroCorePage::terminal_empty(expected, next)));
-            };
-            if let Some(reason) = candidate.rejection_reason() {
-                self.hash_rejected_candidate(&candidate, reason);
-                self.complete_candidate(candidate.phase, candidate.rowid)?;
-                let terminal = !self.has_more()?;
-                if terminal {
-                    self.emitted_terminal = true;
-                }
-                return Ok(Some(KiroCorePage::rejected(
-                    expected,
-                    self.frontier.clone(),
-                    terminal,
-                    candidate.row_ordinal,
-                    reason.to_owned(),
-                )));
             }
-            if candidate.retained_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 {
-                let reason = format!(
-                    "Kiro {} row {} exceeds the provider SQLite value bound",
-                    candidate.phase.table(),
-                    candidate.rowid
-                );
-                self.hash_rejected_candidate(&candidate, &reason);
-                self.complete_candidate(candidate.phase, candidate.rowid)?;
-                let terminal = !self.has_more()?;
-                if terminal {
-                    self.emitted_terminal = true;
-                }
-                return Ok(Some(KiroCorePage::rejected(
-                    expected,
-                    self.frontier.clone(),
-                    terminal,
-                    candidate.row_ordinal,
-                    reason,
-                )));
+            return Ok(Some(KiroCorePage::rejected(
+                expected,
+                self.frontier.clone(),
+                terminal,
+                candidate.row_ordinal,
+                reason.to_owned(),
+            )));
+        }
+        if candidate.retained_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 {
+            let reason = format!(
+                "Kiro {} row {} exceeds the provider SQLite value bound",
+                candidate.phase.table(),
+                candidate.rowid
+            );
+            self.hash_rejected_candidate(&candidate, &reason);
+            self.complete_candidate(candidate.phase, candidate.rowid)?;
+            let terminal = !self.has_more()?;
+            if terminal {
+                self.emitted_terminal = true;
             }
+            return Ok(Some(KiroCorePage::rejected(
+                expected,
+                self.frontier.clone(),
+                terminal,
+                candidate.row_ordinal,
+                reason,
+            )));
+        }
 
-            let row = hydrate_row(&self.source.connection, candidate.phase, candidate.rowid)?;
-            let value: Value = match serde_json::from_str(&row.value) {
-                Ok(value) => value,
-                Err(error) => {
-                    let reason = format!(
-                        "invalid JSON in Kiro {} row {} for key {}: {error}",
-                        row.table, row.rowid, row.key
-                    );
-                    self.hash_raw_row(&row);
-                    self.complete_candidate(candidate.phase, candidate.rowid)?;
-                    let terminal = !self.has_more()?;
-                    if terminal {
-                        self.emitted_terminal = true;
-                    }
-                    return Ok(Some(KiroCorePage::rejected(
-                        expected,
-                        self.frontier.clone(),
-                        terminal,
-                        candidate.row_ordinal,
-                        reason,
-                    )));
-                }
-            };
-            if value.get("history").is_some()
-                && value.get("history").and_then(Value::as_array).is_none()
-            {
+        let row = hydrate_row(&self.source.connection, candidate.phase, candidate.rowid)?;
+        let value: Value = match serde_json::from_str(&row.value) {
+            Ok(value) => value,
+            Err(error) => {
                 let reason = format!(
-                    "Kiro {} row {} history must be an array when present",
-                    row.table, row.rowid
+                    "invalid JSON in Kiro {} row {} for key {}: {error}",
+                    row.table, row.rowid, row.key
                 );
                 self.hash_raw_row(&row);
                 self.complete_candidate(candidate.phase, candidate.rowid)?;
@@ -119,8 +96,29 @@ impl<'source> KiroScanner<'source> {
                     reason,
                 )));
             }
-            return self.prepare_row_page(expected, candidate, row, value);
+        };
+        if value.get("history").is_some()
+            && value.get("history").and_then(Value::as_array).is_none()
+        {
+            let reason = format!(
+                "Kiro {} row {} history must be an array when present",
+                row.table, row.rowid
+            );
+            self.hash_raw_row(&row);
+            self.complete_candidate(candidate.phase, candidate.rowid)?;
+            let terminal = !self.has_more()?;
+            if terminal {
+                self.emitted_terminal = true;
+            }
+            return Ok(Some(KiroCorePage::rejected(
+                expected,
+                self.frontier.clone(),
+                terminal,
+                candidate.row_ordinal,
+                reason,
+            )));
         }
+        self.prepare_row_page(expected, candidate, row, value)
     }
 
     fn prepare_row_page(

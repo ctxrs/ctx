@@ -38,8 +38,9 @@ use crate::{
             provider_import_session_uuid, provider_path_identity,
             provider_scoped_source_identity_key, provider_scoped_source_uuid,
             provider_session_uuid, provider_source_cursor_stream_for_path,
-            provider_source_identity, provider_sync_metadata, timestamps, CertifiedProviderCursor,
-            ExactLegacySourceEventCandidate,
+            provider_source_event_import_identity, provider_source_identity,
+            provider_sync_metadata, timestamps, CertifiedProviderCursor,
+            ExactLegacySourceEventCandidate, ProviderEventImportIdentity,
         },
         native_ingestion::{
             process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
@@ -147,6 +148,8 @@ impl OpenHandsNativeCursor {
     }
 }
 
+// The decoded native cursor stays inline so cursor-state handling remains allocation-free.
+#[allow(clippy::large_enum_variant)]
 enum StoredCoreCursor {
     Fresh,
     Native {
@@ -490,7 +493,7 @@ fn prepare_core_page(
         let retained = retained_core_event(source, &decoded, raw_bytes)?;
         if retained
             .as_ref()
-            .map(|event| serde_json::to_vec(event))
+            .map(serde_json::to_vec)
             .transpose()?
             .is_some_and(|bytes| bytes.len() > OPENHANDS_NATIVE_PAGE_MAX_BYTES)
         {
@@ -669,7 +672,7 @@ fn collect_touch_page(
                     metadata: draft.metadata,
                 },
             ));
-            return Ok(());
+            Ok(())
         },
     );
     match outcome {
@@ -963,7 +966,7 @@ fn publish_core_page(
         })
         .transpose()?;
     for (touch_ordinal, touch) in &page.touches {
-        if resolved.legacy_source_layout && published_event.is_some_and(|(_, inserted)| !inserted) {
+        if published_event.is_some_and(|(_, inserted)| !inserted) {
             continue;
         }
         publish_touch(
@@ -1155,7 +1158,16 @@ fn resolve_source(
         ),
     };
     let (session, existed) = match committed_store.get_session(session_id) {
-        Ok(existing) => (existing, true),
+        Ok(mut existing) => {
+            // Each authoritative event file contributes its timestamp to the
+            // session's temporal bounds, including provider outputs omitted
+            // from Core. Store upsert merges these observations with MIN/MAX,
+            // while preserving the released session identity and metadata.
+            existing.started_at = started_at;
+            existing.ended_at = Some(started_at);
+            existing.timestamps.updated_at = context.imported_at;
+            (existing, true)
+        }
         Err(StoreError::NotFound(_)) => (proposed_session, false),
         Err(error) => return Err(error.into()),
     };
@@ -1205,19 +1217,36 @@ fn publish_event(
             ),
             provider_event_index,
         });
-    let identity = provider_event_import_identity_with_exact_legacy_source(
-        committed_store,
-        CaptureProvider::OpenHands,
-        &source.session_id,
-        resolved.source_id,
-        provider_event_index,
-        provider_event_index,
-        event_hash,
-        exact_legacy_source,
-        openhands_legacy_filename_index_candidate(&source.canonical_path),
-        resolved.session.id
-            == provider_session_uuid(CaptureProvider::OpenHands, &source.session_id),
-    )?;
+    let identity = exact_legacy_source
+        .map(|candidate| {
+            exact_legacy_openhands_event_identity(
+                committed_store,
+                source,
+                resolved.source_id,
+                event_hash,
+                candidate,
+            )
+        })
+        .transpose()?
+        .flatten()
+        .map_or_else(
+            || {
+                provider_event_import_identity_with_exact_legacy_source(
+                    committed_store,
+                    CaptureProvider::OpenHands,
+                    &source.session_id,
+                    resolved.source_id,
+                    provider_event_index,
+                    provider_event_index,
+                    event_hash,
+                    None,
+                    openhands_legacy_filename_index_candidate(&source.canonical_path),
+                    resolved.session.id
+                        == provider_session_uuid(CaptureProvider::OpenHands, &source.session_id),
+                )
+            },
+            Ok,
+        )?;
     let dedupe_key =
         Store::provider_event_dedupe_key_with_payload_hash(&identity.dedupe_key, event_hash)
             .unwrap_or(identity.dedupe_key);
@@ -1278,6 +1307,45 @@ fn publish_event(
     Ok((normalized.id, inserted))
 }
 
+fn exact_legacy_openhands_event_identity(
+    committed_store: &Store,
+    source: &OpenHandsObservedFile,
+    incoming_source_id: Uuid,
+    event_hash: &str,
+    candidate: ExactLegacySourceEventCandidate,
+) -> Result<Option<ProviderEventImportIdentity>> {
+    let legacy_identity = provider_source_event_import_identity(
+        candidate.source_id,
+        candidate.provider_event_index,
+        event_hash,
+    );
+    let event_id = match committed_store.event_id_by_dedupe_key(&legacy_identity.dedupe_key) {
+        Ok(event_id) => event_id,
+        Err(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let event = committed_store.get_event(event_id)?;
+    if event
+        .sync
+        .metadata
+        .pointer("/metadata/event_path")
+        .and_then(Value::as_str)
+        != Some(source.canonical_path_text.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(event
+        .dedupe_key
+        .map(|dedupe_key| ProviderEventImportIdentity {
+            id: event.id,
+            seq: event.seq,
+            dedupe_key,
+            run_source_id: event.capture_source_id.or(Some(incoming_source_id)),
+        }))
+}
+
+// This publication boundary keeps every identity input explicit and auditable.
+#[allow(clippy::too_many_arguments)]
 fn publish_touch(
     committed_store: &Store,
     group: &mut ctx_history_store::NativePathPublicationGroup<'_>,

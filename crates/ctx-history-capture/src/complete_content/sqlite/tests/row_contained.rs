@@ -487,9 +487,10 @@ fn legacy_kiro_row_preserves_decoder_identity_locator_and_content() {
     let decoded = kiro::kiro_history_events(&row, &provider_session_id, &value, started_at)
         .next()
         .unwrap();
+    assert!(decoded.event.provider_event_hash.is_none());
     assert_eq!(
-        decoded.event.provider_event_hash.as_deref(),
-        Some("conversations:kiro-legacy-session:0:user")
+        decoded.event.metadata["legacy_provider_event_hash"],
+        "conversations:kiro-legacy-session:0:user"
     );
     assert_eq!(
         decoded.event.cursor,

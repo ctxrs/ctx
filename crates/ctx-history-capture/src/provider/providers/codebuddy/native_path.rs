@@ -307,6 +307,9 @@ struct CodeBuddyInventory {
 }
 
 #[derive(Debug)]
+// The native cursor is consumed immediately after classification; preserving
+// the explicit wire variants is clearer than allocating the common path.
+#[allow(clippy::large_enum_variant)]
 enum StoredCursor {
     None,
     Native {
@@ -2256,14 +2259,16 @@ fn publish_core_page(
     }
 
     let mut summary = ProviderImportSummary::default();
-    let template = page
-        .records
-        .iter()
-        .find_map(|record| record.core.as_ref().map(|core| &core.session))
-        .cloned();
-    let template = match template {
-        Some(template) => Some(template),
-        None => cursor_session_draft(source, context, &page.next_cursor)?,
+    let has_accepted_core = page.next_cursor.accepted_events != 0
+        || page.records.iter().any(|record| record.core.is_some());
+    let template = if has_accepted_core {
+        cursor_session_draft(source, context, &page.next_cursor)?.or_else(|| {
+            page.records
+                .iter()
+                .find_map(|record| record.core.as_ref().map(|core| core.session.clone()))
+        })
+    } else {
+        None
     };
     let resolved = template
         .as_ref()

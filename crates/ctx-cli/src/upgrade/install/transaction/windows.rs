@@ -1,4 +1,5 @@
 #![cfg(any(windows, test))]
+#![cfg_attr(all(test, not(windows)), allow(dead_code))]
 
 //! Windows deferred replacement coordinator.
 //!

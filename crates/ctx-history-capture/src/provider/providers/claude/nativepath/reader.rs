@@ -84,6 +84,7 @@ pub(crate) struct ClaudePageCertificate {
 pub(crate) struct ClaudeNativePageIdentity([u8; 32]);
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ClaudeNativePage {
     pub(crate) identity: ClaudeNativePageIdentity,
     pub(crate) session: ClaudeSessionMetadata,
@@ -99,6 +100,7 @@ pub(crate) struct ClaudeNativePage {
 }
 
 impl ClaudeNativePage {
+    #[allow(dead_code)]
     pub(crate) fn receipt(&self) -> ClaudeNativePageReceipt {
         ClaudeNativePageReceipt {
             identity: self.identity,
@@ -111,6 +113,7 @@ impl ClaudeNativePage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) struct ClaudeNativePageReceipt {
     pub(crate) identity: ClaudeNativePageIdentity,
     pub(crate) expected_frontier: ClaudeNativeFrontier,
@@ -123,6 +126,7 @@ pub(crate) struct ClaudeNativePageReceipt {
 pub(crate) struct ClaudeNativeProOutputPageIdentity([u8; 32]);
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ClaudeNativeProOutputPage {
     pub(crate) identity: ClaudeNativeProOutputPageIdentity,
     pub(crate) expected_frontier: ClaudeNativeFrontier,
@@ -136,27 +140,6 @@ pub(crate) struct ClaudeNativeProOutputPage {
     pub(crate) certificate: ClaudePageCertificate,
 }
 
-impl ClaudeNativeProOutputPage {
-    pub(crate) fn receipt(&self) -> ClaudeNativeProOutputPageReceipt {
-        ClaudeNativeProOutputPageReceipt {
-            identity: self.identity,
-            expected_frontier: self.expected_frontier.clone(),
-            committed_frontier: self.next_safe_frontier.clone(),
-            accepted_outputs: self.outputs.len(),
-            accepted_physical_records: self.logical_units,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClaudeNativeProOutputPageReceipt {
-    pub(crate) identity: ClaudeNativeProOutputPageIdentity,
-    pub(crate) expected_frontier: ClaudeNativeFrontier,
-    pub(crate) committed_frontier: ClaudeNativeFrontier,
-    pub(crate) accepted_outputs: usize,
-    pub(crate) accepted_physical_records: usize,
-}
-
 #[derive(Debug)]
 pub(crate) enum ClaudeNativeOwnedPage {
     Core(Box<ClaudeNativePage>),
@@ -164,6 +147,7 @@ pub(crate) enum ClaudeNativeOwnedPage {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ParseOutput {
     pub(crate) change: ChangeSignal,
     pub(crate) lifecycle: ClaudeSourceLifecycle,
@@ -336,6 +320,7 @@ impl ClaudeNativeScanner {
     /// certified prefix. The caller supplies the already accepted
     /// provider-private session metadata; it is deliberately absent from the
     /// content-free frontier.
+    #[allow(dead_code)]
     pub(crate) fn resume_page(
         source: DiscoveredClaudeSession,
         frontier: ClaudeNativeFrontier,
@@ -1246,6 +1231,7 @@ impl ClaudeNativeScanner {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_session<F>(
     source: &DiscoveredClaudeSession,
     previous: Option<&ParseCheckpoint>,
@@ -1466,7 +1452,7 @@ fn initial_frontier() -> ClaudeNativeFrontier {
 fn lifecycle_from_change(change: ChangeSignal) -> ClaudeSourceLifecycle {
     match change {
         ChangeSignal::Fresh => ClaudeSourceLifecycle::New,
-        ChangeSignal::Unchanged | ChangeSignal::ExactRestore => ClaudeSourceLifecycle::Replay,
+        ChangeSignal::Unchanged => ClaudeSourceLifecycle::Replay,
         ChangeSignal::Append => ClaudeSourceLifecycle::Append,
         ChangeSignal::Rewrite | ChangeSignal::Reparse => ClaudeSourceLifecycle::Rewrite,
         ChangeSignal::Truncation => ClaudeSourceLifecycle::Rewind,

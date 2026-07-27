@@ -7,9 +7,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    provider::tool_input, OutputAssociations, OutputCommandContext, OutputNativeCoordinate,
-    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceLocator,
-    ProOutputObservation, MAX_PROVIDER_JSONL_LINE_BYTES,
+    provider::{file_touches::visit_provider_file_touch_drafts_with_limit, tool_input},
+    OutputAssociations, OutputCommandContext, OutputNativeCoordinate, OutputObservationKind,
+    OutputOutcome, OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::{
@@ -18,12 +19,13 @@ use super::{
         validate_and_root, JsonArrayCursor, JsonKind, JsonSpan,
     },
     normalize::{
-        normalize_continue_document, normalize_event, ContinueEventRow,
+        normalize_continue_document, normalize_event, ContinueEventRow, ContinueFileTouch,
         ContinueGenerationAuthority, ContinueNativeProfile, ContinuePreparedPage,
         ContinuePreparedSource, ContinueProExtractionFailure, ContinueSessionIdentity,
         ContinueSourceCompleteness, ContinueTransientOutputPayload, NormalizeEventError,
-        CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES, CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS,
-        CONTINUE_NATIVE_MAX_PAGE_BYTES, CONTINUE_NATIVE_MAX_PAGE_ROWS,
+        CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT, CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES,
+        CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS, CONTINUE_NATIVE_MAX_PAGE_BYTES,
+        CONTINUE_NATIVE_MAX_PAGE_ROWS,
     },
     source::{
         ContinueIndexObservation, ContinueIndexSnapshot, ContinueSourceObservation,
@@ -233,6 +235,7 @@ pub(super) struct RawContinueMessageCall {
     pub(super) id: Option<String>,
     pub(super) kind: Option<String>,
     pub(super) name: Option<String>,
+    pub(super) file_touches: Vec<ContinueFileTouch>,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +262,7 @@ pub(super) struct RawContinueToolCall {
     pub(super) kind: Option<String>,
     pub(super) name: Option<String>,
     pub(super) function_name: Option<String>,
+    pub(super) file_touches: Vec<ContinueFileTouch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -474,7 +478,7 @@ impl ContinueSourcePageStream {
                 break;
             }
             let event_bytes = retained.event.estimated_bytes();
-            let next_rows = row_count.saturating_add(1);
+            let next_rows = row_count.saturating_add(retained.event.logical_units());
             let next_bytes = estimated_bytes.saturating_add(event_bytes);
             if row_count > 0
                 && (next_rows > CONTINUE_NATIVE_MAX_PAGE_ROWS
@@ -686,14 +690,12 @@ fn extract_continue_outputs(
                     scan_error(error),
                 )
             })?;
-            if key.is("output") {
-                if output_span.replace(value).is_some() {
-                    return Err(ContinueSourceFailure::from_snapshot(
-                        snapshot,
-                        ContinueSourceFailureKind::MalformedDocument,
-                        "Continue tool state has duplicate output fields".to_owned(),
-                    ));
-                }
+            if key.is("output") && output_span.replace(value).is_some() {
+                return Err(ContinueSourceFailure::from_snapshot(
+                    snapshot,
+                    ContinueSourceFailureKind::MalformedDocument,
+                    "Continue tool state has duplicate output fields".to_owned(),
+                ));
             }
         }
         let Some(output_span) = output_span.filter(|span| span.kind() != JsonKind::Null) else {
@@ -980,6 +982,13 @@ fn normalization_failure(
             format!(
                 "Continue history item {history_ordinal} serializes to {observed} bytes, exceeding \
                  the {MAX_PROVIDER_JSONL_LINE_BYTES} byte product bound"
+            ),
+        ),
+        NormalizeEventError::FileTouchLimitExceeded => (
+            ContinueSourceFailureKind::Normalization,
+            format!(
+                "Continue history item exceeds the {CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT} \
+                 unique file-touch transaction bound"
             ),
         ),
         NormalizeEventError::Serialization(message) => {
@@ -1481,6 +1490,7 @@ fn parse_message_call_block(
     let kind = Some("tool_call".to_owned());
     let mut direct_name = None;
     let mut function_name = None;
+    let mut file_touches = Vec::new();
     for field in block.as_object().map_err(scan_error)? {
         let (key, value) = field.map_err(scan_error)?;
         if key.is("id") {
@@ -1490,14 +1500,17 @@ fn parse_message_call_block(
             direct_name = retained_bounded_string(value, MAX_TOOL_NAME_BYTES, stats)?;
         } else if key.is("function") {
             function_name = parse_tool_function(value, stats)?;
+            file_touches.extend(extract_continue_file_touches(value)?);
         } else if key.is("arguments") || key.is("input") || key.is("parameters") {
             record_call_body(stats, value);
+            file_touches.extend(extract_continue_file_touches(value)?);
         }
     }
     Ok(Some(RawContinueMessageCall {
         id,
         kind,
         name: function_name.or(direct_name),
+        file_touches,
     }))
 }
 
@@ -1789,6 +1802,7 @@ fn parse_tool_call(
     let mut kind = None;
     let mut name = None;
     let mut function_name = None;
+    let mut file_touches = Vec::new();
     for field in value.as_object().map_err(scan_error)? {
         let (key, value) = field.map_err(scan_error)?;
         if key.is("id") {
@@ -1799,8 +1813,10 @@ fn parse_tool_call(
             name = retained_bounded_string(value, MAX_TOOL_NAME_BYTES, stats)?;
         } else if key.is("function") {
             function_name = parse_tool_function(value, stats)?;
+            file_touches.extend(extract_continue_file_touches(value)?);
         } else if key.is("arguments") || key.is("input") || key.is("parameters") {
             record_call_body(stats, value);
+            file_touches.extend(extract_continue_file_touches(value)?);
         }
     }
     let retained_request_identity = id.is_some() || name.is_some() || function_name.is_some();
@@ -1809,7 +1825,36 @@ fn parse_tool_call(
         kind,
         name,
         function_name,
+        file_touches,
     }))
+}
+
+fn extract_continue_file_touches(value: JsonSpan<'_>) -> Result<Vec<ContinueFileTouch>, String> {
+    let value = serde_json::from_slice::<Value>(value.raw())
+        .map_err(|error| format!("invalid Continue tool request body: {error}"))?;
+    let mut touches = Vec::new();
+    let outcome = visit_provider_file_touch_drafts_with_limit(
+        &value,
+        true,
+        CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT,
+        |(_, touch)| {
+            touches.push(ContinueFileTouch {
+                path: touch.path,
+                old_path: touch.old_path,
+                change_kind: touch.change_kind,
+                confidence: touch.confidence,
+                metadata: touch.metadata,
+            });
+            Ok::<(), String>(())
+        },
+    )?;
+    if outcome.limit_exceeded() {
+        return Err(format!(
+            "Continue tool request exceeds the {CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT} \
+             unique file-touch transaction bound"
+        ));
+    }
+    Ok(touches)
 }
 
 fn parse_tool_function(

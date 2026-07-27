@@ -19,19 +19,15 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
     let fixture = provider_history_fixture("warp/v1/warp.sqlite");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let first = import_warp_sqlite(
-        &fixture,
-        &mut store,
-        WarpSqliteImportOptions {
-            machine_id: "test-machine".into(),
-            source_path: Some(fixture.clone()),
-            imported_at: DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            ..WarpSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
+    let options = WarpSqliteImportOptions {
+        machine_id: "test-machine".into(),
+        source_path: Some(fixture.clone()),
+        imported_at: DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        ..WarpSqliteImportOptions::default()
+    };
+    let first = import_warp_sqlite(&fixture, &mut store, options.clone()).unwrap();
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
@@ -65,20 +61,12 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Warp)));
 
-    let second = import_warp_sqlite(
-        &fixture,
-        &mut store,
-        WarpSqliteImportOptions {
-            source_path: Some(fixture.clone()),
-            ..WarpSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
+    let second = import_warp_sqlite(&fixture, &mut store, options).unwrap();
     assert_eq!(second.failed, 0, "{:?}", second.failures);
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert_eq!(second.skipped_sessions, 0);
+    assert_eq!(second.skipped_events, 0);
 }
 
 #[test]

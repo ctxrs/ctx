@@ -15,6 +15,7 @@ mod history_source_plugins;
 mod identity;
 mod install_marker;
 mod integrations;
+mod local_usage;
 mod mcp;
 mod net;
 mod output;
@@ -38,7 +39,8 @@ mod parser_prop_tests;
 pub(crate) use cli::{
     Cli, DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
     DoctorArgs, ImportArgs, JsonArgs, LocateArgs, LocateTarget, SearchArgs, SearchBackendArg,
-    SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatusArgs, UsageStatusMode,
+    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 pub(crate) use commands::search::{RefreshArg, SearchRefreshReport};
 pub(crate) use commands::sql::raw_sql_result_json;

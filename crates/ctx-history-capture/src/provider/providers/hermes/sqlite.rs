@@ -2,7 +2,10 @@
 
 use rusqlite::{Connection, OptionalExtension, Statement};
 
-use crate::provider::sqlite::SqliteLengthPreflightGuard;
+use crate::provider::{
+    normalization::{provider_nonnegative_i64_to_u64, provider_required_timestamp_seconds},
+    sqlite::SqliteLengthPreflightGuard,
+};
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 use super::layout::{
@@ -321,9 +324,21 @@ impl<'connection> HermesRowReader<'connection> {
                 let values = self
                     .message_hydration
                     .query_row([candidate.rowid], |row| layout.capture_values(row, 0))?;
-                HermesNativeRecord::Message {
-                    row: decode_hermes_message(&self.schema, &values)?,
-                    values,
+                let row = decode_hermes_message(&self.schema, &values)?;
+                let validation = provider_nonnegative_i64_to_u64(row.id, "Hermes message id")
+                    .and_then(|_| {
+                        provider_required_timestamp_seconds(
+                            row.timestamp,
+                            "Hermes message timestamp",
+                        )
+                        .map(|_| ())
+                    });
+                match validation {
+                    Ok(()) => HermesNativeRecord::Message { row, values },
+                    Err(CaptureError::InvalidPayload(reason)) => {
+                        HermesNativeRecord::Rejected(reason)
+                    }
+                    Err(error) => return Err(error),
                 }
             }
         };

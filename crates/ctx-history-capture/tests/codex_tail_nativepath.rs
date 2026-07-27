@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -14,10 +14,13 @@ use tempfile::TempDir;
 
 const TAIL_SESSION_ID: &str = "codex-nativepath-tail";
 
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/codex_tail_nativepath")
-        .join(name)
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/codex_tail_nativepath")
+            .join(name),
+    )
+    .unwrap()
 }
 
 fn tempdir() -> TempDir {
@@ -72,10 +75,10 @@ fn stored_event_texts(store: &Store, provider_session_id: &str) -> Vec<String> {
 }
 
 #[test]
-fn codex_tail_import_reports_an_incomplete_record_then_imports_it_when_completed() {
+fn codex_tail_import_defers_an_incomplete_record_then_imports_it_when_completed() {
     let temp = tempdir();
     let path = temp.path().join("codex-tail.jsonl");
-    fs::copy(fixture("initial.jsonl"), &path).unwrap();
+    fs::write(&path, fixture_bytes("initial.jsonl")).unwrap();
     let initial_end = fs::metadata(&path).unwrap().len();
 
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -89,7 +92,7 @@ fn codex_tail_import_reports_an_incomplete_record_then_imports_it_when_completed
     assert_eq!(initial.imported_sessions, 1);
     assert_eq!(initial.imported_events, 1);
 
-    append(&path, &fs::read(fixture("append.jsonl")).unwrap());
+    append(&path, &fixture_bytes("append.jsonl"));
     let incomplete_start = fs::metadata(&path).unwrap().len();
     append(
         &path,
@@ -105,10 +108,10 @@ fn codex_tail_import_reports_an_incomplete_record_then_imports_it_when_completed
     )
     .unwrap();
 
-    assert_eq!(incomplete.failed, 1, "{:?}", incomplete.failures);
-    assert_eq!(incomplete.failures[0].line, 4);
-    assert_eq!(incomplete.imported_sessions, 0);
-    assert_eq!(incomplete.skipped_sessions, 1);
+    assert_eq!(incomplete.failed, 0, "{:?}", incomplete.failures);
+    assert!(incomplete.failures.is_empty());
+    assert_eq!(incomplete.imported_sessions, 1);
+    assert_eq!(incomplete.skipped_sessions, 0);
     assert_eq!(incomplete.imported_events, 1);
     assert_eq!(fs::read(&path).unwrap(), incomplete_source);
     assert_eq!(
@@ -131,8 +134,8 @@ fn codex_tail_import_reports_an_incomplete_record_then_imports_it_when_completed
     .unwrap();
 
     assert_eq!(completed.failed, 0, "{:?}", completed.failures);
-    assert_eq!(completed.imported_sessions, 0);
-    assert_eq!(completed.skipped_sessions, 1);
+    assert_eq!(completed.imported_sessions, 1);
+    assert_eq!(completed.skipped_sessions, 0);
     assert_eq!(completed.imported_events, 1);
     assert_eq!(fs::read(&path).unwrap(), completed_source);
     assert_eq!(
