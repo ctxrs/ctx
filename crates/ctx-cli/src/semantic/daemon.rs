@@ -167,7 +167,6 @@ impl DaemonTelemetry {
             self.idle_state = None;
             events.push(self.cycle_event(result, 1, state, duration));
         }
-
         if iteration.failed && !self.failure_active {
             events.push(runtime_event(
                 DaemonRuntimeObservationV1::failed(self.snapshot()),
@@ -322,6 +321,7 @@ pub(super) struct DaemonRuntime {
     pub(super) history_source_cursor: usize,
     pub(super) history_followup_passes_remaining: usize,
     pub(super) history_retry_drain_passes_remaining: usize,
+    pub(super) history_rejected_records_by_source: std::collections::BTreeMap<String, u64>,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,

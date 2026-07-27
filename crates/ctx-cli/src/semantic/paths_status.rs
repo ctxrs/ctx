@@ -782,43 +782,37 @@ pub(super) fn daemon_history_refresh_job_report(
 ) -> Value {
     let daemon_enabled = daemon_enabled_for_status(data_root);
     let status_value = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
+    let job = status_value.as_ref();
     let disabled = !daemon_enabled && disabled_overrides_lifecycle;
     let current_status = if disabled {
         "disabled".to_owned()
     } else {
-        status_value
-            .as_ref()
-            .and_then(|value| json_string(value, "status"))
+        job.and_then(|value| json_string(value, "status"))
             .unwrap_or_else(|| "unknown".to_owned())
     };
     let reason = if disabled {
         Some("daemon_disabled".to_owned())
     } else {
-        status_value
-            .as_ref()
-            .and_then(|value| json_string(value, "reason"))
+        job.and_then(|value| json_string(value, "reason"))
     };
     compact_json(json!({
         "status": current_status,
         "enabled": daemon_enabled,
         "reason": reason,
-        "mode": status_value
-            .as_ref()
+        "mode": job
             .and_then(|value| json_string(value, "mode"))
             .unwrap_or_else(|| RefreshArg::Background.as_str().to_owned()),
-        "last_run_at_ms": status_value.as_ref().and_then(|value| json_i64(value, "last_run_at_ms")),
-        "source_count": status_value.as_ref().and_then(|value| value.get("source_count").cloned()),
-        "source_fingerprint": status_value
-            .as_ref()
+        "last_run_at_ms": job.and_then(|value| json_i64(value, "last_run_at_ms")),
+        "source_count": job.and_then(|value| value.get("source_count").cloned()),
+        "source_fingerprint": job
             .and_then(|value| json_string(value, "source_fingerprint")),
-        "passes": status_value.as_ref().and_then(|value| json_usize(value, "passes")),
-        "totals": status_value.as_ref().and_then(|value| value.get("totals").cloned()),
-        "budget_reasons": status_value
-            .as_ref()
+        "passes": job.and_then(|value| json_usize(value, "passes")),
+        "totals": job.and_then(|value| value.get("totals").cloned()),
+        "rejection_diagnostics": job
+            .and_then(|value| value.get("rejection_diagnostics")).cloned(),
+        "budget_reasons": job
             .and_then(|value| value.get("budget_reasons").cloned()),
-        "last_error": status_value
-            .as_ref()
-            .and_then(|value| json_string(value, "last_error")),
+        "last_error": job.and_then(|value| json_string(value, "last_error")),
     }))
 }
 

@@ -60,8 +60,14 @@ pub(super) fn print_daemon_status_human(daemon: &Value) {
         .get("jobs")
         .and_then(|jobs| jobs.get("history_refresh"));
     if let Some(rejected_records) = history_refresh
-        .and_then(|job| job.get("totals"))
-        .and_then(|totals| totals.get("rejected_records"))
+        .and_then(|job| {
+            job.get("rejection_diagnostics")
+                .and_then(|diagnostics| diagnostics.get("rejected_records"))
+                .or_else(|| {
+                    job.get("totals")
+                        .and_then(|totals| totals.get("rejected_records"))
+                })
+        })
         .and_then(Value::as_u64)
         .filter(|count| *count > 0)
     {
@@ -119,21 +125,6 @@ pub(super) fn daemon_jobs_failure_message(
         .filter(|error| !error.is_empty())
     {
         return Some(format!("history refresh failed: {error}"));
-    }
-    if let Some(rejected_records) = history
-        .and_then(|job| job.get("totals"))
-        .and_then(|totals| totals.get("rejected_records"))
-        .and_then(Value::as_u64)
-        .filter(|count| *count > 0)
-    {
-        let record = if rejected_records == 1 {
-            "record"
-        } else {
-            "records"
-        };
-        return Some(format!(
-            "history refresh rejected {rejected_records} {record}; run `ctx import --all --no-daemon` for rejection details"
-        ));
     }
     if let Some(failed_sources) = history
         .and_then(|job| job.get("totals"))

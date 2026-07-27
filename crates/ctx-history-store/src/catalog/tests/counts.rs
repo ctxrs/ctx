@@ -71,6 +71,73 @@ fn catalog_sessions_count_indexed_and_stale_rows() {
 }
 
 #[test]
+fn inventory_source_byte_progress_tracks_completed_and_append_prefix_bytes() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let mut session = catalog_session(
+        "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+        "codex-session-1",
+        observed_at_ms,
+    );
+    let source_file = SourceImportFile {
+        provider: CaptureProvider::Claude,
+        source_format: "claude_projects_jsonl_tree".into(),
+        source_root: "/home/user/.claude/projects".into(),
+        source_path: "/home/user/.claude/projects/session.jsonl".into(),
+        file_size_bytes: 21,
+        file_modified_at_ms: observed_at_ms,
+        observed_at_ms,
+        metadata: serde_json::json!({}),
+    };
+    store
+        .upsert_catalog_sessions(std::slice::from_ref(&session))
+        .unwrap();
+    store
+        .upsert_source_import_files(std::slice::from_ref(&source_file))
+        .unwrap();
+
+    assert_eq!(
+        store.inventory_source_byte_progress().unwrap(),
+        InventorySourceByteProgress {
+            completed: 0,
+            total: 63,
+        }
+    );
+
+    store
+        .upsert_session(&imported_session("codex-session-1"))
+        .unwrap();
+    store
+        .mark_catalog_source_observation_indexed(&session, None, Some(3), observed_at_ms + 10)
+        .unwrap();
+    store
+        .mark_source_import_file_indexed(&source_file, observed_at_ms + 20)
+        .unwrap();
+    assert_eq!(
+        store.inventory_source_byte_progress().unwrap(),
+        InventorySourceByteProgress {
+            completed: 63,
+            total: 63,
+        }
+    );
+
+    session.file_size_bytes = 84;
+    session.file_modified_at_ms += 1;
+    store
+        .upsert_catalog_sessions(std::slice::from_ref(&session))
+        .unwrap();
+    assert_eq!(
+        store.inventory_source_byte_progress().unwrap(),
+        InventorySourceByteProgress {
+            completed: 63,
+            total: 105,
+        },
+        "the completed prefix of an append-only session remains processed"
+    );
+}
+
+#[test]
 fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

@@ -244,6 +244,13 @@ semantic runtime's job `status`, `reason`, or `last_error`. When the daemon is
 disabled for ordinary status reporting, the semantic job reports
 `enabled: false`, `status: "disabled"`, and `reason: "daemon_disabled"`.
 
+`daemon.jobs.history_refresh.rejection_diagnostics` preserves aggregate
+`rejected_records` and `sources_completed_with_rejections` from the latest
+completed observation of each currently discovered history source. These
+diagnostics survive later healthy source cycles and daemon restarts, clear when
+that source is observed without rejections, and do not make the daemon fail.
+Source-level failures remain terminal and are reported separately.
+
 `ctx daemon status --json` returns `schema_version`, `daemon`, `pro`, and
 `local_only`. `ctx daemon enable --json` and `ctx daemon disable --json` return
 `schema_version`, `daemon_enabled`, `config_path`, and `local_only`.

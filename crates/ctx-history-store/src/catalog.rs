@@ -5,7 +5,9 @@ mod source_completion;
 mod source_files;
 mod source_reconciliation;
 
-pub use counts::{CatalogCounts, IndexedHistoryCounts, SourceImportFileCounts};
+pub use counts::{
+    CatalogCounts, IndexedHistoryCounts, InventorySourceByteProgress, SourceImportFileCounts,
+};
 pub use session_completion::{CatalogIndexedStatus, CatalogSourceIndexState};
 pub use sessions::CatalogSession;
 pub use source_files::{SourceImportFile, SourceImportInventoryControl};
