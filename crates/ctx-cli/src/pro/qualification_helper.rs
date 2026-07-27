@@ -117,6 +117,22 @@ impl QualificationHelperBundle {
         Ok(&self.path)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn prepare_descriptor_execution(&self) -> Result<QualificationDescriptorExecution> {
+        self.verify()?;
+        let retained = self.stage.helper_handle.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("invalid_request: qualification stage is unavailable")
+        })?;
+        let descriptor = retained
+            .try_clone()
+            .context("invalid_request: duplicate qualification helper descriptor")?;
+        let program = descriptor_execution_path(&descriptor)?;
+        Ok(QualificationDescriptorExecution {
+            program,
+            descriptor,
+        })
+    }
+
     #[cfg(ctx_pro_qualification)]
     pub(crate) fn source_path(&self) -> &Path {
         &self.source_path
@@ -146,6 +162,51 @@ impl QualificationHelperBundle {
         verify_reader_digest(&mut named, opened.len(), &self.sha256)?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+pub(crate) struct QualificationDescriptorExecution {
+    program: PathBuf,
+    descriptor: File,
+}
+
+#[cfg(unix)]
+impl QualificationDescriptorExecution {
+    pub(crate) fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub(crate) fn configure_command(&self, command: &mut std::process::Command) {
+        use std::{os::fd::AsRawFd as _, os::unix::process::CommandExt as _};
+
+        let descriptor = self.descriptor.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                if flags == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+#[cfg(unix)]
+fn descriptor_execution_path(file: &File) -> Result<PathBuf> {
+    use std::os::fd::AsRawFd as _;
+
+    #[cfg(target_os = "linux")]
+    let root = Path::new("/proc/self/fd");
+    #[cfg(not(target_os = "linux"))]
+    let root = Path::new("/dev/fd");
+    if !root.is_dir() {
+        bail!("invalid_request: descriptor-bound qualification execution is unavailable");
+    }
+    Ok(root.join(file.as_raw_fd().to_string()))
 }
 
 struct VerifiedSource {
@@ -537,6 +598,37 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("changed during validation"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_execution_survives_post_verification_pre_spawn_replacement() {
+        let (root, path, digest) = helper();
+        let bundle = QualificationHelperBundle::from_values(
+            Some(path.into_os_string()),
+            value(&digest),
+            value("stable"),
+            ReleaseChannel::Stable,
+        )
+        .unwrap()
+        .unwrap();
+        let staged = bundle.verified_path().unwrap().to_path_buf();
+        let execution = bundle.prepare_descriptor_execution().unwrap();
+
+        let displaced = root.path().join("verified-staged-helper");
+        fs::rename(&staged, &displaced).unwrap();
+        fs::write(&staged, b"#!/bin/sh\nprintf 'attacker replacement\\n'\n").unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let mut command = std::process::Command::new(execution.program());
+        execution.configure_command(&mut command);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"verified helper\n");
+        assert_eq!(
+            fs::read_to_string(&staged).unwrap(),
+            "#!/bin/sh\nprintf 'attacker replacement\\n'\n"
+        );
     }
 
     #[cfg(unix)]

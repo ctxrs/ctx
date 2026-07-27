@@ -470,7 +470,7 @@ fn validate_claim_time_and_audience(claims: &AccessClaims, client_id: &str) -> R
         || claims
         .aud
         .as_ref()
-        .is_some_and(|aud| !audience_contains(aud, client_id))
+        .is_some_and(|aud| !audience_matches(aud, client_id))
     {
         bail!("authentication_invalid: WorkOS access token audience does not match ctx");
     }
@@ -514,13 +514,8 @@ fn valid_scope(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-/".contains(&byte))
 }
 
-fn audience_contains(value: &Value, expected: &str) -> bool {
+fn audience_matches(value: &Value, expected: &str) -> bool {
     value.as_str() == Some(expected)
-        || value.as_array().is_some_and(|items| {
-            items.len() <= 16
-                && items.iter().all(Value::is_string)
-                && items.iter().any(|item| item.as_str() == Some(expected))
-        })
 }
 
 fn deserialize_optional_present_string<'de, D>(
@@ -879,6 +874,7 @@ mod tests {
         for claims in [
             serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"other_123","iat":now,"exp":now+300,"permissions":[REQUIRED_PERMISSION]}),
             serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":"other_123","permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":["client_123456","other_123"],"permissions":[REQUIRED_PERMISSION]}),
             serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":"client_123456","scope":{"bad":true},"permissions":[REQUIRED_PERMISSION]}),
         ] {
             assert!(client.validate_access_token(&jwt(claims)).is_err());

@@ -252,7 +252,7 @@ pub(crate) fn run(args: ReferralArgs, data_root: PathBuf) -> Result<()> {
         super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?.ok_or_else(
             || {
                 anyhow::anyhow!(
-                    "authentication_required: rerun the referral command without --json to sign in"
+                    "authentication_required: rerun the referral command without --format=json to sign in"
                 )
             },
         )?;
