@@ -1,19 +1,17 @@
 use std::collections::BTreeSet;
 
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
-use crate::captured_batch::CapturedSqliteValue;
+use crate::native_source::NativeSqliteValue;
 use crate::provider::sqlite::{
-    ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
+    ensure_sqlite_table_columns, sqlite_ident, sqlite_table_columns, sqlite_table_exists,
 };
 use crate::{CaptureError, Result};
 
-pub(super) const GOOSE_MESSAGE_RECORD_KIND: &str = "goose-message-v3";
-pub(super) const GOOSE_SESSION_RECORD_KIND: &str = "goose-session-v3";
 pub(super) const GOOSE_MESSAGE_VALUE_COUNT: usize = 10;
-pub(super) const GOOSE_SESSION_VALUE_COUNT: usize = 21;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct GooseSessionRow {
     pub(super) id: String,
     pub(super) name: Option<String>,
@@ -38,35 +36,7 @@ pub(super) struct GooseSessionRow {
     pub(super) project_id: Option<String>,
 }
 
-impl GooseSessionRow {
-    pub(super) fn event_reference(session_id: &str) -> Self {
-        Self {
-            id: session_id.to_owned(),
-            name: None,
-            description: None,
-            user_set_name: false,
-            session_type: None,
-            working_dir: None,
-            created_at: None,
-            updated_at: None,
-            extension_data: None,
-            total_tokens: None,
-            input_tokens: None,
-            output_tokens: None,
-            accumulated_total_tokens: None,
-            accumulated_input_tokens: None,
-            accumulated_output_tokens: None,
-            accumulated_cost: None,
-            provider_name: None,
-            model_config_json: None,
-            goose_mode: None,
-            archived_at: None,
-            project_id: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GooseMessageRow {
     pub(super) rowid: i64,
     pub(super) id: i64,
@@ -120,40 +90,25 @@ fn goose_qualified_optional_column(
 
 struct GooseSqlFieldExpressions {
     hydration: String,
-    retained: String,
 }
 
 impl GooseSqlFieldExpressions {
     fn same(expression: String) -> Self {
         Self {
-            hydration: expression.clone(),
-            retained: expression,
-        }
-    }
-
-    fn distinct(hydration: String, retained: String) -> Self {
-        Self {
-            hydration,
-            retained,
+            hydration: expression,
         }
     }
 }
 
 pub(super) struct GooseSqlExpressions {
     pub(super) hydration: Vec<String>,
-    pub(super) retained: Vec<String>,
 }
 
 fn goose_sql_expressions<const N: usize>(
     fields: [GooseSqlFieldExpressions; N],
 ) -> GooseSqlExpressions {
-    let (hydration, retained) = fields
-        .into_iter()
-        .map(|field| (field.hydration, field.retained))
-        .unzip();
     GooseSqlExpressions {
-        hydration,
-        retained,
+        hydration: fields.into_iter().map(|field| field.hydration).collect(),
     }
 }
 
@@ -173,10 +128,7 @@ pub(super) fn goose_session_expressions(
     alias: &str,
 ) -> GooseSqlExpressions {
     goose_sql_expressions([
-        GooseSqlFieldExpressions::distinct(
-            format!("CAST({alias}.id AS TEXT)"),
-            format!("{alias}.id"),
-        ),
+        GooseSqlFieldExpressions::same(format!("CAST({alias}.id AS TEXT)")),
         goose_optional_field(columns, alias, "name", "NULL"),
         goose_optional_field(columns, alias, "description", "NULL"),
         goose_optional_field(columns, alias, "user_set_name", "0"),
@@ -210,10 +162,7 @@ pub(super) fn goose_message_expressions(
         format!("{alias}.rowid")
     };
     let tokens = if columns.contains("tokens") {
-        GooseSqlFieldExpressions::distinct(
-            format!("CAST({alias}.tokens AS TEXT)"),
-            format!("{alias}.tokens"),
-        )
+        GooseSqlFieldExpressions::same(format!("CAST({alias}.tokens AS TEXT)"))
     } else {
         GooseSqlFieldExpressions::same("NULL".to_owned())
     };
@@ -221,10 +170,7 @@ pub(super) fn goose_message_expressions(
         GooseSqlFieldExpressions::same(format!("{alias}.rowid")),
         GooseSqlFieldExpressions::same(id),
         goose_optional_field(columns, alias, "message_id", "NULL"),
-        GooseSqlFieldExpressions::distinct(
-            format!("CAST({alias}.session_id AS TEXT)"),
-            format!("{alias}.session_id"),
-        ),
+        GooseSqlFieldExpressions::same(format!("CAST({alias}.session_id AS TEXT)")),
         GooseSqlFieldExpressions::same(format!("{alias}.role")),
         GooseSqlFieldExpressions::same(format!("{alias}.content_json")),
         goose_optional_field(columns, alias, "created_timestamp", "NULL"),
@@ -234,23 +180,17 @@ pub(super) fn goose_message_expressions(
     ])
 }
 
-pub(super) fn goose_message_only_values(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
-    goose_message_values_at(row, 0)
-}
-
 pub(super) fn goose_message_values_at(
     row: &rusqlite::Row<'_>,
     offset: usize,
-) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
+) -> rusqlite::Result<Vec<NativeSqliteValue>> {
     Ok(vec![
-        CapturedSqliteValue::Integer(row.get(offset)?),
-        CapturedSqliteValue::Integer(row.get(offset + 1)?),
+        NativeSqliteValue::Integer(row.get(offset)?),
+        NativeSqliteValue::Integer(row.get(offset + 1)?),
         goose_optional_text_value(row.get(offset + 2)?),
-        CapturedSqliteValue::Text(row.get(offset + 3)?),
-        CapturedSqliteValue::Text(row.get(offset + 4)?),
-        CapturedSqliteValue::Text(row.get(offset + 5)?),
+        NativeSqliteValue::Text(row.get(offset + 3)?),
+        NativeSqliteValue::Text(row.get(offset + 4)?),
+        NativeSqliteValue::Text(row.get(offset + 5)?),
         goose_optional_integer_value(row.get(offset + 6)?),
         goose_optional_text_value(row.get(offset + 7)?),
         goose_optional_text_value(row.get(offset + 8)?),
@@ -258,49 +198,16 @@ pub(super) fn goose_message_values_at(
     ])
 }
 
-pub(super) fn goose_session_values(
-    row: &rusqlite::Row<'_>,
-    offset: usize,
-) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
-    Ok(vec![
-        goose_optional_text_value(row.get(offset)?),
-        goose_optional_text_value(row.get(offset + 1)?),
-        goose_optional_text_value(row.get(offset + 2)?),
-        goose_optional_integer_value(row.get(offset + 3)?),
-        goose_optional_text_value(row.get(offset + 4)?),
-        goose_optional_text_value(row.get(offset + 5)?),
-        goose_optional_text_value(row.get(offset + 6)?),
-        goose_optional_text_value(row.get(offset + 7)?),
-        goose_optional_text_value(row.get(offset + 8)?),
-        goose_optional_integer_value(row.get(offset + 9)?),
-        goose_optional_integer_value(row.get(offset + 10)?),
-        goose_optional_integer_value(row.get(offset + 11)?),
-        goose_optional_integer_value(row.get(offset + 12)?),
-        goose_optional_integer_value(row.get(offset + 13)?),
-        goose_optional_integer_value(row.get(offset + 14)?),
-        goose_optional_real_value(row.get(offset + 15)?),
-        goose_optional_text_value(row.get(offset + 16)?),
-        goose_optional_text_value(row.get(offset + 17)?),
-        goose_optional_text_value(row.get(offset + 18)?),
-        goose_optional_text_value(row.get(offset + 19)?),
-        goose_optional_text_value(row.get(offset + 20)?),
-    ])
+fn goose_optional_text_value(value: Option<String>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
 }
 
-fn goose_optional_text_value(value: Option<String>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Text)
-}
-
-fn goose_optional_integer_value(value: Option<i64>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer)
-}
-
-fn goose_optional_real_value(value: Option<f64>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::from_real)
+fn goose_optional_integer_value(value: Option<i64>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
 }
 
 pub(super) fn decode_goose_message_record(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
 ) -> Result<(Option<i64>, GooseMessageRow)> {
     if values.len() != GOOSE_MESSAGE_VALUE_COUNT + 1 {
         return Err(CaptureError::InvalidPayload(
@@ -323,67 +230,19 @@ pub(super) fn decode_goose_message_record(
     Ok((parent_rowid, message))
 }
 
-pub(super) fn decode_goose_session(values: &[CapturedSqliteValue]) -> Result<GooseSessionRow> {
-    if values.len() != GOOSE_SESSION_VALUE_COUNT {
-        return Err(CaptureError::InvalidPayload(
-            "Goose session logical row has an unexpected value count".to_owned(),
-        ));
-    }
-    Ok(GooseSessionRow {
-        id: goose_required_text(values, 0, "session id")?,
-        name: goose_optional_text(values, 1, "session name")?,
-        description: goose_optional_text(values, 2, "session description")?,
-        user_set_name: goose_optional_integer(values, 3, "session user_set_name")?
-            .is_some_and(|value| value != 0),
-        session_type: goose_optional_text(values, 4, "session_type")?,
-        working_dir: goose_optional_text(values, 5, "session working_dir")?,
-        created_at: goose_optional_text(values, 6, "session created_at")?,
-        updated_at: goose_optional_text(values, 7, "session updated_at")?,
-        extension_data: goose_optional_text(values, 8, "session extension_data")?,
-        total_tokens: goose_optional_integer(values, 9, "session total_tokens")?,
-        input_tokens: goose_optional_integer(values, 10, "session input_tokens")?,
-        output_tokens: goose_optional_integer(values, 11, "session output_tokens")?,
-        accumulated_total_tokens: goose_optional_integer(
-            values,
-            12,
-            "session accumulated_total_tokens",
-        )?,
-        accumulated_input_tokens: goose_optional_integer(
-            values,
-            13,
-            "session accumulated_input_tokens",
-        )?,
-        accumulated_output_tokens: goose_optional_integer(
-            values,
-            14,
-            "session accumulated_output_tokens",
-        )?,
-        accumulated_cost: goose_optional_real(values, 15, "session accumulated_cost")?,
-        provider_name: goose_optional_text(values, 16, "session provider_name")?,
-        model_config_json: goose_optional_text(values, 17, "session model_config_json")?,
-        goose_mode: goose_optional_text(values, 18, "session goose_mode")?,
-        archived_at: goose_optional_text(values, 19, "session archived_at")?,
-        project_id: goose_optional_text(values, 20, "session project_id")?,
-    })
-}
-
 fn goose_value<'a>(
-    values: &'a [CapturedSqliteValue],
+    values: &'a [NativeSqliteValue],
     index: usize,
     field: &str,
-) -> Result<&'a CapturedSqliteValue> {
+) -> Result<&'a NativeSqliteValue> {
     values.get(index).ok_or_else(|| {
         CaptureError::InvalidPayload(format!("Goose logical row is missing {field}"))
     })
 }
 
-fn goose_required_text(
-    values: &[CapturedSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<String> {
+fn goose_required_text(values: &[NativeSqliteValue], index: usize, field: &str) -> Result<String> {
     match goose_value(values, index, field)? {
-        CapturedSqliteValue::Text(value) => Ok(value.clone()),
+        NativeSqliteValue::Text(value) => Ok(value.clone()),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Goose logical row {field} must be text"
         ))),
@@ -391,26 +250,22 @@ fn goose_required_text(
 }
 
 fn goose_optional_text(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     index: usize,
     field: &str,
 ) -> Result<Option<String>> {
     match goose_value(values, index, field)? {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Text(value) => Ok(Some(value.clone())),
+        NativeSqliteValue::Null => Ok(None),
+        NativeSqliteValue::Text(value) => Ok(Some(value.clone())),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Goose logical row {field} must be text or null"
         ))),
     }
 }
 
-fn goose_required_integer(
-    values: &[CapturedSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<i64> {
+fn goose_required_integer(values: &[NativeSqliteValue], index: usize, field: &str) -> Result<i64> {
     match goose_value(values, index, field)? {
-        CapturedSqliteValue::Integer(value) => Ok(*value),
+        NativeSqliteValue::Integer(value) => Ok(*value),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Goose logical row {field} must be an integer"
         ))),
@@ -418,29 +273,16 @@ fn goose_required_integer(
 }
 
 fn goose_optional_integer(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
     index: usize,
     field: &str,
 ) -> Result<Option<i64>> {
     match goose_value(values, index, field)? {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Integer(value) => Ok(Some(*value)),
+        NativeSqliteValue::Null => Ok(None),
+        NativeSqliteValue::Integer(value) => Ok(Some(*value)),
         _ => Err(CaptureError::InvalidPayload(format!(
             "Goose logical row {field} must be an integer or null"
         ))),
-    }
-}
-
-fn goose_optional_real(
-    values: &[CapturedSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<Option<f64>> {
-    match goose_value(values, index, field)? {
-        CapturedSqliteValue::Null => Ok(None),
-        value => value.as_real().map(Some).ok_or_else(|| {
-            CaptureError::InvalidPayload(format!("Goose logical row {field} must be real or null"))
-        }),
     }
 }
 
@@ -459,4 +301,163 @@ pub(super) fn goose_schema_version(conn: &Connection) -> Result<Option<i64>> {
     let sql = format!("select max({version_column}) from schema_version");
     conn.query_row(&sql, [], |row| row.get::<_, Option<i64>>(0))
         .map_err(CaptureError::from)
+}
+
+const GOOSE_NATIVE_SCHEMA_VERSION: i64 = 14;
+const GOOSE_CAPABILITY_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-capability-v1\0";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GooseNativeSchema {
+    pub(super) user_version: i64,
+    pub(super) schema_version: i64,
+    pub(super) capability_digest: String,
+    session_columns: BTreeSet<String>,
+    message_columns: BTreeSet<String>,
+}
+
+impl GooseNativeSchema {
+    pub(super) fn probe(conn: &Connection) -> Result<Self> {
+        let session_columns = goose_session_columns(conn)?;
+        let message_columns = goose_message_columns(conn)?;
+        ensure_sqlite_table_columns(&session_columns, "Goose NativePath sessions table", &["id"])?;
+        ensure_sqlite_table_columns(
+            &message_columns,
+            "Goose NativePath messages table",
+            &["id", "message_id", "session_id", "role", "content_json"],
+        )?;
+        goose_require_native_primary_key(conn, "sessions", "id", None)?;
+        goose_require_native_primary_key(conn, "messages", "id", Some("INTEGER"))?;
+        let schema_version = goose_schema_version(conn)?.ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "Goose NativePath requires the schema_version table".to_owned(),
+            )
+        })?;
+        if schema_version != GOOSE_NATIVE_SCHEMA_VERSION {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Goose NativePath supports schema version {GOOSE_NATIVE_SCHEMA_VERSION}, found {schema_version}"
+            )));
+        }
+        let user_version =
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        let schema_objects = goose_native_schema_objects(conn)?;
+        let capability_digest = goose_capability_digest(
+            user_version,
+            schema_version,
+            &session_columns,
+            &message_columns,
+            &schema_objects,
+        );
+        Ok(Self {
+            user_version,
+            schema_version,
+            capability_digest,
+            session_columns,
+            message_columns,
+        })
+    }
+
+    pub(super) fn session_hydration_expressions(&self, alias: &str) -> Vec<String> {
+        goose_session_expressions(&self.session_columns, alias).hydration
+    }
+
+    pub(super) fn message_id_expression(&self, alias: &str) -> String {
+        goose_qualified_optional_column(&self.message_columns, alias, "message_id", "NULL")
+    }
+
+    pub(super) fn message_created_timestamp_expression(&self, alias: &str) -> String {
+        goose_qualified_optional_column(&self.message_columns, alias, "created_timestamp", "NULL")
+    }
+
+    pub(super) fn message_timestamp_expression(&self, alias: &str) -> String {
+        goose_qualified_optional_column(&self.message_columns, alias, "timestamp", "NULL")
+    }
+
+    pub(super) fn message_tokens_expression(&self, alias: &str) -> String {
+        goose_qualified_optional_column(&self.message_columns, alias, "tokens", "NULL")
+    }
+
+    pub(super) fn message_metadata_expression(&self, alias: &str) -> String {
+        goose_qualified_optional_column(&self.message_columns, alias, "metadata_json", "NULL")
+    }
+}
+
+fn goose_capability_digest(
+    user_version: i64,
+    schema_version: i64,
+    session_columns: &BTreeSet<String>,
+    message_columns: &BTreeSet<String>,
+    schema_objects: &[(String, String, String)],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(GOOSE_CAPABILITY_DIGEST_DOMAIN);
+    hasher.update(user_version.to_le_bytes());
+    hasher.update(schema_version.to_le_bytes());
+    for (table, columns) in [("sessions", session_columns), ("messages", message_columns)] {
+        hasher.update((table.len() as u64).to_le_bytes());
+        hasher.update(table.as_bytes());
+        for column in columns {
+            hasher.update((column.len() as u64).to_le_bytes());
+            hasher.update(column.as_bytes());
+        }
+    }
+    for (object_type, name, sql) in schema_objects {
+        for field in [object_type, name, sql] {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field.as_bytes());
+        }
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn goose_native_schema_objects(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+    let mut statement = conn.prepare(
+        "select type, name, coalesce(sql, '')
+         from sqlite_schema
+         where type in ('table', 'index')
+           and (tbl_name in ('sessions', 'messages', 'schema_version')
+                or name in ('sessions', 'messages', 'schema_version'))
+         order by type, name",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn goose_require_native_primary_key(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    expected_declared_type: Option<&str>,
+) -> Result<()> {
+    let mut statement = conn.prepare(&format!("pragma table_info({})", sqlite_ident(table)))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    let columns = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    let Some((_, declared_type, primary_key_ordinal)) =
+        columns.into_iter().find(|(name, _, _)| name == column)
+    else {
+        return Err(CaptureError::InvalidPayload(format!(
+            "Goose NativePath {table}.{column} is missing"
+        )));
+    };
+    if primary_key_ordinal <= 0 {
+        return Err(CaptureError::InvalidPayload(format!(
+            "Goose NativePath requires {table}.{column} to be a primary key"
+        )));
+    }
+    if let Some(expected) = expected_declared_type {
+        let actual = declared_type.trim().to_ascii_uppercase();
+        if actual != expected {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Goose NativePath requires {table}.{column} to be declared {expected}, found {declared_type}"
+            )));
+        }
+    }
+    Ok(())
 }

@@ -2,7 +2,7 @@ use serde_json::Value;
 
 mod pro;
 
-use pro::{render_pro_text, render_unknown_pro_text, ProTextKind};
+use pro::{is_blame_result, render_blame_text};
 
 const MCP_TEXT_MAX_SEARCH_RESULTS: usize = 5;
 const MCP_TEXT_MAX_SOURCES: usize = 12;
@@ -14,16 +14,11 @@ const MCP_TEXT_MAX_EVENT_CHARS: usize = 500;
 const MCP_TEXT_MAX_CELL_CHARS: usize = 80;
 
 pub(super) fn render_tool_text(value: &Value) -> String {
-    let payload_type = value.get("payload_type").and_then(Value::as_str);
-    if let Some(kind) = payload_type.and_then(ProTextKind::from_payload_type) {
-        return render_pro_text(value, kind);
-    }
-    if payload_type.is_some_and(|payload_type| payload_type.starts_with("pro_"))
-        && value.get("results").and_then(Value::as_array).is_some()
-    {
-        return render_unknown_pro_text(value);
+    if is_blame_result(value) {
+        return render_blame_text(value);
     }
 
+    let payload_type = value.get("payload_type").and_then(Value::as_str);
     match payload_type {
         Some("sql_result") => render_sql_text(value),
         Some("session_transcript") => render_session_text(value),
@@ -682,19 +677,6 @@ mod tests {
         assert_eq!(
             render_tool_text(&value),
             "ctx search\nquery: journal replay\nresults: 1\n\n1. Replay decision\n   ctx_session_id: session-1\n   ctx_event_id: event-2\n   provider: codex\n   timestamp: 2026-07-22T12:00:00Z\n   snippet: Use the canonical journal checkpoint.\n   next: ctx show event event-2\n"
-        );
-    }
-
-    #[test]
-    fn unknown_pro_query_payload_does_not_fall_through_to_search() {
-        let value = json!({
-            "payload_type": "pro_future",
-            "query": "must not become search",
-            "results": [{"title": "misleading search result"}]
-        });
-        assert_eq!(
-            render_tool_text(&value),
-            "ctx pro result\npayload_type: pro_future\nerror_code: unsupported_payload_type\nstatus: not_rendered\n"
         );
     }
 

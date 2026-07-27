@@ -15,6 +15,28 @@ GLOBAL_FILES = {
     "MODULE.bazel",
     "MODULE.bazel.lock",
 }
+EXCLUDED_TARGET_TERMS = (
+    "advisory",
+    "external",
+    "external-harness",
+    "external_harness",
+    "flaky-repetition",
+    "flaky_repetition",
+    "manual",
+    "network",
+    "no-cache",
+    "no_cache",
+    "platform-native",
+    "platform_native",
+    "release",
+    "requires-local-history",
+    "requires-signing",
+    "requires-vm",
+    "requires_local_history",
+    "requires_signing",
+    "requires_vm",
+    "stress",
+)
 
 
 def is_graph_global(path: str) -> bool:
@@ -28,7 +50,10 @@ def is_graph_global(path: str) -> bool:
 
 
 def is_runnable_test(label: str) -> bool:
-    name = label.rsplit(":", 1)[-1]
+    normalized_label = label.lower()
+    name = normalized_label.rsplit(":", 1)[-1]
+    if any(term in normalized_label for term in EXCLUDED_TARGET_TERMS):
+        return False
     return label.startswith("//") and (
         name.endswith(("_test", "_tests", "_check", "_e2e", "_smoke"))
         or name in {"fast", "presubmit", "ci", "smoke", "native_rust", "native_rust_smoke"}

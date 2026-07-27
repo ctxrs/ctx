@@ -5,6 +5,54 @@ use serde_json::Value;
 
 use crate::{Result, StoreError};
 
+const MAX_FAILURE_PREVIEW_CHARS: usize = 4_000;
+
+/// Whether a normalized provider output is one of the sparse diagnostics Core
+/// retains. Unknown and successful outputs belong only to the transient Pro
+/// stream.
+pub(crate) fn provider_output_is_retained_failure(event: &Event) -> bool {
+    if !matches!(
+        event.event_type,
+        EventType::ToolOutput | EventType::CommandOutput
+    ) {
+        return true;
+    }
+    result_payload_is_failure(&event.payload)
+}
+
+pub(crate) fn retained_failure_preview(payload: &Value) -> Option<String> {
+    if !result_payload_is_failure(payload) {
+        return None;
+    }
+    first_result_field(payload, "output_preview")
+        .and_then(Value::as_str)
+        .filter(|preview| !preview.trim().is_empty())
+        .map(|preview| preview.chars().take(MAX_FAILURE_PREVIEW_CHARS).collect())
+}
+
+fn result_payload_is_failure(payload: &Value) -> bool {
+    let compact = compact_result_payload(payload);
+    compact
+        .get("result_outcome")
+        .and_then(Value::as_str)
+        .is_some_and(|outcome| outcome == "failure")
+        || compact
+            .get("timed_out")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || compact
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .is_some_and(|exit_code| exit_code != 0)
+}
+
+fn first_result_field<'a>(payload: &'a Value, key: &str) -> Option<&'a Value> {
+    payload
+        .get(key)
+        .or_else(|| payload.get("body").and_then(|body| body.get(key)))
+        .filter(|value| !value.is_null())
+}
+
 /// Returns the exact event shape that may cross a durable Store write boundary.
 ///
 /// Result bodies are always reduced to the bounded typed contract. Blob-backed
@@ -29,7 +77,7 @@ pub(crate) fn durable_event(event: &Event) -> Result<Cow<'_, Event>> {
 /// retaining only the wrapper fields needed for canonical provenance.
 pub(crate) fn compact_stored_result_event_payload(payload: &Value) -> Value {
     let Some(wrapper) = payload.as_object() else {
-        return compact_result_payload(payload);
+        return compact_result_diagnostic_payload(payload);
     };
     let is_import_wrapper = wrapper.contains_key("body")
         && [
@@ -43,7 +91,7 @@ pub(crate) fn compact_stored_result_event_payload(payload: &Value) -> Value {
         .iter()
         .any(|key| wrapper.contains_key(*key));
     if !is_import_wrapper {
-        return compact_result_payload(payload);
+        return compact_result_diagnostic_payload(payload);
     }
 
     let mut compact_wrapper = serde_json::Map::new();
@@ -59,6 +107,56 @@ pub(crate) fn compact_stored_result_event_payload(payload: &Value) -> Value {
             compact_wrapper.insert(key.to_owned(), value.clone());
         }
     }
-    compact_wrapper.insert("body".to_owned(), compact_result_payload(payload));
+    compact_wrapper.insert(
+        "body".to_owned(),
+        compact_result_diagnostic_payload(payload),
+    );
     Value::Object(compact_wrapper)
+}
+
+fn compact_result_diagnostic_payload(payload: &Value) -> Value {
+    let mut compact = compact_result_payload(payload);
+    if let Some(preview) = retained_failure_preview(payload) {
+        compact
+            .as_object_mut()
+            .expect("compact result payload is an object")
+            .insert("output_preview".to_owned(), Value::String(preview));
+    }
+    compact
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn failure_preview_is_bounded_while_success_has_no_preview() {
+        let failure = json!({
+            "body": {
+                "result_outcome": "failure",
+                "exit_code": 1,
+                "output_preview": "x".repeat(MAX_FAILURE_PREVIEW_CHARS + 10)
+            }
+        });
+        let compact = compact_stored_result_event_payload(&failure);
+        assert_eq!(
+            compact["output_preview"]
+                .as_str()
+                .expect("failure preview")
+                .chars()
+                .count(),
+            MAX_FAILURE_PREVIEW_CHARS
+        );
+
+        let success = json!({
+            "result_outcome": "success",
+            "exit_code": 0,
+            "output_preview": "must not persist"
+        });
+        assert!(compact_stored_result_event_payload(&success)
+            .get("output_preview")
+            .is_none());
+    }
 }

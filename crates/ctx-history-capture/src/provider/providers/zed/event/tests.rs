@@ -10,20 +10,27 @@ fn row(thread: Value) -> ZedThreadRow {
     ZedThreadRow {
         rowid: 7,
         id: "zed-decoder-parity".to_owned(),
-        parent_id: None,
-        folder_paths: None,
-        folder_paths_order: None,
-        summary: "decoder parity".to_owned(),
         updated_at: "2026-07-21T12:00:00Z".to_owned(),
         data_type: "json".to_owned(),
         data: serde_json::to_vec(&thread).unwrap(),
-        created_at: None,
     }
 }
 
 fn snapshot(decoded: ZedDecodedEvent<'_>) -> EventSnapshot {
+    let event = decoded.event;
     (
-        serde_json::to_value(decoded.event).unwrap(),
+        json!({
+            "provider_event_index": event.provider_event_index,
+            "provider_event_hash": event.provider_event_hash,
+            "cursor": event.cursor,
+            "event_type": event.event_type,
+            "role": event.role,
+            "occurred_at": event.occurred_at,
+            "fidelity": event.fidelity,
+            "idempotency_key": event.idempotency_key,
+            "payload": event.payload,
+            "metadata": event.metadata,
+        }),
         decoded.complete_text,
     )
 }
@@ -31,8 +38,13 @@ fn snapshot(decoded: ZedDecodedEvent<'_>) -> EventSnapshot {
 fn live_decode(row: &ZedThreadRow) -> std::result::Result<Vec<EventSnapshot>, String> {
     let decoded = decode_zed_thread_events(row).map_err(|error| error.to_string())?;
     decoded
-        .events(&row.id)
-        .map(|event| event.map(snapshot).map_err(|error| error.to_string()))
+        .native_events(&row.id)
+        .map(|event| {
+            event
+                .decode()
+                .map(snapshot)
+                .map_err(|error| error.to_string())
+        })
         .collect()
 }
 
@@ -40,13 +52,10 @@ fn recovery_decode(row: &ZedThreadRow) -> std::result::Result<Vec<EventSnapshot>
     let decoded = decode_zed_thread_events(row).map_err(|error| error.to_string())?;
     let mut events = Vec::new();
     for event_index in 0.. {
-        let Some(event) = decoded
-            .event_at(&row.id, event_index)
-            .map_err(|error| error.to_string())?
-        else {
+        let Some(event) = decoded.native_events(&row.id).nth(event_index) else {
             break;
         };
-        events.push(snapshot(event));
+        events.push(snapshot(event.decode().map_err(|error| error.to_string())?));
     }
     Ok(events)
 }

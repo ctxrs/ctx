@@ -11,6 +11,13 @@ pub(super) struct DeepAgentsMessage {
     pub(super) message_type: String,
     pub(super) message_class: Option<String>,
     pub(super) message_id: Option<String>,
+    pub(super) tool_call_id: Option<String>,
+    pub(super) status: Option<String>,
+    pub(super) exit_code: Option<i32>,
+    pub(super) duration_ms: Option<u64>,
+    pub(super) timed_out: bool,
+    pub(super) is_error: Option<bool>,
+    pub(super) success: Option<bool>,
     pub(super) text: String,
 }
 
@@ -96,6 +103,23 @@ pub(super) fn deepagents_message_from_fields(
         message_type,
         message_class: class_name,
         message_id: msgpack_map_string(fields, "id"),
+        tool_call_id: msgpack_map_string(fields, "tool_call_id")
+            .or_else(|| msgpack_map_string(fields, "toolCallId")),
+        status: msgpack_map_string(fields, "status")
+            .or_else(|| msgpack_map_string(fields, "state"))
+            .or_else(|| msgpack_map_string(fields, "outcome")),
+        exit_code: msgpack_map_i64(fields, "exit_code")
+            .or_else(|| msgpack_map_i64(fields, "exitCode"))
+            .and_then(|value| i32::try_from(value).ok()),
+        duration_ms: msgpack_map_u64(fields, "duration_ms")
+            .or_else(|| msgpack_map_u64(fields, "durationMs")),
+        timed_out: msgpack_map_bool(fields, "timed_out")
+            .or_else(|| msgpack_map_bool(fields, "timedOut"))
+            .or_else(|| msgpack_map_bool(fields, "timeout"))
+            .unwrap_or(false),
+        is_error: msgpack_map_bool(fields, "is_error")
+            .or_else(|| msgpack_map_bool(fields, "isError")),
+        success: msgpack_map_bool(fields, "success").or_else(|| msgpack_map_bool(fields, "ok")),
         text,
     })
 }
@@ -154,6 +178,18 @@ pub(super) fn msgpack_map_string(
     key: &str,
 ) -> Option<String> {
     msgpack_map_get(fields, key).and_then(msgpack_string)
+}
+
+fn msgpack_map_i64(fields: &[(MsgpackValue, MsgpackValue)], key: &str) -> Option<i64> {
+    msgpack_map_get(fields, key).and_then(MsgpackValue::as_i64)
+}
+
+fn msgpack_map_u64(fields: &[(MsgpackValue, MsgpackValue)], key: &str) -> Option<u64> {
+    msgpack_map_get(fields, key).and_then(MsgpackValue::as_u64)
+}
+
+fn msgpack_map_bool(fields: &[(MsgpackValue, MsgpackValue)], key: &str) -> Option<bool> {
+    msgpack_map_get(fields, key).and_then(MsgpackValue::as_bool)
 }
 
 pub(super) fn msgpack_string(value: &MsgpackValue) -> Option<String> {

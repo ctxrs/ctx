@@ -1,7 +1,7 @@
 use crate::provider::importer::provider_session_uuid;
 use crate::tests::support::assertions::{
-    assert_event_type_count, assert_event_with_role, assert_events_have_provider_citations,
-    assert_search_hits_provider, assert_search_misses,
+    assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
+    assert_search_misses,
 };
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::stored_provider_session_id;
@@ -42,8 +42,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     let cline_events = store.events_for_session(cline_session).unwrap();
     assert_eq!(cline_events.len(), 4);
     assert_event_type_count(&cline_events, EventType::ToolCall, 1);
-    assert_event_type_count(&cline_events, EventType::ToolOutput, 1);
-    assert_event_with_role(&cline_events, EventType::ToolOutput, EventRole::User);
+    assert_event_type_count(&cline_events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&cline_events);
     assert_search_hits_provider(
         &store,
@@ -60,6 +59,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         .files_touched
         .iter()
         .any(|file| file.path == "docs/cline-task-json.md"));
+    assert!(store.runs_for_session(cline_session).unwrap().is_empty());
 
     let cline_second = import_cline_task_json_history(
         &cline,
@@ -95,8 +95,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     let roo_events = store.events_for_session(roo_session).unwrap();
     assert_eq!(roo_events.len(), 4);
     assert_event_type_count(&roo_events, EventType::ToolCall, 1);
-    assert_event_type_count(&roo_events, EventType::ToolOutput, 1);
-    assert_event_with_role(&roo_events, EventType::ToolOutput, EventRole::User);
+    assert_event_type_count(&roo_events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&roo_events);
     assert_search_hits_provider(
         &store,
@@ -116,6 +115,8 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         .files_touched
         .iter()
         .any(|file| file.path == "tests/roo-task-json.txt"));
+    assert!(store.runs_for_session(roo_session).unwrap().is_empty());
+    assert!(store.runs_for_session(fallback).unwrap().is_empty());
 
     let roo_second = import_roo_task_json_history(
         &roo,

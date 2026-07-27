@@ -1,15 +1,11 @@
 mod content_policy;
-mod envelope;
 mod io;
 mod result_content;
 mod result_evidence;
 mod value;
 
 pub(crate) use content_policy::{provider_policy_body, provider_policy_event_text};
-pub(crate) use envelope::{
-    native_event, native_provider_capture, NativeEventDraft, NativeSessionDraft,
-};
-pub(crate) use io::{provider_optional_regular_file, read_provider_json_file};
+pub(crate) use io::provider_optional_regular_file;
 pub(crate) use result_content::provider_normalized_result_value;
 pub(crate) use result_evidence::{
     provider_output_event_is_failure, provider_result_identifier_evidence,

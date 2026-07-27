@@ -35,15 +35,22 @@ chmod +x "${tmp}/llvm-readobj" "${tmp}/llvm-objdump"
 printf 'not a real binary\n' > "${tmp}/candidate"
 : > "${tmp}/empty"
 
+# Parser fixtures execute only through this disposable checker copy. The
+# production checker retains its fixed package-root resolution and has no
+# caller-selected tool path.
+fixture_checker="${tmp}/check-release-binary-compat-fixture.sh"
+sed \
+  "s#^LLVM_TOOL_ROOT=.*#LLVM_TOOL_ROOT=\"${tmp}\"#" \
+  "${checker}" > "${fixture_checker}"
+chmod 700 "${fixture_checker}"
+
 run_check() {
   local platform="$1"
   local readobj="$2"
   local objdump="${3:-${tmp}/empty}"
   FAKE_READOBJ_OUTPUT="${readobj}" \
     FAKE_OBJDUMP_OUTPUT="${objdump}" \
-    CTX_LLVM_READOBJ="${tmp}/llvm-readobj" \
-    CTX_LLVM_OBJDUMP="${tmp}/llvm-objdump" \
-    "${checker}" "${platform}" "${tmp}/candidate"
+    "${fixture_checker}" "${platform}" "${tmp}/candidate"
 }
 
 expect_pass() {
@@ -69,6 +76,39 @@ expect_fail() {
     exit 1
   }
 }
+
+for override in CTX_LLVM_READOBJ CTX_LLVM_OBJDUMP; do
+  if env "${override}=${tmp}/forged-tool" \
+    "${checker}" linux-x64 "${tmp}/candidate" \
+    >"${tmp}/${override}.out" 2>"${tmp}/${override}.err"; then
+    printf 'production compatibility checker accepted %s\n' "${override}" >&2
+    exit 1
+  fi
+  grep -Fq \
+    "forbidden public release environment variable: ${override}" \
+    "${tmp}/${override}.err"
+done
+
+mkdir "${tmp}/forged-path"
+cat > "${tmp}/forged-path/llvm-readobj" <<'EOF'
+#!/bin/sh
+touch "$FORGED_TOOL_MARKER"
+exit 0
+EOF
+printf '#!/bin/sh\ntouch "$FORGED_TOOL_MARKER"\nexit 0\n' \
+  > "${tmp}/forged-path/llvm-objdump"
+chmod +x "${tmp}/forged-path/llvm-readobj" "${tmp}/forged-path/llvm-objdump"
+if PATH="${tmp}/forged-path:${PATH}" \
+  FORGED_TOOL_MARKER="${tmp}/forged-tool-ran" \
+  "${checker}" linux-x64 "${tmp}/candidate" \
+  >"${tmp}/forged-path.out" 2>"${tmp}/forged-path.err"; then
+  echo "production compatibility checker accepted a forged PATH tool" >&2
+  exit 1
+fi
+if [[ -e "${tmp}/forged-tool-ran" ]]; then
+  echo "production compatibility checker executed a caller-PATH LLVM tool" >&2
+  exit 1
+fi
 
 linux_x64="${tmp}/linux-x64.txt"
 cat > "${linux_x64}" <<'EOF'
@@ -299,6 +339,9 @@ mutate_and_fail linux_endian linux-x64 "${linux_x64}" 's/DataEncoding: LittleEnd
 mutate_and_fail linux_type linux-x64 "${linux_x64}" 's/Type: SharedObject/Type: Relocatable/'
 mutate_and_fail linux_interpreter linux-x64 "${linux_x64}" 's#/lib64/ld-linux-x86-64.so.2#/lib/ld-linux.so.2#'
 mutate_and_fail linux_glibc linux-x64 "${linux_x64}" 's/GLIBC_2.35/GLIBC_2.36/'
+grep -Fq 'requires GLIBC_2.36, above allowed GLIBC_2.35' "${tmp}/linux_glibc.err"
+mutate_and_fail arm_glibc linux-aarch64 "${linux_arm64}" 's/GLIBC_2.35/GLIBC_2.36/'
+grep -Fq 'requires GLIBC_2.36, above allowed GLIBC_2.35' "${tmp}/arm_glibc.err"
 mutate_and_fail linux_glibcxx linux-x64 "${linux_x64}" 's/Name: GLIBC_2.35/Name: GLIBC_2.35\nName: GLIBCXX_3.4.30/'
 mutate_and_fail linux_cxxabi linux-x64 "${linux_x64}" 's/Name: GLIBC_2.35/Name: GLIBC_2.35\nName: CXXABI_1.3.11/'
 mutate_and_fail linux_gcc linux-x64 "${linux_x64}" 's/GCC_4.2.0/GCC_4.3.0/'

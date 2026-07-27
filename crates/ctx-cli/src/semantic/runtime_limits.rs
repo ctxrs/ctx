@@ -3,12 +3,6 @@ pub(super) const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 pub(super) const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
 pub(super) const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
-pub(super) const SEMANTIC_VECTOR_OVERFETCH: usize = 4;
-pub(super) const SEMANTIC_FULL_SCAN_MAX_CHUNKS: usize = 250_000;
-pub(super) const SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES: usize = 512 * 1024 * 1024;
-pub(super) const SEMANTIC_VECTOR_BACKEND_RUST: &str = "rust_blob_scan";
-pub(super) const SEMANTIC_VECTOR_BACKEND_SQLITE_VEC: &str = "sqlite_vec0";
-pub(super) const SEMANTIC_SQLITE_VEC0_MAX_K: usize = 4_096;
 #[cfg(ctx_semantic_fastembed)]
 pub(super) const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
 #[cfg(ctx_semantic_fastembed)]

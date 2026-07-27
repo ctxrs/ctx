@@ -106,6 +106,7 @@ fn sql_reads_existing_store_and_supports_formats_and_input_sources() {
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["payload_type"], "sql_result");
     assert_eq!(json["read_only"], true);
+    assert_eq!(json["share_safe"], false);
     assert_eq!(json["columns"], json!(["one", "two"]));
     assert_eq!(json["rows"], json!([[1, "two"]]));
     assert_eq!(json["returned_rows"], 1);
@@ -733,7 +734,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 8);
+    assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["imported_edges"], 1);
 
     let primary_default = json_output(ctx(&temp).args(["search", "subagent", "--json"]));
@@ -837,7 +838,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 8);
+    assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["rejected_records"], 0);
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
@@ -878,7 +879,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--json",
     ]));
     assert_eq!(basic["totals"]["imported_sessions"], 2);
-    assert_eq!(basic["totals"]["imported_events"], 8);
+    assert_eq!(basic["totals"]["imported_events"], 7);
     assert_eq!(basic["totals"]["imported_edges"], 1);
 
     let rich = json_output(ctx(&temp).args([
@@ -890,7 +891,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--json",
     ]));
     assert_eq!(rich["totals"]["imported_sessions"], 1);
-    assert_eq!(rich["totals"]["imported_events"], 7);
+    assert_eq!(rich["totals"]["imported_events"], 5);
 
     let query = "setup flow";
     let search = json_output(ctx(&temp).args(["search", query, "--provider", "codex", "--json"]));
@@ -909,7 +910,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.fidelity = 'imported'"
         ),
-        15
+        12
     );
     assert_eq!(
         sqlite_count(
@@ -937,15 +938,32 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'tool_output'"
         ),
-        1
+        0
     );
     assert_eq!(
         sqlite_count(
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'command_output'"
         ),
-        2
+        0
     );
+    for forbidden_output in [
+        "all onboarding tests passed",
+        "unit tests passed in /workspace/ctx-rich-fixture",
+        "Success. Updated files:",
+    ] {
+        assert_eq!(
+            sqlite_count(
+                &conn,
+                &format!(
+                    "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id \
+                     WHERE s.provider = 'codex' AND e.payload_json LIKE '%{forbidden_output}%'"
+                ),
+            ),
+            0,
+            "successful Codex output body leaked into Core rows: {forbidden_output}"
+        );
+    }
     assert_eq!(
         sqlite_count(
             &conn,
@@ -976,7 +994,7 @@ fn pi_cli_import_search_flow() {
     assert_eq!(imported["sources"][0]["provider"], "pi");
     assert_eq!(imported["sources"][0]["source_format"], "pi_session_jsonl");
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 6);
+    assert_eq!(imported["totals"]["imported_events"], 4);
 
     let search =
         json_output(ctx(&temp).args(["search", "provider metadata", "--provider", "pi", "--json"]));
@@ -995,7 +1013,7 @@ fn pi_cli_import_search_flow() {
     assert_eq!(second["resume_mode"], "idempotent_rescan");
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped"].as_u64().unwrap(), 7);
+    assert_eq!(second["totals"]["skipped"].as_u64().unwrap(), 5);
 
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
@@ -1010,7 +1028,7 @@ fn pi_cli_import_search_flow() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'pi' AND e.fidelity = 'imported'"
         ),
-        6
+        4
     );
     assert_eq!(
         sqlite_count(
@@ -1033,6 +1051,32 @@ fn pi_cli_import_search_flow() {
         ),
         2
     );
+    for event_type in ["tool_output", "command_output"] {
+        assert_eq!(
+            sqlite_count(
+                &conn,
+                &format!(
+                    "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id \
+                     WHERE s.provider = 'pi' AND e.event_type = '{event_type}'"
+                ),
+            ),
+            0,
+            "successful Pi output created a Core {event_type} row"
+        );
+    }
+    for forbidden_output in ["tests passed", "ok token=fixture-secret"] {
+        assert_eq!(
+            sqlite_count(
+                &conn,
+                &format!(
+                    "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id \
+                     WHERE s.provider = 'pi' AND e.payload_json LIKE '%{forbidden_output}%'"
+                ),
+            ),
+            0,
+            "successful Pi output body leaked into Core rows: {forbidden_output}"
+        );
+    }
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM session_edges"), 0);
 }
 
@@ -1464,7 +1508,7 @@ fn codex_cli_marks_deleted_raw_source_citations_unavailable() {
         &copied_text,
         "--json",
     ]));
-    assert_eq!(imported["totals"]["imported_events"], 8);
+    assert_eq!(imported["totals"]["imported_events"], 7);
 
     fs::remove_dir_all(&copied).unwrap();
 

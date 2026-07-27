@@ -13,12 +13,7 @@ use crate::provider::sqlite::{
 };
 use crate::{CaptureError, ProviderAdapterContext, Result};
 
-use super::{
-    deepagents_oversize_limit, DEEPAGENTS_CAPTURE_REVISION, DEEPAGENTS_POLICY_REVISION,
-    DEEPAGENTS_SQLITE_VALUE_OVERHEAD_BYTES,
-};
-#[cfg(test)]
-use super::{deepagents_trace, DeepAgentsImportTraceEvent};
+const DEEPAGENTS_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 32 * 16;
 
 pub(super) fn deepagents_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
     ProviderSqliteSourceSnapshot::read(
@@ -28,17 +23,7 @@ pub(super) fn deepagents_source_snapshot(path: &Path) -> Result<ProviderSqliteSo
     )
 }
 
-pub(super) fn deepagents_source_revision(
-    snapshot: &ProviderSqliteSourceSnapshot,
-    schema_fingerprint: &str,
-) -> String {
-    format!(
-        "deepagents-sqlite-snapshot-v1:capture={DEEPAGENTS_CAPTURE_REVISION};policy={DEEPAGENTS_POLICY_REVISION};schema={schema_fingerprint};{}",
-        snapshot.revision_component(),
-    )
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct DeepAgentsThread {
     pub(super) thread_id: String,
     pub(super) agent_name: Option<String>,
@@ -57,21 +42,20 @@ pub(super) struct DeepAgentsWriteKey {
     pub(super) idx: i64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct DeepAgentsThreadSummary {
     pub(super) thread: DeepAgentsThread,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct DeepAgentsWriteCandidate {
     pub(super) rowid: i64,
     pub(super) key: Option<DeepAgentsWriteKey>,
     pub(super) retained_bytes: i64,
-    pub(super) same_thread_as_prior: bool,
     pub(super) rejection_reason: Option<String>,
 }
 
-pub(super) type DeepAgentsWritePreflight = (i64, [i64; 5], [String; 6], bool);
+pub(super) type DeepAgentsWritePreflight = (i64, [i64; 5], [String; 6]);
 
 impl DeepAgentsWriteCandidate {
     pub(super) fn observed_bytes(&self) -> Result<u64> {
@@ -86,6 +70,12 @@ impl DeepAgentsWriteCandidate {
                 "Deep Agents SQLite retained byte count overflowed",
             ))
     }
+}
+
+pub(super) fn deepagents_oversize_limit() -> Result<u64> {
+    let bounded = ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES.saturating_sub(256 * 1024);
+    u64::try_from(bounded)
+        .map_err(|_| CaptureError::SystemInvariant("Deep Agents byte limit exceeds u64"))
 }
 
 pub(super) struct DeepAgentsThreadCandidate {
@@ -142,11 +132,7 @@ pub(super) fn deepagents_next_write_candidate_scoped(
                     coalesce(length(candidate.value), 0), \
                     typeof(candidate.thread_id), typeof(candidate.checkpoint_id), \
                     typeof(candidate.task_id), typeof(candidate.idx), typeof(candidate.type), \
-                    typeof(candidate.value), \
-                    case when ?1 = 0 then 0 else exists( \
-                        select 1 from writes as prior where prior.rowid = ?2 \
-                          and candidate.thread_id = prior.thread_id \
-                    ) end \
+                    typeof(candidate.value) \
              from writes as candidate \
              where candidate.checkpoint_ns = '' and candidate.channel = 'messages' \
                and (?3 is null or candidate.thread_id = ?3) \
@@ -163,9 +149,44 @@ pub(super) fn deepagents_next_write_candidate_scoped(
         )
         .optional()
     })?;
-    let Some((rowid, lengths, types, same_thread_as_prior)) = preflight else {
-        return Ok(None);
-    };
+    preflight
+        .map(|preflight| deepagents_candidate_from_preflight(conn, preflight))
+        .transpose()
+}
+
+pub(super) fn deepagents_write_candidate_at(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<DeepAgentsWriteCandidate>> {
+    let preflight = with_deepagents_length_preflight(conn, || {
+        conn.query_row(
+            "select candidate.rowid, \
+                    coalesce(octet_length(candidate.thread_id), 0), \
+                    coalesce(octet_length(candidate.checkpoint_id), 0), \
+                    coalesce(octet_length(candidate.task_id), 0), \
+                    coalesce(octet_length(candidate.type), 0), \
+                    coalesce(length(candidate.value), 0), \
+                    typeof(candidate.thread_id), typeof(candidate.checkpoint_id), \
+                    typeof(candidate.task_id), typeof(candidate.idx), typeof(candidate.type), \
+                    typeof(candidate.value) \
+             from writes as candidate \
+             where candidate.rowid = ?1 \
+               and candidate.checkpoint_ns = '' and candidate.channel = 'messages'",
+            [rowid],
+            deepagents_write_preflight_from_row,
+        )
+        .optional()
+    })?;
+    preflight
+        .map(|preflight| deepagents_candidate_from_preflight(conn, preflight))
+        .transpose()
+}
+
+fn deepagents_candidate_from_preflight(
+    conn: &Connection,
+    preflight: DeepAgentsWritePreflight,
+) -> Result<DeepAgentsWriteCandidate> {
+    let (rowid, lengths, types) = preflight;
     let retained_bytes = lengths.into_iter().try_fold(0_i64, |total, value| {
         if value < 0 {
             return Err(CaptureError::InvalidPayload(
@@ -196,8 +217,6 @@ pub(super) fn deepagents_next_write_candidate_scoped(
     let key = if preflight_observed > deepagents_oversize_limit()? || rejection_reason.is_some() {
         None
     } else {
-        #[cfg(test)]
-        deepagents_trace(DeepAgentsImportTraceEvent::WriteKeyHydrated(rowid));
         Some(conn.query_row(
             "select thread_id, checkpoint_id, task_id, idx from writes \
              where rowid = ?1 and checkpoint_ns = '' and channel = 'messages'",
@@ -212,13 +231,12 @@ pub(super) fn deepagents_next_write_candidate_scoped(
             },
         )?)
     };
-    Ok(Some(DeepAgentsWriteCandidate {
+    Ok(DeepAgentsWriteCandidate {
         rowid,
         key,
         retained_bytes,
-        same_thread_as_prior,
         rejection_reason,
-    }))
+    })
 }
 
 pub(super) fn deepagents_write_preflight_from_row(
@@ -241,7 +259,6 @@ pub(super) fn deepagents_write_preflight_from_row(
             row.get::<_, String>(10)?,
             row.get::<_, String>(11)?,
         ],
-        row.get::<_, i64>(12)? != 0,
     ))
 }
 
@@ -256,25 +273,6 @@ pub(super) fn deepagents_hydrate_write(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .map_err(CaptureError::from)
-}
-
-pub(super) fn deepagents_has_valid_thread(conn: &Connection, thread_id: &str) -> Result<bool> {
-    let max_bytes = i64::try_from(deepagents_oversize_limit()?).map_err(|_| {
-        CaptureError::SystemInvariant("Deep Agents bounded record limit exceeds SQLite integers")
-    })?;
-    with_deepagents_length_preflight(conn, || {
-        conn.query_row(
-            "select exists(select 1 from checkpoints \
-             where checkpoint_ns = '' and thread_id = ?1 \
-               and typeof(checkpoint_id) = 'text' \
-               and typeof(metadata) in ('null', 'blob') \
-               and coalesce(octet_length(checkpoint_id), 0) \
-                   + coalesce(length(metadata), 0) <= ?2)",
-            rusqlite::params![thread_id, max_bytes],
-            |row| row.get::<_, i64>(0),
-        )
-    })
-    .map(|exists| exists != 0)
 }
 
 pub(super) fn deepagents_next_thread_candidate(
@@ -421,10 +419,6 @@ pub(super) fn deepagents_thread_summary(
             [rowid],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
         )?;
-        #[cfg(test)]
-        deepagents_trace(DeepAgentsImportTraceEvent::ThreadMetadataHydrated(
-            checkpoint_id.clone(),
-        ));
         let metadata = deepagents_metadata_json(metadata_blob.as_deref());
         let updated_at =
             deepagents_metadata_time(&metadata, "updated_at").unwrap_or(context.imported_at);
@@ -462,10 +456,6 @@ pub(super) fn deepagents_checkpoint_time(
     thread_id: &str,
     checkpoint_id: &str,
 ) -> Result<Option<DateTime<Utc>>> {
-    #[cfg(test)]
-    deepagents_trace(
-        DeepAgentsImportTraceEvent::CheckpointMetadataPreflightQueried(checkpoint_id.to_owned()),
-    );
     let metadata_preflight = with_deepagents_length_preflight(conn, || {
         conn.query_row(
             "select coalesce(length(metadata), 0), typeof(metadata) from checkpoints \
@@ -488,10 +478,6 @@ pub(super) fn deepagents_checkpoint_time(
     {
         return Ok(Some(context.imported_at));
     }
-    #[cfg(test)]
-    deepagents_trace(DeepAgentsImportTraceEvent::CheckpointMetadataHydrated(
-        checkpoint_id.to_owned(),
-    ));
     let metadata_blob = conn.query_row(
         "select metadata from checkpoints \
          where checkpoint_ns = '' and thread_id = ?1 and checkpoint_id = ?2",

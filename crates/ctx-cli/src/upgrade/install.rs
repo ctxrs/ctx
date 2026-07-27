@@ -1,15 +1,222 @@
 mod archive;
 mod durability;
+mod lock;
+mod lock_fs;
+#[cfg(test)]
+mod lock_tests;
 mod marker;
 mod runtime;
 mod transaction;
 
+use std::path::Path;
+
+use anyhow::{bail, Result};
+
 pub(crate) use marker::is_valid_install_attempt_id;
-pub(super) use marker::{
-    current_install_path, install_marker_for_plan, read_verified_install_marker_for_current_exe,
-    InstallMarker,
-};
-pub(super) use transaction::{apply_artifact, recover_interrupted_install, ApplyResult};
+pub(super) use marker::InstallFingerprint;
+pub(super) use marker::{current_install_path, InstallMarker};
+pub(super) use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
+pub(super) use runtime::semantic_install_required;
+pub(super) use transaction::ApplyResult;
+#[cfg(windows)]
+pub(in crate::upgrade) use transaction::HelperOutcome;
+pub(super) use transaction::RECOVERY_REEXEC_ENV;
+pub(super) use transaction::{PendingRecovery, TerminalRecovery};
+
+use self::lock::canonical_executable;
+pub(in crate::upgrade) use self::lock::InstallationLock;
+use super::UpgradePlan;
+
+/// The installed executable and marker observed under the executable-scoped
+/// lock while a plan is built.  The installed marker version, not this
+/// process's compile-time version, is the authority for update decisions.
+#[derive(Debug, Clone)]
+pub(in crate::upgrade) struct InstallSnapshot {
+    pub(in crate::upgrade) marker: InstallMarker,
+    pub(in crate::upgrade) fingerprint: InstallFingerprint,
+}
+
+pub(in crate::upgrade) fn capture_install_snapshot(
+    _installation_lock: &InstallationLock,
+    require_managed: bool,
+    platform: &str,
+    channel: &str,
+    fallback_current_version: &str,
+    warnings: &mut Vec<String>,
+) -> Result<InstallSnapshot> {
+    let marker = marker::install_marker_for_plan(
+        require_managed,
+        platform,
+        channel,
+        fallback_current_version,
+        warnings,
+    )?;
+    let fingerprint = marker::install_fingerprint(&marker.install_path)?;
+    Ok(InstallSnapshot {
+        marker,
+        fingerprint,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(in crate::upgrade) enum InstallRecovery {
+    None,
+    Recovered { committed: bool },
+    Scheduled { attempt_id: String, helper_pid: u32 },
+    ReexecRequired(std::path::PathBuf),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::upgrade) fn apply_artifact(
+    _installation_lock: &InstallationLock,
+    plan: &UpgradePlan,
+    artifact: Option<&mut super::download::DownloadedArtifact>,
+    runtime_artifact: Option<&mut super::download::DownloadedArtifact>,
+    semantic_artifacts: &mut [super::download::DownloadedArtifact],
+    data_root: &Path,
+    attempt_id: &str,
+    daemon_restart: Option<(&str, u64, u64)>,
+    before_publish: &mut dyn FnMut() -> Result<()>,
+) -> Result<ApplyResult> {
+    let running_executable = current_install_path()?;
+    let planned_executable = canonical_executable(&plan.install_path)?;
+    if planned_executable != running_executable {
+        bail!(
+            "upgrade target {} is not the running ctx executable {}",
+            planned_executable.display(),
+            running_executable.display()
+        );
+    }
+
+    // On Windows the parent retains this lock through the helper's validated
+    // readiness receipt. The helper then blocks on the same lock and performs
+    // a second fingerprint check immediately before publication.
+    revalidate_plan_snapshot_locked(plan, &running_executable)?;
+    transaction::apply_artifact_for_attempt(
+        plan,
+        artifact,
+        runtime_artifact,
+        semantic_artifacts,
+        data_root,
+        attempt_id,
+        daemon_restart,
+        before_publish,
+    )
+}
+
+fn revalidate_plan_snapshot_locked(plan: &UpgradePlan, running_executable: &Path) -> Result<()> {
+    if running_executable != plan.install_path {
+        bail!(
+            "managed executable changed after this upgrade plan was created; refusing stale cross-root publication"
+        );
+    }
+    let mut warnings = Vec::new();
+    let marker = marker::install_marker_for_plan(
+        true,
+        &plan.platform,
+        &plan.channel,
+        &plan.current_version,
+        &mut warnings,
+    )?;
+    let observed = marker::install_fingerprint(running_executable)?;
+    if marker.install_path != plan.install_path
+        || marker.version != plan.current_version
+        || observed != plan.install_fingerprint
+    {
+        bail!(
+            "managed executable or install marker changed after this upgrade plan was created; refusing stale cross-root publication"
+        );
+    }
+    Ok(())
+}
+
+pub(in crate::upgrade) fn pending_recovery(
+    data_root: &Path,
+) -> Result<Option<transaction::PendingRecovery>> {
+    transaction::pending_recovery(data_root)
+}
+
+pub(in crate::upgrade) fn remove_terminal_recovery(
+    expected: &PendingRecovery,
+    installation_lock: &InstallationLock,
+) -> Result<()> {
+    transaction::remove_terminal_recovery(expected, installation_lock)
+}
+
+pub(in crate::upgrade) fn validate_recovery_observation(
+    expected: &PendingRecovery,
+    terminal: bool,
+    _installation_lock: &InstallationLock,
+) -> Result<()> {
+    transaction::validate_recovery_observation(expected, terminal)
+}
+
+pub(in crate::upgrade) fn recover_interrupted_install(
+    expected: &PendingRecovery,
+    installation_lock: &InstallationLock,
+) -> Result<InstallRecovery> {
+    #[cfg(unix)]
+    {
+        let outcome =
+            transaction::recover_interrupted_install_outcome(expected, installation_lock)?;
+        if let Some(path) = outcome.restored_executable() {
+            return Ok(InstallRecovery::ReexecRequired(path.to_path_buf()));
+        }
+        Ok(if outcome.recovered() {
+            InstallRecovery::Recovered {
+                committed: matches!(
+                    outcome,
+                    transaction::RecoveryOutcome::Committed
+                        | transaction::RecoveryOutcome::CleanupPending { .. }
+                ),
+            }
+        } else {
+            InstallRecovery::None
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        return match transaction::recover_interrupted_install_outcome(expected, installation_lock)?
+        {
+            transaction::RecoveryOutcome::None => Ok(InstallRecovery::None),
+            transaction::RecoveryOutcome::WindowsHelperScheduled {
+                attempt_id,
+                helper_pid,
+            } => Ok(InstallRecovery::Scheduled {
+                attempt_id,
+                helper_pid,
+            }),
+            outcome => Ok(InstallRecovery::Recovered {
+                committed: matches!(
+                    outcome,
+                    transaction::RecoveryOutcome::Committed
+                        | transaction::RecoveryOutcome::CleanupPending { .. }
+                ),
+            }),
+        };
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (expected, installation_lock);
+        bail!("executable-scoped installation locking is unsupported on this platform");
+    }
+}
+
+pub(in crate::upgrade) fn reexec_recovered_executable(path: &Path, attempt_id: &str) -> Result<()> {
+    transaction::reexec_restored_executable(path, attempt_id)
+}
+
+#[cfg(windows)]
+pub(in crate::upgrade) fn run_replacement_helper(
+    install_path: &Path,
+    attempt_id: &str,
+    parent_pid: u32,
+) -> Result<HelperOutcome> {
+    transaction::run_windows_replacement_helper(install_path, attempt_id, parent_pid)
+}
 
 // The Windows runtime contract test reads this constant from this exact source path.
 #[cfg(windows)]

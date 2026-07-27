@@ -349,29 +349,44 @@ fn route_registry_exactly_covers_matrix_formats_roles_platforms_and_contracts() 
             .sum::<usize>()
     );
 
-    const NATIVE_RESULT_FIXTURE_REFERENCE: &str = "provider::providers::native_jsonl::\
-         result_locator_tests::\
-         native_import_attaches_verified_result_locators_without_persisting_bodies";
-    const OBSOLETE_NATIVE_RESULT_FIXTURE_REFERENCE: &str = "provider::providers::native_jsonl::\
-         result_locator_tests::native_jsonl_result_content_ref_and_locator_share_one_digest";
-    let native_result_fixture_source =
-        include_str!("../provider/providers/native_jsonl/result_locator_tests.rs");
-    assert!(native_result_fixture_source
-        .contains("fn native_import_attaches_verified_result_locators_without_persisting_bodies"));
-    assert_eq!(
-        VERIFIED_CONTENT_ROUTES
-            .iter()
-            .flat_map(|route| route.contracts)
-            .filter(|contract| contract.fixture_reference == NATIVE_RESULT_FIXTURE_REFERENCE)
-            .count(),
-        7
-    );
+    const NATIVE_RESULT_FIXTURES: [(&str, &str); 5] = [
+        (
+            "provider::providers::native_jsonl::native_path::gemini::tests::gemini_production_nativepath_core_first_failure_isolated_and_replay_catches_up_idempotently",
+            include_str!("../provider/providers/native_jsonl/native_path/gemini.rs"),
+        ),
+        (
+            "provider::providers::native_jsonl::native_path::tabnine::tests::production_is_core_first_with_independent_pro_replay",
+            include_str!("../provider/providers/native_jsonl/native_path/tabnine.rs"),
+        ),
+        (
+            "provider::providers::native_jsonl::native_path::copilot::tests::production_is_core_first_with_independent_pro_replay",
+            include_str!("../provider/providers/native_jsonl/native_path/copilot.rs"),
+        ),
+        (
+            "provider::providers::native_jsonl::native_path::factory_ai_droid::tests::production_is_core_first_and_pro_failure_is_independent",
+            include_str!("../provider/providers/native_jsonl/native_path/factory_ai_droid.rs"),
+        ),
+        (
+            "provider::providers::native_jsonl::native_path::qwen_code::tests::core_commits_before_failed_pro_and_later_output_replay_is_independent",
+            include_str!("../provider/providers/native_jsonl/native_path/qwen_code.rs"),
+        ),
+    ];
+    for (fixture_reference, source) in NATIVE_RESULT_FIXTURES {
+        let test_name = fixture_reference.rsplit("::").next().unwrap();
+        assert!(source.contains(&format!("fn {test_name}")));
+        assert_eq!(
+            VERIFIED_CONTENT_ROUTES
+                .iter()
+                .flat_map(|route| route.contracts)
+                .filter(|contract| contract.fixture_reference == fixture_reference)
+                .count(),
+            1
+        );
+    }
     assert!(VERIFIED_CONTENT_ROUTES
         .iter()
         .flat_map(|route| route.contracts)
-        .all(|contract| {
-            contract.fixture_reference != OBSOLETE_NATIVE_RESULT_FIXTURE_REFERENCE
-        }));
+        .all(|contract| !contract.fixture_reference.contains("result_locator_tests")));
 }
 
 #[test]

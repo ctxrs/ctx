@@ -8,8 +8,7 @@ use crate::analytics::{count_bucket, IntegrationResult, IntegrationTelemetry};
 use super::{
     format::{self, ConfigKind, ConfigStatus},
     registry::{project_detection_path, McpTarget},
-    McpAgentArg, McpInstallArgs, McpPathContext, McpStatusArgs, SERVER_ARGS, SERVER_COMMAND,
-    SERVER_NAME,
+    McpAgentArg, McpInstallArgs, McpPathContext, McpStatusArgs, SERVER_NAME,
 };
 
 #[derive(Debug)]
@@ -90,14 +89,15 @@ pub(super) fn run_install(
         results.iter().filter(|result| result.modified).count() as u64,
     ));
     if args.json {
+        let command = format::server_command();
         println!(
             "{}",
             json!({
                 "integration": "mcp",
                 "server": {
                     "name": SERVER_NAME,
-                    "command": SERVER_COMMAND,
-                    "args": SERVER_ARGS,
+                    "command": command.executable(),
+                    "args": command.args(),
                 },
                 "scope": if args.project { "project" } else { "global" },
                 "results": results.iter().map(McpInstallResult::to_json).collect::<Vec<_>>(),
@@ -148,14 +148,15 @@ pub(super) fn run_status(
         IntegrationResult::PartiallyCurrent
     });
     if args.json {
+        let command = format::server_command();
         println!(
             "{}",
             json!({
                 "integration": "mcp",
                 "server": {
                     "name": SERVER_NAME,
-                    "command": SERVER_COMMAND,
-                    "args": SERVER_ARGS,
+                    "command": command.executable(),
+                    "args": command.args(),
                 },
                 "scope": if args.project { "project" } else { "global" },
                 "results": results.iter().map(McpStatusResult::to_json).collect::<Vec<_>>(),
@@ -372,7 +373,7 @@ fn print_install_results(results: &[McpInstallResult]) {
     } else {
         "ctx MCP integration"
     };
-    println!("{heading}: {SERVER_COMMAND} {}", SERVER_ARGS.join(" "));
+    println!("{heading}: {}", format::server_command().render_for_host());
     for result in results {
         let verb = if result.already_installed {
             "current"
@@ -410,8 +411,8 @@ fn print_status_results(results: &[McpStatusResult]) {
         return;
     }
     println!(
-        "ctx MCP integration status: {SERVER_COMMAND} {}",
-        SERVER_ARGS.join(" ")
+        "ctx MCP integration status: {}",
+        format::server_command().render_for_host()
     );
     for result in results {
         let detail = result

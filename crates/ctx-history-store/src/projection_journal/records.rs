@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
@@ -16,7 +18,95 @@ use crate::canonical_observations::{
     canonical_observation_by_coordinate, canonical_observation_by_coordinate_including_deleted,
     canonical_semantic_digest, CanonicalObservation,
 };
+use crate::native_path_group::{NATIVE_PATH_MAX_JOURNAL_BYTES, NATIVE_PATH_MAX_JOURNAL_RECORDS};
 use crate::{Result, StoreError};
+
+#[derive(Debug, Default)]
+pub(crate) struct GroupJournalCollector {
+    chunks: Vec<Vec<ProjectionJournalRecord>>,
+    chunk_bytes: Vec<usize>,
+    record_count: usize,
+    uncompressed_bytes: usize,
+    sealed: bool,
+    overflowed: bool,
+}
+
+impl GroupJournalCollector {
+    fn push(&mut self, record: ProjectionJournalRecord) -> Result<()> {
+        if self.sealed {
+            return Err(StoreError::NativePathJournalSealed);
+        }
+        let record_bytes = serde_json::to_vec(&record)?.len();
+        let append_to_current = self.chunks.last().is_some_and(|chunk| {
+            chunk.len() < super::pages::PROJECTION_JOURNAL_CHUNK_SIZE
+                && self
+                    .chunk_bytes
+                    .last()
+                    .copied()
+                    .unwrap_or(2)
+                    .saturating_add(1)
+                    .saturating_add(record_bytes)
+                    <= PROJECTION_JOURNAL_MAX_PAGE_BYTES
+        });
+        let added_bytes = if append_to_current {
+            1_usize.saturating_add(record_bytes)
+        } else {
+            2_usize.saturating_add(record_bytes)
+        };
+        let next_records = self.record_count.saturating_add(1);
+        let next_bytes = self.uncompressed_bytes.saturating_add(added_bytes);
+        if next_records > NATIVE_PATH_MAX_JOURNAL_RECORDS {
+            self.overflowed = true;
+            return Err(StoreError::NativePathGroupLimitExceeded {
+                limit: "actual journal records",
+                actual: next_records,
+                maximum: NATIVE_PATH_MAX_JOURNAL_RECORDS,
+            });
+        }
+        if next_bytes > NATIVE_PATH_MAX_JOURNAL_BYTES {
+            self.overflowed = true;
+            return Err(StoreError::NativePathGroupLimitExceeded {
+                limit: "uncompressed journal encoding bytes",
+                actual: next_bytes,
+                maximum: NATIVE_PATH_MAX_JOURNAL_BYTES,
+            });
+        }
+        if append_to_current {
+            self.chunks
+                .last_mut()
+                .expect("checked current journal chunk")
+                .push(record);
+            let chunk_bytes = self
+                .chunk_bytes
+                .last_mut()
+                .expect("journal chunk byte accounting");
+            *chunk_bytes = chunk_bytes.saturating_add(1).saturating_add(record_bytes);
+        } else {
+            self.chunks.push(vec![record]);
+            self.chunk_bytes.push(2_usize.saturating_add(record_bytes));
+        }
+        self.record_count = next_records;
+        self.uncompressed_bytes = next_bytes;
+        Ok(())
+    }
+
+    pub(crate) fn seal_and_flush(&mut self, conn: &rusqlite::Connection) -> Result<(usize, usize)> {
+        if self.overflowed {
+            return Err(StoreError::NativePathGroupPoisoned);
+        }
+        if !self.sealed {
+            for chunk in &self.chunks {
+                insert_record_chunk(conn, chunk)?;
+            }
+            self.sealed = true;
+        }
+        Ok((self.record_count, self.uncompressed_bytes))
+    }
+
+    pub(crate) fn is_overflowed(&self) -> bool {
+        self.overflowed
+    }
+}
 
 #[derive(Debug)]
 struct PreparedEntity {
@@ -31,11 +121,13 @@ struct PreparedEntity {
 fn live_entity_ids(conn: &rusqlite::Connection, kind: JournalEntityKind) -> Result<Vec<Uuid>> {
     let sql = match kind {
         // Baselines must preserve the canonical provider order. Private
-        // command/result correlation is deliberately bounded across journal
-        // pages, so UUID order can otherwise separate a result from its
-        // producing command by the entire corpus.
+        // correlation is deliberately bounded across journal pages, so UUID
+        // order can otherwise separate related non-output observations by the
+        // entire corpus. Outputs use the Pro-only per-source stream.
         JournalEntityKind::Event => {
-            "SELECT id FROM events WHERE deleted_at_ms IS NULL
+            "SELECT id FROM events
+             WHERE deleted_at_ms IS NULL
+               AND event_type NOT IN ('tool_output', 'command_output')
              ORDER BY COALESCE(capture_source_id, ''),
                       CASE
                         WHEN json_type(metadata_json, '$.source_record_ordinal') = 'integer'
@@ -71,6 +163,7 @@ pub(super) fn append_entity(
     conn: &rusqlite::Connection,
     kind: JournalEntityKind,
     id: Uuid,
+    collector: Option<&RefCell<Option<GroupJournalCollector>>>,
 ) -> Result<()> {
     let Some(state) = active_state(conn)? else {
         return Ok(());
@@ -131,7 +224,16 @@ pub(super) fn append_entity(
         &prepared,
         cumulative_digest.clone(),
     )?;
-    insert_record_chunk(conn, std::slice::from_ref(&record))?;
+    match collector {
+        Some(collector) => {
+            let mut collector = collector.borrow_mut();
+            match collector.as_mut() {
+                Some(collector) => collector.push(record)?,
+                None => insert_record_chunk(conn, std::slice::from_ref(&record))?,
+            }
+        }
+        None => insert_record_chunk(conn, std::slice::from_ref(&record))?,
+    }
     persist_entity_state(conn, state.generation, kind, id, revision, &prepared)?;
     conn.execute(
         "UPDATE projection_journal_state
@@ -398,5 +500,69 @@ fn provenance_identity(
             .actor
             .as_ref()
             .and_then(|actor| actor.external_session_id.clone()),
+    }
+}
+
+#[cfg(test)]
+mod group_collector_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn record(sequence: u64, payload_bytes: usize) -> ProjectionJournalRecord {
+        ProjectionJournalRecord {
+            generation: 1,
+            sequence,
+            projection_contract_version: PROJECTION_CONTRACT_VERSION,
+            entity_kind: JournalEntityKind::Event,
+            stable_entity_id: Uuid::from_u128(u128::from(sequence)),
+            entity_revision: 1,
+            operation: JournalOperation::Upsert,
+            canonical_payload: Some(json!({"body": "x".repeat(payload_bytes)})),
+            payload_sha256: "a".repeat(64),
+            evidence: Vec::new(),
+            provenance: JournalProvenanceIdentity {
+                entity_kind: JournalEntityKind::Event,
+                stable_entity_id: Uuid::from_u128(u128::from(sequence)),
+                capture_source_id: None,
+                provider: None,
+                provider_external_id: None,
+            },
+            cumulative_digest: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn group_journal_byte_limit_accepts_exact_and_refuses_one_over() {
+        let empty = vec![record(1, 0), record(2, 0), record(3, 0)];
+        let fixed_bytes = serde_json::to_vec(&empty).unwrap().len();
+        let payload_total = NATIVE_PATH_MAX_JOURNAL_BYTES - fixed_bytes;
+        let first = payload_total / 3;
+        let second = payload_total / 3;
+        let third = payload_total - first - second;
+        let records = vec![record(1, first), record(2, second), record(3, third)];
+        assert_eq!(
+            serde_json::to_vec(&records).unwrap().len(),
+            NATIVE_PATH_MAX_JOURNAL_BYTES
+        );
+        assert!(records.iter().all(|record| {
+            serde_json::to_vec(record).unwrap().len() < PROJECTION_JOURNAL_RECORD_MAX_BYTES
+        }));
+
+        let mut collector = GroupJournalCollector::default();
+        for record in records {
+            collector.push(record).unwrap();
+        }
+        assert_eq!(collector.record_count, 3);
+        assert_eq!(collector.uncompressed_bytes, NATIVE_PATH_MAX_JOURNAL_BYTES);
+        assert!(matches!(
+            collector.push(record(4, 0)),
+            Err(StoreError::NativePathGroupLimitExceeded {
+                limit: "uncompressed journal encoding bytes",
+                maximum: NATIVE_PATH_MAX_JOURNAL_BYTES,
+                ..
+            })
+        ));
+        assert!(collector.is_overflowed());
     }
 }

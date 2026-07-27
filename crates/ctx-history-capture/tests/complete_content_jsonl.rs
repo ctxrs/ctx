@@ -1037,13 +1037,20 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
     let mut policy_revisions = provider_cursor_rows(&store)
         .iter()
         .map(|(_, _, cursor)| {
-            serde_json::from_str::<serde_json::Value>(cursor).unwrap()["o"]
-                .as_u64()
-                .unwrap()
+            let wire = serde_json::from_str::<serde_json::Value>(cursor).unwrap();
+            wire.get("provider_cursor")
+                .and_then(serde_json::Value::as_str)
+                .map(|provider_cursor| {
+                    serde_json::from_str::<serde_json::Value>(provider_cursor).unwrap()
+                        ["checkpoint"]["policy_revision"]
+                        .as_u64()
+                        .unwrap()
+                })
+                .unwrap_or_else(|| wire["o"].as_u64().unwrap())
         })
         .collect::<Vec<_>>();
     policy_revisions.sort_unstable();
-    assert_eq!(policy_revisions, vec![5, 6, 6, 6]);
+    assert_eq!(policy_revisions, vec![5, 6, 6, 7]);
     for (provider, event_id, locator_value) in stable_events {
         let rebuilt = persisted_request_for_provider(&store, provider);
         assert_eq!(rebuilt.event_id, event_id);

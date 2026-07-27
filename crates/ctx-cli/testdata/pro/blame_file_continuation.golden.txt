@@ -1,0 +1,16 @@
+src/lib.rs:42-60
+repository  ctxrs/ctx
+snapshot    HEAD deadbeef
+worktree    differs (ranges are committed HEAD lines)
+
+Lines 42-50
+  commit    deadbeef
+  evidence  [1]
+
+  Agent production  not proven
+
+Evidence
+  [1] ctx show event 00000000-0000-0000-0000-000000000001
+
+1 matches shown for committed lines 42-50; more committed lines are available.
+continue  ctx blame file src/lib.rs --lines 42:60 --repository ctxrs/ctx --cursor more-lines

@@ -3,7 +3,7 @@
 use ctx_history_core::EventType;
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::{captured_batch::CapturedSqliteValue, provider::providers::warp, CaptureError};
+use crate::{native_source::NativeSqliteValue, provider::providers::warp, CaptureError};
 
 use super::super::{
     CompleteContentError, CompleteContentErrorKind, ResolvedResultContent, ResultContentRequest,
@@ -25,11 +25,11 @@ pub(super) fn resolve_result(
             [rowid],
             |row| {
                 Ok(vec![
-                    CapturedSqliteValue::Integer(row.get(0)?),
-                    CapturedSqliteValue::Text(row.get(1)?),
-                    CapturedSqliteValue::Text(row.get(2)?),
-                    CapturedSqliteValue::Blob(row.get(3)?),
-                    CapturedSqliteValue::Text(row.get(4)?),
+                    NativeSqliteValue::Integer(row.get(0)?),
+                    NativeSqliteValue::Text(row.get(1)?),
+                    NativeSqliteValue::Text(row.get(2)?),
+                    NativeSqliteValue::Blob(row.get(3)?),
+                    NativeSqliteValue::Text(row.get(4)?),
                 ])
             },
         )
@@ -42,7 +42,7 @@ pub(super) fn resolve_result(
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    let [_, _, CapturedSqliteValue::Text(task_id), CapturedSqliteValue::Blob(task), _] =
+    let [_, _, NativeSqliteValue::Text(task_id), NativeSqliteValue::Blob(task), _] =
         values.as_slice()
     else {
         return Err(error(

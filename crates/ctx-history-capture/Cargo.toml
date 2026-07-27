@@ -31,6 +31,7 @@ uuid.workspace = true
 zstd.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-store = { path = "../ctx-history-store" }
+ctx-pro-host-protocol = { path = "../ctx-pro-host-protocol" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

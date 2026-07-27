@@ -141,16 +141,15 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     .unwrap();
     assert_eq!(gemini_summary.failed, 0);
     assert_eq!(gemini_summary.imported_sessions, 2);
-    assert_eq!(gemini_summary.imported_events, 6);
+    assert_eq!(gemini_summary.imported_events, 5);
     assert_eq!(gemini_summary.imported_edges, 1);
     let gemini_parent = stored_provider_session_id(&store, CaptureProvider::Gemini, "gemini-root");
     let gemini_events = store.events_for_session(gemini_parent).unwrap();
-    assert_eq!(gemini_events.len(), 4);
+    assert_eq!(gemini_events.len(), 3);
     assert_event_type_count(&gemini_events, EventType::Message, 1);
     assert_event_type_count(&gemini_events, EventType::ToolCall, 1);
-    assert_event_type_count(&gemini_events, EventType::ToolOutput, 1);
+    assert_event_type_count(&gemini_events, EventType::ToolOutput, 0);
     assert_event_type_count(&gemini_events, EventType::Notice, 1);
-    assert_event_with_role(&gemini_events, EventType::ToolOutput, EventRole::Assistant);
     assert_events_have_provider_citations(&gemini_events);
     assert_search_hits_provider(
         &store,
@@ -176,7 +175,7 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     assert_eq!(gemini_second.imported_events, 0);
     assert_eq!(gemini_second.imported_edges, 0);
     assert_eq!(gemini_second.skipped_sessions, 2);
-    assert_eq!(gemini_second.skipped_events, 6);
+    assert_eq!(gemini_second.skipped_events, 5);
     assert_eq!(gemini_second.skipped_edges, 0);
 
     let tabnine = provider_history_fixture("tabnine-cli/.tabnine/agent");
@@ -190,7 +189,7 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     .unwrap();
     assert_eq!(tabnine_summary.failed, 0, "{:?}", tabnine_summary.failures);
     assert_eq!(tabnine_summary.imported_sessions, 2);
-    assert_eq!(tabnine_summary.imported_events, 7);
+    assert_eq!(tabnine_summary.imported_events, 6);
     assert_eq!(tabnine_summary.imported_edges, 1);
 
     let tabnine_events = store
@@ -200,13 +199,12 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
             "tabnine-root",
         ))
         .unwrap();
-    assert_eq!(tabnine_events.len(), 5);
+    assert_eq!(tabnine_events.len(), 4);
     assert_event_type_count(&tabnine_events, EventType::Message, 2);
     assert_event_type_count(&tabnine_events, EventType::ToolCall, 1);
-    assert_event_type_count(&tabnine_events, EventType::ToolOutput, 1);
+    assert_event_type_count(&tabnine_events, EventType::ToolOutput, 0);
     assert_event_type_count(&tabnine_events, EventType::Notice, 1);
     assert_event_with_role(&tabnine_events, EventType::ToolCall, EventRole::Assistant);
-    assert_event_with_role(&tabnine_events, EventType::ToolOutput, EventRole::Assistant);
     assert_events_have_provider_citations(&tabnine_events);
     let tabnine_rendered = serde_json::to_string(&tabnine_events).unwrap();
     assert!(tabnine_rendered.contains("tabnine jsonl oracle prompt"));
@@ -239,17 +237,16 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     .unwrap();
     assert_eq!(droid_summary.failed, 0);
     assert_eq!(droid_summary.imported_sessions, 2);
-    assert_eq!(droid_summary.imported_events, 6);
+    assert_eq!(droid_summary.imported_events, 5);
     assert_eq!(droid_summary.imported_edges, 1);
     let droid_parent =
         stored_provider_session_id(&store, CaptureProvider::FactoryAiDroid, "droid-root");
     let droid_events = store.events_for_session(droid_parent).unwrap();
-    assert_eq!(droid_events.len(), 4);
+    assert_eq!(droid_events.len(), 3);
     assert_event_type_count(&droid_events, EventType::Message, 1);
     assert_event_type_count(&droid_events, EventType::ToolCall, 1);
-    assert_event_type_count(&droid_events, EventType::ToolOutput, 1);
+    assert_event_type_count(&droid_events, EventType::ToolOutput, 0);
     assert_event_type_count(&droid_events, EventType::Notice, 1);
-    assert_event_with_role(&droid_events, EventType::ToolOutput, EventRole::Tool);
     assert_events_have_provider_citations(&droid_events);
     assert_search_hits_provider(
         &store,
@@ -276,7 +273,7 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     assert_eq!(droid_second.imported_events, 0);
     assert_eq!(droid_second.imported_edges, 0);
     assert_eq!(droid_second.skipped_sessions, 2);
-    assert_eq!(droid_second.skipped_events, 6);
+    assert_eq!(droid_second.skipped_events, 5);
     assert_eq!(droid_second.skipped_edges, 0);
 
     let copilot = write_copilot_smoke_fixture(&temp);
@@ -290,7 +287,7 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     .unwrap();
     assert_eq!(copilot_summary.failed, 0);
     assert_eq!(copilot_summary.imported_sessions, 2);
-    assert_eq!(copilot_summary.imported_events, 7);
+    assert_eq!(copilot_summary.imported_events, 6);
     let copilot_events = store
         .events_for_session(stored_provider_session_id(
             &store,
@@ -298,12 +295,11 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
             "copilot-root",
         ))
         .unwrap();
-    assert_eq!(copilot_events.len(), 5);
+    assert_eq!(copilot_events.len(), 4);
     assert_event_type_count(&copilot_events, EventType::Message, 2);
     assert_event_type_count(&copilot_events, EventType::ToolCall, 1);
-    assert_event_type_count(&copilot_events, EventType::ToolOutput, 1);
+    assert_event_type_count(&copilot_events, EventType::ToolOutput, 0);
     assert_event_type_count(&copilot_events, EventType::Notice, 1);
-    assert_event_with_role(&copilot_events, EventType::ToolOutput, EventRole::Tool);
     assert_events_have_provider_citations(&copilot_events);
     assert_search_hits_provider(&store, "running", CaptureProvider::CopilotCli);
     assert_search_misses(&store, "COPILOT_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
@@ -313,6 +309,7 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         "copilot child oracle prompt",
         CaptureProvider::CopilotCli,
     );
+    assert!(store.export_archive().unwrap().runs.is_empty());
 
     let copilot_second = import_copilot_cli_session_events(
         &copilot,
@@ -326,7 +323,7 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     assert_eq!(copilot_second.imported_sessions, 0);
     assert_eq!(copilot_second.imported_events, 0);
     assert_eq!(copilot_second.skipped_sessions, 2);
-    assert_eq!(copilot_second.skipped_events, 7);
+    assert_eq!(copilot_second.skipped_events, 6);
 }
 
 #[test]
@@ -396,7 +393,7 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     .unwrap();
     assert_eq!(qwen_summary.failed, 0, "{:?}", qwen_summary.failures);
     assert_eq!(qwen_summary.imported_sessions, 1);
-    assert_eq!(qwen_summary.imported_events, 3);
+    assert_eq!(qwen_summary.imported_events, 2);
 
     let qwen_events = store
         .events_for_session(stored_provider_session_id(
@@ -405,11 +402,10 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
             "qwen-smoke",
         ))
         .unwrap();
-    assert_eq!(qwen_events.len(), 3);
+    assert_eq!(qwen_events.len(), 2);
     assert_event_type_count(&qwen_events, EventType::Message, 1);
     assert_event_type_count(&qwen_events, EventType::ToolCall, 1);
-    assert_event_type_count(&qwen_events, EventType::ToolOutput, 1);
-    assert_event_with_role(&qwen_events, EventType::ToolOutput, EventRole::Tool);
+    assert_event_type_count(&qwen_events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&qwen_events);
     let qwen_rendered = serde_json::to_string(&qwen_events).unwrap();
     assert!(qwen_rendered.contains("qwen jsonl oracle prompt"));
@@ -420,6 +416,7 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
         CaptureProvider::QwenCode,
     );
     assert_search_misses(&store, "QWEN_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
+    assert!(store.export_archive().unwrap().runs.is_empty());
 
     let qwen_second = import_qwen_code_history(
         &qwen,
@@ -432,6 +429,8 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     assert_eq!(qwen_second.failed, 0, "{:?}", qwen_second.failures);
     assert_eq!(qwen_second.imported_sessions, 0);
     assert_eq!(qwen_second.imported_events, 0);
+    assert_eq!(qwen_second.skipped_sessions, 1);
+    assert_eq!(qwen_second.skipped_events, 2);
 
     let kimi = write_kimi_smoke_fixture(&temp);
     let kimi_summary = import_kimi_code_cli_history(
@@ -444,7 +443,7 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     .unwrap();
     assert_eq!(kimi_summary.failed, 0, "{:?}", kimi_summary.failures);
     assert_eq!(kimi_summary.imported_sessions, 2);
-    assert_eq!(kimi_summary.imported_events, 7);
+    assert_eq!(kimi_summary.imported_events, 6);
     assert_eq!(kimi_summary.imported_edges, 1);
 
     let kimi_events = store
@@ -454,12 +453,11 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
             "kimi-smoke",
         ))
         .unwrap();
-    assert_eq!(kimi_events.len(), 5);
+    assert_eq!(kimi_events.len(), 4);
     assert_event_type_count(&kimi_events, EventType::Message, 2);
     assert_event_type_count(&kimi_events, EventType::ToolCall, 1);
-    assert_event_type_count(&kimi_events, EventType::ToolOutput, 1);
+    assert_event_type_count(&kimi_events, EventType::ToolOutput, 0);
     assert_event_type_count(&kimi_events, EventType::Notice, 1);
-    assert_event_with_role(&kimi_events, EventType::ToolOutput, EventRole::Tool);
     assert_events_have_provider_citations(&kimi_events);
     let kimi_rendered = serde_json::to_string(&kimi_events).unwrap();
     assert!(kimi_rendered.contains("kimi jsonl oracle prompt"));
@@ -484,6 +482,7 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
         store.get_session(kimi_child).unwrap().parent_session_id,
         Some(kimi_parent)
     );
+    assert!(store.runs_for_session(kimi_parent).unwrap().is_empty());
 
     let kimi_second = import_kimi_code_cli_history(
         &kimi,
@@ -497,6 +496,8 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     assert_eq!(kimi_second.imported_sessions, 0);
     assert_eq!(kimi_second.imported_events, 0);
     assert_eq!(kimi_second.imported_edges, 0);
+    assert_eq!(kimi_second.skipped_sessions, 2);
+    assert_eq!(kimi_second.skipped_events, 6);
 }
 
 #[test]
@@ -533,18 +534,22 @@ fn native_kimi_rejects_oversized_wire_record() {
     assert_eq!(summary.skipped_sessions, 2);
     assert_eq!(summary.skipped_events, 0);
     assert_eq!(summary.imported_sessions, 2);
-    assert_eq!(summary.imported_events, 7);
+    assert_eq!(summary.imported_events, 6);
     let session_id = stored_provider_session_id(&store, CaptureProvider::KimiCodeCli, "kimi-smoke");
     let source = store
         .capture_source_by_external_session(CaptureProvider::KimiCodeCli, "kimi-smoke")
         .unwrap()
         .unwrap();
     assert_eq!(source.descriptor.cwd.as_deref(), Some("/workspace/kimi"));
+    let events = store.events_for_session(session_id).unwrap();
     assert_eq!(
-        store.events_for_session(session_id).unwrap().len(),
-        5,
+        events.len(),
+        4,
         "main wire events should resume after the oversized record"
     );
+    assert_event_type_count(&events, EventType::ToolCall, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
+    assert!(store.runs_for_session(session_id).unwrap().is_empty());
 }
 
 #[test]
@@ -619,7 +624,7 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
     .unwrap();
     assert_eq!(gemini_summary.failed, 2, "{:?}", gemini_summary.failures);
     assert_eq!(gemini_summary.imported_sessions, 2);
-    assert_eq!(gemini_summary.imported_events, 6);
+    assert_eq!(gemini_summary.imported_events, 5);
     assert_native_jsonl_failures_include_headerless_and_malformed(&gemini_summary);
 
     let droid = write_droid_smoke_fixture(&temp);
@@ -634,7 +639,7 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
     .unwrap();
     assert_eq!(droid_summary.failed, 2, "{:?}", droid_summary.failures);
     assert_eq!(droid_summary.imported_sessions, 2);
-    assert_eq!(droid_summary.imported_events, 6);
+    assert_eq!(droid_summary.imported_events, 5);
     assert_native_jsonl_failures_include_headerless_and_malformed(&droid_summary);
 
     let copilot = write_copilot_smoke_fixture(&temp);
@@ -649,7 +654,7 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
     .unwrap();
     assert_eq!(copilot_summary.failed, 2, "{:?}", copilot_summary.failures);
     assert_eq!(copilot_summary.imported_sessions, 2);
-    assert_eq!(copilot_summary.imported_events, 7);
+    assert_eq!(copilot_summary.imported_events, 6);
     assert_native_jsonl_failures_include_headerless_and_malformed(&copilot_summary);
 }
 

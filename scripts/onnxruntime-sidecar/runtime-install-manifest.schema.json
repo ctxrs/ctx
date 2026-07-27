@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cli.ctx.rs/schemas/semantic-runtime-install-v1.json",
+  "title": "ctx verified semantic runtime install manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manager",
+    "metadata_trust",
+    "runtime",
+    "platform",
+    "version",
+    "sha256",
+    "artifact_url",
+    "installed_at",
+    "files"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manager": { "const": "ctx-hosted-installer" },
+    "metadata_trust": { "const": "signed-release-metadata" },
+    "runtime": { "enum": ["onnxruntime", "windows-ml"] },
+    "platform": {
+      "enum": [
+        "linux-x64",
+        "linux-x64-cuda12",
+        "linux-aarch64",
+        "macos-arm64",
+        "macos-x64",
+        "windows-x64",
+        "freebsd-x64"
+      ]
+    },
+    "version": { "enum": ["1.27.0", "2.1.74"] },
+    "sha256": { "$ref": "#/$defs/sha256" },
+    "artifact_url": { "type": "string", "minLength": 1 },
+    "installed_at": { "type": "string", "minLength": 1 },
+    "files": {
+      "type": "array",
+      "minItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size", "sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+          },
+          "size": { "type": "integer", "minimum": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "runtime": { "const": "windows-ml" } },
+        "required": ["runtime"]
+      },
+      "then": {
+        "properties": {
+          "platform": { "const": "windows-x64" },
+          "version": { "const": "2.1.74" },
+          "files": { "minItems": 5, "maxItems": 5 }
+        }
+      },
+      "else": {
+        "properties": {
+          "version": { "const": "1.27.0" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

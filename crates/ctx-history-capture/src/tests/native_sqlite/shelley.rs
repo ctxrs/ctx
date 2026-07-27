@@ -48,7 +48,7 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 3);
-    assert_eq!(summary.imported_events, 4);
+    assert_eq!(summary.imported_events, 3);
     assert_eq!(summary.imported_edges, 1);
 
     let parent_id = stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-root");
@@ -76,37 +76,21 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
     assert_eq!(source.descriptor.provider, CaptureProvider::Shelley);
 
     let events = store.events_for_session(parent_id).unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     let agent_event = events
         .iter()
         .find(|event| event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-agent"))
         .expect("Shelley agent event imported");
-    let tool_result_event = events
-        .iter()
-        .find(|event| {
-            event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-tool-result")
-        })
-        .expect("Shelley tool-result event imported");
     assert_eq!(agent_event.event_type, EventType::ToolCall);
-    assert_eq!(tool_result_event.event_type, EventType::ToolOutput);
-    let locators = VerifiedContentLocatorsV1::from_metadata_value(
-        &tool_result_event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
-    )
-    .expect("Shelley tool result has a bounded verified-content locator");
-    let result_locator = locators
-        .locator(VerifiedContentRole::ResultBody)
-        .expect("Shelley tool result has a result-body route");
-    assert_eq!(result_locator.native_record_id(), "msg-tool-result");
-    assert_eq!(result_locator.source_locator().unwrap().value()[0], 2);
-    let locator_json = serde_json::to_string(result_locator).unwrap();
-    assert!(!locator_json.contains(fixture.to_string_lossy().as_ref()));
-    assert!(!locator_json.contains("0123456789abcdef0123456789abcdef01234567"));
+    assert!(events
+        .iter()
+        .all(|event| event.event_type != EventType::ToolOutput));
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("shelley search oracle"));
     assert!(rendered.contains("thinking through the search"));
     assert!(rendered.contains("tool call: bash"));
-    assert!(rendered.contains("0123456789abcdef0123456789abcdef01234567"));
-    assert!(rendered.contains("https://github.com/ctxrs/ctx/pull/123"));
+    assert!(!rendered.contains("0123456789abcdef0123456789abcdef01234567"));
+    assert!(!rendered.contains("https://github.com/ctxrs/ctx/pull/123"));
     assert!(rendered.contains("toolu_1"));
     assert!(rendered.contains("claude-opus-4-7"));
     assert!(rendered.contains("https://api.anthropic.com/v1/messages"));
@@ -152,7 +136,7 @@ fn native_shelley_reimport_is_idempotent() {
         },
     )
     .unwrap();
-    assert_eq!(first.imported_events, 4);
+    assert_eq!(first.imported_events, 3);
 
     let second = import_shelley_sqlite(
         &fixture,
@@ -187,30 +171,34 @@ fn native_shelley_policy_upgrade_repairs_once_then_is_terminal_noop() {
 
     let first = import_shelley_sqlite(&fixture, &mut store, options.clone()).unwrap();
     assert_eq!(first.failed, 0, "{first:?}");
-    assert_eq!(first.imported_events, 4);
+    assert_eq!(first.imported_events, 3);
     let session_id = stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-root");
-    let output = store
+    let retained_event = store
         .events_for_session(session_id)
         .unwrap()
         .into_iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("Shelley result exists before simulated legacy upgrade");
+        .find(|event| event.event_type == EventType::ToolCall)
+        .expect("Shelley retained event exists before simulated legacy upgrade");
     let stream = only_provider_cursor_stream(&database, machine_id);
     let policy_revision = delete_event_and_downgrade_provider_policy_cursor(
-        &database, &store, machine_id, &stream, output.id,
+        &database,
+        &store,
+        machine_id,
+        &stream,
+        retained_event.id,
     );
 
     let repaired = import_shelley_sqlite(&fixture, &mut store, options.clone()).unwrap();
     assert_eq!(repaired.failed, 0, "{repaired:?}");
     assert_eq!(repaired.imported_events, 1);
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 3);
+    assert_eq!(store.events_for_session(session_id).unwrap().len(), 2);
     assert_provider_policy_cursor_restored(&store, machine_id, &stream, policy_revision);
 
     let terminal = import_shelley_sqlite(&fixture, &mut store, options).unwrap();
     assert_eq!(terminal.failed, 0, "{terminal:?}");
     assert_eq!(terminal.imported_events, 0);
     assert_eq!(terminal.skipped_events, 0);
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 3);
+    assert_eq!(store.events_for_session(session_id).unwrap().len(), 2);
 }
 
 #[test]

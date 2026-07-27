@@ -3,8 +3,7 @@
 //! The public crate is the only wire authority. Private implementations mirror its
 //! generated inventory and fingerprint; they do not define a compatible range.
 
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use ctx_history_core::ContentRef;
@@ -12,16 +11,16 @@ pub use ctx_history_core::ContentRef;
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Lowercase SHA-256 of `testdata/v1/inventory.json`'s canonical inventory.
-pub const PROTOCOL_FINGERPRINT: &str =
-    "f9c77c0df491f276dd3d8c2cdb7f6c95daf8ebb9a216b2ca9a158ff0be1024c9";
+pub const PROTOCOL_FINGERPRINT: &str = include!("protocol_fingerprint.rs");
 pub const PROJECTION_CONTRACT_VERSION: u32 = 1;
 pub const FRAME_HEADER_BYTES: usize = FRAME_MAGIC.len() + 2 + 4;
-pub const MAX_FRAME_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_QUERY_RESULTS: u32 = 500;
-pub const MAX_QUERY_CURSOR_BYTES: usize = 4 * 1024;
+pub const MAX_FRAME_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_BLAME_RESULTS: u32 = 100;
+pub const MAX_BLAME_CURSOR_BYTES: usize = 256;
+pub const MAX_BLAME_EVIDENCE: usize = 3_200;
+pub const MAX_BLAME_ATTRIBUTIONS_PER_MATCH: usize = 100;
 pub const MAX_CITATIONS_PER_FACT: usize = 32;
-pub const MAX_FACTS_PER_QUERY_RECORD: usize = 128;
-pub const MAX_RESOURCE_SELECTOR_BYTES: usize = 8 * 1024;
+pub const MAX_BLAME_TARGET_BYTES: usize = 8 * 1024;
 
 mod entitlement;
 pub use entitlement::{
@@ -42,12 +41,11 @@ pub use journal::{
     canonical_payload_bytes, initial_journal_digest, journal_record_digest,
     journal_sync_envelope_bytes, sha256_hex, JournalCheckpoint, JournalEntityKind,
     JournalEvidenceIdentity, JournalOperation, JournalPosition, JournalProvenanceIdentity,
-    JournalRecord, JournalSyncMode, JournalSyncRequest, JournalSyncResult, ResultContentSidecar,
+    JournalRecord, JournalSyncMode, JournalSyncRequest, JournalSyncResult,
     MAX_AUTHORIZED_REPOSITORY_ROOTS, MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES,
     MAX_AUTHORIZED_REPOSITORY_ROOT_BYTES, MAX_JOURNAL_EVIDENCE_PER_RECORD,
     MAX_JOURNAL_IDENTITY_BYTES, MAX_JOURNAL_PAYLOAD_BYTES, MAX_JOURNAL_RECORDS_PER_BATCH,
-    MAX_JOURNAL_SYNC_ENVELOPE_BYTES, MAX_RESULT_CONTENT_BYTES_PER_ITEM,
-    MAX_RESULT_CONTENT_ITEMS_PER_REQUEST, MAX_RESULT_CONTENT_TOTAL_BYTES,
+    MAX_JOURNAL_SYNC_ENVELOPE_BYTES,
 };
 mod layout;
 pub use layout::{
@@ -72,12 +70,33 @@ pub use message::{
     Capability, GraphState, HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope,
     HostMessage, StatusRequest, StatusResult,
 };
+mod output;
+pub use output::{
+    BeginOutputInventoryRequest, FinishOutputInventoryRequest, ObserveOutputSourceRequest,
+    OutputAssociations, OutputCommandContext, OutputInventoryBegan, OutputInventoryFinished,
+    OutputNativeCoordinate, OutputNativeCursor, OutputObservationKind, OutputOutcome,
+    OutputOutcomeMetadata, OutputPageMaterialized, OutputProgressRequest, OutputProgressResult,
+    OutputRepositoryContext, OutputSourceAvailability, OutputSourceDisposition,
+    OutputSourceIdentity, OutputSourceLocator, OutputSourceObserved, OutputSourceProgress,
+    ProOutputMaterializationPage, ProOutputObservation, ProviderOutputEvidence,
+    TransientOutputContent, MAX_OUTPUT_COMMAND_BYTES, MAX_OUTPUT_CONTENT_BYTES,
+    MAX_OUTPUT_CONTENT_BYTES_PER_PAGE, MAX_OUTPUT_CURSOR_BYTES, MAX_OUTPUT_IDENTITY_BYTES,
+    MAX_OUTPUT_LOCATOR_BYTES, MAX_OUTPUT_OBSERVATIONS_PER_PAGE, MAX_OUTPUT_PROGRESS_SOURCES,
+    OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
+};
 mod query;
-pub use query::{QueryRequest, QuerySnapshotExpectation};
+pub use query::{
+    AgentAttribution, BlameContinuation, BlameMatch, BlameRequest, BlameResult, BlameTarget,
+    CommitBlameMatch, CommitFactType, CommitPredicate, ContinuationReason, FactConfidence,
+    FactState, FileBlameMatch, GitSnapshot, LineRange, NumberedEvidence, ProductionRelationship,
+    PullRequestAction, PullRequestActivity, PullRequestBlameMatch, PullRequestBlameRelationship,
+    PullRequestCommit, PullRequestCommitRelationship, QuerySnapshotExpectation,
+    ResolvedBlameTarget, WorktreeStatus,
+};
 mod fake;
-pub use fake::{FakeHelper, FakeQueryFailure};
+pub use fake::{FakeBlameFailure, FakeHelper};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationKind {
     Event,
@@ -85,14 +104,14 @@ pub enum ObservationKind {
     VcsChange,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ByteRange {
     pub start: u64,
     pub end_exclusive: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceCitation {
     pub observation_id: Option<Uuid>,
@@ -107,20 +126,38 @@ pub struct EvidenceCitation {
     pub source_record_subrecord_index: Option<u32>,
     pub byte_range: Option<ByteRange>,
     pub source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_output: Option<ProviderOutputEvidence>,
 }
 
 impl EvidenceCitation {
     #[must_use]
     pub fn is_usable(&self) -> bool {
+        if let Some(provider_output) = &self.provider_output {
+            return self.observation_id.is_none()
+                && self.observation_seq.is_none()
+                && self.observation_kind.is_none()
+                && self.session_id.is_none()
+                && self.event_id.is_none()
+                && self.event_seq.is_none()
+                && self.source_path.is_none()
+                && self.fixture_line.is_none()
+                && self.source_record_ordinal.is_none()
+                && self.source_record_subrecord_index.is_none()
+                && self.byte_range.is_none()
+                && self.source_sha256.is_none()
+                && provider_output.is_usable();
+        }
         let coordinate_is_complete = self.observation_id.is_some()
             == (self.observation_seq.is_some() && self.observation_kind.is_some());
         let fields_are_valid = coordinate_is_complete
             && self.observation_id.is_none_or(|id| !id.is_nil())
             && self.session_id.is_none_or(|id| !id.is_nil())
             && self.event_id.is_none_or(|id| !id.is_nil())
-            && self.source_path.as_deref().is_none_or(|path| {
-                !path.trim().is_empty() && path.len() <= MAX_RESOURCE_SELECTOR_BYTES
-            })
+            && self
+                .source_path
+                .as_deref()
+                .is_none_or(|path| !path.trim().is_empty() && path.len() <= MAX_BLAME_TARGET_BYTES)
             && self.fixture_line.is_none_or(|line| line > 0)
             && self
                 .byte_range
@@ -148,23 +185,6 @@ fn is_lower_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryKind {
-    Show,
-    Locate,
-    Blame,
-    Timeline,
-    Related,
-    Facts,
-}
-
-impl QueryKind {
-    pub const fn required_capability(self) -> Capability {
-        Capability::Query
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -252,265 +272,24 @@ impl ResourceKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResourceSelector {
-    pub kind: ResourceKind,
-    pub value: String,
-    pub repository: Option<String>,
-    pub line: Option<u32>,
-}
-
-impl ResourceSelector {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.value.trim().is_empty() || self.value.len() > MAX_RESOURCE_SELECTOR_BYTES {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "resource selector value is empty or exceeds its byte bound",
-            ));
-        }
-        if self.repository.as_deref().is_some_and(|repository| {
-            repository.trim().is_empty() || repository.len() > MAX_RESOURCE_SELECTOR_BYTES
-        }) {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "resource selector repository is empty or exceeds its byte bound",
-            ));
-        }
-        if self.line == Some(0) {
-            return Err(ProtocolError::new(
-                ErrorClass::InvalidRequest,
-                "resource selector line must be positive",
-            ));
-        }
-        if self.line.is_some() && self.kind != ResourceKind::File {
-            return Err(ProtocolError::new(
-                ErrorClass::InvalidRequest,
-                "resource selector line is valid only for file targets",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResourceRef {
     pub id: String,
     pub kind: ResourceKind,
     pub display: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct QueryResult {
-    pub records: Vec<QueryRecord>,
-    pub next_cursor: Option<String>,
-    pub truncated: bool,
-    pub stale: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueryResultWire {
-    records: Vec<QueryRecord>,
-    next_cursor: Option<String>,
-    truncated: bool,
-    stale: bool,
-}
-
-impl<'de> Deserialize<'de> for QueryResult {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = QueryResultWire::deserialize(deserializer)?;
-        if wire.records.len() > MAX_QUERY_RESULTS as usize
-            || wire.next_cursor.as_deref().is_some_and(|cursor| {
-                cursor.is_empty() || cursor.len() > MAX_QUERY_CURSOR_BYTES || !cursor.is_ascii()
-            })
-        {
-            return Err(serde::de::Error::custom(
-                "query result exceeds Protocol V1 bounds",
-            ));
-        }
-        Ok(Self {
-            records: wire.records,
-            next_cursor: wire.next_cursor,
-            truncated: wire.truncated,
-            stale: wire.stale,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct QueryRecord {
-    pub resource: ResourceRef,
-    pub summary: Option<String>,
-    pub occurred_at_ms: Option<i64>,
-    pub facts: Vec<FactRecord>,
-    pub citations: Vec<EvidenceCitation>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueryRecordWire {
-    resource: ResourceRef,
-    summary: Option<String>,
-    occurred_at_ms: Option<i64>,
-    facts: Vec<FactRecord>,
-    citations: Vec<EvidenceCitation>,
-}
-
-impl<'de> Deserialize<'de> for QueryRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = QueryRecordWire::deserialize(deserializer)?;
-        let record = Self {
-            resource: wire.resource,
-            summary: wire.summary,
-            occurred_at_ms: wire.occurred_at_ms,
-            facts: wire.facts,
-            citations: wire.citations,
-        };
-        record
-            .validate()
-            .map_err(|error| serde::de::Error::custom(error.message))?;
-        Ok(record)
-    }
-}
-
-impl QueryRecord {
+impl ResourceRef {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.citations.len() > MAX_CITATIONS_PER_FACT
-            || self.facts.len() > MAX_FACTS_PER_QUERY_RECORD
+        if self.id.trim().is_empty()
+            || self.id.len() > MAX_BLAME_TARGET_BYTES
+            || self.id.chars().any(char::is_control)
+            || self.display.trim().is_empty()
+            || self.display.len() > MAX_BLAME_TARGET_BYTES
+            || self.display.chars().any(char::is_control)
         {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
-                "query record exceeds fact or citation bounds",
-            ));
-        }
-        if self.citations.iter().any(|citation| !citation.is_usable()) {
-            return Err(ProtocolError::new(
-                ErrorClass::Corrupt,
-                "query record has an unusable citation",
-            ));
-        }
-        for fact in &self.facts {
-            fact.validate()?;
-        }
-        if self.citations.is_empty() && self.facts.is_empty() {
-            return Err(ProtocolError::new(
-                ErrorClass::Corrupt,
-                "query record has no cited evidence leaf",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactConfidence {
-    Explicit,
-    High,
-    Medium,
-    Low,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactState {
-    Asserted,
-    Ambiguous,
-    Contradicted,
-    Superseded,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum FactValue {
-    Resource(ResourceRef),
-    Text(String),
-    Integer(i64),
-    Boolean(bool),
-    Json(Value),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct FactRecord {
-    pub id: String,
-    pub fact_type: String,
-    pub subject: ResourceRef,
-    pub predicate: String,
-    pub object: FactValue,
-    pub confidence: FactConfidence,
-    pub state: FactState,
-    pub detector_version: String,
-    pub owning_root_session_id: Option<Uuid>,
-    pub direct_actor_session_id: Option<Uuid>,
-    pub citations: Vec<EvidenceCitation>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FactRecordWire {
-    id: String,
-    fact_type: String,
-    subject: ResourceRef,
-    predicate: String,
-    object: FactValue,
-    confidence: FactConfidence,
-    state: FactState,
-    detector_version: String,
-    owning_root_session_id: Option<Uuid>,
-    direct_actor_session_id: Option<Uuid>,
-    citations: Vec<EvidenceCitation>,
-}
-
-impl<'de> Deserialize<'de> for FactRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = FactRecordWire::deserialize(deserializer)?;
-        let fact = Self {
-            id: wire.id,
-            fact_type: wire.fact_type,
-            subject: wire.subject,
-            predicate: wire.predicate,
-            object: wire.object,
-            confidence: wire.confidence,
-            state: wire.state,
-            detector_version: wire.detector_version,
-            owning_root_session_id: wire.owning_root_session_id,
-            direct_actor_session_id: wire.direct_actor_session_id,
-            citations: wire.citations,
-        };
-        fact.validate()
-            .map_err(|error| serde::de::Error::custom(error.message))?;
-        Ok(fact)
-    }
-}
-
-impl FactRecord {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.citations.is_empty() {
-            return Err(ProtocolError::new(
-                ErrorClass::Corrupt,
-                "fact has no usable supporting citation",
-            ));
-        }
-        if self.citations.len() > MAX_CITATIONS_PER_FACT {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "fact exceeds its citation bound",
-            ));
-        }
-        if self.citations.iter().any(|citation| !citation.is_usable()) {
-            return Err(ProtocolError::new(
-                ErrorClass::Corrupt,
-                "fact has an unusable supporting citation",
+                "resource reference is empty, unsafe, or exceeds its byte bound",
             ));
         }
         Ok(())

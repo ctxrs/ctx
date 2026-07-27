@@ -86,7 +86,6 @@ impl MistralVibeFrozenFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MistralVibeSessionObservation {
-    pub(super) canonical_messages_path: PathBuf,
     metadata_file: MistralVibeFrozenFile,
     pub(super) messages_file: MistralVibeFrozenFile,
 }
@@ -94,15 +93,25 @@ pub(super) struct MistralVibeSessionObservation {
 impl MistralVibeSessionObservation {
     pub(super) fn read(source: &MistralVibeSessionSource) -> Result<Self> {
         Ok(Self {
-            canonical_messages_path: fs::canonicalize(&source.messages_path)?,
             metadata_file: MistralVibeFrozenFile::read(&source.metadata_path)?,
             messages_file: MistralVibeFrozenFile::read(&source.messages_path)?,
         })
     }
 
     pub(super) fn source_revision(&self) -> String {
+        self.source_revision_for_revisions(
+            MISTRAL_VIBE_CAPTURE_REVISION,
+            MISTRAL_VIBE_POLICY_REVISION,
+        )
+    }
+
+    pub(super) fn source_revision_for_revisions(
+        &self,
+        capture_revision: u32,
+        policy_revision: u32,
+    ) -> String {
         let mut input = format!(
-            "mistral-vibe-session-v1\0capture={MISTRAL_VIBE_CAPTURE_REVISION}\0policy={MISTRAL_VIBE_POLICY_REVISION}\nmeta\n"
+            "mistral-vibe-session-v1\0capture={capture_revision}\0policy={policy_revision}\nmeta\n"
         );
         self.metadata_file.revision_component(&mut input);
         input.push_str("messages\n");
@@ -121,28 +130,6 @@ impl MistralVibeSessionObservation {
             fnv1a64(input.as_bytes())
         )
     }
-
-    pub(super) fn revalidate(&self, source: &MistralVibeSessionSource) -> Result<bool> {
-        let metadata_file = match MistralVibeFrozenFile::read(&source.metadata_path) {
-            Ok(file) => file,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        let messages_file = match MistralVibeFrozenFile::read(&source.messages_path) {
-            Ok(file) => file,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(metadata_file == self.metadata_file
-            && messages_file == self.messages_file
-            && fs::canonicalize(&source.messages_path)? == self.canonical_messages_path)
-    }
 }
 
 pub(crate) fn mistral_vibe_complete_content_revision_from_admitted(
@@ -150,10 +137,6 @@ pub(crate) fn mistral_vibe_complete_content_revision_from_admitted(
     messages: &Metadata,
 ) -> Result<String> {
     let observation = MistralVibeSessionObservation {
-        // Exact-content admission supplies path identity separately. The
-        // revision itself is intentionally only the two admitted file
-        // snapshots plus the capture/policy revisions.
-        canonical_messages_path: PathBuf::new(),
         metadata_file: MistralVibeFrozenFile::from_metadata(metadata)?,
         messages_file: MistralVibeFrozenFile::from_metadata(messages)?,
     };

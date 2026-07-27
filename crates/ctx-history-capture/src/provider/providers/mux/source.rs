@@ -161,6 +161,13 @@ impl MuxFileObservation {
         format!("mux-{kind}-v1:fnv1a64:{:016x}", fnv1a64(input.as_bytes()))
     }
 
+    pub(super) fn content_identity(&self) -> String {
+        format!(
+            "mux-file-v1:{:?}:{:?}",
+            self.content.device, self.content.inode
+        )
+    }
+
     pub(super) fn metadata_revision(&self) -> String {
         let mut input = "mux-metadata-v1\n".to_owned();
         match &self.metadata {

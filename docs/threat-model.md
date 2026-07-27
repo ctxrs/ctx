@@ -36,6 +36,20 @@ the authoritative local inventory verifies deletion. The installation's
 small anti-rollback watermark may remain after deletion; it contains no graph
 key, transcript content, account token, or entitlement body and is ignored by
 the installed/not-installed status decision.
+Pro initialization evidence is persisted before the first commercial vault
+write. Deletion uses only opaque record IDs derived from that root's
+installation identity and its recorded production/staging thumbprints; it does
+not broadly enumerate another installation's credentials. This also covers
+graph keys created before the first graph database file. Corrupt thumbprint
+inventory fails before deletion. A bounded nonsecret root-local cleanup phase
+is durably published before graph-key deletion and retained through credential
+and helper verification, so retry does not depend on credential records that a
+prior attempt already removed. Setup and preservation are blocked while this
+phase remains; successful deletion removes it.
+Users deleting the Core data root must run the identity-aware
+`ctx pro uninstall --delete-data` operation first. Removing `install.json`
+before native deletion can make the opaque vault records impossible to locate
+and orphan credentials or graph keys.
 
 ## Risks
 

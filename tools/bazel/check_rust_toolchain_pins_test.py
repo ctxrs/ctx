@@ -21,6 +21,7 @@ MATRIX_TEXT = (ROOT / "contracts/release-targets-v1.json").read_text(
 )
 ARM_ARCHIVE = "rustc-1.97.1-aarch64-unknown-linux-gnu.tar.xz"
 ARM_CHECKSUM = "b344b81f0cd4c2246c7da8b197fe7a339d7dd02bb15cb69b2524115d9c75224c"
+FREEBSD_CRATE_UNIVERSE_LINE = '        "x86_64-unknown-freebsd",\n'
 
 
 class RustToolchainPinContractTest(unittest.TestCase):
@@ -46,6 +47,15 @@ class RustToolchainPinContractTest(unittest.TestCase):
         matrix["targets"].append({"os": "plan9", "arch": "x86_64"})
         with self.assertRaisesRegex(PinContractError, "no native Bazel host mapping"):
             validate_release_matrix_text(json.dumps(matrix))
+
+    def test_missing_freebsd_crate_universe_target_is_rejected(self) -> None:
+        mutated = MODULE_TEXT.replace(FREEBSD_CRATE_UNIVERSE_LINE, "", 1)
+        self.assertNotEqual(mutated, MODULE_TEXT)
+        with self.assertRaisesRegex(
+            PinContractError,
+            "crate_universe is missing release host triple x86_64-unknown-freebsd",
+        ):
+            validate_module_text(mutated)
 
 
 if __name__ == "__main__":

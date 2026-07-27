@@ -5,9 +5,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use std::cell::{Cell, RefCell};
-
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
@@ -19,25 +16,14 @@ use crate::{CaptureError, Result};
 
 use super::position::{nanoclaw_ordered_i64, NanoClawMessageSource};
 use super::rows::{
-    nanoclaw_observed_bytes, nanoclaw_oversize_limit, nanoclaw_retained_length_expr,
-    nanoclaw_session_columns, nanoclaw_session_projection,
+    nanoclaw_observed_bytes, nanoclaw_retained_length_expr, nanoclaw_session_columns,
+    nanoclaw_session_projection, NANOCLAW_NATIVE_MAX_RECORD_BYTES,
 };
 use super::{NANOCLAW_CAPTURE_REVISION, NANOCLAW_POLICY_REVISION};
 
 const NANOCLAW_INVENTORY_PAGE_ENTRIES: usize = 64;
 const NANOCLAW_INVENTORY_MIN_INTERVAL: Duration = Duration::from_millis(5);
 const NANOCLAW_INVENTORY_HASH_DOMAIN: &[u8] = b"ctx-nanoclaw-inventory-sha256-v1\0";
-
-#[cfg(test)]
-type NanoClawCommitRevalidationCallback = Box<dyn FnMut(usize)>;
-
-#[cfg(test)]
-thread_local! {
-    static NANOCLAW_INVENTORY_SCANS: Cell<usize> = const { Cell::new(0) };
-    static NANOCLAW_BEFORE_COMMIT_REVALIDATION: RefCell<Option<NanoClawCommitRevalidationCallback>> =
-        const { RefCell::new(None) };
-    static NANOCLAW_COMMIT_REVALIDATIONS: Cell<usize> = const { Cell::new(0) };
-}
 
 #[derive(Clone, PartialEq, Eq)]
 struct NanoClawFrozenFileMetadata {
@@ -185,11 +171,6 @@ impl NanoClawSqliteSnapshot {
         self.update_hash(&mut hasher);
         hasher.finalize().into()
     }
-
-    #[cfg(test)]
-    pub(super) fn database_change_token(&self) -> [u8; 32] {
-        self.database.change_token
-    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -324,8 +305,6 @@ impl NanoClawProjectSnapshot {
     }
 
     pub(super) fn revalidate_before_commit(&self) -> Result<bool> {
-        #[cfg(test)]
-        nanoclaw_run_before_commit_revalidation_hook();
         self.revalidate_frozen_inventory()
     }
 
@@ -339,16 +318,6 @@ impl NanoClawProjectSnapshot {
             }
         }
         self.central.revalidate(&self.central_path)
-    }
-
-    #[cfg(test)]
-    pub(super) fn database_paths(&self) -> Vec<&Path> {
-        self.inventory
-            .session_databases
-            .iter()
-            .flat_map(|session| [&session.inbound, &session.outbound])
-            .map(NanoClawProjectDatabaseSnapshot::path)
-            .collect()
     }
 }
 
@@ -383,9 +352,6 @@ fn nanoclaw_stream_inventory(
     project_root: &Path,
     conn: &Connection,
 ) -> Result<NanoClawProjectInventory> {
-    #[cfg(test)]
-    NANOCLAW_INVENTORY_SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
-
     let columns = nanoclaw_session_columns(conn)?;
     let retained = nanoclaw_retained_length_expr(&nanoclaw_session_projection(conn, &columns)?);
     let mut candidates = conn.prepare(&format!(
@@ -406,7 +372,7 @@ fn nanoclaw_stream_inventory(
         let observed_bytes = nanoclaw_observed_bytes(retained_bytes)?;
         nanoclaw_hash_u64(&mut hasher, nanoclaw_ordered_i64(rowid));
         nanoclaw_hash_u64(&mut hasher, observed_bytes);
-        if observed_bytes <= nanoclaw_oversize_limit()? {
+        if observed_bytes <= NANOCLAW_NATIVE_MAX_RECORD_BYTES {
             let (session_id, agent_group_id): (String, String) =
                 hydrate.query_row([rowid], |row| Ok((row.get(0)?, row.get(1)?)))?;
             nanoclaw_hash_bytes(&mut hasher, session_id.as_bytes());
@@ -524,49 +490,4 @@ pub(super) fn nanoclaw_project_root(path: &Path) -> Result<PathBuf> {
         path: path.to_path_buf(),
         reason: "NanoClaw import path must be a project root or data/v2.db",
     })
-}
-
-#[cfg(test)]
-pub(super) fn nanoclaw_inventory_scans() -> usize {
-    NANOCLAW_INVENTORY_SCANS.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(super) struct NanoClawCommitRevalidationHook;
-
-#[cfg(test)]
-impl Drop for NanoClawCommitRevalidationHook {
-    fn drop(&mut self) {
-        NANOCLAW_BEFORE_COMMIT_REVALIDATION.with(|hook| {
-            hook.borrow_mut().take();
-        });
-        NANOCLAW_COMMIT_REVALIDATIONS.with(|revalidations| revalidations.set(0));
-    }
-}
-
-#[cfg(test)]
-pub(super) fn nanoclaw_set_before_commit_revalidation_hook(
-    hook: impl FnMut(usize) + 'static,
-) -> NanoClawCommitRevalidationHook {
-    NANOCLAW_COMMIT_REVALIDATIONS.with(|revalidations| revalidations.set(0));
-    NANOCLAW_BEFORE_COMMIT_REVALIDATION.with(|installed| {
-        *installed.borrow_mut() = Some(Box::new(hook));
-    });
-    NanoClawCommitRevalidationHook
-}
-
-#[cfg(test)]
-fn nanoclaw_run_before_commit_revalidation_hook() {
-    let ordinal = NANOCLAW_COMMIT_REVALIDATIONS.with(|revalidations| {
-        let ordinal = revalidations.get().saturating_add(1);
-        revalidations.set(ordinal);
-        ordinal
-    });
-    NANOCLAW_BEFORE_COMMIT_REVALIDATION.with(|installed| {
-        let mut hook = installed.borrow_mut().take();
-        if let Some(callback) = hook.as_mut() {
-            callback(ordinal);
-        }
-        *installed.borrow_mut() = hook;
-    });
 }

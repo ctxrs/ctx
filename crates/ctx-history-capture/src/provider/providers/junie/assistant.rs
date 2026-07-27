@@ -6,12 +6,35 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub(super) struct JunieStepAgg {
     pub(super) order: usize,
+    pub(super) provider_step_id: String,
     pub(super) label: Option<String>,
     pub(super) command: Option<String>,
     pub(super) files: Option<Value>,
     pub(super) changes: Vec<Value>,
     pub(super) details: Option<String>,
     pub(super) status: Option<String>,
+    pub(super) exit_code: Option<i32>,
+    pub(super) duration_ms: Option<u64>,
+    pub(super) timed_out: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JunieOutputOutcome {
+    Success,
+    Failure,
+    Timeout,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct JunieStepOutputProjection<'a> {
+    pub(super) details: &'a str,
+    pub(super) call_id: String,
+    pub(super) tool_name: &'static str,
+    pub(super) command: Option<&'a str>,
+    pub(super) outcome: JunieOutputOutcome,
+    pub(super) exit_code: Option<i32>,
+    pub(super) duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,8 +54,6 @@ pub(crate) struct JunieAssistantBuffer {
     pub(super) step_ids_in_order: Vec<String>,
     pub(super) results: BTreeMap<String, String>,
     pub(super) usage: JunieUsage,
-    pub(super) retained_source_bytes: usize,
-    pub(super) source_binding: crate::complete_content::jsonl::JunieRecordSetBinding,
 }
 
 pub(crate) fn junie_merge_buffered_agent_event(
@@ -130,6 +151,67 @@ pub(crate) fn junie_buffer_step_output(
         .filter(|details| !details.trim().is_empty())
 }
 
+pub(super) fn junie_step_output_projection(
+    step: &JunieStepAgg,
+) -> Option<JunieStepOutputProjection<'_>> {
+    if !step.changes.is_empty() {
+        return None;
+    }
+    let details = step
+        .details
+        .as_deref()
+        .filter(|details| !details.trim().is_empty())?;
+    let status = step
+        .status
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    let outcome = if step.timed_out
+        || status
+            .as_deref()
+            .is_some_and(|status| matches!(status, "timeout" | "timed_out" | "timedout"))
+    {
+        JunieOutputOutcome::Timeout
+    } else if step.exit_code.is_some_and(|code| code != 0)
+        || status.as_deref().is_some_and(|status| {
+            matches!(
+                status,
+                "failed" | "failure" | "error" | "errored" | "cancelled" | "canceled"
+            )
+        })
+    {
+        JunieOutputOutcome::Failure
+    } else if step.exit_code == Some(0)
+        || status.as_deref().is_some_and(|status| {
+            matches!(
+                status,
+                "success" | "succeeded" | "complete" | "completed" | "ok" | "passed"
+            )
+        })
+    {
+        JunieOutputOutcome::Success
+    } else {
+        JunieOutputOutcome::Unknown
+    };
+    Some(JunieStepOutputProjection {
+        details,
+        // The record-set locator addresses StepOutput by first-seen step order. Use the same
+        // stable association instead of a mutable provider update ID.
+        call_id: format!("step:{}", step.order),
+        tool_name: if step.command.is_some() {
+            "Bash"
+        } else if step.files.is_some() {
+            "view"
+        } else {
+            "tool"
+        },
+        command: step.command.as_deref(),
+        outcome,
+        exit_code: step.exit_code,
+        duration_ms: step.duration_ms,
+    })
+}
+
 pub(super) fn junie_ensure_assistant(
     buffer: &mut JunieAssistantBuffer,
     occurred_at: DateTime<Utc>,
@@ -198,12 +280,16 @@ pub(super) fn junie_merge_step(
         .entry(step_id.to_owned())
         .or_insert_with(|| JunieStepAgg {
             order: next_order,
+            provider_step_id: step_id.to_owned(),
             label: None,
             command: None,
             files: None,
             changes: Vec::new(),
             details: None,
             status: None,
+            exit_code: None,
+            duration_ms: None,
+            timed_out: false,
         });
     if let Some(text) = agent_event.get("text").and_then(Value::as_str) {
         if !text.trim().is_empty() {
@@ -231,4 +317,25 @@ pub(super) fn junie_merge_step(
             step.status = Some(status.to_owned());
         }
     }
+    step.exit_code = ["exitCode", "exit_code"]
+        .iter()
+        .find_map(|key| agent_event.get(*key).and_then(Value::as_i64))
+        .and_then(|code| i32::try_from(code).ok())
+        .or(step.exit_code);
+    step.duration_ms = ["durationMs", "duration_ms"]
+        .iter()
+        .find_map(|key| {
+            agent_event.get(*key).and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+            })
+        })
+        .or(step.duration_ms);
+    step.timed_out |= ["timedOut", "timed_out", "timeout"].iter().any(|key| {
+        agent_event
+            .get(*key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
 }

@@ -6,9 +6,11 @@ mod parity_tests;
 mod prepared;
 mod query;
 mod semantic_document;
+mod snapshot;
 mod storage;
 
 pub use identity::{EventEmbeddingDocument, EventSearchHit};
+pub use snapshot::SemanticProjectionSnapshot;
 
 pub(crate) use eligibility::{
     semantic_searchable_document_count_for_event,

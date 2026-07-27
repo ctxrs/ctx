@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use uuid::Uuid;
 
 use ctx_history_capture::{
-    CodexSessionImportProgressCallback, ProviderImportSummary, ProviderImportSupport,
+    CodexSessionImportProgressCallback, ImportProfile, ProviderImportSummary, ProviderImportSupport,
 };
 use ctx_history_core::utc_now;
 use ctx_history_store::{SourceImportFile, Store};
@@ -46,26 +46,29 @@ pub(crate) fn validate_source_import_supported(source: &SourceInfo) -> Result<()
     }
 }
 
-pub(crate) fn import_one_source(
+pub(crate) fn import_one_source_with_profile(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
     full_rescan: bool,
     preinventory: &SourcePreinventory,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     let event_search_needs_backfill = store.event_search_projection_needs_backfill()?;
     let refresh_search_after_import =
         event_search_needs_backfill || !source_uses_incremental_event_search(source);
-    import_one_source_inner(
+    import_one_source_inner_with_profile(
         store,
         source,
         progress,
         refresh_search_after_import,
         full_rescan,
         preinventory,
+        import_profile,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn import_one_source_without_search_refresh(
     store: &mut Store,
     source: &SourceInfo,
@@ -73,14 +76,57 @@ pub(crate) fn import_one_source_without_search_refresh(
     full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    import_one_source_inner(store, source, progress, false, full_rescan, preinventory)
+    import_one_source_without_search_refresh_with_profile(
+        store,
+        source,
+        progress,
+        full_rescan,
+        preinventory,
+        &ImportProfile::CoreOnly,
+    )
 }
 
+pub(crate) fn import_one_source_without_search_refresh_with_profile(
+    store: &mut Store,
+    source: &SourceInfo,
+    progress: Option<CodexSessionImportProgressCallback>,
+    full_rescan: bool,
+    preinventory: &SourcePreinventory,
+    import_profile: &ImportProfile,
+) -> Result<ProviderImportSummary> {
+    import_one_source_inner_with_profile(
+        store,
+        source,
+        progress,
+        false,
+        full_rescan,
+        preinventory,
+        import_profile,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn import_one_source_for_search_refresh(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory: &SourcePreinventory,
+) -> Result<ProviderImportSummary> {
+    import_one_source_for_search_refresh_with_profile(
+        store,
+        source,
+        progress,
+        preinventory,
+        &ImportProfile::CoreOnly,
+    )
+}
+
+pub(crate) fn import_one_source_for_search_refresh_with_profile(
+    store: &mut Store,
+    source: &SourceInfo,
+    progress: Option<CodexSessionImportProgressCallback>,
+    preinventory: &SourcePreinventory,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     import_one_source_for_search_refresh_with_limit(
         store,
@@ -88,14 +134,32 @@ pub(crate) fn import_one_source_for_search_refresh(
         progress,
         preinventory,
         ctx_history_capture::CaptureWorkLimit::Drain,
+        import_profile,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn import_one_source_for_background_refresh(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory: &SourcePreinventory,
+) -> Result<ProviderImportSummary> {
+    import_one_source_for_background_refresh_with_profile(
+        store,
+        source,
+        progress,
+        preinventory,
+        &ImportProfile::CoreOnly,
+    )
+}
+
+pub(crate) fn import_one_source_for_background_refresh_with_profile(
+    store: &mut Store,
+    source: &SourceInfo,
+    progress: Option<CodexSessionImportProgressCallback>,
+    preinventory: &SourcePreinventory,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     import_one_source_for_search_refresh_with_limit(
         store,
@@ -103,6 +167,7 @@ pub(crate) fn import_one_source_for_background_refresh(
         progress,
         preinventory,
         ctx_history_capture::CaptureWorkLimit::OneSafeGroup,
+        import_profile,
     )
 }
 
@@ -112,8 +177,10 @@ fn import_one_source_for_search_refresh_with_limit(
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory: &SourcePreinventory,
     capture_work_limit: ctx_history_capture::CaptureWorkLimit,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
-    if !source_uses_import_file_manifest(source)
+    if matches!(import_profile, ImportProfile::CoreOnly)
+        && !source_uses_import_file_manifest(source)
         && preinventory.source_root_file().is_some()
         && store
             .list_pending_source_import_files(source.provider, &source.path.display().to_string())?
@@ -135,9 +202,11 @@ fn import_one_source_for_search_refresh_with_limit(
         preinventory,
         capture_work_limit,
         None,
+        import_profile,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn import_one_source_inner(
     store: &mut Store,
     source: &SourceInfo,
@@ -145,6 +214,26 @@ pub(crate) fn import_one_source_inner(
     refresh_search_after_import: bool,
     full_rescan: bool,
     preinventory: &SourcePreinventory,
+) -> Result<ProviderImportSummary> {
+    import_one_source_inner_with_profile(
+        store,
+        source,
+        progress,
+        refresh_search_after_import,
+        full_rescan,
+        preinventory,
+        &ImportProfile::CoreOnly,
+    )
+}
+
+pub(crate) fn import_one_source_inner_with_profile(
+    store: &mut Store,
+    source: &SourceInfo,
+    progress: Option<CodexSessionImportProgressCallback>,
+    refresh_search_after_import: bool,
+    full_rescan: bool,
+    preinventory: &SourcePreinventory,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     bulk::import_one_source_inner_at_path(
         store,
@@ -156,6 +245,7 @@ pub(crate) fn import_one_source_inner(
         preinventory,
         ctx_history_capture::CaptureWorkLimit::Drain,
         None,
+        import_profile,
     )
 }
 
@@ -167,6 +257,7 @@ struct NativeSourceRun<'a> {
     preinventory: &'a SourcePreinventory,
     capture_work_limit: ctx_history_capture::CaptureWorkLimit,
     inventory_observation_token: Option<String>,
+    import_profile: ImportProfile,
 }
 
 impl<'a> NativeSourceRun<'a> {
@@ -179,6 +270,7 @@ impl<'a> NativeSourceRun<'a> {
         preinventory: &'a SourcePreinventory,
         capture_work_limit: ctx_history_capture::CaptureWorkLimit,
         inventory_observation_token: Option<String>,
+        import_profile: &ImportProfile,
     ) -> Self {
         Self {
             store,
@@ -188,6 +280,7 @@ impl<'a> NativeSourceRun<'a> {
             preinventory,
             capture_work_limit,
             inventory_observation_token,
+            import_profile: import_profile.clone(),
         }
     }
 
@@ -203,6 +296,7 @@ impl<'a> NativeSourceRun<'a> {
                 self.progress.clone(),
                 matches!(self.preinventory, SourcePreinventory::SourceImportManifest),
                 self.capture_work_limit,
+                &self.import_profile,
             )
         } else {
             dispatch::import_direct_source(
@@ -215,6 +309,7 @@ impl<'a> NativeSourceRun<'a> {
                 self.preinventory,
                 self.capture_work_limit,
                 self.inventory_observation_token.clone(),
+                &self.import_profile,
             )
         };
         self.finish(record_id, record_existed, summary)

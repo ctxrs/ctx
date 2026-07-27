@@ -448,13 +448,7 @@ fn result_metadata(tool: McpToolV1, response: &Value) -> McpResultMetadataV1 {
             metadata.events_truncated =
                 result.pointer("/truncated/events").and_then(Value::as_bool);
         }
-        McpToolV1::ShowResource
-        | McpToolV1::LocateResource
-        | McpToolV1::Blame
-        | McpToolV1::Timeline
-        | McpToolV1::Related
-        | McpToolV1::Facts
-        | McpToolV1::ProStatus => {
+        McpToolV1::Blame | McpToolV1::ProStatus => {
             // MCP owns protocol and delivery telemetry. Pro-host telemetry owns
             // Pro product outcomes, result counts, and materialization facts.
         }
@@ -582,8 +576,8 @@ mod tests {
 
     use super::*;
     use crate::analytics::{
-        pro_operation_event, OperationPayloadV1, ProHostOperationV1, ProQueryKindV1,
-        ProQuerySurfaceV1, ProQueryTelemetryV1, RuntimeObservationKindV1,
+        pro_operation_event, OperationPayloadV1, ProHostOperationV1, ProStatusTelemetryV1,
+        ProSurfaceV1, RuntimeObservationKindV1,
     };
 
     fn test_event() -> PublicEventV1 {
@@ -596,10 +590,7 @@ mod tests {
 
     fn test_pro_event() -> PublicEventV1 {
         pro_operation_event(
-            ProHostOperationV1::Query(ProQueryTelemetryV1::new(
-                ProQueryKindV1::Status,
-                ProQuerySurfaceV1::Mcp,
-            )),
+            ProHostOperationV1::Status(ProStatusTelemetryV1::new(ProSurfaceV1::Mcp)),
             Outcome::Success,
             Duration::ZERO,
         )
@@ -742,15 +733,7 @@ mod tests {
                 }
             }
         });
-        for tool in [
-            McpToolV1::ShowResource,
-            McpToolV1::LocateResource,
-            McpToolV1::Blame,
-            McpToolV1::Timeline,
-            McpToolV1::Related,
-            McpToolV1::Facts,
-            McpToolV1::ProStatus,
-        ] {
+        for tool in [McpToolV1::Blame, McpToolV1::ProStatus] {
             assert_eq!(
                 result_metadata(tool, &response),
                 McpResultMetadataV1::default()

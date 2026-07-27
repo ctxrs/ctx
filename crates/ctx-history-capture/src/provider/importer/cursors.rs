@@ -2,29 +2,42 @@ use std::{fmt, io::Write, path::Path};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    CaptureProvider, ProviderCaptureEnvelope, ProviderCursorCheckpoint, ProviderCursorRange,
-    ProviderSourceEnvelope, SyncCursor,
-};
-use ctx_history_store::Store;
+use ctx_history_core::{CaptureProvider, SyncCursor};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(test)]
+use sha2::{Digest, Sha256};
 
-use crate::{
-    captured_batch::{
-        NativePosition, SourceObservation, CAPTURE_BATCH_MAX_PARSER_CHECKPOINT_BYTES,
-    },
-    stable_capture_uuid, CaptureError, Result,
-};
+use crate::{native_source::NativePosition, stable_capture_uuid, CaptureError, Result};
 
 use super::ids::{provider_source_identity_component, timestamps};
 
 pub(crate) const CERTIFIED_PROVIDER_CURSOR_SCHEMA_VERSION: u32 = 1;
-pub(crate) const MAX_PROVIDER_PARSER_CHECKPOINT_BYTES: usize =
-    CAPTURE_BATCH_MAX_PARSER_CHECKPOINT_BYTES;
+pub(crate) const MAX_PROVIDER_PARSER_CHECKPOINT_BYTES: usize = 256 * 1024;
 const MAX_PROVIDER_SOURCE_REVISION_BYTES: usize = 4 * 1024;
 const MAX_PROVIDER_NATIVE_POSITION_BYTES: usize = 256 * 1024;
 const MAX_CERTIFIED_PROVIDER_CURSOR_WIRE_BYTES: usize = 704 * 1024;
 pub(crate) const MAX_PROVIDER_PATH_IDENTITY_RAW_BYTES: usize = 7 * 1024;
+
+/// Reconstructs the exact empty JSONL position emitted by the released
+/// pre-NativePath cursor codec. This exists only to prove migration reset
+/// behavior; production NativePath readers never encode or interpret it.
+#[cfg(test)]
+pub(crate) fn released_jsonl_initial_position_for_test() -> NativePosition {
+    const HASH_DOMAIN: &[u8] = b"ctx-jsonl-append-boundary-sha256-v1\0";
+    let mut hasher = Sha256::new();
+    hasher.update(HASH_DOMAIN);
+    hasher.update(0_u64.to_be_bytes());
+    hasher.update(0_u32.to_be_bytes());
+
+    let mut value = Vec::with_capacity(56);
+    value.extend_from_slice(b"CTXJLBP\0");
+    value.extend_from_slice(&[1, 1, 0, 0]);
+    value.extend_from_slice(&0_u64.to_be_bytes());
+    value.extend_from_slice(&0_u32.to_be_bytes());
+    value.extend_from_slice(&hasher.finalize());
+    NativePosition::new("jsonl-byte-boundary-v1", value)
+        .expect("released empty JSONL position is a valid bounded native position")
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct BoundedParserCheckpoint(Vec<u8>);
@@ -236,34 +249,6 @@ impl CertifiedProviderCursor {
     pub(crate) fn rejected_records(&self) -> u64 {
         self.rejected_records
     }
-
-    pub(crate) fn matches_revisions(
-        &self,
-        source_revision: &str,
-        parser_revision: u32,
-        policy_revision: u32,
-    ) -> bool {
-        self.source_revision == source_revision
-            && self.parser_revision == parser_revision
-            && self.policy_revision == policy_revision
-    }
-
-    pub(crate) fn validate_observation_position(
-        &self,
-        source: &crate::captured_batch::SourceObservation,
-        position: &NativePosition,
-    ) -> Result<()> {
-        if self.source_revision != source.source_revision()
-            || self.parser_revision != source.capture_revision()
-            || self.policy_revision != source.policy_revision()
-            || self.native_position != *position
-        {
-            return Err(CaptureError::SystemInvariant(
-                "certified provider cursor does not match the exact observed source position",
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Serialize)]
@@ -305,12 +290,6 @@ struct CertifiedProviderCursorWire {
     parser_checkpoint_base64: String,
     #[serde(rename = "r", alias = "rejected_records", default)]
     rejected_records: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderCursorCommit {
-    Committed,
-    Conflict,
 }
 
 fn validate_source_revision(source_revision: &str) -> Result<()> {
@@ -402,10 +381,6 @@ pub(crate) fn provider_path_identity(path: &Path) -> Result<String> {
     Ok(encoded)
 }
 
-pub(crate) fn captured_batch_cursor_stream(source: &SourceObservation) -> String {
-    source.cursor_stream().to_owned()
-}
-
 pub(crate) fn provider_source_cursor_stream_for_path(
     provider: CaptureProvider,
     source_format: &str,
@@ -419,73 +394,6 @@ pub(crate) fn provider_source_cursor_stream_for_path(
             Some(raw_source_path),
             None,
             &serde_json::Value::Null,
-        )
-        .unwrap_or(("default", "default".to_owned())),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn provider_source_cursor_stream(
-    provider: CaptureProvider,
-    source_format: &str,
-    source_root: Option<&str>,
-) -> String {
-    provider_source_cursor_stream_for_component(
-        provider,
-        source_format,
-        provider_source_identity_component(source_root, None, None, &serde_json::Value::Null)
-            .unwrap_or(("default", "default".to_owned())),
-    )
-}
-
-pub(crate) fn provider_source_cursor_range(
-    capture: &ProviderCaptureEnvelope,
-) -> Option<ProviderCursorRange> {
-    if capture.provider == CaptureProvider::Custom {
-        return capture.source.cursor.clone();
-    }
-    capture
-        .source
-        .cursor
-        .as_ref()
-        .map(|cursor| ProviderCursorRange {
-            before: cursor
-                .before
-                .as_ref()
-                .map(|checkpoint| source_scoped_checkpoint(capture, checkpoint)),
-            after: cursor
-                .after
-                .as_ref()
-                .map(|checkpoint| source_scoped_checkpoint(capture, checkpoint)),
-        })
-}
-
-fn source_scoped_checkpoint(
-    capture: &ProviderCaptureEnvelope,
-    checkpoint: &ProviderCursorCheckpoint,
-) -> ProviderCursorCheckpoint {
-    if capture.provider == CaptureProvider::Custom {
-        return checkpoint.clone();
-    }
-    ProviderCursorCheckpoint {
-        stream: provider_source_cursor_stream_for_source(capture.provider, &capture.source),
-        cursor: checkpoint.cursor.clone(),
-        observed_at: checkpoint.observed_at,
-    }
-}
-
-pub(crate) fn provider_source_cursor_stream_for_source(
-    provider: CaptureProvider,
-    source: &ProviderSourceEnvelope,
-) -> String {
-    provider_source_cursor_stream_for_component(
-        provider,
-        &source.source_format,
-        provider_source_identity_component(
-            source.source_root.as_deref(),
-            source.raw_source_path.as_deref(),
-            source.idempotency_key.as_deref(),
-            &source.metadata,
         )
         .unwrap_or(("default", "default".to_owned())),
     )
@@ -511,43 +419,6 @@ fn provider_source_cursor_stream_for_component(
         provider_cursor_stream(provider, source_format),
         source_id.simple()
     )
-}
-
-pub(crate) fn provider_sync_cursor(capture: &ProviderCaptureEnvelope) -> Option<SyncCursor> {
-    let checkpoint = capture
-        .source
-        .cursor
-        .as_ref()
-        .and_then(|cursor| {
-            cursor
-                .after
-                .as_ref()
-                .map(|after| source_scoped_checkpoint(capture, after))
-        })
-        .or_else(|| {
-            capture.event.as_ref().and_then(|event| {
-                event
-                    .cursor
-                    .as_ref()
-                    .map(|cursor| ProviderCursorCheckpoint {
-                        stream: provider_source_cursor_stream_for_source(
-                            capture.provider,
-                            &capture.source,
-                        ),
-                        cursor: cursor.clone(),
-                        observed_at: event.occurred_at,
-                    })
-            })
-        });
-    let checkpoint = checkpoint?;
-
-    Some(provider_sync_cursor_record(
-        capture.provider,
-        &capture.source.machine_id,
-        checkpoint.stream,
-        checkpoint.cursor,
-        checkpoint.observed_at,
-    ))
 }
 
 pub(crate) fn certified_provider_sync_cursor(
@@ -590,23 +461,6 @@ fn provider_sync_cursor_record(
         last_synced_at: Some(observed_at),
         timestamps: timestamps(observed_at),
     }
-}
-
-pub(crate) fn compare_and_set_provider_sync_cursor(
-    store: &Store,
-    expected: Option<&SyncCursor>,
-    cursor: &SyncCursor,
-) -> Result<ProviderCursorCommit> {
-    if store.compare_and_set_sync_cursor(expected, cursor)? {
-        Ok(ProviderCursorCommit::Committed)
-    } else {
-        Ok(ProviderCursorCommit::Conflict)
-    }
-}
-
-pub(crate) fn persist_provider_sync_cursor(store: &mut Store, cursor: &SyncCursor) -> Result<()> {
-    store.upsert_sync_cursor(cursor)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -671,7 +525,6 @@ mod tests {
         assert_eq!(decoded.source_revision(), "sha256:test-source");
         assert_eq!(decoded.parser_revision(), 3);
         assert_eq!(decoded.policy_revision(), 7);
-        assert!(decoded.matches_revisions("sha256:test-source", 3, 7));
         assert_eq!(decoded.native_position().kind(), "jsonl-byte");
         assert_eq!(decoded.native_position().value(), 4096_u64.to_be_bytes());
         assert_eq!(decoded.rejected_records(), 11);
@@ -824,40 +677,5 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unsupported certified provider cursor schema version 2"));
-    }
-
-    #[test]
-    fn certified_sync_cursor_keeps_legacy_provider_cursor_identity() {
-        let cursor = test_cursor();
-        let observed_at = DateTime::<Utc>::UNIX_EPOCH;
-        let legacy_stream = provider_source_cursor_stream_for_component(
-            CaptureProvider::Codex,
-            "jsonl",
-            ("path", "/tmp/session.jsonl".to_owned()),
-        );
-        let source = SourceObservation::new(
-            CaptureProvider::Codex,
-            "jsonl",
-            "session:test",
-            "revision:test",
-            legacy_stream.clone(),
-            cursor.parser_revision(),
-            cursor.policy_revision(),
-            None,
-        )
-        .expect("valid source observation");
-        assert_eq!(captured_batch_cursor_stream(&source), legacy_stream);
-        let sync = certified_provider_sync_cursor(
-            CaptureProvider::Codex,
-            "test-machine",
-            captured_batch_cursor_stream(&source),
-            &cursor,
-            observed_at,
-        )
-        .expect("build sync cursor");
-
-        let decoded = CertifiedProviderCursor::decode(&sync.cursor).expect("decode sync cursor");
-        assert_eq!(decoded, cursor);
-        assert_eq!(sync.last_synced_at, Some(observed_at));
     }
 }

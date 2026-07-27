@@ -2,8 +2,10 @@
 
 `ctx mcp serve` starts a local MCP server over newline-delimited stdio JSON-RPC.
 It is for agents or MCP hosts that prefer tool discovery over shell commands.
-The CLI remains the primary interface. Pro graph queries may idempotently catch
-up only the separate derived graph.
+The CLI remains the primary interface. Pro blame may perform bounded local
+catch-up that updates the canonical Core index, writes the encrypted derived Pro
+graph, and writes the projection acknowledgement. It never writes provider
+history or repositories.
 
 ```bash
 ctx mcp serve
@@ -34,30 +36,40 @@ forward the returned complete transcript, so callers should request it only
 when needed. Typed failures are returned in `structuredContent` with the same
 stable complete-content error codes as the CLI JSON contract.
 
-Seven use the optional local Pro helper:
+Two use the optional local Pro helper:
 
 - `pro_status`, inspect helper availability, capabilities, nonsecret access
   state, and applicable refresh/access/grace deadlines without returning the
   helper path;
-- `show_resource` and `locate_resource`, resolve a typed resource and its exact
-  evidence;
-- `blame`, join a file or line with Git and producing-session provenance;
-- `timeline`, `related`, and `facts`, return bounded cited graph views.
+- `blame`, return typed, fully cited provenance for a committed file or line
+  range, commit, or pull request.
 
-Pro query targets use the resource kinds `repository`, `worktree`, `branch`,
-`commit`, `file`, `pull_request`, `issue`, `command`, `check`, `session`,
-`agent`, and `run`. Query `target.repository` is an optional logical identity
-such as `forge:github.com/ctxrs/ctx` and is not a path.
-Unscoped results expose an opaque `resource.id` that can be reused as the same
-kind's `target.value` after the caller selects the intended match.
-`target.line` is a positive 1-based source line and is accepted only when
-`target.kind` is `file`; other kinds return the typed `invalid_request` error.
+The `blame` target is exactly one of `file`, `commit`, or `pull_request`.
+`target.repository` is an optional logical identity such as
+`forge:github.com/ctxrs/ctx`, never a path; a numeric PR selector requires it.
+File `target.lines` contains positive inclusive `start` and `end` values.
 
-Only `facts`, `timeline`, and `related` are page-capable. Their authenticated
-cursors are bound to the query and current graph state. Tampered cursors are
-invalid and graph changes make previous cursors stale. `show_resource`,
-`locate_resource`, and `blame` are bounded and unpaged. MCP Pro errors use
-stable `error_code` values in `structuredContent`.
+MCP blame defaults to and permits at most 8 complete matches per page. Its
+authenticated cursor is bound to the request and current graph state. Every
+returned match has all of its referenced entries in the deduplicated evidence
+table; the text fallback emits every match and every evidence entry without
+clipping. After adding both exact `structuredContent` and the text fallback,
+the final serialized JSON-RPC response is capped at 1 MiB. If a complete helper
+page exceeds that MCP-specific cap, the tool returns a small
+`invalid_response` error asking the caller to lower `limit` or use
+`ctx blame ... --json`; it does not truncate a match or evidence entry and does
+not fabricate a continuation cursor.
+
+`pro_status` is read-only. `blame` advertises `readOnlyHint: false` because its
+bounded catch-up updates the canonical Core index, writes the encrypted derived
+Pro graph, and writes the projection acknowledgement. It never writes provider
+history or repositories. The operation is nondestructive and idempotent.
+
+PR activity remains separate from code production. PR code membership appears
+only when structured captured forge evidence names the canonical PR and exact
+Git object ID in the same recognized record. When that proof is absent, the
+result explicitly contains no PR-commit relationship. MCP Pro errors use stable
+`error_code` values in `structuredContent`.
 Helper/graph readiness and subscription access are separate fields. Access is
 `trial`, `active`, `canceling_paid`, `offline_grace`, `locked`, or null when it
 cannot be determined.
@@ -65,6 +77,9 @@ cannot be determined.
 MCP search and SQL query the existing index only. They do not refresh provider
 history, import files, initialize storage, or write provider data. MCP search
 currently uses the lexical search path only.
+
+The `sources` tool returns the same bounded provider discovery `issues` as
+`ctx sources --json`, including stable issue codes and truncation markers.
 
 MCP search defaults to primary-agent sessions only, matching `ctx search`.
 Pass `include_subagents: true` when implementation details, code review notes,
@@ -76,6 +91,11 @@ the target.
 The MCP `sql` tool uses the same read-only stable views and result limits as
 `ctx sql --json`. Prefer stable `ctx_*` views for scripts and agent workflows.
 Run `ctx docs show sql` for the view schemas and examples.
+
+Malformed tool arguments return `isError: true` with the existing diagnostic
+`error` and stable `error_code: "invalid_request"` in `structuredContent`.
+Malformed JSON-RPC framing or envelopes continue to use protocol-level parse
+and invalid-params errors.
 
 Tool results include MCP text content plus `structuredContent` JSON. Treat all
 MCP output as private local history: it may include absolute paths, source

@@ -3,40 +3,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use std::cell::Cell;
-
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::captured_batch::{CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES, CAPTURE_BATCH_MAX_RECORDS};
 use crate::provider::normalization::provider_value_text;
 use crate::provider::sqlite::{sqlite_table_columns, sqlite_table_exists};
-use crate::{CaptureError, Result};
+use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 use super::source::with_astrbot_length_preflight;
 
-pub(super) const ASTRBOT_PREFERENCE_SCAN_MAX_SOURCE_ROWS_PER_PAGE: usize =
-    CAPTURE_BATCH_MAX_RECORDS;
+pub(super) const ASTRBOT_PREFERENCE_SCAN_MAX_SOURCE_ROWS_PER_PAGE: usize = 64;
 const ASTRBOT_PREFERENCE_SCAN_MIN_PAGE_INTERVAL: Duration = Duration::from_millis(5);
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct AstrBotPreferenceScanTestPacing {
-    pub(super) pages: usize,
-    pub(super) max_source_rows: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    static ASTRBOT_PREFERENCE_SCAN_TEST_PACING: Cell<AstrBotPreferenceScanTestPacing> =
-        const { Cell::new(AstrBotPreferenceScanTestPacing {
-            pages: 0,
-            max_source_rows: 0,
-        }) };
-    static ASTRBOT_PREFERENCE_SCAN_TEST_WAIT_COUNT: Cell<Option<usize>> =
-        const { Cell::new(None) };
-}
 
 struct AstrBotPreferenceScanPacer {
     page_started: Instant,
@@ -49,56 +26,14 @@ impl AstrBotPreferenceScanPacer {
         }
     }
 
-    fn finish_page(&mut self, source_rows: usize) {
-        #[cfg(not(test))]
-        let _ = source_rows;
-        #[cfg(test)]
-        ASTRBOT_PREFERENCE_SCAN_TEST_PACING.with(|pacing| {
-            let current = pacing.get();
-            pacing.set(AstrBotPreferenceScanTestPacing {
-                pages: current.pages.saturating_add(1),
-                max_source_rows: current.max_source_rows.max(source_rows),
-            });
-        });
+    fn finish_page(&mut self) {
         let elapsed = self.page_started.elapsed();
         let wait = ASTRBOT_PREFERENCE_SCAN_MIN_PAGE_INTERVAL.saturating_sub(elapsed);
-        #[cfg(test)]
-        let intercepted = ASTRBOT_PREFERENCE_SCAN_TEST_WAIT_COUNT.with(|count| {
-            let Some(current) = count.get() else {
-                return false;
-            };
-            count.set(Some(current.saturating_add(1)));
-            true
-        });
-        #[cfg(not(test))]
-        let intercepted = false;
-        if !intercepted && !wait.is_zero() {
+        if !wait.is_zero() {
             thread::sleep(wait);
         }
         self.page_started = Instant::now();
     }
-}
-
-#[cfg(test)]
-pub(super) fn astrbot_reset_preference_scan_test_pacing() {
-    ASTRBOT_PREFERENCE_SCAN_TEST_PACING
-        .with(|pacing| pacing.set(AstrBotPreferenceScanTestPacing::default()));
-    ASTRBOT_PREFERENCE_SCAN_TEST_WAIT_COUNT.with(|count| count.set(Some(0)));
-}
-
-#[cfg(test)]
-pub(super) fn astrbot_preference_scan_test_pacing() -> AstrBotPreferenceScanTestPacing {
-    ASTRBOT_PREFERENCE_SCAN_TEST_PACING.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(super) fn astrbot_preference_scan_test_wait_count() -> usize {
-    ASTRBOT_PREFERENCE_SCAN_TEST_WAIT_COUNT.with(|count| count.get().unwrap_or_default())
-}
-
-#[cfg(test)]
-pub(super) fn astrbot_disable_preference_scan_test_wait_hook() {
-    ASTRBOT_PREFERENCE_SCAN_TEST_WAIT_COUNT.with(|count| count.set(None));
 }
 
 pub(super) fn astrbot_selected_conversation_bounded(conn: &Connection) -> Result<Option<String>> {
@@ -204,10 +139,10 @@ pub(super) fn astrbot_selected_conversation_bounded(conn: &Connection) -> Result
             selected = Some((metadata.rowid, metadata.value_bytes));
             break;
         }
-        pacer.finish_page(page.len());
+        pacer.finish_page();
         if let Some((rowid, value_bytes)) = selected {
             let value_bytes = astrbot_preference_length(value_bytes, "value")?;
-            if value_bytes > CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES {
+            if value_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES {
                 return Err(CaptureError::InvalidPayload(
                     "AstrBot selected-conversation preference exceeds the provider record limit"
                         .to_owned(),

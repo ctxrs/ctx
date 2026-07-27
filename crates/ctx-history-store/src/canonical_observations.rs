@@ -198,6 +198,7 @@ fn canonical_observations_select_sql(include_deleted: bool) -> &'static str {
         LEFT JOIN capture_sources cs
           ON cs.id = COALESCE(e.capture_source_id, s.capture_source_id, r.source_id)
         WHERE e.id = ?1
+          AND e.event_type NOT IN ('tool_output', 'command_output')
     "#
     } else {
         r#"
@@ -220,6 +221,7 @@ fn canonical_observations_select_sql(include_deleted: bool) -> &'static str {
         LEFT JOIN capture_sources cs
           ON cs.id = COALESCE(e.capture_source_id, s.capture_source_id, r.source_id)
         WHERE e.deleted_at_ms IS NULL AND e.id = ?1
+          AND e.event_type NOT IN ('tool_output', 'command_output')
     "#
     }
 }
@@ -233,12 +235,6 @@ fn canonical_event_observation_from_row(
     let event_type = row.get::<_, String>(4)?;
     let mut payload = parse_json_column(row, 6)?;
     let mut metadata = parse_json_column(row, 7)?;
-    if matches!(event_type.as_str(), "tool_output" | "command_output") {
-        // Result bodies and previews are source-backed. The durable canonical
-        // event carries only bounded identity/timing metadata, its typed result
-        // contract, and citation.
-        payload = ctx_history_core::compact_result_payload(&payload);
-    }
     let result = take_result_evidence(&mut payload);
     strip_local_complete_content_metadata(&mut metadata);
 
@@ -604,7 +600,7 @@ fn canonical_source_by_id(
     .optional()
 }
 
-fn canonical_actor_by_id(
+pub(crate) fn canonical_actor_by_id(
     conn: &rusqlite::Connection,
     id: Uuid,
 ) -> rusqlite::Result<Option<CanonicalActor>> {

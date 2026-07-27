@@ -1,9 +1,15 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
+use ctx_history_core::{CaptureProvider, EventRole, EventType, Fidelity};
 use serde_json::{json, Value};
 
-use crate::provider::normalization::{native_event, provider_value_text, NativeEventDraft};
-use crate::{compute_payload_hash, CaptureError, Result, ZED_THREADS_SQLITE_SOURCE_FORMAT};
+use crate::provider::normalization::{
+    provider_capped_json, provider_policy_body, provider_policy_event_text,
+    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_value_text,
+};
+use crate::{
+    compute_payload_hash, CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS,
+    ZED_THREADS_SQLITE_SOURCE_FORMAT,
+};
 
 use super::thread::{zed_decode_thread_json, zed_required_timestamp, ZedThreadRow};
 
@@ -19,15 +25,10 @@ const _: () = assert!(
 
 pub(crate) struct ZedDecodedThread {
     thread: Value,
-    row_updated_at: DateTime<Utc>,
     event_occurred_at: DateTime<Utc>,
 }
 
 impl ZedDecodedThread {
-    pub(crate) fn thread(&self) -> &Value {
-        &self.thread
-    }
-
     pub(crate) fn messages(&self) -> &[Value] {
         self.thread
             .get("messages")
@@ -35,52 +36,96 @@ impl ZedDecodedThread {
             .expect("validated Zed thread must retain its messages array")
     }
 
-    pub(crate) fn row_updated_at(&self) -> DateTime<Utc> {
-        self.row_updated_at
-    }
-
     pub(crate) fn event_occurred_at(&self) -> DateTime<Utc> {
         self.event_occurred_at
     }
 
-    pub(crate) fn events<'a>(&'a self, provider_session_id: &'a str) -> ZedDecodedEvents<'a> {
-        ZedDecodedEvents {
+    pub(crate) fn native_events<'a>(&'a self, provider_session_id: &'a str) -> ZedNativeEvents<'a> {
+        ZedNativeEvents {
             provider_session_id,
             messages: self.messages(),
             occurred_at: self.event_occurred_at,
             message_index: 0,
             next_split_index: 0,
+            source_record_subrecord_index: 0,
         }
-    }
-
-    pub(crate) fn event_at<'a>(
-        &'a self,
-        provider_session_id: &'a str,
-        event_index: usize,
-    ) -> Result<Option<ZedDecodedEvent<'a>>> {
-        self.events(provider_session_id)
-            .nth(event_index)
-            .transpose()
     }
 }
 
 pub(crate) struct ZedDecodedEvent<'a> {
-    pub(crate) event: ProviderEventEnvelope,
+    pub(crate) event: ZedCoreEventDraft,
     pub(crate) complete_text: String,
     pub(crate) message: &'a Value,
-    pub(crate) first_for_message: bool,
 }
 
-pub(crate) struct ZedDecodedEvents<'a> {
+pub(crate) struct ZedCoreEventDraft {
+    pub(super) provider_event_index: u64,
+    pub(super) provider_event_hash: String,
+    pub(super) cursor: String,
+    pub(super) event_type: EventType,
+    pub(super) role: Option<EventRole>,
+    pub(super) occurred_at: DateTime<Utc>,
+    pub(super) fidelity: Fidelity,
+    pub(super) idempotency_key: String,
+    pub(super) payload: Value,
+    pub(super) metadata: Value,
+}
+
+pub(crate) struct ZedNativeEvent<'a> {
+    provider_session_id: &'a str,
+    pub(crate) message: &'a Value,
+    message_index: usize,
+    occurred_at: DateTime<Utc>,
+    pub(crate) event_type: EventType,
+    event_suffix: &'static str,
+    split_index: u64,
+    pub(crate) source_record_subrecord_index: u32,
+}
+
+impl<'a> ZedNativeEvent<'a> {
+    pub(crate) fn cursor(&self) -> String {
+        if self.split_index == 0 && self.event_suffix == "message" {
+            format!(
+                "thread:{}:message:{}",
+                self.provider_session_id, self.message_index
+            )
+        } else {
+            format!(
+                "thread:{}:message:{}:{}",
+                self.provider_session_id, self.message_index, self.event_suffix
+            )
+        }
+    }
+
+    pub(crate) fn decode(self) -> Result<ZedDecodedEvent<'a>> {
+        zed_message_event(
+            self.provider_session_id,
+            self.message,
+            self.message_index,
+            self.occurred_at,
+            self.event_type,
+            self.event_suffix,
+            self.split_index,
+        )
+        .map(|(event, complete_text)| ZedDecodedEvent {
+            event,
+            complete_text,
+            message: self.message,
+        })
+    }
+}
+
+pub(crate) struct ZedNativeEvents<'a> {
     provider_session_id: &'a str,
     messages: &'a [Value],
     occurred_at: DateTime<Utc>,
     message_index: usize,
     next_split_index: u64,
+    source_record_subrecord_index: u32,
 }
 
-impl<'a> Iterator for ZedDecodedEvents<'a> {
-    type Item = Result<ZedDecodedEvent<'a>>;
+impl<'a> Iterator for ZedNativeEvents<'a> {
+    type Item = ZedNativeEvent<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let message = self.messages.get(self.message_index)?;
@@ -99,23 +144,18 @@ impl<'a> Iterator for ZedDecodedEvents<'a> {
             self.message_index += 1;
             (zed_message_event_type(kind, message), "message", 0)
         };
-        Some(
-            zed_message_event(
-                self.provider_session_id,
-                message,
-                message_index,
-                self.occurred_at,
-                event_type,
-                event_suffix,
-                split_index,
-            )
-            .map(|(event, complete_text)| ZedDecodedEvent {
-                event,
-                complete_text,
-                message,
-                first_for_message: split_index == 0,
-            }),
-        )
+        let source_record_subrecord_index = self.source_record_subrecord_index;
+        self.source_record_subrecord_index = self.source_record_subrecord_index.saturating_add(1);
+        Some(ZedNativeEvent {
+            provider_session_id: self.provider_session_id,
+            message,
+            message_index,
+            occurred_at: self.occurred_at,
+            event_type,
+            event_suffix,
+            split_index,
+            source_record_subrecord_index,
+        })
     }
 }
 
@@ -148,7 +188,6 @@ pub(crate) fn decode_zed_thread_events(row: &ZedThreadRow) -> Result<ZedDecodedT
         .unwrap_or(row_updated_at);
     Ok(ZedDecodedThread {
         thread,
-        row_updated_at,
         event_occurred_at,
     })
 }
@@ -225,7 +264,7 @@ fn zed_message_event(
     event_type: EventType,
     event_suffix: &str,
     split_index: u64,
-) -> Result<(ProviderEventEnvelope, String)> {
+) -> Result<(ZedCoreEventDraft, String)> {
     let kind = zed_message_kind(message).unwrap_or("Unknown");
     let text = zed_message_text_for_event_type(kind, message, event_type)
         .unwrap_or_else(|| format!("Zed {kind} message"));
@@ -255,18 +294,33 @@ fn zed_message_event(
     } else {
         format!("thread:{provider_session_id}:message:{message_index}:{event_suffix}")
     };
-    let event = native_event(NativeEventDraft {
-        provider: CaptureProvider::Zed,
-        source_format: ZED_THREADS_SQLITE_SOURCE_FORMAT,
-        provider_session_id: provider_session_id.to_owned(),
+    let body = zed_message_body(kind, message, event_type);
+    let retained_text = provider_policy_event_text(event_type, &text, &body);
+    let retained_body = provider_policy_body(event_type, &body);
+    let result_evidence = provider_result_identifier_evidence(event_type, &text, &body);
+    let result_outcome = provider_result_outcome_evidence(event_type, &body);
+    let event = ZedCoreEventDraft {
         provider_event_index,
-        provider_event_hash: Some(format!("zed-message:{message_hash}")),
+        provider_event_hash: format!("zed-message:{message_hash}"),
         cursor,
         event_type,
         role,
         occurred_at,
-        text: text.clone(),
-        body: zed_message_body(kind, message, event_type),
+        fidelity: Fidelity::Imported,
+        idempotency_key: format!(
+            "provider-event:{}:{}:{}",
+            CaptureProvider::Zed.as_str(),
+            provider_session_id,
+            provider_event_index
+        ),
+        payload: json!({
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
+            "result_evidence": result_evidence,
+            "result_outcome": result_outcome,
+            "source_format": ZED_THREADS_SQLITE_SOURCE_FORMAT,
+            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+        }),
         metadata: json!({
             "source": "zed_threads_db",
             "source_format": ZED_THREADS_SQLITE_SOURCE_FORMAT,
@@ -277,7 +331,7 @@ fn zed_message_event(
             "provider_event_identity_index": provider_event_identity_index,
             "timestamp_source": "thread.updated_at",
         }),
-    });
+    };
     Ok((event, text))
 }
 
@@ -501,7 +555,7 @@ fn zed_tool_result_summary(value: &Value) -> Value {
     json!({
         "id": value.get("id").and_then(Value::as_str),
         "tool_name": value.get("tool_name").and_then(Value::as_str),
-        "is_error": value.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+        "is_error": value.get("is_error").and_then(Value::as_bool),
         "content_present": value.get("content").is_some_and(|content| !content.is_null()),
         "output_present": value.get("output").is_some_and(|output| !output.is_null()),
     })
@@ -576,6 +630,48 @@ pub(crate) fn zed_result_content(message: &Value) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+pub(super) fn zed_result_is_error(message: &Value) -> Option<bool> {
+    let results = zed_tool_results(message)?;
+    let mut saw_result = false;
+    let mut all_explicit_success = true;
+    for result in results.values() {
+        saw_result = true;
+        match result.get("is_error").and_then(Value::as_bool) {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => all_explicit_success = false,
+        }
+    }
+    (saw_result && all_explicit_success).then_some(false)
+}
+
+pub(super) fn zed_result_call_id(message: &Value) -> Option<String> {
+    let results = zed_tool_results(message)?;
+    let mut entries = results.iter();
+    let (key, result) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    Some(
+        result
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(key)
+            .to_owned(),
+    )
+}
+
+fn zed_tool_results(message: &Value) -> Option<&serde_json::Map<String, Value>> {
+    if zed_message_kind(message) != Some("Agent") {
+        return None;
+    }
+    zed_message_inner(message, "Agent")?
+        .get("tool_results")?
+        .as_object()
+        .filter(|results| !results.is_empty())
 }
 
 fn zed_result_value_text(value: &Value) -> Option<String> {

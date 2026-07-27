@@ -49,21 +49,21 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
     }
 
     for (cli_provider, stored_provider, query, minimum_events) in [
-        ("qwen-code", "qwen_code", "qwen jsonl oracle prompt", 3),
+        ("qwen-code", "qwen_code", "qwen jsonl oracle prompt", 2),
         (
             "kimi-code-cli",
             "kimi_code_cli",
             "kimi jsonl oracle prompt",
-            7,
+            6,
         ),
         (
             "mistral-vibe",
             "mistral_vibe",
             "mistral vibe oracle prompt",
-            4,
+            3,
         ),
-        ("mux", "mux", "mux jsonl oracle prompt", 6),
-        ("qoder", "qoder", "qoder jsonl oracle prompt", 7),
+        ("mux", "mux", "mux jsonl oracle prompt", 4),
+        ("qoder", "qoder", "qoder jsonl oracle prompt", 6),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -901,7 +901,7 @@ fn warp_cli_imports_explicit_sqlite() {
     assert_eq!(imported["sources"][0]["source_format"], "warp_sqlite");
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["imported_events"], 3);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -961,7 +961,7 @@ fn warp_native_default_discovery_auto_imports_for_search() {
     assert_eq!(search["freshness"]["source_count"], 1);
     assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 4);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
     assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
 }
 
@@ -981,7 +981,7 @@ fn warp_native_default_discovery_is_included_in_import_all() {
         }));
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["imported_events"], 3);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1054,7 +1054,7 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
     );
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 7);
+    assert_eq!(imported["totals"]["imported_events"], 6);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1126,7 +1126,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
     );
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_eq!(imported["totals"]["imported_events"], 2);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1161,7 +1161,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'deepagents'"
         ),
-        3
+        2
     );
 }
 
@@ -1175,7 +1175,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "zed/v1/threads.db",
             "zed sqlite oracle",
             2,
-            6,
+            5,
         ),
         (
             "crush",
@@ -1184,7 +1184,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "crush/v1/crush.db",
             "crush oracle",
             2,
-            4,
+            3,
         ),
         (
             "goose",
@@ -1193,7 +1193,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "goose/v14/sessions.db",
             "goose oracle",
             1,
-            3,
+            2,
         ),
         (
             "kiro-cli",
@@ -1211,7 +1211,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "forgecode/v1/forge.db",
             "forgecode oracle",
             1,
-            3,
+            2,
         ),
     ] {
         let temp = tempdir();
@@ -1242,7 +1242,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
                      WHERE provider = 'crush' AND provider_session_id = 'crush-child'",
                 ),
                 1,
-                "CapturedBatch must preserve the structurally valid child without conversation messages"
+                "NativePath must preserve the structurally valid child without conversation messages"
             );
             assert_eq!(
                 sqlite_count(
@@ -1251,8 +1251,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
                      WHERE provider = 'crush' AND provider_session_id = 'crush-child' \
                      AND event_type = 'command_output'",
                 ),
-                1,
-                "the child-only shell command output must remain attached to the Crush child"
+                0,
+                "the successful child-only shell command output must remain absent from Core"
             );
             assert_eq!(
                 sqlite_count(
@@ -1578,14 +1578,14 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "cline_task_directory_json"
     );
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["imported_events"], 3);
     assert_eq!(imported["totals"]["rejected_records"], 0);
 
     let second =
         json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped_events"], 4);
+    assert_eq!(second["totals"]["skipped_events"], 3);
 
     let search =
         json_output(ctx(&temp).args(["search", "parser note", "--provider", "cline", "--json"]));
@@ -1607,7 +1607,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "roo_task_directory_json"
     );
     assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 6);
+    assert_eq!(imported["totals"]["imported_events"], 5);
     assert_eq!(imported["totals"]["rejected_records"], 0);
 
     let search = json_output(ctx(&temp).args([

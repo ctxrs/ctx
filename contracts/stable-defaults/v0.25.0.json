@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "release_tag": "v0.25.0",
+  "config_source": "crates/ctx-cli/src/config.rs",
+  "config_source_sha256": "2343a862cfdf22ae99a58f98237bfce921b00ce3293678ae38507cc6fcc1a4ae",
+  "defaults": {
+    "analytics.enabled": true,
+    "upgrade.auto": "apply",
+    "daemon.enabled": false,
+    "search.semantic": false
+  }
+}

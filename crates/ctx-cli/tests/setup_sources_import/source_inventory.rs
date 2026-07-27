@@ -72,6 +72,33 @@ fn sources_provider_filter_rejects_unsupported_providers() {
 }
 
 #[test]
+fn sources_json_reports_typed_discovery_issues_additively() {
+    let temp = tempdir();
+
+    let sources = json_output(
+        ctx(&temp)
+            .env("CLAUDE_CONFIG_DIR", "relative-account")
+            .args(["sources", "--provider", "claude", "--json"]),
+    );
+
+    assert_eq!(sources["schema_version"], 1);
+    assert_eq!(sources["scope"], "all");
+    assert_eq!(sources["hidden_missing_sources"], 0);
+    assert!(sources["sources"].as_array().unwrap().is_empty());
+    assert_eq!(sources["issues_truncated"], false);
+    let issues = sources["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["provider"], "claude");
+    assert_eq!(issues[0]["path"], "relative-account");
+    assert_eq!(issues[0]["code"], "selector_unreconstructible");
+    assert_eq!(
+        issues[0]["message"],
+        "the selected provider root cannot be reconstructed safely; use an exact --path"
+    );
+    assert_eq!(issues[0]["message_truncated"], false);
+}
+
+#[test]
 fn sources_lists_supported_personal_agent_provider_defaults() {
     let temp = tempdir();
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");

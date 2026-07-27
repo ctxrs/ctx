@@ -101,9 +101,19 @@ pub(crate) fn initialize_pro_installation_identity(data_root: &Path) {
 }
 
 #[cfg(unix)]
-pub(crate) fn write_locate_helper(path: &Path) {
+pub(crate) fn write_blame_helper(path: &Path) {
+    write_blame_helper_with_oversized_page(path, false);
+}
+
+#[cfg(unix)]
+pub(crate) fn write_oversized_blame_helper(path: &Path) {
+    write_blame_helper_with_oversized_page(path, true);
+}
+
+#[cfg(unix)]
+fn write_blame_helper_with_oversized_page(path: &Path, oversized_page: bool) {
     const HELPER: &str = r#"#!/usr/bin/python3
-import json, struct, sys
+import base64, json, os, struct, sys
 
 def receive():
     header = sys.stdin.buffer.read(12)
@@ -120,35 +130,163 @@ def send(value):
 hello = receive()
 if 'query' not in hello['message']['body']['capabilities']:
     sys.exit(21)
+capabilities = [
+    capability for capability in hello['message']['body']['capabilities']
+    if capability in ('query', 'git_read')
+]
 send({
   'sequence': hello['sequence'],
   'request_id': hello['request_id'],
   'message': {'kind':'hello','body':{
     'protocol_version':1,
-    'protocol_fingerprint':'f9c77c0df491f276dd3d8c2cdb7f6c95daf8ebb9a216b2ca9a158ff0be1024c9',
-    'helper_version':'fake-locate-v1',
+    'protocol_fingerprint':'__PROTOCOL_FINGERPRINT__',
+    'helper_version':'fake-blame-v1',
     'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'capabilities':['query']
+    'capabilities':capabilities
   }}
 })
 request = receive()
 body = request['message']['body']
-if request['message']['kind'] != 'query' or body['kind'] != 'locate':
+if request['message']['kind'] != 'blame':
     sys.exit(22)
 target = body['target']
+if body['limit'] < 1 or body['limit'] > 100:
+    sys.exit(23)
+repository = target.get('repository') or 'ctxrs/ctx'
+repository_ref = {'id':'repository:' + repository, 'kind':'repository', 'display':repository}
+evidence = [{
+  'number':1,
+  'citation':{
+    'event_id':'00000000-0000-0000-0000-000000000001',
+    'event_seq':1
+  }
+}]
+if __OVERSIZED_BLAME__:
+    locator_payload = base64.b64encode(b'x' * (64 * 1024)).decode()
+    evidence = [{
+      'number':number,
+      'citation':{
+        'provider_output':{
+          'source_id':'oversized-source',
+          'source_epoch':1,
+          'locator':{
+            'version':1,
+            'kind':'native',
+            'payload_base64':locator_payload
+          },
+          'coordinate':{
+            'unit_key':'unit',
+            'native_sequence':number,
+            'native_record_id':None,
+            'source_record_ordinal':None,
+            'source_record_subrecord_index':None,
+            'byte_start':None,
+            'byte_end_exclusive':None
+          },
+          'availability':'available'
+        }
+      }
+    } for number in range(1, 17)]
+evidence_numbers = [item['number'] for item in evidence]
+kind = target['kind']
+if kind == 'commit':
+    oid = target['oid']
+    commit = {'id':'commit:' + oid, 'kind':'commit', 'display':oid}
+    resolved = {'kind':'commit', 'commit':commit, 'repository':repository_ref}
+    matches = [{
+      'kind':'commit',
+      'value':{
+        'fact_id':'fact:produced',
+        'fact_type':'git.commit.produced',
+        'predicate':'produced_by',
+        'subject':commit,
+        'object':{'id':'session:producer', 'kind':'session', 'display':'session-producer'},
+        'fact_occurred_at_ms':None,
+        'confidence':'explicit',
+        'state':'asserted',
+        'direct_actor':None,
+        'owning_root':None,
+        'evidence_numbers':evidence_numbers
+      }
+    }]
+    snapshot = None
+elif kind == 'file':
+    if 'git_read' not in capabilities or not os.environ.get('CTX_PRO_GIT_EXECUTABLE'):
+        sys.exit(24)
+    path = target['path']
+    lines = target.get('lines') or {'start':1, 'end':1}
+    commit = {'id':'commit:deadbeef', 'kind':'commit', 'display':'deadbeef'}
+    resolved = {
+      'kind':'file',
+      'path':path,
+      'repository':repository_ref,
+      'requested_lines':target.get('lines')
+    }
+    matches = [{
+      'kind':'file',
+      'value':{
+        'id':'file-match:1',
+        'lines':lines,
+        'commit':commit,
+        'line_evidence_numbers':[1],
+        'production':[]
+      }
+    }]
+    snapshot = {'head_oid':'deadbeef', 'worktree_status':'clean'}
+elif kind == 'pull_request':
+    selector = target['selector']
+    pull_request = {'id':'pull_request:' + selector, 'kind':'pull_request', 'display':selector}
+    resolved = {
+      'kind':'pull_request',
+      'selector':selector,
+      'pull_request':pull_request,
+      'repository':repository_ref
+    }
+    matches = [{
+      'kind':'pull_request',
+      'value':{
+        'pull_request':pull_request,
+        'relationship':{
+          'kind':'activity',
+          'value':{
+            'fact_id':'fact:reviewed',
+            'action':'reviewed',
+            'session':{'id':'session:reviewer', 'kind':'session', 'display':'session-reviewer'},
+            'direct_actor':None,
+            'owning_root':None,
+            'fact_occurred_at_ms':None,
+            'confidence':'explicit',
+            'state':'asserted',
+            'evidence_numbers':[1]
+          }
+        }
+      }
+    }]
+    snapshot = None
+else:
+    sys.exit(25)
 send({
   'sequence': request['sequence'],
   'request_id': request['request_id'],
-  'message': {'kind':'query','body':{'records':[{
-    'resource': {'id':target['kind'] + ':' + target['value'],'kind':target['kind'],'display':target['value']},
-    'summary': 'Exact canonical evidence location',
-    'occurred_at_ms': 1,
-    'facts': [],
-    'citations': [{'event_id':'00000000-0000-0000-0000-000000000001','event_seq':1}]
-  }],'next_cursor':None,'truncated':False,'stale':False}}
+  'message': {'kind':'blame','body':{
+    'target':resolved,
+    'git_snapshot':snapshot,
+    'matches':matches,
+    'evidence':evidence,
+    'next':None
+  }}
 })
 "#;
-    write_python_helper(path, HELPER);
+    let helper = HELPER
+        .replace(
+            "__PROTOCOL_FINGERPRINT__",
+            ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
+        )
+        .replace(
+            "__OVERSIZED_BLAME__",
+            if oversized_page { "True" } else { "False" },
+        );
+    write_python_helper(path, &helper);
 }
 
 #[cfg(unix)]

@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use ctx_history_capture::{
-    CaptureWorkLimit, CodexSessionImportProgressCallback, ProviderImportSummary,
+    CaptureWorkLimit, CodexSessionImportProgressCallback, ImportProfile, ProviderImportSummary,
 };
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
@@ -24,10 +24,11 @@ pub(super) fn import_one_source_inner_at_path(
     preinventory: &SourcePreinventory,
     capture_work_limit: CaptureWorkLimit,
     inventory_observation_token: Option<String>,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     // One source import can contain hundreds or thousands of independently
-    // committed CapturedBatch groups. Keep FTS merge suppression active across
-    // that whole bounded source operation. Inner groups retain their own
+    // committed NativePath groups. Keep FTS merge suppression active across
+    // that whole bounded source operation. Provider groups retain their own
     // event/FTS/cursor transactions and source revalidation, while nested bulk
     // guards become in-memory depth counts instead of repeated durable
     // maintenance handoffs.
@@ -40,7 +41,13 @@ pub(super) fn import_one_source_inner_at_path(
                 &source.path.display().to_string(),
             )?
             .is_empty();
-    let bulk_guard = (!codex_catalog_noop)
+    // Codex NativePath owns the real bulk guard around every Core publication.
+    // Acquiring one here as well would leave the provider with a nested guard
+    // (no lock connection, depth two), which strict group admission correctly
+    // rejects. Replay-only work does not enter the provider's Core guard.
+    let codex_nativepath_owns_bulk_guard = source.provider == CaptureProvider::Codex
+        && !matches!(import_profile, ImportProfile::ProReplayOnly(_));
+    let bulk_guard = (!codex_catalog_noop && !codex_nativepath_owns_bulk_guard)
         .then(|| store.begin_event_search_bulk_mode())
         .transpose()?;
     let import_result = NativeSourceRun::new(
@@ -51,6 +58,7 @@ pub(super) fn import_one_source_inner_at_path(
         preinventory,
         capture_work_limit,
         inventory_observation_token,
+        import_profile,
     )
     .run(input_path);
     let finish_result = bulk_guard

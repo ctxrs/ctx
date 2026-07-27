@@ -34,7 +34,7 @@ fn helper_receives_exact_opaque_installation_identity_and_clears_unknown_values(
         &mut command,
         std::path::Path::new("/ctx/data"),
         ID,
-        std::path::Path::new("/usr/bin/git"),
+        Some(std::path::Path::new("/usr/bin/git")),
     )
     .unwrap();
     let environment = command.get_envs().collect::<Vec<_>>();
@@ -103,7 +103,7 @@ mod windows {
             &mut command,
             Path::new(r"C:\ctx\data"),
             "6a1de1ab-c732-45ed-b3f8-bbf6ab1048e8",
-            Path::new(r"C:\Program Files\Git\cmd\git.exe"),
+            Some(Path::new(r"C:\Program Files\Git\cmd\git.exe")),
         )
         .unwrap();
 

@@ -33,6 +33,12 @@ require_cmd curl
 require_cmd openssl
 require_cmd python3
 
+grep -F '[switch]$NoDaemon' "${repo_root}/scripts/install.ps1" >/dev/null
+grep -F '$setupNoDaemon = [bool]$NoDaemon -or $env:CTX_INSTALL_NO_DAEMON -eq "1"' \
+  "${repo_root}/scripts/install.ps1" >/dev/null
+grep -F '$setupArgs += "--no-daemon"' "${repo_root}/scripts/install.ps1" >/dev/null
+grep -F '& $installPath @setupArgs' "${repo_root}/scripts/install.ps1" >/dev/null
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-install-path-smoke.XXXXXX")"
 server_pid=""
 port=""
@@ -50,6 +56,9 @@ artifact="${tmp_dir}/ctx-linux-x64"
 cat > "${artifact}" <<'SH'
 #!/usr/bin/env sh
 if [ "${1:-}" = "setup" ]; then
+  if [ -n "${CTX_FAKE_SETUP_ARGS_LOG:-}" ]; then
+    printf '%s\n' "$@" > "${CTX_FAKE_SETUP_ARGS_LOG}"
+  fi
   exit "${CTX_FAKE_SETUP_EXIT:-0}"
 fi
 exit 0
@@ -266,8 +275,39 @@ if grep -F -q 'zstd' "${repo_root}/scripts/dev-install-from-metadata.sh"; then
   exit 1
 fi
 
-base_env=(CURL_CA_BUNDLE="${tmp_dir}/cert.pem" CTX_INSTALL_NO_MAN=1)
+base_env=(CURL_CA_BUNDLE="${tmp_dir}/cert.pem" CTX_INSTALL_NO_MAN=1 CTX_INSTALL_NO_DAEMON=0)
 installer=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-x64)
+
+home_daemon_default="${tmp_dir}/home-daemon-default"
+daemon_default_log="${tmp_dir}/daemon-default-args.txt"
+mkdir -p "${home_daemon_default}"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" \
+  HOME="${home_daemon_default}" SHELL="/bin/bash" \
+  CTX_SETUP_PROGRESS=none CTX_FAKE_SETUP_ARGS_LOG="${daemon_default_log}" \
+  "${installer[@]}" --no-skill --no-modify-path \
+  > "${tmp_dir}/daemon-default.out"
+test "$(cat "${daemon_default_log}")" = $'setup\n--progress\nnone'
+
+home_no_daemon_flag="${tmp_dir}/home-no-daemon-flag"
+no_daemon_flag_log="${tmp_dir}/no-daemon-flag-args.txt"
+mkdir -p "${home_no_daemon_flag}"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" \
+  HOME="${home_no_daemon_flag}" SHELL="/bin/bash" \
+  CTX_SETUP_PROGRESS=none CTX_FAKE_SETUP_ARGS_LOG="${no_daemon_flag_log}" \
+  "${installer[@]}" --no-daemon --no-skill --no-modify-path \
+  > "${tmp_dir}/no-daemon-flag.out"
+test "$(cat "${no_daemon_flag_log}")" = $'setup\n--progress\nnone\n--no-daemon'
+
+home_no_daemon_env="${tmp_dir}/home-no-daemon-env"
+no_daemon_env_log="${tmp_dir}/no-daemon-env-args.txt"
+mkdir -p "${home_no_daemon_env}"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" \
+  HOME="${home_no_daemon_env}" SHELL="/bin/bash" \
+  CTX_INSTALL_NO_DAEMON=1 CTX_SETUP_PROGRESS=none \
+  CTX_FAKE_SETUP_ARGS_LOG="${no_daemon_env_log}" \
+  "${installer[@]}" --no-skill --no-modify-path \
+  > "${tmp_dir}/no-daemon-env.out"
+test "$(cat "${no_daemon_env_log}")" = $'setup\n--progress\nnone\n--no-daemon'
 
 home_dry_run="${tmp_dir}/home-dry-run"
 mkdir -p "${home_dry_run}"

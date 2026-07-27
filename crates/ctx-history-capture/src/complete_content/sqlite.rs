@@ -10,14 +10,14 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, ContentRef, EventType, ProviderEventEnvelope};
+use ctx_history_core::{CaptureProvider, ContentRef, EventType};
 use rusqlite::{limits::Limit as SqliteLimit, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    captured_batch::{CapturedSqliteValue, NativeLocator},
     compute_payload_hash,
+    native_source::{NativeLocator, NativeSqliteValue},
     provider::{
         providers::{
             crush, firebender, forgecode, goose, hermes, kiro, nanoclaw, opencode, shelley, warp,
@@ -59,7 +59,6 @@ const SQLITE_MAX_SCHEMA_OBJECTS: usize = 1_024;
 const SQLITE_MAX_ROW_VALUES: usize = 64;
 
 mod no_tool_messages;
-pub(crate) use no_tool_messages::attach_sqlite_native_content_locator;
 #[cfg(test)]
 use no_tool_messages::LINGMA_LOCATOR_KIND;
 mod deepagents;
@@ -78,11 +77,7 @@ use query::*;
 use results::*;
 
 pub(crate) use errors::map_bounded_sqlite_error_for_event;
-pub(crate) use locators::{
-    attach_shelley_content_locator, attach_sqlite_complete_content_locator,
-    attach_sqlite_complete_content_locator_with_digest_values,
-    attach_sqlite_result_content_locator,
-};
+pub(crate) use locators::attach_sqlite_complete_content_locator;
 pub(crate) use query::{
     configure_complete_content_sqlite_connection, CompleteContentSqliteBoundError,
     CompleteContentSqliteQueryBudget,

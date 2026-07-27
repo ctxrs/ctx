@@ -132,6 +132,29 @@ class ProducerContractTest(unittest.TestCase):
                     Path("query.mlpackage"), 16, 512, "document model"
                 )
 
+    def test_release_record_includes_manifest_and_every_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            _write_fixture(bundle, has_query=True)
+            archive = root / "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz"
+            archive.write_bytes(b"archive")
+
+            with mock.patch.object(produce.subprocess, "run") as run:
+                produce._write_release_asset_record(bundle, archive, "1.0.0")
+
+            command = run.call_args.args[0]
+            self.assertIn("apple_coreml", command)
+            files = [
+                command[index + 1]
+                for index, value in enumerate(command[:-1])
+                if value == "--file"
+            ]
+            self.assertEqual(files, sorted(files))
+            self.assertIn("manifest.json", files)
+            self.assertIn("document.mlpackage/Data/model.bin", files)
+            self.assertIn("query.mlpackage/Data/model.bin", files)
+
 
 def _write_fixture(root: Path, has_query: bool) -> dict:
     payloads = {

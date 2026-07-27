@@ -39,6 +39,12 @@ def main() -> int:
     parser.add_argument("--builder-recipe-sha256", default="")
     parser.add_argument("--runtime-image-id", default="")
     parser.add_argument("--inspector-image-id", default="")
+    parser.add_argument("--linux-builder-image", default="")
+    parser.add_argument("--linux-ubuntu-snapshot", default="")
+    parser.add_argument("--linux-glibc-max", default="")
+    parser.add_argument("--linux-rust-toolchain", default="")
+    parser.add_argument("--linux-rust-commit", default="")
+    parser.add_argument("--linux-rust-sysroot", default="")
     parser.add_argument("--qemu-version", default="")
     parser.add_argument("--qemu-cpu-profile", default="")
     parser.add_argument("--static-status", required=True, choices=("passed",))
@@ -69,6 +75,28 @@ def main() -> int:
     ):
         parser.error("local runtime authority must be not_run exactly when the gate was not run")
 
+    linux_build_fields = {
+        "builder_image": args.linux_builder_image,
+        "ubuntu_snapshot": args.linux_ubuntu_snapshot,
+        "glibc_max": args.linux_glibc_max,
+        "rust_toolchain": args.linux_rust_toolchain,
+        "rust_commit": args.linux_rust_commit,
+        "rust_sysroot": args.linux_rust_sysroot,
+    }
+    is_linux = args.platform.startswith("linux-")
+    if args.source_clean != "true":
+        parser.error("release build evidence requires a clean source checkout")
+    if is_linux:
+        if not all(linux_build_fields.values()):
+            parser.error("Linux build evidence requires the complete release contract")
+        if (
+            args.local_runtime_status != "passed"
+            or args.local_runtime_authority != "authoritative"
+        ):
+            parser.error("Linux build evidence requires an authoritative local runtime gate")
+    elif any(linux_build_fields.values()):
+        parser.error("Linux build contract fields are only valid for Linux artifacts")
+
     document = {
         "artifact_sha256": sha256(args.artifact),
         "builder": {
@@ -84,12 +112,14 @@ def main() -> int:
             "local_runtime": args.local_runtime_status,
             "local_runtime_authority": args.local_runtime_authority,
             "static": args.static_status,
+            "static_abi": args.static_status,
         },
         "representative_cpu_proof": {
             "profile": optional(args.qemu_cpu_profile),
             "qemu_version": optional(args.qemu_version),
         },
         "platform": args.platform,
+        "linux_build": linux_build_fields if is_linux else None,
         "rust_version": args.rust_version,
         "schema_version": 1,
         "source": {"clean": args.source_clean == "true", "commit": args.source_commit},

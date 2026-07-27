@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use ctx_history_core::{CaptureProvider, Event};
 use ctx_history_store::{Store, StoreError};
 use serde_json::Value;
@@ -11,8 +9,6 @@ use super::ids::{
     provider_event_file_touch_uuid, provider_event_seq, provider_event_uuid,
     provider_source_event_file_touch_uuid, provider_source_event_seq, provider_source_event_uuid,
 };
-use super::ProviderImportCaches;
-
 pub(crate) fn provider_event_exists(store: &Store, dedupe_key: &str) -> Result<bool> {
     match store.event_id_by_dedupe_key(dedupe_key) {
         Ok(_) => Ok(true),
@@ -103,67 +99,6 @@ pub(crate) struct ProviderEventImportIdentity {
 pub(crate) struct ExactLegacySourceEventCandidate {
     pub(crate) source_id: Uuid,
     pub(crate) provider_event_index: u64,
-}
-
-pub(crate) fn pi_existing_event_identity_by_entry_id(
-    store: &Store,
-    provider: CaptureProvider,
-    session_id: Uuid,
-    entry_id: Option<&str>,
-    caches: &mut ProviderImportCaches,
-) -> Result<Option<ProviderEventImportIdentity>> {
-    if provider != CaptureProvider::Pi {
-        return Ok(None);
-    }
-    let Some(entry_id) = entry_id.filter(|id| !id.trim().is_empty()) else {
-        return Ok(None);
-    };
-    if let std::collections::btree_map::Entry::Vacant(entry) =
-        caches.pi_event_identities_by_entry_id.entry(session_id)
-    {
-        let mut identities = BTreeMap::new();
-        for event in store.events_for_session(session_id)? {
-            let Some(existing_entry_id) = pi_stored_event_entry_id(&event) else {
-                continue;
-            };
-            let Some(dedupe_key) = event.dedupe_key.clone() else {
-                continue;
-            };
-            identities
-                .entry(existing_entry_id.to_owned())
-                .or_insert(ProviderEventImportIdentity {
-                    id: event.id,
-                    seq: event.seq,
-                    dedupe_key,
-                    run_source_id: event.capture_source_id,
-                });
-        }
-        entry.insert(identities);
-    }
-    Ok(caches
-        .pi_event_identities_by_entry_id
-        .get(&session_id)
-        .and_then(|identities| identities.get(entry_id).cloned()))
-}
-
-pub(crate) fn pi_stored_event_entry_id(event: &Event) -> Option<&str> {
-    event
-        .payload
-        .pointer("/body/entry_id")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            event
-                .payload
-                .pointer("/body/body/id")
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            event
-                .sync
-                .metadata
-                .pointer("/metadata/entry_id")
-                .and_then(Value::as_str)
-        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -459,27 +394,6 @@ pub(crate) fn provider_file_touch_import_id(
 
 pub(crate) fn provider_event_id_exists(store: &Store, id: Uuid) -> Result<bool> {
     Ok(provider_event_by_id(store, id)?.is_some())
-}
-
-pub(crate) fn provider_session_exists(store: &Store, session_id: Uuid) -> Result<bool> {
-    match store.get_session(session_id) {
-        Ok(_) => Ok(true),
-        Err(StoreError::NotFound(_)) => Ok(false),
-        Err(err) => Err(CaptureError::Store(err)),
-    }
-}
-
-pub(crate) fn provider_session_exists_cached(
-    store: &Store,
-    session_id: Uuid,
-    cache: &mut BTreeMap<Uuid, bool>,
-) -> Result<bool> {
-    if let Some(exists) = cache.get(&session_id) {
-        return Ok(*exists);
-    }
-    let exists = provider_session_exists(store, session_id)?;
-    cache.insert(session_id, exists);
-    Ok(exists)
 }
 
 #[cfg(test)]

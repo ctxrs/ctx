@@ -232,9 +232,6 @@ fn verified_content_registry_source_format(provider: CaptureProvider, source_for
     match (provider, source_format) {
         (CaptureProvider::Codex, crate::CODEX_SESSION_SOURCE_FORMAT) => "codex_session_jsonl_tree",
         (CaptureProvider::Qoder, crate::QODER_SOURCE_FORMAT) => "qoder_transcript_jsonl_tree",
-        (CaptureProvider::Cursor, crate::CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT) => {
-            "cursor_agent_transcript_jsonl_tree"
-        }
         (CaptureProvider::Windsurf, crate::WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT) => {
             "windsurf_cascade_hook_transcript_jsonl_tree"
         }
@@ -308,7 +305,7 @@ pub(super) fn valid_opaque_locator(
             value.len() == 17 && matches!(value.first(), Some(1 | 2))
         }
         (CompleteContentSourceFamily::Sqlite, "nanoclaw-project-message-v1") => {
-            crate::captured_batch::NativeLocator::new(kind, value.to_vec())
+            crate::native_source::NativeLocator::new(kind, value.to_vec())
                 .ok()
                 .and_then(|locator| {
                     crate::provider::providers::nanoclaw::decode_nanoclaw_message_locator(&locator)

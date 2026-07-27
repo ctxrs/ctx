@@ -30,6 +30,52 @@ ctx_default_tmpdir() {
   fi
 }
 
+ctx_bazel_cache_root() {
+  local spacious_root xdg_cache_home
+
+  if [[ -n "${CTX_BAZEL_CACHE_ROOT:-}" ]]; then
+    printf '%s\n' "${CTX_BAZEL_CACHE_ROOT}"
+    return 0
+  fi
+
+  spacious_root="${CTX_BAZEL_SPACIOUS_ROOT:-/mnt/ctx-perf}"
+  if [[ -d "${spacious_root}" && -w "${spacious_root}" ]] \
+    && mkdir -p "${spacious_root}/ctx-bazel" 2>/dev/null; then
+    printf '%s\n' "${spacious_root}/ctx-bazel"
+    return 0
+  fi
+
+  xdg_cache_home="${XDG_CACHE_HOME:-}"
+  if [[ -z "${xdg_cache_home}" ]]; then
+    if [[ -z "${HOME:-}" ]]; then
+      printf 'HOME or XDG_CACHE_HOME is required when %s is unavailable\n' "${spacious_root}" >&2
+      return 1
+    fi
+    xdg_cache_home="${HOME}/.cache"
+  fi
+  printf '%s\n' "${xdg_cache_home}/ctx/bazel"
+}
+
+ctx_bazel_version() {
+  local version_file="${CTX_REPO_ROOT}/.bazelversion"
+  local version
+
+  if [[ -n "${CTX_BAZEL_VERSION:-}" ]]; then
+    version="${CTX_BAZEL_VERSION}"
+  else
+    if [[ ! -r "${version_file}" ]]; then
+      printf 'missing Bazel version file: %s\n' "${version_file}" >&2
+      return 1
+    fi
+    version="$(tr -d '[:space:]' <"${version_file}")"
+  fi
+  if [[ -z "${version}" || ! "${version}" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+    printf 'invalid Bazel version: %s\n' "${version}" >&2
+    return 1
+  fi
+  printf '%s\n' "${version}"
+}
+
 ctx_init_tool_env_defaults() {
   local root
 
@@ -92,6 +138,12 @@ ctx_init_bazel_test_env() {
 ctx_detect_cpu_count() {
   local cores
 
+  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  if ctx_positive_int "${cores}"; then
+    printf '%s\n' "${cores}"
+    return 0
+  fi
+
   if [[ -r /proc/cpuinfo ]]; then
     cores="$(awk '
       /^physical id[[:space:]]*:/ { physical = $NF }
@@ -113,12 +165,6 @@ ctx_detect_cpu_count() {
       printf '%s\n' "${cores}"
       return 0
     fi
-  fi
-
-  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-  if ctx_positive_int "${cores}"; then
-    printf '%s\n' "${cores}"
-    return 0
   fi
 
   cores="$(sysctl -n hw.physicalcpu 2>/dev/null || true)"
@@ -310,7 +356,8 @@ ctx_ensure_rust_build_toolchain() {
 }
 
 ctx_init_resource_env() {
-  local cpu_count memory_gb memory_jobs default_jobs bazel_ram_mb
+  local cpu_count memory_gb cpu_jobs memory_jobs default_jobs
+  local cargo_jobs rust_test_threads bazel_jobs bazel_cpu bazel_ram_mb bazel_test_jobs
 
   cpu_count="${CTX_CPU_COUNT:-$(ctx_detect_cpu_count)}"
   memory_gb="${CTX_TOTAL_MEMORY_GB:-$(ctx_detect_memory_gb)}"
@@ -322,55 +369,82 @@ ctx_init_resource_env() {
     memory_gb=4
   fi
 
+  cpu_jobs=$(( (cpu_count + 3) / 4 ))
+  if (( cpu_jobs > 8 )); then
+    cpu_jobs=8
+  fi
   memory_jobs=$(( memory_gb / 3 ))
   if (( memory_jobs < 1 )); then
     memory_jobs=1
   fi
 
-  default_jobs="${cpu_count}"
+  default_jobs="${cpu_jobs}"
   if (( memory_jobs < default_jobs )); then
     default_jobs="${memory_jobs}"
   fi
   if (( default_jobs < 1 )); then
     default_jobs=1
   fi
-  if [[ "${CTX_LOCAL_RESOURCE_CAP:-1}" == "1" && -z "${CI:-}" && -z "${BUILDKITE:-}" && -z "${BUILDKITE_BUILD_ID:-}" ]] \
-    && (( default_jobs > 2 )); then
-    default_jobs=2
+
+  cargo_jobs="${CARGO_BUILD_JOBS:-${CTX_CARGO_JOBS:-${default_jobs}}}"
+  if ! ctx_positive_int "${cargo_jobs}"; then
+    printf 'CARGO_BUILD_JOBS/CTX_CARGO_JOBS must be a positive integer\n' >&2
+    return 1
+  fi
+
+  rust_test_threads="${RUST_TEST_THREADS:-${CTX_TEST_THREADS:-$(( (cargo_jobs + 1) / 2 ))}}"
+  if ! ctx_positive_int "${rust_test_threads}"; then
+    printf 'RUST_TEST_THREADS/CTX_TEST_THREADS must be a positive integer\n' >&2
+    return 1
+  fi
+  if [[ -z "${RUST_TEST_THREADS:-}" && -z "${CTX_TEST_THREADS:-}" ]] && (( rust_test_threads > 4 )); then
+    rust_test_threads=4
+  fi
+
+  bazel_jobs="${BAZEL_JOBS:-${CTX_BAZEL_JOBS:-${cargo_jobs}}}"
+  bazel_cpu="${BAZEL_LOCAL_CPU_RESOURCES:-${CTX_BAZEL_LOCAL_CPU_RESOURCES:-${bazel_jobs}}}"
+  bazel_test_jobs="${BAZEL_LOCAL_TEST_JOBS:-${CTX_BAZEL_LOCAL_TEST_JOBS:-2}}"
+  for value in "${bazel_jobs}" "${bazel_cpu}" "${bazel_test_jobs}"; do
+    if ! ctx_positive_int "${value}"; then
+      printf 'Bazel jobs, local CPU resources, and local test jobs must be positive integers\n' >&2
+      return 1
+    fi
+  done
+
+  bazel_ram_mb=$(( memory_gb * 512 ))
+  if (( bazel_ram_mb < 1024 )); then
+    bazel_ram_mb=1024
+  fi
+  bazel_ram_mb="${BAZEL_LOCAL_RAM_RESOURCES:-${CTX_BAZEL_LOCAL_RAM_RESOURCES:-${bazel_ram_mb}}}"
+  if ! ctx_positive_int "${bazel_ram_mb}"; then
+    printf 'BAZEL_LOCAL_RAM_RESOURCES/CTX_BAZEL_LOCAL_RAM_RESOURCES must be a positive integer\n' >&2
+    return 1
   fi
 
   export CTX_CPU_COUNT="${cpu_count}"
   export CTX_TOTAL_MEMORY_GB="${memory_gb}"
   export TMPDIR="${TMPDIR:-$(ctx_default_tmpdir)}"
-  export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${CTX_CARGO_JOBS:-${default_jobs}}}"
-  export RUST_TEST_THREADS="${RUST_TEST_THREADS:-${CTX_TEST_THREADS:-${CARGO_BUILD_JOBS}}}"
+  export CARGO_BUILD_JOBS="${cargo_jobs}"
+  export RUST_TEST_THREADS="${rust_test_threads}"
   export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
   if [[ "${CTX_USE_SCCACHE:-0}" != "1" && "${RUSTC_WRAPPER:-}" == *sccache* ]]; then
     unset RUSTC_WRAPPER
   fi
   mkdir -p "${TMPDIR}"
 
-  export BAZEL_JOBS="${BAZEL_JOBS:-${CARGO_BUILD_JOBS}}"
-  export BAZEL_LOCAL_CPU_RESOURCES="${BAZEL_LOCAL_CPU_RESOURCES:-${BAZEL_JOBS}}"
-  bazel_ram_mb=$(( memory_gb * 512 ))
-  if (( bazel_ram_mb < 1024 )); then
-    bazel_ram_mb=1024
-  fi
-  export BAZEL_LOCAL_RAM_RESOURCES="${BAZEL_LOCAL_RAM_RESOURCES:-${bazel_ram_mb}}"
-  export BAZELISK_HOME="${BAZELISK_HOME:-${CTX_REPO_ROOT}/target/tool-cache/bazelisk-home}"
-  export BAZEL_OUTPUT_USER_ROOT="${BAZEL_OUTPUT_USER_ROOT:-${CTX_REPO_ROOT}/target/tool-cache/bazel-output}"
-  mkdir -p "${BAZELISK_HOME}" "${BAZEL_OUTPUT_USER_ROOT}"
+  export BAZEL_JOBS="${bazel_jobs}"
+  export BAZEL_LOCAL_CPU_RESOURCES="${bazel_cpu}"
+  export BAZEL_LOCAL_RAM_RESOURCES="${bazel_ram_mb}"
+  export BAZEL_LOCAL_TEST_JOBS="${bazel_test_jobs}"
 }
 
 ctx_print_resource_env() {
-  printf 'resource limits: cpu=%s memory_gb=%s cargo_jobs=%s test_threads=%s bazel_jobs=%s bazel_ram_mb=%s tmpdir=%s\n' \
-    "${CTX_CPU_COUNT}" \
-    "${CTX_TOTAL_MEMORY_GB}" \
-    "${CARGO_BUILD_JOBS}" \
-    "${RUST_TEST_THREADS}" \
+  printf 'ctx resources: jobs=%s cpu=%s ram_mb=%s test_jobs=%s rust_threads=%s\n' \
     "${BAZEL_JOBS}" \
+    "${BAZEL_LOCAL_CPU_RESOURCES}" \
     "${BAZEL_LOCAL_RAM_RESOURCES}" \
-    "${TMPDIR}"
+    "${BAZEL_LOCAL_TEST_JOBS}" \
+    "${RUST_TEST_THREADS}"
 }
 
 ctx_json_escape() {

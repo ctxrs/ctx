@@ -7,11 +7,13 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_pro_host_protocol::{
-    base64url, installation_key_thumbprint, SignedEntitlement, INSTALLATION_PUBLIC_KEY_BYTES,
+    base64url, installation_key_thumbprint, EntitlementAccessKind, SignedEntitlement,
+    INSTALLATION_PUBLIC_KEY_BYTES,
 };
 use zeroize::Zeroize as _;
 
 use super::{
+    anonymous_trial,
     artifact_delivery::{fetch_latest, CommercialArtifactAuth},
     authorization::InstallationChallengeSigner,
     commercial_api::{
@@ -28,10 +30,10 @@ use super::{
 };
 
 pub(super) struct CommercialLifecycleService {
-    config: CommercialConfig,
+    pub(super) config: CommercialConfig,
     workos: WorkOsDeviceClient,
-    api: CommercialApiClient,
-    vault: PlatformCredentialVault,
+    pub(super) api: CommercialApiClient,
+    pub(super) vault: PlatformCredentialVault,
 }
 
 const ENTITLEMENT_REFRESH_RETRY_SECONDS: i64 = 60 * 60;
@@ -69,6 +71,18 @@ impl CommercialLifecycleService {
         let now = unix_time()?;
         if now < current.grant.refresh_after_unix {
             return Ok(());
+        }
+        if matches!(
+            service.vault.load(CredentialRecordKind::AnonymousTrial),
+            Ok(CredentialRecord::AnonymousTrial(_))
+        ) {
+            return match anonymous_trial::refresh_entitlement(&service) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    anonymous_trial::defer_refresh(&service, now);
+                    entitlement_still_usable(&current, now)
+                }
+            };
         }
         if let Ok(CredentialRecord::WorkOsSession(session)) =
             service.vault.load(CredentialRecordKind::WorkOsSession)
@@ -235,7 +249,7 @@ impl CommercialLifecycleService {
         Ok(state)
     }
 
-    fn installation_public_key(&self) -> Result<[u8; INSTALLATION_PUBLIC_KEY_BYTES]> {
+    pub(super) fn installation_public_key(&self) -> Result<[u8; INSTALLATION_PUBLIC_KEY_BYTES]> {
         self.vault
             .load_or_create_installation_signing_key()
             .map_err(vault_error)?;
@@ -260,6 +274,22 @@ impl CommercialLifecycleService {
         self.vault
             .store(&CredentialRecord::SignedEntitlement(entitlement))
             .map_err(vault_error)
+    }
+
+    pub(super) fn store_anonymous_entitlement(
+        &self,
+        entitlement: SignedEntitlement,
+        public_key: &[u8; INSTALLATION_PUBLIC_KEY_BYTES],
+        trial_deadline_unix: i64,
+    ) -> Result<()> {
+        if entitlement.grant.access_kind != EntitlementAccessKind::Trial
+            || entitlement.grant.access_deadline_unix != trial_deadline_unix
+            || entitlement.grant.grace_deadline_unix != trial_deadline_unix
+            || entitlement.grant.expires_at_unix > trial_deadline_unix
+        {
+            bail!("invalid_response: anonymous entitlement exceeds the authoritative trial");
+        }
+        self.store_entitlement(entitlement, public_key)
     }
 
     fn refresh_entitlement_noninteractive(&self) -> Result<()> {
@@ -328,6 +358,20 @@ impl ProLifecycleService for CommercialLifecycleService {
     }
 
     fn setup(&mut self, data_root: &Path, installed_version: Option<&str>) -> Result<ProSetupPlan> {
+        if !matches!(
+            self.vault.load(CredentialRecordKind::WorkOsSession),
+            Ok(CredentialRecord::WorkOsSession(_))
+        ) {
+            match anonymous_trial::setup(self, data_root, installed_version) {
+                Ok(plan) => return Ok(plan),
+                Err(error) if anonymous_trial_requires_conversion(&error) => {
+                    eprintln!(
+                        "The free Pro trial is unavailable for this device; sign in to continue with paid Pro."
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let mut access_token = self.access_token()?;
         let result = (|| {
             let state = self.active_state(&access_token)?;
@@ -345,7 +389,7 @@ impl ProLifecycleService for CommercialLifecycleService {
                 data_root,
                 CommercialArtifactAuth {
                     api_base_url: self.api.origin(),
-                    access_token: &access_token,
+                    authorization: &format!("Bearer {access_token}"),
                     release_trust: self.config.release_trust,
                 },
                 installed_version,
@@ -384,6 +428,18 @@ impl ProLifecycleService for CommercialLifecycleService {
         access_token.zeroize();
         result
     }
+}
+
+fn anonymous_trial_requires_conversion(error: &anyhow::Error) -> bool {
+    matches!(
+        crate::pro::stable_error_code(error),
+        Some(
+            "anonymous_trial_already_consumed"
+                | "anonymous_trial_identity_ambiguous"
+                | "anonymous_trial_installation_limit"
+                | "commercial_access_locked"
+        )
+    )
 }
 
 impl CommercialLifecycleService {
@@ -574,7 +630,7 @@ fn entitlement_still_usable(entitlement: &SignedEntitlement, now: i64) -> Result
     }
 }
 
-fn unix_time() -> Result<i64> {
+pub(super) fn unix_time() -> Result<i64> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -594,6 +650,25 @@ mod tests {
 
     fn elapsed_since(clock: &Cell<i64>, start: i64) -> Duration {
         Duration::from_secs(u64::try_from(clock.get() - start).unwrap())
+    }
+
+    #[test]
+    fn only_terminal_anonymous_trial_states_enter_paid_conversion() {
+        for code in [
+            "anonymous_trial_already_consumed",
+            "anonymous_trial_identity_ambiguous",
+            "anonymous_trial_installation_limit",
+            "commercial_access_locked",
+        ] {
+            assert!(anonymous_trial_requires_conversion(&anyhow!(
+                "{code}: denied"
+            )));
+        }
+        for code in ["service_unavailable", "rate_limited", "invalid_response"] {
+            assert!(!anonymous_trial_requires_conversion(&anyhow!(
+                "{code}: failed"
+            )));
+        }
     }
 
     fn commercial_state(access_state: &str, access_deadline_unix: Option<i64>) -> CommercialState {

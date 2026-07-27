@@ -31,6 +31,16 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
         self.assertEqual(windows["platform_signature"], "unsigned")
         self.assertEqual(windows["archive"], "zip")
         self.assertEqual(windows["runtime_authority"], "native-windows-x86_64")
+        self.assertIsNone(windows["linux_build"])
+        linux = next(
+            target for target in value["targets"] if target["id"] == "linux-x64"
+        )
+        self.assertEqual(linux["linux_build"]["glibc_max"], "2.35")
+        self.assertEqual(linux["linux_build"]["rust_toolchain"], "1.97.1")
+        self.assertEqual(
+            linux["linux_build"]["rust_sysroot"],
+            "/opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu",
+        )
 
     def test_diagnostic_runner_cannot_be_authoritative(self) -> None:
         value = matrix.load_and_validate()
@@ -76,6 +86,18 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
             path = Path(directory) / "matrix.json"
             path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "unsupported platform signature"):
+                matrix.load_and_validate(path)
+
+    def test_linux_build_baseline_drift_is_rejected(self) -> None:
+        value = matrix.load_and_validate()
+        linux = next(
+            target for target in value["targets"] if target["id"] == "linux-x64"
+        )
+        linux["linux_build"]["glibc_max"] = "2.39"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matrix.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unexpected release contract"):
                 matrix.load_and_validate(path)
 
 

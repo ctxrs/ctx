@@ -7,8 +7,6 @@ use crate::{CaptureError, Result};
 
 use super::normalization::native_jsonl_header_session_id;
 
-const NATIVE_JSONL_RECORD_KIND_PREFIX: &str = "native-jsonl-record-v1";
-
 pub(crate) fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
     match provider {
         CaptureProvider::Pi => "no Pi session JSONL files found",
@@ -18,9 +16,6 @@ pub(crate) fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static
         }
         CaptureProvider::Gemini => "no Gemini CLI chat JSONL transcripts found under chats",
         CaptureProvider::Tabnine => "no Tabnine CLI chat JSONL transcripts found under chats",
-        CaptureProvider::Cursor => {
-            "no Cursor agent transcript JSONL files found under projects/*/agent-transcripts"
-        }
         CaptureProvider::Windsurf => {
             "no Windsurf Cascade hook transcript JSONL files found under ~/.windsurf/transcripts"
         }
@@ -50,9 +45,6 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
         CaptureProvider::Gemini | CaptureProvider::Tabnine => path
             .components()
             .any(|component| component.as_os_str() == "chats"),
-        CaptureProvider::Cursor => path
-            .components()
-            .any(|component| component.as_os_str() == "agent-transcripts"),
         CaptureProvider::Windsurf => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
         CaptureProvider::Qoder => {
             path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
@@ -63,9 +55,6 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }
-        CaptureProvider::QwenCode => path
-            .components()
-            .any(|component| component.as_os_str() == "chats"),
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path
@@ -77,6 +66,12 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
 }
 
 pub(super) fn native_jsonl_file_is_selected(provider: CaptureProvider, path: &Path) -> bool {
+    if provider == CaptureProvider::FactoryAiDroid {
+        return super::native_path::factory_droid_file_is_selected(path);
+    }
+    if provider == CaptureProvider::QwenCode {
+        return super::native_path::qwen_code_file_is_selected(path);
+    }
     if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
         || !provider_jsonl_path_is_native(provider, path)
     {
@@ -98,13 +93,6 @@ pub(super) fn native_jsonl_record_starts_session(provider: CaptureProvider, valu
     ) || native_jsonl_header_session_id(provider, value).is_some()
 }
 
-pub(super) fn native_jsonl_record_kind(provider: CaptureProvider, source_format: &str) -> String {
-    format!(
-        "{NATIVE_JSONL_RECORD_KIND_PREFIX}:{}:{source_format}",
-        provider.as_str()
-    )
-}
-
 pub(super) fn validate_direct_native_jsonl_provider(provider: CaptureProvider) -> Result<()> {
     if matches!(
         provider,
@@ -112,7 +100,6 @@ pub(super) fn validate_direct_native_jsonl_provider(provider: CaptureProvider) -
             | CaptureProvider::Gemini
             | CaptureProvider::Tabnine
             | CaptureProvider::FactoryAiDroid
-            | CaptureProvider::Cursor
             | CaptureProvider::Windsurf
             | CaptureProvider::Qoder
             | CaptureProvider::CopilotCli

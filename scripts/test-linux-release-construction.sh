@@ -7,6 +7,19 @@ cd "${repo_root}"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
+release_contract_root="${tmp_dir}/release-contract-root"
+mkdir -p "${release_contract_root}/contracts" "${release_contract_root}/scripts"
+install -m 0755 \
+  scripts/check-public-cli-build-info.py \
+  scripts/stage-github-release-assets.sh \
+  "${release_contract_root}/scripts"
+cp -L contracts/release-targets-v1.json \
+  "${release_contract_root}/contracts/release-targets-v1.json"
+release_target_matrix="${release_contract_root}/contracts/release-targets-v1.json"
+stage_release_assets="${release_contract_root}/scripts/stage-github-release-assets.sh"
+test -f "${release_target_matrix}"
+test ! -L "${release_target_matrix}"
+
 printf 'artifact\n' > "${tmp_dir}/artifact"
 printf 'lock\n' > "${tmp_dir}/Cargo.lock"
 build_info_args=(
@@ -15,14 +28,21 @@ build_info_args=(
   --cargo-lock "${tmp_dir}/Cargo.lock"
   --platform linux-x64
   --target x86_64-unknown-linux-gnu
-  --source-commit 0123456789abcdef
+  --source-commit 0123456789abcdef0123456789abcdef01234567
   --source-clean true
-  --rust-version "rustc test"
-  --expected-builder-base sha256:expected
-  --actual-builder-base sha256:expected
+  --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  --expected-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+  --actual-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
   --builder-image-id sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  --builder-recipe-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   --runtime-image-id sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   --inspector-image-id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  --linux-builder-image docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+  --linux-ubuntu-snapshot 20260701T000000Z
+  --linux-glibc-max 2.35
+  --linux-rust-toolchain 1.97.1
+  --linux-rust-commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+  --linux-rust-sysroot /opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu
   --static-status passed
   --local-runtime-status passed
   --local-runtime-authority authoritative
@@ -37,13 +57,25 @@ import sys
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
 assert document["builder"]["base_image"] == {
-    "actual": "sha256:expected",
-    "expected": "sha256:expected",
+    "actual": "sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
+    "expected": "sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
 }
 assert document["builder"]["image_id"] == "sha256:" + "a" * 64
 assert document["runtime"]["image_id"] == "sha256:" + "b" * 64
 assert document["inspector"]["image_id"] == "sha256:" + "c" * 64
+assert document["gates"]["static_abi"] == "passed"
+assert document["linux_build"]["glibc_max"] == "2.35"
+assert document["linux_build"]["rust_sysroot"] == (
+    "/opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu"
+)
 PY
+test "$(
+  python3 -I scripts/check-public-cli-build-info.py \
+    --artifact "${tmp_dir}/artifact" \
+    --build-info "${tmp_dir}/artifact.build-info.json" \
+    --matrix "${release_target_matrix}" \
+    --platform linux-x64
+)" = "$(sha256sum "${tmp_dir}/artifact.build-info.json" | awk '{ print $1 }')"
 
 python3 scripts/write-public-cli-build-info.py \
   --output "${tmp_dir}/cross-artifact.build-info.json" \
@@ -51,7 +83,7 @@ python3 scripts/write-public-cli-build-info.py \
   --cargo-lock "${tmp_dir}/Cargo.lock" \
   --platform windows-x64 \
   --target x86_64-pc-windows-gnu \
-  --source-commit 0123456789abcdef \
+  --source-commit 0123456789abcdef0123456789abcdef01234567 \
   --source-clean true \
   --rust-version "rustc test" \
   --inspector-image-id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
@@ -67,7 +99,48 @@ assert document["builder"]["image_id"] is None
 assert document["builder"]["base_image"] == {"actual": None, "expected": None}
 assert document["runtime"]["image_id"] is None
 assert document["inspector"]["image_id"] == "sha256:" + "c" * 64
+assert document["linux_build"] is None
 PY
+test "$(
+  python3 -I scripts/check-public-cli-build-info.py \
+    --artifact "${tmp_dir}/artifact" \
+    --build-info "${tmp_dir}/cross-artifact.build-info.json" \
+    --matrix "${release_target_matrix}" \
+    --platform windows-x64
+)" = "$(sha256sum "${tmp_dir}/cross-artifact.build-info.json" | awk '{ print $1 }')"
+
+python3 scripts/write-public-cli-build-info.py \
+  --output "${tmp_dir}/freebsd-artifact.build-info.json" \
+  --artifact "${tmp_dir}/artifact" \
+  --cargo-lock "${tmp_dir}/Cargo.lock" \
+  --platform freebsd-x64 \
+  --target x86_64-unknown-freebsd \
+  --source-commit 0123456789abcdef0123456789abcdef01234567 \
+  --source-clean true \
+  --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-14)" \
+  --static-status passed \
+  --local-runtime-status passed \
+  --local-runtime-authority authoritative
+test "$(
+  python3 -I scripts/check-public-cli-build-info.py \
+    --artifact "${tmp_dir}/artifact" \
+    --build-info "${tmp_dir}/freebsd-artifact.build-info.json" \
+    --matrix "${release_target_matrix}" \
+    --platform freebsd-x64
+)" = "$(sha256sum "${tmp_dir}/freebsd-artifact.build-info.json" | awk '{ print $1 }')"
+
+ln -s "${release_target_matrix}" "${tmp_dir}/release-targets-link.json"
+if python3 -I scripts/check-public-cli-build-info.py \
+  --artifact "${tmp_dir}/artifact" \
+  --build-info "${tmp_dir}/cross-artifact.build-info.json" \
+  --matrix "${tmp_dir}/release-targets-link.json" \
+  --platform windows-x64 \
+  >"${tmp_dir}/matrix-symlink.out" 2>"${tmp_dir}/matrix-symlink.err"; then
+  echo "build-info validator accepted a symlink target matrix" >&2
+  exit 1
+fi
+grep -Fq 'release-target matrix is not a regular file' \
+  "${tmp_dir}/matrix-symlink.err"
 
 if python3 scripts/write-public-cli-build-info.py \
   --output "${tmp_dir}/mismatch.json" \
@@ -88,6 +161,20 @@ if python3 scripts/write-public-cli-build-info.py \
   --local-runtime-authority authoritative \
   >/dev/null 2>&1; then
   echo "mismatched builder identity unexpectedly produced build evidence" >&2
+  exit 1
+fi
+
+if python3 scripts/write-public-cli-build-info.py \
+  "${build_info_args[@]}" \
+  --source-clean false >/dev/null 2>&1; then
+  echo "dirty Linux source unexpectedly produced build evidence" >&2
+  exit 1
+fi
+
+if python3 scripts/write-public-cli-build-info.py \
+  "${build_info_args[@]}" \
+  --local-runtime-authority non_authoritative >/dev/null 2>&1; then
+  echo "non-authoritative Linux runtime unexpectedly produced build evidence" >&2
   exit 1
 fi
 
@@ -254,7 +341,7 @@ touch \
   "${partial_runtime_matrix}/ctx-onnxruntime-linux-aarch64.tar.gz" \
   "${partial_runtime_matrix}/ctx-onnxruntime-macos-arm64.tar.gz" \
   "${partial_runtime_matrix}/ctx-onnxruntime-windows-x64.zip"
-if scripts/stage-github-release-assets.sh \
+if "${stage_release_assets}" \
   "${partial_runtime_matrix}" "${tmp_dir}/partial-release" \
   >"${tmp_dir}/partial-runtime.out" 2>"${tmp_dir}/partial-runtime.err"; then
   echo "release staging accepted an incomplete runtime matrix" >&2
@@ -276,7 +363,7 @@ touch \
   "${complete_runtime_matrix}/ctx-onnxruntime-macos-x64.tar.gz" \
   "${complete_runtime_matrix}/ctx-onnxruntime-windows-x64.zip" \
   "${complete_runtime_matrix}/ctx-onnxruntime-freebsd-x64.tar.gz"
-if scripts/stage-github-release-assets.sh \
+if "${stage_release_assets}" \
   "${complete_runtime_matrix}" "${tmp_dir}/unproven-release" \
   >"${tmp_dir}/unproven-runtime.out" 2>"${tmp_dir}/unproven-runtime.err"; then
   echo "release staging accepted runtimes without native exact-binary proof" >&2
@@ -288,6 +375,66 @@ grep -Fq \
 grep -Fq \
   'ctx-linux-x64.native-runtime-proof.txt' \
   "${tmp_dir}/unproven-runtime.err"
+
+write_synthetic_build_info() {
+  local matrix="$1"
+  local platform="$2"
+  local binary="$3"
+  local target rust_sysroot local_runtime_status local_runtime_authority
+  local extra_args=()
+  local_runtime_status=passed
+  local_runtime_authority=authoritative
+  case "${platform}" in
+    linux-x64)
+      target=x86_64-unknown-linux-gnu
+      ;;
+    linux-aarch64)
+      target=aarch64-unknown-linux-gnu
+      ;;
+    windows-x64)
+      target=x86_64-pc-windows-gnu
+      local_runtime_status=not_run
+      local_runtime_authority=not_run
+      ;;
+    freebsd-x64)
+      target=x86_64-unknown-freebsd
+      ;;
+    *)
+      echo "unsupported synthetic build-info platform: ${platform}" >&2
+      return 2
+      ;;
+  esac
+  if [[ "${platform}" == linux-* ]]; then
+    rust_sysroot="/opt/rustup/toolchains/1.97.1-${target}"
+    extra_args=(
+      --expected-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+      --actual-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+      --builder-image-id sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      --builder-recipe-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      --runtime-image-id sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      --inspector-image-id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      --linux-builder-image docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+      --linux-ubuntu-snapshot 20260701T000000Z
+      --linux-glibc-max 2.35
+      --linux-rust-toolchain 1.97.1
+      --linux-rust-commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+      --linux-rust-sysroot "${rust_sysroot}"
+    )
+  fi
+  python3 scripts/write-public-cli-build-info.py \
+    --output "${matrix}/${binary}.build-info.json" \
+    --artifact "${matrix}/${binary}" \
+    --cargo-lock "${tmp_dir}/Cargo.lock" \
+    --platform "${platform}" \
+    --target "${target}" \
+    --source-commit 0123456789abcdef0123456789abcdef01234567 \
+    --source-clean true \
+    --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-14)" \
+    "${extra_args[@]}" \
+    --static-status passed \
+    --local-runtime-status "${local_runtime_status}" \
+    --local-runtime-authority "${local_runtime_authority}"
+}
 
 mismatched_runtime_matrix="${tmp_dir}/mismatched-runtime-matrix"
 cp -R "${complete_runtime_matrix}" "${mismatched_runtime_matrix}"
@@ -301,6 +448,9 @@ linux_runtime_sha="$(sha256sum \
   "${mismatched_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz" | awk '{ print $1 }')"
 printf '%s\n' "${linux_runtime_sha}" > \
   "${mismatched_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz.sha256"
+write_synthetic_build_info "${mismatched_runtime_matrix}" linux-x64 ctx
+linux_build_info_sha="$(sha256sum \
+  "${mismatched_runtime_matrix}/ctx.build-info.json" | awk '{ print $1 }')"
 cat > "${mismatched_runtime_matrix}/ctx-linux-x64.native-runtime-proof.txt" <<EOF
 runtime=onnxruntime
 embedding_backend=cpu
@@ -312,10 +462,11 @@ process_translated=0
 native_arch_probe=uname
 runtime_authority=authoritative
 artifact_sha256=${linux_binary_sha}
+build_info_sha256=${linux_build_info_sha}
 runtime_archive_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 semantic_search=passed
 EOF
-if scripts/stage-github-release-assets.sh \
+if "${stage_release_assets}" \
   "${mismatched_runtime_matrix}" "${tmp_dir}/mismatched-release" \
   >"${tmp_dir}/mismatched-runtime.out" 2>"${tmp_dir}/mismatched-runtime.err"; then
   echo "release staging accepted proof for a different runtime sidecar" >&2
@@ -329,7 +480,7 @@ duplicate_proof_matrix="${tmp_dir}/duplicate-proof-matrix"
 cp -R "${mismatched_runtime_matrix}" "${duplicate_proof_matrix}"
 printf 'platform=linux-x64\n' >> \
   "${duplicate_proof_matrix}/ctx-linux-x64.native-runtime-proof.txt"
-if scripts/stage-github-release-assets.sh \
+if "${stage_release_assets}" \
   "${duplicate_proof_matrix}" "${tmp_dir}/duplicate-proof-release" \
   >"${tmp_dir}/duplicate-proof.out" 2>"${tmp_dir}/duplicate-proof.err"; then
   echo "release staging accepted a proof with duplicate fields" >&2
@@ -349,7 +500,7 @@ write_synthetic_runtime_proof() {
   local host_arch="$5"
   local runtime_asset="$6"
   local native_arch_probe="$7"
-  local binary_sha runtime_sha
+  local binary_sha runtime_sha build_info_line
 
   printf 'synthetic %s\n' "${platform}" > "${missing_windows_dependency_matrix}/${binary}"
   binary_sha="$(sha256sum "${missing_windows_dependency_matrix}/${binary}" | awk '{ print $1 }')"
@@ -358,6 +509,16 @@ write_synthetic_runtime_proof() {
     "${missing_windows_dependency_matrix}/${runtime_asset}" | awk '{ print $1 }')"
   printf '%s\n' "${runtime_sha}" > \
     "${missing_windows_dependency_matrix}/${runtime_asset}.sha256"
+  build_info_line=""
+  case "${platform}" in
+    linux-*|windows-x64|freebsd-x64)
+      write_synthetic_build_info \
+        "${missing_windows_dependency_matrix}" "${platform}" "${binary}"
+      build_info_line="build_info_sha256=$(sha256sum \
+        "${missing_windows_dependency_matrix}/${binary}.build-info.json" \
+        | awk '{ print $1 }')"
+      ;;
+  esac
   cat > "${missing_windows_dependency_matrix}/${proof}" <<EOF
 runtime=onnxruntime
 embedding_backend=cpu
@@ -369,6 +530,7 @@ process_translated=0
 native_arch_probe=${native_arch_probe}
 runtime_authority=authoritative
 artifact_sha256=${binary_sha}
+${build_info_line}
 runtime_archive_sha256=${runtime_sha}
 semantic_search=passed
 EOF
@@ -388,6 +550,172 @@ write_synthetic_runtime_proof \
 write_synthetic_runtime_proof \
   windows-x64 ctx.exe ctx-windows-x64.native-runtime-proof.txt \
   Windows_NT AMD64 ctx-onnxruntime-windows-x64.zip iswow64process2
+write_synthetic_runtime_proof \
+  freebsd-x64 ctx-freebsd-x64 ctx-freebsd-x64.native-runtime-proof.txt \
+  FreeBSD amd64 ctx-onnxruntime-freebsd-x64.tar.gz uname
+
+expect_provenance_rejection() {
+  local name="$1"
+  local expected="$2"
+  local base_matrix="$3"
+  local matrix="${tmp_dir}/${name}-matrix"
+  local output="${tmp_dir}/${name}-release"
+  cp -R "${base_matrix}" "${matrix}"
+  shift 3
+  "$@" "${matrix}"
+  if "${stage_release_assets}" \
+    "${matrix}" "${output}" \
+    >"${tmp_dir}/${name}.out" 2>"${tmp_dir}/${name}.err"; then
+    printf 'release staging accepted hostile provenance: %s\n' "${name}" >&2
+    exit 1
+  fi
+  grep -Fq "${expected}" "${tmp_dir}/${name}.err"
+  test ! -e "${output}"
+}
+
+mutate_linux_build_info() {
+  local mode="$1"
+  local matrix="$2"
+  python3 - "${matrix}/ctx.build-info.json" "${mode}" <<'PY'
+import json
+import sys
+
+path, mode = sys.argv[1:]
+with open(path, encoding="utf-8") as source:
+    value = json.load(source)
+if mode == "dirty":
+    value["source"]["clean"] = False
+elif mode == "non-authoritative":
+    value["gates"]["local_runtime_authority"] = "non_authoritative"
+elif mode == "builder":
+    value["linux_build"]["builder_image"] = (
+        "docker.io/library/ubuntu:22.04@sha256:" + "f" * 64
+    )
+elif mode == "rust-sysroot":
+    value["linux_build"]["rust_sysroot"] = "/tmp/caller-selected-sysroot"
+elif mode == "static-abi":
+    value["gates"]["static_abi"] = "not_run"
+elif mode == "artifact":
+    value["artifact_sha256"] = "0" * 64
+else:
+    raise SystemExit(f"unknown mutation: {mode}")
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PY
+}
+
+corrupt_build_info_proof_binding() {
+  local matrix="$1"
+  sed -i \
+    's/^build_info_sha256=.*/build_info_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' \
+    "${matrix}/ctx-linux-x64.native-runtime-proof.txt"
+}
+
+mutate_platform_build_info() {
+  local binary="$1"
+  local mode="$2"
+  local matrix="$3"
+  python3 - "${matrix}/${binary}.build-info.json" "${mode}" <<'PY'
+import json
+import sys
+
+path, mode = sys.argv[1:]
+with open(path, encoding="utf-8") as source:
+    value = json.load(source)
+if mode == "dirty":
+    value["source"]["clean"] = False
+elif mode == "artifact":
+    value["artifact_sha256"] = "0" * 64
+elif mode == "matrix":
+    value["linux_build"] = {}
+else:
+    raise SystemExit(f"unknown mutation: {mode}")
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PY
+}
+
+corrupt_platform_build_info_proof() {
+  local proof="$1"
+  local matrix="$2"
+  sed -i \
+    's/^build_info_sha256=.*/build_info_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' \
+    "${matrix}/${proof}"
+}
+
+expect_provenance_rejection dirty-linux-build \
+  'linux-x64 release build-info does not bind the clean exact artifact' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_linux_build_info dirty
+expect_provenance_rejection non-authoritative-linux-build \
+  'Linux release build-info does not record an authoritative runtime gate' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_linux_build_info non-authoritative
+expect_provenance_rejection mismatched-linux-builder \
+  'linux-x64 release build-info does not match the matrix build contract' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_linux_build_info builder
+expect_provenance_rejection mismatched-linux-rust-sysroot \
+  'linux-x64 release build-info does not match the matrix build contract' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_linux_build_info rust-sysroot
+expect_provenance_rejection missing-linux-static-abi \
+  'linux-x64 release build-info does not record passed static ABI gates' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_linux_build_info static-abi
+expect_provenance_rejection mismatched-linux-artifact \
+  'linux-x64 release build-info does not bind the clean exact artifact' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_linux_build_info artifact
+expect_provenance_rejection mismatched-build-info-proof \
+  'runtime proof does not bind the validated build info:' \
+  "${missing_windows_dependency_matrix}" \
+  corrupt_build_info_proof_binding
+
+expect_provenance_rejection dirty-windows-build \
+  'windows-x64 release build-info does not bind the clean exact artifact' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_platform_build_info ctx.exe dirty
+expect_provenance_rejection mismatched-windows-artifact \
+  'windows-x64 release build-info does not bind the clean exact artifact' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_platform_build_info ctx.exe artifact
+expect_provenance_rejection mismatched-windows-matrix \
+  'windows-x64 release build-info does not match the matrix build contract' \
+  "${missing_windows_dependency_matrix}" \
+  mutate_platform_build_info ctx.exe matrix
+expect_provenance_rejection mismatched-windows-build-info-proof \
+  'runtime proof does not bind the validated build info:' \
+  "${missing_windows_dependency_matrix}" \
+  corrupt_platform_build_info_proof ctx-windows-x64.native-runtime-proof.txt
+
+freebsd_provenance_matrix="${tmp_dir}/freebsd-provenance-matrix"
+cp -R "${missing_windows_dependency_matrix}" "${freebsd_provenance_matrix}"
+cat >> "${freebsd_provenance_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
+runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
+runtime_dependency_msvcp140=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\msvcp140.dll
+runtime_dependency_msvcp140_1=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\msvcp140_1.dll
+runtime_dependency_vcruntime140=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\vcruntime140.dll
+runtime_dependency_vcruntime140_1=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\vcruntime140_1.dll
+EOF
+expect_provenance_rejection dirty-freebsd-build \
+  'freebsd-x64 release build-info does not bind the clean exact artifact' \
+  "${freebsd_provenance_matrix}" \
+  mutate_platform_build_info ctx-freebsd-x64 dirty
+expect_provenance_rejection mismatched-freebsd-artifact \
+  'freebsd-x64 release build-info does not bind the clean exact artifact' \
+  "${freebsd_provenance_matrix}" \
+  mutate_platform_build_info ctx-freebsd-x64 artifact
+expect_provenance_rejection mismatched-freebsd-matrix \
+  'freebsd-x64 release build-info does not match the matrix build contract' \
+  "${freebsd_provenance_matrix}" \
+  mutate_platform_build_info ctx-freebsd-x64 matrix
+expect_provenance_rejection mismatched-freebsd-build-info-proof \
+  'runtime proof does not bind the validated build info:' \
+  "${freebsd_provenance_matrix}" \
+  corrupt_platform_build_info_proof ctx-freebsd-x64.native-runtime-proof.txt
 
 preview_macos_matrix="${tmp_dir}/preview-macos-matrix"
 cp -R "${missing_windows_dependency_matrix}" "${preview_macos_matrix}"
@@ -399,7 +727,7 @@ preview_macos_sha="$(cat "${preview_macos_matrix}/ctx-macos-x64.sha256")"
 cat > "${preview_macos_matrix}/ctx-macos-x64.build-info.json" <<EOF
 {"schema_version":1,"artifact_sha256":"${preview_macos_sha}","platform":"macos-x64","target":"x86_64-apple-darwin","source":{"commit":"228e05fa0fd058822be7a362acd65cacdad24356","clean":true}}
 EOF
-if scripts/stage-github-release-assets.sh \
+if "${stage_release_assets}" \
   "${preview_macos_matrix}" "${tmp_dir}/preview-macos-default-release" \
   >"${tmp_dir}/preview-macos-default.out" 2>"${tmp_dir}/preview-macos-default.err"; then
   echo "release staging accepted macOS x64 preview proof without explicit opt-in" >&2
@@ -407,11 +735,14 @@ if scripts/stage-github-release-assets.sh \
 fi
 grep -Fq \
   'runtime proof has the wrong authority classification:' \
-  "${tmp_dir}/preview-macos-default.err"
+  "${tmp_dir}/preview-macos-default.err" || {
+    cat "${tmp_dir}/preview-macos-default.err" >&2
+    exit 1
+  }
 
 printf 'ctx 0.25.1\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
 if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  scripts/stage-github-release-assets.sh \
+  "${stage_release_assets}" \
     "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-version-release" \
     >"${tmp_dir}/preview-macos-wrong-version.out" \
     2>"${tmp_dir}/preview-macos-wrong-version.err"; then
@@ -427,7 +758,7 @@ sed -i \
   's/228e05fa0fd058822be7a362acd65cacdad24356/0000000000000000000000000000000000000000/' \
   "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
 if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  scripts/stage-github-release-assets.sh \
+  "${stage_release_assets}" \
     "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-source-release" \
     >"${tmp_dir}/preview-macos-wrong-source.out" \
     2>"${tmp_dir}/preview-macos-wrong-source.err"; then
@@ -442,7 +773,7 @@ sed -i \
   "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
 
 if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  scripts/stage-github-release-assets.sh \
+  "${stage_release_assets}" \
     "${preview_macos_matrix}" "${tmp_dir}/preview-macos-release" \
     >"${tmp_dir}/preview-macos.out" 2>"${tmp_dir}/preview-macos.err"; then
   echo "release staging unexpectedly passed an incomplete synthetic matrix" >&2
@@ -457,7 +788,7 @@ sed -i \
   -e 's/^process_translated=0$/process_translated=1/' \
   "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
 if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  scripts/stage-github-release-assets.sh \
+  "${stage_release_assets}" \
     "${preview_macos_matrix}" "${tmp_dir}/preview-macos-rosetta-release" \
     >"${tmp_dir}/preview-macos-rosetta.out" 2>"${tmp_dir}/preview-macos-rosetta.err"; then
   echo "release staging accepted Rosetta-shaped proof as preview evidence" >&2
@@ -471,7 +802,7 @@ cat >> \
   "${missing_windows_dependency_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
 runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
 EOF
-if scripts/stage-github-release-assets.sh \
+if "${stage_release_assets}" \
   "${missing_windows_dependency_matrix}" "${tmp_dir}/missing-windows-dependency-release" \
   >"${tmp_dir}/missing-windows-dependency.out" \
   2>"${tmp_dir}/missing-windows-dependency.err"; then
@@ -490,18 +821,32 @@ test "$(printf '%s\n' 'cross 0.2.4' 'rustup 1.28.2' | sed -n '1p')" != 'cross 0.
 bash scripts/tests/public-cli-freebsd-build-strategy-test.sh
 python3 scripts/tests/onnxruntime-sidecar-tools-test.py
 
+for platform in windows-x64 freebsd-x64; do
+  if env CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD=1 \
+    scripts/build-public-cli-artifact.sh "${platform}" \
+    >"${tmp_dir}/${platform}-dirty-override.out" \
+    2>"${tmp_dir}/${platform}-dirty-override.err"; then
+    printf '%s construction accepted the dirty-build override\n' "${platform}" >&2
+    exit 1
+  fi
+  grep -Fq \
+    'forbidden public release environment variable: CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD' \
+    "${tmp_dir}/${platform}-dirty-override.err"
+done
+
 mkdir -p "${tmp_dir}/dirty-path"
 cat > "${tmp_dir}/dirty-path/git" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
-  rev-parse) printf '%s\n' 0123456789abcdef ;;
+  rev-parse) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
   status) printf '%s\n' '?? synthetic-dirty-file' ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "${tmp_dir}/dirty-path/git"
 dirty_out="target/ctx-release-dirty-test.$$"
-trap 'rm -rf "${tmp_dir}" "${dirty_out}"' EXIT
+hostile_tool_out="target/ctx-release-tool-override-test.$$"
+trap 'rm -rf "${tmp_dir}" "${dirty_out}" "${hostile_tool_out}"' EXIT
 mkdir -p "${dirty_out}"
 printf 'stale evidence\n' > "${dirty_out}/ctx.exe.build-info.json"
 if PATH="${tmp_dir}/dirty-path:${PATH}" \
@@ -512,12 +857,37 @@ if PATH="${tmp_dir}/dirty-path:${PATH}" \
   exit 1
 fi
 grep -Fq 'public release construction requires a clean checkout' "${tmp_dir}/dirty.err"
-test ! -e "${dirty_out}/ctx.exe.build-info.json"
+grep -Fxq 'stale evidence' "${dirty_out}/ctx.exe.build-info.json"
+
+for override in CTX_LLVM_READOBJ CTX_LLVM_OBJDUMP; do
+  for platform in \
+    linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64 freebsd-x64; do
+    hostile_output="${hostile_tool_out}/${override}/${platform}"
+    if env \
+      "${override}=${tmp_dir}/forged-llvm-tool" \
+      CTX_PUBLIC_CLI_ARTIFACT_DIR="${hostile_output}" \
+      scripts/build-public-cli-artifact.sh "${platform}" \
+      >"${tmp_dir}/${override}-${platform}.out" \
+      2>"${tmp_dir}/${override}-${platform}.err"; then
+      printf '%s construction accepted %s\n' "${platform}" "${override}" >&2
+      exit 1
+    fi
+    grep -Fq \
+      "forbidden public release environment variable: ${override}" \
+      "${tmp_dir}/${override}-${platform}.err"
+    if [[ -e "${hostile_output}" ]]; then
+      printf '%s construction created output before rejecting %s\n' \
+        "${platform}" "${override}" >&2
+      exit 1
+    fi
+  done
+done
 
 inspector_parent="${tmp_dir}/mode-0700-parent"
 inspector_source="${inspector_parent}/source"
 inspector_artifacts="${inspector_source}/target/public-cli-artifacts"
 mkdir -p \
+  "${inspector_source}/contracts" \
   "${inspector_source}/scripts" \
   "${inspector_source}/tests/fixtures/custom-history-jsonl" \
   "${inspector_artifacts}"
@@ -525,6 +895,7 @@ chmod 0700 "${inspector_parent}" "${inspector_source}"
 for source in check-public-cli-artifact.sh check-release-binary-compat.sh run-native-candidate-smoke.sh; do
   printf '#!/bin/sh\nexit 0\n' >"${inspector_source}/scripts/${source}"
 done
+printf '{}\n' >"${inspector_source}/contracts/public-control-surface-v1.json"
 printf '{}\n' >"${inspector_source}/tests/fixtures/custom-history-jsonl/basic.jsonl"
 printf 'candidate\n' >"${inspector_artifacts}/ctx"
 printf '%064d\n' 0 >"${inspector_artifacts}/ctx.sha256"
@@ -535,6 +906,7 @@ scripts/stage-public-cli-inspector-inputs.sh \
   "${inspector_source}" "${inspector_artifacts}" ctx "${inspector_output}" >/dev/null
 test -x "${inspector_output}/artifacts/ctx"
 test "$(stat -c '%a' "${inspector_output}")" = 755
+test "$(stat -c '%a' "${inspector_output}/contracts/public-control-surface-v1.json")" = 444
 test "$(stat -c '%a' "${inspector_output}/tests/fixtures/custom-history-jsonl/basic.jsonl")" = 444
 
 mv "${inspector_artifacts}/ctx" "${inspector_artifacts}/real-ctx"
@@ -570,8 +942,19 @@ grep -Fq 'empty non-symlink' "${tmp_dir}/inspector-output-link.err"
 
 grep -F '20260701T000000Z' scripts/docker/linux-release.Dockerfile >/dev/null
 grep -F 'ubuntu:22.04@sha256:' scripts/docker/linux-release.Dockerfile >/dev/null
+grep -F 'GLIBC_BASELINE="2.35"' scripts/docker/linux-release.Dockerfile >/dev/null
+grep -F 'org.ctx.release.glibc-baseline="${GLIBC_BASELINE}"' \
+  scripts/docker/linux-release.Dockerfile >/dev/null
 grep -F 'RUSTUP_VERSION="1.28.2"' scripts/docker/linux-release.Dockerfile >/dev/null
+grep -F 'LINUX_GLIBC_BASELINE="2.35"' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'LINUX_RELEASE_IMAGE_UBUNTU="22.04"' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'LINUX_RELEASE_UBUNTU_DIGEST="sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982"' \
+  scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'LINUX_RELEASE_UBUNTU_SNAPSHOT="20260701T000000Z"' \
+  scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'RUST_TOOLCHAIN_VERSION="1.97.1"' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'RUST_TOOLCHAIN_COMMIT="8bab26f4f68e0e26f0bb7960be334d5b520ea452"' \
+  scripts/build-public-cli-artifact.sh >/dev/null
 grep -A5 -F '[profile.release]' Cargo.toml | grep -F 'strip = "symbols"' >/dev/null
 grep -F 'rustup target add --toolchain "${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'cargo "+${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
@@ -584,9 +967,45 @@ grep -F 'scripts/run-native-candidate-smoke.sh' scripts/build-public-cli-artifac
 grep -F 'CTX_PRO_HELPER="${untrusted_helper}"' scripts/run-native-candidate-smoke.sh >/dev/null
 grep -F 'pro_helper_override_ignored' scripts/run-native-candidate-smoke.sh >/dev/null
 grep -F 'LINUX_X64_QEMU_CPU_PROFILE="qemu64"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD' scripts/build-public-cli-artifact.sh >/dev/null
+if grep -Fq 'CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD' \
+  scripts/build-public-cli-artifact.sh; then
+  echo "production Linux builder still contains an emulation override" >&2
+  exit 1
+fi
+if sed -n '/^run_linux_container_build()/,/^}/p' \
+  scripts/build-public-cli-artifact.sh \
+  | grep -Fq 'CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD'; then
+  echo "production Linux builder still contains a dirty-source override" >&2
+  exit 1
+fi
+test "$(grep -Fc 'CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD' \
+  scripts/build-public-cli-artifact.sh)" = 2
+dirty_override_guard_line="$(grep -n \
+  'CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD+x' \
+  scripts/build-public-cli-artifact.sh | cut -d: -f1)"
+platform_dispatch_line="$(grep -n '^case "${platform}" in' \
+  scripts/build-public-cli-artifact.sh | head -n 1 | cut -d: -f1)"
+test "${dirty_override_guard_line}" -lt "${platform_dispatch_line}"
+for override in CTX_LLVM_READOBJ CTX_LLVM_OBJDUMP; do
+  override_guard_line="$(grep -n "${override}+x" \
+    scripts/build-public-cli-artifact.sh | cut -d: -f1)"
+  test "${override_guard_line}" -lt "${platform_dispatch_line}"
+done
+grep -F 'LLVM_TOOL_ROOT="$(authoritative_llvm_root)"' \
+  scripts/check-release-binary-compat.sh >/dev/null
+if grep -Eq 'CTX_LLVM_(READOBJ|OBJDUMP):-' \
+  scripts/check-release-binary-compat.sh; then
+  echo "production release compatibility checker retains a tool override" >&2
+  exit 1
+fi
 grep -F 'flock -n' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/null
+grep -F 'build_info_sha256=' scripts/smoke-daemon-semantic-release.sh >/dev/null
+grep -F 'linux-*|freebsd-x64)' scripts/smoke-daemon-semantic-release.sh >/dev/null
+grep -F 'runtime proof does not bind the validated build info' \
+  scripts/stage-github-release-assets.sh >/dev/null
+grep -F 'linux-*|windows-x64|freebsd-x64)' \
+  scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-macos-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
@@ -599,7 +1018,17 @@ grep -F -- '--inspector-image-id "${inspector_image_id}"' scripts/build-public-c
 grep -F -- '--inspector-image-id "${artifact_inspector_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'build-info.json' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--locked --offline' scripts/build-linux-release-offline.sh >/dev/null
-grep -F 'python3 scripts/check-linux-release-network-isolation.py' scripts/build-linux-release-offline.sh >/dev/null
+grep -F 'bash scripts/check-linux-release-environment.sh' \
+  scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'bash scripts/check-linux-release-environment.sh' \
+  scripts/build-linux-release-offline.sh >/dev/null
+grep -F 'bash scripts/check-linux-release-builder.sh "${target}"' \
+  scripts/build-linux-release-offline.sh >/dev/null
+grep -F '/usr/bin/python3 -I scripts/check-linux-release-network-isolation.py' \
+  scripts/build-linux-release-offline.sh >/dev/null
+grep -F 'bash scripts/build-linux-release-offline.sh "${platform}" "${target}"' \
+  scripts/build-public-cli-artifact.sh >/dev/null
+bash scripts/tests/check-linux-release-builder-test.sh
 python3 scripts/tests/check-linux-release-network-isolation-test.py \
   scripts/check-linux-release-network-isolation.py \
   scripts/tests/fixtures/linux-release-network-isolation.json
@@ -622,6 +1051,10 @@ grep -F 'timeout --signal=KILL 120s' scripts/build-public-cli-artifact.sh >/dev/
 grep -F 'x86_64-unknown-freebsd:0.2.5@sha256:' Cross.toml >/dev/null
 grep -F '[System.IO.File]::WriteAllText(' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F '($runtimeProofLines -join "`n") + "`n"' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F 'function Get-BoundWindowsBuildInfoSha256' \
+  scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F '"build_info_sha256=$buildInfoSha"' \
+  scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F 'param([string[]]$CommandArgs)' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F '@CommandArgs' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' .buildkite/pipeline.yml >/dev/null

@@ -18,15 +18,19 @@ use super::authorization::InstallationChallengeSigner;
 #[cfg(target_os = "macos")]
 #[rustfmt::skip]
 mod macos;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod secret_service;
 #[cfg(target_os = "windows")]
 #[rustfmt::skip]
 mod windows;
 
+#[cfg(target_os = "linux")]
+use linux::PlatformBackend;
 #[cfg(target_os = "macos")]
 use macos::PlatformBackend;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "freebsd")]
 use secret_service::PlatformBackend;
 #[cfg(target_os = "windows")]
 use windows::PlatformBackend;
@@ -39,6 +43,7 @@ const RECORD_ID_PREFIX: &str = "cv2-";
 const RECORD_ID_HEX_BYTES: usize = 64;
 const RECORD_ID_DOMAIN: &[u8] = b"ctx\0credential-vault\0record-id\0v2\0";
 const WORKOS_SCHEMA_VERSION: u16 = 1;
+const ANONYMOUS_TRIAL_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CredentialVaultNamespace {
@@ -58,6 +63,7 @@ impl CredentialVaultNamespace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CredentialRecordKind {
     WorkOsSession,
+    AnonymousTrial,
     InstallationSigningKey,
     SignedEntitlement,
 }
@@ -66,6 +72,7 @@ impl CredentialRecordKind {
     const fn domain_label(self) -> &'static [u8] {
         match self {
             Self::WorkOsSession => b"workos-session",
+            Self::AnonymousTrial => b"anonymous-trial",
             Self::InstallationSigningKey => b"installation-signing-key",
             Self::SignedEntitlement => b"signed-entitlement",
         }
@@ -75,6 +82,7 @@ impl CredentialRecordKind {
 #[derive(Debug)]
 struct CredentialRecordIds {
     workos_session: String,
+    anonymous_trial: String,
     installation_signing_key: String,
     signed_entitlement: String,
 }
@@ -90,6 +98,11 @@ impl CredentialRecordIds {
                 installation_id,
                 namespace,
                 CredentialRecordKind::WorkOsSession,
+            ),
+            anonymous_trial: derive_record_id(
+                installation_id,
+                namespace,
+                CredentialRecordKind::AnonymousTrial,
             ),
             installation_signing_key: derive_record_id(
                 installation_id,
@@ -107,6 +120,7 @@ impl CredentialRecordIds {
     fn get(&self, kind: CredentialRecordKind) -> &str {
         match kind {
             CredentialRecordKind::WorkOsSession => &self.workos_session,
+            CredentialRecordKind::AnonymousTrial => &self.anonymous_trial,
             CredentialRecordKind::InstallationSigningKey => &self.installation_signing_key,
             CredentialRecordKind::SignedEntitlement => &self.signed_entitlement,
         }
@@ -211,6 +225,83 @@ impl fmt::Debug for WorkOsSessionMaterial {
     }
 }
 
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AnonymousTrialMaterial {
+    schema_version: u16,
+    access_token: String,
+    trial_deadline_unix: i64,
+    #[serde(default)]
+    refresh_not_before_unix: Option<i64>,
+}
+
+impl AnonymousTrialMaterial {
+    pub(crate) fn new(
+        access_token: String,
+        trial_deadline_unix: i64,
+    ) -> Result<Self, CredentialVaultError> {
+        let value = Self {
+            schema_version: ANONYMOUS_TRIAL_SCHEMA_VERSION,
+            access_token,
+            trial_deadline_unix,
+            refresh_not_before_unix: None,
+        };
+        value.validate().map(|()| value)
+    }
+
+    pub(crate) fn access_token(&self) -> &str {
+        &self.access_token
+    }
+
+    pub(crate) const fn trial_deadline_unix(&self) -> i64 {
+        self.trial_deadline_unix
+    }
+
+    pub(crate) const fn refresh_not_before_unix(&self) -> Option<i64> {
+        self.refresh_not_before_unix
+    }
+
+    pub(crate) fn with_access_token(
+        mut self,
+        access_token: String,
+    ) -> Result<Self, CredentialVaultError> {
+        self.access_token = access_token;
+        self.refresh_not_before_unix = None;
+        self.validate().map(|()| self)
+    }
+
+    pub(crate) fn with_refresh_not_before_unix(
+        mut self,
+        value: Option<i64>,
+    ) -> Result<Self, CredentialVaultError> {
+        self.refresh_not_before_unix = value;
+        self.validate().map(|()| self)
+    }
+
+    fn validate(&self) -> Result<(), CredentialVaultError> {
+        if self.schema_version != ANONYMOUS_TRIAL_SCHEMA_VERSION
+            || self.access_token.len() < 16
+            || invalid_secret(&self.access_token)
+            || self.access_token.bytes().any(|byte| {
+                !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+            })
+            || self.trial_deadline_unix <= 0
+            || self
+                .refresh_not_before_unix
+                .is_some_and(|value| value < 0 || value > self.trial_deadline_unix)
+        {
+            return Err(CredentialVaultError::Corrupt);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AnonymousTrialMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AnonymousTrialMaterial([REDACTED])")
+    }
+}
+
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct InstallationSigningKeySeed([u8; INSTALLATION_PUBLIC_KEY_BYTES]);
 
@@ -261,6 +352,7 @@ impl fmt::Debug for BoundedSignedEntitlement {
 #[derive(Debug)]
 pub(crate) enum CredentialRecord {
     WorkOsSession(WorkOsSessionMaterial),
+    AnonymousTrial(AnonymousTrialMaterial),
     InstallationSigningKey(InstallationSigningKeySeed),
     SignedEntitlement(BoundedSignedEntitlement),
 }
@@ -269,6 +361,7 @@ impl CredentialRecord {
     const fn kind(&self) -> CredentialRecordKind {
         match self {
             Self::WorkOsSession(_) => CredentialRecordKind::WorkOsSession,
+            Self::AnonymousTrial(_) => CredentialRecordKind::AnonymousTrial,
             Self::InstallationSigningKey(_) => CredentialRecordKind::InstallationSigningKey,
             Self::SignedEntitlement(_) => CredentialRecordKind::SignedEntitlement,
         }
@@ -358,6 +451,16 @@ pub(crate) struct PlatformCredentialVault {
     record_ids: CredentialRecordIds,
 }
 
+#[cfg(target_os = "linux")]
+fn production_backend(data_root: &Path) -> PlatformBackend {
+    PlatformBackend::production(data_root)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn production_backend(_data_root: &Path) -> PlatformBackend {
+    PlatformBackend::production()
+}
+
 impl PlatformCredentialVault {
     pub(crate) fn production(
         data_root: &Path,
@@ -367,9 +470,21 @@ impl PlatformCredentialVault {
             .map_err(|_| CredentialVaultError::InvalidDataRoot)?
             .ok_or(CredentialVaultError::NotFound)?;
         Ok(Self {
-            backend: PlatformBackend::production(),
+            backend: production_backend(data_root),
             record_ids: CredentialRecordIds::new(&installation_id, namespace)?,
         })
+    }
+
+    pub(crate) fn cleanup_backend_state(data_root: &Path) -> Result<(), CredentialVaultError> {
+        #[cfg(target_os = "linux")]
+        {
+            PlatformBackend::production(data_root).cleanup_if_empty()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = data_root;
+            Ok(())
+        }
     }
 
     pub(crate) fn load(
@@ -450,6 +565,9 @@ fn load_record<B: CredentialVaultBackend>(
         CredentialRecordKind::WorkOsSession => {
             decode_workos(bytes.as_slice()).map(CredentialRecord::WorkOsSession)
         }
+        CredentialRecordKind::AnonymousTrial => {
+            decode_anonymous_trial(bytes.as_slice()).map(CredentialRecord::AnonymousTrial)
+        }
         CredentialRecordKind::InstallationSigningKey => {
             let seed = bytes
                 .as_slice()
@@ -474,6 +592,7 @@ fn store_record<B: CredentialVaultBackend>(
 ) -> Result<(), CredentialVaultError> {
     let bytes = match record {
         CredentialRecord::WorkOsSession(value) => encode_workos(value)?,
+        CredentialRecord::AnonymousTrial(value) => encode_anonymous_trial(value)?,
         CredentialRecord::InstallationSigningKey(value) => {
             SecretBytes::new(value.expose().to_vec())?
         }
@@ -498,6 +617,19 @@ fn encode_workos(value: &WorkOsSessionMaterial) -> Result<SecretBytes, Credentia
 
 fn decode_workos(bytes: &[u8]) -> Result<WorkOsSessionMaterial, CredentialVaultError> {
     let value: WorkOsSessionMaterial =
+        serde_json::from_slice(bytes).map_err(|_| CredentialVaultError::Corrupt)?;
+    value.validate().map(|()| value)
+}
+
+fn encode_anonymous_trial(
+    value: &AnonymousTrialMaterial,
+) -> Result<SecretBytes, CredentialVaultError> {
+    value.validate()?;
+    SecretBytes::new(serde_json::to_vec(value).map_err(|_| CredentialVaultError::Corrupt)?)
+}
+
+fn decode_anonymous_trial(bytes: &[u8]) -> Result<AnonymousTrialMaterial, CredentialVaultError> {
+    let value: AnonymousTrialMaterial =
         serde_json::from_slice(bytes).map_err(|_| CredentialVaultError::Corrupt)?;
     value.validate().map(|()| value)
 }
@@ -568,6 +700,7 @@ mod tests {
         let second = CredentialRecordIds::new(second_id, CredentialVaultNamespace::Production)?;
         let kinds = [
             CredentialRecordKind::WorkOsSession,
+            CredentialRecordKind::AnonymousTrial,
             CredentialRecordKind::InstallationSigningKey,
             CredentialRecordKind::SignedEntitlement,
         ];
@@ -596,6 +729,7 @@ mod tests {
         let staging = CredentialRecordIds::new(installation_id, CredentialVaultNamespace::Staging)?;
         for kind in [
             CredentialRecordKind::WorkOsSession,
+            CredentialRecordKind::AnonymousTrial,
             CredentialRecordKind::InstallationSigningKey,
             CredentialRecordKind::SignedEntitlement,
         ] {
@@ -666,6 +800,18 @@ mod tests {
                 Err(CredentialVaultError::InvalidRecordId)
             );
         }
+    }
+
+    #[test]
+    fn anonymous_trial_material_is_bounded_and_round_trips() {
+        let value = AnonymousTrialMaterial::new("a".repeat(32), 2_000).unwrap();
+        let encoded = encode_anonymous_trial(&value).unwrap();
+        let decoded = decode_anonymous_trial(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.access_token(), "a".repeat(32));
+        assert_eq!(decoded.trial_deadline_unix(), 2_000);
+        assert_eq!(decoded.refresh_not_before_unix(), None);
+        assert!(AnonymousTrialMaterial::new("short".to_owned(), 2_000).is_err());
+        assert!(AnonymousTrialMaterial::new("a".repeat(32), 0).is_err());
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

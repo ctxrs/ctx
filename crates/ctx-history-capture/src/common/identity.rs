@@ -30,25 +30,6 @@ pub(crate) fn default_machine_id() -> String {
         .unwrap_or_else(|_| "local".to_owned())
 }
 
-pub(crate) fn sanitize_filename_component(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let sanitized = sanitized.trim_matches('-');
-    if sanitized.is_empty() {
-        "unknown".to_owned()
-    } else {
-        sanitized.to_owned()
-    }
-}
-
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {

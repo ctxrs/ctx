@@ -1,27 +1,23 @@
 use super::*;
-use crate::commands::import::catalog::{
-    import_incremental_codex_session_tree, mark_catalog_session_indexed,
-    mark_catalog_sessions_failed,
-};
-#[cfg(unix)]
 use crate::commands::import::inventory_import_sources;
 use crate::provider_sources::explicit_path_source;
 use ctx_history_capture::{
-    import_cline_task_json_history, CatalogSummary, ClineTaskJsonImportOptions,
-    ProviderImportFailure,
+    import_cline_task_json_history, ClineTaskJsonImportOptions, ImportProfile,
+    OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress,
+    ProOutputSink, ProOutputSinkError,
 };
 use ctx_history_core::{
-    new_id, AgentType, CaptureProvider, Event, EventRole, EventType, Fidelity, SyncMetadata,
-    SyncState, Visibility,
+    new_id, CaptureProvider, Event, EventRole, EventType, Fidelity, SyncMetadata, SyncState,
+    Visibility,
 };
-use ctx_history_store::{CatalogSession, SourceImportFile, StoreError};
+use ctx_history_store::{SourceImportFile, StoreError};
 use rusqlite::Connection;
 use serde_json::json;
 use std::{
     fs,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -199,12 +195,12 @@ fn assert_inventory_race_winner_remains_pending(db_path: &Path, original: &Sourc
 }
 
 #[test]
-fn direct_source_import_does_not_nest_captured_batch_maintenance() {
+fn direct_source_import_does_not_nest_nativepath_maintenance() {
     assert_openhands_pinned_reader_allows_cli_cursor(false);
 }
 
 #[test]
-fn manifested_source_import_does_not_nest_captured_batch_maintenance() {
+fn manifested_source_import_does_not_nest_nativepath_maintenance() {
     assert_openhands_pinned_reader_allows_cli_cursor(true);
 }
 
@@ -452,63 +448,6 @@ fn source_root_completion_surfaces_newer_inventory_observation() {
 }
 
 #[test]
-fn catalog_completion_surfaces_newer_inventory_observation() {
-    let temp = tempdir();
-    let source_root = temp.path().join("sessions");
-    let source_path = source_root.join("session.jsonl");
-    fs::create_dir_all(&source_root).unwrap();
-    fs::write(&source_path, b"stale catalog bytes").unwrap();
-    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let original = CatalogSession {
-        provider: CaptureProvider::Codex,
-        source_format: "codex_session_jsonl".to_owned(),
-        source_root: source_root.display().to_string(),
-        source_path: source_path.display().to_string(),
-        external_session_id: Some("catalog-observation-race".to_owned()),
-        parent_external_session_id: None,
-        agent_type: AgentType::Primary,
-        role_hint: Some("primary".to_owned()),
-        external_agent_id: None,
-        cwd: None,
-        session_started_at_ms: None,
-        file_size_bytes: fs::metadata(&source_path).unwrap().len(),
-        file_modified_at_ms: 100,
-        cataloged_at_ms: 1_000,
-        metadata: json!({"inventory_file_change_token_v1": "original-token"}),
-    };
-    store
-        .upsert_catalog_sessions(std::slice::from_ref(&original))
-        .unwrap();
-    let mut newer = original.clone();
-    newer.cataloged_at_ms += 1;
-    newer.metadata["inventory_file_change_token_v1"] = json!("newer-token");
-    store.upsert_catalog_sessions(&[newer]).unwrap();
-
-    let indexed_error =
-        mark_catalog_session_indexed(&store, &original, Some(1), original.cataloged_at_ms + 10)
-            .expect_err("stale catalog indexed completion must conflict");
-    assert_source_import_observation_conflict(
-        &indexed_error,
-        "indexed",
-        original.provider,
-        &source_path,
-    );
-    let failed_error = mark_catalog_sessions_failed(
-        &store,
-        std::slice::from_ref(&original),
-        "stale catalog failure",
-    )
-    .expect_err("stale catalog failed completion must conflict");
-    assert_source_import_observation_conflict(
-        &failed_error,
-        "failed",
-        original.provider,
-        &source_path,
-    );
-    assert_eq!(store.catalog_session_counts().unwrap().pending, 1);
-}
-
-#[test]
 fn indexed_inventory_race_cleans_replay_only_history_record_without_marking_winner() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
@@ -600,30 +539,6 @@ fn failed_inventory_race_cleans_rejected_history_record_without_marking_winner()
     assert_inventory_race_winner_remains_pending(&db_path, &original);
 }
 
-#[test]
-fn codex_preinventory_failures_survive_when_catalog_has_no_pending_sessions() {
-    let temp = tempdir();
-    let source_path = temp.path().join("sessions");
-    fs::create_dir_all(&source_path).unwrap();
-    let source = explicit_path_source(CaptureProvider::Codex, source_path);
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let catalog = CatalogSummary {
-        failed_sessions: 1,
-        failures: vec![ProviderImportFailure {
-            line: 0,
-            error: "catalog-only rejection".to_owned(),
-        }],
-        ..CatalogSummary::default()
-    };
-
-    let summary =
-        import_incremental_codex_session_tree(&mut store, &source, new_id(), None, Some(&catalog))
-            .unwrap();
-
-    assert_eq!(summary.failed, 1);
-    assert_eq!(summary.failures, catalog.failures);
-}
-
 fn persist_indexed_root(
     store: &Store,
     source: &SourceInfo,
@@ -646,6 +561,347 @@ fn persist_indexed_root(
         .unwrap();
     store.mark_source_import_file_indexed(&file, 1).unwrap();
     file
+}
+
+struct RecordingProOutputSink {
+    observations: AtomicUsize,
+    pages: AtomicUsize,
+    fail_pages: bool,
+    behind: AtomicBool,
+    progress: Mutex<Option<ProOutputProgress>>,
+}
+
+impl RecordingProOutputSink {
+    fn new(fail_pages: bool) -> Self {
+        Self {
+            observations: AtomicUsize::new(0),
+            pages: AtomicUsize::new(0),
+            fail_pages,
+            behind: AtomicBool::new(false),
+            progress: Mutex::new(None),
+        }
+    }
+}
+
+impl ProOutputSink for RecordingProOutputSink {
+    fn inventory_generation(&self) -> u64 {
+        1
+    }
+
+    fn materializer_revision(&self) -> &str {
+        "cli-test-materializer-v1"
+    }
+
+    fn observe_source(
+        &self,
+        _source: &OutputSourceIdentity,
+    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
+        self.observations.fetch_add(1, Ordering::SeqCst);
+        self.progress
+            .lock()
+            .map_err(|_| ProOutputSinkError::new("test_lock", "test progress lock poisoned"))
+            .map(|progress| progress.clone())
+    }
+
+    fn materialize_page(
+        &self,
+        page: ProOutputMaterializationPage,
+    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
+        self.pages.fetch_add(1, Ordering::SeqCst);
+        if self.fail_pages {
+            return Err(ProOutputSinkError::new(
+                "helper_crashed",
+                "simulated Pro output failure",
+            ));
+        }
+        let accepted_outputs = u32::try_from(page.observations.len()).unwrap();
+        let committed_cursor = page.next_safe_cursor.clone();
+        *self
+            .progress
+            .lock()
+            .map_err(|_| ProOutputSinkError::new("test_lock", "test progress lock poisoned"))? =
+            Some(ProOutputProgress {
+                source_epoch: page.source_epoch,
+                observed_revision: page.observed_revision,
+                cursor: Some(committed_cursor.clone()),
+                parser_revision: page.parser_revision,
+                materializer_revision: page.materializer_revision,
+                terminal: page.terminal,
+            });
+        Ok(ProOutputPageResult {
+            source_epoch: page.source_epoch,
+            committed_cursor,
+            accepted_outputs,
+            materialized_facts: accepted_outputs,
+            replayed: false,
+        })
+    }
+
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn unchanged_codex_catalog_session_replays_on_first_pro_activation_without_core_rewrite() {
+    let temp = tempdir();
+    let source_root = temp.path().join("codex-sessions");
+    fs::create_dir_all(&source_root).unwrap();
+    let session_path = source_root.join("session.jsonl");
+    let transcript = [
+        json!({
+            "timestamp": "2026-07-23T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "019f92f1-0000-7000-8000-000000000001",
+                "timestamp": "2026-07-23T12:00:00Z",
+                "cwd": "/workspace/ctx",
+                "originator": "codex-cli"
+            }
+        }),
+        json!({
+            "timestamp": "2026-07-23T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "catalog-call",
+                "arguments": "{\"cmd\":\"printf catalog\"}"
+            }
+        }),
+        json!({
+            "timestamp": "2026-07-23T12:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "catalog-call",
+                "output": "unchanged catalog output"
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|record| format!("{record}\n"))
+    .collect::<String>();
+    fs::write(&session_path, transcript).unwrap();
+
+    let source = explicit_path_source(CaptureProvider::Codex, source_root.clone());
+    let db_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&db_path).unwrap();
+    let first_inventory =
+        inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
+    assert_eq!(first_inventory.catalog.parsed_sessions, 1);
+    let first_plan = first_inventory.sources.into_iter().next().unwrap();
+    let first = import_one_source_for_search_refresh(
+        &mut store,
+        &first_plan.source,
+        None,
+        &first_plan.preinventory,
+    )
+    .unwrap();
+    assert_eq!(first.failed, 0);
+    assert!(first.imported_sessions > 0);
+    assert!(store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, &source_root.display().to_string())
+        .unwrap()
+        .is_empty());
+
+    let second_inventory =
+        inventory_import_sources(&store, vec![source.clone()], true, true).unwrap();
+    assert_eq!(second_inventory.catalog.cached_sessions, 1);
+    assert_eq!(second_inventory.catalog.parsed_sessions, 0);
+    let available_catalog_rows: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "select count(*) from catalog_sessions where source_path = ?1 and is_stale = 0",
+            [session_path.display().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(available_catalog_rows, 1);
+    let second_plan = second_inventory.sources.into_iter().next().unwrap();
+    let core_sessions_before: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from sessions", [], |row| row.get(0))
+        .unwrap();
+    let core_events_before: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from events", [], |row| row.get(0))
+        .unwrap();
+    let sink = Arc::new(RecordingProOutputSink::new(false));
+    let profile = ImportProfile::CoreAndPro(sink.clone());
+
+    let catch_up = import_one_source_for_search_refresh_with_profile(
+        &mut store,
+        &second_plan.source,
+        None,
+        &second_plan.preinventory,
+        &profile,
+    )
+    .unwrap();
+
+    assert_eq!(catch_up.failed, 0);
+    assert_eq!(
+        Connection::open(&db_path)
+            .unwrap()
+            .query_row("select count(*) from sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        core_sessions_before
+    );
+    assert_eq!(
+        Connection::open(&db_path)
+            .unwrap()
+            .query_row("select count(*) from events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        core_events_before
+    );
+    assert!(sink.observations.load(Ordering::SeqCst) > 0);
+    assert!(sink.pages.load(Ordering::SeqCst) > 0);
+    assert!(!sink.behind.load(Ordering::SeqCst));
+    assert!(store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, &source_root.display().to_string())
+        .unwrap()
+        .is_empty());
+}
+
+fn imported_hermes_source() -> (tempfile::TempDir, SourceInfo, std::path::PathBuf) {
+    let temp = tempdir();
+    let source_path = temp.path().join("hermes.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "create table sessions (
+                 id text primary key,
+                 source text not null,
+                 started_at real not null
+             );
+             create table messages (
+                 id integer primary key,
+                 session_id text not null,
+                 role text not null,
+                 content text,
+                 tool_call_id text,
+                 timestamp real not null,
+                 finish_reason text
+             );
+             insert into sessions values ('session-id', 'acp', 1782259200.0);
+             insert into messages values (
+                 1, 'session-id', 'tool', 'complete output', 'call-id',
+                 1782259201.0, 'success'
+             );",
+        )
+        .unwrap();
+    drop(source_db);
+
+    let source = explicit_path_source(CaptureProvider::Hermes, source_path);
+    let db_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&db_path).unwrap();
+    let inventory = inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
+    let plan = inventory.sources.into_iter().next().unwrap();
+    let summary =
+        import_one_source_for_search_refresh(&mut store, &plan.source, None, &plan.preinventory)
+            .unwrap();
+    assert!(summary.imported_sessions > 0);
+    let cursor_count: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from sync_cursors", [], |row| row.get(0))
+        .unwrap();
+    assert!(cursor_count > 0);
+    (temp, source, db_path)
+}
+
+#[test]
+fn first_pro_activation_replays_an_unchanged_core_source_then_catch_up_is_a_noop() {
+    let (_temp, source, db_path) = imported_hermes_source();
+    let mut store = Store::open(&db_path).unwrap();
+    let inventory = inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
+    let plan = inventory.sources.into_iter().next().unwrap();
+    assert!(store
+        .list_pending_source_import_files(source.provider, &source.path.display().to_string())
+        .unwrap()
+        .is_empty());
+    let core_events_before: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from events", [], |row| row.get(0))
+        .unwrap();
+    let sink = Arc::new(RecordingProOutputSink::new(false));
+    let profile = ImportProfile::CoreAndPro(sink.clone());
+
+    let summary = import_one_source_for_search_refresh_with_profile(
+        &mut store,
+        &plan.source,
+        None,
+        &plan.preinventory,
+        &profile,
+    )
+    .unwrap();
+
+    let core_events_after: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(core_events_after, core_events_before);
+    assert_eq!(summary.failed, 0);
+    assert!(sink.observations.load(Ordering::SeqCst) > 0);
+    assert!(sink.pages.load(Ordering::SeqCst) > 0);
+    assert!(!sink.behind.load(Ordering::SeqCst));
+
+    let pages_after_activation = sink.pages.load(Ordering::SeqCst);
+    let second = import_one_source_for_search_refresh_with_profile(
+        &mut store,
+        &plan.source,
+        None,
+        &plan.preinventory,
+        &profile,
+    )
+    .unwrap();
+    assert_eq!(second.failed, 0);
+    assert_eq!(
+        sink.pages.load(Ordering::SeqCst),
+        pages_after_activation,
+        "an unchanged source at its terminal private cursor must not materialize another page"
+    );
+    assert_eq!(
+        Connection::open(&db_path)
+            .unwrap()
+            .query_row("select count(*) from events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        core_events_before
+    );
+}
+
+#[test]
+fn pro_output_failure_does_not_fail_unchanged_core_import() {
+    let (_temp, source, db_path) = imported_hermes_source();
+    let mut store = Store::open(&db_path).unwrap();
+    let inventory = inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
+    let plan = inventory.sources.into_iter().next().unwrap();
+    let core_events_before: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from events", [], |row| row.get(0))
+        .unwrap();
+    let sink = Arc::new(RecordingProOutputSink::new(true));
+    let profile = ImportProfile::CoreAndPro(sink.clone());
+
+    let result = import_one_source_for_search_refresh_with_profile(
+        &mut store,
+        &plan.source,
+        None,
+        &plan.preinventory,
+        &profile,
+    );
+
+    assert!(result.is_ok(), "{result:?}");
+    let core_events_after: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row("select count(*) from events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(core_events_after, core_events_before);
+    assert!(sink.observations.load(Ordering::SeqCst) > 0);
+    assert!(sink.pages.load(Ordering::SeqCst) > 0);
+    assert!(sink.behind.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -922,6 +1178,7 @@ fn manifested_inventory_preserves_history_across_confirmed_missing_files() {
         None,
         true,
         ctx_history_capture::CaptureWorkLimit::Drain,
+        &ctx_history_capture::ImportProfile::CoreOnly,
     )
     .unwrap();
     assert_eq!(missing_noop.imported_sessions, 0);

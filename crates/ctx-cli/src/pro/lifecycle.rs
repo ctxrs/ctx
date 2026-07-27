@@ -93,12 +93,119 @@ enum TransactionState {
     Committed,
 }
 
+#[derive(Debug)]
+struct SetupRepairRequiredError {
+    message: &'static str,
+}
+
+impl std::fmt::Display for SetupRepairRequiredError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for SetupRepairRequiredError {}
+
+fn setup_repair_required(message: &'static str) -> anyhow::Error {
+    anyhow::Error::new(SetupRepairRequiredError { message })
+}
+
+pub(in crate::pro) fn is_setup_repair_required_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SetupRepairRequiredError>().is_some()
+}
+
+pub(in crate::pro) fn installation_artifacts_present(data_root: &Path) -> bool {
+    let target = default_helper_path(data_root);
+    let Some(bin) = target.parent() else {
+        return true;
+    };
+    let Some(pro) = bin.parent() else {
+        return true;
+    };
+    for directory in [
+        data_root.to_path_buf(),
+        pro.to_path_buf(),
+        bin.to_path_buf(),
+    ] {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return true,
+        }
+    }
+    let paths = [
+        Ok(target.clone()),
+        install_marker_path(&target),
+        previous_helper_path(&target),
+        previous_marker_path(&target),
+        transaction_journal_path(&target),
+        transaction_journal_next_path(&target),
+        transaction_helper_path(&target),
+        transaction_marker_path(&target),
+        publish_helper_path(&target),
+        publish_marker_path(&target),
+        rollback_helper_stage_path(&target),
+        rollback_marker_stage_path(&target),
+    ];
+    paths.into_iter().any(|path| {
+        let Ok(path) = path else {
+            return true;
+        };
+        match fs::symlink_metadata(path) {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
+    })
+}
+
 #[derive(Debug, Clone)]
-struct ValidatedPair {
+pub(super) struct ValidatedPair {
     identity: PairIdentity,
     artifact: Vec<u8>,
     marker: Vec<u8>,
     manifest: ProManifest,
+}
+
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub(super) enum SetupInstallation {
+    Current(ValidatedPair),
+    Missing,
+    RepairRequired,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum PairInspection {
+    Absent,
+    Untrusted,
+    Valid(ValidatedPair),
+}
+
+impl PairInspection {
+    fn is_untrusted(&self) -> bool {
+        matches!(self, Self::Untrusted)
+    }
+}
+
+impl SetupInstallation {
+    fn installed_version(&self) -> Option<&str> {
+        match self {
+            Self::Current(pair) => Some(pair.manifest.version.as_str()),
+            Self::Missing | Self::RepairRequired => None,
+        }
+    }
+
+    fn is_repair_required(&self) -> bool {
+        matches!(self, Self::RepairRequired)
+    }
+
+    fn into_current(self) -> Option<ValidatedPair> {
+        match self {
+            Self::Current(pair) => Some(pair),
+            Self::Missing | Self::RepairRequired => None,
+        }
+    }
 }
 
 impl PairIdentity {
@@ -145,8 +252,11 @@ pub(super) fn validated_installed_helper_path(data_root: &Path) -> Result<PathBu
 }
 
 pub(super) fn validated_installed_helper(data_root: &Path) -> Result<VerifiedHelperExecutable> {
-    let trust = CommercialConfig::production()?.release_trust;
     let target = default_helper_path(data_root);
+    if !installation_artifacts_present(data_root) {
+        bail!("pro_not_installed: signed Pro helper is not installed");
+    }
+    let trust = CommercialConfig::production()?.release_trust;
     let _lifecycle_lock = LifecycleLock::acquire(&target, false)?
         .ok_or_else(|| anyhow!("pro_not_installed: signed Pro helper is not installed"))?;
     let pair =
@@ -178,6 +288,14 @@ fn validated_installed_helper_path_with_key(
     Ok(target)
 }
 
+#[cfg(test)]
+fn lifecycle_status_json_with_key(data_root: &Path, public_key_pem: &str) -> serde_json::Value {
+    let helper = super::client::status_with_helper_resolver(data_root, |data_root| {
+        validated_installed_helper_path_with_key(data_root, public_key_pem)
+    });
+    commands::lifecycle_status_value(helper, false)
+}
+
 pub(crate) fn install_verified_bundle(
     bundle: &VerifiedArtifactBundle,
     data_root: &Path,
@@ -187,18 +305,21 @@ pub(crate) fn install_verified_bundle(
     let target = default_helper_path(data_root);
     let _lifecycle_lock = LifecycleLock::acquire(&target, true)?
         .ok_or_else(|| anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
-    let current =
-        reconcile_installation_locked(&target, trust.public_key_pem, &mut Persistence::default())?;
-    if let Some(current) = &current {
+    let installation = reconcile_setup_installation_locked(
+        &target,
+        trust.public_key_pem,
+        &mut Persistence::default(),
+    )?;
+    if let SetupInstallation::Current(current) = &installation {
         validate_manifest_release_trust(&current.manifest, trust)?;
     }
     let manifest_bytes = read_bounded(&args.manifest, MAX_MANIFEST_BYTES, "manifest")?;
     let signature = read_bounded(&args.signature, MAX_SIGNATURE_BYTES, "signature")?;
     let _ = verified_manifest_for_trust(&manifest_bytes, &signature, trust)?;
-    install_with_key_locked(
+    install_for_setup_with_key_locked(
         &args,
         data_root,
-        current.is_some(),
+        installation,
         trust.public_key_pem,
         &mut Persistence::default(),
     )
@@ -224,6 +345,7 @@ fn install_with_key(
     )
 }
 
+#[cfg(test)]
 fn install_with_key_locked(
     args: &ProInstallArgs,
     data_root: &Path,
@@ -239,10 +361,49 @@ fn install_with_key_locked(
     if !require_existing && current.is_some() {
         bail!("invalid_request: Pro is already installed; use ctx pro update");
     }
+    install_candidate_with_key_locked(
+        args,
+        data_root,
+        current.as_ref(),
+        require_existing,
+        public_key_pem,
+        persistence,
+    )
+}
+
+fn install_for_setup_with_key_locked(
+    args: &ProInstallArgs,
+    data_root: &Path,
+    installation: SetupInstallation,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<serde_json::Value> {
+    let replacing_existing =
+        installation.is_repair_required() || matches!(&installation, SetupInstallation::Current(_));
+    let current = installation.into_current();
+    install_candidate_with_key_locked(
+        args,
+        data_root,
+        current.as_ref(),
+        replacing_existing,
+        public_key_pem,
+        persistence,
+    )
+}
+
+fn install_candidate_with_key_locked(
+    args: &ProInstallArgs,
+    data_root: &Path,
+    current: Option<&ValidatedPair>,
+    replacing_existing: bool,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<serde_json::Value> {
+    let target = default_helper_path(data_root);
     let manifest_bytes = read_bounded(&args.manifest, MAX_MANIFEST_BYTES, "manifest")?;
     let signature = read_bounded(&args.signature, MAX_SIGNATURE_BYTES, "signature")?;
     let manifest = verified_manifest(&manifest_bytes, &signature, public_key_pem)?;
-    if let Some(current) = &current {
+    if let Some(current) = current {
         validate_update(current, &manifest)?;
     }
     let artifact = read_bounded(&args.artifact, MAX_ARTIFACT_BYTES, "artifact")?;
@@ -259,7 +420,7 @@ fn install_with_key_locked(
     let new_identity = PairIdentity::new(&artifact, &marker_bytes, &manifest);
     install_transaction_locked(
         &target,
-        current.as_ref(),
+        current,
         &artifact,
         &marker_bytes,
         new_identity,
@@ -269,7 +430,7 @@ fn install_with_key_locked(
     Ok(json!({
         "schema_version": 1,
         "installed": true,
-        "updated": require_existing,
+        "updated": replacing_existing,
         "version": manifest.version,
         "source_commit": manifest.source_commit,
         "helper_path": target,
@@ -437,6 +598,7 @@ fn write_journal(
     sync_install_directory(target, persistence, "fsync_transaction_journal_directory")
 }
 
+#[cfg(test)]
 fn reconcile_installation(
     target: &Path,
     public_key_pem: &str,
@@ -448,40 +610,75 @@ fn reconcile_installation(
     reconcile_installation_locked(target, public_key_pem, persistence)
 }
 
+fn reconcile_setup_installation_locked(
+    target: &Path,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+) -> Result<SetupInstallation> {
+    reconcile_installation_locked_with_setup_repair(target, public_key_pem, persistence, true)
+}
+
 fn reconcile_installation_locked(
     target: &Path,
     public_key_pem: &str,
     persistence: &mut Persistence,
 ) -> Result<Option<ValidatedPair>> {
+    match reconcile_installation_locked_with_setup_repair(
+        target,
+        public_key_pem,
+        persistence,
+        false,
+    )? {
+        SetupInstallation::Current(pair) => Ok(Some(pair)),
+        SetupInstallation::Missing => Ok(None),
+        SetupInstallation::RepairRequired => Err(setup_repair_required(
+            "invalid_response: installed Pro helper and marker do not form a trusted pair",
+        )),
+    }
+}
+
+fn reconcile_installation_locked_with_setup_repair(
+    target: &Path,
+    public_key_pem: &str,
+    persistence: &mut Persistence,
+    allow_setup_repair: bool,
+) -> Result<SetupInstallation> {
     let Some(parent) = target.parent() else {
         bail!("invalid_request: Pro install path has no parent");
     };
     if !parent.exists() {
-        return Ok(None);
+        return Ok(SetupInstallation::Missing);
     }
     protect_existing_installation(target)?;
     let journal_path = transaction_journal_path(target)?;
     if !journal_path.exists() {
-        let current = load_pair_at(target, &install_marker_path(target)?, public_key_pem);
-        let current_was_invalid = current.is_err();
-        if let Ok(Some(pair)) = current {
+        let current = inspect_pair_at(target, &install_marker_path(target)?, public_key_pem)?;
+        let current_untrusted = current.is_untrusted();
+        if let PairInspection::Valid(pair) = current {
             cleanup_transaction_files(target, persistence)?;
-            return Ok(Some(pair));
+            return Ok(SetupInstallation::Current(pair));
         }
-        if let Some(previous) = load_pair_at(
+        let previous = inspect_pair_at(
             &previous_helper_path(target)?,
             &previous_marker_path(target)?,
             public_key_pem,
-        )? {
+        )?;
+        let previous_untrusted = previous.is_untrusted();
+        if let PairInspection::Valid(previous) = previous {
             publish_current(target, &previous, public_key_pem, persistence)?;
             cleanup_transaction_files(target, persistence)?;
-            return Ok(Some(previous));
+            return Ok(SetupInstallation::Current(previous));
         }
-        if current_was_invalid {
-            bail!("invalid_response: installed Pro helper and marker do not form a trusted pair");
+        if current_untrusted || previous_untrusted {
+            if allow_setup_repair {
+                return Ok(SetupInstallation::RepairRequired);
+            }
+            return Err(setup_repair_required(
+                "invalid_response: installed Pro helper and marker do not form a trusted pair",
+            ));
         }
         cleanup_transaction_files(target, persistence)?;
-        return Ok(None);
+        return Ok(SetupInstallation::Missing);
     }
 
     let journal_bytes = read_bounded(
@@ -506,10 +703,34 @@ fn reconcile_installation_locked(
         old.as_ref()
     };
     let Some(chosen) = chosen else {
+        if transaction.state == TransactionState::Committed {
+            if allow_setup_repair {
+                let current =
+                    inspect_pair_at(target, &install_marker_path(target)?, public_key_pem)?;
+                if let PairInspection::Valid(current) = current {
+                    cleanup_transaction_files(target, persistence)?;
+                    return Ok(SetupInstallation::Current(current));
+                }
+                let previous = inspect_pair_at(
+                    &previous_helper_path(target)?,
+                    &previous_marker_path(target)?,
+                    public_key_pem,
+                )?;
+                if let PairInspection::Valid(previous) = previous {
+                    publish_current(target, &previous, public_key_pem, persistence)?;
+                    cleanup_transaction_files(target, persistence)?;
+                    return Ok(SetupInstallation::Current(previous));
+                }
+                return Ok(SetupInstallation::RepairRequired);
+            }
+            return Err(setup_repair_required(
+                "invalid_response: Pro transaction contains no recoverable signed helper pair",
+            ));
+        }
         if transaction.old.is_none() && transaction.state == TransactionState::Preparing {
             remove_current_pair(target, persistence)?;
             cleanup_transaction_files(target, persistence)?;
-            return Ok(None);
+            return Ok(SetupInstallation::Missing);
         }
         bail!("invalid_response: Pro transaction contains no recoverable signed helper pair");
     };
@@ -523,7 +744,7 @@ fn reconcile_installation_locked(
     let installed = load_pair_at(target, &install_marker_path(target)?, public_key_pem)?
         .ok_or_else(|| anyhow!("invalid_response: recovered Pro helper pair is missing"))?;
     cleanup_transaction_files(target, persistence)?;
-    Ok(Some(installed))
+    Ok(SetupInstallation::Current(installed))
 }
 
 fn protect_install_directory_tree(target: &Path) -> Result<()> {
@@ -637,25 +858,31 @@ fn find_pair(
         publish_marker_path(target)?,
         rollback_marker_stage_path(target)?,
     ];
-    let artifact = helper_paths
-        .iter()
-        .filter_map(|path| read_candidate(path, MAX_ARTIFACT_BYTES).ok().flatten())
-        .find(|bytes| {
-            bytes.len() as u64 == identity.artifact_size
-                && format!("{:x}", Sha256::digest(bytes)) == identity.artifact_sha256
-        });
-    let marker = marker_paths
-        .iter()
-        .filter_map(|path| {
-            read_candidate(path, MAX_INSTALL_MARKER_BYTES)
-                .ok()
-                .flatten()
-        })
+    let mut artifacts = Vec::new();
+    for path in &helper_paths {
+        if let Some(bytes) = read_candidate(path, MAX_ARTIFACT_BYTES)? {
+            artifacts.push(bytes);
+        }
+    }
+    let mut markers = Vec::new();
+    for path in &marker_paths {
+        if let Some(bytes) = read_candidate(path, MAX_INSTALL_MARKER_BYTES)? {
+            markers.push(bytes);
+        }
+    }
+    let artifact = artifacts.into_iter().find(|bytes| {
+        bytes.len() as u64 == identity.artifact_size
+            && format!("{:x}", Sha256::digest(bytes)) == identity.artifact_sha256
+    });
+    let marker = markers
+        .into_iter()
         .find(|bytes| format!("{:x}", Sha256::digest(bytes)) == identity.marker_sha256);
     let (Some(artifact), Some(marker)) = (artifact, marker) else {
         return Ok(None);
     };
-    let pair = validate_pair_bytes(artifact, marker, public_key_pem)?;
+    let Ok(pair) = validate_pair_bytes(artifact, marker, public_key_pem) else {
+        return Ok(None);
+    };
     if pair.identity != *identity {
         return Ok(None);
     }
@@ -667,14 +894,29 @@ fn load_pair_at(
     marker_path: &Path,
     public_key_pem: &str,
 ) -> Result<Option<ValidatedPair>> {
+    match inspect_pair_at(helper_path, marker_path, public_key_pem)? {
+        PairInspection::Absent => Ok(None),
+        PairInspection::Valid(pair) => Ok(Some(pair)),
+        PairInspection::Untrusted => {
+            bail!("invalid_response: Pro helper and marker do not form a trusted pair")
+        }
+    }
+}
+
+fn inspect_pair_at(
+    helper_path: &Path,
+    marker_path: &Path,
+    public_key_pem: &str,
+) -> Result<PairInspection> {
     let helper = read_candidate(helper_path, MAX_ARTIFACT_BYTES)?;
     let marker = read_candidate(marker_path, MAX_INSTALL_MARKER_BYTES)?;
     match (helper, marker) {
-        (None, None) => Ok(None),
-        (Some(helper), Some(marker)) => {
-            validate_pair_bytes(helper, marker, public_key_pem).map(Some)
-        }
-        _ => bail!("invalid_response: Pro helper and marker are incomplete"),
+        (None, None) => Ok(PairInspection::Absent),
+        (Some(helper), Some(marker)) => match validate_pair_bytes(helper, marker, public_key_pem) {
+            Ok(pair) => Ok(PairInspection::Valid(pair)),
+            Err(_) => Ok(PairInspection::Untrusted),
+        },
+        _ => Ok(PairInspection::Untrusted),
     }
 }
 
@@ -907,6 +1149,11 @@ fn sync_path_directory(
     persistence: &mut Persistence,
     boundary: &'static str,
 ) -> Result<()> {
+    sync_parent_directory(path)?;
+    persistence.boundary(boundary)
+}
+
+pub(super) fn sync_parent_directory(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("invalid_request: Pro install path has no parent"))?;
@@ -925,16 +1172,16 @@ fn sync_path_directory(
     directory
         .sync_all()
         .context("invalid_request: sync Pro install directory")?;
-    persistence.boundary(boundary)
+    Ok(())
 }
 
 #[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(super) fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
     fs::rename(source, target)
 }
 
 #[cfg(windows)]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(super) fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,

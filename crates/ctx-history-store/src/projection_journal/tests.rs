@@ -177,6 +177,55 @@ fn activation_is_deterministic_and_free_users_have_no_rows() {
 }
 
 #[test]
+fn semantic_epoch_and_projection_journal_commit_or_roll_back_together() {
+    let (_temp, store) = open_store();
+    store.activate_projection_journal(FINGERPRINT).unwrap();
+    let initial_version = store.canonical_semantic_projection_version().unwrap();
+    let mut searchable = event(Uuid::new_v4(), 1, json!({"text": "semantic input"}));
+    searchable.event_type = EventType::Message;
+    searchable.role = Some(EventRole::User);
+
+    store.begin_immediate_batch().unwrap();
+    store.upsert_event(&searchable).unwrap();
+    assert!(
+        store
+            .canonical_semantic_projection_version()
+            .unwrap()
+            .mutation_epoch
+            > initial_version.mutation_epoch
+    );
+    store.rollback_batch().unwrap();
+    assert_eq!(
+        store.canonical_semantic_projection_version().unwrap(),
+        initial_version
+    );
+    assert!(store
+        .projection_journal_snapshot(None)
+        .unwrap()
+        .records
+        .is_empty());
+
+    store.upsert_event(&searchable).unwrap();
+    assert!(
+        store
+            .canonical_semantic_projection_version()
+            .unwrap()
+            .mutation_epoch
+            > initial_version.mutation_epoch
+    );
+    assert_eq!(
+        store
+            .projection_journal_snapshot(None)
+            .unwrap()
+            .records
+            .last()
+            .expect("committed event journal record")
+            .stable_entity_id,
+        searchable.id
+    );
+}
+
+#[test]
 fn pages_are_count_bounded_frozen_and_contiguous() {
     let (_temp, store) = open_store();
     let total = PROJECTION_JOURNAL_PAGE_SIZE as u128 + 6;
@@ -835,7 +884,7 @@ fn incremental_final_state_matches_a_fresh_baseline() {
 }
 
 #[test]
-fn file_vcs_and_result_evidence_use_revisioned_canonical_records() {
+fn file_and_vcs_records_remain_revisioned_when_linked_output_is_elided() {
     let (_temp, store) = open_store();
     store.activate_projection_journal(FINGERPRINT).unwrap();
     let event_id = Uuid::new_v4();
@@ -905,26 +954,10 @@ fn file_vcs_and_result_evidence_use_revisioned_canonical_records() {
             .iter()
             .map(|record| record.entity_kind)
             .collect::<Vec<_>>(),
-        vec![
-            JournalEntityKind::Event,
-            JournalEntityKind::FileTouch,
-            JournalEntityKind::VcsChange
-        ]
+        vec![JournalEntityKind::FileTouch, JournalEntityKind::VcsChange]
     );
-    let event_payload = &snapshot.records[0].canonical_payload.as_ref().unwrap()["result"];
-    assert_eq!(event_payload["outcome"], "success");
-    assert_eq!(event_payload["identifiers"][0]["value"], "call-1");
-    assert_eq!(
-        snapshot.records[0].canonical_payload.as_ref().unwrap()["payload"],
-        json!({})
-    );
-    assert!(
-        snapshot.records[0].canonical_payload.as_ref().unwrap()["payload"]
-            .get("result_evidence")
-            .is_none()
-    );
-    assert_eq!(snapshot.records[1].stable_entity_id, file.id);
-    assert_eq!(snapshot.records[2].stable_entity_id, change_id);
+    assert_eq!(snapshot.records[0].stable_entity_id, file.id);
+    assert_eq!(snapshot.records[1].stable_entity_id, change_id);
 
     file.sync.deleted_at = Some(now());
     store.upsert_file_touched(&file).unwrap();
@@ -993,7 +1026,7 @@ fn complete_content_and_repository_roots_never_enter_payloads() {
 }
 
 #[test]
-fn baseline_orders_events_by_source_coordinates_instead_of_entity_uuid() {
+fn outputs_are_absent_from_journal_baselines_and_deltas() {
     let (_temp, store) = open_store();
     let source_id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
@@ -1022,14 +1055,46 @@ fn baseline_orders_events_by_source_coordinates_instead_of_entity_uuid() {
         .expect("lexically last command");
 
     store.activate_projection_journal(FINGERPRINT).unwrap();
-    let records = store.projection_journal_snapshot(None).unwrap().records;
+    let baseline = store.projection_journal_snapshot(None).unwrap();
     assert_eq!(
-        records
+        baseline
+            .records
             .iter()
             .map(|record| record.stable_entity_id)
             .collect::<Vec<_>>(),
-        vec![command_id, result_id]
+        vec![command_id]
     );
+
+    let mut later_result = event(
+        Uuid::new_v4(),
+        42,
+        json!({
+            "body": {
+                "call_id": "call-2",
+                "result_outcome": "failure",
+                "output_preview": "sparse failure diagnostic"
+            }
+        }),
+    );
+    later_result.event_type = EventType::CommandOutput;
+    later_result.session_id = Some(session_id);
+    later_result.capture_source_id = Some(source_id);
+    later_result.sync.metadata = json!({"source_record_ordinal": 42});
+    store.upsert_event(&later_result).expect("later output");
+
+    let later_call_id = Uuid::new_v4();
+    let mut later_call = event(later_call_id, 43, json!({"body": {"call_id": "call-2"}}));
+    later_call.session_id = Some(session_id);
+    later_call.capture_source_id = Some(source_id);
+    later_call.sync.metadata = json!({"source_record_ordinal": 43});
+    store.upsert_event(&later_call).expect("later non-output");
+
+    let delta = store
+        .projection_journal_snapshot(Some(baseline.next_position))
+        .unwrap();
+    assert_eq!(delta.records.len(), 1);
+    assert_eq!(delta.records[0].stable_entity_id, later_call_id);
+    assert_eq!(delta.records[0].entity_kind, JournalEntityKind::Event);
 }
 
 #[test]

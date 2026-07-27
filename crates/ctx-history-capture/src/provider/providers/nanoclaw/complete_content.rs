@@ -4,13 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::ProviderEventEnvelope;
-
-use crate::captured_batch::{CapturedSqliteValue, NativeLocator};
 use crate::complete_content::sqlite::{
     configure_complete_content_sqlite_connection, CompleteContentSqliteBoundError,
     CompleteContentSqliteQueryBudget,
 };
+use crate::native_source::{NativeLocator, NativeSqliteValue};
 use crate::provider::provider_safe_path_segment;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, open_provider_sqlite_readonly, sqlite_table_columns,
@@ -24,18 +22,17 @@ use super::position::{
 use super::project::{
     nanoclaw_project_root, NanoClawProjectDatabaseSnapshot, NanoClawSqliteSnapshot,
 };
-use super::projection::nanoclaw_event_for_complete;
+use super::projection::{nanoclaw_core_event, NanoClawCoreEvent};
 use super::rows::{
-    nanoclaw_hydrate_message, nanoclaw_hydrate_session, nanoclaw_message_values_for_content_digest,
-    nanoclaw_session_candidate_by_rowid, nanoclaw_session_captured_values,
-    nanoclaw_session_columns,
+    nanoclaw_hydrate_native_message, nanoclaw_hydrate_native_session,
+    nanoclaw_message_digest_values, nanoclaw_session_candidate_by_rowid, nanoclaw_session_columns,
 };
 
 pub(crate) struct NanoClawCompleteRecord {
     pub(crate) provider_session_id: String,
-    pub(crate) event: ProviderEventEnvelope,
+    pub(crate) event: NanoClawCoreEvent,
     pub(crate) text: String,
-    pub(crate) values: Vec<CapturedSqliteValue>,
+    pub(crate) values: Vec<NativeSqliteValue>,
 }
 
 /// One bounded, caller-selected view of a NanoClaw project.
@@ -86,7 +83,7 @@ pub(crate) fn selected_component_addresses(
         else {
             continue;
         };
-        let (session, _) = nanoclaw_hydrate_session(central, &session_columns, candidate.rowid)?;
+        let session = nanoclaw_hydrate_native_session(central, &session_columns, candidate.rowid)?;
         if !provider_safe_path_segment(&session.agent_group_id)
             || !provider_safe_path_segment(&session.id)
         {
@@ -153,8 +150,8 @@ impl NanoClawCompleteProject {
             self.components.insert(key, None);
             return Ok(());
         };
-        let (session, _) =
-            nanoclaw_hydrate_session(&self.central, &self.session_columns, candidate.rowid)?;
+        let session =
+            nanoclaw_hydrate_native_session(&self.central, &self.session_columns, candidate.rowid)?;
         if !provider_safe_path_segment(&session.agent_group_id)
             || !provider_safe_path_segment(&session.id)
         {
@@ -197,8 +194,8 @@ impl NanoClawCompleteProject {
         else {
             return Ok(None);
         };
-        let (session, _) =
-            nanoclaw_hydrate_session(&self.central, &self.session_columns, candidate.rowid)?;
+        let session =
+            nanoclaw_hydrate_native_session(&self.central, &self.session_columns, candidate.rowid)?;
         if !provider_safe_path_segment(&session.agent_group_id)
             || !provider_safe_path_segment(&session.id)
         {
@@ -233,7 +230,7 @@ impl NanoClawCompleteProject {
         }
         let columns = sqlite_table_columns(&conn, table)?;
         ensure_sqlite_table_columns(&columns, table, &["id"])?;
-        let mut logical_values = match nanoclaw_hydrate_message(
+        let message = match nanoclaw_hydrate_native_message(
             &conn,
             &columns,
             coordinate.source,
@@ -243,10 +240,7 @@ impl NanoClawCompleteProject {
             Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        logical_values.extend(nanoclaw_session_captured_values(&session));
-        let (message, _) = super::rows::decode_nanoclaw_message_record(&logical_values)?;
-        let digest_value_count = nanoclaw_message_values_for_content_digest(&logical_values)?.len();
-        logical_values.truncate(digest_value_count);
+        let logical_values = nanoclaw_message_digest_values(&message);
         if !component.revalidate()? || !self.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
@@ -261,7 +255,7 @@ impl NanoClawCompleteProject {
             })
             .transpose()?;
         let (event, text) =
-            nanoclaw_event_for_complete(&session, &message, seq, chrono::DateTime::UNIX_EPOCH);
+            nanoclaw_core_event(&session, &message, seq, chrono::DateTime::UNIX_EPOCH);
         Ok(Some(NanoClawCompleteRecord {
             provider_session_id: format!("{}/{}", session.agent_group_id, session.id),
             event,
@@ -280,13 +274,5 @@ impl NanoClawCompleteProject {
             }
         }
         Ok(self.central_snapshot.revalidate(&self.central_path)?)
-    }
-
-    #[cfg(test)]
-    pub(super) fn replace_query_budget_for_test(
-        &mut self,
-        query_budget: CompleteContentSqliteQueryBudget,
-    ) {
-        self.query_budget = query_budget;
     }
 }

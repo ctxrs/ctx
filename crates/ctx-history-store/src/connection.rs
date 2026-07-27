@@ -50,6 +50,12 @@ impl Store {
             import_batch_depth: Default::default(),
             event_search_projection_capabilities: Default::default(),
             projection_journal_active_in_batch: Default::default(),
+            projection_journal_group_collector: Default::default(),
+            native_path_group_token: Default::default(),
+            native_path_mutation_scope: Default::default(),
+            native_path_group_poisoned: Default::default(),
+            native_path_transaction_control_scope: Default::default(),
+            event_search_bulk_group_admission_outstanding: Default::default(),
         };
         store.initialize_event_search_projection_capabilities()?;
         Ok(store)
@@ -86,6 +92,12 @@ impl Store {
             import_batch_depth: Default::default(),
             event_search_projection_capabilities: Default::default(),
             projection_journal_active_in_batch: Default::default(),
+            projection_journal_group_collector: Default::default(),
+            native_path_group_token: Default::default(),
+            native_path_mutation_scope: Default::default(),
+            native_path_group_poisoned: Default::default(),
+            native_path_transaction_control_scope: Default::default(),
+            event_search_bulk_group_admission_outstanding: Default::default(),
         };
         store.migrate()?;
         restrict_existing_sqlite_auxiliary_files(&store.path)?;
@@ -102,7 +114,38 @@ impl Store {
         &self.path
     }
 
+    /// Returns whether no provider-owned Core projection has begun.
+    ///
+    /// Catalog rows and their owning history record are intentionally allowed:
+    /// the native import lifecycle creates those control rows before projecting
+    /// provider content. The predicate fails closed on every provider
+    /// projection, locator, route, and cursor table used by the fresh Codex
+    /// bootstrap path.
+    #[doc(hidden)]
+    pub fn fresh_provider_projection_eligible(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    NOT EXISTS (SELECT 1 FROM capture_sources)
+                    AND NOT EXISTS (SELECT 1 FROM provider_source_locators)
+                    AND NOT EXISTS (SELECT 1 FROM capture_source_provider_routes)
+                    AND NOT EXISTS (SELECT 1 FROM sessions)
+                    AND NOT EXISTS (SELECT 1 FROM session_edges)
+                    AND NOT EXISTS (SELECT 1 FROM runs)
+                    AND NOT EXISTS (SELECT 1 FROM events)
+                    AND NOT EXISTS (SELECT 1 FROM event_search_lookup)
+                    AND NOT EXISTS (SELECT 1 FROM files_touched)
+                    AND NOT EXISTS (SELECT 1 FROM sync_cursors)
+                "#,
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
     pub fn begin_immediate_batch(&self) -> Result<()> {
+        self.reject_unowned_native_path_transaction_control()?;
         let depth = self.batch_depth.get();
         if depth == 0 {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -116,6 +159,7 @@ impl Store {
     }
 
     pub fn commit_batch(&self) -> Result<()> {
+        self.reject_unowned_native_path_transaction_control()?;
         let depth = self.batch_depth.get();
         if depth == 0 {
             return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
@@ -134,6 +178,7 @@ impl Store {
     }
 
     pub fn rollback_batch(&self) -> Result<()> {
+        self.reject_unowned_native_path_transaction_control()?;
         let depth = self.batch_depth.get();
         if depth == 0 {
             return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
@@ -150,6 +195,16 @@ impl Store {
         // A savepoint may have activated or disabled the journal. Its cached
         // activity must be re-read after any rollback restores the prior state.
         self.projection_journal_active_in_batch.set(None);
+        Ok(())
+    }
+
+    fn reject_unowned_native_path_transaction_control(&self) -> Result<()> {
+        if self.native_path_group_token.get().is_some()
+            && !self.native_path_transaction_control_scope.get()
+        {
+            self.poison_native_path_group();
+            return Err(StoreError::NativePathTransactionControlDenied);
+        }
         Ok(())
     }
 

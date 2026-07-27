@@ -4,12 +4,171 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::schema::ddl::table_exists;
 use crate::schema::rebuild::sanitize_v44_result_event_payloads;
+use crate::schema::semantic_projection_epoch::install as install_semantic_projection_epoch;
 use crate::search::projections::rebuild_search_projection;
 use crate::{Result, StoreError, FINAL_SCHEMA_IDENTITY};
 
 const PRE_SOURCE_BACKED_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v2";
 const PRE_VERIFIED_CONTENT_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v3";
 const PRE_SOURCE_ROUTE_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v4";
+const PRE_SEMANTIC_EPOCH_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v5";
+const PRE_NATIVE_PATH_GENERATIONS_FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v6";
+
+pub(super) fn migrate_final_v47_native_path_source_generations(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "ctx_store_schema_identity")? {
+        return Ok(());
+    }
+    let identity = conn
+        .query_row(
+            "SELECT schema_identity FROM ctx_store_schema_identity
+             WHERE singleton = 1 AND schema_version = 47",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if identity.as_deref() != Some(PRE_NATIVE_PATH_GENERATIONS_FINAL_SCHEMA_IDENTITY) {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS native_path_source_generations (
+                 provider TEXT NOT NULL,
+                 source_format TEXT NOT NULL,
+                 machine_id TEXT NOT NULL,
+                 locator_identity TEXT NOT NULL,
+                 generation_id TEXT NOT NULL,
+                 cursor_stream TEXT NOT NULL,
+                 canonical_source_identity TEXT NOT NULL,
+                 source_revision TEXT NOT NULL,
+                 state TEXT NOT NULL CHECK (
+                     state IN ('staging', 'retiring', 'complete')
+                 ),
+                 frontier_kind TEXT,
+                 frontier_id TEXT,
+                 last_request_kind TEXT,
+                 last_request_id TEXT,
+                 last_next_kind TEXT,
+                 last_next_id TEXT,
+                 last_done INTEGER NOT NULL DEFAULT 0 CHECK (last_done IN (0, 1)),
+                 last_inspected INTEGER NOT NULL DEFAULT 0 CHECK (last_inspected >= 0),
+                 last_retired INTEGER NOT NULL DEFAULT 0 CHECK (last_retired >= 0),
+                 PRIMARY KEY (
+                     provider, source_format, machine_id, locator_identity,
+                     generation_id
+                 )
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS
+                 idx_native_path_source_generation_active
+             ON native_path_source_generations(
+                 provider, source_format, machine_id, locator_identity
+             )
+             WHERE state IN ('staging', 'retiring');
+             CREATE TABLE IF NOT EXISTS native_path_source_generation_entities (
+                 provider TEXT NOT NULL,
+                 source_format TEXT NOT NULL,
+                 machine_id TEXT NOT NULL,
+                 locator_identity TEXT NOT NULL,
+                 generation_id TEXT NOT NULL,
+                 entity_kind TEXT NOT NULL CHECK (
+                     entity_kind IN (
+                         'capture_source', 'session', 'session_edge', 'run',
+                         'event', 'file_touch'
+                     )
+                 ),
+                 entity_id TEXT NOT NULL,
+                 PRIMARY KEY (
+                     provider, source_format, machine_id, locator_identity,
+                     generation_id, entity_kind, entity_id
+                 ),
+                 FOREIGN KEY (
+                     provider, source_format, machine_id, locator_identity,
+                     generation_id
+                 ) REFERENCES native_path_source_generations(
+                     provider, source_format, machine_id, locator_identity,
+                     generation_id
+                 ) ON DELETE CASCADE
+             );",
+        )?;
+        let updated = conn.execute(
+            "UPDATE ctx_store_schema_identity SET schema_identity = ?1
+             WHERE singleton = 1 AND schema_version = 47 AND schema_identity = ?2",
+            [
+                FINAL_SCHEMA_IDENTITY,
+                PRE_NATIVE_PATH_GENERATIONS_FINAL_SCHEMA_IDENTITY,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::UnsupportedSchemaIdentity(
+                identity.unwrap_or_else(|| "missing".to_owned()),
+            ));
+        }
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK") {
+                return Err(StoreError::Sql(rollback_error));
+            }
+            Err(error)
+        }
+    }
+}
+
+pub(super) fn migrate_final_v47_semantic_projection_epoch(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "ctx_store_schema_identity")? {
+        return Ok(());
+    }
+    let identity = conn
+        .query_row(
+            "SELECT schema_identity FROM ctx_store_schema_identity
+             WHERE singleton = 1 AND schema_version = 47",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if identity.as_deref() != Some(PRE_SEMANTIC_EPOCH_FINAL_SCHEMA_IDENTITY) {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let migration = (|| -> Result<()> {
+        install_semantic_projection_epoch(conn)?;
+        let updated = conn.execute(
+            "UPDATE ctx_store_schema_identity SET schema_identity = ?1
+             WHERE singleton = 1 AND schema_version = 47 AND schema_identity = ?2",
+            [
+                FINAL_SCHEMA_IDENTITY,
+                PRE_SEMANTIC_EPOCH_FINAL_SCHEMA_IDENTITY,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::UnsupportedSchemaIdentity(
+                identity.unwrap_or_else(|| "missing".to_owned()),
+            ));
+        }
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK") {
+                return Err(StoreError::Sql(rollback_error));
+            }
+            Err(error)
+        }
+    }
+}
 
 pub(super) fn migrate_final_v47_provider_source_routes(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "ctx_store_schema_identity")? {
@@ -77,7 +236,7 @@ pub(super) fn migrate_final_v47_provider_source_routes(conn: &Connection) -> Res
             "UPDATE ctx_store_schema_identity SET schema_identity = ?1
              WHERE singleton = 1 AND schema_version = 47 AND schema_identity = ?2",
             [
-                FINAL_SCHEMA_IDENTITY,
+                PRE_SEMANTIC_EPOCH_FINAL_SCHEMA_IDENTITY,
                 PRE_SOURCE_ROUTE_FINAL_SCHEMA_IDENTITY,
             ],
         )?;

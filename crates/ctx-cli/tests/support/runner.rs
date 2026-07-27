@@ -9,10 +9,17 @@ use tempfile::{Builder, TempDir};
 pub(crate) fn tempdir() -> TempDir {
     let temp_root = fs::canonicalize(std::env::temp_dir())
         .expect("system temporary directory should be canonicalizable");
-    Builder::new()
+    let temp = Builder::new()
         .prefix("ctx-search-mvp-")
         .tempdir_in(temp_root)
-        .unwrap()
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    temp
 }
 
 pub(crate) fn ctx(temp: &TempDir) -> Command {

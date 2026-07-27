@@ -1,4 +1,7 @@
-use super::{support::*, write_codex_setup_session};
+use super::{
+    assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
+    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
+};
 
 #[test]
 fn import_accepts_deprecated_partial_as_a_compatibility_noop() {
@@ -53,6 +56,96 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
     assert!(stderr.contains(r#""operation":"import""#), "{stderr}");
+}
+
+#[test]
+fn machine_readable_native_import_preserves_json_without_autostarting_daemon() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let missing_exe = temp.path().join("missing-ctx-binary");
+    write_active_daemon_upgrade_handoff(&temp);
+
+    let import = json_output(
+        ctx(&temp)
+            .args([
+                "import",
+                "--provider",
+                "codex",
+                "--path",
+                &fixture,
+                "--json",
+                "--progress",
+                "none",
+            ])
+            .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
+            .env_remove("CI")
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF"),
+    );
+    assert_eq!(import["schema_version"], 2);
+    assert!(import["totals"]["imported_sessions"].as_u64().unwrap() > 0);
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn progress_json_native_import_does_not_autostart_or_nudge_daemon() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    write_active_daemon_upgrade_handoff(&temp);
+
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            &fixture,
+            "--progress",
+            "json",
+        ])
+        .env_remove("CI")
+        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn human_native_import_starts_a_reported_daemon_process() {
+    let temp = tempdir();
+    let binary = copied_ctx_binary(&temp);
+    let fixture = provider_history_fixture("codex-sessions");
+
+    ctx_from_binary(&temp, &binary)
+        .args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            &fixture,
+            "--progress",
+            "none",
+        ])
+        .env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2")
+        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
+        .env("CTX_UPGRADE_AUTO", "off")
+        .env_remove("CI")
+        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+        .assert()
+        .success();
+
+    let running = wait_for_daemon_status(&temp, "running", true, "import");
+    assert_eq!(running["daemon"]["start_mode"], "auto");
+    let pid = running["daemon"]["pid"].as_u64().unwrap() as u32;
+    assert_daemon_process_running(pid);
+
+    let completed = wait_for_daemon_status(&temp, "completed", false, "import");
+    assert_eq!(completed["daemon"]["pid"], pid);
+    assert!(completed["daemon"]["finished_at_ms"].as_i64().unwrap() > 0);
 }
 
 #[test]

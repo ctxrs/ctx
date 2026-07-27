@@ -85,7 +85,8 @@ Self-upgrade requires an official installer-managed binary and matching
 package-manager installs, and binaries whose SHA-256 no longer matches the
 sidecar are intentionally unmanaged.
 
-Background auto-upgrade is disabled by default. To remove an existing opt-in,
+Daemon-owned automatic upgrade is on by default for an official
+installer-managed binary while the daemon is enabled. To opt out persistently,
 run:
 
 ```bash
@@ -98,8 +99,9 @@ or for one process:
 CTX_UPGRADE_AUTO=off ctx search "query"
 ```
 
-Background checks log to `~/.ctx/logs/upgrade.log` and should not write to
-stdout or stderr.
+The automatic scheduler state is stored beside the managed executable in
+`.ctx.upgrade-state.json`; checks should not write to foreground stdout or
+stderr. With `daemon.enabled = false`, no automatic check occurs.
 
 ## Store Problems
 

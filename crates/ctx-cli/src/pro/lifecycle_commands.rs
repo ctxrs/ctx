@@ -9,22 +9,36 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use ctx_history_core::platform_security::{restrict_private_file, verify_private_file};
-use ctx_pro_host_protocol::{
-    Capability, ProFilesystemLayout, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
-};
+use ctx_pro_host_protocol::ProFilesystemLayout;
+#[cfg(test)]
+use ctx_pro_host_protocol::{Capability, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION};
 use serde_json::json;
 
 use super::{
     default_helper_path, install_marker_path, install_verified_bundle, previous_helper_path,
-    previous_marker_path, publish_helper_path, publish_marker_path, reconcile_installation,
-    rollback_helper_stage_path, rollback_marker_stage_path, transaction_helper_path,
+    previous_marker_path, publish_helper_path, publish_marker_path,
+    reconcile_setup_installation_locked, replace_file, rollback_helper_stage_path,
+    rollback_marker_stage_path, sync_parent_directory, transaction_helper_path,
     transaction_journal_next_path, transaction_journal_path, transaction_marker_path, Persistence,
+    SetupInstallation,
 };
 use crate::pro::artifact_delivery::VerifiedArtifactBundle;
-use crate::pro::client::{materialize, smoke_helper_at_path, status, HelperSmoke, ProStatus};
+#[cfg(test)]
+use crate::pro::client::HelperSmoke;
+use crate::pro::client::{
+    materialize, smoke_helper_at_path, status, ProSetupRepairability, ProStatus,
+};
 use crate::pro::commercial_lifecycle::CommercialLifecycleService;
 use crate::pro::lifecycle::lifecycle_manifest::ReleaseTrust;
-use crate::pro::local_deletion::LocalDeletionService;
+use crate::pro::local_deletion::{
+    clear_local_pro_initialization_indicator, local_pro_graph_data_exists,
+    local_pro_graph_key_cleanup_phase_exists, local_pro_initialization_indicator_exists,
+    write_local_pro_initialization_indicator, LocalDeletionService,
+};
+use crate::pro::pending_materialization;
+use crate::pro::setup_validation::{
+    setup_artifact, validate_account_state, validate_staged_helper,
+};
 use crate::{
     analytics::{
         send_pro_operation, Outcome, ProAccessStateV1, ProHelperConnectionOutcomeV1,
@@ -56,6 +70,8 @@ enum ProCommand {
 struct ProSetupArgs {
     #[arg(long)]
     json: bool,
+    #[arg(long, hide = true)]
+    defer_materialization: bool,
 }
 
 #[derive(Debug, Args)]
@@ -87,6 +103,13 @@ const UNINSTALL_DATA_PROMPT: &str =
 enum UninstallDataDisposition {
     Delete,
     Keep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalProDataOutcome {
+    Absent,
+    Deleted,
+    Preserved,
 }
 
 impl ProArgs {
@@ -137,6 +160,7 @@ pub(crate) trait ProLifecycleService {
 pub(crate) trait ProDeletionService {
     fn delete_graph_data(&mut self, data_root: &Path) -> Result<()>;
     fn delete_commercial_credentials(&mut self, data_root: &Path) -> Result<()>;
+    fn finish_deletion(&mut self, data_root: &Path) -> Result<()>;
 }
 
 pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf) -> Result<()> {
@@ -165,12 +189,25 @@ fn run_lifecycle_inner(
     telemetry: &mut ProLifecycleTelemetryV1,
 ) -> Result<()> {
     let json_output = args.json_output();
+    let defer_materialization = matches!(
+        &args.command,
+        Some(ProCommand::Setup(ProSetupArgs {
+            defer_materialization: true,
+            ..
+        }))
+    );
     match args.command {
         None | Some(ProCommand::Setup(_)) => {
             crate::identity::installation_id(data_root)
                 .context("key_store_unavailable: initialize local Pro installation identity")?;
             let mut service = CommercialLifecycleService::production(data_root)?;
-            run_setup(data_root, &mut service, json_output, telemetry)
+            run_setup(
+                data_root,
+                &mut service,
+                json_output,
+                defer_materialization,
+                telemetry,
+            )
         }
         Some(ProCommand::Manage(args)) => {
             let mut service = CommercialLifecycleService::production(data_root)?;
@@ -192,9 +229,10 @@ fn run_lifecycle_inner(
                 UninstallDataDisposition::Delete => {
                     let mut service = LocalDeletionService::production();
                     run_uninstall(data_root, Some(&mut service), disposition, json_output)
+                        .map(|_| ())
                 }
                 UninstallDataDisposition::Keep => {
-                    run_uninstall(data_root, None, disposition, json_output)
+                    run_uninstall(data_root, None, disposition, json_output).map(|_| ())
                 }
             }
         }
@@ -240,33 +278,42 @@ pub(crate) fn lifecycle_status_json(data_root: &Path) -> serde_json::Value {
     lifecycle_status_value(status(data_root), preserved_data_marker_is_set(data_root))
 }
 
-fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) -> serde_json::Value {
+pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) -> serde_json::Value {
     let (state, next_command, next_reason) = if !helper.installed {
-        if preserved_data {
-            (
+        match helper.setup_repairability {
+            ProSetupRepairability::Automated => (
+                "repair_required",
+                Some("ctx pro"),
+                "helper_artifacts_invalid",
+            ),
+            ProSetupRepairability::ManualDiagnosis => {
+                ("unavailable", None, "manual_diagnosis_required")
+            }
+            ProSetupRepairability::NotNeeded if preserved_data => (
                 "uninstalled_data_preserved",
-                "ctx pro",
+                Some("ctx pro"),
                 "restore_preserved_pro_data",
-            )
-        } else {
-            ("not_setup", "ctx pro", "helper_missing")
+            ),
+            ProSetupRepairability::NotNeeded => ("not_setup", Some("ctx pro"), "helper_missing"),
         }
     } else {
         match helper.error_code.as_deref() {
-            None if helper.ready => ("ready", "ctx pro manage", "billing_and_account"),
-            Some("entitlement_expired") => {
-                ("locked", "ctx pro manage", "subscription_or_trial_ended")
-            }
+            None if helper.ready => ("ready", Some("ctx pro manage"), "billing_and_account"),
+            Some("entitlement_expired") => (
+                "locked",
+                Some("ctx pro manage"),
+                "subscription_or_trial_ended",
+            ),
             Some("not_materialized" | "needs_rebuild" | "partial" | "needs_resume") => {
-                ("catch_up_required", "ctx pro", "graph_not_current")
+                ("catch_up_required", Some("ctx pro"), "graph_not_current")
             }
             Some("helper_upgrade_required" | "protocol_mismatch") => {
-                ("repair_required", "ctx pro", "helper_incompatible")
+                ("repair_required", Some("ctx pro"), "helper_incompatible")
             }
             Some("key_store_unavailable" | "key_store_locked" | "corrupt_graph") => {
-                ("repair_required", "ctx pro", "local_pro_unavailable")
+                ("repair_required", Some("ctx pro"), "local_pro_unavailable")
             }
-            Some(_) | None => ("unavailable", "ctx pro", "helper_unavailable"),
+            Some(_) | None => ("unavailable", Some("ctx pro"), "helper_unavailable"),
         }
     };
     json!({
@@ -295,23 +342,34 @@ fn run_setup(
     data_root: &Path,
     service: &mut dyn ProLifecycleService,
     json_output: bool,
+    defer_materialization: bool,
     telemetry: &mut ProLifecycleTelemetryV1,
 ) -> Result<()> {
     let trust = service.release_trust()?;
     let target = default_helper_path(data_root);
     telemetry.reconcile = ProReconcileOutcomeV1::Failed;
-    let current =
-        reconcile_installation(&target, trust.public_key_pem, &mut Persistence::default())?;
-    telemetry.reconcile = if current.is_some() {
-        ProReconcileOutcomeV1::Current
-    } else {
-        ProReconcileOutcomeV1::Missing
+    let (installation, plan) = with_pro_initialization(data_root, || {
+        let installation = reconcile_setup_installation_locked(
+            &target,
+            trust.public_key_pem,
+            &mut Persistence::default(),
+        )?;
+        let plan = service.setup(data_root, installation.installed_version())?;
+        Ok((installation, plan))
+    })?;
+    let replacing_existing = matches!(
+        &installation,
+        SetupInstallation::Current(_) | SetupInstallation::RepairRequired
+    );
+    telemetry.reconcile = match &installation {
+        SetupInstallation::Current(_) => ProReconcileOutcomeV1::Current,
+        SetupInstallation::Missing => ProReconcileOutcomeV1::Missing,
+        SetupInstallation::RepairRequired => ProReconcileOutcomeV1::Failed,
     };
-    let installed_version = current.as_ref().map(|pair| pair.manifest.version.as_str());
-    let plan = service.setup(data_root, installed_version)?;
     validate_account_state(&plan.account_state)?;
     telemetry.access_state = ProAccessStateV1::from_safe_name(&plan.account_state);
-    let helper_updated = if let Some(bundle) = plan.artifact {
+    let artifact = setup_artifact(&installation, plan.artifact)?;
+    let helper_updated = if let Some(bundle) = artifact {
         let smoke = match smoke_helper_at_path(data_root, &bundle.artifact) {
             Ok(smoke) => {
                 telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
@@ -325,21 +383,24 @@ fn run_setup(
         };
         validate_staged_helper(&smoke)?;
         install_verified_bundle(&bundle, data_root, trust)?;
-        telemetry.reconcile = if current.is_some() {
+        telemetry.reconcile = if replacing_existing {
             ProReconcileOutcomeV1::Updated
         } else {
             ProReconcileOutcomeV1::Installed
         };
         true
     } else {
-        if current.is_none() {
-            bail!("invalid_response: Pro setup returned no helper artifact for a new install");
-        }
         false
     };
-    // Repository authorization is derived from canonical activity. Until the
-    // repository-discovery projection contributes roots, an empty set still
-    // materializes all canonical transcript evidence without Git reads.
+    if defer_materialization {
+        return pending_materialization::defer_setup(
+            data_root,
+            &plan.account_state,
+            helper_updated,
+            json_output,
+        );
+    }
+    // An empty repository-root set still materializes canonical transcript evidence.
     let mut materialization = ProMaterializationTelemetryV1::started();
     let report = materialize(data_root, &mut materialization);
     if materialization.helper_connection != ProHelperConnectionOutcomeV1::NotAttempted {
@@ -365,28 +426,6 @@ fn run_setup(
     Ok(())
 }
 
-fn validate_staged_helper(smoke: &HelperSmoke) -> Result<()> {
-    if smoke.protocol_version != PROTOCOL_VERSION
-        || smoke.protocol_fingerprint != PROTOCOL_FINGERPRINT
-        || smoke.helper_version.is_empty()
-        || smoke.helper_version.len() > 128
-        || !smoke
-            .capabilities
-            .contains(&Capability::EntitlementAuthorization)
-        || !smoke.capabilities.contains(&Capability::Status)
-    {
-        bail!("protocol_mismatch: staged Pro helper failed the activation smoke contract");
-    }
-    Ok(())
-}
-
-fn validate_account_state(value: &str) -> Result<()> {
-    if !matches!(value, "trial" | "active" | "canceling_paid") {
-        bail!("invalid_response: Pro setup returned an unknown account state");
-    }
-    Ok(())
-}
-
 fn run_manage(
     data_root: &Path,
     service: &mut dyn ProLifecycleService,
@@ -394,7 +433,7 @@ fn run_manage(
     json_output: bool,
     telemetry: &mut ProLifecycleTelemetryV1,
 ) -> Result<()> {
-    let plan = service.manage(data_root)?;
+    let plan = with_pro_initialization(data_root, || service.manage(data_root))?;
     validate_portal_url(&plan.portal_url)?;
     validate_access_status(
         &plan.access_state,
@@ -417,6 +456,22 @@ fn run_manage(
         }
     }
     Ok(())
+}
+
+fn with_pro_initialization<T>(
+    data_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let target = default_helper_path(data_root);
+    let _lifecycle_lock = super::lifecycle_lock::LifecycleLock::acquire(&target, true)?
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
+    if local_pro_graph_key_cleanup_phase_exists(data_root)? {
+        bail!(
+            "key_store_unavailable: interrupted Pro deletion must be completed with `ctx pro uninstall --delete-data`"
+        );
+    }
+    write_local_pro_initialization_indicator(data_root)?;
+    operation()
 }
 
 fn manage_payload(plan: &ProManagePlan, browser_opened: bool) -> serde_json::Value {
@@ -508,70 +563,148 @@ fn run_uninstall(
     service: Option<&mut dyn ProDeletionService>,
     disposition: UninstallDataDisposition,
     json_output: bool,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     let delete_data = disposition == UninstallDataDisposition::Delete;
     let target = default_helper_path(data_root);
-    let _lifecycle_lock = super::lifecycle_lock::LifecycleLock::acquire(&target, true)?
-        .ok_or_else(|| anyhow::anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
-    if delete_data {
-        let service = service.ok_or_else(|| {
-            anyhow::anyhow!("key_store_unavailable: local deletion service is unavailable")
-        })?;
-        // The public delete-only adapter destroys the exact native key record
-        // and then removes all graph-family files. It does not launch or retain
-        // the private helper and remains available after an ordinary uninstall.
-        service.delete_graph_data(data_root)?;
-        service.delete_commercial_credentials(data_root)?;
+    let initial_state = inspect_local_pro_uninstall_state(data_root)?;
+    if !initial_state.any_artifact() {
+        return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output);
+    }
+    let Some(_lifecycle_lock) = super::lifecycle_lock::LifecycleLock::acquire(&target, false)?
+    else {
+        return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output);
+    };
+    let state = inspect_local_pro_uninstall_state(data_root)?;
+    pending_materialization::clear(data_root)?;
+    if !delete_data && state.cleanup_phase {
+        bail!(
+            "key_store_unavailable: interrupted Pro deletion must be completed with `ctx pro uninstall --delete-data`"
+        );
+    }
+    let helper_removed = if delete_data {
+        let helper_removed =
+            if state.initialized || state.graph_data || state.helper_files || state.cleanup_phase {
+                let service = service.ok_or_else(|| {
+                    anyhow::anyhow!("key_store_unavailable: local deletion service is unavailable")
+                })?;
+                // The public delete-only adapter destroys the exact native key record
+                // and then removes all graph-family files. It does not launch or retain
+                // the private helper and remains available after an ordinary uninstall.
+                service.delete_graph_data(data_root)?;
+                service.delete_commercial_credentials(data_root)?;
+                let helper_removed = delete_helper_files(data_root)?;
+                service.finish_deletion(data_root)?;
+                helper_removed
+            } else {
+                delete_helper_files(data_root)?
+            };
+        clear_local_pro_initialization_indicator(data_root)?;
         clear_preserved_data_marker(data_root)?;
-    } else {
+        helper_removed
+    } else if state.graph_data {
         write_preserved_data_marker(data_root)?;
-    }
-    let helper_removed = delete_helper_files(data_root)?;
-    let value = uninstall_payload(helper_removed, disposition);
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else if delete_data {
-        println!("Local Pro data was deleted. Canonical ctx history was preserved.");
-        println!("next: ctx pro (rebuild Pro data)");
+        delete_helper_files(data_root)?
     } else {
-        println!("ctx Pro was removed. Local Pro data was preserved.");
-        println!("next: ctx pro (restore preserved Pro data)");
-    }
-    Ok(())
+        clear_preserved_data_marker(data_root)?;
+        delete_helper_files(data_root)?
+    };
+    let data_outcome = if state.graph_data {
+        if delete_data {
+            LocalProDataOutcome::Deleted
+        } else {
+            LocalProDataOutcome::Preserved
+        }
+    } else {
+        LocalProDataOutcome::Absent
+    };
+    emit_uninstall_result(helper_removed, data_outcome, json_output)
 }
 
-fn uninstall_payload(
+fn emit_uninstall_result(
     helper_removed: bool,
-    disposition: UninstallDataDisposition,
-) -> serde_json::Value {
-    let delete_data = disposition == UninstallDataDisposition::Delete;
+    data_outcome: LocalProDataOutcome,
+    json_output: bool,
+) -> Result<serde_json::Value> {
+    let value = uninstall_payload(helper_removed, data_outcome);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        match data_outcome {
+            LocalProDataOutcome::Deleted => {
+                println!("Local Pro data was deleted. Canonical ctx history was preserved.");
+                println!("next: ctx pro (rebuild Pro data)");
+            }
+            LocalProDataOutcome::Preserved => {
+                println!("ctx Pro was removed. Local Pro data was preserved.");
+                println!("next: ctx pro (restore preserved Pro data)");
+            }
+            LocalProDataOutcome::Absent if helper_removed => {
+                println!(
+                    "ctx Pro was removed. No local Pro data was found. Canonical ctx history was preserved."
+                );
+            }
+            LocalProDataOutcome::Absent => {
+                println!(
+                    "No ctx Pro installation or local Pro data was found. Canonical ctx history was preserved."
+                );
+            }
+        }
+    }
+    Ok(value)
+}
+
+fn uninstall_payload(helper_removed: bool, data_outcome: LocalProDataOutcome) -> serde_json::Value {
+    let next_action = match data_outcome {
+        LocalProDataOutcome::Deleted => Some(json!({
+            "command": "ctx pro",
+            "reason": "rebuild_pro_data",
+        })),
+        LocalProDataOutcome::Preserved => Some(json!({
+            "command": "ctx pro",
+            "reason": "restore_preserved_pro_data",
+        })),
+        LocalProDataOutcome::Absent => None,
+    };
     json!({
         "schema_version": 1,
         "payload_type": "pro_uninstall",
         "uninstalled": true,
         "helper_removed": helper_removed,
-        "local_pro_data": if delete_data { "deleted" } else { "preserved" },
-        "canonical_history_preserved": true,
-        "next_action": {
-            "command": "ctx pro",
-            "reason": if delete_data { "rebuild_pro_data" } else { "restore_preserved_pro_data" },
+        "local_pro_data": match data_outcome {
+            LocalProDataOutcome::Absent => "absent",
+            LocalProDataOutcome::Deleted => "deleted",
+            LocalProDataOutcome::Preserved => "preserved",
         },
+        "canonical_history_preserved": true,
+        "next_action": next_action,
     })
 }
 
 const PRESERVED_DATA_MARKER_CONTENT: &[u8] = b"ctx-local-pro-data-preserved-v1\n";
 
 fn preserved_data_marker_is_set(data_root: &Path) -> bool {
-    ProFilesystemLayout::new(data_root)
-        .preserved_data_marker_path()
-        .symlink_metadata()
+    let path = ProFilesystemLayout::new(data_root).preserved_data_marker_path();
+    path.symlink_metadata()
         .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        && fs::read(path).is_ok_and(|content| content == PRESERVED_DATA_MARKER_CONTENT)
+        && local_pro_graph_data_exists(data_root).unwrap_or(false)
 }
 
 fn write_preserved_data_marker(data_root: &Path) -> Result<()> {
+    if !local_pro_graph_data_exists(data_root)? {
+        bail!("invalid_request: cannot mark absent local Pro data as preserved");
+    }
     let path = ProFilesystemLayout::new(data_root).preserved_data_marker_path();
     match path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => return Ok(()),
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            verify_private_file(&path).context("verify local Pro data marker")?;
+            if fs::read(&path).context("read local Pro data marker")?
+                != PRESERVED_DATA_MARKER_CONTENT
+            {
+                bail!("invalid_request: local Pro data marker has invalid content");
+            }
+            return Ok(());
+        }
         Ok(_) => bail!("invalid_request: local Pro data marker is not a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("inspect local Pro data marker"),
@@ -594,7 +727,7 @@ fn write_preserved_data_marker(data_root: &Path) -> Result<()> {
     file.sync_all().context("sync local Pro data marker")?;
     restrict_private_file(&staged).context("protect local Pro data marker")?;
     verify_private_file(&staged).context("verify local Pro data marker")?;
-    fs::rename(&staged, &path).context("publish local Pro data marker")?;
+    replace_file(&staged, &path).context("publish local Pro data marker")?;
     sync_parent_directory(&path)?;
     Ok(())
 }
@@ -610,37 +743,64 @@ fn clear_preserved_data_marker(data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid_request: local Pro data marker has no parent"))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .context("sync local Pro data marker directory")
+#[derive(Debug, Clone, Copy)]
+struct LocalProUninstallState {
+    initialized: bool,
+    cleanup_phase: bool,
+    graph_data: bool,
+    helper_files: bool,
+    preserved_marker: bool,
+    pending_materialization: bool,
+    lifecycle_lock: bool,
 }
 
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> Result<()> {
-    Ok(())
+impl LocalProUninstallState {
+    const fn any_artifact(self) -> bool {
+        self.initialized
+            || self.cleanup_phase
+            || self.graph_data
+            || self.helper_files
+            || self.preserved_marker
+            || self.pending_materialization
+            || self.lifecycle_lock
+    }
+}
+
+fn inspect_local_pro_uninstall_state(data_root: &Path) -> Result<LocalProUninstallState> {
+    let layout = ProFilesystemLayout::new(data_root);
+    let helper_files =
+        helper_file_candidates(data_root)?
+            .iter()
+            .try_fold(false, |present, path| {
+                let exists = regular_file_exists(path, "local Pro helper file")?;
+                Ok::<_, anyhow::Error>(present || exists)
+            })?;
+    Ok(LocalProUninstallState {
+        initialized: local_pro_initialization_indicator_exists(data_root)?,
+        cleanup_phase: local_pro_graph_key_cleanup_phase_exists(data_root)?,
+        graph_data: local_pro_graph_data_exists(data_root)?,
+        helper_files,
+        preserved_marker: regular_file_exists(
+            &layout.preserved_data_marker_path(),
+            "local Pro data marker",
+        )?,
+        pending_materialization: pending_materialization::pending(data_root)?,
+        lifecycle_lock: regular_file_exists(&layout.lifecycle_lock_path(), "Pro lifecycle lock")?,
+    })
+}
+
+fn regular_file_exists(path: &Path, label: &str) -> Result<bool> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => bail!("invalid_request: {label} is not a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {label}")),
+    }
 }
 
 fn delete_helper_files(data_root: &Path) -> Result<bool> {
     let target = default_helper_path(data_root);
-    let candidates = [
-        target.clone(),
-        install_marker_path(&target)?,
-        previous_helper_path(&target)?,
-        previous_marker_path(&target)?,
-        transaction_journal_path(&target)?,
-        transaction_journal_next_path(&target)?,
-        transaction_helper_path(&target)?,
-        transaction_marker_path(&target)?,
-        publish_helper_path(&target)?,
-        publish_marker_path(&target)?,
-        rollback_helper_stage_path(&target)?,
-        rollback_marker_stage_path(&target)?,
-    ];
+    let candidates = helper_file_candidates(data_root)?;
     let mut removed = false;
     for candidate in &candidates {
         removed |= delete_one_file(candidate)?;
@@ -659,6 +819,24 @@ fn delete_helper_files(data_root: &Path) -> Result<bool> {
         }
     }
     Ok(removed)
+}
+
+fn helper_file_candidates(data_root: &Path) -> Result<[PathBuf; 12]> {
+    let target = default_helper_path(data_root);
+    Ok([
+        target.clone(),
+        install_marker_path(&target)?,
+        previous_helper_path(&target)?,
+        previous_marker_path(&target)?,
+        transaction_journal_path(&target)?,
+        transaction_journal_next_path(&target)?,
+        transaction_helper_path(&target)?,
+        transaction_marker_path(&target)?,
+        publish_helper_path(&target)?,
+        publish_marker_path(&target)?,
+        rollback_helper_stage_path(&target)?,
+        rollback_marker_stage_path(&target)?,
+    ])
 }
 
 fn delete_one_file(path: &Path) -> Result<bool> {
@@ -700,18 +878,43 @@ mod tests {
             }
             Ok(())
         }
+
+        fn finish_deletion(&mut self, data_root: &Path) -> Result<()> {
+            if default_helper_path(data_root).exists() {
+                bail!("invalid_request: cleanup phase finished before helper deletion");
+            }
+            self.calls.push("finish_deletion");
+            Ok(())
+        }
     }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let helper = default_helper_path(root.path());
         fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        ctx_history_core::platform_security::restrict_private_directory(
+            &ProFilesystemLayout::new(root.path()).pro_root(),
+        )
+        .unwrap();
+        write_local_pro_initialization_indicator(root.path()).unwrap();
         fs::write(&helper, b"helper").unwrap();
         let graph = ctx_pro_host_protocol::ProFilesystemLayout::new(root.path()).graph_path();
         let canonical = root.path().join("work.sqlite");
         fs::write(&graph, b"encrypted graph").unwrap();
         fs::write(&canonical, b"canonical history").unwrap();
         (root, helper, graph, canonical)
+    }
+
+    #[test]
+    fn repair_required_setup_rejects_a_missing_artifact() {
+        let error = setup_artifact(&SetupInstallation::RepairRequired, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid_response: Pro setup returned no helper artifact for an install or repair"
+        );
     }
 
     #[test]
@@ -764,13 +967,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             service.calls,
-            ["delete_graph_data", "delete_commercial_credentials"]
+            [
+                "delete_graph_data",
+                "delete_commercial_credentials",
+                "finish_deletion",
+            ]
         );
         assert!(!helper.exists());
         assert!(!graph.exists());
         assert!(canonical.exists());
         assert_eq!(
-            uninstall_payload(true, UninstallDataDisposition::Delete),
+            uninstall_payload(true, LocalProDataOutcome::Deleted),
             json!({
                 "schema_version": 1,
                 "payload_type": "pro_uninstall",
@@ -784,6 +991,183 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn never_pro_missing_and_empty_roots_are_truthful_idempotent_noops() {
+        for disposition in [
+            UninstallDataDisposition::Delete,
+            UninstallDataDisposition::Keep,
+        ] {
+            let parent = tempfile::tempdir().unwrap();
+            let missing = parent.path().join("missing");
+            let mut missing_service = RecordingDeletion::default();
+            let value = run_uninstall(
+                &missing,
+                (disposition == UninstallDataDisposition::Delete)
+                    .then_some(&mut missing_service as &mut dyn ProDeletionService),
+                disposition,
+                true,
+            )
+            .unwrap();
+            assert_eq!(value["local_pro_data"], "absent");
+            assert_eq!(value["helper_removed"], false);
+            assert_eq!(value["next_action"], serde_json::Value::Null);
+            assert!(missing_service.calls.is_empty());
+            assert!(!missing.exists());
+
+            let empty = tempfile::tempdir().unwrap();
+            crate::identity::installation_id(empty.path()).unwrap();
+            fs::write(empty.path().join("work.sqlite"), b"canonical history").unwrap();
+            let mut empty_service = RecordingDeletion::default();
+            let value = run_uninstall(
+                empty.path(),
+                (disposition == UninstallDataDisposition::Delete)
+                    .then_some(&mut empty_service as &mut dyn ProDeletionService),
+                disposition,
+                true,
+            )
+            .unwrap();
+            assert_eq!(value["local_pro_data"], "absent");
+            assert_eq!(value["helper_removed"], false);
+            assert_eq!(value["next_action"], serde_json::Value::Null);
+            assert!(empty_service.calls.is_empty());
+            assert!(!ProFilesystemLayout::new(empty.path()).pro_root().exists());
+            assert_eq!(
+                fs::read(empty.path().join("work.sqlite")).unwrap(),
+                b"canonical history"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_artifact_fetch_retains_cleanup_evidence_until_verified_uninstall() {
+        let root = tempfile::tempdir().unwrap();
+        crate::identity::installation_id(root.path()).unwrap();
+        let result = with_pro_initialization(root.path(), || -> Result<()> {
+            assert!(local_pro_initialization_indicator_exists(root.path())?);
+            bail!("artifact_download_failed: simulated interrupted fetch");
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("artifact_download_failed:"));
+        assert!(local_pro_initialization_indicator_exists(root.path()).unwrap());
+
+        let mut deletion = RecordingDeletion::default();
+        let value = run_uninstall(
+            root.path(),
+            Some(&mut deletion),
+            UninstallDataDisposition::Delete,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            deletion.calls,
+            [
+                "delete_graph_data",
+                "delete_commercial_credentials",
+                "finish_deletion",
+            ]
+        );
+        assert_eq!(value["local_pro_data"], "absent");
+        assert_eq!(value["next_action"], serde_json::Value::Null);
+        assert!(!local_pro_initialization_indicator_exists(root.path()).unwrap());
+
+        let mut repeated = RecordingDeletion::default();
+        let value = run_uninstall(
+            root.path(),
+            Some(&mut repeated),
+            UninstallDataDisposition::Delete,
+            true,
+        )
+        .unwrap();
+        assert!(repeated.calls.is_empty());
+        assert_eq!(value["local_pro_data"], "absent");
+    }
+
+    #[test]
+    fn interrupted_deletion_blocks_setup_and_keep_until_delete_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_id = crate::identity::installation_id(root.path()).unwrap();
+        let layout = ProFilesystemLayout::new(root.path());
+        fs::create_dir(&layout.pro_root()).unwrap();
+        ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root())
+            .unwrap();
+        let phase = layout.pro_root().join(".ctx-pro.graph-key-cleanup.json");
+        fs::write(
+            &phase,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "installation_id": installation_id,
+                "thumbprints": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        restrict_private_file(&phase).unwrap();
+
+        let mut operation_called = false;
+        let error = with_pro_initialization(root.path(), || -> Result<()> {
+            operation_called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().starts_with("key_store_unavailable:"));
+        assert!(!operation_called);
+
+        let error =
+            run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap_err();
+        assert!(error.to_string().starts_with("key_store_unavailable:"));
+        assert!(phase.exists());
+    }
+
+    #[test]
+    fn helper_without_graph_still_triggers_vault_cleanup_but_reports_absent() {
+        let root = tempfile::tempdir().unwrap();
+        crate::identity::installation_id(root.path()).unwrap();
+        let layout = ProFilesystemLayout::new(root.path());
+        fs::create_dir(&layout.pro_root()).unwrap();
+        ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root())
+            .unwrap();
+        fs::create_dir(layout.bin_dir()).unwrap();
+        fs::write(layout.helper_path(), b"helper").unwrap();
+
+        let mut deletion = RecordingDeletion::default();
+        let value = run_uninstall(
+            root.path(),
+            Some(&mut deletion),
+            UninstallDataDisposition::Delete,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            deletion.calls,
+            [
+                "delete_graph_data",
+                "delete_commercial_credentials",
+                "finish_deletion",
+            ]
+        );
+        assert_eq!(value["local_pro_data"], "absent");
+        assert_eq!(value["helper_removed"], true);
+        assert_eq!(value["next_action"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn keep_data_marks_only_real_graph_data() {
+        let root = tempfile::tempdir().unwrap();
+        let pro_root = ProFilesystemLayout::new(root.path()).pro_root();
+        fs::create_dir(&pro_root).unwrap();
+        let stale_marker = ProFilesystemLayout::new(root.path()).preserved_data_marker_path();
+        fs::write(&stale_marker, PRESERVED_DATA_MARKER_CONTENT).unwrap();
+
+        assert!(!preserved_data_marker_is_set(root.path()));
+        let value = run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
+        assert_eq!(value["local_pro_data"], "absent");
+        assert_eq!(value["next_action"], serde_json::Value::Null);
+        assert!(!stale_marker.exists());
+        assert!(!preserved_data_marker_is_set(root.path()));
     }
 
     #[test]
@@ -823,6 +1207,7 @@ mod tests {
             refresh_after_unix: Some(100),
             access_deadline_unix: Some(200),
             grace_deadline_unix: Some(300),
+            setup_repairability: ProSetupRepairability::NotNeeded,
         }
     }
 
@@ -849,6 +1234,41 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn lifecycle_status_distinguishes_invalid_artifacts_from_never_installed() {
+        let mut invalid = pro_status("active");
+        invalid.installed = false;
+        invalid.ready = false;
+        invalid.materialized = false;
+        invalid.helper_version = None;
+        invalid.capabilities.clear();
+        invalid.error_code = Some("invalid_response".to_owned());
+        invalid.access_state = None;
+        invalid.refresh_after_unix = None;
+        invalid.access_deadline_unix = None;
+        invalid.grace_deadline_unix = None;
+        invalid.setup_repairability = ProSetupRepairability::Automated;
+
+        let value = lifecycle_status_value(invalid.clone(), false);
+        assert_eq!(value["state"], "repair_required");
+        assert_eq!(value["installed"], false);
+        assert_eq!(value["error_code"], "invalid_response");
+        assert_eq!(value["next_action"]["command"], "ctx pro");
+        assert_eq!(value["next_action"]["reason"], "helper_artifacts_invalid");
+
+        invalid.setup_repairability = ProSetupRepairability::ManualDiagnosis;
+        let value = lifecycle_status_value(invalid.clone(), false);
+        assert_eq!(value["state"], "unavailable");
+        assert_eq!(value["next_action"]["command"], serde_json::Value::Null);
+        assert_eq!(value["next_action"]["reason"], "manual_diagnosis_required");
+
+        invalid.error_code = Some("pro_not_installed".to_owned());
+        invalid.setup_repairability = ProSetupRepairability::NotNeeded;
+        let value = lifecycle_status_value(invalid, false);
+        assert_eq!(value["state"], "not_setup");
+        assert_eq!(value["next_action"]["reason"], "helper_missing");
     }
 
     #[test]
@@ -901,17 +1321,16 @@ mod tests {
         assert!(canonical.exists());
 
         let mut repeated = RecordingDeletion::default();
-        run_uninstall(
+        let value = run_uninstall(
             root.path(),
             Some(&mut repeated),
             UninstallDataDisposition::Delete,
             true,
         )
         .unwrap();
-        assert_eq!(
-            repeated.calls,
-            ["delete_graph_data", "delete_commercial_credentials"]
-        );
+        assert!(repeated.calls.is_empty());
+        assert_eq!(value["local_pro_data"], "absent");
+        assert_eq!(value["next_action"], serde_json::Value::Null);
         assert!(canonical.exists());
     }
 

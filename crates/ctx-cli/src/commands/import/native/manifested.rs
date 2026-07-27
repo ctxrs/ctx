@@ -7,8 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
 use ctx_history_capture::{
-    CaptureError, CaptureWorkLimit, CodexSessionImportProgressCallback, ProviderImportFailure,
-    ProviderImportSummary,
+    CaptureError, CaptureWorkLimit, CodexSessionImportProgressCallback, ImportProfile,
+    ProviderImportFailure, ProviderImportSummary,
 };
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::{SourceImportFile, Store, StoreError};
@@ -33,6 +33,7 @@ pub(crate) fn import_manifested_source(
     progress: Option<CodexSessionImportProgressCallback>,
     preinventoried: bool,
     capture_work_limit: CaptureWorkLimit,
+    import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
     if !preinventoried {
@@ -65,7 +66,7 @@ pub(crate) fn import_manifested_source(
             break;
         }
         after_source_path = pending.last().map(|file| file.source_path.clone());
-        // CapturedBatch provider groups own their event, search, and cursor transactions.
+        // NativePath provider groups own their event, search, and cursor transactions.
         // Keeping a manifest page transaction open here would turn those commits into
         // savepoints, defeat bounded WAL checkpoints, and make a large file one unbounded
         // transaction. File completion updates are independently conditional and crash-safe.
@@ -75,6 +76,7 @@ pub(crate) fn import_manifested_source(
             &pending,
             progress.clone(),
             capture_work_limit,
+            import_profile,
             &mut summary,
         )?;
         match control {
@@ -98,13 +100,14 @@ fn import_manifested_source_page(
     pending: &[SourceImportFile],
     progress: Option<CodexSessionImportProgressCallback>,
     capture_work_limit: CaptureWorkLimit,
+    import_profile: &ImportProfile,
     summary: &mut ProviderImportSummary,
 ) -> Result<ManifestImportPageControl> {
     for pending_file in pending {
         let pending_context = manifest_pending_source_context(source, pending_file)?;
         // One Mux inventory unit intentionally expands its metadata/chat/
         // partial siblings into separate, independently revalidated
-        // CapturedBatch sources. A token for the pending inventory file
+        // NativePath source routes. A token for the pending inventory file
         // cannot be asserted against every sibling path.
         let observation_token = (source.provider != CaptureProvider::Mux)
             .then(|| inventory_observation_token(pending_file))
@@ -119,6 +122,7 @@ fn import_manifested_source_page(
             &SourcePreinventory::None,
             capture_work_limit,
             observation_token,
+            import_profile,
         );
         match imported {
             Ok(file_summary) => {

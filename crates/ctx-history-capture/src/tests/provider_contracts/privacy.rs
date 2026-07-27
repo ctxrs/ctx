@@ -1,21 +1,16 @@
-use crate::provider::importer::import_normalized_provider_captures;
 use crate::tests::support::assertions::{
     assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
     assert_search_misses,
 };
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
-use crate::tests::support::provider_state::{
-    provider_collision_capture, provider_collision_file_touch, stored_provider_session_id,
-};
+use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
     import_crush_sqlite, import_forgecode_sqlite, import_goose_sessions_sqlite,
     import_hermes_sqlite, CrushSqliteImportOptions, ForgeCodeSqliteImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, NormalizedProviderImportOptions,
-    ProviderImportSummary, ProviderNormalizationResult, FORGECODE_SQLITE_SOURCE_FORMAT,
-    GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, ProviderImportSummary,
+    FORGECODE_SQLITE_SOURCE_FORMAT, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
 };
-use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EventRole, EventType};
+use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_store::Store;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -23,11 +18,11 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
-fn native_tool_outputs_are_metadata_only_for_sqlite_provider_shapes() {
+fn native_successful_outputs_are_absent_for_sqlite_provider_shapes() {
     let temp = tempdir();
 
     let crush = write_crush_tool_output_db(&temp);
-    assert_imports_metadata_only_tool_output(
+    assert_imports_without_success_output(
         "Crush",
         CaptureProvider::Crush,
         "crush-tool-output",
@@ -48,7 +43,7 @@ fn native_tool_outputs_are_metadata_only_for_sqlite_provider_shapes() {
     );
 
     let hermes = write_hermes_tool_output_db(&temp);
-    assert_imports_metadata_only_tool_output(
+    assert_imports_without_success_output(
         "Hermes",
         CaptureProvider::Hermes,
         "hermes-tool-output",
@@ -69,7 +64,7 @@ fn native_tool_outputs_are_metadata_only_for_sqlite_provider_shapes() {
     );
 }
 
-fn assert_imports_metadata_only_tool_output(
+fn assert_imports_without_success_output(
     label: &str,
     provider: CaptureProvider,
     external_session_id: &str,
@@ -86,9 +81,9 @@ fn assert_imports_metadata_only_tool_output(
     let session_id = stored_provider_session_id(&store, provider, external_session_id);
     let events = store.events_for_session(session_id).unwrap();
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     if let Some(raw_command_output) = raw_command_output {
-        assert_event_type_count(&events, EventType::CommandOutput, 1);
+        assert_event_type_count(&events, EventType::CommandOutput, 0);
         assert_search_misses(&store, raw_command_output);
         assert!(
             !serde_json::to_string(&events)
@@ -103,6 +98,10 @@ fn assert_imports_metadata_only_tool_output(
     assert!(
         !serde_json::to_string(&events).unwrap().contains(raw_output),
         "{label}: raw tool output leaked into stored event payload"
+    );
+    assert!(
+        store.runs_for_session(session_id).unwrap().is_empty(),
+        "{label}: successful outputs must not create Core runs"
     );
 }
 
@@ -245,7 +244,7 @@ fn write_hermes_tool_output_db(temp: &TempDir) -> PathBuf {
 }
 
 #[test]
-fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() {
+fn native_sqlite_successful_tool_outputs_are_absent_and_not_searchable() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
@@ -273,11 +272,10 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
     )
     .unwrap();
     assert_eq!(goose_summary.failed, 0, "{:?}", goose_summary.failures);
-    assert_successful_output_metadata_only(
+    assert_successful_output_absent(
         &store,
         CaptureProvider::Goose,
         "goose-root",
-        EventType::ToolOutput,
         "goose-output-sentinel",
     );
     assert_search_hit_cites_source(
@@ -316,11 +314,10 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
     )
     .unwrap();
     assert_eq!(forge_summary.failed, 0, "{:?}", forge_summary.failures);
-    assert_successful_output_metadata_only(
+    assert_successful_output_absent(
         &store,
         CaptureProvider::ForgeCode,
         "forge-root",
-        EventType::ToolOutput,
         "forge-output-sentinel",
     );
     assert_search_hit_cites_source(
@@ -331,22 +328,16 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
     );
 }
 
-fn assert_successful_output_metadata_only(
+fn assert_successful_output_absent(
     store: &Store,
     provider: CaptureProvider,
     provider_session_id: &str,
-    event_type: EventType,
     forbidden_output: &str,
 ) {
     let session_id = stored_provider_session_id(store, provider, provider_session_id);
     let events = store.events_for_session(session_id).unwrap();
-    let event = events
-        .iter()
-        .find(|event| event.event_type == event_type)
-        .unwrap_or_else(|| panic!("missing {provider:?} {event_type:?} event"));
-    assert!(event.payload["body"].get("text").is_none());
-    assert!(event.payload["body"].get("text_retention").is_none());
-    let rendered = serde_json::to_string(event).unwrap();
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
+    let rendered = serde_json::to_string(&events).unwrap();
     assert!(
         !rendered.contains(forbidden_output),
         "{provider:?} leaked raw output into sanitized event payload"
@@ -357,6 +348,10 @@ fn assert_successful_output_metadata_only(
             .unwrap()
             .is_empty(),
         "{provider:?} raw output should not be indexed"
+    );
+    assert!(
+        store.runs_for_session(session_id).unwrap().is_empty(),
+        "{provider:?} successful output must not create a Core run"
     );
 }
 
@@ -374,95 +369,4 @@ fn assert_search_hit_cites_source(
     assert_eq!(hit.source_format.as_deref(), Some(source_format));
     assert!(hit.raw_source_path.is_some());
     assert!(hit.cursor.is_some());
-}
-
-#[test]
-fn native_provider_import_rejects_tool_only_without_real_message() {
-    let temp = tempdir();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let provider = CaptureProvider::Claude;
-    let mut capture = provider_collision_capture(
-        provider,
-        "tool-only-native-session",
-        "provider_format",
-        "/tmp/tool-only-native-session.jsonl",
-        DateTime::parse_from_rfc3339("2026-06-23T17:00:01Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    );
-    let event = capture.event.as_mut().unwrap();
-    event.event_type = EventType::ToolCall;
-    event.role = Some(EventRole::Tool);
-    event.payload = json!({"text": "tool: shell | status: success"});
-
-    let summary = import_normalized_provider_captures(
-        &mut store,
-        ProviderNormalizationResult {
-            summary: ProviderImportSummary::default(),
-            captures: vec![(1, capture)],
-            files_touched: vec![],
-        },
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert!(summary.failures[0]
-        .error
-        .contains("no real conversation message"));
-    assert!(store.list_sessions().unwrap().is_empty());
-    assert!(store.search_event_hits("tool", 10).unwrap().is_empty());
-}
-
-#[test]
-fn native_provider_import_skips_mixed_metadata_only_session() {
-    let temp = tempdir();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let provider = CaptureProvider::Claude;
-    let occurred_at = DateTime::parse_from_rfc3339("2026-06-23T17:00:01Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let real_capture = provider_collision_capture(
-        provider,
-        "real-native-session",
-        "provider_format",
-        "/tmp/mixed-native-session.jsonl",
-        occurred_at,
-    );
-    let mut metadata_only_capture = provider_collision_capture(
-        provider,
-        "metadata-only-native-session",
-        "provider_format",
-        "/tmp/mixed-native-session.jsonl",
-        occurred_at,
-    );
-    metadata_only_capture.event = None;
-    let metadata_only_touch = provider_collision_file_touch(
-        provider,
-        "metadata-only-native-session",
-        "provider_format",
-        "/tmp/mixed-native-session.jsonl",
-        occurred_at,
-    );
-
-    let summary = import_normalized_provider_captures(
-        &mut store,
-        ProviderNormalizationResult {
-            summary: ProviderImportSummary::default(),
-            captures: vec![(1, real_capture), (2, metadata_only_capture)],
-            files_touched: vec![(2, metadata_only_touch)],
-        },
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
-    assert_eq!(summary.skipped_sessions, 1);
-    assert!(store
-        .sessions_by_external_session_limited(provider, "metadata-only-native-session", 10)
-        .unwrap()
-        .is_empty());
-    assert_eq!(store.export_archive().unwrap().files_touched.len(), 0);
 }

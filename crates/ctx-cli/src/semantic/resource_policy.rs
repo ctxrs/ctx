@@ -1,12 +1,12 @@
-use std::time::Duration as StdDuration;
+use std::{path::Path, time::Duration as StdDuration};
 
 #[cfg(any(target_os = "linux", test))]
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
+
+use serde_json::{json, Value};
 
 use super::model_contract::SemanticModelLoadDeferred;
+use crate::output::compact_json;
 
 #[cfg(test)]
 use anyhow::Result;
@@ -43,8 +43,199 @@ pub(super) struct SemanticQuietPolicy {
     pub(super) active_percent: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SemanticBackgroundOperation {
+    ModelLoad,
+    IndexBatch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SemanticResourceDeferralReason {
+    MemoryPressure,
+    DiskPressure,
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos", test)),
+        allow(dead_code)
+    )]
+    BatteryPower,
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    EnergySaver,
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    ThermalPressure,
+}
+
+impl SemanticResourceDeferralReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryPressure => "memory_pressure",
+            Self::DiskPressure => "disk_pressure",
+            Self::BatteryPower => "battery_power",
+            Self::EnergySaver => "energy_saver",
+            Self::ThermalPressure => "thermal_pressure",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SemanticResourceDeferred {
+    pub(super) reason: SemanticResourceDeferralReason,
+    pub(super) available_memory_bytes: Option<u64>,
+    pub(super) required_available_memory_bytes: Option<u64>,
+    pub(super) available_disk_bytes: Option<u64>,
+    pub(super) required_available_disk_bytes: Option<u64>,
+}
+
+impl SemanticResourceDeferred {
+    pub(super) fn to_json(self) -> Value {
+        compact_json(json!({
+            "reason": self.reason.as_str(),
+            "available_memory_bytes": self.available_memory_bytes,
+            "required_available_memory_bytes": self.required_available_memory_bytes,
+            "available_disk_bytes": self.available_disk_bytes,
+            "required_available_disk_bytes": self.required_available_disk_bytes,
+        }))
+    }
+}
+
 pub(super) const SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+pub(super) const SEMANTIC_INDEX_MIN_AVAILABLE_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+pub(super) const SEMANTIC_BACKGROUND_MIN_AVAILABLE_DISK_BYTES: u64 = 1024 * 1024 * 1024;
+
+pub(super) fn semantic_background_resource_deferred(
+    storage_path: &Path,
+    operation: SemanticBackgroundOperation,
+) -> Option<SemanticResourceDeferred> {
+    let resources = SemanticSystemResources::current();
+    semantic_background_resource_deferred_for(
+        resources.available_memory_bytes,
+        semantic_available_space(storage_path),
+        semantic_energy_deferral_reason(),
+        operation,
+    )
+}
+
+fn semantic_background_resource_deferred_for(
+    available_memory_bytes: Option<u64>,
+    available_disk_bytes: Option<u64>,
+    energy_reason: Option<SemanticResourceDeferralReason>,
+    operation: SemanticBackgroundOperation,
+) -> Option<SemanticResourceDeferred> {
+    let required_memory = match operation {
+        SemanticBackgroundOperation::ModelLoad => SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES,
+        SemanticBackgroundOperation::IndexBatch => SEMANTIC_INDEX_MIN_AVAILABLE_MEMORY_BYTES,
+    };
+    let required_disk = match operation {
+        SemanticBackgroundOperation::ModelLoad | SemanticBackgroundOperation::IndexBatch => {
+            SEMANTIC_BACKGROUND_MIN_AVAILABLE_DISK_BYTES
+        }
+    };
+    let deferred = |reason, required_memory, required_disk| SemanticResourceDeferred {
+        reason,
+        available_memory_bytes,
+        required_available_memory_bytes: required_memory,
+        available_disk_bytes,
+        required_available_disk_bytes: required_disk,
+    };
+    if available_memory_bytes.is_some_and(|available| available < required_memory) {
+        return Some(deferred(
+            SemanticResourceDeferralReason::MemoryPressure,
+            Some(required_memory),
+            None,
+        ));
+    }
+    if available_disk_bytes.is_some_and(|available| available < required_disk) {
+        return Some(deferred(
+            SemanticResourceDeferralReason::DiskPressure,
+            None,
+            Some(required_disk),
+        ));
+    }
+    energy_reason.map(|reason| deferred(reason, None, None))
+}
+
+pub(super) fn semantic_resource_deferral_releases_runtime(
+    reason: SemanticResourceDeferralReason,
+) -> bool {
+    reason == SemanticResourceDeferralReason::MemoryPressure
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn semantic_available_space(path: &Path) -> Option<u64> {
+    let mut candidate = path;
+    while !candidate.exists() {
+        candidate = candidate.parent()?;
+    }
+    fs2::available_space(candidate).ok()
+}
+
+#[cfg(not(ctx_semantic_fastembed))]
+fn semantic_available_space(_path: &Path) -> Option<u64> {
+    None
+}
+
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", test)),
+    allow(dead_code)
+)]
+fn semantic_energy_deferral_reason_for(
+    external_power: Option<bool>,
+    energy_saver: Option<bool>,
+    serious_thermal_pressure: Option<bool>,
+) -> Option<SemanticResourceDeferralReason> {
+    if external_power == Some(false) {
+        Some(SemanticResourceDeferralReason::BatteryPower)
+    } else if energy_saver == Some(true) {
+        Some(SemanticResourceDeferralReason::EnergySaver)
+    } else if serious_thermal_pressure == Some(true) {
+        Some(SemanticResourceDeferralReason::ThermalPressure)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn semantic_energy_deferral_reason() -> Option<SemanticResourceDeferralReason> {
+    let root = Path::new("/sys/class/power_supply");
+    let mut saw_system_battery = false;
+    let mut external_online = false;
+    for entry in fs::read_dir(root).ok()? {
+        let path = entry.ok()?.path();
+        match fs::read_to_string(path.join("type")).ok()?.trim() {
+            "Battery" => {
+                let scope = fs::read_to_string(path.join("scope")).ok();
+                if scope
+                    .as_deref()
+                    .is_none_or(|scope| scope.trim() != "Device")
+                {
+                    saw_system_battery = true;
+                }
+            }
+            "Mains" | "UPS" | "USB" | "USB_C" | "USB_PD" | "Wireless" => {
+                external_online |= fs::read_to_string(path.join("online"))
+                    .ok()
+                    .is_some_and(|value| value.trim() == "1");
+            }
+            _ => {}
+        }
+    }
+    semantic_energy_deferral_reason_for(saw_system_battery.then_some(external_online), None, None)
+}
+
+#[cfg(target_os = "macos")]
+fn semantic_energy_deferral_reason() -> Option<SemanticResourceDeferralReason> {
+    let process = objc2_foundation::NSProcessInfo::processInfo();
+    semantic_energy_deferral_reason_for(
+        None,
+        Some(process.isLowPowerModeEnabled()),
+        Some(process.thermalState().0 >= 2),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn semantic_energy_deferral_reason() -> Option<SemanticResourceDeferralReason> {
+    None
+}
 
 pub(super) fn semantic_model_load_deferred(
     available_memory_bytes: Option<u64>,
@@ -585,5 +776,57 @@ mod semantic_resource_policy_tests {
             semantic_model_load_deferred(Some(floor), SemanticComputeClass::Accelerator).is_none()
         );
         assert!(semantic_model_load_deferred(None, SemanticComputeClass::Accelerator).is_none());
+    }
+
+    #[test]
+    fn background_policy_uses_one_gib_disk_reserve_and_separate_memory_floors() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let model_memory = semantic_background_resource_deferred_for(
+            Some(SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES - 1),
+            Some(8 * GIB),
+            None,
+            SemanticBackgroundOperation::ModelLoad,
+        )
+        .expect("model load should defer below its memory floor");
+        assert_eq!(
+            model_memory.reason,
+            SemanticResourceDeferralReason::MemoryPressure
+        );
+
+        let index_disk = semantic_background_resource_deferred_for(
+            Some(8 * GIB),
+            Some(GIB - 1),
+            None,
+            SemanticBackgroundOperation::IndexBatch,
+        )
+        .expect("indexing should preserve one GiB of free disk");
+        assert_eq!(
+            index_disk.required_available_disk_bytes,
+            Some(SEMANTIC_BACKGROUND_MIN_AVAILABLE_DISK_BYTES)
+        );
+        assert!(semantic_background_resource_deferred_for(
+            Some(8 * GIB),
+            Some(GIB),
+            None,
+            SemanticBackgroundOperation::IndexBatch,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn energy_and_thermal_signals_defer_only_when_known_pressured() {
+        assert_eq!(
+            semantic_energy_deferral_reason_for(Some(false), Some(false), Some(false)),
+            Some(SemanticResourceDeferralReason::BatteryPower)
+        );
+        assert_eq!(
+            semantic_energy_deferral_reason_for(Some(true), Some(true), Some(false)),
+            Some(SemanticResourceDeferralReason::EnergySaver)
+        );
+        assert_eq!(
+            semantic_energy_deferral_reason_for(Some(true), Some(false), Some(true)),
+            Some(SemanticResourceDeferralReason::ThermalPressure)
+        );
+        assert_eq!(semantic_energy_deferral_reason_for(None, None, None), None);
     }
 }

@@ -171,7 +171,7 @@ fn wal_snapshot_reads_committed_append_without_mutating_provider_components() {
     )
     .unwrap();
     let values = firebender_values(&messages_json);
-    let event = firebender::firebender_event(
+    let event = firebender_event(
         SESSION_ID,
         0,
         &message,

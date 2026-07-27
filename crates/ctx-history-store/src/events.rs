@@ -6,7 +6,8 @@ use crate::connection::{
     collect_rows, ms_to_time, nonnegative_i64_to_u64, optional_timestamp_ms, optional_uuid_string,
     parse_json, parse_optional_uuid, parse_text_enum, parse_uuid, timestamp_ms,
 };
-use crate::result_storage::durable_event;
+use crate::native_path_group::event_bind_bytes;
+use crate::result_storage::{durable_event, provider_output_is_retained_failure};
 use crate::search::projections::{
     adjust_semantic_searchable_item_stats, insert_event_search_projection_for_event,
     semantic_searchable_document_count_for_event,
@@ -16,6 +17,32 @@ use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
 const PROVIDER_EVENT_HASH_AUTHORITY_KEY: &str = "provider_event_hash_authority";
+
+#[derive(Default)]
+struct NativePathEventBindAccounting {
+    enabled: bool,
+    bytes: usize,
+}
+
+impl NativePathEventBindAccounting {
+    fn enabled() -> Self {
+        Self {
+            enabled: true,
+            bytes: 0,
+        }
+    }
+
+    fn record_event_write(&mut self, event: &Event) -> Result<()> {
+        if self.enabled {
+            self.bytes = self.bytes.saturating_add(event_bind_bytes(event)?);
+        }
+        Ok(())
+    }
+
+    fn search_bytes(&mut self) -> Option<&mut usize> {
+        self.enabled.then_some(&mut self.bytes)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderEventHashAuthority {
@@ -75,10 +102,22 @@ impl Store {
     }
 
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
-        self.with_import_batch_write(|| self.upsert_event_inner(event))
+        self.with_import_batch_write(|| {
+            self.upsert_event_inner(event, &mut NativePathEventBindAccounting::default())
+        })
     }
 
-    fn upsert_event_inner(&self, event: &Event) -> Result<Uuid> {
+    pub(crate) fn upsert_event_with_native_path_accounting(&self, event: &Event) -> Result<usize> {
+        let mut accounting = NativePathEventBindAccounting::enabled();
+        self.write_event(event, &mut accounting)?;
+        Ok(accounting.bytes)
+    }
+
+    fn upsert_event_inner(
+        &self,
+        event: &Event,
+        accounting: &mut NativePathEventBindAccounting,
+    ) -> Result<Uuid> {
         let event = durable_event(event)?;
         let event = event.as_ref();
         if let Some(dedupe_key) = &event.dedupe_key {
@@ -95,15 +134,20 @@ impl Store {
                 return Ok(existing_id);
             }
         }
-        self.write_event(event)
+        self.write_event(event, accounting)
     }
 
-    fn write_event(&self, event: &Event) -> Result<Uuid> {
+    fn write_event(
+        &self,
+        event: &Event,
+        accounting: &mut NativePathEventBindAccounting,
+    ) -> Result<Uuid> {
         let event = durable_event(event)?;
         let event = event.as_ref();
         let previous_searchable_count =
             semantic_searchable_document_count_from_stored_event(&self.conn, event.id)?;
 
+        accounting.record_event_write(event)?;
         self.conn
             .prepare_cached(
                 r#"
@@ -155,11 +199,13 @@ impl Store {
             event.id,
             event,
             self.event_search_projection_capabilities()?,
+            accounting.search_bytes(),
         )?;
         adjust_semantic_searchable_item_stats(
             &self.conn,
             previous_searchable_count,
             semantic_searchable_document_count_for_event(event),
+            accounting.search_bytes(),
         )?;
         let id = if let Some(dedupe_key) = &event.dedupe_key {
             self.event_id_by_dedupe_key(dedupe_key)?
@@ -183,22 +229,70 @@ impl Store {
         incoming_authority: ProviderEventHashAuthority,
     ) -> Result<bool> {
         self.with_import_batch_write(|| {
-            self.reconcile_provider_event_inner(event, incoming_authority)
+            self.reconcile_provider_event_inner(
+                event,
+                incoming_authority,
+                None,
+                &mut NativePathEventBindAccounting::default(),
+            )
         })
+    }
+
+    pub(crate) fn reconcile_provider_event_with_native_path_accounting(
+        &self,
+        event: &Event,
+        incoming_authority: ProviderEventHashAuthority,
+    ) -> Result<(bool, usize)> {
+        let mut accounting = NativePathEventBindAccounting::enabled();
+        let result = self.with_import_batch_write(|| {
+            self.reconcile_provider_event_inner(event, incoming_authority, None, &mut accounting)
+        })?;
+        Ok((result, accounting.bytes))
+    }
+
+    pub(crate) fn reconcile_provider_event_migrating_exact_legacy_provider_hash_with_native_path_accounting(
+        &self,
+        event: &Event,
+        exact_legacy_provider_hash: &str,
+    ) -> Result<(bool, usize)> {
+        if exact_legacy_provider_hash.is_empty() {
+            return Err(StoreError::InvalidNativePathLegacyProviderHashMigration);
+        }
+        let mut event = event.clone();
+        event.sync.metadata[PROVIDER_EVENT_HASH_AUTHORITY_KEY] = serde_json::Value::String(
+            ProviderEventHashAuthority::NormalizedPayloadFallback
+                .as_str()
+                .to_owned(),
+        );
+        let mut accounting = NativePathEventBindAccounting::enabled();
+        let result = self.with_import_batch_write(|| {
+            self.reconcile_provider_event_inner(
+                &event,
+                ProviderEventHashAuthority::NormalizedPayloadFallback,
+                Some(exact_legacy_provider_hash),
+                &mut accounting,
+            )
+        })?;
+        Ok((result, accounting.bytes))
     }
 
     fn reconcile_provider_event_inner(
         &self,
         event: &Event,
         incoming_authority: ProviderEventHashAuthority,
+        exact_legacy_provider_hash: Option<&str>,
+        accounting: &mut NativePathEventBindAccounting,
     ) -> Result<bool> {
+        if !provider_output_is_retained_failure(event) {
+            return Ok(false);
+        }
         let Some(incoming_key) = event.dedupe_key.as_deref() else {
-            return self.insert_event_if_absent(event);
+            return self.insert_event_if_absent_inner(event, accounting);
         };
         let Some(incoming) = parse_provider_event_dedupe_key(incoming_key) else {
-            return self.insert_event_if_absent(event);
+            return self.insert_event_if_absent_inner(event, accounting);
         };
-        if self.insert_event_if_absent_without_conflict_check(event)? {
+        if self.insert_event_if_absent_without_conflict_check(event, accounting)? {
             return Ok(true);
         }
         let Some(existing) = provider_event_with_same_identity(&self.conn, &incoming)? else {
@@ -218,6 +312,24 @@ impl Store {
         let existing_authority = stored_provider_event_hash_authority(&existing, &existing_key)?;
         let hashes_match = existing_key.payload_hash == incoming.payload_hash;
 
+        if existing_authority == ProviderEventHashAuthority::ProviderSupplied {
+            if let Some(expected_hash) = exact_legacy_provider_hash {
+                if incoming_authority != ProviderEventHashAuthority::NormalizedPayloadFallback
+                    || existing_key.payload_hash != expected_hash
+                {
+                    return Err(provider_event_conflict(
+                        &incoming,
+                        &existing_key.payload_hash,
+                    ));
+                }
+                let mut replacement = event.clone();
+                replacement.id = existing.id;
+                replacement.seq = existing.seq;
+                self.write_event(&replacement, accounting)?;
+                return Ok(false);
+            }
+        }
+
         if !hashes_match
             && (incoming_authority == ProviderEventHashAuthority::ProviderSupplied
                 || existing_authority == ProviderEventHashAuthority::ProviderSupplied)
@@ -232,22 +344,33 @@ impl Store {
         // and metadata remain immutable. Fallback normalization migrations
         // below are permitted only when their normalized payload hash changes.
         if hashes_match {
+            if existing.sync.deleted_at.is_some() && event.sync.deleted_at.is_none() {
+                let mut restoration = existing;
+                restoration.sync.deleted_at = None;
+                self.write_event(&restoration, accounting)?;
+            }
             return Ok(false);
         }
 
         let mut replacement = event.clone();
         replacement.id = existing.id;
         replacement.seq = existing.seq;
-        self.write_event(&replacement)?;
+        self.write_event(&replacement, accounting)?;
         Ok(false)
     }
 
     pub fn insert_event_if_absent(&self, event: &Event) -> Result<bool> {
-        self.with_import_batch_write(|| self.insert_event_if_absent_inner(event))
+        self.with_import_batch_write(|| {
+            self.insert_event_if_absent_inner(event, &mut NativePathEventBindAccounting::default())
+        })
     }
 
-    fn insert_event_if_absent_inner(&self, event: &Event) -> Result<bool> {
-        let inserted = self.insert_event_if_absent_without_conflict_check(event)?;
+    fn insert_event_if_absent_inner(
+        &self,
+        event: &Event,
+        accounting: &mut NativePathEventBindAccounting,
+    ) -> Result<bool> {
+        let inserted = self.insert_event_if_absent_without_conflict_check(event, accounting)?;
         if !inserted {
             if let Some(dedupe_key) = &event.dedupe_key {
                 reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
@@ -256,9 +379,14 @@ impl Store {
         Ok(inserted)
     }
 
-    fn insert_event_if_absent_without_conflict_check(&self, event: &Event) -> Result<bool> {
+    fn insert_event_if_absent_without_conflict_check(
+        &self,
+        event: &Event,
+        accounting: &mut NativePathEventBindAccounting,
+    ) -> Result<bool> {
         let event = durable_event(event)?;
         let event = event.as_ref();
+        accounting.record_event_write(event)?;
         let changed = self
                 .conn
                 .prepare_cached(
@@ -293,11 +421,13 @@ impl Store {
                 &self.conn,
                 event,
                 self.event_search_projection_capabilities()?,
+                accounting.search_bytes(),
             )?;
             adjust_semantic_searchable_item_stats(
                 &self.conn,
                 0,
                 semantic_searchable_document_count_for_event(event),
+                accounting.search_bytes(),
             )?;
             self.journal_event_mutated(event.id)?;
         }
@@ -940,6 +1070,107 @@ mod tests {
     }
 
     #[test]
+    fn native_path_exactly_migrates_released_provider_hash_in_place() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let id = new_id();
+        let legacy_hash = "released-positional-hash";
+        let existing = normalized_provider_event(
+            id,
+            json!({"text": "released"}),
+            legacy_hash,
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+        assert!(store.insert_event_if_absent(&existing).unwrap());
+
+        let replacement_body = json!({"text": "rewritten"});
+        let replacement_hash = compute_payload_hash(&replacement_body).unwrap();
+        let replacement =
+            normalized_provider_event(new_id(), replacement_body.clone(), &replacement_hash, None);
+        let (inserted, _) = store
+            .reconcile_provider_event_migrating_exact_legacy_provider_hash_with_native_path_accounting(
+                &replacement,
+                legacy_hash,
+            )
+            .unwrap();
+        assert!(!inserted);
+
+        let migrated = store.get_event(id).unwrap();
+        assert_eq!(migrated.id, id);
+        assert_eq!(migrated.seq, existing.seq);
+        assert_eq!(migrated.payload["body"], replacement_body);
+        assert!(migrated
+            .dedupe_key
+            .as_deref()
+            .unwrap()
+            .ends_with(&replacement_hash));
+        assert_eq!(
+            migrated.sync.metadata[PROVIDER_EVENT_HASH_AUTHORITY_KEY],
+            json!(ProviderEventHashAuthority::NormalizedPayloadFallback.as_str())
+        );
+    }
+
+    #[test]
+    fn provider_reconciliation_elides_success_and_unknown_outputs_but_retains_failure() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let mut success = normalized_provider_event(
+            new_id(),
+            json!({
+                "result_outcome": "success",
+                "exit_code": 0,
+                "output_preview": "successful output"
+            }),
+            "success-output",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+        success.event_type = EventType::CommandOutput;
+        assert!(!store
+            .reconcile_provider_event(&success, ProviderEventHashAuthority::ProviderSupplied)
+            .unwrap());
+
+        let mut unknown = normalized_provider_event(
+            new_id(),
+            json!({"output_preview": "unknown output"}),
+            "unknown-output",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+        unknown.event_type = EventType::ToolOutput;
+        assert!(!store
+            .reconcile_provider_event(&unknown, ProviderEventHashAuthority::ProviderSupplied)
+            .unwrap());
+
+        let mut failure = normalized_provider_event(
+            new_id(),
+            json!({
+                "result_outcome": "failure",
+                "exit_code": 1,
+                "output_preview": "sparse failure oracle"
+            }),
+            "failure-output",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+        failure.event_type = EventType::CommandOutput;
+        assert!(store
+            .reconcile_provider_event(&failure, ProviderEventHashAuthority::ProviderSupplied)
+            .unwrap());
+
+        let events = store.list_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, failure.id);
+        assert_eq!(
+            events[0].payload["body"]["output_preview"],
+            "sparse failure oracle"
+        );
+        assert!(store
+            .search_event_hits("sparse failure oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.event_id == failure.id));
+    }
+
+    #[test]
     fn cached_event_upsert_reprepares_after_schema_change() {
         let temp = tempdir().unwrap();
         let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -950,7 +1181,9 @@ mod tests {
             "cached-upsert",
             Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
         );
-        store.write_event(&event).unwrap();
+        store
+            .write_event(&event, &mut NativePathEventBindAccounting::default())
+            .unwrap();
 
         store
             .conn
@@ -962,7 +1195,9 @@ mod tests {
             )
             .unwrap();
         event.payload["body"] = json!({"text": "after"});
-        store.write_event(&event).unwrap();
+        store
+            .write_event(&event, &mut NativePathEventBindAccounting::default())
+            .unwrap();
 
         let audit_rows: u64 = store
             .conn

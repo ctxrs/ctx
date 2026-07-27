@@ -3,6 +3,9 @@
 //! This module deliberately knows only the stable key-store locator. It cannot
 //! read key material, open the encrypted graph, or run private detectors.
 
+use std::path::Path;
+
+use anyhow::Result;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use sha2::{Digest as _, Sha256};
 
@@ -25,6 +28,10 @@ const NATIVE_RECORD_ID_DOMAIN: &[u8] = b"ctx\0local-pro\0native-vault-record-id\
 const GRAPH_RECORD_DOMAIN: &[u8] = b"graph-key";
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 const GRAPH_RECORD_PREFIX: &str = "nvr1-g-";
+
+pub(super) fn delete_selected(data_root: &Path, installation_key_thumbprint: &str) -> Result<()> {
+    super::client::delete_graph_key(data_root, installation_key_thumbprint)
+}
 
 pub(super) fn delete(graph_id: &str) -> Result<(), CredentialVaultError> {
     validate_graph_id(graph_id)?;

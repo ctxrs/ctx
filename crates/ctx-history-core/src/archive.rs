@@ -1,14 +1,11 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     dtos::{
         Artifact, Event, FileTouched, HistoryRecord, HistoryRecordLink, Run, Session, Summary,
         VcsChange, VcsWorkspace,
     },
-    source::{CaptureSource, CaptureSourceDescriptor},
-    sync::{default_metadata, Fidelity},
+    source::CaptureSource,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,25 +59,6 @@ impl Default for SessionHistoryArchive {
             files_touched: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CaptureEnvelope {
-    pub schema_version: u32,
-    pub capture_event_id: Uuid,
-    pub dedupe_key: String,
-    pub source: CaptureSourceDescriptor,
-    pub occurred_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default = "default_metadata")]
-    pub env_session_hints: serde_json::Value,
-    #[serde(default = "default_metadata")]
-    pub payload: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_hash: Option<String>,
-    #[serde(default)]
-    pub fidelity: Fidelity,
 }
 
 fn archive_schema_version() -> u32 {

@@ -16,6 +16,7 @@ impl LifecycleLock {
     pub(super) fn acquire(target: &Path, create_pro_root: bool) -> Result<Option<Self>> {
         let layout = layout_for_target(target)?;
         let pro_root = layout.pro_root();
+        let mut created_pro_root = false;
         match fs::symlink_metadata(&pro_root) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) => bail!("invalid_request: Pro lifecycle root is not a safe directory"),
@@ -25,7 +26,7 @@ impl LifecycleLock {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 validate_private_directory(layout.data_root(), "ctx data root")?;
                 match fs::create_dir(&pro_root) {
-                    Ok(()) => {}
+                    Ok(()) => created_pro_root = true,
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                     Err(error) => {
                         return Err(error).context("invalid_request: create Pro lifecycle root")
@@ -43,6 +44,10 @@ impl LifecycleLock {
                 .with_context(|| format!("invalid_request: protect {label}"))?;
             verify_private_directory(directory)
                 .with_context(|| format!("invalid_request: verify {label}"))?;
+        }
+        if created_pro_root {
+            super::sync_parent_directory(&pro_root)
+                .context("invalid_request: persist Pro lifecycle root")?;
         }
 
         let path = layout.lifecycle_lock_path();

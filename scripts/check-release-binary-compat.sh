@@ -1,10 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The release image owns the LLVM version. Tests inject small stand-in tools by
-# path so parser failures can be exercised without manufacturing six binaries.
-LLVM_READOBJ="${CTX_LLVM_READOBJ:-llvm-readobj}"
-LLVM_OBJDUMP="${CTX_LLVM_OBJDUMP:-llvm-objdump}"
+if [[ -n "${CTX_LLVM_READOBJ+x}" ]]; then
+  echo "error: forbidden public release environment variable: CTX_LLVM_READOBJ" >&2
+  exit 1
+fi
+if [[ -n "${CTX_LLVM_OBJDUMP+x}" ]]; then
+  echo "error: forbidden public release environment variable: CTX_LLVM_OBJDUMP" >&2
+  exit 1
+fi
+
+authoritative_llvm_root() {
+  case "$(/usr/bin/uname -s):$(/usr/bin/uname -m)" in
+    Linux:*)
+      printf '%s\n' /usr/bin
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      printf '%s\n' /opt/homebrew/opt/llvm/bin
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      printf '%s\n' /usr/local/opt/llvm/bin
+      ;;
+    FreeBSD:*)
+      printf '%s\n' /usr/local/bin
+      ;;
+    *)
+      echo "error: no authoritative LLVM release tool root for this host" >&2
+      exit 127
+      ;;
+  esac
+}
+
+# Release construction owns these package roots. In particular, Linux checks
+# run in the pinned inspector image; caller PATH never selects an ABI parser.
+LLVM_TOOL_ROOT="$(authoritative_llvm_root)"
+LLVM_READOBJ="${LLVM_TOOL_ROOT}/llvm-readobj"
+LLVM_OBJDUMP="${LLVM_TOOL_ROOT}/llvm-objdump"
 
 usage() {
   cat >&2 <<'USAGE'

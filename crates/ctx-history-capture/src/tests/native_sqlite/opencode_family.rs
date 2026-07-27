@@ -381,7 +381,7 @@ fn native_opencode_imports_message_part_text_and_metadata() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.imported_events, 1);
     assert_message_part_import(
         &store,
         CaptureProvider::OpenCode,
@@ -413,7 +413,7 @@ fn native_kilo_imports_message_part_text_and_metadata() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.imported_events, 1);
     assert_message_part_import(
         &store,
         CaptureProvider::Kilo,
@@ -446,7 +446,7 @@ fn native_mimocode_imports_message_part_text_and_metadata_idempotently() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 2);
+    assert_eq!(first.imported_events, 1);
     assert_message_part_import(
         &store,
         CaptureProvider::MiMoCode,
@@ -508,7 +508,10 @@ fn assert_message_part_import(
 ) {
     let session_id = stored_provider_session_id(store, provider, provider_session_id);
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
+    assert!(!events
+        .iter()
+        .any(|event| event.event_type == EventType::ToolOutput));
     let event = events
         .iter()
         .find(|event| event.event_type == EventType::Message)
@@ -534,18 +537,6 @@ fn assert_message_part_import(
     assert!(!rendered.contains("opencode_part_from_files"));
     assert!(!rendered.contains("*** Begin Patch"));
     assert!(!rendered.contains("raw-opencode-patch-needle"));
-
-    let tool_output = events
-        .iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("tool part metadata-only output event imported");
-    assert!(tool_output.payload["body"].get("text").is_none());
-    assert!(tool_output.payload["body"].get("text_retention").is_none());
-    let rendered_tool = serde_json::to_string(tool_output).unwrap();
-    assert!(!rendered_tool.contains("write_file"));
-    assert!(!rendered_tool.contains("completed"));
-    assert!(!rendered_tool.contains("outputPath"));
-    assert!(!rendered_tool.contains("tool_arg_should_not_touch"));
 
     assert!(store
         .search_event_hits(oracle_text, 10)

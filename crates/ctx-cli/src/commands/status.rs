@@ -14,6 +14,10 @@ use crate::semantic::{
 use crate::store_util::open_existing_store_read_only;
 use crate::JsonArgs;
 
+pub(super) fn upgrade_report(config: &config::AppConfig) -> serde_json::Value {
+    crate::upgrade::upgrade_diagnostics(config).report
+}
+
 pub(crate) fn run_status(
     args: JsonArgs,
     data_root: PathBuf,
@@ -85,6 +89,7 @@ pub(crate) fn run_status(
     telemetry.failed_inventory_units = Some(count_bucket(failed_inventory_units as u64));
     telemetry.stale_inventory_units = Some(count_bucket(stale_inventory_units as u64));
     let pro = crate::pro::lifecycle_status_json(&data_root);
+    let upgrade = upgrade_report(&config);
 
     if args.json {
         print_json(json!({
@@ -113,6 +118,7 @@ pub(crate) fn run_status(
             "stale_source_import_files": source_import_file_counts.stale,
             "semantic": semantic,
             "daemon": daemon,
+            "upgrade": upgrade,
             "pro": pro,
             "local_only": true,
             "read_only": true,
@@ -179,6 +185,7 @@ pub(crate) fn run_status(
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown")
         );
+        println!("upgrade_auto: {}", config.auto_upgrade_mode().as_str());
         if let Some(reason) = daemon.get("reason").and_then(|value| value.as_str()) {
             println!("daemon_reason: {reason}");
         }

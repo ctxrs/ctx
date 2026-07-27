@@ -83,7 +83,7 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
 
     assert_eq!(summary.failed, 2, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 2);
-    assert_eq!(summary.imported_events, 6);
+    assert_eq!(summary.imported_events, 5);
     drop(store);
 
     let conn = Connection::open(&db_path).unwrap();
@@ -109,7 +109,7 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
         )
         .unwrap();
     assert_eq!(session_count, 2);
-    assert_eq!(tool_count, 2);
+    assert_eq!(tool_count, 1);
     assert_eq!(touched_count, 1);
 }
 

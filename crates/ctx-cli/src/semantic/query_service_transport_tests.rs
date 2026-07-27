@@ -303,6 +303,174 @@ fn daemon_query_endpoint_roundtrips_unix_metadata() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn stale_unix_endpoint_is_sanitized_and_removed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let socket_path = temp.path().join("private-stale-query.sock");
+    write_daemon_query_endpoint(
+        temp.path(),
+        &DaemonQueryEndpoint::Unix {
+            path: socket_path.clone(),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
+        },
+    )?;
+
+    let error = daemon_query_request(
+        temp.path(),
+        compact_json(json!({"schema_version": 1, "op": "ping"})),
+        StdDuration::from_millis(100),
+        1024,
+    )
+    .expect_err("missing socket should be unavailable");
+    let message = format!("{error:#}");
+
+    assert!(error
+        .downcast_ref::<DaemonQueryServiceUnavailable>()
+        .is_some());
+    assert!(message.len() < 256, "{message}");
+    assert!(!message.contains(&socket_path.display().to_string()));
+    assert!(!message.contains("Connection refused"));
+    assert!(!message.contains("os error"));
+    assert!(!daemon_query_endpoint_path(temp.path()).exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_unix_listener_is_sanitized_and_removed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let socket_path = temp.path().join("closed-query.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    drop(listener);
+    write_daemon_query_endpoint(
+        temp.path(),
+        &DaemonQueryEndpoint::Unix {
+            path: socket_path.clone(),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
+        },
+    )?;
+
+    let error = daemon_query_request(
+        temp.path(),
+        compact_json(json!({"schema_version": 1, "op": "ping"})),
+        StdDuration::from_millis(100),
+        1024,
+    )
+    .expect_err("closed listener should be unavailable");
+    let message = format!("{error:#}");
+    assert!(error
+        .downcast_ref::<DaemonQueryServiceUnavailable>()
+        .is_some());
+    assert!(!message.contains(&socket_path.display().to_string()));
+    assert!(!message.contains("Connection refused"));
+    assert!(!message.contains("os error"));
+    assert!(!daemon_query_endpoint_path(temp.path()).exists());
+    fs::remove_file(socket_path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_cleanup_preserves_replacement_endpoint_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let stale_endpoint = DaemonQueryEndpoint::Unix {
+        path: temp.path().join("stale.sock"),
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    write_daemon_query_endpoint(temp.path(), &stale_endpoint)?;
+    let observed =
+        read_daemon_query_endpoint_identity(temp.path())?.expect("stale endpoint identity");
+    let replacement_owner_pid = process::id().saturating_add(1).max(1);
+    let replacement_path = temp.path().join("replacement.sock");
+    write_private_json_file(
+        &daemon_query_endpoint_path(temp.path()),
+        &compact_json(json!({
+            "schema_version": 1,
+            "transport": "unix",
+            "path": replacement_path,
+            "token": "fedcba9876543210fedcba9876543210",
+            "pid": replacement_owner_pid,
+        })),
+    )?;
+
+    remove_daemon_query_endpoint_if_matches(temp.path(), &observed);
+
+    let current = read_daemon_query_endpoint_identity(temp.path())?.expect("replacement endpoint");
+    assert_eq!(current.owner_pid, replacement_owner_pid);
+    assert_ne!(current, observed);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_cleanup_waits_for_replacement_daemon_ownership() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path: temp.path().join("owned-replacement.sock"),
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    write_daemon_query_endpoint(temp.path(), &endpoint)?;
+    let observed = read_daemon_query_endpoint_identity(temp.path())?.expect("endpoint identity");
+    let replacement_daemon =
+        DaemonLock::acquire(temp.path())?.expect("replacement daemon should acquire ownership");
+
+    remove_daemon_query_endpoint_if_matches(temp.path(), &observed);
+
+    assert_eq!(
+        read_daemon_query_endpoint_identity(temp.path())?,
+        Some(observed)
+    );
+    drop(replacement_daemon);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_disconnect_kinds_are_classified_as_unavailable() {
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::ConnectionRefused,
+        std::io::ErrorKind::ConnectionReset,
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::BrokenPipe,
+        std::io::ErrorKind::NotConnected,
+    ] {
+        assert!(daemon_query_unix_io_error_is_unavailable(kind));
+    }
+    assert!(!daemon_query_unix_io_error_is_unavailable(
+        std::io::ErrorKind::TimedOut
+    ));
+}
+
+#[test]
+fn windows_disconnect_codes_are_classified_without_native_io() {
+    for raw_os_error in [2, 3, 109, 230, 232, 233] {
+        assert!(daemon_query_windows_io_error_is_unavailable(
+            std::io::ErrorKind::Other,
+            Some(raw_os_error),
+        ));
+    }
+    assert!(!daemon_query_windows_io_error_is_unavailable(
+        std::io::ErrorKind::TimedOut,
+        None,
+    ));
+}
+
+#[test]
+fn windows_pipe_creation_source_verifies_a_protected_handle_bound_acl() {
+    let security = include_str!("query_service/windows_security.rs");
+    let server = include_str!("query_service/server.rs");
+    assert!(security.contains("GetTokenInformation"));
+    assert!(security.contains("WinLocalSystemSid"));
+    assert!(security.contains("SE_DACL_PROTECTED"));
+    assert!(security.contains("GetSecurityInfo"));
+    assert!(security.contains("OWNER_SECURITY_INFORMATION"));
+    assert!(server.contains("for_current_user_and_system"));
+    assert!(server.contains(".verify_handle(pipe.handle)"));
+    assert!(server.contains("&security_attributes"));
+}
+
 #[cfg(windows)]
 #[test]
 fn daemon_query_endpoint_roundtrips_windows_named_pipe_metadata() -> Result<()> {

@@ -170,7 +170,7 @@ fn sqlite_result_profiles_query_exact_native_rows_for_supported_providers() {
 }
 
 #[test]
-fn forgecode_import_persists_only_result_identity_and_resolves_from_source() {
+fn forgecode_success_result_is_absent_from_core_storage() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let source_path = temp.path().join("source.forge.db");
     let source = Connection::open(&source_path).unwrap();
@@ -199,7 +199,7 @@ fn forgecode_import_persists_only_result_identity_and_resolves_from_source() {
 
     let store_path = temp.path().join("ctx.db");
     let mut store = Store::open(&store_path).unwrap();
-    let summary = forgecode::import_forgecode_sqlite_batched(
+    let summary = forgecode::import_forgecode_nativepath(
         &source_path,
         &mut store,
         ProviderAdapterContext {
@@ -208,56 +208,32 @@ fn forgecode_import_persists_only_result_identity_and_resolves_from_source() {
             source_root: Some(temp.path().to_path_buf()),
             imported_at: DateTime::<Utc>::UNIX_EPOCH,
         },
-        NormalizedProviderImportOptions::default(),
+        ProviderImportOptions::default(),
     )
     .unwrap();
-    assert_eq!(summary.imported_events, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 0);
 
     let stored = Connection::open(&store_path).unwrap();
-    let (event_id, payload_json, metadata_json): (String, String, String) = stored
+    let event_count: i64 = stored
         .query_row(
-            "select e.id, e.payload_json, e.metadata_json from events e \
-             join sessions s on s.id = e.session_id where s.provider = 'forgecode'",
+            "select count(*) from events e join sessions s on s.id = e.session_id \
+             where s.provider = 'forgecode'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| row.get(0),
         )
         .unwrap();
-    assert!(!payload_json.contains(secret));
-    assert!(!metadata_json.contains(secret));
-    let payload: Value = serde_json::from_str(&payload_json).unwrap();
-    let metadata: Value = serde_json::from_str(&metadata_json).unwrap();
-    let content_ref: ContentRef =
-        serde_json::from_value(payload["body"]["result_content_ref"].clone()).unwrap();
-    let locators = VerifiedContentLocatorsV1::from_metadata_value(
-        &metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
-    )
-    .unwrap();
-    let locator = locators.locator(VerifiedContentRole::ResultBody).unwrap();
-    assert_eq!(locator.content_ref(), &content_ref);
-    let event_id = Uuid::parse_str(&event_id).unwrap();
-    let request = ResultContentRequest {
-        event_id,
-        provider: CaptureProvider::ForgeCode,
-        source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
-        source_access: sqlite_source_access(
-            &source_path,
-            CaptureProvider::ForgeCode,
-            FORGECODE_SQLITE_SOURCE_FORMAT,
-            event_id,
-        ),
-        source_family: CompleteContentSourceFamily::Sqlite,
-        content_profile: locator.content_profile().to_owned(),
-        source_locator: locator.source_locator().unwrap(),
-        source_record_ordinal: metadata["source_record_ordinal"].as_u64().unwrap(),
-        source_record_subrecord_index: metadata["source_record_subrecord_index"]
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap(),
-        expected_native_record_id: locator.native_record_id().to_owned(),
-        expected_record_digest: locator.record_sha256().clone(),
-        expected_content_ref: content_ref,
-    };
-    assert_eq!(resolve_result(&request).unwrap().content, secret);
+    assert_eq!(event_count, 0);
+    let run_count: i64 = stored
+        .query_row(
+            "select count(*) from runs r join sessions s on s.id = r.session_id \
+             where s.provider = 'forgecode'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_count, 0);
 }
 
 #[test]
@@ -288,7 +264,7 @@ fn capabilities_account_for_every_sqlite_cohort_without_silent_fallback() {
     }));
 }
 
-fn synthetic_event(provider_event_hash: &str, body: &str) -> ProviderEventEnvelope {
+fn synthetic_event(provider_event_hash: &str, body: &str) -> TestProviderEvent {
     let (_, mut event) = create_event_without_database(body);
     event.provider_event_hash = Some(provider_event_hash.to_owned());
     event
@@ -303,7 +279,7 @@ fn ordered_rowid_locator(kind: &str, phase: u8, rowid: i64) -> (String, Vec<u8>)
 #[test]
 fn newly_supported_sqlite_locators_are_bounded_and_path_free() {
     let body = long_body("path-free locator body");
-    let stable_values = vec![CapturedSqliteValue::Text("stable logical row".into())];
+    let stable_values = vec![NativeSqliteValue::Text("stable logical row".into())];
     let (_, ordered) = ordered_rowid_locator(CRUSH_LOCATOR_KIND, 2, 7);
     let mut raw_phase = vec![2];
     raw_phase.extend_from_slice(&7_i64.to_be_bytes());
@@ -357,7 +333,7 @@ fn newly_supported_sqlite_locators_are_bounded_and_path_free() {
     for (provider, source_format, kind, value) in routes {
         let mut event = synthetic_event("native-record", &body);
         let locator = NativeLocator::new(kind, value).unwrap();
-        attach_sqlite_complete_content_locator(
+        attach_test_sqlite_message_locator(
             &mut event,
             provider,
             source_format,
@@ -544,11 +520,13 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
     )
     .unwrap();
     let values = hermes::load_hermes_message_values(&conn, 1).unwrap();
+    let (_, _, normalized_payload_hash, _) =
+        hermes::hermes_complete_message_with_normalized_hash(&conn, &values).unwrap();
     drop(conn);
     let mut locator = vec![2];
     locator.extend_from_slice(&1_i64.to_be_bytes());
     let event = synthetic_event("message:1", &body);
-    let request = request_for(
+    let legacy_request = request_for(
         &path,
         CaptureProvider::Hermes,
         crate::HERMES_SQLITE_SOURCE_FORMAT,
@@ -560,9 +538,20 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
         &event,
         &body,
     );
+    let mut nativepath_request = legacy_request.clone();
+    nativepath_request.expected_hash_authority =
+        CompleteContentHashAuthority::NormalizedPayloadFallback;
+    nativepath_request.expected_provider_event_hash = normalized_payload_hash;
     assert_eq!(
         SqliteCompleteContentResolver::new()
-            .resolve(&[request])
+            .resolve(&[legacy_request])
+            .unwrap()[0]
+            .text,
+        body
+    );
+    assert_eq!(
+        SqliteCompleteContentResolver::new()
+            .resolve(&[nativepath_request])
             .unwrap()[0]
             .text,
         body
@@ -658,10 +647,18 @@ fn lingma_user_prompt_round_trips_and_changed_row_fails_closed() {
     )
     .unwrap();
     let values = lingma::lingma_complete_values(&conn, 1).unwrap().unwrap();
-    let (mut event, complete_text) = lingma::lingma_complete_user_message(&values).unwrap();
+    let (event, complete_text) = lingma::lingma_complete_user_message(&values).unwrap();
+    let mut event = test_provider_event(
+        event.provider_event_index,
+        Some(event.provider_event_hash),
+        Some(event.cursor),
+        event.event_type,
+        event.payload,
+        json!({}),
+    );
     let locator_value = ((1_i64 as u64) ^ (1_u64 << 63)).to_be_bytes().to_vec();
     let locator = NativeLocator::new(LINGMA_LOCATOR_KIND, locator_value.clone()).unwrap();
-    attach_sqlite_complete_content_locator(
+    attach_test_sqlite_message_locator(
         &mut event,
         CaptureProvider::Lingma,
         LINGMA_SQLITE_SOURCE_FORMAT,
@@ -734,10 +731,17 @@ fn trae_nested_itemtable_message_round_trips_without_storing_parent_body() {
     .unwrap();
     let bytes = trae::trae_complete_value(&conn, 0).unwrap().unwrap();
     let provider_session_id = "workspace/trae-session";
-    let (mut event, complete_text) =
-        trae::trae_complete_message(&bytes, 0, 0, 0, provider_session_id)
-            .unwrap()
-            .unwrap();
+    let (event, complete_text) = trae::trae_complete_message(&bytes, 0, 0, 0, provider_session_id)
+        .unwrap()
+        .unwrap();
+    let mut event = test_provider_event(
+        event.provider_event_index,
+        Some(event.provider_event_hash),
+        Some(event.cursor),
+        event.event_type,
+        event.payload,
+        json!({}),
+    );
     let locator = trae::trae_complete_message_locator(0, 0, 0).unwrap();
     attach_sqlite_native_content_locator(
         &mut event,
@@ -756,7 +760,7 @@ fn trae_nested_itemtable_message_round_trips_without_storing_parent_body() {
     assert!(!locator_json.contains("state.vscdb"));
     assert!(!locator_json.contains("Trae exact message"));
 
-    let values = [CapturedSqliteValue::Blob(bytes.clone())];
+    let values = [NativeSqliteValue::Blob(bytes.clone())];
     let mut request = request_for(
         &path,
         CaptureProvider::Trae,
@@ -809,12 +813,21 @@ fn astrbot_conversation_message_round_trips_and_binds_original_item() {
     let values = astrbot::astrbot_complete_conversation_values(&conn, 1)
         .unwrap()
         .unwrap();
-    let (mut event, complete_text, provider_session_id) =
-        astrbot::astrbot_complete_conversation_message(&values, 1)
-            .unwrap()
-            .unwrap();
+    let message = astrbot::astrbot_complete_conversation_message(&values, 1)
+        .unwrap()
+        .unwrap();
+    let complete_text = message.text;
+    let provider_session_id = message.provider_session_id;
+    let mut event = test_provider_event(
+        message.provider_event_index,
+        message.provider_event_hash,
+        Some(message.cursor),
+        message.event_type,
+        message.payload,
+        json!({}),
+    );
     let locator = astrbot::astrbot_complete_message_locator(1, 1).unwrap();
-    attach_sqlite_complete_content_locator(
+    attach_test_sqlite_message_locator(
         &mut event,
         CaptureProvider::AstrBot,
         ASTRBOT_SQLITE_SOURCE_FORMAT,

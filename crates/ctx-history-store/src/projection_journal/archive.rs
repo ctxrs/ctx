@@ -41,7 +41,7 @@ pub(crate) fn journal_archive_dependencies(
     conn: &rusqlite::Connection,
     dependencies: SessionJournalDependencies,
 ) -> Result<()> {
-    journal_session_dependencies(conn, dependencies)
+    journal_session_dependencies(conn, dependencies, None)
 }
 
 pub(crate) fn journal_archive_mutations(
@@ -70,18 +70,21 @@ pub(crate) fn journal_archive_mutations(
              WHERE e.capture_source_id = ?1 OR s.capture_source_id = ?1 OR r.source_id = ?1
              ORDER BY e.id",
             id,
+            None,
         )?;
         append_query_when_active(
             conn,
             JournalEntityKind::FileTouch,
             "SELECT id FROM files_touched WHERE source_id = ?1 ORDER BY id",
             id,
+            None,
         )?;
         append_query_when_active(
             conn,
             JournalEntityKind::VcsChange,
             "SELECT id FROM vcs_changes WHERE source_id = ?1 ORDER BY id",
             id,
+            None,
         )?;
     }
 
@@ -97,6 +100,7 @@ pub(crate) fn journal_archive_mutations(
             "SELECT DISTINCT e.id FROM events e LEFT JOIN runs r ON r.id = e.run_id
              WHERE e.session_id = ?1 OR r.session_id = ?1 ORDER BY e.id",
             id,
+            None,
         )?;
         append_query_when_active(
             conn,
@@ -110,6 +114,7 @@ pub(crate) fn journal_archive_mutations(
                 OR f.source_id = s.capture_source_id
              ORDER BY f.id",
             id,
+            None,
         )?;
         append_query_when_active(
             conn,
@@ -122,6 +127,7 @@ pub(crate) fn journal_archive_mutations(
              WHERE v.source_id = s.capture_source_id OR l.history_record_id = s.history_record_id
              ORDER BY v.id",
             id,
+            None,
         )?;
     }
 
@@ -136,22 +142,25 @@ pub(crate) fn journal_archive_mutations(
             JournalEntityKind::Event,
             "SELECT id FROM events WHERE run_id = ?1 ORDER BY id",
             id,
+            None,
         )?;
         append_query_when_active(
             conn,
             JournalEntityKind::FileTouch,
             "SELECT id FROM files_touched WHERE run_id = ?1 ORDER BY id",
             id,
+            None,
         )?;
     }
 
     for id in canonical_ids.event_ids.iter().copied() {
-        append_entity(conn, JournalEntityKind::Event, id)?;
+        append_entity(conn, JournalEntityKind::Event, id, None)?;
         append_query_when_active(
             conn,
             JournalEntityKind::FileTouch,
             "SELECT id FROM files_touched WHERE event_id = ?1 ORDER BY id",
             id,
+            None,
         )?;
     }
     for id in archive
@@ -160,7 +169,7 @@ pub(crate) fn journal_archive_mutations(
         .map(|file| file.id)
         .collect::<BTreeSet<_>>()
     {
-        append_entity(conn, JournalEntityKind::FileTouch, id)?;
+        append_entity(conn, JournalEntityKind::FileTouch, id, None)?;
     }
     for id in canonical_ids
         .vcs_change_ids
@@ -175,7 +184,7 @@ pub(crate) fn journal_archive_mutations(
         )
         .collect::<BTreeSet<_>>()
     {
-        append_entity(conn, JournalEntityKind::VcsChange, id)?;
+        append_entity(conn, JournalEntityKind::VcsChange, id, None)?;
     }
     Ok(())
 }

@@ -7,14 +7,17 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::{database_path, utc_now};
-use ctx_history_store::Store;
+use ctx_history_store::{CanonicalSemanticProjectionVersion, Store};
 use serde_json::{json, Value};
 
 use crate::{store_util::open_existing_store_read_only, DaemonRunArgs, DaemonTriggerCommandArg};
 
 use super::{
     daemon::DaemonRuntime,
-    daemon_retry::DaemonRetryBackoff,
+    daemon_retry::{
+        annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff,
+        SemanticFailureClass,
+    },
     daemon_scheduler::{
         daemon_deadline_has_min_budget, daemon_deadline_remaining, daemon_run_start_mode,
         refresh_semantic_document_count_cache, semantic_report_should_queue_recent_work,
@@ -26,13 +29,19 @@ use super::{
     },
     indexing::{backfill_semantic_embeddings, semantic_document_hash, semantic_source_text},
     model_contract::{semantic_model_key, SemanticModelLoadDeferred, SEMANTIC_MODEL_ID},
-    model_runtime::SharedSemanticRuntime,
+    model_runtime::{
+        SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SharedSemanticRuntime,
+    },
     paths_status::{
         read_semantic_worker_status, semantic_status_file_model_matches, semantic_vector_path,
         semantic_worker_report, semantic_worker_report_best_effort, semantic_worker_report_cached,
         write_daemon_status, write_semantic_worker_status, SemanticWorkerLock,
     },
     reports::SemanticWorkerReport,
+    resource_policy::{
+        semantic_background_resource_deferred, semantic_resource_deferral_releases_runtime,
+        SemanticBackgroundOperation, SemanticResourceDeferred,
+    },
     runtime_limits::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
         SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
@@ -47,10 +56,169 @@ use super::daemon::daemon_test_job;
 
 use crate::output::compact_json;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SemanticReconciliationSweepState {
+    pub(super) target_version: Option<CanonicalSemanticProjectionVersion>,
+    pub(super) committed_store_complete: bool,
+    pub(super) pruning_complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct SemanticReconciliationOutcome {
+    pub(super) committed_documents_scanned: usize,
+    pub(super) committed_documents_queued: usize,
+    pub(super) pruned_events_scanned: usize,
+    pub(super) deleted_chunks: usize,
+    pub(super) queued_stale_events: usize,
+    pub(super) work_remaining: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SemanticWorkerArgs {
     pub(super) max_chunks: Option<usize>,
     pub(super) max_seconds: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(super) enum DaemonSemanticModelStartup {
+    Loaded,
+    Finished(Value),
+}
+
+fn daemon_semantic_model_acquisition_error(
+    data_root: &Path,
+    last_run_at_ms: i64,
+    error: anyhow::Error,
+) -> DaemonSemanticModelStartup {
+    if let Some(deferred) = error.downcast_ref::<SemanticModelLoadDeferred>() {
+        let _ = write_semantic_model_load_deferred_status(data_root, deferred);
+        return DaemonSemanticModelStartup::Finished(daemon_semantic_model_load_deferred_job(
+            last_run_at_ms,
+            deferred,
+        ));
+    }
+    let message = format!("{error:#}");
+    let failure_class = classify_semantic_failure(&error);
+    let integrity_failure = semantic_model_acquisition_integrity_error(&error);
+    let failure_code = if integrity_failure {
+        "model_integrity_failed"
+    } else {
+        "model_acquisition_failed"
+    };
+    let _ = write_semantic_model_acquisition_status(
+        data_root,
+        failure_code,
+        Some(message.clone()),
+        Some(failure_class),
+    );
+    DaemonSemanticModelStartup::Finished(annotate_semantic_failure(
+        daemon_semantic_job_json(
+            "skipped",
+            Some(failure_code),
+            last_run_at_ms,
+            None,
+            Some(message),
+        ),
+        failure_class,
+    ))
+}
+
+pub(super) fn run_daemon_semantic_model_startup_with<Acquire, AcquireCpuFallback, Load>(
+    data_root: &Path,
+    last_run_at_ms: i64,
+    acquire: Acquire,
+    acquire_cpu_fallback: AcquireCpuFallback,
+    mut load: Load,
+) -> Result<DaemonSemanticModelStartup>
+where
+    Acquire: FnOnce() -> Result<SemanticDaemonModelAcquisition>,
+    AcquireCpuFallback: FnOnce(&'static str) -> Result<SemanticDaemonModelAcquisition>,
+    Load: FnMut(SemanticDaemonModelAcquisition) -> Result<(Option<Value>, Value)>,
+{
+    let _ = write_semantic_model_acquisition_status(data_root, "acquiring_model", None, None);
+    let mut acquisition = match acquire() {
+        Ok(acquisition) => acquisition,
+        Err(error) => {
+            return Ok(daemon_semantic_model_acquisition_error(
+                data_root,
+                last_run_at_ms,
+                error,
+            ))
+        }
+    };
+    let mut acquire_cpu_fallback = Some(acquire_cpu_fallback);
+
+    loop {
+        let _ = write_semantic_model_load_status(data_root, "loading_model", None, None);
+        match load(acquisition) {
+            Ok((embedding_runtime, embed_policy)) => {
+                let _ =
+                    write_semantic_model_loaded_status(data_root, embedding_runtime, embed_policy);
+                return Ok(DaemonSemanticModelStartup::Loaded);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<SemanticDaemonCpuFallbackRequired>()
+                    .is_some() =>
+            {
+                let fallback = error
+                    .downcast_ref::<SemanticDaemonCpuFallbackRequired>()
+                    .expect("matched daemon CPU fallback");
+                let reason = fallback.reason();
+                let Some(acquire_cpu_fallback) = acquire_cpu_fallback.take() else {
+                    return Err(error.context("daemon CPU fallback was requested twice"));
+                };
+                let _ = write_semantic_model_acquisition_status(
+                    data_root,
+                    "acquiring_model",
+                    None,
+                    None,
+                );
+                acquisition = match acquire_cpu_fallback(reason) {
+                    Ok(acquisition) => acquisition,
+                    Err(error) => {
+                        return Ok(daemon_semantic_model_acquisition_error(
+                            data_root,
+                            last_run_at_ms,
+                            error,
+                        ))
+                    }
+                };
+            }
+            Err(error) if error.downcast_ref::<SemanticModelLoadDeferred>().is_some() => {
+                let deferred = error
+                    .downcast_ref::<SemanticModelLoadDeferred>()
+                    .expect("matched semantic model load deferral");
+                let _ = write_semantic_model_load_deferred_status(data_root, deferred);
+                return Ok(DaemonSemanticModelStartup::Finished(
+                    daemon_semantic_model_load_deferred_job(last_run_at_ms, deferred),
+                ));
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                let failure_class = classify_semantic_failure(&error);
+                let failure_code = "model_load_failed";
+                let _ = write_semantic_model_load_status(
+                    data_root,
+                    failure_code,
+                    Some(message.clone()),
+                    Some(failure_class),
+                );
+                return Ok(DaemonSemanticModelStartup::Finished(
+                    annotate_semantic_failure(
+                        daemon_semantic_job_json(
+                            "skipped",
+                            Some(failure_code),
+                            last_run_at_ms,
+                            None,
+                            Some(message),
+                        ),
+                        failure_class,
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 pub(super) fn run_daemon_semantic_job(
@@ -62,12 +230,10 @@ pub(super) fn run_daemon_semantic_job(
 ) -> Result<Value> {
     let last_run_at_ms = utc_now().timestamp_millis();
     if !semantic_enabled {
-        let report = semantic_worker_report_best_effort(data_root);
         return Ok(daemon_semantic_job_json(
             "disabled",
             Some("semantic_disabled"),
             last_run_at_ms,
-            &report,
             None,
             None,
         ));
@@ -80,20 +246,47 @@ pub(super) fn run_daemon_semantic_job(
 
     let db_path = database_path(data_root.to_path_buf());
     if !db_path.exists() {
-        let report = semantic_worker_report_best_effort(data_root);
         return Ok(daemon_semantic_job_json(
             "skipped",
             Some("store_missing"),
             last_run_at_ms,
-            &report,
+            None,
+            None,
+        ));
+    }
+    if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
+        return Ok(daemon_semantic_job_json(
+            "skipped",
+            Some("daemon_deadline"),
+            last_run_at_ms,
             None,
             None,
         ));
     }
 
+    let admission_operation = if runtime.semantic_runtime.is_loaded() {
+        SemanticBackgroundOperation::IndexBatch
+    } else {
+        SemanticBackgroundOperation::ModelLoad
+    };
+    if let Some(deferred) = semantic_background_resource_deferred(data_root, admission_operation) {
+        if semantic_resource_deferral_releases_runtime(deferred.reason) {
+            let _ = runtime.semantic_runtime.release_if_idle();
+        }
+        let _ = write_semantic_resource_deferred_status(data_root, deferred);
+        return Ok(daemon_semantic_resource_deferred_job(
+            last_run_at_ms,
+            deferred,
+        ));
+    }
+
     let store = Store::open(&db_path).context("open ctx store for daemon semantic job")?;
     refresh_semantic_document_count_cache(&store)?;
-    reconcile_committed_semantic_work(data_root, &store)?;
+    let _ = reconcile_committed_semantic_work_with_state(
+        data_root,
+        &store,
+        &mut runtime.semantic_reconciliation_sweep,
+    )?;
     let mut before = semantic_worker_report(data_root, Some(&store))?;
     if semantic_report_should_queue_recent_work(&before)
         && queue_recent_semantic_work(data_root, &store, "daemon_recent")? > 0
@@ -105,7 +298,6 @@ pub(super) fn run_daemon_semantic_job(
             "empty",
             Some("no_searchable_items"),
             last_run_at_ms,
-            &before,
             None,
             None,
         ));
@@ -121,62 +313,35 @@ pub(super) fn run_daemon_semantic_job(
             "skipped",
             Some("daemon_deadline"),
             last_run_at_ms,
-            &before,
             None,
             None,
         ));
     }
     if semantic_daemon_model_load_needed(&before, runtime.semantic_runtime.is_loaded()) {
         let cache_dir = semantic_worker_cache_dir(data_root);
-        let _ = write_semantic_model_acquisition_status(data_root, "acquiring_model", None);
-        match runtime
-            .semantic_runtime
-            .ensure_loaded_for_daemon(&cache_dir)
-        {
-            Ok(_) => {
-                let embedding_runtime = runtime.semantic_runtime.runtime_status_json()?;
-                let embed_policy = runtime.semantic_runtime.policy_status_json()?;
-                let _ = write_semantic_model_acquired_status(
-                    data_root,
-                    embedding_runtime,
-                    embed_policy,
-                );
+        match run_daemon_semantic_model_startup_with(
+            data_root,
+            last_run_at_ms,
+            || runtime.semantic_runtime.acquire_for_daemon(&cache_dir),
+            |fallback| {
+                runtime
+                    .semantic_runtime
+                    .acquire_cpu_fallback_for_daemon(&cache_dir, fallback)
+            },
+            |acquisition| {
+                runtime
+                    .semantic_runtime
+                    .ensure_loaded_after_daemon_acquisition(&cache_dir, acquisition)?;
+                Ok((
+                    runtime.semantic_runtime.runtime_status_json()?,
+                    runtime.semantic_runtime.policy_status_json()?,
+                ))
+            },
+        )? {
+            DaemonSemanticModelStartup::Loaded => {
                 before = semantic_worker_report(data_root, Some(&store))?;
             }
-            Err(error) if error.downcast_ref::<SemanticModelLoadDeferred>().is_some() => {
-                let deferred = error
-                    .downcast_ref::<SemanticModelLoadDeferred>()
-                    .expect("matched semantic model load deferral");
-                let _ = write_semantic_model_load_deferred_status(data_root, deferred);
-                let report = semantic_worker_report(data_root, Some(&store))?;
-                return Ok(daemon_semantic_model_load_deferred_job(
-                    last_run_at_ms,
-                    &report,
-                    deferred,
-                ));
-            }
-            Err(error) => {
-                let message = format!("{error:#}");
-                let integrity_failure = semantic_model_acquisition_integrity_error(&error);
-                let failure_code = if integrity_failure {
-                    "model_integrity_failed"
-                } else {
-                    "model_acquisition_failed"
-                };
-                let _ = write_semantic_model_acquisition_status(
-                    data_root,
-                    failure_code,
-                    Some(message.clone()),
-                );
-                return Ok(daemon_semantic_job_json(
-                    "skipped",
-                    Some(failure_code),
-                    last_run_at_ms,
-                    &before,
-                    None,
-                    Some(message),
-                ));
-            }
+            DaemonSemanticModelStartup::Finished(job) => return Ok(job),
         }
     }
     if before.queued_items_estimate == 0 {
@@ -184,21 +349,31 @@ pub(super) fn run_daemon_semantic_job(
             "ready",
             None,
             last_run_at_ms,
-            &before,
             None,
             None,
         ));
     }
     drop(store);
 
+    if let Some(deferred) =
+        semantic_background_resource_deferred(data_root, SemanticBackgroundOperation::IndexBatch)
+    {
+        if semantic_resource_deferral_releases_runtime(deferred.reason) {
+            let _ = runtime.semantic_runtime.release_if_idle();
+        }
+        let _ = write_semantic_resource_deferred_status(data_root, deferred);
+        return Ok(daemon_semantic_resource_deferred_job(
+            last_run_at_ms,
+            deferred,
+        ));
+    }
+
     let worker_max_seconds = daemon_semantic_worker_seconds_budget(args, deadline);
     if worker_max_seconds == 0 {
-        let report = semantic_worker_report_for_daemon(data_root);
         return Ok(daemon_semantic_job_json(
             "skipped",
             Some("daemon_deadline"),
             last_run_at_ms,
-            &report,
             None,
             None,
         ));
@@ -207,32 +382,22 @@ pub(super) fn run_daemon_semantic_job(
         max_chunks: args.max_chunks,
         max_seconds: Some(worker_max_seconds),
     };
-    let worker_result = run_semantic_worker_inner_with_runtime(
-        worker_args,
-        data_root,
-        None,
-        &runtime.semantic_runtime,
-    );
+    let worker_result =
+        run_semantic_worker_inner_with_runtime(worker_args, data_root, &runtime.semantic_runtime);
     if let Err(error) = worker_result {
         if let Some(deferred) = error.downcast_ref::<SemanticModelLoadDeferred>() {
             let _ = write_semantic_model_load_deferred_status(data_root, deferred);
-            let report = semantic_worker_report_for_daemon(data_root);
             return Ok(daemon_semantic_model_load_deferred_job(
                 last_run_at_ms,
-                &report,
                 deferred,
             ));
         }
         let message = format!("{error:#}");
+        let failure_class = classify_semantic_failure(&error);
         let _ = write_semantic_worker_failure_status(data_root, message.clone());
-        let report = semantic_worker_report_for_daemon(data_root);
-        return Ok(daemon_semantic_job_json(
-            "failed",
-            None,
-            last_run_at_ms,
-            &report,
-            None,
-            Some(message),
+        return Ok(annotate_semantic_failure(
+            daemon_semantic_job_json("failed", None, last_run_at_ms, None, Some(message)),
+            failure_class,
         ));
     }
     let report = semantic_worker_report_for_daemon(data_root);
@@ -253,25 +418,71 @@ pub(super) fn run_daemon_semantic_job(
         status,
         None,
         last_run_at_ms,
-        &report,
         indexed_chunks,
         None,
     ))
 }
 
-pub(super) fn reconcile_committed_semantic_work(data_root: &Path, store: &Store) -> Result<()> {
+pub(super) fn reconcile_committed_semantic_work_with_state(
+    data_root: &Path,
+    store: &Store,
+    sweep: &mut SemanticReconciliationSweepState,
+) -> Result<SemanticReconciliationOutcome> {
     let vector_path = semantic_vector_path(data_root);
     if !vector_path.exists() {
-        return Ok(());
+        sweep.target_version = Some(store.canonical_semantic_projection_version()?);
+        sweep.committed_store_complete = true;
+        sweep.pruning_complete = true;
+        return Ok(SemanticReconciliationOutcome::default());
     }
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
-    vector_store.prune_ineligible_events(store)?;
+    prepare_semantic_reconciliation_version(&mut vector_store, store, sweep)?;
+
+    let prune = if sweep.pruning_complete {
+        super::vector_store::SemanticPruneOutcome {
+            scan_complete: true,
+            ..super::vector_store::SemanticPruneOutcome::default()
+        }
+    } else {
+        let prune = vector_store.prune_ineligible_events(store)?;
+        if prune.scan_complete {
+            sweep.pruning_complete = true;
+        }
+        prune
+    };
+
+    let mut outcome = SemanticReconciliationOutcome {
+        pruned_events_scanned: prune.scanned_events,
+        deleted_chunks: prune.deleted_chunks,
+        queued_stale_events: prune.queued_stale_events,
+        ..SemanticReconciliationOutcome::default()
+    };
+    if sweep.committed_store_complete {
+        compare_and_ack_semantic_reconciliation_version(
+            &mut vector_store,
+            store,
+            sweep,
+            &mut outcome,
+        )?;
+        outcome.work_remaining = !sweep.committed_store_complete || !sweep.pruning_complete;
+        return Ok(outcome);
+    }
+
     let before = vector_store.committed_store_reconciliation_cursor()?;
     let docs = store.recent_event_embedding_documents(before, SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?;
     if docs.is_empty() {
         vector_store.set_committed_store_reconciliation_cursor(None)?;
-        return Ok(());
+        sweep.committed_store_complete = true;
+        compare_and_ack_semantic_reconciliation_version(
+            &mut vector_store,
+            store,
+            sweep,
+            &mut outcome,
+        )?;
+        outcome.work_remaining = !sweep.committed_store_complete || !sweep.pruning_complete;
+        return Ok(outcome);
     }
+    outcome.committed_documents_scanned = docs.len();
     let next_cursor = if docs.len() == SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT {
         docs.iter()
             .map(|doc| (doc.anchor_occurred_at_ms, doc.seq))
@@ -291,8 +502,94 @@ pub(super) fn reconcile_committed_semantic_work(data_root: &Path, store: &Store)
                 .is_none_or(|stored_hash| stored_hash != &current_hash)
         })
         .collect::<Vec<_>>();
-    vector_store.enqueue_dirty_documents(&missing_or_changed, "committed_store_reconcile")?;
+    outcome.committed_documents_queued =
+        vector_store.enqueue_dirty_documents(&missing_or_changed, "committed_store_reconcile")?;
     vector_store.set_committed_store_reconciliation_cursor(next_cursor)?;
+    if next_cursor.is_none() {
+        sweep.committed_store_complete = true;
+    }
+    compare_and_ack_semantic_reconciliation_version(&mut vector_store, store, sweep, &mut outcome)?;
+    outcome.work_remaining = !sweep.committed_store_complete || !sweep.pruning_complete;
+    Ok(outcome)
+}
+
+fn prepare_semantic_reconciliation_version(
+    vector_store: &mut SemanticVectorStore,
+    store: &Store,
+    sweep: &mut SemanticReconciliationSweepState,
+) -> Result<()> {
+    let current_version = store.canonical_semantic_projection_version()?;
+    let acknowledged_version = vector_store.reconciled_store_version()?;
+    let durable_target_version = vector_store.reconciliation_target_store_version()?;
+
+    match sweep.target_version {
+        Some(target_version) if current_version.store_identity != target_version.store_identity => {
+            rearm_semantic_reconciliation(vector_store, sweep, current_version)
+        }
+        Some(target_version)
+            if sweep.committed_store_complete
+                && sweep.pruning_complete
+                && current_version != target_version =>
+        {
+            rearm_semantic_reconciliation(vector_store, sweep, current_version)
+        }
+        // Finish an active sweep even when its epoch advances. Completion
+        // compare-and-ack will start a successor sweep at the newest epoch.
+        // Restarting here would starve large histories under steady ingestion.
+        Some(_) => Ok(()),
+        None if acknowledged_version == Some(current_version) => {
+            sweep.target_version = Some(current_version);
+            sweep.committed_store_complete = true;
+            sweep.pruning_complete = true;
+            Ok(())
+        }
+        None if durable_target_version
+            .is_some_and(|target| target.store_identity == current_version.store_identity) =>
+        {
+            sweep.target_version = durable_target_version;
+            Ok(())
+        }
+        None => rearm_semantic_reconciliation(vector_store, sweep, current_version),
+    }
+}
+
+fn rearm_semantic_reconciliation(
+    vector_store: &mut SemanticVectorStore,
+    sweep: &mut SemanticReconciliationSweepState,
+    target_version: CanonicalSemanticProjectionVersion,
+) -> Result<()> {
+    vector_store.begin_reconciliation_version(target_version)?;
+    sweep.target_version = Some(target_version);
+    sweep.committed_store_complete = false;
+    sweep.pruning_complete = false;
+    Ok(())
+}
+
+fn compare_and_ack_semantic_reconciliation_version(
+    vector_store: &mut SemanticVectorStore,
+    store: &Store,
+    sweep: &mut SemanticReconciliationSweepState,
+    outcome: &mut SemanticReconciliationOutcome,
+) -> Result<()> {
+    if !sweep.committed_store_complete || !sweep.pruning_complete {
+        return Ok(());
+    }
+    let target_version = sweep
+        .target_version
+        .ok_or_else(|| anyhow!("semantic reconciliation completed without a Store version"))?;
+    let completion_version = store.canonical_semantic_projection_version()?;
+    if completion_version == target_version {
+        vector_store.acknowledge_reconciliation_version(target_version)?;
+        let post_ack_version = store.canonical_semantic_projection_version()?;
+        if post_ack_version != target_version {
+            rearm_semantic_reconciliation(vector_store, sweep, post_ack_version)?;
+            outcome.work_remaining = true;
+        }
+        return Ok(());
+    }
+
+    rearm_semantic_reconciliation(vector_store, sweep, completion_version)?;
+    outcome.work_remaining = true;
     Ok(())
 }
 
@@ -325,12 +622,11 @@ pub(super) fn daemon_semantic_worker_seconds_budget(
 }
 
 pub(super) fn daemon_semantic_deadline_skipped_job(data_root: &Path) -> Value {
-    let report = semantic_worker_report_for_daemon(data_root);
+    let _ = data_root;
     daemon_semantic_job_json(
         "skipped",
         Some("daemon_deadline"),
         utc_now().timestamp_millis(),
-        &report,
         None,
         None,
     )
@@ -341,7 +637,7 @@ pub(super) fn daemon_semantic_skipped_job(
     semantic_enabled: bool,
     reason: &str,
 ) -> Value {
-    let report = semantic_worker_report_for_daemon(data_root);
+    let _ = data_root;
     daemon_semantic_job_json(
         if semantic_enabled {
             "skipped"
@@ -354,7 +650,6 @@ pub(super) fn daemon_semantic_skipped_job(
             "semantic_disabled"
         }),
         utc_now().timestamp_millis(),
-        &report,
         None,
         None,
     )
@@ -372,15 +667,18 @@ pub(super) fn daemon_semantic_retry_backoff_job(
     job
 }
 
-pub(super) fn daemon_semantic_failed_job(data_root: &Path, message: String) -> Value {
-    let report = semantic_worker_report_for_daemon(data_root);
-    daemon_semantic_job_json(
-        "failed",
-        None,
-        utc_now().timestamp_millis(),
-        &report,
-        None,
-        Some(message),
+pub(super) fn daemon_semantic_failed_job(data_root: &Path, error: anyhow::Error) -> Value {
+    let _ = data_root;
+    let failure_class = classify_semantic_failure(&error);
+    annotate_semantic_failure(
+        daemon_semantic_job_json(
+            "failed",
+            None,
+            utc_now().timestamp_millis(),
+            None,
+            Some(format!("{error:#}")),
+        ),
+        failure_class,
     )
 }
 
@@ -388,7 +686,6 @@ pub(super) fn daemon_semantic_job_json(
     status: &str,
     reason: Option<&str>,
     last_run_at_ms: i64,
-    report: &SemanticWorkerReport,
     indexed_chunks: Option<usize>,
     last_error: Option<String>,
 ) -> Value {
@@ -396,46 +693,49 @@ pub(super) fn daemon_semantic_job_json(
         "schema_version": 1,
         "status": status,
         "model_key": semantic_model_key(),
-        "enabled": true,
         "reason": reason,
         "last_run_at_ms": last_run_at_ms,
         "last_error": last_error,
         "indexed_chunks": indexed_chunks,
-        "model_cache_available": report.model_cache_available,
-        "model_acquisition": report.model_acquisition.clone(),
-        "embed_policy": report.embed_policy.clone(),
-        "embedding_runtime": report.embedding_runtime.clone(),
-        "worker_status": report.status,
-        "coverage": {
-            "searchable_items": report.searchable_items,
-            "completed_items": report.embedded_items,
-            "embedded_items": report.embedded_items,
-            "embedded_chunks": report.embedded_chunks,
-            "dirty_items": report.dirty_items,
-            "queued_items_estimate": report.queued_items_estimate,
-        },
     }))
 }
 
 pub(super) fn daemon_semantic_model_load_deferred_job(
     last_run_at_ms: i64,
-    report: &SemanticWorkerReport,
     deferred: &SemanticModelLoadDeferred,
 ) -> Value {
     let mut value = daemon_semantic_job_json(
         "skipped",
         Some("memory_pressure"),
         last_run_at_ms,
-        report,
         None,
         None,
     );
+    value["failure_class"] = Value::String("resource_pressure".to_owned());
     value["retryable"] = Value::Bool(true);
     value["available_memory_bytes"] = json!(deferred.available_memory_bytes);
     value["required_available_memory_bytes"] = json!(deferred.required_available_memory_bytes);
     compact_json(value)
 }
 
+pub(super) fn daemon_semantic_resource_deferred_job(
+    last_run_at_ms: i64,
+    deferred: SemanticResourceDeferred,
+) -> Value {
+    let mut value = daemon_semantic_job_json(
+        "resource_deferred",
+        Some(deferred.reason.as_str()),
+        last_run_at_ms,
+        None,
+        None,
+    );
+    value["failure_class"] = Value::String("resource_pressure".to_owned());
+    value["retryable"] = Value::Bool(true);
+    value["resource_deferral"] = deferred.to_json();
+    compact_json(value)
+}
+
+#[cfg(test)]
 pub(super) fn write_daemon_lifecycle_status(
     data_root: &Path,
     args: &DaemonRunArgs,
@@ -443,6 +743,52 @@ pub(super) fn write_daemon_lifecycle_status(
     started_at_ms: i64,
     finished_at_ms: Option<i64>,
     last_error: Option<String>,
+) -> Result<()> {
+    write_daemon_lifecycle_status_observed(
+        data_root,
+        args,
+        status,
+        started_at_ms,
+        finished_at_ms,
+        last_error,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_daemon_lifecycle_status_with_runtime(
+    data_root: &Path,
+    args: &DaemonRunArgs,
+    status: &str,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+    last_error: Option<String>,
+    semantic_runtime_active: bool,
+    config_reload: &Value,
+) -> Result<()> {
+    write_daemon_lifecycle_status_observed(
+        data_root,
+        args,
+        status,
+        started_at_ms,
+        finished_at_ms,
+        last_error,
+        Some(semantic_runtime_active),
+        Some(config_reload),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_daemon_lifecycle_status_observed(
+    data_root: &Path,
+    args: &DaemonRunArgs,
+    status: &str,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+    last_error: Option<String>,
+    semantic_runtime_active: Option<bool>,
+    config_reload: Option<&Value>,
 ) -> Result<()> {
     write_daemon_status(
         data_root,
@@ -456,6 +802,8 @@ pub(super) fn write_daemon_lifecycle_status(
             "start_mode": daemon_run_start_mode(args).as_str(),
             "trigger_command": args.trigger_command.map(DaemonTriggerCommandArg::as_str),
             "last_error": last_error,
+            "semantic_runtime_active": semantic_runtime_active,
+            "config_reload": config_reload,
         })),
     )
 }
@@ -504,6 +852,7 @@ pub(super) fn write_semantic_model_acquisition_status(
     data_root: &Path,
     status: &str,
     message: Option<String>,
+    failure_class: Option<SemanticFailureClass>,
 ) -> Result<()> {
     let now = utc_now().timestamp_millis();
     write_semantic_worker_status(
@@ -520,6 +869,41 @@ pub(super) fn write_semantic_model_acquisition_status(
             )
             .then_some(now),
             "last_error": message,
+            "failure_class": failure_class.map(SemanticFailureClass::as_str),
+            "retryable": failure_class.map(|class| matches!(
+                class,
+                SemanticFailureClass::Retryable | SemanticFailureClass::ResourcePressure
+            )),
+            "model_acquisition": semantic_model_acquisition_status_json(
+                &semantic_worker_cache_dir(data_root),
+            ),
+            "embed_policy": semantic_embed_policy_status_json(),
+        }),
+    )
+}
+
+pub(super) fn write_semantic_model_load_status(
+    data_root: &Path,
+    status: &str,
+    message: Option<String>,
+    failure_class: Option<SemanticFailureClass>,
+) -> Result<()> {
+    let now = utc_now().timestamp_millis();
+    write_semantic_worker_status(
+        data_root,
+        &json!({
+            "schema_version": 1,
+            "status": status,
+            "model_key": semantic_model_key(),
+            "pid": process::id(),
+            "heartbeat_at_ms": now,
+            "finished_at_ms": (status == "model_load_failed").then_some(now),
+            "last_error": message,
+            "failure_class": failure_class.map(SemanticFailureClass::as_str),
+            "retryable": failure_class.map(|class| matches!(
+                class,
+                SemanticFailureClass::Retryable | SemanticFailureClass::ResourcePressure
+            )),
             "model_acquisition": semantic_model_acquisition_status_json(
                 &semantic_worker_cache_dir(data_root),
             ),
@@ -543,6 +927,7 @@ pub(super) fn write_semantic_model_load_deferred_status(
             "heartbeat_at_ms": now,
             "finished_at_ms": now,
             "last_error": null,
+            "failure_class": "resource_pressure",
             "retryable": true,
             "available_memory_bytes": deferred.available_memory_bytes,
             "required_available_memory_bytes": deferred.required_available_memory_bytes,
@@ -554,7 +939,33 @@ pub(super) fn write_semantic_model_load_deferred_status(
     )
 }
 
-pub(super) fn write_semantic_model_acquired_status(
+pub(super) fn write_semantic_resource_deferred_status(
+    data_root: &Path,
+    deferred: SemanticResourceDeferred,
+) -> Result<()> {
+    let now = utc_now().timestamp_millis();
+    write_semantic_worker_status(
+        data_root,
+        &compact_json(json!({
+            "schema_version": 1,
+            "status": "resource_deferred",
+            "model_key": semantic_model_key(),
+            "pid": process::id(),
+            "heartbeat_at_ms": now,
+            "finished_at_ms": now,
+            "last_error": null,
+            "failure_class": "resource_pressure",
+            "retryable": true,
+            "resource_deferral": deferred.to_json(),
+            "model_acquisition": semantic_model_acquisition_status_json(
+                &semantic_worker_cache_dir(data_root),
+            ),
+            "embed_policy": semantic_embed_policy_status_json(),
+        })),
+    )
+}
+
+pub(super) fn write_semantic_model_loaded_status(
     data_root: &Path,
     embedding_runtime: Option<Value>,
     embed_policy: Value,
@@ -564,7 +975,7 @@ pub(super) fn write_semantic_model_acquired_status(
         data_root,
         &json!({
             "schema_version": 1,
-            "status": "model_acquired",
+            "status": "model_loaded",
             "model_key": semantic_model_key(),
             "pid": process::id(),
             "heartbeat_at_ms": now,
@@ -581,7 +992,6 @@ pub(super) fn write_semantic_model_acquired_status(
 pub(super) fn run_semantic_worker_inner_with_runtime(
     args: SemanticWorkerArgs,
     data_root: &Path,
-    query_hint: Option<String>,
     runtime: &SharedSemanticRuntime,
 ) -> Result<()> {
     let Some(_lock) = SemanticWorkerLock::acquire(data_root)? else {
@@ -655,9 +1065,7 @@ pub(super) fn run_semantic_worker_inner_with_runtime(
             runtime,
             &mut model_init_ms,
             &cache_dir,
-            query_hint.as_deref(),
             max_chunks,
-            true,
             continue_past_indexed_pages,
             Some(deadline),
         )?

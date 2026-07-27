@@ -1,7 +1,28 @@
+use std::fmt;
+
 use anyhow::Error;
 use serde_json::{json, Value};
 
 use super::{compact_json, render_tool_text};
+
+#[derive(Debug)]
+pub(super) struct InvalidToolRequest {
+    message: String,
+}
+
+impl fmt::Display for InvalidToolRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidToolRequest {}
+
+pub(super) fn invalid_tool_request(message: impl Into<String>) -> Error {
+    Error::new(InvalidToolRequest {
+        message: message.into(),
+    })
+}
 
 pub(super) fn tool_result(structured: Value) -> Value {
     let text = render_tool_text(&structured);
@@ -30,6 +51,22 @@ pub(super) fn tool_error_result(err: Error) -> Value {
                 }
             ],
             "structuredContent": structured,
+        });
+    }
+    if let Some(error) = err.downcast_ref::<InvalidToolRequest>() {
+        let message = error.to_string();
+        return json!({
+            "isError": true,
+            "content": [
+                {
+                    "type": "text",
+                    "text": message.clone(),
+                }
+            ],
+            "structuredContent": {
+                "error": message,
+                "error_code": "invalid_request",
+            }
         });
     }
     if let Some(error_code) = crate::pro::stable_error_code(&err) {
@@ -105,7 +142,9 @@ pub(super) fn json_rpc_error(code: i64, message: &str, data: Option<Value>) -> V
 mod tests {
     use serde_json::json;
 
-    use super::{error_response, invalid_request_response};
+    use super::{
+        error_response, invalid_request_response, invalid_tool_request, tool_error_result,
+    };
 
     #[test]
     fn error_response_preserves_required_null_id_while_pruning_optional_data() {
@@ -137,5 +176,18 @@ mod tests {
             assert!(response.as_object().unwrap().contains_key("id"));
             assert!(response["id"].is_null());
         }
+    }
+
+    #[test]
+    fn invalid_tool_request_preserves_detail_and_adds_stable_error_code() {
+        let result = tool_error_result(invalid_tool_request("limit must be an integer"));
+
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["error"],
+            "limit must be an integer"
+        );
+        assert_eq!(result["structuredContent"]["error_code"], "invalid_request");
+        assert_eq!(result["content"][0]["text"], "limit must be an integer");
     }
 }

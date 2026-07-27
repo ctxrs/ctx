@@ -5,25 +5,23 @@
 //! content profile. Both routes verify the captured record
 //! digest and normalized content reference before returning source content.
 
-use ctx_history_core::{CaptureProvider, ContentRef, EventType, ProviderEventEnvelope};
-use serde_json::{json, Value};
+use ctx_history_core::{CaptureProvider, EventType};
+use serde_json::Value;
 
+#[cfg(test)]
+use super::digest_bytes;
 use super::{
-    digest_bytes, CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
+    CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
     CompleteContentHashAuthority, CompleteContentSourceFamily, CompleteContentSourceLocator,
-    CompleteMessage, CompleteMessageRequest, JsonlRange, SourceVerification,
-    VerifiedContentLocatorV1, VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES,
+    CompleteMessage, CompleteMessageRequest, JsonlRange, SourceVerification, VerifiedContentRole,
 };
-use crate::captured_batch::jsonl::jsonl_locator_range;
-use crate::captured_batch::{CapturedRecord, CapturedRecordPayload};
 use crate::complete_content::{
-    attach_verified_content_locator, verified_content_profile_for_locator,
     verified_content_route_matches, ResolvedResultContent, ResultContentRequest,
 };
 use crate::provider::providers::mux::{
     mux_event_id, mux_event_text, mux_event_type, mux_result_content,
 };
-use crate::{CaptureError, Result as CaptureResult, MUX_SOURCE_FORMAT};
+use crate::MUX_SOURCE_FORMAT;
 
 pub(super) const MUX_LOCATOR_KIND: &str = "mux-record-v1";
 const MUX_LOCATOR_BYTES: usize = 17;
@@ -35,6 +33,7 @@ enum MuxAddress {
 }
 
 impl MuxAddress {
+    #[cfg(test)]
     fn encode(self) -> [u8; MUX_LOCATOR_BYTES] {
         let (tag, range) = match self {
             Self::Chat(range) => (1, range),
@@ -72,148 +71,6 @@ pub(crate) fn valid_mux_locator(value: &[u8]) -> bool {
         .as_ref()
         .and_then(MuxAddress::decode)
         .is_some()
-}
-
-pub(crate) fn attach_mux_verified_content_locator(
-    event: &mut ProviderEventEnvelope,
-    result_content_ref: Option<&ContentRef>,
-    raw_value: &Value,
-    record: &CapturedRecord,
-    line_number: usize,
-    is_partial: bool,
-) -> CaptureResult<()> {
-    let locator_value = mux_locator(record, is_partial)?;
-    let CapturedRecordPayload::NativeBytes(record_bytes) = record.payload() else {
-        return Err(CaptureError::SystemInvariant(
-            "Mux verified-content locator requires native bytes",
-        ));
-    };
-    let native_record_id = mux_native_record_id(raw_value, line_number, is_partial);
-
-    if event.event_type == EventType::Message {
-        let text = mux_event_text(raw_value, EventType::Message);
-        if text.chars().count() > crate::PROVIDER_MAX_TEXT_CHARS
-            && text.len() <= COMPLETE_CONTENT_MAX_BODY_BYTES
-        {
-            if let Some(content_ref) = ContentRef::from_bytes(text.as_bytes()) {
-                let _ = attach_mux_locator(
-                    event,
-                    VerifiedContentRole::MessageBody,
-                    MUX_SOURCE_FORMAT,
-                    MUX_LOCATOR_KIND,
-                    &locator_value,
-                    native_record_id.clone(),
-                    digest_bytes(record_bytes),
-                    content_ref,
-                )?;
-            }
-        }
-    }
-
-    if matches!(
-        event.event_type,
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        if let Some(content_ref) = result_content_ref.filter(|content_ref| {
-            usize::try_from(content_ref.byte_len())
-                .ok()
-                .is_some_and(|length| length <= COMPLETE_CONTENT_MAX_BODY_BYTES)
-        }) {
-            if event.payload.as_object().is_none() {
-                return Ok(());
-            }
-            if attach_mux_locator(
-                event,
-                VerifiedContentRole::ResultBody,
-                MUX_SOURCE_FORMAT,
-                MUX_LOCATOR_KIND,
-                &locator_value,
-                native_record_id,
-                digest_bytes(record_bytes),
-                content_ref.clone(),
-            )? {
-                let payload =
-                    event
-                        .payload
-                        .as_object_mut()
-                        .ok_or(CaptureError::SystemInvariant(
-                            "Mux event payload stopped being an object",
-                        ))?;
-                payload.insert("result_content_ref".to_owned(), json!(content_ref));
-                payload.insert(
-                    "output_bytes".to_owned(),
-                    Value::from(content_ref.byte_len()),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn attach_mux_locator(
-    event: &mut ProviderEventEnvelope,
-    role: VerifiedContentRole,
-    source_format: &str,
-    locator_kind: &str,
-    locator_value: &[u8],
-    native_record_id: String,
-    record_sha256: CompleteContentBodyDigest,
-    content_ref: ContentRef,
-) -> CaptureResult<bool> {
-    let profile = verified_content_profile_for_locator(
-        CaptureProvider::Mux,
-        source_format,
-        CompleteContentSourceFamily::Jsonl,
-        role,
-        locator_kind,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "Mux verified-content route must have a profile",
-    ))?;
-    let Some(locator) = VerifiedContentLocatorV1::new(
-        role,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Jsonl,
-        locator_kind,
-        locator_value,
-        native_record_id,
-        record_sha256,
-    ) else {
-        return Ok(false);
-    };
-    attach_verified_content_locator(&mut event.metadata, locator)
-        .map(|()| true)
-        .ok_or(CaptureError::SystemInvariant(
-            "verified-content locator collection is malformed",
-        ))
-}
-
-fn mux_locator(record: &CapturedRecord, is_partial: bool) -> CaptureResult<Vec<u8>> {
-    if is_partial {
-        if record.ordinal() != 0 {
-            return Err(CaptureError::SystemInvariant(
-                "Mux partial record ordinal must be zero",
-            ));
-        }
-        let CapturedRecordPayload::NativeBytes(bytes) = record.payload() else {
-            return Err(CaptureError::SystemInvariant(
-                "Mux partial locator requires native bytes",
-            ));
-        };
-        let byte_len = u64::try_from(bytes.len())
-            .map_err(|_| CaptureError::SystemInvariant("Mux partial record length overflowed"))?;
-        return Ok(MuxAddress::Partial { byte_len }.encode().to_vec());
-    }
-    let (byte_start, byte_end_exclusive) = jsonl_locator_range(record.locator())
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    Ok(MuxAddress::Chat(JsonlRange {
-        byte_start,
-        byte_end_exclusive,
-    })
-    .encode()
-    .to_vec())
 }
 
 pub(super) fn resolve_messages(

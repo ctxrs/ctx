@@ -31,7 +31,7 @@ fn search_refreshes_discovered_codex_sessions_before_query() {
 }
 
 #[test]
-fn default_search_bootstraps_and_autostarts_daemon_with_semantic_disabled() {
+fn machine_readable_default_search_does_not_autostart_daemon() {
     let temp = tempdir();
     let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
     let discovered = temp.path().join(".codex").join("sessions");
@@ -47,10 +47,10 @@ fn default_search_bootstraps_and_autostarts_daemon_with_semantic_disabled() {
     assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["retrieval"]["requested_mode"], "lexical");
+    assert!(!temp.path().join("daemon/status.json").exists());
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["daemon"]["status"], "failed");
-    assert_eq!(status["daemon"]["trigger_command"], "search");
+    assert!(status["daemon"]["trigger_command"].is_null());
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
 }
@@ -1143,13 +1143,13 @@ fn search_refresh_wait_json_emits_progress_on_stderr() {
 }
 
 #[test]
-fn search_refresh_wait_fails_when_no_supported_refresh_source_exists() {
+fn search_refresh_wait_reports_no_sources_for_complete_empty_inventory() {
     let temp = tempdir();
-    ctx(&temp)
-        .args(["search", "anything", "--refresh", "wait", "--json"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "wait search refresh found no supported",
-        ));
+    let search =
+        json_output(ctx(&temp).args(["search", "anything", "--refresh", "wait", "--json"]));
+
+    assert_eq!(search["freshness"]["status"], "no_sources");
+    assert_eq!(search["freshness"]["source_count"], 0);
+    assert_eq!(search["freshness"]["totals"]["failed_sources"], 0);
+    assert!(search["results"].as_array().unwrap().is_empty());
 }

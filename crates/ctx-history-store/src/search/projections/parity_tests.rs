@@ -304,6 +304,7 @@ fn persisted_projection_goldens_match_incremental_and_rebuild_paths() {
         row(SYSTEM_ID, "system", "system gamma", "message"),
         row(SUMMARY_ID, "assistant", "summary delta", "summary"),
         row(TOOL_CALL_ID, "assistant", "cargo test", "tool_call"),
+        row(FAILED_OUTPUT_ID, "tool", "failed epsilon", "command_output"),
         row(
             CONTROL_ID,
             "user",

@@ -12,8 +12,6 @@ cat > "${fake}" <<'EOF'
 #!/bin/sh
 set -eu
 
-test "${CTX_ANALYTICS_ENABLED:-}" = false
-test "${CTX_UPGRADE_AUTO:-}" = off
 test "${CTX_DAEMON_AUTOSTART_OFF:-}" = 1
 test -n "${CTX_DATA_ROOT:-}"
 test -n "${HOME:-}"
@@ -23,6 +21,8 @@ test "${HOME}" != "${ORIGINAL_HOME:-not-in-clean-env}"
 
 case " $* " in
   *" --backend semantic "*)
+    test "${CTX_ANALYTICS_ENABLED:-}" = false
+    test "${CTX_UPGRADE_AUTO:-}" = off
     test "${CTX_SEARCH_SEMANTIC:-}" = 1
     test "${CTX_DAEMON_ENABLED:-}" = 1
     printf '%s\n' 'semantic-only search will not initialize or download intfloat/multilingual-e5-small during search' >&2
@@ -30,9 +30,22 @@ case " $* " in
     ;;
   *" status --json "*)
     test -z "${CTX_SEARCH_SEMANTIC:-}"
-    test -z "${CTX_DAEMON_ENABLED:-}"
+    if test -n "${CTX_PRO_HELPER:-}"; then
+      test "${CTX_ANALYTICS_ENABLED:-}" = false
+      test "${CTX_UPGRADE_AUTO:-}" = off
+      test "${CTX_DAEMON_ENABLED:-}" = false
+    elif test "${CTX_ANALYTICS_ENABLED+x}" != x; then
+      test -z "${CTX_UPGRADE_AUTO:-}"
+      test -z "${CTX_DAEMON_ENABLED:-}"
+    else
+      test "${CTX_ANALYTICS_ENABLED:-}" = false
+      test "${CTX_UPGRADE_AUTO:-}" = off
+      test "${CTX_DAEMON_ENABLED:-}" = false
+    fi
     ;;
   *)
+    test "${CTX_ANALYTICS_ENABLED:-}" = false
+    test "${CTX_UPGRADE_AUTO:-}" = off
     test "${CTX_DAEMON_ENABLED:-}" = false
     test "${CTX_SEARCH_SEMANTIC:-}" = 0
     ;;
@@ -57,8 +70,60 @@ case "${1:-}" in
       printf '%s' '{"read_only":true,"pro":'
       cat "${0}.pro-status.json"
       printf '%s\n' '}'
+    elif test "${CTX_ANALYTICS_ENABLED+x}" != x; then
+      analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
+      printf '%s\n' '{"events":[{"event_name":"operation_completed"}]}' > "${analytics_path}"
+      cat <<'JSON'
+{
+  "read_only": true,
+  "daemon": {
+    "jobs": {
+      "history_refresh": {
+        "enabled": false
+      }
+    },
+    "enabled": true
+  },
+  "upgrade": {
+    "auto": "apply",
+    "auto_enabled": true
+  },
+  "semantic": {
+    "config_source": "default",
+    "enabled": false,
+    "reason": "semantic_disabled",
+    "embed_policy": {
+      "source": "dynamic_quiet"
+    }
+  }
+}
+JSON
     else
-      printf '%s\n' '{"read_only":true,"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}'
+      cat <<'JSON'
+{
+  "read_only": true,
+  "daemon": {
+    "jobs": {
+      "history_refresh": {
+        "enabled": true
+      }
+    },
+    "enabled": false
+  },
+  "upgrade": {
+    "auto": "off",
+    "auto_enabled": false
+  },
+  "semantic": {
+    "config_source": "default",
+    "enabled": false,
+    "reason": "semantic_disabled",
+    "embed_policy": {
+      "source": "dynamic_quiet"
+    }
+  }
+}
+JSON
     fi
     ;;
   *)
@@ -70,7 +135,7 @@ EOF
 chmod +x "${fake}"
 printf '%s\n' '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}' > "${tmp}/fixture.jsonl"
 
-expected='{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","pro_helper_override_ignored":"passed","semantic_offline_fail_closed":"passed"}}'
+expected='{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","released_defaults":"passed","explicit_opt_outs":"passed","pro_helper_override_ignored":"passed","semantic_offline_fail_closed":"passed"}}'
 for access_case in absent-helper-trial absent-helper-locked absent-helper-unavailable; do
   cp "${pro_status_fixtures}/${access_case}.json" "${fake}.pro-status.json"
   result="${tmp}/result-${access_case}.json"

@@ -12,7 +12,6 @@ pub use provider_sources::{
     ProviderSourceStatus, DISCOVERY_ENV_ALLOWLIST,
 };
 
-pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_PROVIDER_SQLITE_VALUE_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_BYTES: usize = 1024 * 1024;
@@ -61,7 +60,16 @@ pub(crate) const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
 
 pub mod complete_content;
 
-pub(crate) mod captured_batch;
+pub(crate) mod native_source;
+mod pro_output;
+pub(crate) mod released_jsonl_cursor;
+pub use pro_output::{
+    ImportProfile, OutputAssociations, OutputCommandContext, OutputNativeCoordinate,
+    OutputNativeCursor, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
+    OutputRepositoryContext, OutputSourceIdentity, OutputSourceLocator,
+    ProOutputMaterializationPage, ProOutputObservation, ProOutputPageResult, ProOutputProgress,
+    ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition,
+};
 
 mod error;
 pub use error::{CaptureError, Result};
@@ -69,7 +77,6 @@ pub use error::{CaptureError, Result};
 mod summaries;
 pub use summaries::{
     CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
-    SpoolCounts, SpoolImportFailure, SpoolImportSummary, SpoolRepairSummary,
 };
 
 mod options;
@@ -80,15 +87,15 @@ pub use options::{
     CodexSessionImportProgress, CodexSessionImportProgressCallback, ContinueCliImportOptions,
     CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
     CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
-    FirebenderSqliteImportOptions, FixtureOptions, ForgeCodeSqliteImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     LingmaSqliteImportOptions, MiMoCodeSqliteImportOptions, MistralVibeImportOptions,
     MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, PiSessionImportOptions, ProviderFixtureImportOptions,
-    QoderImportOptions, QwenCodeImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
-    ShelleySqliteImportOptions, TabnineCliImportOptions, TraeImportOptions,
-    WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    OpenHandsImportOptions, PiSessionImportOptions, QoderImportOptions, QwenCodeImportOptions,
+    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
+    TabnineCliImportOptions, TraeImportOptions, WarpSqliteImportOptions,
+    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 
 pub(crate) mod common {
@@ -98,21 +105,13 @@ pub(crate) mod common {
     pub(crate) mod time;
 }
 pub use common::identity::{compute_payload_hash, stable_capture_uuid};
-pub(crate) use common::identity::{default_machine_id, fnv1a64, sanitize_filename_component};
-
-mod fixture;
-pub use fixture::{fixture_envelope, write_fixture};
+pub(crate) use common::identity::{default_machine_id, fnv1a64};
 
 #[cfg(test)]
 mod test_support_paths;
 
 pub(crate) mod provider;
-pub use provider::adapter::{
-    CaptureWorkLimit, NormalizedProviderImportOptions, ProviderAdapterContext,
-    ProviderCaptureAdapter, ProviderEventDto, ProviderFileTouchedEnvelope,
-    ProviderFixtureJsonlAdapter, ProviderFixtureLine, ProviderNormalizationResult,
-    ProviderSessionDto,
-};
+pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::api::{
     import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
     import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
@@ -124,10 +123,10 @@ pub use provider::api::{
     import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
     import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history, import_mux_history,
     import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
-    import_openhands_file_events, import_pi_session_jsonl, import_provider_fixture_jsonl,
-    import_qoder_history, import_qwen_code_history, import_roo_task_json_history,
-    import_rovodev_history, import_shelley_sqlite, import_tabnine_cli_history, import_trae_history,
-    import_warp_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
+    import_openhands_file_events, import_pi_session_jsonl, import_qoder_history,
+    import_qwen_code_history, import_roo_task_json_history, import_rovodev_history,
+    import_shelley_sqlite, import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
+    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
 };
 pub use provider::codex::{
@@ -135,13 +134,8 @@ pub use provider::codex::{
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
     import_codex_session_tree,
 };
-pub use provider::custom_history_jsonl::custom_history_jsonl_v1_cursor_stream;
-pub use provider::importer::import_normalized_provider_captures;
-
-mod spool;
-pub use spool::{
-    archive_from_envelopes, import_spool, inbox_dir, read_jsonl, retry_failed_spool_files,
-    spool_counts, SpoolWriter,
+pub use provider::custom_history_jsonl::{
+    custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
 };
 
 #[cfg(test)]

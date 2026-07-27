@@ -23,6 +23,12 @@ impl PlatformBackend {
         Self
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn probe(&self) -> Result<(), CredentialVaultError> {
+        let service = connect()?;
+        persistent_default_collection(&service).map(|_| ())
+    }
+
     fn load_unlocked(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
         with_unique_item(record_id, |item| {
             let raw = item.get_secret().map_err(map_secret_service_error)?;

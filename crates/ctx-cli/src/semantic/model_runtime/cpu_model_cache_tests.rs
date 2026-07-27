@@ -11,9 +11,9 @@ use super::{
     lock_semantic_model_acquisition,
     maybe_cleanup_semantic_cpu_download_cache_after_cached_acquisition,
     prepare_semantic_cpu_download_cache, publish_semantic_cpu_model_root,
-    semantic_model_acquisition_integrity_error, stage_semantic_cpu_model_file,
-    verify_semantic_cpu_file, SemanticCpuModelIntegrityError, SemanticModelFile,
-    SEMANTIC_HF_MODEL_CACHE_DIR, SEMANTIC_MANAGED_MODEL_CACHE_DIR,
+    replace_cpu_model_cache_from_pinned_revision, semantic_model_acquisition_integrity_error,
+    stage_semantic_cpu_model_file, verify_semantic_cpu_file, SemanticCpuModelIntegrityError,
+    SemanticModelFile, SEMANTIC_HF_MODEL_CACHE_DIR, SEMANTIC_MANAGED_MODEL_CACHE_DIR,
 };
 
 #[test]
@@ -119,6 +119,24 @@ fn foreground_cached_cpu_model_acquisition_does_not_mutate_cache() -> Result<()>
 
     assert_eq!(fs::read(download_cache.join("stale"))?, b"stale");
     assert!(!managed.join("acquisition.lock").exists());
+    Ok(())
+}
+
+#[test]
+fn daemon_cpu_acquisition_fails_before_network_on_invalid_managed_root() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let managed = temp.path().join(SEMANTIC_MANAGED_MODEL_CACHE_DIR);
+    fs::write(&managed, b"preserve invalid managed root")?;
+
+    let error = replace_cpu_model_cache_from_pinned_revision(temp.path()).unwrap_err();
+
+    assert!(format!("{error:#}").contains("create semantic model cache"));
+    assert_eq!(fs::read(&managed)?, b"preserve invalid managed root");
+    assert!(
+        !managed.join("download-cache").exists(),
+        "deterministic local failure must happen before downloader initialization"
+    );
+    assert!(!managed.join(SEMANTIC_HF_MODEL_CACHE_DIR).exists());
     Ok(())
 }
 
