@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 
-use crate::{analytics, AnalyticsProperties};
+use crate::analytics::{count_bucket, IntegrationScope, IntegrationTelemetry, TargetSelection};
 
 mod agents;
 mod install;
@@ -15,7 +15,6 @@ mod tests;
 use agents::SkillAgentArg;
 use install::{run_install, run_status};
 use paths::PathContext;
-use selection::insert_target_analytics;
 
 const BUNDLED_SKILL_NAME: &str = "ctx-agent-history-search";
 const BUNDLED_SKILL_BODY: &str = include_str!("../../../skills/ctx-agent-history-search/SKILL.md");
@@ -72,10 +71,14 @@ impl SkillInstallArgs {
         self.json
     }
 
-    pub(crate) fn add_initial_analytics(&self, properties: &mut AnalyticsProperties) {
-        analytics::insert_str(properties, "skill_name", BUNDLED_SKILL_NAME);
-        analytics::insert_str(properties, "skill_action", "install");
-        insert_target_analytics(properties, &self.agent, self.all_agents, self.project);
+    pub(crate) fn add_initial_analytics(&self, telemetry: &mut IntegrationTelemetry) {
+        insert_target_analytics(
+            telemetry,
+            self.agent.len(),
+            self.all_agents,
+            self.project,
+            self.force,
+        );
     }
 }
 
@@ -84,25 +87,56 @@ impl SkillStatusArgs {
         self.json
     }
 
-    pub(crate) fn add_initial_analytics(&self, properties: &mut AnalyticsProperties) {
-        analytics::insert_str(properties, "skill_name", BUNDLED_SKILL_NAME);
-        analytics::insert_str(properties, "skill_action", "status");
-        insert_target_analytics(properties, &self.agent, self.all_agents, self.project);
+    pub(crate) fn add_initial_analytics(&self, telemetry: &mut IntegrationTelemetry) {
+        insert_target_analytics(
+            telemetry,
+            self.agent.len(),
+            self.all_agents,
+            self.project,
+            false,
+        );
     }
 }
 
 pub(crate) fn run_install_command(
     args: SkillInstallArgs,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
 ) -> Result<()> {
     let context = PathContext::from_env()?;
-    run_install(args, &context, analytics_properties)
+    run_install(args, &context, telemetry)
 }
 
 pub(crate) fn run_status_command(
     args: SkillStatusArgs,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
 ) -> Result<()> {
     let context = PathContext::from_env()?;
-    run_status(args, &context, analytics_properties)
+    run_status(args, &context, telemetry)
+}
+
+fn insert_target_analytics(
+    telemetry: &mut IntegrationTelemetry,
+    explicit_agents: usize,
+    all_agents: bool,
+    project: bool,
+    force: bool,
+) {
+    telemetry.scope = Some(if project {
+        IntegrationScope::Project
+    } else {
+        IntegrationScope::Global
+    });
+    telemetry.selection = Some(if all_agents {
+        TargetSelection::All
+    } else if explicit_agents == 0 {
+        TargetSelection::Fallback
+    } else {
+        TargetSelection::Explicit
+    });
+    telemetry.target_agents = Some(count_bucket(if all_agents {
+        SkillAgentArg::ALL.len() as u64
+    } else {
+        explicit_agents.max(1) as u64
+    }));
+    telemetry.force = Some(force);
 }

@@ -3,7 +3,7 @@ mod import;
 #[cfg(test)]
 mod tests;
 
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{Artifact, CaptureSourceDescriptor, Fidelity, SessionHistoryArchive};
@@ -20,6 +20,12 @@ use crate::object_store::{
     ensure_regular_blob_file, object_relative_path, sha256_hex, BlobWriteGuard, LEGACY_BLOBS_DIR,
 };
 use crate::{Result, Store, StoreError};
+
+#[derive(Debug, Default)]
+pub(crate) struct ImportedArchiveCanonicalIds {
+    pub(crate) event_ids: BTreeSet<Uuid>,
+    pub(crate) vcs_change_ids: BTreeSet<Uuid>,
+}
 
 impl Store {
     pub fn export_archive(&self) -> Result<SessionHistoryArchive> {
@@ -48,19 +54,28 @@ impl Store {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
+        self.invalidate_event_search_projection_capabilities();
         let tx = self.conn.transaction()?;
         reject_import_invariant_conflicts(&tx, archive)?;
         if !overwrite {
             reject_import_conflicts(&tx, archive)?;
         }
+        let journal_dependencies =
+            crate::projection_journal::capture_archive_journal_dependencies(&tx, archive)?;
         let mut blob_guard = BlobWriteGuard::default();
         for record in &archive.records {
             upsert_record_tx(&tx, record, None)?;
         }
-        import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
+        let canonical_ids =
+            import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
+        crate::projection_journal::journal_archive_mutations(&tx, archive, &canonical_ids, None)?;
+        crate::projection_journal::journal_archive_dependencies(&tx, journal_dependencies)?;
+        crate::search::projections::rebuild_search_projection(&tx)?;
+        let search_capabilities =
+            crate::search::projections::detect_event_search_projection_capabilities(&tx)?;
         tx.commit()?;
+        self.cache_event_search_projection_capabilities(search_capabilities);
         blob_guard.commit();
-        self.rebuild_search_projection()?;
         Ok(())
     }
 
@@ -76,21 +91,35 @@ impl Store {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
+        self.invalidate_event_search_projection_capabilities();
         let tx = self.conn.transaction()?;
         reject_import_invariant_conflicts(&tx, archive)?;
         if !overwrite {
             reject_capture_source_import_conflict(&tx, source_id)?;
             reject_import_conflicts(&tx, archive)?;
         }
+        let journal_dependencies =
+            crate::projection_journal::capture_archive_journal_dependencies(&tx, archive)?;
         let mut blob_guard = BlobWriteGuard::default();
         upsert_capture_source_tx(&tx, source_id, source, occurred_at, fidelity)?;
         for record in &archive.records {
             upsert_record_tx(&tx, record, Some(source_id))?;
         }
-        import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
+        let canonical_ids =
+            import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
+        crate::projection_journal::journal_archive_mutations(
+            &tx,
+            archive,
+            &canonical_ids,
+            Some(source_id),
+        )?;
+        crate::projection_journal::journal_archive_dependencies(&tx, journal_dependencies)?;
+        crate::search::projections::rebuild_search_projection(&tx)?;
+        let search_capabilities =
+            crate::search::projections::detect_event_search_projection_capabilities(&tx)?;
         tx.commit()?;
+        self.cache_event_search_projection_capabilities(search_capabilities);
         blob_guard.commit();
-        self.rebuild_search_projection()?;
         Ok(())
     }
 }

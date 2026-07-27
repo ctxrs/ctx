@@ -52,7 +52,6 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
         "min_semantic_coverage_ratio": 1.0,
         "require_semantic_model_cache": True,
         "require_history_refresh_not_failed": True,
-        "require_cloud_sync_disabled": True,
     },
 }
 
@@ -288,7 +287,6 @@ def status_summary(status: dict[str, Any], thresholds: dict[str, Any]) -> tuple[
     daemon = status.get("daemon") if isinstance(status, dict) else {}
     daemon_jobs = daemon.get("jobs") if isinstance(daemon, dict) else {}
     history_refresh = daemon_jobs.get("history_refresh") if isinstance(daemon_jobs, dict) else {}
-    cloud_sync = daemon_jobs.get("cloud_sync") if isinstance(daemon_jobs, dict) else {}
     coverage = semantic.get("coverage") if isinstance(semantic.get("coverage"), dict) else {}
     searchable = as_number(coverage.get("searchable_items"))
     embedded = as_number(coverage.get("embedded_items"))
@@ -325,15 +323,6 @@ def status_summary(status: dict[str, Any], thresholds: dict[str, Any]) -> tuple[
             history_status not in {None, "failed"},
             f"history refresh status {history_status}",
         )
-    if thresholds["status"].get("require_cloud_sync_disabled"):
-        cloud_status = cloud_sync.get("status") if isinstance(cloud_sync, dict) else None
-        network_allowed = cloud_sync.get("network_allowed") if isinstance(cloud_sync, dict) else None
-        add_gate(
-            gates,
-            "status_cloud_sync_disabled",
-            cloud_status == "disabled" and network_allowed is False,
-            f"cloud sync status {cloud_status}, network_allowed {network_allowed}",
-        )
     return {
         "semantic_status": semantic.get("status"),
         "semantic_running": semantic.get("running"),
@@ -349,7 +338,6 @@ def status_summary(status: dict[str, Any], thresholds: dict[str, Any]) -> tuple[
             if isinstance(daemon_jobs, dict) and isinstance(daemon_jobs.get("semantic_index"), dict)
             else None
         ),
-        "cloud_sync_status": cloud_sync.get("status") if isinstance(cloud_sync, dict) else None,
     }, gates
 
 

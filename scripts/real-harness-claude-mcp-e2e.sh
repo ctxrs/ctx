@@ -101,7 +101,7 @@ main() {
     CLAUDE_CONFIG_DIR="${claude_config_dir}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${ctx_bin}" integrations install mcp --agent claude-code --json > "${install_json}"
   require_contains "${install_json}" '"agent":"claude-code"'
   require_contains "${install_json}" '"status":"current"'
@@ -122,7 +122,7 @@ main() {
     CLAUDE_CONFIG_DIR="${claude_config_dir}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     ANTHROPIC_API_KEY="sk-ctx-real-harness-fixture" \
     ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
     CLAUDE_CODE_SKIP_PROMPT_HISTORY=1 \

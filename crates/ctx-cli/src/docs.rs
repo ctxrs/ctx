@@ -4,7 +4,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Command, CommandFactory, Subcommand};
 use serde_json::{json, Value};
 
-use crate::Cli;
+use crate::{
+    analytics::{count_bucket, text_length_bucket, DocTopicId, DocsOperation, DocsTelemetry},
+    Cli,
+};
 
 #[derive(Debug, Args)]
 pub struct DocsArgs {
@@ -228,7 +231,7 @@ const TOPICS: &[DocTopic] = &[
         title: "Storage And Privacy",
         audience: "human-agent",
         summary: "Local storage layout, command read/write behavior, privacy, and upgrades.",
-        tags: &["storage", "privacy", "upgrade"],
+        tags: &["storage", "privacy"],
         source_path: "docs/storage.md",
         body: include_str!("../../../docs/storage.md"),
     },
@@ -297,17 +300,41 @@ const TOPICS: &[DocTopic] = &[
     },
 ];
 
-pub fn run(args: DocsArgs) -> Result<()> {
+pub fn run(args: DocsArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
     match args.command {
-        Some(DocsCommand::List(args)) => list_docs(args.json),
-        Some(DocsCommand::Search(args)) => search_docs(&args.query, args.limit, args.json),
-        Some(DocsCommand::Show(args)) => show_doc(args),
-        Some(DocsCommand::Man(args)) => man_docs(args),
-        None => list_docs(false),
+        Some(DocsCommand::List(args)) => {
+            telemetry.operation = Some(DocsOperation::List);
+            list_docs(args.json, telemetry)
+        }
+        Some(DocsCommand::Search(args)) => {
+            telemetry.operation = Some(DocsOperation::Search);
+            search_docs(&args.query, args.limit, args.json, telemetry)
+        }
+        Some(DocsCommand::Show(args)) => {
+            telemetry.operation = Some(DocsOperation::Show);
+            telemetry.writes_output = args.out.is_some();
+            show_doc(args, telemetry)
+        }
+        Some(DocsCommand::Man(args)) => {
+            telemetry.operation = Some(if args.print.is_some() {
+                DocsOperation::ManPrint
+            } else {
+                DocsOperation::ManGenerate
+            });
+            telemetry.writes_output = args.out.is_some();
+            man_docs(args)
+        }
+        None => {
+            telemetry.operation = Some(DocsOperation::List);
+            telemetry.implicit_list = true;
+            list_docs(false, telemetry)
+        }
     }
 }
 
-fn list_docs(json_output: bool) -> Result<()> {
+fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry) -> Result<()> {
+    telemetry.result_count = Some(count_bucket(TOPICS.len() as u64));
+    telemetry.zero_result = Some(TOPICS.is_empty());
     if json_output {
         let topics: Vec<Value> = TOPICS.iter().map(topic_json).collect();
         println!(
@@ -329,8 +356,15 @@ fn list_docs(json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn search_docs(query: &str, limit: usize, json_output: bool) -> Result<()> {
+fn search_docs(
+    query: &str,
+    limit: usize,
+    json_output: bool,
+    telemetry: &mut DocsTelemetry,
+) -> Result<()> {
     let terms = docs_query_terms(query);
+    telemetry.query_length = Some(text_length_bucket(query.chars().count()));
+    telemetry.query_term_count = Some(count_bucket(terms.len() as u64));
     let mut results: Vec<(usize, &DocTopic)> = TOPICS
         .iter()
         .filter_map(|topic| {
@@ -340,6 +374,8 @@ fn search_docs(query: &str, limit: usize, json_output: bool) -> Result<()> {
         .collect();
     results.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.id.cmp(right.1.id)));
     results.truncate(limit.max(1));
+    telemetry.result_count = Some(count_bucket(results.len() as u64));
+    telemetry.zero_result = Some(results.is_empty());
     if json_output {
         let rows: Vec<Value> = results
             .iter()
@@ -443,11 +479,14 @@ fn docs_shell_quote_arg(value: &str) -> String {
     }
 }
 
-fn show_doc(args: DocsShowArgs) -> Result<()> {
+fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
     let topic = TOPICS
         .iter()
         .find(|topic| topic.id == args.id)
         .ok_or_else(|| unknown_doc_topic_error(&args.id))?;
+    telemetry.topic = DocTopicId::from_known_id(topic.id);
+    telemetry.result_count = Some(count_bucket(1));
+    telemetry.zero_result = Some(false);
     let body = if args.json || args.format == DocsFormat::Json {
         serde_json::to_string_pretty(&topic_json_with_body(topic))?
     } else {

@@ -1,7 +1,8 @@
-use super::{parse_event_window_limit, parse_search_limit, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT};
+use crate::cli::{parse_search_limit, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT};
 use crate::commands::sql::parse_sql_timeout;
 use crate::search_filters::parse_since_filter;
 use crate::transcript::normalize_uuid_prefix;
+use crate::value_parsers::parse_event_window_limit;
 use ctx_history_core::utc_now;
 use proptest::prelude::*;
 use std::panic;

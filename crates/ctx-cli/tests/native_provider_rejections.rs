@@ -244,22 +244,22 @@ fn all_invalid_source_reports_failure_json_and_exits_nonzero() {
 }
 
 #[test]
-fn all_rejected_codex_session_leaves_no_import_scaffolding() {
+fn complete_oversize_only_codex_session_replays_failure_without_import_scaffolding() {
     let temp = tempdir();
     let session = temp.path().join("codex-all-rejected.jsonl");
-    fs::write(
-        &session,
-        concat!(
-            r#"{"timestamp":"2026-07-13T12:00:00Z","type":"session_meta","payload":{"id":"codex-all-rejected","timestamp":"2026-07-13T12:00:00Z","cwd":"/repo","originator":"codex-cli"}}"#,
-            "\n",
-            r#"{"timestamp":"not-rfc3339","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"must not persist"}]}}"#,
-            "\n",
-        ),
+    let mut source = concat!(
+        r#"{"timestamp":"2026-07-13T12:00:00Z","type":"session_meta","payload":{"id":"codex-all-rejected","timestamp":"2026-07-13T12:00:00Z","cwd":"/repo","originator":"codex-cli"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-13T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":""#,
     )
-    .unwrap();
+    .to_owned();
+    source.push_str(&"x".repeat(16 * 1024 * 1024));
+    source.push_str("\"}]}}\n");
+    fs::write(&session, source).unwrap();
 
-    let output = ctx(&temp)
-        .args([
+    for resume in [false, true] {
+        let mut command = ctx(&temp);
+        command.args([
             "import",
             "--provider",
             "codex",
@@ -268,19 +268,20 @@ fn all_rejected_codex_session_leaves_no_import_scaffolding() {
             "--json",
             "--progress",
             "none",
-        ])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "invalid import JSON ({error}); stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    assert_eq!(report["outcome"], "failure", "{report:#}");
-    assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
+        ]);
+        if resume {
+            command.arg("--resume");
+        }
+        let output = command.assert().failure().get_output().clone();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "invalid import JSON ({error}); stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(report["outcome"], "failure", "resume={resume}: {report:#}");
+        assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
+    }
 
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     for table in ["history_records", "capture_sources", "sessions", "events"] {
@@ -331,54 +332,39 @@ fn missing_explicit_format_source_reports_failure_json() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_failure_isolated_from_independent_valid_source() {
+fn symlinked_default_source_is_not_admitted_beside_a_valid_source() {
     let temp = tempdir();
     write_codex_inventory_oracle(&temp);
     write_symlinked_claude_inventory_source(&temp);
 
     let report = json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
 
-    assert_eq!(
-        report["outcome"], "completed_with_source_failures",
-        "{report:#}"
-    );
+    assert_eq!(report["outcome"], "success", "{report:#}");
     assert_eq!(report["totals"]["imported_sources"], 1, "{report:#}");
-    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
+    assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
     assert_eq!(report["totals"]["imported_events"], 1, "{report:#}");
-    assert!(report["sources"]
+    assert!(!report["sources"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|source| source["status"] == "failure"
-            && source["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("symlinked provider transcript roots"))));
+        .any(|source| source["provider"] == "claude"));
 }
 
 #[cfg(unix)]
 #[test]
-fn all_inventory_failures_report_json_and_exit_nonzero() {
+fn symlinked_default_source_is_rejected_before_inventory() {
     let temp = tempdir();
     write_symlinked_claude_inventory_source(&temp);
 
-    let output = ctx(&temp)
-        .args(["import", "--all", "--json", "--progress", "none"])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert_eq!(report["outcome"], "failure", "{report:#}");
-    assert_eq!(report["failure_scope"], "source", "{report:#}");
-    assert_eq!(report["totals"]["imported_sources"], 0, "{report:#}");
-    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
-    assert_eq!(report["sources"][0]["rejected_records"], 0, "{report:#}");
-    assert_eq!(
-        report["sources"][0]["rejections"].as_array().unwrap().len(),
-        0,
-        "{report:#}"
+    let error =
+        failure_stderr(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    assert!(
+        error.contains("no importable provider history sources found"),
+        "{error}"
     );
+
+    let sources = json_output(ctx(&temp).args(["sources", "--provider", "claude", "--json"]));
+    assert_eq!(sources["sources"], json!([]), "{sources:#}");
 }
 
 #[test]
@@ -406,7 +392,7 @@ fn mixed_import_analytics_reports_only_coarse_rejection_outcome() {
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_OFF")
+        .env_remove("CTX_ANALYTICS_ENABLED")
         .env("CTX_ANALYTICS_ENABLED", "1")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
@@ -455,6 +441,7 @@ fn write_antigravity_valid_and_malformed_file_tree(temp: &TempDir) -> PathBuf {
     brain
 }
 
+#[cfg(unix)]
 fn write_codex_inventory_oracle(temp: &TempDir) {
     let sessions = temp
         .path()

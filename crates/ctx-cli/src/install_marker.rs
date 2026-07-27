@@ -7,7 +7,6 @@ use std::{
 use serde_json::Value;
 
 const MAX_MARKER_BYTES: u64 = 16 * 1024;
-const MAX_INSTALL_ATTEMPT_ID_CHARS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallMarker {
@@ -35,22 +34,14 @@ pub(crate) fn read_install_marker(path: &Path) -> Option<InstallMarker> {
 
 pub(crate) fn parse_install_marker(bytes: &[u8]) -> Option<InstallMarker> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    let id = value.get("install_attempt_id")?.as_str()?.trim();
-    if is_valid_install_attempt_id(id) {
+    let id = value.get("install_attempt_id")?.as_str()?;
+    if crate::upgrade::is_valid_install_attempt_id(id) {
         Some(InstallMarker {
             install_attempt_id: id.to_owned(),
         })
     } else {
         None
     }
-}
-
-pub(crate) fn is_valid_install_attempt_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.chars().count() <= MAX_INSTALL_ATTEMPT_ID_CHARS
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 pub(crate) fn install_marker_path(exe: &Path) -> PathBuf {
@@ -64,24 +55,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_bounded_install_attempt_id() {
-        let marker = parse_install_marker(br#"{"install_attempt_id":"attempt_01-HOSTED"}"#)
+    fn parses_canonical_install_attempt_id() {
+        let marker = parse_install_marker(br#"{"install_attempt_id":"ia_01-HOSTED"}"#)
             .expect("valid marker");
 
-        assert_eq!(marker.install_attempt_id, "attempt_01-HOSTED");
+        assert_eq!(marker.install_attempt_id, "ia_01-HOSTED");
     }
 
     #[test]
-    fn ignores_malformed_or_unbounded_install_attempt_id() {
+    fn ignores_malformed_legacy_or_noncanonical_install_attempt_id() {
         assert!(parse_install_marker(b"{not-json").is_none());
         assert!(parse_install_marker(br#"{"install_attempt_id":""}"#).is_none());
+        assert!(parse_install_marker(br#"{"install_attempt_id":"attempt_01-HOSTED"}"#).is_none());
+        assert!(parse_install_marker(br#"{"install_attempt_id":"ia_1234567"}"#).is_none());
         assert!(parse_install_marker(br#"{"install_attempt_id":"contains space"}"#).is_none());
+        assert!(parse_install_marker(br#"{"install_attempt_id":" ia_12345678"}"#).is_none());
         assert!(parse_install_marker(
-            format!(
-                r#"{{"install_attempt_id":"{}"}}"#,
-                "a".repeat(MAX_INSTALL_ATTEMPT_ID_CHARS + 1)
-            )
-            .as_bytes()
+            format!(r#"{{"install_attempt_id":"ia_{}"}}"#, "a".repeat(129)).as_bytes()
         )
         .is_none());
     }

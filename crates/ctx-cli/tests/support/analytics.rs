@@ -22,11 +22,33 @@ pub(crate) fn read_analytics_events(path: &Path) -> Vec<Value> {
 }
 
 pub(crate) fn analytics_event_properties(event: &Value) -> &serde_json::Map<String, Value> {
-    event["events"][0]["properties"].as_object().unwrap()
+    analytics_cli_event(event)["properties"]
+        .as_object()
+        .unwrap()
 }
 
 pub(crate) fn analytics_cli_event(event: &Value) -> &Value {
-    &event["events"][0]
+    event["events"]
+        .as_array()
+        .and_then(|events| {
+            events.iter().find(|event| {
+                event["event_name"] == "operation_completed" && event["surface"] == "cli"
+            })
+        })
+        .unwrap_or_else(|| panic!("analytics batch has no CLI operation event: {event:#}"))
+}
+
+pub(crate) fn assert_operation_event(event: &Value, operation: &str, outcome: &str) {
+    let event = analytics_cli_event(event);
+    assert_eq!(event["event_name"], "operation_completed");
+    assert_eq!(event["event_version"], 1);
+    assert_eq!(event["surface"], "cli");
+    assert_eq!(event["operation"], operation);
+    assert_eq!(event["outcome"], outcome);
+    assert!(event["event_id"].as_str().is_some_and(|value| {
+        uuid::Uuid::parse_str(value).is_ok_and(|id| id.get_version_num() == 4)
+    }));
+    assert!(event.get("duration_ms").is_none());
 }
 
 pub(crate) fn expected_device_path(_home: &Path, _state: &Path) -> PathBuf {
@@ -150,17 +172,15 @@ pub(crate) fn assert_analytics_properties_are_allowlisted(
 ) {
     let allowed = [
         "acceleration_candidate",
-        "action",
         "all_sources",
-        "analytics_client",
+        "already_installed",
+        "auto_upgrade_channel",
         "available_parallelism_bucket",
-        "available_sources_bucket",
         "auto_upgrade_allowed",
         "auto_upgrade_due",
         "auto_upgrade_probe",
         "auto_upgrade_spawn_status",
         "auto_upgrade_spawned",
-        "background",
         "capability_snapshot_schema",
         "catalog_only",
         "catalog_source_bytes_bucket",
@@ -168,16 +188,22 @@ pub(crate) fn assert_analytics_properties_are_allowlisted(
         "citation_count_bucket",
         "cpu_vector_tier",
         "db_size_bucket",
-        "daemon_command",
+        "conflicting_targets_bucket",
+        "current_targets_bucket",
+        "deprecated_daemon_control",
+        "deprecated_upgrade_control",
+        "docs_operation",
         "dry_run",
         "edges_imported_bucket",
         "events_imported_bucket",
         "event_results",
         "rejected_records_bucket",
         "failed_sources_bucket",
-        "failure_kind",
+        "events_returned_bucket",
+        "failed_inventory_units_bucket",
         "finding_count_bucket",
         "force",
+        "healthy",
         "has_event_type_filter",
         "has_file_filter",
         "has_indexed_content_after_setup",
@@ -197,7 +223,14 @@ pub(crate) fn assert_analytics_properties_are_allowlisted(
         "indexed_items_bucket",
         "indexed_sessions_bucket",
         "indexed_sources_bucket",
+        "index_operation",
+        "input",
         "install_manager",
+        "integration_action",
+        "integration_result",
+        "integration_scope",
+        "integration_target",
+        "invalid_targets_bucket",
         "initialized",
         "inventory_source_bytes_bucket",
         "inventory_source_files_bucket",
@@ -205,18 +238,24 @@ pub(crate) fn assert_analytics_properties_are_allowlisted(
         "import_failure_scope",
         "import_failure_type",
         "import_outcome",
-        "json_output",
+        "implicit_list",
+        "inventory_units_bucket",
+        "lexical_state",
         "limit_bucket",
-        "native_sources_bucket",
+        "missing_targets_bucket",
+        "modified_targets_bucket",
         "no_daemon",
-        "once",
+        "output",
         "output_format",
         "pending_sessions_bucket",
         "primary_only",
         "progress_mode",
         "provider_filter",
         "provider_lookup",
+        "pending_inventory_units_bucket",
         "providers_detected_bucket",
+        "providers_existing_bucket",
+        "providers_importable_bucket",
         "query_duration_bucket",
         "query_length_bucket",
         "query_term_count_bucket",
@@ -231,18 +270,27 @@ pub(crate) fn assert_analytics_properties_are_allowlisted(
         "search_backend_effective",
         "search_backend_requested",
         "sessions_imported_bucket",
-        "setup_completed",
-        "setup_result",
+        "resolved_agents_count_bucket",
+        "resource_kind",
+        "returned_columns_bucket",
+        "returned_rows_bucket",
+        "rows_truncated",
+        "semantic_state",
+        "setup_mode",
+        "show_missing",
         "skipped_bucket",
         "source_files_bucket",
         "source_bytes_bucket",
         "source_mode",
         "sources_seen_bucket",
-        "start_mode",
+        "stale_inventory_units_bucket",
         "store_created_by_search",
+        "target_agent_group",
+        "target_agents_count_bucket",
         "target_kind",
+        "topic",
         "transcript_mode",
-        "trigger_command",
+        "unsupported_targets_bucket",
         "managed_install",
         "self_upgrade_allowed",
         "update_available",
@@ -254,8 +302,15 @@ pub(crate) fn assert_analytics_properties_are_allowlisted(
         "upgrade_scheduled",
         "upgrade_status",
         "upgrade_warning_count_bucket",
+        "updated",
+        "values_truncated",
+        "wait",
+        "wait_lexical",
+        "wait_outcome",
+        "wait_semantic",
         "window_bucket",
         "writes_out_file",
+        "writes_output",
         "zero_result",
     ]
     .into_iter()

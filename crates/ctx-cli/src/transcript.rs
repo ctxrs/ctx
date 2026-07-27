@@ -11,7 +11,18 @@ use uuid::Uuid;
 use ctx_history_core::{CaptureProvider, Event, EventRole, EventType, Session};
 use ctx_history_store::Store;
 
+use ctx_history_capture::complete_content::{
+    PersistedCompleteContentLocatorV1, COMPLETE_CONTENT_LOCATOR_METADATA_KEY,
+};
+
+use crate::complete_content::{
+    enforce_complete_content_cli_output_limit, ContentPolicy, ResolvedContent,
+    ResolvedEventContent, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+};
 use crate::output::{compact_json, OutputFormat};
+
+mod artifact;
+use artifact::atomic_write_output;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum TranscriptMode {
@@ -95,15 +106,26 @@ pub(crate) fn write_rendered_session(
     mode: TranscriptMode,
     format: OutputFormat,
     out: Option<PathBuf>,
+    content: &ResolvedContent,
 ) -> Result<()> {
     let body = match format {
-        OutputFormat::Text => render_session_text(store, session, events, mode),
-        OutputFormat::Markdown => render_session_markdown(store, session, events, mode),
+        OutputFormat::Text => render_session_text(store, session, events, mode, content)?,
+        OutputFormat::Markdown => render_session_markdown(store, session, events, mode, content)?,
         OutputFormat::Json => serde_json::to_string_pretty(&session_transcript_json(
-            store, session, events, mode, format,
-        ))?,
-        OutputFormat::Jsonl => render_session_jsonl(store, session, events, mode)?,
+            store, session, events, mode, format, content,
+        )?)?,
+        OutputFormat::Jsonl => render_session_jsonl(store, session, events, mode, content)?,
     };
+    let event_id = selected_transcript_events(events, mode)
+        .last()
+        .map_or(session.id, |event| event.id);
+    enforce_complete_content_cli_output_limit(
+        content.requested(),
+        &body,
+        out.is_none(),
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        event_id,
+    )?;
     write_output(body, out)
 }
 
@@ -113,15 +135,23 @@ pub(crate) fn write_rendered_events(
     events: &[Event],
     format: OutputFormat,
     out: Option<PathBuf>,
+    content: &ResolvedContent,
 ) -> Result<()> {
     let body = match format {
-        OutputFormat::Text => render_events_text(store, selected, events),
-        OutputFormat::Markdown => render_events_markdown(store, selected, events),
-        OutputFormat::Json => {
-            serde_json::to_string_pretty(&event_window_json(store, selected, events, format))?
-        }
-        OutputFormat::Jsonl => render_events_jsonl(store, events)?,
+        OutputFormat::Text => render_events_text(store, selected, events, content)?,
+        OutputFormat::Markdown => render_events_markdown(store, selected, events, content)?,
+        OutputFormat::Json => serde_json::to_string_pretty(&event_window_json(
+            store, selected, events, format, content,
+        )?)?,
+        OutputFormat::Jsonl => render_events_jsonl(store, events, content)?,
     };
+    enforce_complete_content_cli_output_limit(
+        content.requested(),
+        &body,
+        true,
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        events.last().map_or(selected.id, |event| event.id),
+    )?;
     write_output(body, out)
 }
 
@@ -130,7 +160,7 @@ pub(crate) fn write_output(body: String, out: Option<PathBuf>) -> Result<()> {
         if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&out, body).with_context(|| format!("write {}", out.display()))?;
+        atomic_write_output(&out, body.as_bytes())?;
     } else {
         print!("{body}");
         if !body.ends_with('\n') {
@@ -184,6 +214,17 @@ pub(crate) fn is_assistant_message(event: &Event) -> bool {
 }
 
 pub(crate) fn event_content(event: &Event) -> String {
+    if matches!(
+        event.event_type,
+        EventType::ToolOutput | EventType::CommandOutput
+    ) {
+        let preview = ctx_history_search::event_preview_text(event);
+        return if preview.trim().is_empty() {
+            format!("{} event", event.event_type.as_str())
+        } else {
+            ctx_history_search::display_snippet(&preview, 16_000)
+        };
+    }
     if let Some(value) = event.payload.get("body").and_then(event_value_text) {
         return ctx_history_search::display_snippet(&value, 16_000);
     }
@@ -207,15 +248,7 @@ pub(crate) fn event_value_text(value: &Value) -> Option<String> {
         return Some(value.to_owned());
     }
     let object = value.as_object()?;
-    for key in [
-        "text",
-        "preview",
-        "summary",
-        "command",
-        "output_preview",
-        "output",
-        "message",
-    ] {
+    for key in ["text", "preview", "summary", "command", "output", "message"] {
         if let Some(value) = object
             .get(key)
             .and_then(|value| value.as_str())
@@ -243,13 +276,21 @@ pub(crate) fn render_session_text(
     session: &Session,
     events: &[Event],
     mode: TranscriptMode,
-) -> String {
+    content: &ResolvedContent,
+) -> Result<String> {
     let mut out = String::new();
-    push_session_header(&mut out, store, session, mode, OutputFormat::Text);
+    push_session_header(
+        &mut out,
+        store,
+        session,
+        mode,
+        OutputFormat::Text,
+        content.requested(),
+    );
     for event in selected_transcript_events(events, mode) {
-        push_event_text_block(&mut out, event);
+        push_event_text_block(&mut out, event, resolved_event_content(content, event)?);
     }
-    out
+    Ok(out)
 }
 
 pub(crate) fn render_session_markdown(
@@ -257,14 +298,22 @@ pub(crate) fn render_session_markdown(
     session: &Session,
     events: &[Event],
     mode: TranscriptMode,
-) -> String {
+    content: &ResolvedContent,
+) -> Result<String> {
     let mut out = String::new();
     let label = session
         .external_session_id
         .clone()
         .unwrap_or_else(|| session.id.to_string());
     out.push_str(&format!("# {} session {}\n\n", session.provider, label));
-    push_session_metadata_markdown(&mut out, store, session, mode, OutputFormat::Markdown);
+    push_session_metadata_markdown(
+        &mut out,
+        store,
+        session,
+        mode,
+        OutputFormat::Markdown,
+        content.requested(),
+    );
     for event in selected_transcript_events(events, mode) {
         let heading = event
             .role
@@ -277,10 +326,36 @@ pub(crate) fn render_session_markdown(
             event.occurred_at
         ));
         out.push_str(&format!("ctx_event_id: `{}`\n\n", event.id));
-        out.push_str(&event_content(event));
+        let content = resolved_event_content(content, event)?;
+        push_indexed_truncation_markdown(&mut out, content);
+        out.push_str(&content.text);
         out.push('\n');
     }
-    out
+    Ok(out)
+}
+
+fn resolved_event_content<'a>(
+    content: &'a ResolvedContent,
+    event: &Event,
+) -> Result<&'a ResolvedEventContent> {
+    content.event(event).ok_or_else(|| {
+        anyhow!(
+            "event {} was not resolved before transcript rendering",
+            event.id
+        )
+    })
+}
+
+fn push_indexed_truncation_markdown(out: &mut String, content: &ResolvedEventContent) {
+    if content.outcome.stored_truncated && !content.outcome.complete {
+        if content.complete_content_available {
+            out.push_str("> Indexed content is truncated; use `--content complete`.\n\n");
+        } else {
+            out.push_str(
+                "> Complete content is unavailable beyond this indexed bounded preview.\n\n",
+            );
+        }
+    }
 }
 
 pub(crate) fn push_session_header(
@@ -289,6 +364,7 @@ pub(crate) fn push_session_header(
     session: &Session,
     mode: TranscriptMode,
     format: OutputFormat,
+    content: ContentPolicy,
 ) {
     out.push_str(&format!("ctx_session_id: {}\n", session.id));
     out.push_str(&format!("provider: {}\n", session.provider));
@@ -296,6 +372,7 @@ pub(crate) fn push_session_header(
         out.push_str(&format!("provider_session_id: {provider_session_id}\n"));
     }
     out.push_str(&format!("mode: {}\n", mode.as_str()));
+    out.push_str(&format!("content: {}\n", content.as_str()));
     out.push_str(&format!("format: {}\n", format.as_str()));
     if let Some(source) = source_json_for(store, session.capture_source_id) {
         if let Some(path) = source.get("path").and_then(|value| value.as_str()) {
@@ -311,6 +388,7 @@ pub(crate) fn push_session_metadata_markdown(
     session: &Session,
     mode: TranscriptMode,
     format: OutputFormat,
+    content: ContentPolicy,
 ) {
     out.push_str(&format!("- ctx_session_id: `{}`\n", session.id));
     out.push_str(&format!("- provider: `{}`\n", session.provider));
@@ -318,6 +396,7 @@ pub(crate) fn push_session_metadata_markdown(
         out.push_str(&format!("- provider_session_id: `{provider_session_id}`\n"));
     }
     out.push_str(&format!("- mode: `{}`\n", mode.as_str()));
+    out.push_str(&format!("- content: `{}`\n", content.as_str()));
     out.push_str(&format!("- format: `{}`\n", format.as_str()));
     if let Some(source) = source_json_for(store, session.capture_source_id) {
         if let Some(path) = source.get("path").and_then(|value| value.as_str()) {
@@ -387,7 +466,11 @@ pub(crate) fn normalize_uuid_prefix(value: &str, kind: &str) -> Result<String> {
     Ok(prefix.to_ascii_lowercase())
 }
 
-pub(crate) fn push_event_text_block(out: &mut String, event: &Event) {
+pub(crate) fn push_event_text_block(
+    out: &mut String,
+    event: &Event,
+    content: &ResolvedEventContent,
+) {
     let role = event.role.map(|role| role.as_str()).unwrap_or("-");
     out.push_str(&format!(
         "[{}] {} {} {}\n",
@@ -396,11 +479,23 @@ pub(crate) fn push_event_text_block(out: &mut String, event: &Event) {
         event.event_type.as_str(),
         event.id
     ));
-    out.push_str(&event_content(event));
+    if content.outcome.stored_truncated && !content.outcome.complete {
+        if content.complete_content_available {
+            out.push_str("content: indexed (truncated; use --content complete)\n");
+        } else {
+            out.push_str("content: indexed bounded preview (complete content unavailable)\n");
+        }
+    }
+    out.push_str(&content.text);
     out.push_str("\n\n");
 }
 
-pub(crate) fn render_events_text(store: &Store, selected: &Event, events: &[Event]) -> String {
+pub(crate) fn render_events_text(
+    store: &Store,
+    selected: &Event,
+    events: &[Event],
+    content: &ResolvedContent,
+) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("ctx_event_id: {}\n", selected.id));
     if let Some(session_id) = selected.session_id {
@@ -412,14 +507,20 @@ pub(crate) fn render_events_text(store: &Store, selected: &Event, events: &[Even
             }
         }
     }
+    out.push_str(&format!("content: {}\n", content.requested().as_str()));
     out.push('\n');
     for event in events {
-        push_event_text_block(&mut out, event);
+        push_event_text_block(&mut out, event, resolved_event_content(content, event)?);
     }
-    out
+    Ok(out)
 }
 
-pub(crate) fn render_events_markdown(store: &Store, selected: &Event, events: &[Event]) -> String {
+pub(crate) fn render_events_markdown(
+    store: &Store,
+    selected: &Event,
+    events: &[Event],
+    content: &ResolvedContent,
+) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("# Event {}\n\n", selected.id));
     if let Some(session_id) = selected.session_id {
@@ -431,6 +532,7 @@ pub(crate) fn render_events_markdown(store: &Store, selected: &Event, events: &[
             }
         }
     }
+    out.push_str(&format!("- content: `{}`\n", content.requested().as_str()));
     for event in events {
         let role = event.role.map(|role| role.as_str()).unwrap_or("-");
         out.push_str(&format!(
@@ -440,10 +542,12 @@ pub(crate) fn render_events_markdown(store: &Store, selected: &Event, events: &[
             event.occurred_at
         ));
         out.push_str(&format!("ctx_event_id: `{}`\n\n", event.id));
-        out.push_str(&event_content(event));
+        let content = resolved_event_content(content, event)?;
+        push_indexed_truncation_markdown(&mut out, content);
+        out.push_str(&content.text);
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 pub(crate) fn session_transcript_json(
@@ -452,8 +556,19 @@ pub(crate) fn session_transcript_json(
     events: &[Event],
     mode: TranscriptMode,
     format: OutputFormat,
-) -> Value {
-    compact_json(json!({
+    content: &ResolvedContent,
+) -> Result<Value> {
+    let rendered_events = selected_transcript_events(events, mode)
+        .into_iter()
+        .map(|event| {
+            Ok(transcript_event_json(
+                store,
+                event,
+                resolved_event_content(content, event)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(compact_json(json!({
         "schema_version": 1,
         "target": "session",
         "payload_type": "session_transcript",
@@ -461,14 +576,12 @@ pub(crate) fn session_transcript_json(
         "provider": session.provider,
         "provider_session_id": session.external_session_id,
         "mode": mode.as_str(),
+        "content_policy": content.requested().as_str(),
         "format": format.as_str(),
         "session": ShowDto::session(store, session),
         "source": source_json_for(store, session.capture_source_id),
-        "events": selected_transcript_events(events, mode)
-            .into_iter()
-            .map(|event| transcript_event_json(store, event))
-            .collect::<Vec<_>>(),
-    }))
+        "events": rendered_events,
+    })))
 }
 
 pub(crate) fn event_window_json(
@@ -476,23 +589,36 @@ pub(crate) fn event_window_json(
     selected: &Event,
     events: &[Event],
     format: OutputFormat,
-) -> Value {
-    compact_json(json!({
+    content: &ResolvedContent,
+) -> Result<Value> {
+    let rendered_events = events
+        .iter()
+        .map(|event| {
+            Ok(transcript_event_json(
+                store,
+                event,
+                resolved_event_content(content, event)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(compact_json(json!({
         "schema_version": 1,
         "target": "event",
         "payload_type": "event_window",
         "ctx_event_id": selected.id,
         "ctx_session_id": selected.session_id,
+        "content_policy": content.requested().as_str(),
         "format": format.as_str(),
-        "event": transcript_event_json(store, selected),
-        "events": events
-            .iter()
-            .map(|event| transcript_event_json(store, event))
-            .collect::<Vec<_>>(),
-    }))
+        "event": transcript_event_json(store, selected, resolved_event_content(content, selected)?),
+        "events": rendered_events,
+    })))
 }
 
-pub(crate) fn transcript_event_json(store: &Store, event: &Event) -> Value {
+pub(crate) fn transcript_event_json(
+    store: &Store,
+    event: &Event,
+    content: &ResolvedEventContent,
+) -> Value {
     let session = event.session_id.and_then(|id| store.get_session(id).ok());
     compact_json(json!({
         "ctx_event_id": event.id,
@@ -513,7 +639,8 @@ pub(crate) fn transcript_event_json(store: &Store, event: &Event) -> Value {
         "source": source_json_for(store, event.capture_source_id),
         "cursor": event_cursor(event),
         "preview": event_preview(event),
-        "text": event_content(event),
+        "text": content.text,
+        "content": content.outcome.as_json(),
     }))
 }
 
@@ -522,6 +649,7 @@ pub(crate) fn render_session_jsonl(
     session: &Session,
     events: &[Event],
     mode: TranscriptMode,
+    content: &ResolvedContent,
 ) -> Result<String> {
     let mut lines = Vec::new();
     for event in selected_transcript_events(events, mode) {
@@ -529,19 +657,28 @@ pub(crate) fn render_session_jsonl(
             "schema_version": 1,
             "payload_type": "session_transcript_event",
             "mode": mode.as_str(),
+            "content_policy": content.requested().as_str(),
             "ctx_session_id": session.id,
             "provider": session.provider,
             "provider_session_id": session.external_session_id,
-            "event": transcript_event_json(store, event),
+            "event": transcript_event_json(store, event, resolved_event_content(content, event)?),
         })))?);
     }
     Ok(lines.join("\n") + "\n")
 }
 
-pub(crate) fn render_events_jsonl(store: &Store, events: &[Event]) -> Result<String> {
+pub(crate) fn render_events_jsonl(
+    store: &Store,
+    events: &[Event],
+    content: &ResolvedContent,
+) -> Result<String> {
     let mut lines = Vec::new();
     for event in events {
-        lines.push(serde_json::to_string(&transcript_event_json(store, event))?);
+        lines.push(serde_json::to_string(&transcript_event_json(
+            store,
+            event,
+            resolved_event_content(content, event)?,
+        ))?);
     }
     Ok(lines.join("\n") + "\n")
 }
@@ -568,6 +705,11 @@ pub(crate) fn locate_session_json(store: &Store, session: &Session) -> Value {
 
 pub(crate) fn locate_event_json(store: &Store, event: &Event) -> Value {
     let session = event.session_id.and_then(|id| store.get_session(id).ok());
+    let locator = event
+        .sync
+        .metadata
+        .get(COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
+        .and_then(PersistedCompleteContentLocatorV1::from_metadata_value);
     compact_json(json!({
         "schema_version": 1,
         "target": "event",
@@ -583,6 +725,18 @@ pub(crate) fn locate_event_json(store: &Store, event: &Event) -> Value {
         "role": event.role,
         "occurred_at": event.occurred_at,
         "source": source_json_for(store, event.capture_source_id),
+        "source_record": {
+            "ordinal": event.sync.metadata.get("source_record_ordinal"),
+            "subrecord_index": event.sync.metadata.get("source_record_subrecord_index"),
+            "fixture_line": event.sync.metadata.get("fixture_line"),
+            "provider_event_hash": event.sync.metadata.get("provider_event_hash"),
+            "provider_event_hash_authority": event.sync.metadata.get("provider_event_hash_authority"),
+        },
+        "complete_content": locator.as_ref().map(|locator| json!({
+            "available": true,
+            "source_family": locator.family(),
+            "locator_kind": locator.kind(),
+        })).unwrap_or_else(|| json!({"available": false})),
         "cursor": event_cursor(event),
         "resume": session
             .as_ref()
@@ -593,6 +747,11 @@ pub(crate) fn locate_event_json(store: &Store, event: &Event) -> Value {
 pub(crate) fn source_json_for(store: &Store, source_id: Option<Uuid>) -> Option<Value> {
     let source = source_id.and_then(|source_id| store.get_capture_source(source_id).ok())?;
     let path = source.descriptor.raw_source_path.clone();
+    let source_format = source
+        .descriptor
+        .source_format
+        .clone()
+        .or_else(|| source_format(&source.sync.metadata));
     Some(compact_json(json!({
         "source_id": source.id,
         "provider": source.descriptor.provider,
@@ -602,8 +761,13 @@ pub(crate) fn source_json_for(store: &Store, source_id: Option<Uuid>) -> Option<
         "cwd": source.descriptor.cwd,
         "started_at": source.started_at,
         "ended_at": source.ended_at,
-        "source_format": source_format(&source.sync.metadata),
+        "source_format": source_format,
         "cursor": source_cursor(&source.sync.metadata),
+        "verification_snapshot": {
+            "size_bytes": source.sync.metadata.get("last_imported_size_bytes"),
+            "modified_at_ms": source.sync.metadata.get("last_imported_modified_at_ms"),
+            "sha256": source.sync.metadata.get("last_imported_sha256"),
+        },
     })))
 }
 
@@ -722,6 +886,14 @@ pub(crate) fn print_locate_event_text(value: &Value) -> Result<()> {
     if let Some(source) = value.get("source") {
         print_optional_json_str(source, "path");
     }
+    if let Some(source_record) = value.get("source_record") {
+        if let Some(ordinal) = source_record.get("ordinal").and_then(Value::as_u64) {
+            println!("source_record_ordinal: {ordinal}");
+        }
+        if let Some(index) = source_record.get("subrecord_index").and_then(Value::as_u64) {
+            println!("source_record_subrecord_index: {index}");
+        }
+    }
     Ok(())
 }
 
@@ -753,46 +925,5 @@ impl ShowDto {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{DateTime, Utc};
-    use ctx_history_core::{Fidelity, SyncMetadata, SyncState, Visibility};
-
-    fn test_event() -> Event {
-        Event {
-            id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000010").unwrap(),
-            seq: 1,
-            history_record_id: None,
-            session_id: None,
-            run_id: None,
-            event_type: EventType::Message,
-            role: Some(EventRole::User),
-            occurred_at: DateTime::parse_from_rfc3339("2026-06-23T12:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            capture_source_id: None,
-            payload: json!({"text": "local show payload should render"}),
-            payload_blob_id: None,
-            dedupe_key: None,
-            sync: SyncMetadata {
-                visibility: Visibility::LocalOnly,
-                fidelity: Fidelity::Imported,
-                sync_state: SyncState::LocalOnly,
-                sync_version: 0,
-                deleted_at: None,
-                metadata: json!({}),
-            },
-        }
-    }
-
-    #[test]
-    fn event_content_preserves_payload_text() {
-        let event = test_event();
-
-        let content = event_content(&event);
-        let preview = event_preview(&event);
-
-        assert!(content.contains("local show payload should render"));
-        assert!(preview.contains("local show payload"));
-    }
-}
+#[path = "transcript_tests.rs"]
+mod tests;

@@ -1,11 +1,13 @@
 # JSON Contracts
 
 ctx JSON is for local agents and scripts. It can include prompts, command
-output previews, and local paths. Treat it as private until a user reviews it.
+arguments, typed result identifiers, and local paths. Treat it as private until
+a user reviews it.
 
-Command result JSON uses `schema_version: 1` except for the intentionally
-breaking `ctx import --json` schema version 2 described below. Progress-event
-JSON is stderr progress output and does not include `schema_version`.
+Command result JSON uses `schema_version: 1` except for `ctx import --json`.
+The Pro status object embedded by `ctx status --json` and exposed through MCP
+uses its own version 2 contract, described below. Progress-event JSON is stderr
+progress output and does not include `schema_version`.
 
 ## Setup
 
@@ -83,8 +85,15 @@ Reads local storage state and returns:
 - `stale_source_import_files`;
 - `semantic`;
 - `daemon`;
+- `pro`, using the path-safe Local Pro status shape;
 - `local_only: true`;
 - `read_only: true`.
+
+For status, `read_only: true` means the command does not mutate canonical
+history or local Pro graph data. When Pro is installed, entitlement
+authorization may advance nonsecret anti-clock-rollback security metadata in
+the operating-system key store; that metadata is outside both data stores and
+does not change this stable field.
 
 `semantic` reports semantic sidecar and background-worker state. Fields listed
 as nullable may be omitted when unavailable:
@@ -155,11 +164,7 @@ the persisted result from the last daemon iteration. When the daemon is disabled
 for ordinary status reporting, the semantic job reports `enabled: false`,
 `status: "disabled"`, and `reason: "daemon_disabled"`.
 
-`daemon.jobs.cloud_sync` currently reports `status: "disabled"`,
-`enabled: false`, `reason: "not_configured"`, `network_allowed: false`,
-nullable/omitted `last_upload_at_ms`, and `queued_items_estimate: 0`.
-
-`ctx daemon status --json` returns `schema_version`, `daemon`, and
+`ctx daemon status --json` returns `schema_version`, `daemon`, `pro`, and
 `local_only`. `ctx daemon enable --json` and `ctx daemon disable --json` return
 `schema_version`, `daemon_enabled`, `config_path`, and `local_only`.
 `ctx daemon run --json` returns the daemon object directly. The legacy hidden
@@ -193,9 +198,12 @@ Each source includes:
 - `unsupported_reason`.
 
 `status` is `available`, `empty`, `unknown`, `missing`, or `unsupported`.
-`import_support` is `native` or `unsupported`. `native_import` is a boolean
-derived from `import_support == "native"`. `importable` is true only when the
-source is both available and natively importable. `unknown` means the bounded
+`import_support` is `native`, `explicit`, or `unsupported`. `native_import`
+is derived from `import_support == "native"`; explicit sources therefore report
+`native_import: false`. `importable` is true when a source is available and
+either native or explicitly importable. Explicit sources require a targeted
+provider import and are excluded from setup, `--all`, daemon refresh, and
+search refresh. `unknown` means the bounded
 provider-specific transcript probe hit its scan budget before proving the
 source available or empty. `unsupported_reason` is a string for unsupported,
 empty, or unknown rows and otherwise null.
@@ -292,6 +300,7 @@ Writes nothing and returns:
 - `payload_type`, either `session_transcript` or `event_window`;
 - `mode` for session transcripts;
 - `format`;
+- `content_policy`, either `indexed` (the default) or `complete`;
 - `session` for session output;
 - `event` for event output;
 - `source`;
@@ -300,7 +309,17 @@ Writes nothing and returns:
 `session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
 `provider_session_id` when known. `event` and `events[]` rows include
 `ctx_event_id`, `record_type`, `ctx_session_id`, `sequence`, `event_type`,
-`role`, `occurred_at`, `source`, `cursor`, and `text` or `preview`.
+`role`, `occurred_at`, `source`, `cursor`, and `text` or `preview`. Each
+rendered event also includes `content` with `requested`, `complete`, `origin`,
+`stored_truncated`, and `source_verified`. `origin` is `ctx_index` or
+`provider_source`.
+
+Complete-content failures are all-or-nothing. JSON mode writes no transcript
+and reports a stable error object containing `error`, `error_code`,
+`ctx_event_id`, `retryable`, and a `ctx locate event` remediation command.
+Current error codes are `source_missing`, `source_unreadable`, `source_changed`,
+`hydration_unsupported`, `source_record_missing`, `content_too_large`, and
+`content_verification_failed`.
 
 ## Locate
 
@@ -323,6 +342,10 @@ Writes nothing and returns provenance metadata:
 `source` includes `path`, `cursor`, `exists`, `source_id`, and
 `source_format` when known. `resume` includes provider cursor or import resume
 metadata when available.
+Event locations can additionally include `source_record`,
+`complete_content.available`, `complete_content.source_family`, and
+`complete_content.locator_kind`. They do not expose locator bytes or complete
+body digests.
 
 ## Transcript Artifacts
 
@@ -650,6 +673,88 @@ Citations can include:
 `source_exists: false` means indexed text is available but the raw source
 was not present at the stored path when checked.
 
+## Local Pro
+
+The `pro` object in `ctx status --json` has `schema_version: 2`,
+`payload_type: "pro_status"`,
+`state`, `installed`, `ready`, `materialized`, `helper_version`,
+`protocol_version`, `capabilities`, `error_code`, `access_state`,
+`refresh_after_unix`, `access_deadline_unix`, `grace_deadline_unix`, and a typed
+`next_action`. Access fields are null when access cannot be determined. The
+generic `state` remains helper/graph readiness; `access_state` is independently
+`trial`, `active`, `canceling_paid`, `offline_grace`, or `locked`.
+After an uninstall that deliberately preserves local Pro data, `state` is
+`uninstalled_data_preserved` and `next_action.reason` is
+`restore_preserved_pro_data`; a first-use installation remains `not_setup` with
+`helper_missing`.
+The same path-safe shape is returned by the MCP `pro_status` tool.
+`ctx doctor --json` also embeds that shape under `pro`.
+
+`ctx pro --json` and its explicit synonym `ctx pro setup --json` both run the
+idempotent setup path, report operation `setup`, and return the
+`schema_version: 1`, `payload_type: "pro_setup"` contract.
+`ctx pro manage --no-open --json` and
+`ctx pro uninstall (--delete-data|--keep-data) --json` return the `pro_manage`
+and `pro_uninstall` payload types respectively.
+Materialization is an internal,
+idempotent part of setup, daemon freshness, and graph-query catch-up.
+The `pro_manage` payload includes `portal_url`, `browser_opened`, and the same
+nonsecret access state/deadline fields. A locked account preserves canonical
+history, encrypted derived data, and keys; successful resubscription followed
+by `ctx pro` restores access.
+`pro_uninstall` reports `helper_removed`, `local_pro_data` (`preserved` or
+`deleted`), `canonical_history_preserved`, and an actionable `next_action`.
+Explicit `--delete-data` reports `local_pro_data: "deleted"` only after the
+authoritative local Pro inventory has been verified absent. JSON callers must
+provide one of the two data-choice flags and are never prompted.
+
+Successful `show`/`locate` resource queries and `blame`, `timeline`, and `facts`
+JSON return:
+
+- `schema_version: 1`;
+- `payload_type`, identifying the query view;
+- `target`, with `kind`, `value`, optional `repository`, and optional `line`;
+- `results`, bounded cited resource records and facts; each record's `resource`
+  has an opaque stable `id`, `kind`, and human-readable `display`;
+- `citations`, a flattened convenience list;
+- `pagination.next_cursor` and `pagination.truncated`;
+- `stale`;
+- `suggested_next_commands`.
+
+Facts include stable IDs, predicate/object data, confidence, state, owning root
+session, direct actor session, and at least one usable canonical citation.
+An unscoped query can return multiple resources. A caller may choose one
+`results[].resource` and reuse its opaque `id` as the same resource kind's
+`value` in a later query. The ID must not be parsed. Query `target.repository`
+is an optional logical identity, not a local path, and the current public
+resource record does not expose it as a separate field. `target.line` is a
+positive 1-based source line and is valid only when `target.kind` is `file`.
+
+MCP text rendering dispatches on this `payload_type`. The six query payloads
+`pro_resource`, `pro_location`, `pro_blame`, `pro_timeline`, `pro_related`, and
+`pro_facts` retain distinct text views and the typed fact/citation vocabulary
+above. An unrecognized Pro query payload is reported as
+`unsupported_payload_type`; it is never coerced into a search result merely
+because it contains `results`.
+
+`facts` and `timeline` cursors are authenticated, query-bound, and
+graph-state-bound. Tampering returns `invalid_request`; changing the graph makes
+an old cursor return `stale_fact`. Only `facts` and `timeline` accept a
+continuation cursor in the CLI; MCP also offers a paged `related` operation.
+`show`, `locate`, and `blame` are bounded, unpaged point views; their
+`pagination.next_cursor` is null and their CLI/MCP inputs do not offer a cursor.
+
+CLI failures exit nonzero with a stable error token on stderr. MCP failures set
+`isError: true` and return `error` plus `error_code` in `structuredContent`.
+Stable codes include `pro_not_installed`, `commercial_unavailable`,
+`entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
+`key_store_locked`, `not_materialized`, `protocol_mismatch`,
+`source_unavailable`, `repository_unavailable`, `stale_fact`, `ambiguous`,
+`corrupt_graph`, `invalid_request`, `invalid_response`, `cancelled`,
+`helper_crashed`, and `helper_timeout`.
+Native key-store failures use only `key_store_unavailable` and
+`key_store_locked`. Unshipped `credential_vault_*` spellings are not aliases.
+
 ## Doctor
 
 ```bash
@@ -663,7 +768,8 @@ Reads local storage and returns findings:
 - `progress`;
 - `findings`.
 
-Doctor checks the main SQLite store plus read-only semantic sidecar health. It
+Doctor checks the main SQLite store, read-only semantic sidecar health, and an
+installed Pro helper. Its JSON includes `daemon` and `pro` status. It
 does not initialize embedding models or write sidecar data. Semantic or hybrid
 search may ask the daemon query service to embed the query from an
 already-cached local model; search does not download models or write sidecar

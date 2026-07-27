@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::provider::file_touches::normalized_key;
-use crate::provider::native::provider_capped_json_value;
+use crate::provider::normalization::provider_capped_json_value;
 use crate::{PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS};
 
 pub(crate) fn windsurf_event_text(value: &Value, entry_type: &str) -> String {

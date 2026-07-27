@@ -12,6 +12,7 @@ use crate::events::{event_from_row, event_select_sql};
 use crate::events::{parse_provider_event_dedupe_key, reject_provider_event_hash_conflict_tx};
 use crate::files::{file_touched_from_row, file_touched_select_sql};
 use crate::records::{history_record_link_from_row, history_record_link_select_sql};
+use crate::result_storage::durable_event;
 use crate::runs::{run_from_row, run_select_sql};
 use crate::sessions::{session_from_row, session_select_sql};
 use crate::sources::capture_source_from_row;
@@ -59,6 +60,7 @@ pub(super) fn reject_import_invariant_conflicts(
     }
 
     for event in &archive.events {
+        let _ = durable_event(event)?;
         if let Some(dedupe_key) = &event.dedupe_key {
             reject_provider_event_hash_conflict_tx(tx, dedupe_key)?;
         }
@@ -144,15 +146,16 @@ fn reject_rich_import_conflicts(
         reject_entity_conflict(existing_run_by_id(tx, run.id)?, run, "run", run.id)?;
     }
     for event in &archive.events {
+        let incoming = durable_event(event)?;
         reject_entity_conflict(
             existing_event_by_id(tx, event.id)?,
-            event,
+            incoming.as_ref(),
             "event",
             event.id,
         )?;
         reject_entity_conflict(
             existing_event_by_seq(tx, event.seq)?,
-            event,
+            incoming.as_ref(),
             "event",
             event.id,
         )?;
@@ -160,7 +163,7 @@ fn reject_rich_import_conflicts(
             reject_provider_event_hash_conflict_tx(tx, dedupe_key)?;
             reject_entity_conflict(
                 existing_event_by_dedupe_key(tx, dedupe_key)?,
-                event,
+                incoming.as_ref(),
                 "event",
                 event.id,
             )?;

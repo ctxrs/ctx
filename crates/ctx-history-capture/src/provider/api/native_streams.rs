@@ -1,18 +1,18 @@
 use std::path::Path;
 
+use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 
-use crate::provider::adapter::{
-    AntigravityCliJsonlAdapter, CopilotCliSessionEventsAdapter, CursorAgentTranscriptJsonlAdapter,
-    FactoryAiDroidJsonlAdapter, GeminiCliJsonlAdapter, KimiCodeCliWireJsonlAdapter,
-    LingmaSqliteAdapter, MistralVibeJsonlAdapter, MuxJsonlAdapter, ProviderCaptureAdapter,
-    QoderJsonlAdapter, QwenCodeJsonlAdapter, RovoDevSessionJsonAdapter, TabnineCliJsonlAdapter,
-    WindsurfCascadeHookTranscriptJsonlAdapter, ZedThreadsSqliteAdapter,
+use crate::provider::providers::kimi::import_kimi_wire_jsonl_tree_batched;
+use crate::provider::providers::lingma::import_lingma_sqlite_batched;
+use crate::provider::providers::mistral_vibe::import_mistral_vibe_sessions_batched;
+use crate::provider::providers::mux::import_mux_sessions_batched;
+use crate::provider::providers::native_jsonl::{
+    import_bounded_native_jsonl_tree, NativeJsonlTreeImport,
 };
-use crate::provider::importer::{
-    import_native_jsonl_tree, import_normalized_provider_captures, NativeJsonlTreeImport,
-};
-use crate::provider::providers::warp::normalize_warp_sqlite;
+use crate::provider::providers::rovodev::import_rovodev_sessions_batched;
+use crate::provider::providers::warp::import_warp_sqlite_batched;
+use crate::provider::providers::zed::import_zed_threads_sqlite_batched;
 use crate::{
     AntigravityCliImportOptions, CopilotCliImportOptions, CursorNativeImportOptions,
     FactoryAiDroidImportOptions, GeminiCliImportOptions, KimiCodeCliImportOptions,
@@ -20,7 +20,10 @@ use crate::{
     NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
     QoderImportOptions, QwenCodeImportOptions, Result, RovoDevImportOptions,
     TabnineCliImportOptions, WarpSqliteImportOptions, WindsurfCascadeHookImportOptions,
-    ZedThreadsSqliteImportOptions,
+    ZedThreadsSqliteImportOptions, ANTIGRAVITY_CLI_SOURCE_FORMAT, COPILOT_CLI_SOURCE_FORMAT,
+    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, FACTORY_DROID_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT,
+    QODER_SOURCE_FORMAT, QWEN_CODE_SOURCE_FORMAT, TABNINE_CLI_SOURCE_FORMAT,
+    WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
 };
 
 pub fn import_antigravity_cli_history(
@@ -28,7 +31,7 @@ pub fn import_antigravity_cli_history(
     store: &mut Store,
     options: AntigravityCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -37,8 +40,11 @@ pub fn import_antigravity_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        AntigravityCliJsonlAdapter,
+        CaptureProvider::Antigravity,
+        ANTIGRAVITY_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -47,7 +53,7 @@ pub fn import_gemini_cli_history(
     store: &mut Store,
     options: GeminiCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -56,8 +62,11 @@ pub fn import_gemini_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        GeminiCliJsonlAdapter,
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -66,7 +75,7 @@ pub fn import_tabnine_cli_history(
     store: &mut Store,
     options: TabnineCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -75,8 +84,11 @@ pub fn import_tabnine_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        TabnineCliJsonlAdapter,
+        CaptureProvider::Tabnine,
+        TABNINE_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -85,7 +97,7 @@ pub fn import_cursor_native_history(
     store: &mut Store,
     options: CursorNativeImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -94,8 +106,11 @@ pub fn import_cursor_native_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        CursorAgentTranscriptJsonlAdapter,
+        CaptureProvider::Cursor,
+        CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
     )
 }
 
@@ -104,7 +119,7 @@ pub fn import_windsurf_cascade_hook_transcripts(
     store: &mut Store,
     options: WindsurfCascadeHookImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -113,8 +128,11 @@ pub fn import_windsurf_cascade_hook_transcripts(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        WindsurfCascadeHookTranscriptJsonlAdapter,
+        CaptureProvider::Windsurf,
+        WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
     )
 }
 
@@ -128,23 +146,22 @@ pub fn import_warp_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = normalize_warp_sqlite(
+    import_warp_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: false,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -154,7 +171,7 @@ pub fn import_qoder_history(
     store: &mut Store,
     options: QoderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -163,8 +180,11 @@ pub fn import_qoder_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        QoderJsonlAdapter,
+        CaptureProvider::Qoder,
+        QODER_SOURCE_FORMAT,
     )
 }
 
@@ -178,23 +198,22 @@ pub fn import_zed_threads_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ZedThreadsSqliteAdapter.normalize_path(
+    import_zed_threads_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -209,23 +228,22 @@ pub fn import_lingma_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = LingmaSqliteAdapter.normalize_path(
+    import_lingma_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -235,7 +253,7 @@ pub fn import_factory_ai_droid_sessions(
     store: &mut Store,
     options: FactoryAiDroidImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -244,8 +262,11 @@ pub fn import_factory_ai_droid_sessions(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        FactoryAiDroidJsonlAdapter,
+        CaptureProvider::FactoryAiDroid,
+        FACTORY_DROID_SOURCE_FORMAT,
     )
 }
 
@@ -254,7 +275,7 @@ pub fn import_copilot_cli_session_events(
     store: &mut Store,
     options: CopilotCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -263,8 +284,11 @@ pub fn import_copilot_cli_session_events(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        CopilotCliSessionEventsAdapter,
+        CaptureProvider::CopilotCli,
+        COPILOT_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -273,7 +297,7 @@ pub fn import_qwen_code_history(
     store: &mut Store,
     options: QwenCodeImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    import_bounded_native_jsonl_tree(
         store,
         NativeJsonlTreeImport {
             path: path.as_ref(),
@@ -282,8 +306,11 @@ pub fn import_qwen_code_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token,
         },
-        QwenCodeJsonlAdapter,
+        CaptureProvider::QwenCode,
+        QWEN_CODE_SOURCE_FORMAT,
     )
 }
 
@@ -292,17 +319,28 @@ pub fn import_kimi_code_cli_history(
     store: &mut Store,
     options: KimiCodeCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    import_kimi_wire_jsonl_tree_batched(
+        path,
         store,
-        NativeJsonlTreeImport {
-            path: path.as_ref(),
+        ProviderAdapterContext {
             machine_id: options.machine_id,
-            source_path: options.source_path,
+            source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            history_record_id: options.history_record_id,
         },
-        KimiCodeCliWireJsonlAdapter,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
+        },
     )
 }
 
@@ -316,23 +354,22 @@ pub fn import_rovodev_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = RovoDevSessionJsonAdapter.normalize_path(
+    import_rovodev_sessions_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -342,17 +379,28 @@ pub fn import_mistral_vibe_history(
     store: &mut Store,
     options: MistralVibeImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    import_mistral_vibe_sessions_batched(
+        path,
         store,
-        NativeJsonlTreeImport {
-            path: path.as_ref(),
+        ProviderAdapterContext {
             machine_id: options.machine_id,
-            source_path: options.source_path,
+            source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            history_record_id: options.history_record_id,
         },
-        MistralVibeJsonlAdapter,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
+        },
     )
 }
 
@@ -361,16 +409,27 @@ pub fn import_mux_history(
     store: &mut Store,
     options: MuxImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    import_mux_sessions_batched(
+        path,
         store,
-        NativeJsonlTreeImport {
-            path: path.as_ref(),
+        ProviderAdapterContext {
             machine_id: options.machine_id,
-            source_path: options.source_path,
+            source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            history_record_id: options.history_record_id,
         },
-        MuxJsonlAdapter,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
+        },
     )
 }

@@ -25,11 +25,9 @@ from typing import Any
 
 DEFAULT_MODES = ("hybrid", "lexical", "semantic")
 OFFLINE_ENV = {
-    "CTX_ANALYTICS_OFF": "1",
-    "CTX_DISABLE_ANALYTICS": "1",
-    "CTX_DISABLE_AUTO_UPGRADE": "1",
+    "CTX_ANALYTICS_ENABLED": "false",
+    "CTX_UPGRADE_AUTO": "off",
     "CTX_SEMANTIC_WORKER_OFF": "1",
-    "CTX_UPGRADE_OFF": "1",
     "FASTEMBED_OFFLINE": "1",
     "HF_HUB_OFFLINE": "1",
     "NO_COLOR": "1",

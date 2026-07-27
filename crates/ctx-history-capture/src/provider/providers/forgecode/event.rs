@@ -1,0 +1,383 @@
+use std::collections::BTreeSet;
+
+use chrono::{DateTime, Utc};
+use ctx_history_core::{CaptureProvider, Confidence, EventRole, EventType, FileChangeKind};
+use serde_json::{json, Value};
+
+use crate::provider::file_touches::{normalized_key, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT};
+use crate::provider::normalization::{
+    provider_line_from_index, provider_role, provider_timestamp_value, provider_value_text,
+};
+use crate::provider::providers::goose::goose_timestamp;
+use crate::{ProviderFileTouchedEnvelope, FORGECODE_SQLITE_SOURCE_FORMAT};
+
+use super::source::ForgeCodeConversationRow;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ForgeCodeMessageParts<'a> {
+    pub(super) variant: &'static str,
+    pub(super) body: &'a Value,
+    pub(super) usage: Option<&'a Value>,
+}
+
+pub(super) fn forgecode_message_parts(entry: &Value) -> ForgeCodeMessageParts<'_> {
+    let message = entry.get("message").unwrap_or(entry);
+    let usage = entry.get("usage");
+    if let Some((variant, body)) = forgecode_message_variant(message) {
+        return ForgeCodeMessageParts {
+            variant,
+            body,
+            usage,
+        };
+    }
+    ForgeCodeMessageParts {
+        variant: "unknown",
+        body: message,
+        usage,
+    }
+}
+
+fn forgecode_message_variant(value: &Value) -> Option<(&'static str, &Value)> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    object
+        .iter()
+        .find_map(|(key, value)| match normalized_key(key).as_str() {
+            "text" => Some(("text", value)),
+            "tool" => Some(("tool", value)),
+            "image" => Some(("image", value)),
+            _ => None,
+        })
+}
+
+pub(super) fn forgecode_event_type(parts: ForgeCodeMessageParts<'_>) -> EventType {
+    match parts.variant {
+        "text" if forgecode_text_has_tool_calls(parts.body) => EventType::ToolCall,
+        "text" => EventType::Message,
+        "tool" => EventType::ToolOutput,
+        "image" => EventType::Artifact,
+        _ => EventType::Notice,
+    }
+}
+
+pub(super) fn forgecode_event_role(parts: ForgeCodeMessageParts<'_>) -> Option<EventRole> {
+    match parts.variant {
+        "text" => forgecode_role_text(parts).map(|role| provider_role(Some(&role))),
+        "tool" => Some(EventRole::Tool),
+        "image" => Some(EventRole::Unknown),
+        _ => None,
+    }
+}
+
+pub(super) fn forgecode_role_text(parts: ForgeCodeMessageParts<'_>) -> Option<String> {
+    forgecode_text_body(parts)
+        .and_then(|body| body.get("role"))
+        .and_then(Value::as_str)
+        .map(|role| role.to_ascii_lowercase())
+}
+
+pub(super) fn forgecode_text_body(parts: ForgeCodeMessageParts<'_>) -> Option<&Value> {
+    (parts.variant == "text").then_some(parts.body)
+}
+
+fn forgecode_text_has_tool_calls(body: &Value) -> bool {
+    body.get("tool_calls")
+        .or_else(|| body.get("toolCalls"))
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
+}
+
+pub(super) fn forgecode_message_text(
+    parts: ForgeCodeMessageParts<'_>,
+    event_type: EventType,
+) -> String {
+    match parts.variant {
+        "text" => forgecode_text_message_text(parts.body, event_type),
+        "tool" => forgecode_tool_result_text(parts.body),
+        "image" => forgecode_image_text(parts.body),
+        _ => provider_value_text(parts.body).unwrap_or_default(),
+    }
+}
+
+pub(super) fn forgecode_text_message_text(body: &Value, _event_type: EventType) -> String {
+    let mut parts = Vec::new();
+    if let Some(content) = body
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        parts.push(content.to_owned());
+    }
+    if let Some(tool_text) = body
+        .get("tool_calls")
+        .or_else(|| body.get("toolCalls"))
+        .and_then(forgecode_tool_calls_text)
+    {
+        parts.push(tool_text);
+    }
+    if parts.is_empty() {
+        if let Some(raw_content) = body.get("raw_content").and_then(provider_value_text) {
+            parts.push(raw_content);
+        }
+    }
+    parts.join("\n")
+}
+
+fn forgecode_tool_calls_text(value: &Value) -> Option<String> {
+    let calls = value.as_array()?;
+    let mut parts = Vec::new();
+    for call in calls {
+        let name = call
+            .get("name")
+            .and_then(forgecode_scalar_text)
+            .unwrap_or_else(|| "tool".to_owned());
+        parts.push(format!("tool call: {name}"));
+        if let Some(call_id) = call.get("call_id").and_then(forgecode_scalar_text) {
+            parts.push(format!("tool call id: {call_id}"));
+        }
+        if let Some(arguments) = call
+            .get("arguments")
+            .and_then(provider_value_text)
+            .filter(|text| !text.trim().is_empty())
+        {
+            parts.push(format!("tool input: {arguments}"));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn forgecode_tool_result_text(body: &Value) -> String {
+    let name = body
+        .get("name")
+        .and_then(forgecode_scalar_text)
+        .unwrap_or_else(|| "tool".to_owned());
+    let mut parts = vec![format!("tool result: {name}")];
+    if let Some(call_id) = body.get("call_id").and_then(forgecode_scalar_text) {
+        parts.push(format!("tool call id: {call_id}"));
+    }
+    if body
+        .pointer("/output/is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        parts.push("tool error".to_owned());
+    }
+    if let Some(values) = body.pointer("/output/values").and_then(Value::as_array) {
+        for value in values {
+            if let Some(text) = forgecode_tool_value_text(value) {
+                parts.push(text);
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn forgecode_tool_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(object) => {
+            for (key, child) in object {
+                match normalized_key(key).as_str() {
+                    "text" | "markdown" => return child.as_str().map(str::to_owned),
+                    "ai" => {
+                        return child
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .or_else(|| provider_value_text(child));
+                    }
+                    "image" => return Some(forgecode_image_text(child)),
+                    "filediff" => {
+                        let path = child
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        return Some(format!("[File diff: {path}]"));
+                    }
+                    "pair" => {
+                        if let Some(items) = child.as_array() {
+                            return items.first().and_then(forgecode_tool_value_text);
+                        }
+                    }
+                    "empty" => return None,
+                    _ => {}
+                }
+            }
+            provider_value_text(value)
+        }
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(forgecode_tool_value_text)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        Value::Null => None,
+    }
+}
+
+fn forgecode_image_text(body: &Value) -> String {
+    let mime_type = body
+        .get("mime_type")
+        .or_else(|| body.get("mimeType"))
+        .and_then(Value::as_str)
+        .unwrap_or("image");
+    let url = body
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty());
+    match url {
+        Some(url) => format!("ForgeCode image: {mime_type} {url}"),
+        None => format!("ForgeCode image: {mime_type}"),
+    }
+}
+
+fn forgecode_scalar_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| provider_value_text(value))
+}
+
+pub(super) fn forgecode_for_each_metric_file_touch<E>(
+    row: &ForgeCodeConversationRow,
+    metrics: &Value,
+    raw_source_path: &str,
+    fallback: DateTime<Utc>,
+    mut emit: impl FnMut((usize, ProviderFileTouchedEnvelope)) -> std::result::Result<(), E>,
+) -> std::result::Result<bool, E> {
+    let occurred_at = metrics
+        .get("started_at")
+        .map(|value| provider_timestamp_value(Some(value), fallback))
+        .unwrap_or(fallback);
+    let mut emitted_count = 0_u64;
+    let mut seen = BTreeSet::<(String, &'static str)>::new();
+
+    if let Some(files_changed) = metrics.get("files_changed").and_then(Value::as_object) {
+        for (path, operation_value) in files_changed {
+            let Some(operation) = forgecode_metric_operation(operation_value) else {
+                continue;
+            };
+            let tool = operation
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("write");
+            let change_kind = forgecode_metric_change_kind(tool);
+            let key = (path.clone(), change_kind.as_str());
+            if seen.contains(&key) {
+                continue;
+            }
+            if emitted_count == MAX_PROVIDER_FILE_TOUCHES_PER_EVENT as u64 {
+                return Ok(true);
+            }
+            seen.insert(key);
+            let lines_added = operation.get("lines_added").and_then(forgecode_json_i64);
+            let lines_removed = operation.get("lines_removed").and_then(forgecode_json_i64);
+            let line_count_delta = match (lines_added, lines_removed) {
+                (Some(added), Some(removed)) => Some(added.saturating_sub(removed)),
+                (Some(added), None) => Some(added),
+                (None, Some(removed)) => Some(removed.saturating_neg()),
+                _ => None,
+            };
+            let touch_index = 0x0400_0000_0000_u64.saturating_add(emitted_count);
+            emit((
+                provider_line_from_index(touch_index),
+                ProviderFileTouchedEnvelope {
+                    provider: CaptureProvider::ForgeCode,
+                    provider_session_id: row.conversation_id.clone(),
+                    provider_touch_index: touch_index,
+                    provider_event_index: None,
+                    raw_source_path: Some(raw_source_path.to_owned()),
+                    source_root: Some(raw_source_path.to_owned()),
+                    path: path.clone(),
+                    change_kind: Some(change_kind),
+                    old_path: None,
+                    line_count_delta,
+                    confidence: Confidence::Explicit,
+                    occurred_at,
+                    source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
+                    metadata: json!({
+                        "source": "forgecode_metrics_files_changed",
+                        "tool": tool,
+                        "lines_added": lines_added,
+                        "lines_removed": lines_removed,
+                        "content_hash": operation.get("content_hash").and_then(Value::as_str),
+                    }),
+                },
+            ))?;
+            emitted_count = emitted_count.saturating_add(1);
+        }
+    }
+
+    if let Some(files_accessed) = metrics.get("files_accessed").and_then(Value::as_array) {
+        for path in files_accessed
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+        {
+            let key = (path.to_owned(), FileChangeKind::Read.as_str());
+            if seen.contains(&key) {
+                continue;
+            }
+            if emitted_count == MAX_PROVIDER_FILE_TOUCHES_PER_EVENT as u64 {
+                return Ok(true);
+            }
+            seen.insert(key);
+            let touch_index = 0x0500_0000_0000_u64.saturating_add(emitted_count);
+            emit((
+                provider_line_from_index(touch_index),
+                ProviderFileTouchedEnvelope {
+                    provider: CaptureProvider::ForgeCode,
+                    provider_session_id: row.conversation_id.clone(),
+                    provider_touch_index: touch_index,
+                    provider_event_index: None,
+                    raw_source_path: Some(raw_source_path.to_owned()),
+                    source_root: Some(raw_source_path.to_owned()),
+                    path: path.to_owned(),
+                    change_kind: Some(FileChangeKind::Read),
+                    old_path: None,
+                    line_count_delta: None,
+                    confidence: Confidence::Explicit,
+                    occurred_at,
+                    source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
+                    metadata: json!({
+                        "source": "forgecode_metrics_files_accessed",
+                    }),
+                },
+            ))?;
+            emitted_count = emitted_count.saturating_add(1);
+        }
+    }
+
+    Ok(false)
+}
+
+fn forgecode_metric_operation(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(_) => Some(value),
+        Value::Array(items) => items.iter().rev().find(|item| item.is_object()),
+        _ => None,
+    }
+}
+
+fn forgecode_metric_change_kind(tool: &str) -> FileChangeKind {
+    match tool.to_ascii_lowercase().as_str() {
+        "read" => FileChangeKind::Read,
+        "patch" | "edit" | "update" | "write" => FileChangeKind::Modified,
+        "delete" | "remove" => FileChangeKind::Deleted,
+        "create" | "add" => FileChangeKind::Created,
+        _ => FileChangeKind::Unknown,
+    }
+}
+
+fn forgecode_json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
+pub(super) fn forgecode_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    goose_timestamp(raw, fallback)
+}

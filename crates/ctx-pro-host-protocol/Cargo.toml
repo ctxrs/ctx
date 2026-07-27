@@ -1,0 +1,23 @@
+[package]
+name = "ctx-pro-host-protocol"
+version = "0.1.0"
+description = "Bounded local protocol between the OSS ctx host and an installed Pro helper"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+ctx-history-core = { path = "../ctx-history-core" }
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+proptest.workspace = true

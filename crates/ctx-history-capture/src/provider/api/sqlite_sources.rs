@@ -2,14 +2,20 @@ use std::path::Path;
 
 use ctx_history_store::Store;
 
-use crate::provider::adapter::{
-    AstrBotSqliteAdapter, ContinueCliSessionsAdapter, DeepAgentsSqliteAdapter,
-    FirebenderSqliteAdapter, ForgeCodeSqliteAdapter, KiloSqliteAdapter, KiroSqliteAdapter,
-    MiMoCodeSqliteAdapter, NanoClawProjectAdapter, OpenCodeSqliteAdapter,
-    OpenHandsFileEventsAdapter, ProviderCaptureAdapter, ShelleySqliteAdapter,
-};
-use crate::provider::importer::import_normalized_provider_captures;
+use crate::provider::providers::astrbot::import_astrbot_sqlite_batched;
+use crate::provider::providers::continue_cli::import_continue_cli_sessions_batched;
+use crate::provider::providers::deepagents::import_deepagents_sqlite_batched;
 use crate::provider::providers::firebender::firebender_source_root;
+use crate::provider::providers::firebender::import_firebender_sqlite_batched;
+use crate::provider::providers::forgecode::import_forgecode_sqlite_batched;
+use crate::provider::providers::kiro::import_kiro_sqlite_batched;
+use crate::provider::providers::nanoclaw::import_nanoclaw_project_batched;
+use crate::provider::providers::opencode::{
+    import_opencode_sqlite_batched, KILO_SQLITE_DIALECT, MIMOCODE_SQLITE_DIALECT,
+    OPENCODE_SQLITE_DIALECT,
+};
+use crate::provider::providers::openhands::import_openhands_file_events_batched;
+use crate::provider::providers::shelley::import_shelley_sqlite_batched;
 use crate::{
     AstrBotSqliteImportOptions, ContinueCliImportOptions, DeepAgentsSqliteImportOptions,
     FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, KiloSqliteImportOptions,
@@ -29,24 +35,22 @@ pub fn import_firebender_sqlite(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     let source_root = firebender_source_root(path)?;
-    let normalization = FirebenderSqliteAdapter.normalize_path(
+    import_firebender_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: Some(source_root),
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -61,25 +65,24 @@ pub fn import_opencode_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = OpenCodeSqliteAdapter.normalize_path(
+    import_opencode_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
+        &OPENCODE_SQLITE_DIALECT,
     )
 }
 
@@ -93,25 +96,24 @@ pub fn import_kilo_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = KiloSqliteAdapter.normalize_path(
+    import_opencode_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
+        &KILO_SQLITE_DIALECT,
     )
 }
 
@@ -125,24 +127,22 @@ pub fn import_forgecode_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ForgeCodeSqliteAdapter.normalize_path(
+    import_forgecode_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -157,24 +157,22 @@ pub fn import_deepagents_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = DeepAgentsSqliteAdapter.normalize_path(
+    import_deepagents_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -189,23 +187,22 @@ pub fn import_nanoclaw_project(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = NanoClawProjectAdapter.normalize_path(
+    import_nanoclaw_project_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -220,24 +217,22 @@ pub fn import_kiro_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = KiroSqliteAdapter.normalize_path(
+    import_kiro_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -252,23 +247,22 @@ pub fn import_astrbot_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = AstrBotSqliteAdapter.normalize_path(
+    import_astrbot_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -283,23 +277,22 @@ pub fn import_shelley_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ShelleySqliteAdapter.normalize_path(
+    import_shelley_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -314,23 +307,22 @@ pub fn import_continue_cli_sessions(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ContinueCliSessionsAdapter.normalize_path(
+    import_continue_cli_sessions_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -345,23 +337,22 @@ pub fn import_openhands_file_events(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = OpenHandsFileEventsAdapter.normalize_path(
+    import_openhands_file_events_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -376,23 +367,23 @@ pub fn import_mimocode_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = MiMoCodeSqliteAdapter.normalize_path(
+    import_opencode_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
+        &MIMOCODE_SQLITE_DIALECT,
     )
 }

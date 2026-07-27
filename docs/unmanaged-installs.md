@@ -74,8 +74,8 @@ https://github.com/ctxrs/ctx/releases/download/vVERSION/ASSET
 For example:
 
 ```text
-https://github.com/ctxrs/ctx/releases/download/v0.25.0/ctx-linux-x64
-https://github.com/ctxrs/ctx/releases/download/v0.25.0/SHA256SUMS
+https://github.com/ctxrs/ctx/releases/download/v0.26.0/ctx-linux-x64
+https://github.com/ctxrs/ctx/releases/download/v0.26.0/SHA256SUMS
 ```
 
 ## Direct GitHub Download
@@ -117,7 +117,7 @@ mise use -g 'github:ctxrs/ctx[bin=ctx]@latest'
 For a pinned install, replace `latest` with a release version:
 
 ```bash
-mise use -g 'github:ctxrs/ctx[bin=ctx]@0.25.0'
+mise use -g 'github:ctxrs/ctx[bin=ctx]@0.26.0'
 ```
 
 mise owns upgrades for this install. Re-run `ctx integrations install skills` after upgrading

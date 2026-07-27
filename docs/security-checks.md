@@ -18,8 +18,10 @@ the local retrieval product.
   write the semantic sidecar.
 - `ctx show` and `ctx locate` write nothing in local-only security mode, except
   `ctx show session --out` writes only the explicit path when one is provided.
-- `ctx status` is strictly read-only: missing stores stay missing, and existing
-  stores are not migrated, repaired, or used to create search projections.
+- `ctx status` does not mutate canonical history or local Pro graph data:
+  missing stores stay missing, and existing stores are not migrated, repaired,
+  or used to create search projections. Pro entitlement authorization may
+  advance nonsecret anti-clock-rollback security metadata.
 - `ctx sql` opens only the existing SQLite index, rejects write statements and
   multiple statements, and does not run background upgrade checks.
 - In local-only security mode, setup/import/default search do not use network
@@ -29,24 +31,24 @@ the local retrieval product.
   already-cached local model to embed the query.
 - `ctx setup --no-daemon`, `ctx setup --catalog-only`, `ctx setup --json`,
   `ctx import --no-daemon`, and `ctx import --json` must not autostart daemon
-  maintenance. Search and all JSON-output commands must not autostart daemon
-  maintenance.
+  maintenance. `ctx search --refresh background` may autostart local daemon
+  maintenance, including with JSON output; `--refresh off` must never do so.
 - `ctx docs` reads embedded documentation and writes only an explicit topic
   output path for `ctx docs show --out` or an explicit man-page output
   directory when `ctx docs man --out` is used.
 - `ctx upgrade` uses signed release metadata with explicit self-upgrade policy
   and applies only to official installer-managed binaries with a matching
   install sidecar.
-- Background auto-upgrade is managed-install-only, skipped for status/JSON/MCP/
-  docs/sql/upgrade commands, requires explicit signed auto-upgrade policy, and
-  must not collect provider history or pollute command stdout/stderr.
+- Background auto-upgrade is explicit-opt-in and managed-install-only, skipped
+  for status/JSON/MCP/docs/sql/upgrade commands, requires explicit signed
+  auto-upgrade policy, and must not collect provider history or pollute command
+  stdout/stderr.
 
 - A ctx-owned background coordinator, when launched by `ctx daemon run` or
   setup/import autostart, must write only under the configured ctx data root,
-  respect `[daemon].enabled` unless explicitly forced, keep cloud sync disabled
-  with `enabled: false` and `network_allowed: false`, and may run only bounded
-  native local provider-history refresh plus bounded semantic catch-up under the
-  ctx data root. It must not run history-source plugins or use cloud sync.
+  respect `[daemon].enabled` unless explicitly forced, and may run only bounded
+  native local provider-history refresh and bounded semantic catch-up. It must
+  not run history-source plugins.
   Network model acquisition is allowed only for the local embedding model when
   semantic search is explicitly enabled.
 - Provider files are read as sources and not modified.

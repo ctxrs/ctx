@@ -6,11 +6,73 @@ use crate::events::parse_provider_event_dedupe_key;
 use crate::schema::ddl::{table_exists, CREATE_TABLES_SQL};
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::provider_session_identity::PROVIDER_SESSION_INVARIANTS_SQL;
+use crate::schema::rebuild::sanitize_v44_result_event_payloads;
 use crate::search::projections::{
     event_scriptgram_table_ready, event_search_lookup_table_ready,
-    populate_event_search_projection_from_query, refresh_semantic_searchable_item_stats,
+    populate_event_search_projection_from_query, rebuild_search_projection,
+    refresh_semantic_searchable_item_stats,
 };
-use crate::{Result, StoreError};
+use crate::{Result, StoreError, FINAL_SCHEMA_IDENTITY};
+
+const FINAL_SCHEMA_SQL: &str = r#"
+DROP TRIGGER IF EXISTS sync_cursors_provider_publication_insert_fence;
+DROP TRIGGER IF EXISTS sync_cursors_provider_publication_update_fence;
+DROP TABLE IF EXISTS cloud_publication_cursor_permits;
+DROP TABLE IF EXISTS cloud_publication_state;
+
+CREATE TABLE IF NOT EXISTS ctx_store_schema_identity (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 47),
+    schema_identity TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projection_journal_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    projection_contract_version INTEGER NOT NULL DEFAULT 1
+        CHECK (projection_contract_version = 1),
+    contract_fingerprint TEXT,
+    high_water_sequence INTEGER NOT NULL DEFAULT 0 CHECK (high_water_sequence >= 0),
+    cumulative_digest TEXT NOT NULL DEFAULT
+        '0000000000000000000000000000000000000000000000000000000000000000',
+    acknowledged_sequence INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged_sequence >= 0),
+    acknowledged_cumulative_digest TEXT NOT NULL DEFAULT
+        '0000000000000000000000000000000000000000000000000000000000000000',
+    activated_at_ms INTEGER,
+    CHECK ((active = 0) OR (
+        generation > 0 AND activated_at_ms IS NOT NULL
+        AND length(contract_fingerprint) = 64
+        AND length(cumulative_digest) = 64
+        AND acknowledged_sequence <= high_water_sequence
+        AND length(acknowledged_cumulative_digest) = 64
+    ))
+);
+INSERT OR IGNORE INTO projection_journal_state (singleton) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS projection_journal_chunks (
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+    last_sequence INTEGER NOT NULL CHECK (last_sequence >= first_sequence),
+    record_count INTEGER NOT NULL CHECK (record_count > 0 AND record_count <= 64),
+    uncompressed_bytes INTEGER NOT NULL CHECK (
+        uncompressed_bytes > 0 AND uncompressed_bytes <= 8388608
+    ),
+    records_zstd BLOB NOT NULL CHECK (length(records_zstd) > 0),
+    PRIMARY KEY (generation, first_sequence),
+    UNIQUE (generation, last_sequence),
+    CHECK (last_sequence - first_sequence + 1 = record_count)
+);
+
+CREATE TABLE IF NOT EXISTS projection_journal_entities (
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('event', 'file_touch', 'vcs_change')),
+    stable_entity_id TEXT NOT NULL,
+    entity_revision INTEGER NOT NULL CHECK (entity_revision > 0),
+    content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),
+    PRIMARY KEY (generation, entity_kind, stable_entity_id)
+);
+"#;
 
 // Removal plan: once ctx intentionally requires on-disk schema v47 or newer
 // and provides an explicit path for older stores, delete this module and its
@@ -25,8 +87,20 @@ pub(super) fn migrate_to_v47(conn: &Connection) -> Result<()> {
         if !affected_event_ids.is_empty() {
             refresh_event_search_projection_for_event_ids(conn, &affected_event_ids)?;
         }
+        sanitize_v44_result_event_payloads(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch(PROVIDER_SESSION_INVARIANTS_SQL)?;
+        conn.execute_batch(FINAL_SCHEMA_SQL)?;
+        // v46 may contain a silently partial projection left by an interrupted
+        // legacy autocommit rebuild. Rebuild once inside this final migration
+        // transaction so v47 never blesses that state as initialized.
+        rebuild_search_projection(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO ctx_store_schema_identity
+                 (singleton, schema_version, schema_identity)
+             VALUES (1, 47, ?1)",
+            [FINAL_SCHEMA_IDENTITY],
+        )?;
         conn.execute_batch("PRAGMA user_version = 47;")?;
         Ok(())
     })();
@@ -185,7 +259,10 @@ fn refresh_event_search_projection_for_event_ids(
                e.role,
                e.event_type,
                e.payload_json,
-               'safe_preview'
+               'safe_preview',
+               e.visibility,
+               e.sync_state,
+               e.deleted_at_ms
         FROM temp.ctx_v47_affected_event_ids AS affected
         CROSS JOIN events AS e ON e.id = affected.event_id
         LEFT JOIN runs r ON r.id = e.run_id

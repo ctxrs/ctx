@@ -2,44 +2,12 @@ use std::io::{self, IsTerminal, Write};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::{analytics, AnalyticsProperties};
-
 use super::{
     agents::{agent_from_name, picker_agents, SkillAgentArg},
     paths::PathContext,
     target::single_target,
     SkillInstallArgs, SkillStatusArgs, BUNDLED_SKILL_NAME,
 };
-
-pub(super) fn insert_target_analytics(
-    properties: &mut AnalyticsProperties,
-    agents: &[SkillAgentArg],
-    all_agents: bool,
-    project: bool,
-) {
-    analytics::insert_str(
-        properties,
-        "skill_scope",
-        if project { "project" } else { "global" },
-    );
-    analytics::insert_str(
-        properties,
-        "target_agent_group",
-        if all_agents {
-            "all"
-        } else if agents.is_empty() {
-            "default"
-        } else {
-            "explicit"
-        },
-    );
-    let count = if all_agents {
-        SkillAgentArg::ALL.len()
-    } else {
-        agents.len().max(1)
-    };
-    analytics::insert_count_bucket(properties, "target_agents_count_bucket", count as u64);
-}
 
 #[cfg(test)]
 pub(super) fn explicit_selected_agents(
@@ -106,18 +74,6 @@ pub(super) enum SkillSelectionSource {
     Picker,
     Detected,
     Fallback,
-}
-
-impl SkillSelectionSource {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Explicit => "explicit",
-            Self::All => "all",
-            Self::Picker => "picker",
-            Self::Detected => "detected",
-            Self::Fallback => "fallback",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

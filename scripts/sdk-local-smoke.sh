@@ -26,7 +26,7 @@ fixture = repo_root / "tests" / "fixtures" / "provider-history" / "codex-session
 client = AgentHistoryClient.local(
     ctx_binary=os.environ["CTX_BIN"],
     data_root=os.environ["CTX_DATA_ROOT"],
-    env={"CTX_ANALYTICS_OFF": "1"},
+    env={"CTX_ANALYTICS_ENABLED": "false"},
     timeout=30,
 )
 

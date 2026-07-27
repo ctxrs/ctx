@@ -5,27 +5,13 @@ env:
   CTX_BOOTSTRAP_BAZELISK: "1"
   CTX_BAZELISK_VERSION: "v1.29.0"
   CTX_GO_VERSION: "1.22.12"
-  CTX_RUST_TOOLCHAIN: "1.88.0"
+  CTX_RUST_TOOLCHAIN: "1.97.1"
 
 steps:
   - label: ":bazel: public smoke gate"
     key: "public-smoke"
     command: |
-      bash scripts/buildkite-public-ci.sh -- test \
-        //crates/ctx-cli:unit_tests \
-        //:buildkite_pipeline_check \
-        //:cargo_check \
-        //:cargo_fmt_check \
-        //:docs_check \
-        //:installer_path_smoke \
-        //:linux_release_construction_tests \
-        //:loc_check \
-        //:macos_release_signing_tests \
-        //:native_candidate_smoke_tests \
-        //:package_audit_fast \
-        //:release_binary_compat_tests \
-        //:source_diff_check \
-        --config=ci
+      bash scripts/buildkite-public-ci.sh --mode=ci
     agents:
       queue: "default"
     concurrency: 1
@@ -175,6 +161,8 @@ steps:
     key: "public-cli-macos-arm64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
+      rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal
+      rustup run "${CTX_RUST_TOOLCHAIN}" cargo check --workspace --all-targets --all-features --locked
       export CTX_MACOS_RELEASE_SIGNING=required
       export CTX_MACOS_SIGNING_SECRET_SOURCE=infisical
       # Build and smoke processes never receive signing values; only narrow
@@ -367,6 +355,8 @@ steps:
     depends_on: "public-cli-windows-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
     command: |
+      rustup toolchain install 1.97.1 --profile minimal
+      rustup run 1.97.1 cargo check --workspace --all-targets --all-features --locked
       buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe*" . --step public-cli-windows-x64
       buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip*" . --step public-cli-windows-x64
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-semantic-smoke-contract.ps1

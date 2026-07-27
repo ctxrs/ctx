@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "payload_type": "pro_status",
+  "state": "not_setup",
+  "installed": false,
+  "ready": false,
+  "materialized": false,
+  "helper_version": null,
+  "protocol_version": 1,
+  "capabilities": [],
+  "error_code": "commercial_unavailable",
+  "access_state": null,
+  "refresh_after_unix": null,
+  "access_deadline_unix": null,
+  "grace_deadline_unix": null,
+  "next_action": {
+    "command": "ctx pro",
+    "reason": "helper_missing"
+  }
+}

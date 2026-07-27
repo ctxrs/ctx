@@ -1,4 +1,31 @@
-use super::*;
+use std::{fs, io::Cursor, path::Path};
+
+use anyhow::{anyhow, Context, Result};
+use serde_json::{json, Value};
+
+use ctx_history_capture::{
+    import_custom_history_jsonl_v1_reader, provider_source_spec, CustomHistoryJsonlV1ImportOptions,
+    DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderImportSummary,
+    ProviderImportSupport, ProviderSourceStatus,
+};
+use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord};
+use ctx_history_store::Store;
+
+use crate::commands::import::catalog::import_record_for_history_source_plugin;
+use crate::commands::import::native::validate_source_import_supported;
+use crate::commands::import::{
+    cleanup_rejected_history_record, history_record_exists, provider_summary_has_imported_content,
+    rejected_source_error, SourceStats,
+};
+use crate::history_source_plugins::{
+    discover_history_source_plugins, run_history_source_plugin, HistorySourcePluginRunOptions,
+    HistorySourcePluginSource,
+};
+use crate::provider_sources::{
+    discovered_sources, discovered_sources_for_provider_report, explicit_path_source,
+    manual_path_guidance, provider_cli_name, SourceInfo,
+};
+use crate::{ImportArgs, MAX_HISTORY_SOURCE_PLUGIN_JSONL_LINE_BYTES};
 
 pub(crate) fn validate_import_args(args: &ImportArgs) -> Result<()> {
     if args.path.is_some() && args.format.is_none() && args.provider.is_none() {
@@ -43,8 +70,9 @@ pub(crate) fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
             .collect());
     }
     let provider = args.provider.expect("checked provider").capture_provider();
-    let discovered = discovered_sources_for_provider(provider);
-    let sources = discovered
+    let report = discovered_sources_for_provider_report(provider);
+    let sources = report
+        .sources
         .iter()
         .filter(|source| {
             source.provider == provider
@@ -67,7 +95,7 @@ pub(crate) fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
                 provider.as_str()
             ));
         }
-        return Err(no_importable_provider_sources_error(provider, &discovered));
+        return Err(no_importable_provider_sources_error(provider, &report));
     }
     for source in &sources {
         validate_source_import_supported(source)?;
@@ -77,14 +105,28 @@ pub(crate) fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
 
 pub(crate) fn no_importable_provider_sources_error(
     provider: CaptureProvider,
-    sources: &[SourceInfo],
+    report: &DiscoveryReport,
 ) -> anyhow::Error {
     let mut message = format!("no importable {} history found", provider.as_str());
-    if sources.is_empty() {
+    if let Some(source) = report.sources.iter().find(|source| {
+        source.status == ProviderSourceStatus::Unsupported
+            || source.import_support == ProviderImportSupport::Unsupported
+    }) {
+        message.push_str(&format!(
+            "\ndetected unsupported history at {}",
+            source.path.display()
+        ));
+        if let Some(reason) = source.unsupported_reason {
+            message.push_str(&format!(": {reason}"));
+        }
+        message.push_str("\ncurrent ctx cannot import that path");
+    } else if let Some(issue) = report.issues.first() {
+        append_discovery_issue(&mut message, issue);
+    } else if report.sources.is_empty() {
         message.push_str("; no default paths are registered for this provider");
     } else {
         message.push_str("\nchecked paths:");
-        for source in sources {
+        for source in &report.sources {
             message.push_str(&format!(
                 "\n  {} ({})",
                 source.path.display(),
@@ -95,8 +137,27 @@ pub(crate) fn no_importable_provider_sources_error(
             }
         }
     }
-    message.push_str("\nuse `ctx sources` to inspect discovery, or pass --path");
+    message.push_str(&format!(
+        "\nuse `ctx sources` or `ctx sources --provider {}` to inspect discovery, or use `{}`",
+        provider_cli_name(provider),
+        manual_path_guidance(provider)
+    ));
     anyhow!(message)
+}
+
+fn append_discovery_issue(message: &mut String, issue: &DiscoveryIssue) {
+    match issue.kind {
+        DiscoveryIssueKind::NoDiskHistory => {
+            message.push_str(&format!("; no disk history is selected: {}", issue.reason))
+        }
+        DiscoveryIssueKind::SelectorUnreconstructible => message.push_str(&format!(
+            "; the automatic history location cannot be safely reconstructed: {}",
+            issue.reason
+        )),
+        DiscoveryIssueKind::InsufficientOfficialEvidence => {
+            message.push_str("; no official automatic history location is established")
+        }
+    }
 }
 
 pub(crate) fn history_source_plugin_import_requests(
@@ -176,7 +237,9 @@ pub(crate) fn import_history_source_plugin(
 ) -> Result<(ProviderImportSummary, SourceStats)> {
     let record = import_record_for_history_source_plugin(source);
     let record_id = record.id;
-    let options = CustomHistoryJsonlV1ImportOptions::default();
+    let options = CustomHistoryJsonlV1ImportOptions {
+        ..CustomHistoryJsonlV1ImportOptions::default()
+    };
     let machine_id = options.machine_id.clone();
     let cursor_stream = source.cursor_stream();
     let previous_cursor = if full_rescan {

@@ -85,7 +85,8 @@ Self-upgrade requires an official installer-managed binary and matching
 package-manager installs, and binaries whose SHA-256 no longer matches the
 sidecar are intentionally unmanaged.
 
-Disable managed background auto-upgrade with:
+Background auto-upgrade is disabled by default. To remove an existing opt-in,
+run:
 
 ```bash
 ctx upgrade disable
@@ -94,7 +95,7 @@ ctx upgrade disable
 or for one process:
 
 ```bash
-CTX_UPGRADE_OFF=1 ctx search "query"
+CTX_UPGRADE_AUTO=off ctx search "query"
 ```
 
 Background checks log to `~/.ctx/logs/upgrade.log` and should not write to

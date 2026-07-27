@@ -1,27 +1,80 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use clap::Args;
 
 use ctx_history_core::database_path;
 
-use crate::analytics::AnalyticsProperties;
-use crate::output::effective_format;
+use crate::analytics::{count_bucket, ShowTelemetry};
+use crate::complete_content::{
+    resolve_event_contents, ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+};
+use crate::output::{effective_format, OutputFormat};
+use crate::pro::ResourceKindArg;
 use crate::provider_args::ProviderArg;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::{
-    event_window, resolve_event, resolve_session, write_rendered_events, write_rendered_session,
+    event_window, resolve_event, resolve_session, selected_transcript_events,
+    write_rendered_events, write_rendered_session, TranscriptMode,
 };
-use crate::{analytics, ShowArgs, ShowTarget};
+use crate::{parse_event_window_limit, parse_provider_arg, ShowArgs, ShowTarget};
+
+#[derive(Debug, Args)]
+pub(crate) struct ShowSessionArgs {
+    #[arg(help = "ctx session id or unambiguous id prefix")]
+    pub(crate) id: Option<String>,
+    #[arg(long, value_parser = parse_provider_arg, hide_possible_values = true)]
+    pub(crate) provider: Option<ProviderArg>,
+    #[arg(long = "provider-session")]
+    pub(crate) provider_session: Option<String>,
+    #[arg(long, value_enum, default_value_t = TranscriptMode::Lite)]
+    pub(crate) mode: TranscriptMode,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ContentPolicy::Indexed,
+        help = "Message content fidelity; complete may read verified local provider sources and caps final serialized output at 64 MiB"
+    )]
+    pub(crate) content: ContentPolicy,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
+    #[arg(long)]
+    pub(crate) json: bool,
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ShowEventArgs {
+    #[arg(help = "ctx event id or unambiguous id prefix")]
+    pub(crate) id: String,
+    #[arg(long, default_value_t = 0, value_parser = parse_event_window_limit)]
+    pub(crate) before: usize,
+    #[arg(long, default_value_t = 0, value_parser = parse_event_window_limit)]
+    pub(crate) after: usize,
+    #[arg(long, value_parser = parse_event_window_limit)]
+    pub(crate) window: Option<usize>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ContentPolicy::Indexed,
+        help = "Message content fidelity; complete may read verified local provider sources and caps final serialized output at 64 MiB"
+    )]
+    pub(crate) content: ContentPolicy,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
 
 pub(crate) fn run_show(
     args: ShowArgs,
     data_root: PathBuf,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut ShowTelemetry,
 ) -> Result<()> {
-    let db_path = database_path(data_root);
-    let store = open_existing_store_read_only(&db_path, "ctx show")?;
     match args.target {
         ShowTarget::Session(args) => {
+            let store = open_existing_store_read_only(&database_path(data_root), "ctx show")?;
             let session = resolve_session(
                 &store,
                 args.id,
@@ -29,25 +82,59 @@ pub(crate) fn run_show(
                 args.provider_session.as_deref(),
             )?;
             let events = store.events_for_session(session.id)?;
-            analytics::insert_count_bucket(
-                analytics_properties,
-                "events_returned_bucket",
-                events.len() as u64,
-            );
+            telemetry.events_returned = Some(count_bucket(events.len() as u64));
             let format = effective_format(args.format, args.json);
-            write_rendered_session(&store, &session, &events, args.mode, format, args.out)?;
+            let selected = selected_transcript_events(&events, args.mode);
+            let content = resolve_event_contents(
+                &store,
+                &selected,
+                args.content,
+                CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+            )?;
+            write_rendered_session(
+                &store, &session, &events, args.mode, format, args.out, &content,
+            )?;
         }
         ShowTarget::Event(args) => {
+            let store = open_existing_store_read_only(&database_path(data_root), "ctx show")?;
             let event = resolve_event(&store, &args.id)?;
             let events = event_window(&store, &event, args.before, args.after, args.window)?;
-            analytics::insert_count_bucket(
-                analytics_properties,
-                "events_returned_bucket",
-                events.len() as u64,
-            );
+            telemetry.events_returned = Some(count_bucket(events.len() as u64));
             let format = effective_format(args.format, args.json);
-            write_rendered_events(&store, &event, &events, format, None)?;
+            let selected = events.iter().collect::<Vec<_>>();
+            let content = resolve_event_contents(
+                &store,
+                &selected,
+                args.content,
+                CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+            )?;
+            write_rendered_events(&store, &event, &events, format, None, &content)?;
+        }
+        ShowTarget::Commit(args) => return run_resource(args, ResourceKindArg::Commit, data_root),
+        ShowTarget::PullRequest(args) => {
+            return run_resource(args, ResourceKindArg::PullRequest, data_root)
+        }
+        ShowTarget::Issue(args) => return run_resource(args, ResourceKindArg::Issue, data_root),
+        ShowTarget::File(args) => {
+            return run_resource(args.into(), ResourceKindArg::File, data_root)
+        }
+        ShowTarget::Branch(args) => return run_resource(args, ResourceKindArg::Branch, data_root),
+        ShowTarget::Repository(args) => {
+            return run_resource(args, ResourceKindArg::Repository, data_root)
         }
     }
     Ok(())
+}
+
+fn run_resource(
+    args: crate::commands::work_graph::ResourceValueArgs,
+    kind: ResourceKindArg,
+    data_root: PathBuf,
+) -> Result<()> {
+    crate::commands::work_graph::run(
+        args.into_work_graph(kind),
+        data_root,
+        ctx_pro_host_protocol::QueryKind::Show,
+        "pro_resource",
+    )
 }

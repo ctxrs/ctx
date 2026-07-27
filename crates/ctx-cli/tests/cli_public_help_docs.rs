@@ -68,8 +68,219 @@ fn help_exposes_session_retrieval_commands() {
         "skill",
     ] {
         assert!(
-            !commands.contains(&format!("  {forbidden}")),
+            !commands.lines().any(|line| {
+                line.strip_prefix("  ")
+                    .and_then(|line| line.split_whitespace().next())
+                    == Some(forbidden)
+            }),
             "forbidden command {forbidden} appeared in\n{help}"
+        );
+    }
+}
+
+#[test]
+fn show_help_exposes_explicit_content_fidelity() {
+    let temp = tempdir();
+    for target in ["session", "event"] {
+        let output = ctx(&temp)
+            .args(["show", target, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert!(help.contains("--content <CONTENT>"), "{help}");
+        assert!(help.contains("indexed, complete"), "{help}");
+        assert!(help.contains("verified local provider sources"), "{help}");
+    }
+}
+
+#[test]
+fn pro_uninstall_help_uses_local_pro_data_terminology() {
+    let temp = tempdir();
+    let output = ctx(&temp)
+        .args(["pro", "uninstall", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(help.contains("Delete local Pro data"), "{help}");
+    assert!(
+        help.contains("Preserve local Pro data for later setup"),
+        "{help}"
+    );
+    assert!(!help.contains("encrypted graph"), "{help}");
+    assert!(!help.contains("credentials"), "{help}");
+}
+
+#[test]
+fn complete_content_json_failure_is_one_parseable_error_object() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let source = Path::new(&fixture).join("2026/06/23/root.jsonl");
+    let original = fs::read_to_string(&source).unwrap();
+    let indexed_message = "Fix the onboarding bug and make sure local history search stays useful.";
+    let expanded_message = format!("{indexed_message}{}", "x".repeat(20_000));
+    let expanded = original.replacen(indexed_message, &expanded_message, 1);
+    assert_ne!(expanded, original);
+    fs::write(&source, &expanded).unwrap();
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--events",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    let event_id = search["results"][0]["ctx_event_id"].as_str().unwrap();
+    // Exercise the CLI renderer independently of provider classification by making the
+    // imported long message use the canonical complete-content-eligible retention shape.
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM events WHERE id = ?1",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["body"]["truncated"], true);
+    payload["body"]["text_retention"] = json!({
+        "mode": "bounded",
+        "limit_chars": 16_000,
+        "truncated": true,
+        "omission_policy": "none",
+        "omission_applied": false,
+    });
+    conn.execute(
+        "UPDATE events SET payload_json = ?1 WHERE id = ?2",
+        params![serde_json::to_string(&payload).unwrap(), event_id],
+    )
+    .unwrap();
+    drop(conn);
+    let changed = expanded.replacen("Fix the onboarding bug", "Mix the onboarding bug", 1);
+    assert_ne!(changed, expanded);
+    fs::write(source, changed).unwrap();
+
+    let output = ctx(&temp)
+        .args(["show", "event", event_id, "--content", "complete", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "JSON failure wrote partial stdout"
+    );
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"], "source_changed");
+    assert_eq!(error["error_code"], "source_changed");
+    assert_eq!(error["ctx_event_id"], event_id);
+    assert_eq!(
+        output.stderr.iter().filter(|byte| **byte == b'\n').count(),
+        1
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Error:"));
+}
+
+#[test]
+fn work_graph_help_explains_resource_selectors_and_bounds() {
+    let temp = tempdir();
+    for args in [
+        vec!["show", "commit", "--help"],
+        vec!["locate", "file", "--help"],
+        vec!["facts", "--help"],
+        vec!["timeline", "--help"],
+        vec!["blame", "--help"],
+    ] {
+        let output = ctx(&temp)
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert!(
+            help.contains("logical repository identity"),
+            "{args:?} help omitted repository semantics:\n{help}"
+        );
+        assert!(
+            help.contains("forge:github.com/ctxrs/ctx"),
+            "{args:?} help omitted a concrete logical identity:\n{help}"
+        );
+        assert!(
+            help.contains("Maximum cited records to return, from 1 to 500"),
+            "{args:?} help omitted the limit contract:\n{help}"
+        );
+        if args.as_slice() != ["show", "commit", "--help"] {
+            assert!(
+                help.contains("--line <LINE>"),
+                "{args:?} help omitted line semantics:\n{help}"
+            );
+        } else {
+            assert!(
+                !help.contains("--line"),
+                "non-file point-query help advertised --line:\n{help}"
+            );
+        }
+    }
+
+    for args in [
+        vec!["show", "commit", "--help"],
+        vec!["locate", "file", "--help"],
+        vec!["facts", "--help"],
+        vec!["timeline", "--help"],
+    ] {
+        let output = ctx(&temp)
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert!(
+            help.contains("<VALUE>"),
+            "{args:?} help omitted VALUE:\n{help}"
+        );
+        assert!(
+            help.contains("Resource value"),
+            "{args:?} help did not explain VALUE:\n{help}"
+        );
+    }
+}
+
+#[test]
+fn cli_rejects_line_for_non_file_resources_before_local_pro_access() {
+    let temp = tempdir();
+    for args in [
+        vec!["show", "commit", "abc123", "--line", "42"],
+        vec!["show", "pr", "42", "--line", "42"],
+        vec!["locate", "issue", "42", "--line", "42"],
+        vec!["facts", "session", "ses_123", "--line", "42"],
+        vec!["timeline", "run", "run_123", "--line", "42"],
+    ] {
+        let stderr = failure_stderr(ctx(&temp).args(&args));
+        assert_eq!(
+            stderr,
+            "Error: invalid_request: resource selector line is valid only for file targets\n",
+            "unexpected typed line error for {args:?}"
         );
     }
 }
@@ -643,7 +854,14 @@ fn removed_public_commands_are_rejected() {
         .nth(1)
         .and_then(|tail| tail.split("Options:").next())
         .unwrap_or(&root_help);
-    for removed in ["context", "list", "export", "validate"] {
+    for removed in [
+        "context",
+        "list",
+        "export",
+        "validate",
+        "materialize",
+        "related",
+    ] {
         assert!(
             !commands.contains(removed),
             "removed {removed} command appeared in root help\n{root_help}"
@@ -655,10 +873,20 @@ fn removed_public_commands_are_rejected() {
         vec!["list", "--json"],
         vec!["export", "session", "00000000-0000-0000-0000-000000000000"],
         vec!["validate", "--json"],
+        vec!["materialize", "--json"],
+        vec!["related", "commit", "abc"],
     ] {
         ctx(&temp).args(args.clone()).assert().failure().stderr(
             predicate::str::contains("unrecognized subcommand")
                 .and(predicate::str::contains(args[0])),
         );
+    }
+
+    for obsolete in ["status", "install", "update"] {
+        ctx(&temp)
+            .args(["pro", obsolete])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unrecognized subcommand"));
     }
 }

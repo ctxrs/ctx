@@ -1,5 +1,9 @@
 use serde_json::Value;
 
+mod pro;
+
+use pro::{render_pro_text, render_unknown_pro_text, ProTextKind};
+
 const MCP_TEXT_MAX_SEARCH_RESULTS: usize = 5;
 const MCP_TEXT_MAX_SOURCES: usize = 12;
 const MCP_TEXT_MAX_SQL_ROWS: usize = 8;
@@ -10,11 +14,21 @@ const MCP_TEXT_MAX_EVENT_CHARS: usize = 500;
 const MCP_TEXT_MAX_CELL_CHARS: usize = 80;
 
 pub(super) fn render_tool_text(value: &Value) -> String {
-    match value.get("payload_type").and_then(Value::as_str) {
+    let payload_type = value.get("payload_type").and_then(Value::as_str);
+    if let Some(kind) = payload_type.and_then(ProTextKind::from_payload_type) {
+        return render_pro_text(value, kind);
+    }
+    if payload_type.is_some_and(|payload_type| payload_type.starts_with("pro_"))
+        && value.get("results").and_then(Value::as_array).is_some()
+    {
+        return render_unknown_pro_text(value);
+    }
+
+    match payload_type {
         Some("sql_result") => render_sql_text(value),
         Some("session_transcript") => render_session_text(value),
         Some("event_window") => render_event_window_text(value),
-        _ if value.get("results").and_then(Value::as_array).is_some() => render_search_text(value),
+        Some("search_results") => render_search_text(value),
         _ if value.get("sources").and_then(Value::as_array).is_some() => render_sources_text(value),
         _ if value.get("initialized").and_then(Value::as_bool).is_some() => {
             render_status_text(value)
@@ -251,7 +265,7 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
     let Some(jobs) = daemon.get("jobs") else {
         return;
     };
-    let job_parts = ["history_refresh", "semantic_index", "cloud_sync"]
+    let job_parts = ["history_refresh", "semantic_index"]
         .into_iter()
         .filter_map(|key| {
             jobs.get(key)
@@ -641,5 +655,67 @@ fn push_omitted_line(out: &mut String, total: usize, shown: usize, noun: &str) {
             "... {} more {noun} omitted from text\n",
             total - shown
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn search_dispatch_and_text_remain_exact() {
+        let value = json!({
+            "payload_type": "search_results",
+            "query": "journal replay",
+            "results": [{
+                "title": "Replay decision",
+                "ctx_session_id": "session-1",
+                "ctx_event_id": "event-2",
+                "provider": "codex",
+                "timestamp": "2026-07-22T12:00:00Z",
+                "snippet": "Use the canonical journal checkpoint.",
+                "suggested_next_commands": ["ctx show event event-2"]
+            }]
+        });
+        assert_eq!(
+            render_tool_text(&value),
+            "ctx search\nquery: journal replay\nresults: 1\n\n1. Replay decision\n   ctx_session_id: session-1\n   ctx_event_id: event-2\n   provider: codex\n   timestamp: 2026-07-22T12:00:00Z\n   snippet: Use the canonical journal checkpoint.\n   next: ctx show event event-2\n"
+        );
+    }
+
+    #[test]
+    fn unknown_pro_query_payload_does_not_fall_through_to_search() {
+        let value = json!({
+            "payload_type": "pro_future",
+            "query": "must not become search",
+            "results": [{"title": "misleading search result"}]
+        });
+        assert_eq!(
+            render_tool_text(&value),
+            "ctx pro result\npayload_type: pro_future\nerror_code: unsupported_payload_type\nstatus: not_rendered\n"
+        );
+    }
+
+    #[test]
+    fn results_without_an_authoritative_kind_are_generic_not_search() {
+        assert_eq!(
+            render_tool_text(&json!({"results": [{"title": "not search"}]})),
+            "ctx tool result\nresults: [1 items]\n"
+        );
+    }
+
+    #[test]
+    fn non_query_pro_payloads_keep_their_generic_text() {
+        let rendered = render_tool_text(&json!({
+            "payload_type": "pro_status",
+            "installed": true,
+            "ready": true
+        }));
+        assert_eq!(
+            rendered,
+            "ctx tool result\ninstalled: true\npayload_type: pro_status\nready: true\n"
+        );
     }
 }

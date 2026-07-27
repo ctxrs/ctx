@@ -21,7 +21,6 @@ pub(crate) mod openclaw;
 pub(crate) mod opencode;
 pub(crate) mod openhands;
 pub(crate) mod pi;
-pub(crate) mod real_content;
 pub(crate) mod rovodev;
 pub(crate) mod shelley;
 pub(crate) mod task_json;

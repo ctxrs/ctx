@@ -20,6 +20,15 @@ shipped.
   IM replies as platform-side history rather than guaranteed `data_v4.db`
   transcript rows.
 - Unknown provider formats should not be parsed optimistically.
+- Automatic discovery checks the single winner from each provider's precedence,
+  except for current providers that genuinely maintain finite coexisting stores.
+  Removed probes do not remove already indexed history.
+- One-shot flags, API paths, moved roots, past launch directories, and container
+  host mappings generally require exact `--path`. Manual selection bypasses
+  discovery precedence, not parser or path-safety validation.
+- Current Kiro ACP/v3, Qoder direct SDK JSONL, OpenClaw SQLite, OpenHands CLI
+  events, Mux archive JSONL, and Cline SDK stores are detected but unsupported;
+  Codex compressed JSONL is unsupported only when encountered.
 
 ## Import Semantics
 
@@ -39,7 +48,8 @@ shipped.
 ## Search Semantics
 
 - Search quality depends on what providers expose and what importers index.
-- Large outputs may be represented as bounded previews.
+- Command and tool result bodies are not searchable; only compact typed
+  outcome/evidence metadata is indexed.
 - Ranking is deterministic for the same local database and options, but it is
   not a claim of semantic understanding.
 - Empty or punctuation-only search is invalid. Broad valid queries can still
@@ -59,11 +69,20 @@ shipped.
 - Token counts are estimates.
 - If a raw source moves, ctx may still return indexed text from SQLite.
 - JSON is local/private and can include sensitive content.
+- Complete message retrieval is opt-in. It is available only for provider
+  adapters and newly imported records that retain a safe, bounded locator and
+  can re-verify the native record. Legacy rows, rewritten or missing sources,
+  and unsupported formats fail with a typed error rather than returning a
+  best-effort body.
+- Complete retrieval applies only to eligible truncated user, assistant, and
+  system message text. It does not recover omitted tool output, command output,
+  patches, diffs, binary payloads, secret-marked fields, or arbitrary provider
+  blobs.
 
 ## Operations
 
 - Core setup/import/search are local filesystem operations.
-- Official installer-managed binaries can use signed release metadata for
-  `ctx upgrade` and managed background auto-upgrade checks.
+- Official installer-managed binaries can use signed release metadata for an
+  explicit `ctx upgrade` command and, after opt-in, managed background checks.
 - Unmanaged installs do not self-upgrade.
 - No provider beyond the support matrix should be described as supported.

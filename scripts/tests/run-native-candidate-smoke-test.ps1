@@ -10,16 +10,15 @@ try {
     $fake = Join-Path $root "ctx.cmd"
     @'
 @echo off
-if not "%CTX_ANALYTICS_OFF%"=="1" exit /b 91
-if not "%CTX_UPGRADE_OFF%"=="1" exit /b 92
+if not "%CTX_ANALYTICS_ENABLED%"=="false" exit /b 91
+if not "%CTX_UPGRADE_AUTO%"=="off" exit /b 92
 if not "%CTX_DAEMON_AUTOSTART_OFF%"=="1" exit /b 93
 if "%HOME%"=="" exit /b 94
 if "%USERPROFILE%"=="" exit /b 95
 echo %* | findstr /c:"--backend semantic" >nul
 if not errorlevel 1 (
   if not "%CTX_SEARCH_SEMANTIC%"=="1" exit /b 96
-  if not "%CTX_DAEMON_ENABLED%"=="1" exit /b 97
-  if not "%CTX_DISABLE_DAEMON%"=="0" exit /b 98
+  if not "%CTX_DAEMON_ENABLED%"=="true" exit /b 98
   1>&2 echo semantic-only search will not initialize or download intfloat/multilingual-e5-small during search
   exit /b 1
 )
@@ -38,7 +37,7 @@ if "%1"=="search" (
 )
 if "%1"=="status" (
   if not "%CTX_SEARCH_SEMANTIC%"=="" exit /b 89
-  if not "%CTX_DISABLE_DAEMON%"=="" exit /b 90
+  if not "%CTX_DAEMON_ENABLED%"=="" exit /b 90
   echo {"read_only":true,"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
   exit /b 0
 )

@@ -3,6 +3,27 @@ use std::path::PathBuf;
 use ctx_history_core::CaptureProvider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryIssueKind {
+    NoDiskHistory,
+    SelectorUnreconstructible,
+    InsufficientOfficialEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryIssue {
+    pub provider: CaptureProvider,
+    pub path: Option<PathBuf>,
+    pub kind: DiscoveryIssueKind,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiscoveryReport {
+    pub sources: Vec<ProviderSource>,
+    pub issues: Vec<DiscoveryIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSourceKind {
     NativeHistory,
     DetectionOnly,

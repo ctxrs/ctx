@@ -1,4 +1,24 @@
-use super::support::*;
+use crate::provider::custom_history_jsonl::{
+    custom_history_internal_session_id, custom_history_jsonl_v1_cursor_stream,
+};
+use crate::provider::importer::{provider_session_uuid, provider_source_cursor_stream};
+use crate::tests::support::fixtures::jsonl::{jsonl_line, oversized_jsonl_line};
+use crate::tests::support::paths::{
+    custom_history_fixture, provider_fixture, provider_history_fixture, tempdir,
+};
+use crate::tests::support::provider_state::{
+    fixed_import_options, provider_fixture_session_id, provider_import_session_id_for_path,
+};
+use crate::{
+    import_codex_history_jsonl, import_custom_history_jsonl_v1,
+    import_custom_history_jsonl_v1_reader, import_provider_fixture_jsonl,
+    CodexHistoryImportOptions, CustomHistoryJsonlV1ImportOptions,
+};
+use ctx_history_core::{CaptureProvider, EventRole, EventType, Fidelity};
+use ctx_history_store::Store;
+use serde_json::json;
+use std::fs;
+use std::path::PathBuf;
 
 #[test]
 fn codex_history_import_is_prompt_only_summary_fidelity_and_idempotent() {
@@ -62,20 +82,25 @@ fn codex_history_import_is_prompt_only_summary_fidelity_and_idempotent() {
         events[0].sync.metadata["source_format"].as_str(),
         Some("codex_history_jsonl")
     );
-    let source_path = fixture.display().to_string();
+    let source_path = crate::provider::importer::provider_path_identity(&fixture).unwrap();
     let cursor = store
         .get_sync_cursor(
             None,
             &CodexHistoryImportOptions::default().machine_id,
-            &provider_source_cursor_stream(
+            &crate::provider::importer::provider_source_cursor_stream_for_path(
                 CaptureProvider::Codex,
                 "codex_history_jsonl",
-                Some(&source_path),
+                &source_path,
             ),
         )
         .unwrap()
         .unwrap();
-    assert_eq!(cursor.cursor, "line:3");
+    let certified = crate::provider::importer::CertifiedProviderCursor::decode(&cursor.cursor)
+        .expect("Codex history cursor should use the captured-batch encoding");
+    assert_eq!(
+        crate::captured_batch::jsonl::jsonl_position_offset(certified.native_position()).unwrap(),
+        fs::metadata(&fixture).unwrap().len()
+    );
 }
 
 #[test]
@@ -502,7 +527,7 @@ fn custom_history_edges_cross_shared_transaction_batch_boundary() {
 }
 
 #[test]
-fn codex_history_jsonl_skips_oversized_line_and_imports_remaining_records() {
+fn codex_history_jsonl_reports_oversized_line_and_imports_remaining_records() {
     let temp = tempdir();
     let path = temp.path().join("codex-history-oversized.jsonl");
     let mut bytes = Vec::new();
@@ -537,9 +562,14 @@ fn codex_history_jsonl_skips_oversized_line_and_imports_remaining_records() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures[0].line, 2);
+    assert!(summary.failures[0]
+        .error
+        .contains("provider record exceeds the"));
     assert_eq!(summary.skipped, 1);
-    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.skipped_sessions, 1);
+    assert_eq!(summary.skipped_events, 0);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
     let session_id = provider_import_session_id_for_path(

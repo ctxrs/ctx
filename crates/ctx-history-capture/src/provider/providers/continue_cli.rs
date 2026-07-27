@@ -1,221 +1,561 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self},
-    path::{Path, PathBuf},
-};
+use std::{num::NonZeroUsize, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
     ProviderEventEnvelope, ProviderSourceTrust,
 };
+use ctx_history_store::Store;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    read_text_file_limited,
+use crate::captured_batch::whole_json::{WholeJsonBatchProducer, WholeJsonItem};
+use crate::captured_batch::{
+    CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, ProviderRecordKind,
+    SourceObservation, CAPTURE_BATCH_MAX_BATCHES_PER_GROUP,
 };
-use crate::provider::custom_history_jsonl::push_provider_import_failure;
-use crate::provider::file_touches::provider_file_touches_from_raw_value;
-use crate::provider::native::{
+use crate::complete_content::structured::attach_structured_complete_content_locator;
+
+use crate::provider::file_touches::{
+    visit_provider_file_touches_from_raw_value, ProviderFileTouchSourceContext,
+    PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
+};
+use crate::provider::importer::{
+    captured_batch_cursor_stream, emit_projected_normalization_units, import_captured_batches,
+    provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
+    CapturedBatchCursorFinish, CapturedBatchCursorMode, CapturedBatchProjector,
+    CapturedSourceAdmission, CertifiedProviderCursor, ProviderProjectionFatal,
+    ProviderProjectionOutput, ProviderProjectionResult,
+};
+use crate::provider::normalization::{
     native_event, native_provider_capture, provider_role, provider_timestamp_value,
     provider_value_text, NativeEventDraft, NativeSessionDraft,
 };
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    CONTINUE_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
+    ProviderNormalizationResult, Result, CONTINUE_CLI_SOURCE_FORMAT,
 };
 
-pub(crate) fn normalize_continue_cli_sessions(
-    path: &Path,
-    context: &ProviderAdapterContext,
-) -> Result<ProviderNormalizationResult> {
-    let mut paths = Vec::new();
-    collect_continue_session_json_paths(path, &mut paths)?;
-    paths.sort();
-    if paths.is_empty() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "no Continue CLI session JSON files found",
-        });
+mod message_text;
+mod source;
+#[cfg(test)]
+mod tests;
+mod traversal;
+mod whole_json;
+
+pub(crate) use message_text::continue_history_item_text;
+use source::{ContinueIndexCache, ContinueIndexObservation, ContinueSessionObservation};
+use traversal::visit_continue_session_files;
+use whole_json::{
+    continue_captured_batch_error, continue_whole_json_error, whole_json_position,
+    whole_json_position_ordinal,
+};
+
+const CONTINUE_CAPTURE_REVISION: u32 = 1;
+const CONTINUE_POLICY_REVISION: u32 = 5;
+const CONTINUE_RECORD_KIND: &str = "continue-session-json-v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinueParserCheckpoint {
+    next_ordinal: u64,
+    accepted_sessions: u64,
+    accepted_events: u64,
+    accepted_file_touches: u64,
+}
+
+struct ContinueCapturedBatchProjector<'a> {
+    context: ProviderAdapterContext,
+    raw_source_path: String,
+    session_path: &'a Path,
+    sibling_index: &'a ContinueIndexObservation,
+    index_cache: &'a ContinueIndexCache,
+    next_ordinal: u64,
+    accepted_sessions: u64,
+    accepted_events: u64,
+    accepted_file_touches: u64,
+}
+
+impl<'a> ContinueCapturedBatchProjector<'a> {
+    fn fresh(
+        context: ProviderAdapterContext,
+        raw_source_path: String,
+        session_path: &'a Path,
+        sibling_index: &'a ContinueIndexObservation,
+        index_cache: &'a ContinueIndexCache,
+    ) -> Self {
+        Self {
+            context,
+            raw_source_path,
+            session_path,
+            sibling_index,
+            index_cache,
+            next_ordinal: 0,
+            accepted_sessions: 0,
+            accepted_events: 0,
+            accepted_file_touches: 0,
+        }
     }
 
-    let session_index = continue_session_index(&paths);
-    let mut result = ProviderNormalizationResult::default();
+    fn resume(
+        context: ProviderAdapterContext,
+        raw_source_path: String,
+        cursor: &CertifiedProviderCursor,
+        session_path: &'a Path,
+        sibling_index: &'a ContinueIndexObservation,
+        index_cache: &'a ContinueIndexCache,
+    ) -> Result<Self> {
+        let checkpoint: ContinueParserCheckpoint = cursor.parser_checkpoint().deserialize()?;
+        if checkpoint.next_ordinal != whole_json_position_ordinal(cursor.native_position())? {
+            return Err(CaptureError::InvalidPayload(
+                "Continue parser checkpoint does not match its native position".to_owned(),
+            ));
+        }
+        Ok(Self {
+            context,
+            raw_source_path,
+            session_path,
+            sibling_index,
+            index_cache,
+            next_ordinal: checkpoint.next_ordinal,
+            accepted_sessions: checkpoint.accepted_sessions,
+            accepted_events: checkpoint.accepted_events,
+            accepted_file_touches: checkpoint.accepted_file_touches,
+        })
+    }
 
-    for (path_index, path) in paths.into_iter().enumerate() {
-        let source_line = path_index.saturating_add(1);
-        let raw_source_path = path.display().to_string();
-        let text = match read_text_file_limited(
-            &path,
-            MAX_PROVIDER_JSONL_LINE_BYTES,
-            "Continue CLI session JSON",
-        ) {
-            Ok(text) => text,
-            Err(err) => {
-                push_provider_import_failure(&mut result.summary, source_line, err.to_string());
-                continue;
-            }
+    fn replay_summary(&self, cursor_rejected_records: u64) -> Result<ProviderImportSummary> {
+        let skipped_sessions = usize::try_from(self.accepted_sessions).map_err(|_| {
+            CaptureError::SystemInvariant("Continue replay session count exceeds platform limits")
+        })?;
+        let skipped_events = usize::try_from(self.accepted_events).map_err(|_| {
+            CaptureError::SystemInvariant("Continue replay event count exceeds platform limits")
+        })?;
+        let skipped_file_touches = usize::try_from(self.accepted_file_touches).map_err(|_| {
+            CaptureError::SystemInvariant(
+                "Continue replay file-touch count exceeds platform limits",
+            )
+        })?;
+        let skipped = skipped_sessions
+            .checked_add(skipped_events)
+            .and_then(|value| value.checked_add(skipped_file_touches))
+            .ok_or(CaptureError::SystemInvariant(
+                "Continue replay summary count overflowed",
+            ))?;
+        let cursor_failed = usize::try_from(cursor_rejected_records).map_err(|_| {
+            CaptureError::SystemInvariant("Continue replay rejection count exceeds platform limits")
+        })?;
+        let mut summary = ProviderImportSummary {
+            skipped,
+            skipped_sessions,
+            skipped_events,
+            accepted_content_records: skipped_events.saturating_add(skipped_file_touches),
+            ..ProviderImportSummary::default()
         };
-        let session: Value = match serde_json::from_str(&text) {
+        // The certified cursor count is cumulative. Overlay it instead of
+        // adding it to any rejection already represented by this replay.
+        summary.failed = summary.failed.max(cursor_failed);
+        Ok(summary)
+    }
+}
+
+impl CapturedBatchProjector for ContinueCapturedBatchProjector<'_> {
+    fn project_record(
+        &mut self,
+        record: &CapturedRecord,
+        output: &mut dyn ProviderProjectionOutput,
+    ) -> ProviderProjectionResult<()> {
+        if record.record_kind().as_str() != CONTINUE_RECORD_KIND {
+            return Err(ProviderProjectionFatal::system_invariant(
+                "Continue projector received an unexpected record kind",
+            ));
+        }
+        if record.ordinal() != self.next_ordinal || record.ordinal() != 0 {
+            return Err(ProviderProjectionFatal::system_invariant(
+                "Continue projector received an unexpected per-file ordinal",
+            ));
+        }
+        let CapturedRecordPayload::NativeBytes(bytes) = record.payload() else {
+            return Err(ProviderProjectionFatal::system_invariant(
+                "Continue projector requires whole-JSON native bytes",
+            ));
+        };
+        self.next_ordinal = 1;
+        let session = match serde_json::from_slice::<Value>(bytes) {
             Ok(session) => session,
-            Err(err) => {
-                push_provider_import_failure(
-                    &mut result.summary,
-                    source_line,
-                    format!("invalid Continue CLI session JSON: {err}"),
-                );
-                continue;
+            Err(error) => {
+                output.reject_record(1, format!("invalid Continue CLI session JSON: {error}"));
+                return Ok(());
             }
         };
-        let Some(provider_session_id) = continue_session_id(&session, &path) else {
-            push_provider_import_failure(
-                &mut result.summary,
-                source_line,
+        let Some(provider_session_id) = continue_session_id(&session, self.session_path) else {
+            output.reject_record(
+                1,
                 "Continue CLI session is missing sessionId and has no JSON file stem".to_owned(),
             );
-            continue;
+            return Ok(());
         };
-        let indexed_metadata = session_index.get(&provider_session_id);
-        let started_at =
-            continue_session_started_at(&session, indexed_metadata, context.imported_at);
+        let indexed_metadata = self
+            .index_cache
+            .metadata(self.sibling_index, &provider_session_id)
+            .map_err(ProviderProjectionFatal::new)?;
+        let started_at = continue_session_started_at(
+            &session,
+            indexed_metadata.as_ref(),
+            self.context.imported_at,
+        );
         let history = session
             .get("history")
             .and_then(Value::as_array)
-            .cloned()
+            .map(Vec::as_slice)
             .unwrap_or_default();
-
         if history.is_empty() {
-            result.summary.skipped += 1;
-            result.summary.skipped_sessions += 1;
-            continue;
+            output.emit_normalization(ProviderNormalizationResult {
+                captures: vec![(
+                    1,
+                    continue_capture(
+                        &provider_session_id,
+                        &session,
+                        indexed_metadata.as_ref(),
+                        started_at,
+                        &self.raw_source_path,
+                        &self.context,
+                        None,
+                    ),
+                )],
+                ..ProviderNormalizationResult::default()
+            })?;
+            self.accepted_sessions = self
+                .accepted_sessions
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Continue projected session count overflowed",
+                ))
+                .map_err(ProviderProjectionFatal::new)?;
+            return Ok(());
         }
-
         for (item_index, item) in history.iter().enumerate() {
             let provider_event_index = item_index.saturating_add(1) as u64;
-            let line = source_line
-                .saturating_mul(1_000_000)
-                .saturating_add(item_index)
-                .saturating_add(1);
+            let line = item_index.saturating_add(1);
             let fallback_time = started_at + chrono::Duration::milliseconds(item_index as i64);
             let occurred_at = continue_history_item_timestamp(item, fallback_time);
-            let event = continue_history_item_event(
+            let mut event = continue_history_item_event(
                 &provider_session_id,
                 item,
                 provider_event_index,
                 occurred_at,
             );
-            result
-                .files_touched
-                .extend(provider_file_touches_from_raw_value(
+            if let Some(complete_text) = continue_history_item_text(item) {
+                let native_id = event
+                    .provider_event_hash
+                    .clone()
+                    .unwrap_or_else(|| format!("history:{provider_session_id}:{item_index}"));
+                attach_structured_complete_content_locator(
+                    CaptureProvider::Continue,
+                    &mut event,
+                    record.ordinal(),
+                    u32::try_from(item_index).map_err(|_| {
+                        ProviderProjectionFatal::system_invariant(
+                            "Continue subrecord index exceeds u32",
+                        )
+                    })?,
+                    &native_id,
+                    bytes,
+                    &complete_text,
+                )
+                .map_err(ProviderProjectionFatal::new)?;
+            }
+            let source_root = self.context.source_root_display();
+            let capture = continue_capture(
+                &provider_session_id,
+                &session,
+                indexed_metadata.as_ref(),
+                started_at,
+                &self.raw_source_path,
+                &self.context,
+                Some(event.clone()),
+            );
+            output.use_explicit_file_touches();
+            emit_projected_normalization_units(
+                output,
+                ProviderNormalizationResult {
+                    captures: vec![(line, capture)],
+                    ..ProviderNormalizationResult::default()
+                },
+            )?;
+            let file_touch_outcome = visit_provider_file_touches_from_raw_value(
+                ProviderFileTouchSourceContext::new(
                     CaptureProvider::Continue,
                     &provider_session_id,
                     CONTINUE_CLI_SOURCE_FORMAT,
-                    Some(raw_source_path.as_str()),
-                    item,
-                    &event,
-                    line,
-                ));
-            result.captures.push((
-                line,
-                continue_capture(
-                    &provider_session_id,
-                    &session,
-                    indexed_metadata,
-                    started_at,
-                    &raw_source_path,
-                    context,
-                    Some(event),
+                    Some(self.raw_source_path.as_str()),
+                    source_root.as_deref(),
                 ),
+                item,
+                &event,
+                line,
+                |file_touch| {
+                    output.emit_normalization(ProviderNormalizationResult {
+                        files_touched: vec![file_touch],
+                        ..ProviderNormalizationResult::default()
+                    })
+                },
+            )?;
+            if file_touch_outcome.limit_exceeded() {
+                output.reject_record(line, PROVIDER_FILE_TOUCH_LIMIT_REJECTION.to_owned());
+            }
+            let file_touch_count = u64::try_from(file_touch_outcome.emitted())
+                .map_err(|_| {
+                    CaptureError::SystemInvariant("Continue projected file-touch count exceeds u64")
+                })
+                .map_err(ProviderProjectionFatal::new)?;
+            self.accepted_events = self
+                .accepted_events
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Continue projected event count overflowed",
+                ))
+                .map_err(ProviderProjectionFatal::new)?;
+            self.accepted_file_touches = self
+                .accepted_file_touches
+                .checked_add(file_touch_count)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Continue projected file-touch count overflowed",
+                ))
+                .map_err(ProviderProjectionFatal::new)?;
+        }
+        self.accepted_sessions = self
+            .accepted_sessions
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "Continue projected session count overflowed",
+            ))
+            .map_err(ProviderProjectionFatal::new)?;
+        Ok(())
+    }
+
+    fn initial_cursor_candidate(
+        &self,
+        source: &SourceObservation,
+        position: &NativePosition,
+    ) -> Result<CertifiedProviderCursor> {
+        if whole_json_position_ordinal(position)? != 0 {
+            return Err(CaptureError::InvalidPayload(
+                "Continue initial cursor candidate is not at the whole-JSON source start"
+                    .to_owned(),
             ));
         }
+        CertifiedProviderCursor::new(
+            source.source_revision(),
+            source.capture_revision(),
+            source.policy_revision(),
+            position.clone(),
+            BoundedParserCheckpoint::from_serializable(&ContinueParserCheckpoint {
+                next_ordinal: 0,
+                accepted_sessions: 0,
+                accepted_events: 0,
+                accepted_file_touches: 0,
+            })?,
+        )
     }
 
-    if result.captures.is_empty() && result.summary.failed == 0 {
-        push_provider_import_failure(
-            &mut result.summary,
-            0,
-            "Continue CLI sessions contained no real conversation messages".to_owned(),
-        );
+    fn finish_cursor(&self, batch: &CapturedBatch) -> Result<CapturedBatchCursorFinish> {
+        let next_ordinal = whole_json_position_ordinal(batch.range_end())?;
+        if next_ordinal < self.next_ordinal {
+            return Err(CaptureError::SystemInvariant(
+                "Continue projector advanced beyond the captured batch",
+            ));
+        }
+        Ok(CapturedBatchCursorFinish::Advance(
+            CertifiedProviderCursor::new(
+                batch.source().source_revision(),
+                batch.source().capture_revision(),
+                batch.source().policy_revision(),
+                batch.range_end().clone(),
+                BoundedParserCheckpoint::from_serializable(&ContinueParserCheckpoint {
+                    next_ordinal,
+                    accepted_sessions: self.accepted_sessions,
+                    accepted_events: self.accepted_events,
+                    accepted_file_touches: self.accepted_file_touches,
+                })?,
+            )?,
+        ))
     }
-
-    Ok(result)
 }
 
-pub(crate) fn collect_continue_session_json_paths(
-    root: &Path,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
+pub(crate) fn import_continue_cli_sessions_batched(
+    path: &Path,
+    store: &mut Store,
+    context: ProviderAdapterContext,
+    import_options: NormalizedProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    let mut merged = ProviderImportSummary::default();
+    let mut index_cache = ContinueIndexCache::default();
+    let mut source_count = 0_usize;
+    visit_continue_session_files(path, &mut |session_path| {
+        source_count = source_count.saturating_add(1);
+        let summary = import_continue_session_file_batched(
+            session_path,
+            store,
+            &context,
+            &import_options,
+            &mut index_cache,
+        )?;
+        merged.merge(summary);
+        Ok(())
+    })?;
+    if source_count == 0 {
         return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
+            path: path.to_path_buf(),
+            reason: "no Continue CLI session JSON files found",
         });
     }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    if file_type.is_file() {
-        if continue_session_json_path(root) {
-            ensure_regular_provider_transcript_file(root)?;
-            paths.push(root.to_path_buf());
+    Ok(merged)
+}
+
+fn import_continue_session_file_batched(
+    path: &Path,
+    store: &mut Store,
+    context: &ProviderAdapterContext,
+    import_options: &NormalizedProviderImportOptions,
+    index_cache: &mut ContinueIndexCache,
+) -> Result<ProviderImportSummary> {
+    let observation = ContinueSessionObservation::read(path, index_cache)?;
+    let path_identity = provider_path_identity(observation.canonical_path())?;
+    let raw_source_path = path.display().to_string();
+    let file_context = ProviderAdapterContext {
+        machine_id: context.machine_id.clone(),
+        source_path: Some(path.to_path_buf()),
+        source_root: context
+            .source_root
+            .clone()
+            .or_else(|| context.source_path.clone()),
+        imported_at: context.imported_at,
+    };
+    let cursor_stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::Continue,
+        CONTINUE_CLI_SOURCE_FORMAT,
+        &path_identity,
+    );
+    let source = SourceObservation::new(
+        CaptureProvider::Continue,
+        CONTINUE_CLI_SOURCE_FORMAT,
+        format!("continue-session-file:{path_identity}"),
+        observation.source_revision(),
+        cursor_stream,
+        CONTINUE_CAPTURE_REVISION,
+        CONTINUE_POLICY_REVISION,
+        import_options.inventory_observation_token.as_deref(),
+    )
+    .map_err(continue_captured_batch_error)?;
+    let record_kind =
+        ProviderRecordKind::new(CONTINUE_RECORD_KIND).map_err(continue_captured_batch_error)?;
+    let initial_position = whole_json_position(0)?;
+    let stream = captured_batch_cursor_stream(&source);
+    let expected_store_cursor = store.get_sync_cursor(None, &context.machine_id, &stream)?;
+    let mut cursor_mode = CapturedBatchCursorMode::Resume;
+    let mut resumable_cursor = None;
+    if let Some(stored_cursor) = expected_store_cursor.as_ref() {
+        match CertifiedProviderCursor::decode_if_certified(&stored_cursor.cursor)? {
+            Some(certified)
+                if certified.source_revision() == source.source_revision()
+                    && certified.parser_revision() == source.capture_revision()
+                    && certified.policy_revision() == source.policy_revision() =>
+            {
+                let ordinal = whole_json_position_ordinal(certified.native_position())?;
+                if ordinal > 1 {
+                    return Err(CaptureError::InvalidPayload(
+                        "Continue per-file cursor exceeds its source".to_owned(),
+                    ));
+                }
+                let projector = ContinueCapturedBatchProjector::resume(
+                    file_context.clone(),
+                    raw_source_path.clone(),
+                    &certified,
+                    observation.session_path(),
+                    observation.sibling_index(),
+                    index_cache,
+                )?;
+                if ordinal == 1 {
+                    if !observation.revalidate()? {
+                        return Err(CaptureError::SourceChangedDuringCapture);
+                    }
+                    return projector.replay_summary(certified.rejected_records());
+                }
+                resumable_cursor = Some(certified);
+            }
+            Some(_) => cursor_mode = CapturedBatchCursorMode::ResetChangedSource,
+            None => cursor_mode = CapturedBatchCursorMode::ReplaceLegacyCursor,
         }
-        return Ok(());
     }
-    if !file_type.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_continue_session_json_paths(&path, paths)?;
-        } else if file_type.is_file() && continue_session_json_path(&path) {
-            ensure_regular_provider_transcript_file(&path)?;
-            paths.push(path);
+
+    let mut emitted = false;
+    let item_path = observation.session_path().to_path_buf();
+    let item_length = observation.session_length();
+    let source_item = path_identity.into_bytes();
+    let mut producer = WholeJsonBatchProducer::new(source.clone(), record_kind, move || {
+        if emitted {
+            return Ok(None);
         }
+        emitted = true;
+        WholeJsonItem::new(0, source_item.clone(), item_length, item_path.clone()).map(Some)
+    })
+    .map_err(continue_whole_json_error)?;
+    let admission = CapturedSourceAdmission::conversation_for_context(&source, &file_context)?;
+    let batch = producer
+        .next_batch()
+        .map_err(continue_whole_json_error)?
+        .ok_or(CaptureError::SystemInvariant(
+            "Continue per-file producer returned no captured batch",
+        ))?;
+    let mut projector = match resumable_cursor.as_ref() {
+        Some(cursor) if cursor_mode == CapturedBatchCursorMode::Resume => {
+            ContinueCapturedBatchProjector::resume(
+                file_context.clone(),
+                raw_source_path,
+                cursor,
+                observation.session_path(),
+                observation.sibling_index(),
+                index_cache,
+            )?
+        }
+        _ => ContinueCapturedBatchProjector::fresh(
+            file_context.clone(),
+            raw_source_path,
+            observation.session_path(),
+            observation.sibling_index(),
+            index_cache,
+        ),
+    };
+    let mut pending_batch = Some(batch);
+    let max_batches = NonZeroUsize::new(CAPTURE_BATCH_MAX_BATCHES_PER_GROUP).ok_or(
+        CaptureError::SystemInvariant("captured batch group limit must be nonzero"),
+    )?;
+    let outcome = import_captured_batches(
+        store,
+        &admission,
+        import_options.clone(),
+        &context.machine_id,
+        context.imported_at,
+        expected_store_cursor.as_ref(),
+        &initial_position,
+        cursor_mode,
+        max_batches,
+        &mut projector,
+        || Ok(pending_batch.take()),
+        || observation.revalidate(),
+    )?;
+    if outcome.batches_imported != 1 || !outcome.source_exhausted {
+        return Err(CaptureError::SystemInvariant(
+            "Continue per-file import did not consume exactly one batch",
+        ));
     }
-    Ok(())
+    Ok(outcome.summary)
 }
 
 pub(crate) fn continue_session_json_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("json")
         && path.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
-}
-
-pub(crate) fn continue_session_index(paths: &[PathBuf]) -> BTreeMap<String, Value> {
-    let mut index = BTreeMap::new();
-    let mut checked = BTreeSet::new();
-    for path in paths {
-        let Some(parent) = path.parent() else {
-            continue;
-        };
-        if !checked.insert(parent.to_path_buf()) {
-            continue;
-        }
-        let index_path = parent.join("sessions.json");
-        let Ok(text) = read_text_file_limited(
-            &index_path,
-            MAX_PROVIDER_JSONL_LINE_BYTES,
-            "Continue CLI sessions index",
-        ) else {
-            continue;
-        };
-        let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        for entry in entries {
-            if let Some(session_id) = entry
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-            {
-                index.entry(session_id.to_owned()).or_insert(entry);
-            }
-        }
-    }
-    index
 }
 
 pub(crate) fn continue_session_id(session: &Value, path: &Path) -> Option<String> {
@@ -346,38 +686,6 @@ pub(crate) fn continue_history_item_event(
             "has_tool_calls": has_tool_calls,
         }),
     })
-}
-
-pub(crate) fn continue_history_item_text(item: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(text) = item
-        .pointer("/message/content")
-        .and_then(provider_value_text)
-        .or_else(|| item.get("editorState").and_then(provider_value_text))
-    {
-        parts.push(text);
-    }
-    if let Some(text) = item
-        .get("contextItems")
-        .and_then(continue_context_items_text)
-    {
-        parts.push(text);
-    }
-    if let Some(text) = item
-        .get("toolCallStates")
-        .and_then(continue_tool_states_text)
-    {
-        parts.push(text);
-    }
-    if let Some(text) = item.get("conversationSummary").and_then(Value::as_str) {
-        parts.push(text.to_owned());
-    }
-    let text = parts
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.trim().is_empty()).then_some(text)
 }
 
 pub(crate) fn continue_context_items_text(value: &Value) -> Option<String> {

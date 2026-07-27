@@ -1,0 +1,10 @@
+{
+  "event_name": "install_stage",
+  "event_version": 1,
+  "install_attempt_id": "ia_01JZCTXHOSTED",
+  "stage": "installer",
+  "status": "completed",
+  "platform": "linux",
+  "arch": "x64",
+  "script_family": "posix"
+}

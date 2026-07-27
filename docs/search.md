@@ -2,14 +2,17 @@
 
 `ctx search` finds matching indexed history. Default results are session-diverse:
 ctx shows the strongest matching span from each session, then lets you drill
-into dense event-level results when needed. With daemon maintenance enabled, the
+into dense event-level results when needed. Daemon maintenance is enabled by
+default, so the
 ctx daemon owns bounded background refresh for native provider history, enabled
-auto-refresh plugins, and semantic sidecar catch-up. Search itself does not
-import provider history when `[daemon].enabled` is true, start vector backfill,
-download models, or create the semantic sidecar. With semantic enabled and
-default background refresh, search may start the configured daemon so the
-daemon-owned query service can embed the query; `--refresh off` skips that
-autostart. Use `ctx setup --no-daemon` or `ctx import --no-daemon` to keep a
+auto-refresh plugins, and semantic sidecar catch-up. After the local index
+exists, search itself does not import provider history when
+`[daemon].enabled` is true. A first search can perform one bounded foreground
+text bootstrap when no index exists. Search does not start vector backfill,
+download models, or create the semantic sidecar. Default background refresh may
+start the configured daemon for local history freshness. With semantic enabled,
+the daemon-owned query service can also embed the query; `--refresh off` skips
+daemon autostart. Use `ctx setup --no-daemon` or `ctx import --no-daemon` to keep a
 foreground command from starting the daemon after it completes.
 The default `hybrid` backend blends lexical and semantic evidence only when
 existing sidecar coverage is complete and dirty work is drained, and falls back
@@ -33,7 +36,7 @@ ctx search "token budget" --session <ctx-session-id>
 ctx search "review findings" --include-subagents
 ctx search "this current task" --include-current-session
 ctx search "mail provider throttled bulk mailbox setup" --backend hybrid
-ctx search "pricing for ctx cloud team history" --backend semantic
+ctx search "pricing decisions from the launch review" --backend semantic
 ctx status
 ctx status --json
 ```
@@ -182,6 +185,11 @@ from the existing index until they are explicitly imported through a supported
 path. Supported AstrBot `data_v4.db` locations participate in bounded native
 discovery and may also be imported with an explicit `--path`.
 
+Only available sources with automatic native import support participate in
+native refresh. Missing, unsupported, and `import_support: explicit` rows do
+not. Winner-only provider precedence prevents refresh from combining a selected
+override with stale defaults or old compatibility probes.
+
 Use `--refresh off` for a search that does not import providers, execute
 plugins, schedule semantic indexing, or update either the main ctx SQLite store
 or semantic sidecar. Explicit semantic or hybrid requests may still ask the
@@ -193,8 +201,8 @@ catch-up work during search.
 
 Semantic freshness is part of the normal search/status surface and the
 first-class ctx daemon model. `ctx daemon` coordinates bounded local maintenance:
-native provider-history refresh, local semantic catch-up, and cloud-sync status.
-When `[daemon].enabled` is true, `ctx setup` and `ctx import` may
+native provider-history refresh and local semantic catch-up.
+With default `[daemon].enabled = true`, `ctx setup` and `ctx import` may
 opportunistically start daemon maintenance after their foreground indexing work.
 Use `ctx setup --no-daemon` or `ctx import --no-daemon` for one foreground run
 without autostart, `ctx daemon run` for the same work in the foreground,
@@ -227,8 +235,7 @@ runs are enabled in config.
 A long-lived daemon keeps the local embedding model resident after the first
 worker pass, uses a low-memory default embedding batch, and performs recent-work
 freshness checks before it settles into idle loops. Daemon semantic catch-up
-may acquire the local embedding model when semantic is enabled. Cloud sync
-reports disabled with `enabled: false` and `network_allowed: false`.
+may acquire the local embedding model when semantic is enabled.
 `ctx doctor` is the place for semantic and daemon diagnostics when local status
 needs troubleshooting.
 
@@ -260,7 +267,9 @@ read, events scored, hydration time, stale-vector drops, and semantic candidate 
 `source_exists: false` means ctx can return indexed text, but the raw provider
 file was not available at the stored path when the result was built.
 
-JSON-output commands do not autostart daemon maintenance.
+JSON setup and import do not autostart daemon maintenance. JSON search follows
+its requested refresh mode: default `background` may autostart, while `off`
+never does.
 
 Search output is local/private by default and is not redacted for sharing.
 Review and redact copied snippets, JSON, or transcripts before sending them

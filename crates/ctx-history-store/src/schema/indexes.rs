@@ -1,4 +1,7 @@
 pub(crate) const INDEXES_SQL: &str = r#"
+-- events.seq is already backed by the table-level UNIQUE autoindex.
+DROP INDEX IF EXISTS idx_events_seq;
+
 CREATE INDEX IF NOT EXISTS idx_capture_sources_external_session_id ON capture_sources(provider, external_session_id);
 CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_source_identity ON capture_sources(provider, source_format, source_identity);
 
@@ -34,15 +37,21 @@ CREATE INDEX IF NOT EXISTS idx_runs_input_blob_id ON runs(input_blob_id);
 CREATE INDEX IF NOT EXISTS idx_runs_output_blob_id ON runs(output_blob_id);
 CREATE INDEX IF NOT EXISTS idx_runs_source_id ON runs(source_id);
 
-CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
 CREATE INDEX IF NOT EXISTS idx_events_history_record_occurred_at_ms ON events(history_record_id, occurred_at_ms);
 CREATE INDEX IF NOT EXISTS idx_events_session_occurred_at_ms ON events(session_id, occurred_at_ms);
 CREATE INDEX IF NOT EXISTS idx_events_history_record_id ON events(history_record_id);
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
-CREATE INDEX IF NOT EXISTS idx_events_role_occurred_seq ON events(event_type, role, occurred_at_ms DESC, seq DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_events_run_role_occurred_seq ON events(run_id, event_type, role, occurred_at_ms DESC, seq DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_events_session_run_role_occurred_seq ON events(session_id, run_id, event_type, role, occurred_at_ms DESC, seq DESC, id DESC);
+-- Semantic turn queries only inspect live message rows. Create the replacement
+-- indexes before dropping the legacy full indexes so an interrupted reopen
+-- never leaves an existing Store without either shape. The distinct names make
+-- reconciliation a one-time operation rather than rebuilding on every open.
+CREATE INDEX IF NOT EXISTS idx_events_live_message_role_occurred_seq ON events(event_type, role, occurred_at_ms DESC, seq DESC, id DESC) WHERE event_type = 'message' AND deleted_at_ms IS NULL;
+CREATE INDEX IF NOT EXISTS idx_events_live_message_run_role_occurred_seq ON events(run_id, event_type, role, occurred_at_ms DESC, seq DESC, id DESC) WHERE event_type = 'message' AND deleted_at_ms IS NULL;
+CREATE INDEX IF NOT EXISTS idx_events_live_message_session_run_role_occurred_seq ON events(session_id, run_id, event_type, role, occurred_at_ms DESC, seq DESC, id DESC) WHERE event_type = 'message' AND deleted_at_ms IS NULL;
+DROP INDEX IF EXISTS idx_events_role_occurred_seq;
+DROP INDEX IF EXISTS idx_events_run_role_occurred_seq;
+DROP INDEX IF EXISTS idx_events_session_run_role_occurred_seq;
 CREATE INDEX IF NOT EXISTS idx_events_capture_source_id ON events(capture_source_id);
 CREATE INDEX IF NOT EXISTS idx_events_payload_blob_id ON events(payload_blob_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe_key ON events(dedupe_key) WHERE dedupe_key IS NOT NULL;
@@ -55,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_vcs_changes_vcs_workspace_id ON vcs_changes(vcs_w
 CREATE INDEX IF NOT EXISTS idx_vcs_changes_source_id ON vcs_changes(source_id);
 
 CREATE INDEX IF NOT EXISTS idx_history_record_links_history_record_id ON history_record_links(history_record_id);
+CREATE INDEX IF NOT EXISTS idx_history_record_links_target ON history_record_links(target_type, target_id, deleted_at_ms, id);
 CREATE INDEX IF NOT EXISTS idx_history_record_links_source_id ON history_record_links(source_id);
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_source_id ON artifacts(source_id);

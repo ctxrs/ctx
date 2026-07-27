@@ -8,6 +8,7 @@ use ctx_history_store::{
     RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
 };
 
+use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
 use crate::output::{compact_json, print_json, SqlFormat};
 use crate::store_util::open_existing_store_read_only;
 use crate::SqlArgs;
@@ -42,7 +43,11 @@ pub(crate) fn parse_sql_timeout(value: &str) -> std::result::Result<StdDuration,
     }
     Ok(StdDuration::from_millis(millis as u64))
 }
-pub(crate) fn run_sql(args: SqlArgs, data_root: PathBuf) -> Result<()> {
+pub(crate) fn run_sql(
+    args: SqlArgs,
+    data_root: PathBuf,
+    telemetry: &mut SqlTelemetry,
+) -> Result<()> {
     let sql = read_sql_input(&args)?;
     let db_path = database_path(data_root);
     let store = open_existing_store_read_only(&db_path, "ctx sql")?;
@@ -56,6 +61,11 @@ pub(crate) fn run_sql(args: SqlArgs, data_root: PathBuf) -> Result<()> {
             timeout: args.timeout,
         },
     )?;
+    telemetry.returned_rows = Some(count_bucket(result.returned_rows as u64));
+    telemetry.returned_columns = Some(count_bucket(result.columns.len() as u64));
+    telemetry.rows_truncated = Some(result.truncated.rows);
+    telemetry.values_truncated = Some(result.truncated.values);
+    telemetry.query_duration = Some(duration_bucket(result.elapsed));
 
     match args.output_format() {
         SqlFormat::Table => print_sql_table(&result),

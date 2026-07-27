@@ -172,9 +172,7 @@ pub(crate) fn search_filters(
         provider_key: source_identity.provider_key,
         source_id: source_identity.source_id,
         source_format: source_identity.source_format,
-        repo: input
-            .workspace
-            .and_then(|s| if s.trim().is_empty() { None } else { Some(s) }),
+        repo: input.workspace.filter(|s| !s.trim().is_empty()),
         since: input.since.as_deref().map(parse_since_filter).transpose()?,
         primary_only: input.primary_only,
         include_subagents: input.include_subagents && !input.primary_only,

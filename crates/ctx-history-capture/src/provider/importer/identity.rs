@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::{CaptureError, Result};
 
 use super::ids::{
-    provider_event_seq, provider_event_uuid, provider_file_touch_uuid, provider_source_event_seq,
-    provider_source_event_uuid, provider_source_file_touch_uuid,
+    provider_event_file_touch_uuid, provider_event_seq, provider_event_uuid,
+    provider_source_event_file_touch_uuid, provider_source_event_seq, provider_source_event_uuid,
 };
 use super::ProviderImportCaches;
 
@@ -55,12 +55,54 @@ fn provider_event_identity_by_alias(
     provider_event_identity_by_id(store, event_id)
 }
 
+fn provider_event_identity_by_dedupe_key_and_source_path(
+    store: &Store,
+    dedupe_key: &str,
+    source_id: Uuid,
+) -> Result<Option<ProviderEventImportIdentity>> {
+    let event_id = match store.event_id_by_dedupe_key(dedupe_key) {
+        Ok(event_id) => event_id,
+        Err(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
+        Err(err) => return Err(CaptureError::Store(err)),
+    };
+    let source = store.get_capture_source(source_id)?;
+    let Some(incoming_path) = source.descriptor.raw_source_path.as_deref() else {
+        return Ok(None);
+    };
+    let Some(event) = provider_event_by_id(store, event_id)? else {
+        return Ok(None);
+    };
+    if event
+        .sync
+        .metadata
+        .pointer("/metadata/event_path")
+        .and_then(Value::as_str)
+        != Some(incoming_path)
+    {
+        return Ok(None);
+    }
+    Ok(event
+        .dedupe_key
+        .map(|dedupe_key| ProviderEventImportIdentity {
+            id: event.id,
+            seq: event.seq,
+            dedupe_key,
+            run_source_id: event.capture_source_id,
+        }))
+}
+
 #[derive(Clone)]
 pub(crate) struct ProviderEventImportIdentity {
     pub(crate) id: Uuid,
     pub(crate) seq: u64,
     pub(crate) dedupe_key: String,
     pub(crate) run_source_id: Option<Uuid>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExactLegacySourceEventCandidate {
+    pub(crate) source_id: Uuid,
+    pub(crate) provider_event_index: u64,
 }
 
 pub(crate) fn pi_existing_event_identity_by_entry_id(
@@ -125,6 +167,7 @@ pub(crate) fn pi_stored_event_entry_id(event: &Event) -> Option<&str> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn provider_event_import_identity(
     store: &Store,
     provider: CaptureProvider,
@@ -133,6 +176,33 @@ pub(crate) fn provider_event_import_identity(
     provider_event_index: u64,
     provider_event_sequence_index: u64,
     event_hash: &str,
+    legacy_provider_event_index: Option<u64>,
+    allow_legacy_provider_identity: bool,
+) -> Result<ProviderEventImportIdentity> {
+    provider_event_import_identity_with_exact_legacy_source(
+        store,
+        provider,
+        provider_session_id,
+        source_id,
+        provider_event_index,
+        provider_event_sequence_index,
+        event_hash,
+        None,
+        legacy_provider_event_index,
+        allow_legacy_provider_identity,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn provider_event_import_identity_with_exact_legacy_source(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_id: Uuid,
+    provider_event_index: u64,
+    provider_event_sequence_index: u64,
+    event_hash: &str,
+    exact_legacy_source: Option<ExactLegacySourceEventCandidate>,
     legacy_provider_event_index: Option<u64>,
     allow_legacy_provider_identity: bool,
 ) -> Result<ProviderEventImportIdentity> {
@@ -151,6 +221,22 @@ pub(crate) fn provider_event_import_identity(
     )?;
     if provider_event_exists(store, &source_identity.dedupe_key)? {
         return Ok(source_identity);
+    }
+    if let Some(candidate) = exact_legacy_source {
+        // The ordinal is advisory. Only an exact old source/index/native-hash
+        // dedupe key and canonical event path can prove the same record.
+        let legacy_source_identity = provider_source_event_import_identity(
+            candidate.source_id,
+            candidate.provider_event_index,
+            event_hash,
+        );
+        if let Some(existing) = provider_event_identity_by_dedupe_key_and_source_path(
+            store,
+            &legacy_source_identity.dedupe_key,
+            source_id,
+        )? {
+            return Ok(existing);
+        }
     }
     if let Some(existing) = provider_event_identity_by_alias(store, source_identity.id)? {
         return Ok(existing);
@@ -342,10 +428,15 @@ pub(crate) fn provider_file_touch_import_id(
     provider: CaptureProvider,
     provider_session_id: &str,
     source_id: Uuid,
+    provider_event_index: Option<u64>,
     provider_touch_index: u64,
     allow_legacy_provider_identity: bool,
 ) -> Result<Uuid> {
-    let source_touch_id = provider_source_file_touch_uuid(source_id, provider_touch_index);
+    let source_touch_id = provider_source_event_file_touch_uuid(
+        source_id,
+        provider_event_index,
+        provider_touch_index,
+    );
     if store.file_touched_exists(source_touch_id)? {
         return Ok(source_touch_id);
     }
@@ -353,8 +444,12 @@ pub(crate) fn provider_file_touch_import_id(
     if !allow_legacy_provider_identity {
         return Ok(source_touch_id);
     }
-    let legacy_touch_id =
-        provider_file_touch_uuid(provider, provider_session_id, provider_touch_index);
+    let legacy_touch_id = provider_event_file_touch_uuid(
+        provider,
+        provider_session_id,
+        provider_event_index,
+        provider_touch_index,
+    );
     if store.file_touched_exists(legacy_touch_id)? {
         Ok(legacy_touch_id)
     } else {
@@ -385,4 +480,65 @@ pub(crate) fn provider_session_exists_cached(
     let exists = provider_session_exists(store, session_id)?;
     cache.insert(session_id, exists);
     Ok(exists)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support_paths::tempdir;
+    use ctx_history_core::{EventRole, EventType, Fidelity};
+    use serde_json::json;
+
+    use super::super::ids::provider_sync_metadata;
+    use super::*;
+
+    #[test]
+    fn full_width_openhands_touch_finds_its_exact_source_event() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("store.sqlite")).unwrap();
+        let source_id = Uuid::parse_str("4ea89d63-c113-4fe8-93e5-12859eb2aac7").unwrap();
+        let provider_event_index = 0xfedc_ba98_7654_3210;
+        let event_id = provider_source_event_uuid(source_id, provider_event_index);
+        store
+            .upsert_event(&Event {
+                id: event_id,
+                seq: 1,
+                history_record_id: None,
+                session_id: None,
+                run_id: None,
+                event_type: EventType::ToolCall,
+                role: Some(EventRole::Assistant),
+                occurred_at: "2026-07-18T00:00:00Z".parse().unwrap(),
+                capture_source_id: None,
+                payload: json!({ "path": ".openhands-hash-event" }),
+                payload_blob_id: None,
+                dedupe_key: Some("full-width-openhands-event".to_owned()),
+                sync: provider_sync_metadata(Fidelity::Imported, json!({})),
+            })
+            .unwrap();
+
+        assert_eq!(
+            provider_file_touch_event_id(
+                &store,
+                CaptureProvider::OpenHands,
+                "hash-indexed-session",
+                source_id,
+                provider_event_index,
+                false,
+            )
+            .unwrap(),
+            Some(event_id)
+        );
+        assert_eq!(
+            provider_file_touch_event_id(
+                &store,
+                CaptureProvider::OpenHands,
+                "hash-indexed-session",
+                source_id,
+                0,
+                false,
+            )
+            .unwrap(),
+            None
+        );
+    }
 }

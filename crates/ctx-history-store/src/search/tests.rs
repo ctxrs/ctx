@@ -13,8 +13,10 @@ use crate::Store;
 
 #[path = "event_query_tests.rs"]
 mod event_query_tests;
+#[path = "semantic_role_index_tests.rs"]
+mod semantic_role_index_tests;
 
-fn tempdir() -> tempfile::TempDir {
+pub(super) fn tempdir() -> tempfile::TempDir {
     let root = std::env::var_os("TEST_TMPDIR")
         .map(|path| std::path::PathBuf::from(path).join("test-data"))
         .unwrap_or_else(|| std::env::current_dir().unwrap().join("target/test-data"));
@@ -25,7 +27,7 @@ fn tempdir() -> tempfile::TempDir {
         .unwrap()
 }
 
-fn fixed_time() -> DateTime<Utc> {
+pub(super) fn fixed_time() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-06-23T12:00:00Z")
         .unwrap()
         .with_timezone(&Utc)
@@ -42,7 +44,7 @@ fn sync_metadata() -> SyncMetadata {
     }
 }
 
-fn local_preview_event(seq: u64, text: &str) -> Event {
+pub(super) fn local_preview_event(seq: u64, text: &str) -> Event {
     Event {
         id: new_id(),
         seq,
@@ -83,7 +85,7 @@ fn policy_event(
     }
 }
 
-fn insert_session(store: &Store, session_id: Uuid) {
+pub(super) fn insert_session(store: &Store, session_id: Uuid) {
     store
         .conn
         .execute(
@@ -98,7 +100,7 @@ fn insert_session(store: &Store, session_id: Uuid) {
         .unwrap();
 }
 
-fn session_event(
+pub(super) fn session_event(
     seq: u64,
     session_id: Uuid,
     event_type: EventType,
@@ -112,7 +114,7 @@ fn session_event(
     event
 }
 
-fn with_occurred_at(mut event: Event, offset_minutes: i64) -> Event {
+pub(super) fn with_occurred_at(mut event: Event, offset_minutes: i64) -> Event {
     event.occurred_at = fixed_time() + Duration::minutes(offset_minutes);
     event
 }
@@ -839,39 +841,19 @@ fn event_search_indexes_policy_allowed_agent_content_only() {
         store.search_event_hits("toolnestoracle", 10).unwrap().len(),
         1
     );
-    assert_eq!(
-        store
-            .search_event_hits("failure-output-oracle", 10)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
-            .search_event_hits("failed-native-output-oracle", 10)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
-            .search_event_hits("failed-v2-native-output-oracle", 10)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(store
-        .search_event_hits("success-output-oracle", 10)
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .search_event_hits("success-native-output-oracle", 10)
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .search_event_hits("success-v2-native-output-oracle", 10)
-        .unwrap()
-        .is_empty());
+    for result_text in [
+        "failure-output-oracle",
+        "failed-native-output-oracle",
+        "failed-v2-native-output-oracle",
+        "success-output-oracle",
+        "success-native-output-oracle",
+        "success-v2-native-output-oracle",
+    ] {
+        assert!(
+            store.search_event_hits(result_text, 10).unwrap().is_empty(),
+            "result body unexpectedly searchable: {result_text}"
+        );
+    }
     assert!(store
         .search_event_hits("notice-oracle", 10)
         .unwrap()
@@ -1365,4 +1347,62 @@ fn semantic_recent_documents_order_by_lite_turn_activity() {
     );
     assert!(docs[0].text.contains("Late assistant makes older turn"));
     assert!(docs[0].occurred_at_ms > docs[1].occurred_at_ms);
+}
+
+#[test]
+fn semantic_recent_document_pages_advance_by_anchor_when_activity_reorders_a_full_page() {
+    const PAGE_SIZE: usize = 512;
+
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let late_activity = fixed_time() + Duration::days(30);
+    let mut users = Vec::with_capacity(PAGE_SIZE + 1);
+
+    store.begin_immediate_batch().unwrap();
+    for index in 0..=PAGE_SIZE {
+        let session_id = Uuid::new_v4();
+        insert_session(&store, session_id);
+        let user_seq = index as u64 * 2 + 1;
+        let mut user = session_event(
+            user_seq,
+            session_id,
+            EventType::Message,
+            Some(EventRole::User),
+            &format!("paged user prompt {index}"),
+        );
+        user.occurred_at = fixed_time() + Duration::minutes(index as i64);
+        let mut assistant = session_event(
+            user_seq + 1,
+            session_id,
+            EventType::Message,
+            Some(EventRole::Assistant),
+            &format!("late assistant answer {index}"),
+        );
+        assistant.occurred_at = late_activity;
+        store.upsert_event(&user).unwrap();
+        store.upsert_event(&assistant).unwrap();
+        users.push(user.id);
+    }
+    store.commit_batch().unwrap();
+
+    let first = store
+        .recent_event_embedding_documents(None, PAGE_SIZE)
+        .unwrap();
+    assert_eq!(first.len(), PAGE_SIZE);
+    assert!(first
+        .iter()
+        .all(|doc| doc.occurred_at_ms == late_activity.timestamp_millis()));
+    assert!(!first.iter().any(|doc| doc.event_id == users[0]));
+
+    let anchor_boundary = first
+        .iter()
+        .map(|doc| (doc.anchor_occurred_at_ms, doc.seq))
+        .min()
+        .unwrap();
+    let second = store
+        .recent_event_embedding_documents(Some(anchor_boundary), PAGE_SIZE)
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].event_id, users[0]);
+    assert!(!first.iter().any(|doc| doc.event_id == second[0].event_id));
 }

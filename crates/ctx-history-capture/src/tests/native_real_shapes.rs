@@ -1,4 +1,18 @@
-use super::support::*;
+use crate::tests::support::fixtures::jsonl::write_nanoclaw_smoke_project;
+use crate::tests::support::paths::tempdir;
+use crate::tests::support::provider_state::stored_provider_session_id;
+use crate::{
+    import_astrbot_sqlite, import_codebuddy_history, import_junie_history, import_nanoclaw_project,
+    provider_source_for_path, AstrBotSqliteImportOptions, CodeBuddyImportOptions,
+    JunieImportOptions, NanoClawImportOptions, ProviderSourceStatus, CODEBUDDY_SOURCE_FORMAT,
+    JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+};
+use chrono::{DateTime, Utc};
+use ctx_history_core::{CaptureProvider, EventRole};
+use ctx_history_store::Store;
+use rusqlite::Connection;
+use serde_json::{json, Value};
+use std::fs;
 
 #[test]
 fn native_astrbot_real_schema_casts_ids_metadata_and_datetime_millis() {

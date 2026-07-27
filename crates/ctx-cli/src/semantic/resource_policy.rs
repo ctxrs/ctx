@@ -1,12 +1,25 @@
+use std::time::Duration as StdDuration;
+
+#[cfg(any(target_os = "linux", test))]
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use super::model_contract::SemanticModelLoadDeferred;
+
+#[cfg(test)]
+use anyhow::Result;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SemanticComputeClass {
+pub(super) enum SemanticComputeClass {
     Cpu,
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     Accelerator,
 }
 
 impl SemanticComputeClass {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
             Self::Accelerator => "accelerator",
@@ -15,34 +28,32 @@ impl SemanticComputeClass {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct SemanticSystemResources {
-    total_memory_bytes: Option<u64>,
-    available_memory_bytes: Option<u64>,
-    available_parallelism: usize,
+pub(super) struct SemanticSystemResources {
+    pub(super) total_memory_bytes: Option<u64>,
+    pub(super) available_memory_bytes: Option<u64>,
+    pub(super) available_parallelism: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SemanticQuietPolicy {
-    threads: usize,
-    batch_size: usize,
+pub(super) struct SemanticQuietPolicy {
+    pub(super) threads: usize,
+    pub(super) batch_size: usize,
     // Heuristic sizing target for batch selection, not an OS-enforced memory limit.
-    memory_budget_bytes: u64,
-    active_percent: u8,
+    pub(super) memory_budget_bytes: u64,
+    pub(super) active_percent: u8,
 }
 
-const SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+pub(super) const SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(super) const SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
-fn semantic_model_load_deferred(
+pub(super) fn semantic_model_load_deferred(
     available_memory_bytes: Option<u64>,
     compute_class: SemanticComputeClass,
 ) -> Option<SemanticModelLoadDeferred> {
     let available_memory_bytes = available_memory_bytes?;
     let required_available_memory_bytes = match compute_class {
         SemanticComputeClass::Cpu => SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES,
-        SemanticComputeClass::Accelerator => {
-            SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES
-        }
+        SemanticComputeClass::Accelerator => SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES,
     };
     (available_memory_bytes < required_available_memory_bytes).then_some(
         SemanticModelLoadDeferred {
@@ -52,14 +63,14 @@ fn semantic_model_load_deferred(
     )
 }
 
-fn semantic_cpu_model_load_deferred(
+pub(super) fn semantic_cpu_model_load_deferred(
     available_memory_bytes: Option<u64>,
 ) -> Option<SemanticModelLoadDeferred> {
     semantic_model_load_deferred(available_memory_bytes, SemanticComputeClass::Cpu)
 }
 
 impl SemanticSystemResources {
-    fn current() -> Self {
+    pub(super) fn current() -> Self {
         let (total_memory_bytes, available_memory_bytes) = semantic_system_memory();
         Self {
             total_memory_bytes,
@@ -71,7 +82,7 @@ impl SemanticSystemResources {
     }
 }
 
-fn semantic_quiet_policy(
+pub(super) fn semantic_quiet_policy(
     resources: SemanticSystemResources,
     compute_class: SemanticComputeClass,
 ) -> SemanticQuietPolicy {
@@ -116,7 +127,7 @@ fn semantic_quiet_policy(
     }
 }
 
-fn semantic_batch_rest(active: StdDuration, active_percent: u8) -> StdDuration {
+pub(super) fn semantic_batch_rest(active: StdDuration, active_percent: u8) -> StdDuration {
     if active.is_zero() || !(1..100).contains(&active_percent) {
         return StdDuration::ZERO;
     }
@@ -129,7 +140,7 @@ fn semantic_batch_rest(active: StdDuration, active_percent: u8) -> StdDuration {
     StdDuration::from_nanos(rest_nanos.min(u128::from(u64::MAX)) as u64)
 }
 
-fn semantic_limited_batch_rest(
+pub(super) fn semantic_limited_batch_rest(
     active: StdDuration,
     active_percent: u8,
     remaining: Option<StdDuration>,
@@ -140,7 +151,7 @@ fn semantic_limited_batch_rest(
         .unwrap_or(rest)
 }
 
-fn throttle_semantic_batch(
+pub(super) fn throttle_semantic_batch(
     active: StdDuration,
     policy: SemanticQuietPolicy,
     remaining: Option<StdDuration>,
@@ -152,7 +163,7 @@ fn throttle_semantic_batch(
 }
 
 #[cfg(target_os = "linux")]
-fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
     let Ok(text) = fs::read_to_string("/proc/meminfo") else {
         return (None, None);
     };
@@ -170,13 +181,16 @@ fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
 }
 
 #[cfg(target_os = "linux")]
-fn semantic_linux_cgroup_memory() -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_linux_cgroup_memory() -> (Option<u64>, Option<u64>) {
     let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     semantic_linux_cgroup_memory_at(Path::new("/sys/fs/cgroup"), &cgroup)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_linux_cgroup_memory_at(root: &Path, cgroup: &str) -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_linux_cgroup_memory_at(
+    root: &Path,
+    cgroup: &str,
+) -> (Option<u64>, Option<u64>) {
     let mut v2_candidates = Vec::new();
     let mut v1_candidates = Vec::new();
     for line in cgroup.lines() {
@@ -218,14 +232,18 @@ fn semantic_linux_cgroup_memory_at(root: &Path, cgroup: &str) -> (Option<u64>, O
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_cgroup_relative_path(path: &str) -> PathBuf {
+pub(super) fn semantic_cgroup_relative_path(path: &str) -> PathBuf {
     path.split('/')
         .filter(|component| !component.is_empty() && *component != "." && *component != "..")
         .collect()
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_push_cgroup_ancestors(candidates: &mut Vec<PathBuf>, root: &Path, relative: &Path) {
+pub(super) fn semantic_push_cgroup_ancestors(
+    candidates: &mut Vec<PathBuf>,
+    root: &Path,
+    relative: &Path,
+) {
     let mut directory = root.join(relative);
     loop {
         if !candidates.iter().any(|candidate| candidate == &directory) {
@@ -238,7 +256,7 @@ fn semantic_push_cgroup_ancestors(candidates: &mut Vec<PathBuf>, root: &Path, re
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_tighten_cgroup_memory(
+pub(super) fn semantic_tighten_cgroup_memory(
     directory: &Path,
     limit_name: &str,
     current_name: &str,
@@ -254,14 +272,13 @@ fn semantic_tighten_cgroup_memory(
     if let Some(limit) = limit {
         *effective_limit = Some(effective_limit.map_or(limit, |known| known.min(limit)));
         let available = limit.saturating_sub(current.unwrap_or(0));
-        *effective_available = Some(
-            effective_available.map_or(available, |known| known.min(available)),
-        );
+        *effective_available =
+            Some(effective_available.map_or(available, |known| known.min(available)));
     }
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_parse_cgroup_memory_value(value: &str) -> Option<u64> {
+pub(super) fn semantic_parse_cgroup_memory_value(value: &str) -> Option<u64> {
     let value = value.trim();
     if value.is_empty() || value == "max" {
         return None;
@@ -270,7 +287,7 @@ fn semantic_parse_cgroup_memory_value(value: &str) -> Option<u64> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_effective_linux_memory(
+pub(super) fn semantic_effective_linux_memory(
     host_total: Option<u64>,
     host_available: Option<u64>,
     cgroup_limit: Option<u64>,
@@ -288,7 +305,7 @@ fn semantic_effective_linux_memory(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn semantic_meminfo_kib(line: &str, key: &str) -> Option<u64> {
+pub(super) fn semantic_meminfo_kib(line: &str, key: &str) -> Option<u64> {
     let mut fields = line.strip_prefix(key)?.split_whitespace();
     let kib = fields.next()?.parse::<u64>().ok()?;
     if fields.next()? != "kB" || fields.next().is_some() {
@@ -298,7 +315,7 @@ fn semantic_meminfo_kib(line: &str, key: &str) -> Option<u64> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-fn semantic_sysctl_number(name: &'static [u8]) -> Option<u64> {
+pub(super) fn semantic_sysctl_number(name: &'static [u8]) -> Option<u64> {
     let mut value = 0_u64;
     let mut size = std::mem::size_of::<u64>();
     let result = unsafe {
@@ -321,7 +338,7 @@ fn semantic_sysctl_number(name: &'static [u8]) -> Option<u64> {
 }
 
 #[cfg(target_os = "macos")]
-fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
     let total = semantic_sysctl_number(b"hw.memsize\0");
     let page_size = semantic_sysctl_number(b"hw.pagesize\0");
     let available_pages = [
@@ -338,7 +355,7 @@ fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
 }
 
 #[cfg(target_os = "freebsd")]
-fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
     let total = semantic_sysctl_number(b"hw.physmem\0");
     let page_size = semantic_sysctl_number(b"vm.stats.vm.v_page_size\0");
     let available_pages = [
@@ -354,7 +371,7 @@ fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
 }
 
 #[cfg(target_os = "windows")]
-fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
     #[repr(C)]
     struct MemoryStatusEx {
         length: u32,
@@ -396,7 +413,7 @@ fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
     target_os = "freebsd",
     target_os = "windows"
 )))]
-fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
+pub(super) fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
     (None, None)
 }
 
@@ -480,11 +497,7 @@ mod semantic_resource_policy_tests {
             StdDuration::from_secs(2),
         );
         assert_eq!(
-            semantic_limited_batch_rest(
-                StdDuration::from_secs(3),
-                25,
-                Some(StdDuration::ZERO),
-            ),
+            semantic_limited_batch_rest(StdDuration::from_secs(3), 25, Some(StdDuration::ZERO),),
             StdDuration::ZERO,
         );
     }
@@ -564,17 +577,13 @@ mod semantic_resource_policy_tests {
     #[test]
     fn accelerator_model_load_uses_larger_measured_memory_floor() {
         let floor = SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES;
-        let deferred = semantic_model_load_deferred(
-            Some(floor - 1),
-            SemanticComputeClass::Accelerator,
-        )
-        .expect("accelerator load should defer below its memory floor");
+        let deferred =
+            semantic_model_load_deferred(Some(floor - 1), SemanticComputeClass::Accelerator)
+                .expect("accelerator load should defer below its memory floor");
         assert_eq!(deferred.required_available_memory_bytes, floor);
-        assert!(semantic_model_load_deferred(
-            Some(floor),
-            SemanticComputeClass::Accelerator
-        )
-        .is_none());
+        assert!(
+            semantic_model_load_deferred(Some(floor), SemanticComputeClass::Accelerator).is_none()
+        );
         assert!(semantic_model_load_deferred(None, SemanticComputeClass::Accelerator).is_none());
     }
 }
