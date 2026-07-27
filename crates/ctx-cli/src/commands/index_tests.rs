@@ -10,6 +10,8 @@ fn watch_status(
     let mut status = json!({
         "lexical": {
             "status": "partial",
+            "indexed_sessions": lexical_done,
+            "indexed_items": lexical_done.saturating_mul(10),
             "inventory_units": lexical_total,
             "pending_inventory_units": lexical_total.saturating_sub(lexical_done),
         },
@@ -76,7 +78,7 @@ fn interactive_watch_redraws_the_existing_block() {
     assert_eq!(
         rendered,
         format!(
-            "{}\n\u{1b}[3A{}",
+            "{}\n\u{1b}[4A{}",
             index_watch_human(&first),
             expected_second
         )
@@ -94,9 +96,9 @@ fn interactive_watch_clears_a_disappearing_reason_line() {
     output.print_human(&second).unwrap();
 
     let rendered = String::from_utf8(bytes).unwrap();
-    assert!(rendered.contains("\u{1b}[4A"));
+    assert!(rendered.contains("\u{1b}[5A"));
     assert!(
         rendered.ends_with("\r\u{1b}[2K\n\u{1b}[1A"),
-        "the stale fourth line must be erased: {rendered:?}"
+        "the stale fifth line must be erased: {rendered:?}"
     );
 }
