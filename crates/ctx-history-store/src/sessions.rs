@@ -68,10 +68,34 @@ impl Store {
         })
     }
 
+    /// Reads the exact stored session row, without alias resolution.
+    ///
+    /// `Session` covers every `sessions` column, and `metadata_json` is
+    /// compared as parsed JSON, so equal rows here imply equal results for
+    /// every dependent read of this row.
+    fn stored_session_row(&self, id: Uuid) -> Result<Option<Session>> {
+        self.conn
+            .prepare_cached(session_select_sql("WHERE id = ?1").as_str())?
+            .query_row(params![id.to_string()], session_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
         self.with_atomic_write(|| {
             let previous_dependencies =
                 self.capture_session_upsert_journal_dependencies(session)?;
+            // Dependent fanout re-derives one canonical observation per event
+            // of this session, which is a function of rows already stored
+            // rather than of this mutation. A session row left identical
+            // cannot change any observation that reads it, so comparing the
+            // row replaces that fanout with two indexed point reads.
+            let journal_active = self.projection_journal_active_for_mutation()?;
+            let previous_row = if journal_active {
+                self.stored_session_row(session.id)?
+            } else {
+                None
+            };
             self.conn
             .prepare_cached(
                 r#"
@@ -124,7 +148,9 @@ impl Store {
                 "#,
             )?
             .execute(session_params!(session))?;
-            self.journal_session_mutated(session.id)?;
+            if journal_active && self.stored_session_row(session.id)? != previous_row {
+                self.journal_session_mutated(session.id)?;
+            }
             self.journal_captured_session_dependencies(previous_dependencies)?;
             Ok(())
         })

@@ -1382,6 +1382,40 @@ fn group_at_the_core_admission_ceiling_commits_its_larger_journal_encoding() {
     store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
+// Dependent fanout is the only part of a group's journal cost that group
+// admission cannot bound, so a mutation that leaves the parent row identical
+// must not pay it at all. Without this, a coordinator that re-asserts the same
+// source row once per publication group pays one canonical-observation build,
+// canonical-JSON encode and SHA-256 per stored event per group.
+#[test]
+fn identical_parent_row_publishes_no_dependent_journal_work() {
+    let (_temp, store, source) = projected_source_with_events(&[256; 64]);
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let mut group = begin_group(&store, &guard);
+    group.upsert_capture_source(&source).unwrap();
+    let receipt = publish_and_commit(group).unwrap();
+
+    assert_eq!(receipt.attempted_mutation_units(), 2);
+    assert_eq!(receipt.journal_records(), 0);
+    assert_eq!(receipt.journal_uncompressed_bytes(), 0);
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+// The skip is exact, not a heuristic: a row that does change still fans out
+// over every dependent entity.
+#[test]
+fn changed_parent_row_still_publishes_its_dependent_journal_records() {
+    let (_temp, store, mut source) = projected_source_with_events(&[256; 64]);
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    source.sync.metadata = json!({"changed": true});
+    let mut group = begin_group(&store, &guard);
+    group.upsert_capture_source(&source).unwrap();
+    let receipt = publish_and_commit(group).unwrap();
+
+    assert_eq!(receipt.journal_records(), 64);
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
 // Every limit the group enforces when it commits must already have been
 // charged before the mutation that could exceed it, so no admitted group is
 // ever rejected.

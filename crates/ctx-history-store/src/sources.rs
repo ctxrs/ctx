@@ -11,9 +11,37 @@ use crate::connection::{
 };
 use crate::{Result, Store, StoreError};
 
+const CAPTURE_SOURCE_SELECT_SQL: &str = "SELECT id, kind, provider, machine_id, process_id, cwd, \
+     raw_source_path, source_format, source_root, source_identity, external_session_id, \
+     started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json \
+     FROM capture_sources WHERE id = ?1";
+
 impl Store {
+    /// Reads the exact stored capture-source row.
+    ///
+    /// `CaptureSource` covers every `capture_sources` column, and
+    /// `metadata_json` is compared as parsed JSON, so equal rows here imply
+    /// equal results for every dependent read of this row.
+    fn stored_capture_source_row(&self, id: Uuid) -> Result<Option<CaptureSource>> {
+        self.conn
+            .prepare_cached(CAPTURE_SOURCE_SELECT_SQL)?
+            .query_row(params![id.to_string()], capture_source_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn upsert_capture_source(&self, source: &CaptureSource) -> Result<()> {
         self.with_atomic_write(|| {
+            // Dependent fanout re-derives one canonical observation per event,
+            // file touch and VCS change of this source, which is a function of
+            // rows already stored rather than of this mutation. A source row
+            // left identical cannot change any observation that reads it.
+            let journal_active = self.projection_journal_active_for_mutation()?;
+            let previous_row = if journal_active {
+                self.stored_capture_source_row(source.id)?
+            } else {
+                None
+            };
             self.conn
             .prepare_cached(
                 r#"
@@ -73,20 +101,16 @@ impl Store {
                 source.sync.sync_version as i64,
                 serde_json::to_string(&source.sync.metadata)?,
             ])?;
-            self.journal_source_mutated(source.id)?;
+            if journal_active && self.stored_capture_source_row(source.id)? != previous_row {
+                self.journal_source_mutated(source.id)?;
+            }
             Ok(())
         })
     }
 
     pub fn get_capture_source(&self, id: Uuid) -> Result<CaptureSource> {
-        self.conn
-                .query_row(
-                    "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
-                    params![id.to_string()],
-                    capture_source_from_row,
-                )
-                .optional()?
-                .ok_or(StoreError::NotFound(id))
+        self.stored_capture_source_row(id)?
+            .ok_or(StoreError::NotFound(id))
     }
 
     pub fn list_capture_sources(&self) -> Result<Vec<CaptureSource>> {
