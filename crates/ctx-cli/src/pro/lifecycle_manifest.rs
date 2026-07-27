@@ -283,7 +283,7 @@ pub(super) fn verify_signature_with_key(
         .map_err(|_| anyhow!("invalid_response: Pro manifest signature verification failed"))
 }
 
-pub(super) fn parse_release_version(version: &str) -> Result<(u64, u64, u64)> {
+pub(crate) fn parse_release_version(version: &str) -> Result<(u64, u64, u64)> {
     if version.is_empty() || version.len() > 64 {
         bail!("invalid_response: signed manifest contains invalid identity fields");
     }
