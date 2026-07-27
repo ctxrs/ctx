@@ -73,9 +73,10 @@ impl CapturedBatchProjector for AstrBotCapturedBatchProjector {
             ASTRBOT_CONVERSATION_RECORD_KIND => {
                 let conversation =
                     decode_astrbot_conversation(values).map_err(ProviderProjectionFatal::new)?;
-                decode_astrbot_locator(record.locator(), AstrBotPhase::Conversations)
-                    .map_err(ProviderProjectionFatal::new)?;
-                self.project_conversation(&conversation, output)
+                let physical_rowid =
+                    decode_astrbot_locator(record.locator(), AstrBotPhase::Conversations)
+                        .map_err(ProviderProjectionFatal::new)?;
+                self.project_conversation(&conversation, physical_rowid, values, output)
             }
             ASTRBOT_PLATFORM_MESSAGE_RECORD_KIND => {
                 let (message, link) = decode_astrbot_platform_message(values)
@@ -150,6 +151,8 @@ impl AstrBotCapturedBatchProjector {
     fn project_conversation(
         &self,
         conversation: &AstrBotConversationRow,
+        physical_rowid: i64,
+        values: &[CapturedSqliteValue],
         output: &mut dyn ProviderProjectionOutput,
     ) -> ProviderProjectionResult<()> {
         let conversation_row_id = match provider_nonnegative_i64_to_u64(
@@ -179,7 +182,7 @@ impl AstrBotCapturedBatchProjector {
                 else {
                     continue;
                 };
-                let event = native_event(NativeEventDraft {
+                let mut event = native_event(NativeEventDraft {
                     provider: CaptureProvider::AstrBot,
                     source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
                     provider_session_id: provider_session_id.clone(),
@@ -190,7 +193,7 @@ impl AstrBotCapturedBatchProjector {
                     event_type: EventType::Message,
                     role: astrbot_role(item),
                     occurred_at: started_at,
-                    text,
+                    text: text.clone(),
                     body: item.clone(),
                     metadata: json!({
                         "source": "astrbot_conversations",
@@ -200,6 +203,17 @@ impl AstrBotCapturedBatchProjector {
                         "item_index": index,
                     }),
                 });
+                let locator = super::astrbot_complete_message_locator(physical_rowid, index)
+                    .map_err(ProviderProjectionFatal::new)?;
+                crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+                    &mut event,
+                    CaptureProvider::AstrBot,
+                    ASTRBOT_SQLITE_SOURCE_FORMAT,
+                    &locator,
+                    values,
+                    || text.clone(),
+                )
+                .map_err(ProviderProjectionFatal::new)?;
                 output.emit_normalization(ProviderNormalizationResult {
                     captures: vec![(
                         index + 1,
@@ -247,7 +261,7 @@ impl AstrBotCapturedBatchProjector {
             );
         };
         let line = provider_line_from_index(conversation_row_id);
-        let event = native_event(NativeEventDraft {
+        let mut event = native_event(NativeEventDraft {
             provider: CaptureProvider::AstrBot,
             source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
             provider_session_id: provider_session_id.clone(),
@@ -257,7 +271,7 @@ impl AstrBotCapturedBatchProjector {
             event_type: EventType::Message,
             role: None,
             occurred_at: started_at,
-            text,
+            text: text.clone(),
             body: content,
             metadata: json!({
                 "source": "astrbot_conversations",
@@ -265,6 +279,17 @@ impl AstrBotCapturedBatchProjector {
                 "conversation_id": conversation.conversation_id,
             }),
         });
+        let locator = super::astrbot_complete_message_locator(physical_rowid, 0)
+            .map_err(ProviderProjectionFatal::new)?;
+        crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+            &mut event,
+            CaptureProvider::AstrBot,
+            ASTRBOT_SQLITE_SOURCE_FORMAT,
+            &locator,
+            values,
+            || text.clone(),
+        )
+        .map_err(ProviderProjectionFatal::new)?;
         output.emit_normalization(ProviderNormalizationResult {
             captures: vec![(
                 line,
@@ -463,6 +488,77 @@ impl AstrBotCapturedBatchProjector {
             ..ProviderNormalizationResult::default()
         })
     }
+}
+
+pub(super) fn astrbot_complete_conversation_message(
+    values: &[CapturedSqliteValue],
+    item_index: u32,
+) -> Result<Option<(ProviderEventEnvelope, String, String)>> {
+    let conversation = decode_astrbot_conversation(values)?;
+    let provider_session_id = astrbot_provider_session_id(&conversation);
+    let started_at =
+        provider_timestamp_millis(conversation.created_at, DateTime::<Utc>::UNIX_EPOCH);
+    let content = provider_json_text(&conversation.content);
+    if let Value::Array(items) = &content {
+        let Some(item) = items.get(usize::try_from(item_index).unwrap_or(usize::MAX)) else {
+            return Ok(None);
+        };
+        if astrbot_checkpoint_id(item).is_some() {
+            return Ok(None);
+        }
+        let Some(text) = astrbot_item_text(item).filter(|text| !text.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::AstrBot,
+            source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
+            provider_session_id: provider_session_id.clone(),
+            provider_event_index: u64::from(item_index),
+            provider_event_hash: astrbot_item_id(item).map(|id| format!("conversation:{id}")),
+            cursor: format!(
+                "conversation:{}:item:{item_index}",
+                conversation.conversation_id
+            ),
+            event_type: EventType::Message,
+            role: astrbot_role(item),
+            occurred_at: started_at,
+            text: text.clone(),
+            body: item.clone(),
+            metadata: json!({
+                "source": "astrbot_conversations",
+                "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
+                "conversation_id": conversation.conversation_id,
+                "inner_conversation_id": conversation.inner_conversation_id,
+                "item_index": item_index,
+            }),
+        });
+        return Ok(Some((event, text, provider_session_id)));
+    }
+    if item_index != 0 {
+        return Ok(None);
+    }
+    let Some(text) = provider_value_text(&content).filter(|text| !text.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let event = native_event(NativeEventDraft {
+        provider: CaptureProvider::AstrBot,
+        source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.clone(),
+        provider_event_index: 0,
+        provider_event_hash: Some(format!("conversation-row:{}", conversation.row_id)),
+        cursor: format!("conversation:{}:content", conversation.conversation_id),
+        event_type: EventType::Message,
+        role: None,
+        occurred_at: started_at,
+        text: text.clone(),
+        body: content,
+        metadata: json!({
+            "source": "astrbot_conversations",
+            "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
+            "conversation_id": conversation.conversation_id,
+        }),
+    });
+    Ok(Some((event, text, provider_session_id)))
 }
 
 pub(super) struct AstrBotCaptureDraft<'a> {

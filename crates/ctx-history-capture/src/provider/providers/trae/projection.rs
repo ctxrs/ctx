@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use crate::captured_batch::{
     CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, SourceObservation,
 };
+use crate::complete_content::CompleteContentBodyDigest;
 use crate::provider::importer::{
     BoundedParserCheckpoint, CapturedBatchCursorFinish, CapturedBatchProjector,
     CertifiedProviderCursor, ProviderProjectionFatal, ProviderProjectionOutput,
@@ -155,12 +156,14 @@ impl TraeCapturedBatchProjector {
         let Some(selection) = selection else {
             return Ok(());
         };
+        let record_digest = CompleteContentBodyDigest::from_bytes(bytes);
         match selection {
             TraeSessionSelection::CnMessages(messages) => self.project_stream_session(
                 bytes,
                 chat_key,
                 key_index,
                 0,
+                &record_digest,
                 TraeStreamSession {
                     native_session_id: "trae-cn-input-history".to_owned(),
                     metadata_preview: json!({
@@ -190,6 +193,7 @@ impl TraeCapturedBatchProjector {
                             chat_key,
                             key_index,
                             session_index,
+                            &record_digest,
                             session,
                             output,
                         )?;
@@ -208,6 +212,7 @@ impl TraeCapturedBatchProjector {
         chat_key: &str,
         key_index: u16,
         session_index: usize,
+        record_digest: &CompleteContentBodyDigest,
         session: TraeStreamSession,
         output: &mut dyn ProviderProjectionOutput,
     ) -> ProviderProjectionResult<()> {
@@ -294,7 +299,17 @@ impl TraeCapturedBatchProjector {
                         ended_at,
                         title,
                         event,
-                    }),
+                        complete_content_locator: Some(
+                            super::trae_complete_message_locator(
+                                key_index,
+                                session_index,
+                                message_index,
+                            )
+                            .map_err(ProviderProjectionFatal::new)?,
+                        ),
+                        complete_content_record_digest: Some(record_digest.clone()),
+                    })
+                    .map_err(ProviderProjectionFatal::new)?,
                 )],
                 ..ProviderNormalizationResult::default()
             })?;
@@ -330,7 +345,10 @@ impl TraeCapturedBatchProjector {
                 text: String::new(),
                 raw_message: Value::Null,
             },
-        });
+            complete_content_locator: None,
+            complete_content_record_digest: None,
+        })
+        .map_err(ProviderProjectionFatal::new)?;
         refresh.event = None;
         output.emit_normalization(ProviderNormalizationResult {
             captures: vec![(line, refresh)],

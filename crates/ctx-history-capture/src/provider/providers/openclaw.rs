@@ -7,13 +7,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderEventEnvelope, ProviderSourceTrust,
-};
+use ctx_history_core::{CaptureProvider, ProviderEventEnvelope};
 use ctx_history_store::Store;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::captured_batch::jsonl::{
@@ -36,9 +33,7 @@ use crate::provider::importer::{
     ProviderProjectionOutput, ProviderProjectionResult,
 };
 use crate::provider::normalization::{
-    native_event, native_provider_capture, provider_capped_json, provider_local_preview,
-    provider_role, provider_timestamp_value, provider_value_text, NativeEventDraft,
-    NativeSessionDraft,
+    provider_capped_json, provider_local_preview, provider_timestamp_value,
 };
 use crate::provider::providers::native_jsonl::{
     native_jsonl_missing_reason, visit_native_jsonl_files,
@@ -50,9 +45,20 @@ use crate::{
     PROVIDER_MAX_TEXT_CHARS,
 };
 
-const OPENCLAW_CAPTURE_REVISION: u32 = 2;
-const OPENCLAW_POLICY_REVISION: u32 = 5;
+const OPENCLAW_CAPTURE_REVISION: u32 = 3;
+const OPENCLAW_POLICY_REVISION: u32 = 6;
 const OPENCLAW_RECORD_KIND: &str = "openclaw-session-jsonl-v1";
+pub(crate) const OPENCLAW_RESULT_CONTENT_PROFILE: &str = "openclaw-legacy-jsonl.result-body.v1";
+
+mod complete_content;
+mod normalization;
+
+pub(crate) use complete_content::{
+    message_record as openclaw_complete_content_record, result_content as openclaw_result_content,
+    source_from_admitted as openclaw_complete_content_source_from_admitted,
+};
+pub(crate) use normalization::event as openclaw_event;
+use normalization::{capture as openclaw_capture, OpenClawCaptureDraft};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -659,20 +665,13 @@ impl CapturedBatchProjector for OpenClawCapturedBatchProjector {
             self.emit_capture(line_number, None, output)?;
         }
         let occurred_at = provider_timestamp_value(value.get("timestamp"), self.session.started_at);
-        let mut event = openclaw_event(
+        let event = complete_content::event_with_locators(
             &self.session.provider_session_id,
             record.ordinal(),
             line_number,
             &value,
             occurred_at,
-        );
-        crate::complete_content::jsonl::attach_exact_jsonl_complete_content_locator(
-            &mut event,
-            CaptureProvider::OpenClaw,
-            OPENCLAW_SOURCE_FORMAT,
-            &value,
             record,
-            line_number,
             &self.complete_content_binding,
         )
         .map_err(ProviderProjectionFatal::new)?;
@@ -915,50 +914,6 @@ pub(crate) fn import_openclaw_session_jsonl_file_batched(
     }
 }
 
-pub(crate) fn openclaw_complete_content_record(
-    value: &Value,
-    line_number: usize,
-) -> Option<(String, String)> {
-    let row_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("message");
-    let message = value.get("message").unwrap_or(value);
-    let role = message
-        .get("role")
-        .or_else(|| value.get("role"))
-        .and_then(Value::as_str)
-        .map(|role| provider_role(Some(role)));
-    let event_type = match row_type {
-        "message" if role != Some(EventRole::Tool) => EventType::Message,
-        "message" => EventType::ToolOutput,
-        _ => EventType::Notice,
-    };
-    (event_type == EventType::Message).then(|| {
-        let native_record_id = value
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("line-{line_number}"));
-        let text = message
-            .get("content")
-            .or_else(|| message.get("text"))
-            .or_else(|| message.get("output"))
-            .and_then(provider_value_text)
-            .unwrap_or_default();
-        (text, native_record_id)
-    })
-}
-
-pub(crate) fn openclaw_complete_content_source(path: &Path) -> Result<(String, String)> {
-    let observation = OpenClawSessionObservation::read(path)?;
-    Ok((
-        observation.source_revision(),
-        provider_path_identity(&observation.canonical_path)?,
-    ))
-}
-
 pub(crate) fn import_openclaw_session_jsonl_tree_batched(
     path: &Path,
     store: &mut Store,
@@ -1008,122 +963,6 @@ fn openclaw_jsonl_batch_error(error: JsonlBatchError) -> CaptureError {
 
 fn openclaw_captured_batch_error(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
-}
-
-pub(crate) struct OpenClawCaptureDraft<'a> {
-    pub(crate) provider_session_id: &'a str,
-    pub(crate) agent_id: Option<&'a str>,
-    pub(crate) started_at: DateTime<Utc>,
-    pub(crate) ended_at: Option<DateTime<Utc>>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) path: &'a Path,
-    pub(crate) index: Value,
-    pub(crate) header_raw: Value,
-    pub(crate) event: Option<ProviderEventEnvelope>,
-}
-
-pub(crate) fn openclaw_capture(
-    draft: OpenClawCaptureDraft<'_>,
-    context: &ProviderAdapterContext,
-) -> ProviderCaptureEnvelope {
-    let OpenClawCaptureDraft {
-        provider_session_id,
-        agent_id,
-        started_at,
-        ended_at,
-        cwd,
-        path,
-        index,
-        header_raw,
-        event,
-    } = draft;
-    native_provider_capture(
-        NativeSessionDraft {
-            provider: CaptureProvider::OpenClaw,
-            source_format: OPENCLAW_SOURCE_FORMAT,
-            provider_session_id: provider_session_id.to_owned(),
-            parent_provider_session_id: index
-                .get("parentSessionId")
-                .or_else(|| index.get("parent_session_id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            root_provider_session_id: None,
-            external_agent_id: agent_id.map(str::to_owned),
-            agent_type: AgentType::Primary,
-            role_hint: Some("personal-agent".to_owned()),
-            is_primary: true,
-            started_at,
-            ended_at,
-            cwd,
-            fidelity: Fidelity::Partial,
-            raw_source_path: path.display().to_string(),
-            trust: ProviderSourceTrust::ProviderNative,
-            source_metadata: json!({
-                "adapter": OPENCLAW_SOURCE_FORMAT,
-                "index": provider_capped_json(&index, PROVIDER_MAX_PREVIEW_CHARS),
-                "header": provider_capped_json(&header_raw, PROVIDER_MAX_PREVIEW_CHARS),
-                "support_level": "beta",
-            }),
-            session_metadata: json!({
-                "source_format": OPENCLAW_SOURCE_FORMAT,
-                "agent_id": agent_id,
-                "session_index": provider_capped_json(&index, PROVIDER_MAX_PREVIEW_CHARS),
-                "fidelity_gap": "OpenClaw session JSONL is current native storage, but upstream keeps a storage-neutral accessor for future schema changes",
-            }),
-        },
-        context,
-        event,
-    )
-}
-
-pub(crate) fn openclaw_event(
-    provider_session_id: &str,
-    event_index: u64,
-    line_number: usize,
-    row: &Value,
-    occurred_at: DateTime<Utc>,
-) -> ProviderEventEnvelope {
-    let row_type = row.get("type").and_then(Value::as_str).unwrap_or("message");
-    let message = row.get("message").unwrap_or(row);
-    let role = message
-        .get("role")
-        .or_else(|| row.get("role"))
-        .and_then(Value::as_str)
-        .map(|role| provider_role(Some(role)));
-    let event_type = match row_type {
-        "message" => match role {
-            Some(EventRole::Tool) => EventType::ToolOutput,
-            _ => EventType::Message,
-        },
-        "leaf" | "compaction" | "custom" => EventType::Notice,
-        _ => EventType::Notice,
-    };
-    let text = message
-        .get("content")
-        .or_else(|| message.get("text"))
-        .or_else(|| message.get("output"))
-        .and_then(provider_value_text)
-        .unwrap_or_default();
-    native_event(NativeEventDraft {
-        provider: CaptureProvider::OpenClaw,
-        source_format: OPENCLAW_SOURCE_FORMAT,
-        provider_session_id: provider_session_id.to_owned(),
-        provider_event_index: event_index,
-        provider_event_hash: row.get("id").and_then(Value::as_str).map(str::to_owned),
-        cursor: format!("line:{line_number}"),
-        event_type,
-        role,
-        occurred_at,
-        text,
-        body: row.clone(),
-        metadata: json!({
-            "source": "openclaw_jsonl",
-            "source_format": OPENCLAW_SOURCE_FORMAT,
-            "row_type": row_type,
-            "message_id": row.get("id").and_then(Value::as_str),
-            "parent_id": row.get("parentId").or_else(|| row.get("parent_id")).cloned(),
-        }),
-    })
 }
 
 #[cfg(test)]

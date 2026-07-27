@@ -1,4 +1,5 @@
 use super::*;
+use crate::complete_content::VERIFIED_CONTENT_ROUTES;
 
 #[test]
 fn range_encoding_is_fixed_width_and_big_endian() {
@@ -15,17 +16,40 @@ fn range_encoding_is_fixed_width_and_big_endian() {
 #[test]
 fn provider_matrix_is_exact() {
     let resolver = JsonlCompleteContentResolver::new();
-    for (provider, source_format) in SUPPORTED_JSONL_SOURCES {
-        assert!(resolver.supports(*provider, source_format));
+    for route in VERIFIED_CONTENT_ROUTES {
+        if route.role == VerifiedContentRole::MessageBody
+            && verified_content_route_supported(
+                route.provider,
+                route.source_format,
+                CompleteContentSourceFamily::Jsonl,
+                route.role,
+            )
+        {
+            assert!(resolver.supports(route.provider, route.source_format));
+        }
     }
-    assert!(!resolver.supports(CaptureProvider::Claude, "claude_projects_jsonl_tree"));
-    assert!(!resolver.supports(CaptureProvider::Pi, "pi_session_jsonl"));
+    assert!(resolver.supports(CaptureProvider::Claude, "claude_projects_jsonl_tree"));
+    assert!(resolver.supports(CaptureProvider::Pi, "pi_session_jsonl"));
     assert!(!resolver.supports(CaptureProvider::Codex, "codex_history_jsonl"));
 }
 
 #[test]
 fn provider_fixtures_preserve_unicode_and_escaping() {
     const FIXTURES: &[(CaptureProvider, &str, &str, usize, &str)] = &[
+        (
+            CaptureProvider::Claude,
+            crate::CLAUDE_PROJECTS_SOURCE_FORMAT,
+            r#"{"type":"user","uuid":"claude-message-1","message":{"role":"user","content":[{"type":"text","text":"Claude snowman ☕\nquoted \"body\" and escaped \\ path"}]}}"#,
+            0,
+            "Claude snowman ☕\nquoted \"body\" and escaped \\ path",
+        ),
+        (
+            CaptureProvider::Pi,
+            crate::provider::providers::pi::PI_SOURCE_FORMAT,
+            r#"{"type":"message","id":"pi-message-1","message":{"role":"user","content":[{"type":"text","text":"Pi snowman ☕\nquoted \"body\" and escaped \\ path"}]}}"#,
+            0,
+            "Pi snowman ☕\nquoted \"body\" and escaped \\ path",
+        ),
         (
             CaptureProvider::Codex,
             CODEX_SESSION_SOURCE_FORMAT,
@@ -106,4 +130,31 @@ fn provider_fixtures_preserve_unicode_and_escaping() {
                 .unwrap_or_else(|| panic!("missing fixture message for {provider:?}"));
         assert_eq!(&text, expected, "provider {provider:?}");
     }
+}
+
+#[test]
+fn claude_and_pi_compound_result_records_are_not_message_hydration_candidates() {
+    let claude: Value = serde_json::from_str(
+        r#"{"type":"user","uuid":"result-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"output"}]}}"#,
+    )
+    .unwrap();
+    assert!(complete_message_text_and_id(
+        CaptureProvider::Claude,
+        crate::CLAUDE_PROJECTS_SOURCE_FORMAT,
+        &claude,
+        1,
+    )
+    .is_none());
+
+    let pi: Value = serde_json::from_str(
+        r#"{"type":"message","id":"result-1","message":{"role":"toolResult","content":[{"type":"text","text":"output"}]}}"#,
+    )
+    .unwrap();
+    assert!(complete_message_text_and_id(
+        CaptureProvider::Pi,
+        crate::provider::providers::pi::PI_SOURCE_FORMAT,
+        &pi,
+        1,
+    )
+    .is_none());
 }

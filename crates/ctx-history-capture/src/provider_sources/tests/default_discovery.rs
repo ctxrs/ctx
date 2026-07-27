@@ -8,6 +8,25 @@ use super::super::{
 };
 use super::support::{assert_source_status, tempdir, EnvGuard, ENV_LOCK};
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_candidate_list_accepts_ordinary_absolute_codex_file() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = tempdir();
+    let _codex_home = EnvGuard::remove("CODEX_HOME");
+    let path = temp.path().join(".codex/history.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{}\n").unwrap();
+
+    assert!(path.is_absolute());
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Codex)
+        .into_iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    assert_eq!(source.unsupported_reason, None);
+}
+
 #[test]
 fn gemini_default_source_is_empty_until_chat_transcripts_exist() {
     let temp = tempdir();

@@ -68,8 +68,8 @@ pub use error::{CaptureError, Result};
 
 mod summaries;
 pub use summaries::{
-    CatalogSummary, ProviderImportFailure, ProviderImportSummary, SpoolCounts, SpoolImportFailure,
-    SpoolImportSummary, SpoolRepairSummary,
+    CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
+    SpoolCounts, SpoolImportFailure, SpoolImportSummary, SpoolRepairSummary,
 };
 
 mod options;

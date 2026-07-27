@@ -200,7 +200,7 @@ pub(super) struct NanoClawProjectDatabaseSnapshot {
 }
 
 impl NanoClawProjectDatabaseSnapshot {
-    fn read(session_dir: &Path, source: NanoClawMessageSource) -> Result<Self> {
+    pub(super) fn read(session_dir: &Path, source: NanoClawMessageSource) -> Result<Self> {
         let path = session_dir.join(source.file_name());
         let sqlite = NanoClawSqliteSnapshot::read_optional(&path)?;
         Ok(Self {

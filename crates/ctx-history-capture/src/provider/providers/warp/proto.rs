@@ -22,6 +22,10 @@ pub(super) struct WarpMessageProto {
     pub(super) role: Option<EventRole>,
     pub(super) event_type: EventType,
     pub(super) text: String,
+    /// Exact provider-backed text for source reopening. Synthetic labels are
+    /// deliberately excluded even when they remain useful as indexed event
+    /// descriptions.
+    pub(super) complete_text: Option<String>,
 }
 
 impl Default for WarpMessageProto {
@@ -35,6 +39,7 @@ impl Default for WarpMessageProto {
             role: None,
             event_type: EventType::Notice,
             text: String::new(),
+            complete_text: None,
         }
     }
 }
@@ -92,6 +97,7 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
                 message.event_type = EventType::Message;
                 message.text =
                     proto_nested_string_field(proto_len(data, &mut pos)?, 1)?.unwrap_or_default();
+                message.complete_text = Some(message.text.clone());
             }
             (3, 2) => {
                 message.kind = "agent_output";
@@ -99,6 +105,7 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
                 message.event_type = EventType::Message;
                 message.text =
                     proto_nested_string_field(proto_len(data, &mut pos)?, 1)?.unwrap_or_default();
+                message.complete_text = Some(message.text.clone());
             }
             (4, 2) => {
                 let tool_name =
@@ -109,19 +116,23 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
                 message.text = format!("tool call: {tool_name}");
             }
             (5, 2) => {
-                let tool_name = warp_tool_result_name(
-                    proto_first_len_field(proto_len(data, &mut pos)?)?.unwrap_or(0),
-                );
+                let result = proto_len(data, &mut pos)?;
+                let tool_name = warp_tool_result_name(warp_tool_result_field(result)?.unwrap_or(0));
                 message.kind = "tool_call_result";
                 message.role = Some(EventRole::Tool);
                 message.event_type = EventType::ToolOutput;
-                message.text = format!("tool result: {tool_name}");
+                message.complete_text = warp_decode_tool_result_text(result)?;
+                message.text = message
+                    .complete_text
+                    .clone()
+                    .unwrap_or_else(|| format!("tool result: {tool_name}"));
             }
             (9, 2) => {
                 message.kind = "system_query";
                 message.role = Some(EventRole::System);
                 message.event_type = EventType::Message;
                 message.text = warp_decode_system_query(proto_len(data, &mut pos)?)?;
+                message.complete_text = Some(message.text.clone());
             }
             (15, 2) => {
                 message.kind = "agent_reasoning";
@@ -129,12 +140,14 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
                 message.event_type = EventType::Message;
                 message.text =
                     proto_nested_string_field(proto_len(data, &mut pos)?, 1)?.unwrap_or_default();
+                message.complete_text = Some(message.text.clone());
             }
             (16, 2) => {
                 message.kind = "summarization";
                 message.role = Some(EventRole::Assistant);
                 message.event_type = EventType::Message;
                 message.text = warp_decode_summarization(proto_len(data, &mut pos)?)?;
+                message.complete_text = Some(message.text.clone());
             }
             (21, 2) => {
                 message.kind = "debug_output";
@@ -147,11 +160,156 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
                 message.role = Some(EventRole::Assistant);
                 message.event_type = EventType::Message;
                 message.text = warp_decode_received_messages(proto_len(data, &mut pos)?)?;
+                message.complete_text = Some(message.text.clone());
             }
             _ => proto_skip(data, &mut pos, wire)?,
         }
     }
     Ok(message)
+}
+
+/// Extracts one exact textual result body from Warp's typed protobuf result.
+///
+/// This intentionally supports only variants whose provider schema exposes a
+/// single authoritative text payload. Status-only, compound, image, and
+/// binary variants retain their typed event but do not receive a content
+/// locator. Unknown fields are skipped by the protobuf rules and can never be
+/// mistaken for result text.
+pub(super) fn warp_decode_tool_result_text(data: &[u8]) -> Result<Option<String>> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            // RunShellCommandResult.
+            (2, 2) => return warp_decode_run_shell_result(proto_len(data, &mut pos)?),
+            // ServerResult.serialized_result.
+            (4, 2) => return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?),
+            // Deprecated FileGlobResult and FileGlobV2/error-shaped results.
+            (10, 2) => return warp_decode_success_or_error_text(proto_len(data, &mut pos)?, 1),
+            // WriteToLongRunningShellCommandResult.
+            (17, 2) | (35, 2) => {
+                return warp_decode_shell_wrapper_result(proto_len(data, &mut pos)?, 1, 2)
+            }
+            // SubagentResult.payload.
+            (23, 2) => return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?),
+            // ReadShellCommandOutputResult.
+            (27, 2) => return warp_decode_shell_wrapper_result(proto_len(data, &mut pos)?, 2, 3),
+            // Result messages whose error arm is field 2 and carries
+            // Error.message at field 1. Success arms are compound or
+            // status-only and are not flattened into plausible text.
+            (
+                3 | 5 | 6 | 9 | 15 | 16 | 19 | 24 | 25 | 26 | 28 | 30 | 32 | 34 | 36 | 38 | 41 | 42,
+                2,
+            ) => return warp_decode_error_text(proto_len(data, &mut pos)?),
+            // InsertReviewCommentsResult and RequestComputerUseResult use
+            // field 3 for their Error arm.
+            (29 | 31, 2) => return warp_decode_nested_arm_text(proto_len(data, &mut pos)?, 3, 1),
+            // RunAgentsResult has two authoritative textual terminal arms.
+            (39, 2) => return warp_decode_run_agents_result(proto_len(data, &mut pos)?),
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    Ok(None)
+}
+
+fn warp_decode_run_agents_result(data: &[u8]) -> Result<Option<String>> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            // Denied.reason or Failure.error.
+            (2 | 3, 2) => {
+                return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?)
+            }
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    Ok(None)
+}
+
+fn warp_decode_run_shell_result(data: &[u8]) -> Result<Option<String>> {
+    let mut pos = 0;
+    let mut deprecated_output = None;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            (1, 2) => deprecated_output = nonempty(Some(proto_string(data, &mut pos)?))?,
+            // LongRunningShellCommandSnapshot.output.
+            (4, 2) => return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?),
+            // ShellCommandFinished.output.
+            (5, 2) => return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?),
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    Ok(deprecated_output)
+}
+
+fn warp_decode_shell_wrapper_result(
+    data: &[u8],
+    snapshot_field: u32,
+    finished_field: u32,
+) -> Result<Option<String>> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            (field, 2) if field == snapshot_field || field == finished_field => {
+                return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?)
+            }
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    Ok(None)
+}
+
+fn warp_decode_error_text(data: &[u8]) -> Result<Option<String>> {
+    warp_decode_nested_arm_text(data, 2, 1)
+}
+
+fn warp_decode_success_or_error_text(
+    data: &[u8],
+    success_text_field: u32,
+) -> Result<Option<String>> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            (1, 2) => {
+                return nonempty(proto_nested_string_field(
+                    proto_len(data, &mut pos)?,
+                    success_text_field,
+                )?)
+            }
+            (2, 2) => return nonempty(proto_nested_string_field(proto_len(data, &mut pos)?, 1)?),
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    Ok(None)
+}
+
+fn warp_decode_nested_arm_text(
+    data: &[u8],
+    arm_field: u32,
+    text_field: u32,
+) -> Result<Option<String>> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            (field, 2) if field == arm_field => {
+                return nonempty(proto_nested_string_field(
+                    proto_len(data, &mut pos)?,
+                    text_field,
+                )?)
+            }
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    Ok(None)
+}
+
+fn nonempty(value: Option<String>) -> Result<Option<String>> {
+    Ok(value.filter(|text| !text.is_empty()))
 }
 
 pub(super) fn warp_decode_timestamp(data: &[u8]) -> Result<Option<DateTime<Utc>>> {
@@ -264,6 +422,18 @@ pub(super) fn proto_first_len_field(data: &[u8]) -> Result<Option<u32>> {
     while pos < data.len() {
         let (field, wire) = proto_key(data, &mut pos)?;
         if wire == 2 {
+            return Ok(Some(field));
+        }
+        proto_skip(data, &mut pos, wire)?;
+    }
+    Ok(None)
+}
+
+fn warp_tool_result_field(data: &[u8]) -> Result<Option<u32>> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        if wire == 2 && !matches!(field, 1 | 11) {
             return Ok(Some(field));
         }
         proto_skip(data, &mut pos, wire)?;
@@ -387,15 +557,20 @@ pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
     match field {
         2 => "run_shell_command",
         3 => "search_codebase",
+        4 => "server",
         5 => "read_files",
         6 => "apply_file_diffs",
+        7 => "suggest_plan",
         8 => "suggest_create_plan",
         9 => "grep",
+        10 => "file_glob",
+        14 => "cancel",
         15 => "read_mcp_resource",
         16 => "call_mcp_tool",
         17 => "write_to_long_running_shell_command",
         18 => "suggest_new_conversation",
-        19 => "file_glob",
+        19 => "file_glob_v2",
+        20 => "suggest_prompt",
         21 => "open_code_review",
         22 => "init_project",
         23 => "subagent",
@@ -404,11 +579,19 @@ pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
         26 => "create_documents",
         27 => "read_shell_command_output",
         28 => "use_computer",
+        29 => "insert_review_comments",
         30 => "read_skill",
+        31 => "request_computer_use",
         32 => "fetch_conversation",
         33 => "start_agent",
         34 => "send_message_to_agent",
         35 => "transfer_shell_command_control_to_user",
+        36 => "ask_user_question",
+        38 => "upload_file_artifact",
+        39 => "run_agents",
+        40 => "wait_for_events",
+        41 => "start_recording",
+        42 => "stop_recording",
         _ => "unknown",
     }
 }

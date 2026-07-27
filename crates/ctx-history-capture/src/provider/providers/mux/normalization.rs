@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
+    AgentType, CaptureProvider, ContentRef, EventType, Fidelity, ProviderCaptureEnvelope,
     ProviderEventEnvelope, ProviderSourceTrust,
 };
 use serde_json::{json, Value};
@@ -41,6 +41,11 @@ pub(super) struct MuxCaptureDraft<'a> {
     pub(super) source: &'a MuxSessionSource,
     pub(super) raw_source_path: &'a Path,
     pub(super) event: Option<ProviderEventEnvelope>,
+}
+
+pub(super) struct MuxProjectedEvent {
+    pub(super) event: ProviderEventEnvelope,
+    pub(super) result_content_ref: Option<ContentRef>,
 }
 
 pub(super) fn mux_capture(
@@ -95,7 +100,7 @@ pub(super) fn mux_event(
     row: &MuxMessageRow,
     occurred_at: DateTime<Utc>,
     model: Option<&str>,
-) -> ProviderEventEnvelope {
+) -> MuxProjectedEvent {
     let role = row
         .value
         .get("role")
@@ -105,7 +110,12 @@ pub(super) fn mux_event(
     let model_value = model
         .map(str::to_owned)
         .or_else(|| mux_message_model(&row.value));
-    native_event(NativeEventDraft {
+    let result_content_ref = matches!(event_type, EventType::ToolOutput | EventType::CommandOutput)
+        .then(|| mux_result_content(&row.value))
+        .flatten()
+        .filter(|content| content.len() <= crate::complete_content::COMPLETE_CONTENT_MAX_BODY_BYTES)
+        .and_then(|content| ContentRef::from_bytes(content.as_bytes()));
+    let event = native_event(NativeEventDraft {
         provider: CaptureProvider::Mux,
         source_format: MUX_SOURCE_FORMAT,
         provider_session_id: provider_session_id.to_owned(),
@@ -137,10 +147,14 @@ pub(super) fn mux_event(
             "mux_metadata": row.value.pointer("/metadata/muxMetadata").map(|metadata| provider_capped_json_value(metadata, PROVIDER_MAX_PREVIEW_CHARS)),
             "partial": row.value.pointer("/metadata/partial").and_then(Value::as_bool),
         }),
-    })
+    });
+    MuxProjectedEvent {
+        event,
+        result_content_ref,
+    }
 }
 
-fn mux_event_type(value: &Value) -> EventType {
+pub(crate) fn mux_event_type(value: &Value) -> EventType {
     if mux_is_summary_message(value) {
         return EventType::Summary;
     }
@@ -185,7 +199,7 @@ fn mux_is_summary_message(value: &Value) -> bool {
             .is_some_and(|kind| kind.contains("compaction") || kind.contains("summary"))
 }
 
-fn mux_event_text(value: &Value, event_type: EventType) -> String {
+pub(crate) fn mux_event_text(value: &Value, event_type: EventType) -> String {
     let mut rendered = Vec::new();
     if let Some(parts) = value.get("parts").and_then(Value::as_array) {
         for part in parts {
@@ -296,7 +310,12 @@ fn mux_value_preview(value: &Value) -> String {
     provider_local_preview(&raw, PROVIDER_MAX_PREVIEW_CHARS).0
 }
 
-fn mux_event_id(value: &Value, line_number: usize, role: &str, is_partial: bool) -> String {
+pub(crate) fn mux_event_id(
+    value: &Value,
+    line_number: usize,
+    role: &str,
+    is_partial: bool,
+) -> String {
     let prefix = if is_partial { "partial:" } else { "" };
     value
         .get("id")
@@ -308,6 +327,34 @@ fn mux_event_id(value: &Value, line_number: usize, role: &str, is_partial: bool)
                 .map(|sequence| format!("{prefix}historySequence:{sequence}"))
         })
         .unwrap_or_else(|| format!("{prefix}{role}:line-{line_number}"))
+}
+
+/// Exact normalized result body for a Mux dynamic-tool record.
+///
+/// A record containing any redacted output is deliberately ineligible. A
+/// single result preserves its string bytes or canonical JSON serialization;
+/// multiple results use a JSON array so their boundaries cannot be confused.
+pub(crate) fn mux_result_content(value: &Value) -> Option<String> {
+    let parts = value.get("parts")?.as_array()?;
+    let mut outputs = Vec::new();
+    for part in parts {
+        if part.get("type").and_then(Value::as_str) != Some("dynamic-tool") {
+            continue;
+        }
+        if part.get("state").and_then(Value::as_str) == Some("output-redacted") {
+            return None;
+        }
+        let Some(output) = part.get("output").filter(|output| !output.is_null()) else {
+            continue;
+        };
+        outputs.push(output);
+    }
+    match outputs.as_slice() {
+        [] => None,
+        [Value::String(text)] => Some((*text).clone()),
+        [output] => serde_json::to_string(output).ok(),
+        outputs => serde_json::to_string(outputs).ok(),
+    }
 }
 
 pub(super) fn mux_partial_event_index(bytes: &[u8]) -> u64 {

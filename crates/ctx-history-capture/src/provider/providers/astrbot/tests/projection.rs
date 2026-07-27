@@ -97,10 +97,9 @@ fn astrbot_projector_preserves_expected_order_links_and_metadata() {
         }
     }
 
-    assert_eq!(
-        output.normalization.summary,
-        ProviderImportSummary::default()
-    );
+    let mut expected = ProviderImportSummary::default();
+    expected.set_work_result(crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(output.normalization.summary, expected);
     assert!(output.normalization.files_touched.is_empty());
     assert_eq!(output.normalization.captures.len(), 4);
 
@@ -157,4 +156,68 @@ fn astrbot_projector_preserves_expected_order_links_and_metadata() {
         captures[3].session.metadata["fidelity_gap"],
         "platform history row was not linked to a conversations checkpoint"
     );
+}
+
+#[test]
+fn astrbot_attaches_locator_only_to_truncated_conversation_messages() {
+    let directory = crate::test_support_paths::tempdir().unwrap();
+    let path = directory.path().join("data_v4.db");
+    let conn = Connection::open(&path).unwrap();
+    create_tables(&conn);
+    let long_conversation = format!(
+        "complete conversation {}",
+        "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 64)
+    );
+    let long_platform = format!(
+        "complete platform {}",
+        "y".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 64)
+    );
+    insert_conversation(
+        &conn,
+        1,
+        "locator-session",
+        &json!([{"role": "user", "id": "message-1", "content": long_conversation}]).to_string(),
+    );
+    insert_platform_message(&conn, 1, None, &long_platform);
+    drop(conn);
+    let conn = open_provider_sqlite_readonly(&path).unwrap();
+    let batches = produce_all(
+        &conn,
+        test_source("locator"),
+        initial_astrbot_position().unwrap(),
+    );
+    let mut checkpoint = AstrBotParserCheckpoint::empty();
+    checkpoint.source_shape_validated = true;
+    let mut projector = AstrBotCapturedBatchProjector {
+        context: context(Some(path.clone())),
+        raw_source_path: path.display().to_string(),
+        user_version: 0,
+        schema_fingerprint: sqlite_schema_fingerprint(&conn).unwrap(),
+        selected_conversation: None,
+        parser_checkpoint: checkpoint,
+    };
+    let mut output = CollectingProjectionOutput::default();
+    for batch in batches {
+        for record in batch.records() {
+            projector.project_record(record, &mut output).unwrap();
+        }
+    }
+    assert_eq!(output.normalization.captures.len(), 2);
+    let conversation = output.normalization.captures[0].1.event.as_ref().unwrap();
+    let locators = crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
+        &conversation.metadata[crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    assert_eq!(
+        locators
+            .locator(crate::complete_content::VerifiedContentRole::MessageBody)
+            .unwrap()
+            .content_profile(),
+        "astrbot-conversation.message-body.v1"
+    );
+    let platform = output.normalization.captures[1].1.event.as_ref().unwrap();
+    assert!(platform
+        .metadata
+        .get(crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
+        .is_none());
 }

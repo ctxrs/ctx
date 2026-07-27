@@ -14,7 +14,7 @@ mod source;
 
 pub(crate) use normalization::{codebuddy_decoded_message, codebuddy_message_text};
 
-const CODEBUDDY_CAPTURE_REVISION: u32 = 2;
+const CODEBUDDY_CAPTURE_REVISION: u32 = 3;
 const CODEBUDDY_POLICY_REVISION: u32 = 4;
 const CODEBUDDY_CLI_POLICY_REVISION: u32 = 5;
 const CODEBUDDY_EXTENSION_RECORD_KIND: &str = "codebuddy-extension-message-json-v1";
@@ -76,5 +76,5 @@ pub(crate) fn import_codebuddy_history_batched(
 }
 
 pub(crate) use cli::complete_content::{
-    codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source,
+    codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
 };

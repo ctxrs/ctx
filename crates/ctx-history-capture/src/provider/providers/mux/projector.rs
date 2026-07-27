@@ -378,13 +378,23 @@ impl CapturedBatchProjector for MuxCapturedBatchProjector {
             .model
             .clone()
             .or_else(|| mux_message_model(&row.value));
-        let event = mux_event(
+        let projected = mux_event(
             &self.session.provider_session_id,
             event_index,
             &row,
             occurred_at,
             model.as_deref(),
         );
+        let mut event = projected.event;
+        crate::complete_content::jsonl::attach_mux_verified_content_locator(
+            &mut event,
+            projected.result_content_ref.as_ref(),
+            &row.value,
+            record,
+            line_number,
+            self.stream_kind.is_partial(),
+        )
+        .map_err(ProviderProjectionFatal::new)?;
         let raw_source_path = self.source_path.display().to_string();
         let source_root = self.context.source_root_display();
         let agent_type = if self.session.parent_provider_session_id.is_some() {

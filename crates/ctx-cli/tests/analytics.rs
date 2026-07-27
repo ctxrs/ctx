@@ -1082,7 +1082,9 @@ fn hosted_install_marker_enriches_analytics_event_without_properties_leak() {
         hosted_install_marker_path(&binary),
         serde_json::to_vec_pretty(&json!({
             "schema_version": 1,
+            "manager": "ctx-hosted-installer",
             "install_attempt_id": install_attempt_id,
+            "installed_at": ctx_history_core::utc_now(),
             "installer_private_note": marker_secret,
         }))
         .unwrap(),
@@ -1115,6 +1117,47 @@ fn hosted_install_marker_enriches_analytics_event_without_properties_leak() {
         &Value::Object(properties.clone()),
         &[install_attempt_id, marker_secret],
     );
+}
+
+#[test]
+fn expired_hosted_install_attribution_is_ignored() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    let binary = copied_ctx_binary(&temp);
+    fs::write(
+        hosted_install_marker_path(&binary),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+            "install_attempt_id": "ia_expired_hosted_attempt",
+            "installed_at": ctx_history_core::utc_now() - chrono::TimeDelta::days(7),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    ctx_from_binary(&temp, &binary)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_ENABLED")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_AUTO", "off")
+        .assert()
+        .success();
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 1);
+    let cli_event = analytics_cli_event(&events[0]);
+    assert!(cli_event.get("install_attempt_id").is_none());
+    assert!(analytics_event_properties(&events[0])
+        .get("install_manager")
+        .is_none());
 }
 
 #[test]

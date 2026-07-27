@@ -10,11 +10,12 @@ mod tests;
 
 use std::{cell::Cell, fs, path::Path};
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ProviderEventEnvelope};
 use ctx_history_store::Store;
+use rusqlite::Connection;
 
 use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
-use crate::captured_batch::SourceObservation;
+use crate::captured_batch::{CapturedSqliteValue, NativeLocator, SourceObservation};
 use crate::provider::importer::{
     captured_batch_cursor_stream, drain_captured_batches, provider_path_identity,
     provider_source_cursor_stream_for_path, BoundedParserCheckpoint, CapturedBatchCursorMode,
@@ -42,7 +43,42 @@ use self::source::{
 };
 
 const ASTRBOT_CAPTURE_REVISION: u32 = 2;
-const ASTRBOT_POLICY_REVISION: u32 = 4;
+const ASTRBOT_POLICY_REVISION: u32 = 5;
+const ASTRBOT_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "astrbot-conversation-message-v1";
+
+pub(crate) fn astrbot_complete_message_locator(
+    physical_rowid: i64,
+    item_index: usize,
+) -> Result<NativeLocator> {
+    let item_index = u32::try_from(item_index).map_err(|_| {
+        CaptureError::InvalidPayload("AstrBot message index exceeds u32".to_owned())
+    })?;
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&codec::astrbot_ordered_i64(physical_rowid).to_be_bytes());
+    value.extend_from_slice(&item_index.to_be_bytes());
+    NativeLocator::new(ASTRBOT_COMPLETE_MESSAGE_LOCATOR_KIND, value)
+        .map_err(codec::astrbot_captured_error)
+}
+
+pub(crate) fn astrbot_complete_conversation_values(
+    conn: &Connection,
+    physical_rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    let sql = AstrBotSql::new(conn)?;
+    match producer::astrbot_hydrate_conversation(conn, &sql.conversation_hydration, physical_rowid)
+    {
+        Ok(row) => Ok(Some(codec::astrbot_conversation_values(row))),
+        Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn astrbot_complete_conversation_message(
+    values: &[CapturedSqliteValue],
+    item_index: u32,
+) -> Result<Option<(ProviderEventEnvelope, String, String)>> {
+    projector::astrbot_complete_conversation_message(values, item_index)
+}
 
 pub(crate) fn import_astrbot_sqlite_batched(
     path: &Path,

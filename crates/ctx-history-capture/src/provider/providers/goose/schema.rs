@@ -237,17 +237,24 @@ pub(super) fn goose_message_expressions(
 pub(super) fn goose_message_only_values(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
+    goose_message_values_at(row, 0)
+}
+
+pub(super) fn goose_message_values_at(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
     Ok(vec![
-        CapturedSqliteValue::Integer(row.get(0)?),
-        CapturedSqliteValue::Integer(row.get(1)?),
-        goose_optional_text_value(row.get(2)?),
-        CapturedSqliteValue::Text(row.get(3)?),
-        CapturedSqliteValue::Text(row.get(4)?),
-        CapturedSqliteValue::Text(row.get(5)?),
-        goose_optional_integer_value(row.get(6)?),
-        goose_optional_text_value(row.get(7)?),
-        goose_optional_text_value(row.get(8)?),
-        goose_optional_text_value(row.get(9)?),
+        CapturedSqliteValue::Integer(row.get(offset)?),
+        CapturedSqliteValue::Integer(row.get(offset + 1)?),
+        goose_optional_text_value(row.get(offset + 2)?),
+        CapturedSqliteValue::Text(row.get(offset + 3)?),
+        CapturedSqliteValue::Text(row.get(offset + 4)?),
+        CapturedSqliteValue::Text(row.get(offset + 5)?),
+        goose_optional_integer_value(row.get(offset + 6)?),
+        goose_optional_text_value(row.get(offset + 7)?),
+        goose_optional_text_value(row.get(offset + 8)?),
+        goose_optional_text_value(row.get(offset + 9)?),
     ])
 }
 

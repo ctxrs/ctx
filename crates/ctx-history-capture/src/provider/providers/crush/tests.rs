@@ -10,7 +10,8 @@ use super::capture::{
     CrushRowFetcher, CRUSH_SQLITE_VALUE_OVERHEAD_BYTES,
 };
 use super::projection::{
-    decode_message_child as decode_crush_message_child, CrushCapturedBatchProjector,
+    crush_normalized_result_content, decode_message_child as decode_crush_message_child,
+    CrushCapturedBatchProjector,
 };
 use super::source::{
     message_columns as crush_message_columns, optional_file_columns as crush_optional_file_columns,
@@ -39,6 +40,34 @@ const PREVIOUS_CRUSH_CAPTURE_REVISION: u32 = 2;
 const UPSTREAM_CRUSH_INITIAL_DDL: &str = include_str!(
     "../../../../../../tests/fixtures/provider-history/crush/upstream-v1/20250424200609_initial.sql"
 );
+
+#[test]
+fn crush_result_content_is_unbounded_ordered_and_uses_explicit_fields() {
+    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 31);
+    let parts = json!([
+        {"type": "text", "data": {"output": "not a result"}},
+        {"type": "tool_result", "data": {
+            "content": long.clone(),
+            "output": "lower priority"
+        }},
+        {"type": "shell_command", "data": {
+            "stdout": "stdout fallback",
+            "stderr": "lower priority"
+        }},
+        {"type": "unknown", "data": {"output": "not discovered"}}
+    ]);
+
+    assert_eq!(
+        crush_normalized_result_content(&parts),
+        Some(format!("{long}\nstdout fallback"))
+    );
+    assert_eq!(
+        crush_normalized_result_content(&json!([
+            {"type": "text", "data": {"output": "not a result"}}
+        ])),
+        None
+    );
+}
 
 #[derive(Default)]
 struct CollectingProjectionOutput {

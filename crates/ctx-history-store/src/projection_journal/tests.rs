@@ -166,7 +166,12 @@ fn activation_is_deterministic_and_free_users_have_no_rows() {
                 sequence: 1
             }
         );
-        snapshots.push(store.projection_journal_snapshot(None).unwrap());
+        let snapshot = store.projection_journal_snapshot(None).unwrap();
+        assert_eq!(
+            snapshot.canonical_schema_identity,
+            crate::CANONICAL_PROJECTION_SCHEMA_IDENTITY
+        );
+        snapshots.push(snapshot);
     }
     assert_eq!(snapshots[0], snapshots[1]);
 }
@@ -963,8 +968,7 @@ fn complete_content_and_repository_roots_never_enter_payloads() {
     value.capture_source_id = Some(source_id);
     value.sync.metadata = json!({
         "source_record_ordinal": 0,
-        "complete_content_locator_v1": {"path": "/secret/body"},
-        "complete_content_body_sha256": "b".repeat(64)
+        "verified_content_locators_v1": {"version": 1, "locators": [{"path": "/secret/body"}]}
     });
     store.upsert_event(&value).unwrap();
     store.activate_projection_journal(FINGERPRINT).unwrap();
@@ -975,8 +979,7 @@ fn complete_content_and_repository_roots_never_enter_payloads() {
             .unwrap(),
     )
     .unwrap();
-    assert!(!payload.contains("complete_content_locator_v1"));
-    assert!(!payload.contains("complete_content_body_sha256"));
+    assert!(!payload.contains("verified_content_locators_v1"));
     assert!(!payload.contains("/secret/repo"));
     assert!(!payload.contains("/secret/provider-root"));
     assert!(payload.contains("/provider/session.jsonl"));

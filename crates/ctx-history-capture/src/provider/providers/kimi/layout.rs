@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, Metadata},
-    io::{BufReader, Read},
+    io::{BufReader, Cursor, Read},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -221,6 +221,56 @@ impl KimiWireLayout {
         })
     }
 
+    pub(super) fn read_from_admitted(
+        path: &Path,
+        canonical_wire_path: PathBuf,
+        wire_metadata: &Metadata,
+        state: Option<(&Metadata, &[u8])>,
+        index: Option<(&Metadata, &[u8])>,
+    ) -> Result<Self> {
+        let paths = KimiWirePaths::from_wire_path(path)?;
+        let wire = KimiFrozenFileMetadata::from_metadata(wire_metadata)?;
+        let (state_file, state) = match state {
+            Some((metadata, bytes)) => {
+                let frozen = KimiFrozenFileMetadata::from_metadata(metadata)?;
+                if frozen.length > KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64 {
+                    return Err(CaptureError::InvalidPayload(format!(
+                        "Kimi Code CLI state.json exceeds the {KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES}-byte layout limit (observed {} bytes)",
+                        frozen.length
+                    )));
+                }
+                (
+                    Some(frozen),
+                    serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null),
+                )
+            }
+            None => (None, Value::Null),
+        };
+        let (index_file, index_entry) = match index {
+            Some((metadata, bytes)) => {
+                let frozen = KimiFrozenFileMetadata::from_metadata(metadata)?;
+                if frozen.length > KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64 {
+                    return Err(kimi_index_bytes_error(frozen.length));
+                }
+                let entry = read_kimi_session_index_entry_from_reader(
+                    BufReader::new(Cursor::new(bytes)),
+                    &paths.session_id,
+                )?;
+                (Some(frozen), entry)
+            }
+            None => (None, None),
+        };
+        Ok(Self {
+            paths,
+            canonical_wire_path,
+            wire,
+            state_file,
+            state,
+            index_file,
+            index_entry,
+        })
+    }
+
     pub(super) fn canonical_wire_path(&self) -> &Path {
         &self.canonical_wire_path
     }
@@ -264,6 +314,11 @@ impl KimiWireLayout {
     }
 }
 
+pub(super) fn complete_content_auxiliary_paths(path: &Path) -> Result<(PathBuf, PathBuf)> {
+    let paths = KimiWirePaths::from_wire_path(path)?;
+    Ok((paths.state_path, paths.index_path))
+}
+
 fn read_kimi_state(path: &Path, file: &KimiFrozenFileMetadata) -> Result<Value> {
     if file.length > KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64 {
         return Err(CaptureError::InvalidPayload(format!(
@@ -289,7 +344,13 @@ fn read_kimi_session_index_entry(
     }
     let file = File::open(path)?;
     let limited = file.take(KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64.saturating_add(1));
-    let mut reader = BufReader::new(limited);
+    read_kimi_session_index_entry_from_reader(BufReader::new(limited), expected_session_id)
+}
+
+fn read_kimi_session_index_entry_from_reader<R: Read>(
+    mut reader: BufReader<R>,
+    expected_session_id: &str,
+) -> Result<Option<KimiSessionIndexEntry>> {
     let mut line = Vec::new();
     let mut aggregate_bytes = 0_usize;
     let mut entries = 0_usize;

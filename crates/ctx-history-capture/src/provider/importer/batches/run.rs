@@ -7,7 +7,10 @@ use crate::captured_batch::{
     CapturedBatch, NativePosition, CAPTURE_BATCH_MAX_BATCHES_PER_GROUP,
     CAPTURE_BATCH_MAX_PAYLOAD_BYTES,
 };
-use crate::{CaptureError, NormalizedProviderImportOptions, ProviderImportSummary, Result};
+use crate::{
+    CaptureError, NormalizedProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
+    Result,
+};
 
 use super::super::cursors::captured_batch_cursor_stream;
 use super::admission::CapturedSourceAdmission;
@@ -344,7 +347,7 @@ where
     Projector: CapturedBatchProjector,
     Revalidate: FnOnce() -> Result<bool>,
 {
-    CapturedImportRun::new(
+    let mut outcome = CapturedImportRun::new(
         store,
         admission,
         options,
@@ -358,7 +361,12 @@ where
         initial_native_position,
         cursor_mode,
         revalidate_source,
-    )
+    )?;
+    outcome.summary.set_work_result(captured_batch_work_result(
+        cursor_mode,
+        outcome.batches_imported,
+    ));
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -381,7 +389,7 @@ where
     NextBatch: FnMut() -> Result<Option<CapturedBatch>>,
     Revalidate: FnMut() -> Result<bool>,
 {
-    CapturedImportRun::new(
+    let mut outcome = CapturedImportRun::new(
         store,
         admission,
         options,
@@ -397,7 +405,12 @@ where
         next_batch,
         revalidate_source,
         CapturedBatchSequenceMode::OneSafeGroup,
-    )
+    )?;
+    outcome.summary.set_work_result(captured_batch_work_result(
+        initial_cursor_mode,
+        outcome.batches_imported,
+    ));
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -449,6 +462,10 @@ where
         revalidate_source,
         sequence_mode,
     )?;
+    outcome.summary.set_work_result(captured_batch_work_result(
+        cursor_mode,
+        outcome.batches_imported,
+    ));
     if !outcome.cursor_safe {
         return Err(CaptureError::SystemInvariant(
             "captured batch drain returned without a parser-safe cursor",
@@ -457,4 +474,15 @@ where
     outcome.summary.work_remaining =
         sequence_mode == CapturedBatchSequenceMode::OneSafeGroup && !outcome.source_exhausted;
     Ok(outcome.summary)
+}
+
+fn captured_batch_work_result(
+    cursor_mode: CapturedBatchCursorMode,
+    batches_imported: usize,
+) -> ProviderImportWorkResult {
+    if cursor_mode == CapturedBatchCursorMode::ResetChangedSource || batches_imported > 0 {
+        ProviderImportWorkResult::Changed
+    } else {
+        ProviderImportWorkResult::NoOp
+    }
 }

@@ -1,8 +1,9 @@
 use super::super::position::{
-    decode_nanoclaw_position, encode_nanoclaw_position, nanoclaw_locator, NanoClawKeyset,
-    NanoClawMessageSource, NanoClawPositionPhase,
+    decode_nanoclaw_message_locator, decode_nanoclaw_position, encode_nanoclaw_position,
+    nanoclaw_locator, nanoclaw_message_locator, NanoClawKeyset, NanoClawMessageSource,
+    NanoClawPositionPhase,
 };
-use super::super::{NANOCLAW_LOCATOR_KIND, NANOCLAW_POSITION_KIND};
+use super::super::{NANOCLAW_LOCATOR_KIND, NANOCLAW_MESSAGE_LOCATOR_KIND, NANOCLAW_POSITION_KIND};
 
 #[test]
 fn position_and_locator_wire_bytes_remain_stable() {
@@ -32,4 +33,19 @@ fn position_and_locator_wire_bytes_remain_stable() {
     let locator = nanoclaw_locator(Some(NanoClawMessageSource::Outbound), 9).unwrap();
     assert_eq!(locator.kind(), NANOCLAW_LOCATOR_KIND);
     assert_eq!(locator.value(), [2, 128, 0, 0, 0, 0, 0, 0, 9]);
+
+    let message_locator = nanoclaw_message_locator(42, NanoClawMessageSource::Outbound, 9).unwrap();
+    assert_eq!(message_locator.kind(), NANOCLAW_MESSAGE_LOCATOR_KIND);
+    assert_eq!(
+        message_locator.value(),
+        [128, 0, 0, 0, 0, 0, 0, 42, 2, 128, 0, 0, 0, 0, 0, 0, 9,]
+    );
+    assert_eq!(
+        decode_nanoclaw_message_locator(&message_locator).unwrap(),
+        super::super::position::NanoClawMessageLocator {
+            session_rowid: 42,
+            source: NanoClawMessageSource::Outbound,
+            message_rowid: 9,
+        }
+    );
 }

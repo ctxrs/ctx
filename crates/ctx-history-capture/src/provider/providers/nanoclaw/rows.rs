@@ -11,6 +11,7 @@ use crate::{CaptureError, Result};
 use super::position::{NanoClawKeyset, NanoClawMessageSource};
 
 const NANOCLAW_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
+const NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT: usize = 14;
 
 #[derive(Debug, Clone)]
 pub(super) struct NanoClawSessionRow {
@@ -503,7 +504,7 @@ fn nanoclaw_message_values_from_row(
 pub(super) fn decode_nanoclaw_message_record(
     values: &[CapturedSqliteValue],
 ) -> Result<(NanoClawMessageRow, NanoClawSessionRow)> {
-    if values.len() != 29 {
+    if values.len() != NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT + 15 {
         return Err(CaptureError::SystemInvariant(
             "NanoClaw message logical row has an invalid value shape",
         ));
@@ -534,7 +535,21 @@ pub(super) fn decode_nanoclaw_message_record(
         source_session_id: nanoclaw_optional_text(&values[12])?,
         on_wake: nanoclaw_optional_i64(&values[13])?,
     };
-    Ok((message, decode_nanoclaw_session(&values[14..])?))
+    Ok((
+        message,
+        decode_nanoclaw_session(&values[NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT..])?,
+    ))
+}
+
+pub(super) fn nanoclaw_message_values_for_content_digest(
+    values: &[CapturedSqliteValue],
+) -> Result<&[CapturedSqliteValue]> {
+    if values.len() != NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT + 15 {
+        return Err(CaptureError::SystemInvariant(
+            "NanoClaw message logical row has an invalid value shape",
+        ));
+    }
+    Ok(&values[..NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT])
 }
 
 pub(super) fn decode_nanoclaw_session(

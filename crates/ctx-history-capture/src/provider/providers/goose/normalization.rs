@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::normalization::{
     native_event, native_provider_capture, provider_json_text, provider_line_from_index,
-    provider_role, provider_timestamp_seconds, provider_value_text, text_id_index,
-    NativeEventDraft, NativeSessionDraft,
+    provider_normalized_result_value, provider_role, provider_timestamp_seconds,
+    provider_value_text, text_id_index, NativeEventDraft, NativeSessionDraft,
 };
 use crate::{
     ProviderAdapterContext, ProviderNormalizationResult, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
@@ -63,6 +63,8 @@ pub(super) fn goose_message_normalization(
         .as_deref()
         .map(|timestamp| goose_timestamp(Some(timestamp), occurred_at));
     let event_type = goose_event_type(&message.role, &content);
+    let complete_text = goose_complete_content_text(&content)
+        .unwrap_or_else(|| format!("Goose {} message", message.role));
     let text =
         goose_content_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
     let event = native_event(NativeEventDraft {
@@ -119,6 +121,7 @@ pub(super) fn goose_message_normalization(
         event,
         raw_content: content,
         capture,
+        complete_text,
     })
 }
 
@@ -128,6 +131,7 @@ pub(super) struct GooseMessageProjection {
     pub(super) event: ProviderEventEnvelope,
     pub(super) raw_content: Value,
     pub(super) capture: ProviderCaptureEnvelope,
+    pub(super) complete_text: String,
 }
 
 pub(super) struct GooseMessageRejection {
@@ -246,7 +250,7 @@ fn goose_event_index(message: &GooseMessageRow) -> u64 {
         .saturating_add(text_id_index(&goose_message_identity(message), 0) % 4_096)
 }
 
-fn goose_message_identity(message: &GooseMessageRow) -> String {
+pub(super) fn goose_message_identity(message: &GooseMessageRow) -> String {
     message
         .message_id
         .clone()
@@ -316,6 +320,61 @@ fn goose_content_text(content: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+/// Returns complete normalized Goose tool-response bodies in native array
+/// order. Only direct `toolResponse` blocks and their documented result fields
+/// are accepted; arbitrary object descendants are not searched. The caller
+/// owns any byte bound.
+#[allow(dead_code)] // Activated by SQLite result-locator attachment.
+pub(crate) fn goose_normalized_result_content(content: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    goose_collect_result_content(content, &mut parts);
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+pub(crate) fn goose_complete_content_text(content: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    goose_collect_complete_text(content, &mut parts);
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn goose_collect_complete_text(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                goose_collect_complete_text(item, parts);
+            }
+        }
+        Value::Object(object) => {
+            let before = parts.len();
+            goose_collect_text(value, parts);
+            if parts.len() == before {
+                for child in object.values() {
+                    goose_collect_complete_text(child, parts);
+                }
+            }
+        }
+        _ => goose_collect_text(value, parts),
+    }
+}
+
+fn goose_collect_result_content(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                goose_collect_result_content(item, parts);
+            }
+        }
+        Value::Object(object)
+            if object.get("type").and_then(Value::as_str) == Some("toolResponse") =>
+        {
+            if let Some(value) = goose_tool_response_value(object) {
+                parts.push(provider_normalized_result_value(value));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
     match value {
         Value::String(text) => parts.push(text.clone()),
@@ -363,11 +422,10 @@ fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
                 }
                 Some("toolResponse") => {
                     parts.push("tool response".to_owned());
-                    for key in ["toolResult", "content", "result"] {
-                        if let Some(text) = object.get(key).and_then(provider_value_text) {
-                            parts.push(text);
-                            break;
-                        }
+                    if let Some(text) =
+                        goose_tool_response_value(object).and_then(provider_value_text)
+                    {
+                        parts.push(text);
                     }
                 }
                 Some("toolConfirmationRequest") => {
@@ -394,4 +452,10 @@ fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
         Value::Number(_) | Value::Bool(_) => parts.push(value.to_string()),
         Value::Null => {}
     }
+}
+
+fn goose_tool_response_value(object: &serde_json::Map<String, Value>) -> Option<&Value> {
+    ["toolResult", "content", "result"]
+        .iter()
+        .find_map(|key| object.get(*key))
 }

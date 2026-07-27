@@ -15,7 +15,7 @@ use super::relationships::{
     decode_shelley_conversation, decode_shelley_message, decode_shelley_message_child_record,
     decode_shelley_message_parent, ShelleyRelationshipState,
 };
-use super::row_stream::initial_shelley_position;
+use super::row_position::initial_shelley_position;
 use super::{
     SHELLEY_CONVERSATION_RECORD_KIND, SHELLEY_MESSAGE_CHILD_RECORD_KIND,
     SHELLEY_MESSAGE_KEY_MARKER_KIND, SHELLEY_MESSAGE_KEY_REJECTION_KIND,
@@ -119,7 +119,9 @@ impl CapturedBatchProjector for ShelleyCapturedBatchProjector {
                     self.user_version,
                     &self.schema_fingerprint,
                     &self.context,
+                    true,
                 )
+                .map_err(ProviderProjectionFatal::new)?
             }
             SHELLEY_MESSAGE_CHILD_RECORD_KIND => {
                 let (message, has_conversation) = match decode_shelley_message_child_record(values)
@@ -160,7 +162,9 @@ impl CapturedBatchProjector for ShelleyCapturedBatchProjector {
                     self.user_version,
                     &self.schema_fingerprint,
                     &self.context,
+                    false,
                 )
+                .map_err(ProviderProjectionFatal::new)?
             }
             SHELLEY_CONVERSATION_RECORD_KIND | SHELLEY_OVERSIZE_SESSION_RECORD_KIND => {
                 let conversation = match decode_shelley_conversation(values) {

@@ -1,5 +1,5 @@
 use ctx_history_core::{CaptureProvider, ProviderCaptureEnvelope, ProviderSourceEnvelope};
-use ctx_history_store::Store;
+use ctx_history_store::{ProviderSourceRouteBinding, Store};
 use uuid::Uuid;
 
 use crate::{
@@ -16,6 +16,7 @@ pub(crate) struct CanonicalProviderSourceOverride {
     pub(super) stable_session_identity: String,
     pub(super) machine_id: String,
     pub(super) uses_relocation_alias: bool,
+    pub(super) route_binding: ProviderSourceRouteBinding,
 }
 
 pub(crate) fn import_provider_capture_line(

@@ -242,6 +242,25 @@ impl CapturedBatchProjector for KimiCapturedBatchProjector {
             &self.complete_content_binding,
         )
         .map_err(ProviderProjectionFatal::new)?;
+        if let Some((content, native_record_id)) =
+            crate::complete_content::jsonl::result_content_and_id(
+                CaptureProvider::KimiCodeCli,
+                KIMI_CODE_CLI_SOURCE_FORMAT,
+                &value,
+                line_number,
+            )
+        {
+            crate::complete_content::jsonl::attach_exact_jsonl_result_content_locator(
+                &mut event,
+                CaptureProvider::KimiCodeCli,
+                KIMI_CODE_CLI_SOURCE_FORMAT,
+                &content,
+                &native_record_id,
+                record,
+                &self.complete_content_binding,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
         let raw_source_path = path.to_string_lossy();
         let source_root = self.context.source_root_display();
         emit_projected_normalization_units(

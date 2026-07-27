@@ -487,7 +487,12 @@ in OS user state, such as `$XDG_STATE_HOME/ctx/device.json` or
 eligible, ctx creates a private versioned claim in that state directory and
 promotes it to a version marker after delivery. A failed or uncertain delivery
 does not change command output or exit status and leaves the claim in place to
-avoid replay.
+avoid replay. For an official hosted installation, eligible product-analytics
+events may also carry the installer attempt identifier for less than seven days
+after the marker's installation timestamp so aggregate reporting can measure
+initial activation. ctx omits that bridge at the seven-day boundary and
+whenever the marker timestamp is absent, malformed, or in the future. Managed
+upgrades preserve the original timestamp instead of reopening the window.
 
 Disable telemetry with either CLI control:
 

@@ -3,6 +3,7 @@ use crate::{CaptureError, Result};
 
 const WARP_POSITION_KIND: &str = "warp-conversation-task-keyset-v4";
 const WARP_LOCATOR_KIND: &str = "warp-conversation-task-row-v2";
+pub(super) const WARP_CONTENT_LOCATOR_KIND: &str = "warp-task-message-v1";
 const WARP_POSITION_BYTES: usize = 1 + 8 + 1 + 1 + 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,13 @@ pub(super) fn warp_locator(phase: WarpPhase, rowid: i64) -> Result<NativeLocator
     value.push(phase.tag());
     value.extend_from_slice(&warp_ordered_i64(rowid).to_be_bytes());
     NativeLocator::new(WARP_LOCATOR_KIND, value).map_err(warp_captured_error)
+}
+
+pub(super) fn warp_content_locator(rowid: i64, message_index: u32) -> Result<NativeLocator> {
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&rowid.to_be_bytes());
+    value.extend_from_slice(&message_index.to_be_bytes());
+    NativeLocator::new(WARP_CONTENT_LOCATOR_KIND, value).map_err(warp_captured_error)
 }
 
 fn warp_captured_error(error: impl std::fmt::Display) -> CaptureError {

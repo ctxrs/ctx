@@ -16,8 +16,13 @@ mod projector;
 mod session_tree;
 mod source;
 
+pub(crate) use assistant::{
+    junie_buffer_result_text, junie_buffer_step_output, junie_merge_buffered_agent_event,
+    JunieAssistantBuffer,
+};
+
 const JUNIE_CAPTURE_REVISION: u32 = 2;
-const JUNIE_POLICY_REVISION: u32 = 4;
+const JUNIE_POLICY_REVISION: u32 = 5;
 const JUNIE_SOURCE_REVISION_SCHEMA: &str = "junie-session-events-v2";
 const JUNIE_RECORD_KIND: &str = "junie-session-events-jsonl-v1";
 const JUNIE_END_RECORD_KIND: &str = "junie-session-events-end-v1";

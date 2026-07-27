@@ -68,11 +68,44 @@ pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn ensure_supported_windows_provider_path_prefix(path: &Path) -> Result<()> {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Ok(());
+    };
+    if !matches!(
+        prefix.kind(),
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _)
+    ) {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "unsupported Windows provider transcript path prefixes are rejected",
+        });
+    }
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "drive-relative provider transcript paths are rejected",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_provider_path_parents_are_not_symlinks(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    ensure_supported_windows_provider_path_prefix(path)?;
+
     let parent_count = path.components().count().saturating_sub(1);
     let mut current = PathBuf::new();
     for component in path.components().take(parent_count) {
         current.push(component.as_os_str());
+        #[cfg(target_os = "windows")]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
         if current.as_os_str().is_empty() {
             continue;
         }

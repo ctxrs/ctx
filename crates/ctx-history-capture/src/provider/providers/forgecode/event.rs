@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 
 use crate::provider::file_touches::{normalized_key, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT};
 use crate::provider::normalization::{
-    provider_line_from_index, provider_role, provider_timestamp_value, provider_value_text,
+    provider_line_from_index, provider_normalized_result_value, provider_role,
+    provider_timestamp_value, provider_value_text,
 };
 use crate::provider::providers::goose::goose_timestamp;
 use crate::{ProviderFileTouchedEnvelope, FORGECODE_SQLITE_SOURCE_FORMAT};
@@ -163,48 +164,61 @@ fn forgecode_tool_result_text(body: &Value) -> String {
     {
         parts.push("tool error".to_owned());
     }
-    if let Some(values) = body.pointer("/output/values").and_then(Value::as_array) {
-        for value in values {
-            if let Some(text) = forgecode_tool_value_text(value) {
-                parts.push(text);
-            }
-        }
+    if let Some(content) = forgecode_normalized_result_content(body) {
+        parts.push(content);
     }
     parts.join("\n")
+}
+
+/// Returns ForgeCode's complete normalized tool-result body.
+///
+/// The DTO owns an ordered `output.values` list. Variant selection below has
+/// explicit precedence and never searches arbitrary descendants for an
+/// output-looking field. The caller owns any byte bound.
+pub(crate) fn forgecode_normalized_result_content(body: &Value) -> Option<String> {
+    let values = body.pointer("/output/values").and_then(Value::as_array)?;
+    let parts = values
+        .iter()
+        .filter_map(forgecode_tool_value_text)
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 fn forgecode_tool_value_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Object(object) => {
-            for (key, child) in object {
-                match normalized_key(key).as_str() {
-                    "text" | "markdown" => return child.as_str().map(str::to_owned),
-                    "ai" => {
-                        return child
-                            .get("value")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                            .or_else(|| provider_value_text(child));
-                    }
-                    "image" => return Some(forgecode_image_text(child)),
-                    "filediff" => {
-                        let path = child
-                            .get("path")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown");
-                        return Some(format!("[File diff: {path}]"));
-                    }
-                    "pair" => {
-                        if let Some(items) = child.as_array() {
-                            return items.first().and_then(forgecode_tool_value_text);
-                        }
-                    }
-                    "empty" => return None,
-                    _ => {}
-                }
+            if let Some(child) = object_value_by_normalized_key(object, "text")
+                .or_else(|| object_value_by_normalized_key(object, "markdown"))
+            {
+                return child.as_str().map(str::to_owned);
             }
-            provider_value_text(value)
+            if let Some(child) = object_value_by_normalized_key(object, "ai") {
+                return child
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| Some(provider_normalized_result_value(child)));
+            }
+            if let Some(child) = object_value_by_normalized_key(object, "image") {
+                return Some(forgecode_image_text(child));
+            }
+            if let Some(child) = object_value_by_normalized_key(object, "filediff") {
+                let path = child
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                return Some(format!("[File diff: {path}]"));
+            }
+            if let Some(items) =
+                object_value_by_normalized_key(object, "pair").and_then(Value::as_array)
+            {
+                return items.first().and_then(forgecode_tool_value_text);
+            }
+            if object_value_by_normalized_key(object, "empty").is_some() {
+                return None;
+            }
+            Some(provider_normalized_result_value(value))
         }
         Value::Array(items) => {
             let parts = items
@@ -216,6 +230,16 @@ fn forgecode_tool_value_text(value: &Value) -> Option<String> {
         Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
         Value::Null => None,
     }
+}
+
+fn object_value_by_normalized_key<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    expected: &str,
+) -> Option<&'a Value> {
+    object
+        .iter()
+        .find(|(key, _)| normalized_key(key) == expected)
+        .map(|(_, value)| value)
 }
 
 fn forgecode_image_text(body: &Value) -> String {

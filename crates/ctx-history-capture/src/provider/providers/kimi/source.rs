@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    fs::Metadata,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::AgentType;
@@ -39,7 +42,26 @@ pub(super) struct KimiWireObservation {
 
 impl KimiWireObservation {
     pub(super) fn read(path: &Path) -> Result<Self> {
-        let mut layout = KimiWireLayout::read(path)?;
+        Self::from_layout(KimiWireLayout::read(path)?)
+    }
+
+    pub(super) fn read_from_admitted(
+        path: &Path,
+        canonical_wire_path: PathBuf,
+        wire_metadata: &Metadata,
+        state: Option<(&Metadata, &[u8])>,
+        index: Option<(&Metadata, &[u8])>,
+    ) -> Result<Self> {
+        Self::from_layout(KimiWireLayout::read_from_admitted(
+            path,
+            canonical_wire_path,
+            wire_metadata,
+            state,
+            index,
+        )?)
+    }
+
+    fn from_layout(mut layout: KimiWireLayout) -> Result<Self> {
         let state = layout.take_state();
         let index_entry = layout.take_index_entry();
         let agent_id = layout.agent_id().to_owned();

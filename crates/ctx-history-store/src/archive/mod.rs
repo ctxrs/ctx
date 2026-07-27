@@ -27,8 +27,18 @@ pub(crate) struct ImportedArchiveCanonicalIds {
     pub(crate) vcs_change_ids: BTreeSet<Uuid>,
 }
 
+fn strip_local_verified_content_locators(events: &mut [ctx_history_core::Event]) {
+    for event in events {
+        crate::canonical_observations::strip_local_complete_content_metadata(
+            &mut event.sync.metadata,
+        );
+    }
+}
+
 impl Store {
     pub fn export_archive(&self) -> Result<SessionHistoryArchive> {
+        let mut events = self.list_events()?;
+        strip_local_verified_content_locators(&mut events);
         Ok(SessionHistoryArchive {
             schema_version: 2,
             version: 2,
@@ -36,7 +46,7 @@ impl Store {
             capture_sources: self.list_capture_sources()?,
             sessions: self.list_sessions()?,
             runs: self.list_runs()?,
-            events: self.list_events()?,
+            events,
             artifact_records: self.list_artifacts()?,
             vcs_workspaces: self.list_vcs_workspaces()?,
             vcs_changes: self.list_vcs_changes()?,
@@ -51,6 +61,9 @@ impl Store {
         archive: &SessionHistoryArchive,
         overwrite: bool,
     ) -> Result<()> {
+        let mut archive = archive.clone();
+        strip_local_verified_content_locators(&mut archive.events);
+        let archive = &archive;
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
@@ -88,6 +101,9 @@ impl Store {
         fidelity: Fidelity,
         overwrite: bool,
     ) -> Result<()> {
+        let mut archive = archive.clone();
+        strip_local_verified_content_locators(&mut archive.events);
+        let archive = &archive;
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();

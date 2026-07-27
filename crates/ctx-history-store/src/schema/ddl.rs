@@ -186,6 +186,22 @@ WHERE is_current = 1;
 CREATE INDEX IF NOT EXISTS idx_provider_source_locators_revision
 ON provider_source_locators(provider, source_format, machine_id, source_revision, is_current);
 
+-- Local-only binding from one canonical capture source to the exact physical
+-- provider-source alias group that produced it. Canonical source identities
+-- may intentionally be shared by multiple current physical sources, so they
+-- are not sufficient to authorize later source reopening.
+CREATE TABLE IF NOT EXISTS capture_source_provider_routes (
+    capture_source_id TEXT PRIMARY KEY NOT NULL
+        REFERENCES capture_sources(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    alias_group_identity TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_capture_source_provider_routes_alias
+ON capture_source_provider_routes(provider, source_format, machine_id, alias_group_identity);
+
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 

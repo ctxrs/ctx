@@ -180,8 +180,8 @@ fn kimi_wire_batches_resume_append_and_preserve_source_scope() {
     assert_eq!(checkpoint.accepted_events, 66);
     assert_eq!(checkpoint.accepted_file_touches, 1);
     assert!(checkpoint.emitted_session);
-    assert_eq!(KIMI_CAPTURE_REVISION, 3);
-    assert_eq!(KIMI_POLICY_REVISION, 5);
+    assert_eq!(KIMI_CAPTURE_REVISION, 4);
+    assert_eq!(KIMI_POLICY_REVISION, 6);
     assert_eq!(certified.parser_revision(), KIMI_CAPTURE_REVISION);
     assert!(certified
         .source_revision()

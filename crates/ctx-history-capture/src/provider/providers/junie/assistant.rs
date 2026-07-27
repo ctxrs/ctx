@@ -24,7 +24,7 @@ pub(super) struct JunieUsage {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct JunieAssistantBuffer {
+pub(crate) struct JunieAssistantBuffer {
     pub(super) open: bool,
     pub(super) turn_ts: Option<DateTime<Utc>>,
     pub(super) steps: BTreeMap<String, JunieStepAgg>,
@@ -32,6 +32,102 @@ pub(super) struct JunieAssistantBuffer {
     pub(super) results: BTreeMap<String, String>,
     pub(super) usage: JunieUsage,
     pub(super) retained_source_bytes: usize,
+    pub(super) source_binding: crate::complete_content::jsonl::JunieRecordSetBinding,
+}
+
+pub(crate) fn junie_merge_buffered_agent_event(
+    buffer: &mut JunieAssistantBuffer,
+    agent_event: &Value,
+    source_line_number: u64,
+    occurred_at: DateTime<Utc>,
+) -> bool {
+    match agent_event
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+    {
+        "LlmResponseMetadataEvent" => {
+            junie_ensure_assistant(buffer, occurred_at);
+            junie_merge_usage(&mut buffer.usage, agent_event);
+            true
+        }
+        "ResultBlockUpdatedEvent" => {
+            let Some(text) = agent_event
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+            else {
+                return false;
+            };
+            let step_id = agent_event
+                .get("stepId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("result-{source_line_number}"));
+            junie_ensure_assistant(buffer, occurred_at);
+            buffer.results.insert(step_id, text.to_owned());
+            true
+        }
+        "AgentFailureEvent" => {
+            let Some(message) = agent_event
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|message| !message.trim().is_empty())
+            else {
+                return false;
+            };
+            let step_id = agent_event
+                .get("errorCode")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("failure-{value}-{source_line_number}"))
+                .unwrap_or_else(|| format!("failure-{source_line_number}"));
+            junie_ensure_assistant(buffer, occurred_at);
+            buffer
+                .results
+                .insert(step_id, format!("Junie failed: {message}"));
+            true
+        }
+        "ToolBlockUpdatedEvent"
+        | "TerminalBlockUpdatedEvent"
+        | "ViewFilesBlockUpdatedEvent"
+        | "FileChangesBlockUpdatedEvent" => {
+            junie_merge_step(buffer, agent_event, occurred_at);
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn junie_buffer_result_text(buffer: &JunieAssistantBuffer) -> String {
+    let mut final_text = String::new();
+    for result in buffer.results.values() {
+        if result.trim().is_empty() {
+            continue;
+        }
+        if !final_text.is_empty() {
+            final_text.push_str("\n\n");
+        }
+        final_text.push_str(result);
+    }
+    final_text
+}
+
+pub(crate) fn junie_buffer_step_output(
+    buffer: &JunieAssistantBuffer,
+    step_order: u32,
+) -> Option<&str> {
+    let step_id = buffer
+        .step_ids_in_order
+        .get(usize::try_from(step_order).ok()?)?;
+    let step = buffer.steps.get(step_id)?;
+    if !step.changes.is_empty() {
+        return None;
+    }
+    step.details
+        .as_deref()
+        .filter(|details| !details.trim().is_empty())
 }
 
 pub(super) fn junie_ensure_assistant(

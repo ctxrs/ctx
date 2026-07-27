@@ -149,31 +149,6 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
         "--json",
     ]));
     let event_id = search["results"][0]["ctx_event_id"].as_str().unwrap();
-    // Exercise the CLI renderer independently of provider classification by making the
-    // imported long message use the canonical complete-content-eligible retention shape.
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    let payload: String = conn
-        .query_row(
-            "SELECT payload_json FROM events WHERE id = ?1",
-            params![event_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut payload: Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(payload["body"]["truncated"], true);
-    payload["body"]["text_retention"] = json!({
-        "mode": "bounded",
-        "limit_chars": 16_000,
-        "truncated": true,
-        "omission_policy": "none",
-        "omission_applied": false,
-    });
-    conn.execute(
-        "UPDATE events SET payload_json = ?1 WHERE id = ?2",
-        params![serde_json::to_string(&payload).unwrap(), event_id],
-    )
-    .unwrap();
-    drop(conn);
     let changed = expanded.replacen("Fix the onboarding bug", "Mix the onboarding bug", 1);
     assert_ne!(changed, expanded);
     fs::write(source, changed).unwrap();

@@ -31,7 +31,7 @@ use sqlite::{
     initial_kiro_position, kiro_captured_error, kiro_conversation_tables, kiro_sqlite_batch_error,
     validate_kiro_position, KiroCapturedBatchProjector, KiroRowFetcher,
 };
-const KIRO_CAPTURE_REVISION: u32 = 1;
+const KIRO_CAPTURE_REVISION: u32 = 2;
 const KIRO_POLICY_REVISION: u32 = 4;
 
 fn kiro_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {

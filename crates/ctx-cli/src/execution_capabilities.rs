@@ -143,20 +143,30 @@ impl MemoryBucketV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CpuVectorTierV1 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     Avx512,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     Avx2,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     X86Baseline,
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
     ArmNeon,
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     Other,
 }
 
 impl CpuVectorTierV1 {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Self::Avx512 => "avx512",
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Self::Avx2 => "avx2",
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Self::X86Baseline => "x86_baseline",
+            #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
             Self::ArmNeon => "arm_neon",
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
             Self::Other => "other",
         }
     }
@@ -164,18 +174,34 @@ impl CpuVectorTierV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AccelerationCandidateV1 {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     AppleAne,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     NvidiaCuda,
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        all(target_os = "macos", not(target_arch = "aarch64"))
+    ))]
     NotDetected,
+    #[cfg(not(target_os = "macos"))]
     Unknown,
 }
 
 impl AccelerationCandidateV1 {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::AppleAne => "apple_ane",
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::NvidiaCuda => "nvidia_cuda",
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "windows",
+                all(target_os = "macos", not(target_arch = "aarch64"))
+            ))]
             Self::NotDetected => "not_detected",
+            #[cfg(not(target_os = "macos"))]
             Self::Unknown => "unknown",
         }
     }
@@ -525,12 +551,8 @@ mod tests {
     #[test]
     fn cpu_vector_tier_is_an_allowlisted_scalar() {
         assert!(matches!(
-            cpu_vector_tier(),
-            CpuVectorTierV1::Avx512
-                | CpuVectorTierV1::Avx2
-                | CpuVectorTierV1::X86Baseline
-                | CpuVectorTierV1::ArmNeon
-                | CpuVectorTierV1::Other
+            cpu_vector_tier().as_str(),
+            "avx512" | "avx2" | "x86_baseline" | "arm_neon" | "other"
         ));
     }
 }

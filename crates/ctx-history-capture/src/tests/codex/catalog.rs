@@ -259,7 +259,7 @@ fn codex_catalog_re_pends_unchanged_sources_from_older_normalization_revisions()
         )
         .unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].metadata["normalization_capture_revision"], 7);
+    assert_eq!(pending[0].metadata["normalization_capture_revision"], 8);
     assert_eq!(pending[0].metadata["normalization_policy_revision"], 3);
 
     let cached = catalog_codex_session_tree(

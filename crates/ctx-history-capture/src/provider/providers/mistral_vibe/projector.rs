@@ -289,6 +289,25 @@ impl CapturedBatchProjector for MistralVibeCapturedBatchProjector {
             &self.complete_content_binding,
         )
         .map_err(ProviderProjectionFatal::new)?;
+        if let Some((content, native_record_id)) =
+            crate::complete_content::jsonl::result_content_and_id(
+                CaptureProvider::MistralVibe,
+                MISTRAL_VIBE_SOURCE_FORMAT,
+                &value,
+                line_number,
+            )
+        {
+            crate::complete_content::jsonl::attach_exact_jsonl_result_content_locator(
+                &mut event,
+                CaptureProvider::MistralVibe,
+                MISTRAL_VIBE_SOURCE_FORMAT,
+                &content,
+                &native_record_id,
+                record,
+                &self.complete_content_binding,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
         let raw_source_path = self.source.messages_path.display().to_string();
         let source_root = self.context.source_root_display();
         output.use_explicit_file_touches();

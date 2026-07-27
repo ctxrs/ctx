@@ -49,6 +49,11 @@ use super::verified_executable::VerifiedHelperExecutable;
 pub(crate) use support::default_helper_path;
 use support::{git_executable, helper_executable};
 
+#[path = "client_errors.rs"]
+mod errors;
+use errors::protocol_error;
+pub(crate) use errors::stable_error_code;
+
 #[path = "client_environment.rs"]
 mod environment;
 use environment::configure_helper_environment;
@@ -946,57 +951,6 @@ impl StderrDrain {
             let _ = thread.join();
         }
         let _ = self.bytes.load(Ordering::Relaxed);
-    }
-}
-
-fn protocol_error(error: ctx_pro_host_protocol::ProtocolError) -> anyhow::Error {
-    let code = match error.class {
-        ctx_pro_host_protocol::ErrorClass::EntitlementExpired => "entitlement_expired",
-        ctx_pro_host_protocol::ErrorClass::KeyStoreUnavailable => "key_store_unavailable",
-        ctx_pro_host_protocol::ErrorClass::KeyStoreLocked => "key_store_locked",
-        ctx_pro_host_protocol::ErrorClass::NotMaterialized => "not_materialized",
-        ctx_pro_host_protocol::ErrorClass::ProtocolMismatch => "protocol_mismatch",
-        ctx_pro_host_protocol::ErrorClass::MissingSource => "source_unavailable",
-        ctx_pro_host_protocol::ErrorClass::MissingRepository => "repository_unavailable",
-        ctx_pro_host_protocol::ErrorClass::StaleFact => "stale_fact",
-        ctx_pro_host_protocol::ErrorClass::Ambiguous => "ambiguous",
-        ctx_pro_host_protocol::ErrorClass::Corrupt => "corrupt_graph",
-        ctx_pro_host_protocol::ErrorClass::InvalidRequest => "invalid_request",
-        ctx_pro_host_protocol::ErrorClass::Bounds => "invalid_request",
-        ctx_pro_host_protocol::ErrorClass::Sequence => "invalid_response",
-        ctx_pro_host_protocol::ErrorClass::Internal => "helper_crashed",
-    };
-    // Helper error details are untrusted and can contain local paths or key-store diagnostics.
-    // The typed class is the complete stable public error contract.
-    anyhow!(code)
-}
-
-pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
-    let text = error.to_string();
-    let code = text.split(':').next().unwrap_or_default();
-    match code {
-        "pro_not_installed" => Some("pro_not_installed"),
-        "commercial_unavailable" => Some("commercial_unavailable"),
-        "helper_upgrade_required" => Some("helper_upgrade_required"),
-        "entitlement_expired" => Some("entitlement_expired"),
-        "key_store_unavailable" => Some("key_store_unavailable"),
-        "key_store_locked" => Some("key_store_locked"),
-        "not_materialized" => Some("not_materialized"),
-        "needs_rebuild" => Some("needs_rebuild"),
-        "partial" => Some("partial"),
-        "needs_resume" => Some("needs_resume"),
-        "protocol_mismatch" => Some("protocol_mismatch"),
-        "source_unavailable" => Some("source_unavailable"),
-        "repository_unavailable" => Some("repository_unavailable"),
-        "stale_fact" => Some("stale_fact"),
-        "ambiguous" => Some("ambiguous"),
-        "corrupt_graph" => Some("corrupt_graph"),
-        "invalid_request" => Some("invalid_request"),
-        "invalid_response" => Some("invalid_response"),
-        "cancelled" => Some("cancelled"),
-        "helper_crashed" => Some("helper_crashed"),
-        "helper_timeout" => Some("helper_timeout"),
-        _ => None,
     }
 }
 

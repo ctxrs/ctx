@@ -8,6 +8,10 @@ use crate::captured_batch::jsonl::jsonl_position_offset;
 use crate::captured_batch::{
     CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, SourceObservation,
 };
+use crate::complete_content::{
+    jsonl::{attach_junie_record_set_locator, JunieRecordSetBinding, JunieRecordSetTarget},
+    VerifiedContentRole,
+};
 use crate::provider::importer::{
     BoundedParserCheckpoint, CapturedBatchCursorFinish, CapturedBatchProjector,
     CertifiedProviderCursor, ProviderProjectionFatal, ProviderProjectionOutput,
@@ -24,15 +28,13 @@ use crate::{
 };
 
 use super::{
-    assistant::{
-        junie_ensure_assistant, junie_merge_step, junie_merge_usage, JunieAssistantBuffer,
-    },
+    assistant::{junie_buffer_result_text, JunieAssistantBuffer},
     checkpoint::{
         bounded_junie_failure, junie_metadata_anchor, junie_parser_state_is_bounded,
         junie_read_anchored_metadata, JunieCheckpointFailure, JunieMetadataAnchor,
         JunieParserCheckpoint,
     },
-    junie_jsonl_batch_error,
+    junie_jsonl_batch_error, junie_merge_buffered_agent_event,
     normalize::{
         junie_file_change_has_path, junie_file_change_normalization, junie_step_normalization,
         junie_step_output_normalization,
@@ -375,6 +377,7 @@ impl JunieCapturedBatchProjector {
         let occurred_at = buffer.turn_ts.unwrap_or(self.started_at);
         let base_draft = self.base_draft();
         let context = self.context.clone();
+        let source_binding = buffer.source_binding.clone();
         let mut emitted = false;
 
         for next_key in std::mem::take(&mut buffer.step_ids_in_order) {
@@ -413,7 +416,9 @@ impl JunieCapturedBatchProjector {
                             occurred_at,
                             &step,
                             details,
-                        ),
+                            &source_binding,
+                        )
+                        .map_err(ProviderProjectionFatal::new)?,
                     )?;
                 }
                 continue;
@@ -447,19 +452,10 @@ impl JunieCapturedBatchProjector {
             ));
         }
 
-        let mut final_text = String::new();
-        for result in buffer.results.values() {
-            if result.trim().is_empty() {
-                continue;
-            }
-            if !final_text.is_empty() {
-                final_text.push_str("\n\n");
-            }
-            final_text.push_str(result);
-        }
+        let final_text = junie_buffer_result_text(&buffer);
         if !final_text.is_empty() {
             let event_index = self.next_provider_event_index()?;
-            let event = native_event(NativeEventDraft {
+            let mut event = native_event(NativeEventDraft {
                 provider: CaptureProvider::Junie,
                 source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
                 provider_session_id: self.provider_session_id.clone(),
@@ -472,7 +468,7 @@ impl JunieCapturedBatchProjector {
                 event_type: EventType::Message,
                 role: Some(EventRole::Assistant),
                 occurred_at,
-                text: final_text,
+                text: final_text.clone(),
                 body: json!({
                     "result_blocks": buffer.results,
                     "model": buffer.usage.model,
@@ -495,6 +491,14 @@ impl JunieCapturedBatchProjector {
                     },
                 }),
             });
+            attach_junie_record_set_locator(
+                &mut event,
+                VerifiedContentRole::MessageBody,
+                &final_text,
+                &source_binding,
+                JunieRecordSetTarget::AssistantMessage,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
             self.accept(
                 output,
                 ProviderNormalizationResult {
@@ -513,6 +517,7 @@ impl JunieCapturedBatchProjector {
     fn project_user_prompt(
         &mut self,
         value: &Value,
+        record: &CapturedRecord,
         line_number: usize,
         import_line: usize,
         output: &mut dyn ProviderProjectionOutput,
@@ -523,7 +528,7 @@ impl JunieCapturedBatchProjector {
             return Ok(());
         }
         let event_index = self.next_provider_event_index()?;
-        let event = native_event(NativeEventDraft {
+        let mut event = native_event(NativeEventDraft {
             provider: CaptureProvider::Junie,
             source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
             provider_session_id: self.provider_session_id.clone(),
@@ -546,6 +551,16 @@ impl JunieCapturedBatchProjector {
                 "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
             }),
         });
+        let mut source_binding = JunieRecordSetBinding::default();
+        source_binding.observe(record);
+        attach_junie_record_set_locator(
+            &mut event,
+            VerifiedContentRole::MessageBody,
+            prompt,
+            &source_binding,
+            JunieRecordSetTarget::UserPrompt,
+        )
+        .map_err(ProviderProjectionFatal::new)?;
         self.state.saw_supported_event = true;
         self.accept(
             output,
@@ -575,6 +590,7 @@ impl JunieCapturedBatchProjector {
         value: &Value,
         retained_source_bytes: usize,
         metadata_anchor: Option<&JunieMetadataAnchor>,
+        source_record: Option<&CapturedRecord>,
     ) -> bool {
         if let Some(timestamp) = junie_timestamp_millis_field(value, "timestampMs")
             .and_then(DateTime::<Utc>::from_timestamp_millis)
@@ -613,13 +629,13 @@ impl JunieCapturedBatchProjector {
                 return false;
             }
             self.buffer.retained_source_bytes = retained.unwrap_or_default();
+            if let Some(record) = source_record {
+                self.buffer.source_binding.observe(record);
+            } else {
+                self.buffer.source_binding.invalidate();
+            }
         }
         match agent_kind {
-            "LlmResponseMetadataEvent" => {
-                junie_ensure_assistant(&mut self.buffer, self.state.last_ts);
-                junie_merge_usage(&mut self.buffer.usage, agent_event);
-                self.state.saw_supported_event = true;
-            }
             "AgentTaskNameUpdatedEvent" => {
                 if let Some(name) = agent_event
                     .get("name")
@@ -648,56 +664,24 @@ impl JunieCapturedBatchProjector {
                     self.state.metadata_dirty = true;
                 }
             }
-            "ResultBlockUpdatedEvent" => {
-                if let Some(text) = agent_event
-                    .get("result")
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.trim().is_empty())
-                {
-                    let step_id = agent_event
-                        .get("stepId")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| format!("result-{}", self.state.next_line_number));
-                    self.project_assistant_result(step_id, text.to_owned());
-                }
-            }
-            "AgentFailureEvent" => {
-                if let Some(message) = agent_event
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .filter(|message| !message.trim().is_empty())
-                {
-                    let step_id = agent_event
-                        .get("errorCode")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| format!("failure-{value}-{}", self.state.next_line_number))
-                        .unwrap_or_else(|| format!("failure-{}", self.state.next_line_number));
-                    self.project_assistant_result(step_id, format!("Junie failed: {message}"));
-                }
-            }
-            "ToolBlockUpdatedEvent"
+            "LlmResponseMetadataEvent"
+            | "ResultBlockUpdatedEvent"
+            | "AgentFailureEvent"
+            | "ToolBlockUpdatedEvent"
             | "TerminalBlockUpdatedEvent"
             | "ViewFilesBlockUpdatedEvent"
             | "FileChangesBlockUpdatedEvent" => {
-                self.project_step_event(agent_event);
-                self.state.saw_supported_event = true;
+                let supported = junie_merge_buffered_agent_event(
+                    &mut self.buffer,
+                    agent_event,
+                    self.state.next_line_number,
+                    self.state.last_ts,
+                );
+                self.state.saw_supported_event |= supported;
             }
             _ => {}
         }
         true
-    }
-
-    fn project_assistant_result(&mut self, step_id: String, text: String) {
-        junie_ensure_assistant(&mut self.buffer, self.state.last_ts);
-        self.buffer.results.insert(step_id, text);
-        self.state.saw_supported_event = true;
-    }
-
-    fn project_step_event(&mut self, agent_event: &Value) {
-        junie_merge_step(&mut self.buffer, agent_event, self.state.last_ts);
     }
 
     fn finish_source(
@@ -858,11 +842,16 @@ impl CapturedBatchProjector for JunieCapturedBatchProjector {
         };
         match value.get("kind").and_then(Value::as_str).unwrap_or("") {
             "UserPromptEvent" => {
-                self.project_user_prompt(&value, line_number, import_line, output)?;
+                self.project_user_prompt(&value, record, line_number, import_line, output)?;
             }
             "SessionA2uxEvent" => {
                 let metadata_anchor = junie_metadata_anchor(record.locator(), bytes);
-                if !self.project_session_event(&value, bytes.len(), metadata_anchor.as_ref()) {
+                if !self.project_session_event(
+                    &value,
+                    bytes.len(),
+                    metadata_anchor.as_ref(),
+                    Some(record),
+                ) {
                     return self.reject_record(
                         output,
                         import_line,
