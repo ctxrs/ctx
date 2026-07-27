@@ -139,7 +139,7 @@ fn deprecated_privacy_opt_outs_suppress_delivery_and_warn_once() {
         let temp = tempdir();
         let events_path = temp.path().join("analytics.jsonl");
         let assert = ctx(&temp)
-            .args(["doctor", "--progress", "none"])
+            .args(["doctor"])
             .env("CTX_ANALYTICS_ENABLED", "true")
             .env(name, "yes")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))

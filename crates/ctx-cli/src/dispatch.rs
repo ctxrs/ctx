@@ -349,7 +349,6 @@ fn command_machine_readable_output(command: &CommandRoot, json_output: bool) -> 
         }
         CommandRoot::Sql(args) => args.output_format() != SqlFormat::Table,
         CommandRoot::Mcp(_) => true,
-        CommandRoot::Doctor(args) => args.progress == crate::progress::ProgressArg::Json,
         _ => false,
     }
 }

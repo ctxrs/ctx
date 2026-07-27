@@ -257,8 +257,8 @@ Source-level failures remain terminal and are reported separately.
 `ctx daemon run --format json` returns the daemon object directly. The legacy hidden
 `__ctx-daemon` entry point follows the same run output for compatibility.
 
-`ctx doctor --format json` returns `schema_version`, `ok`, `progress`, `findings`, and
-the same top-level `daemon` object used by status so callers can inspect daemon
+`ctx doctor --format json` returns `schema_version`, `ok`, `findings`, and the
+same top-level `daemon` object used by status so callers can inspect daemon
 lifecycle and job state without parsing human findings.
 
 ## Sources

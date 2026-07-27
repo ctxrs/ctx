@@ -181,8 +181,6 @@ pub(crate) struct SourcesArgs {
 pub(crate) struct DoctorArgs {
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
-    pub(crate) progress: ProgressArg,
 }
 
 #[derive(Debug, Args)]

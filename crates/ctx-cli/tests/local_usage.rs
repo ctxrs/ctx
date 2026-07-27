@@ -13,7 +13,7 @@ fn enabled(command: &mut assert_cmd::Command) -> &mut assert_cmd::Command {
 #[test]
 fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+    enabled(ctx(&temp).args(["doctor"]))
         .env("CTX_ANALYTICS_ENABLED", "false")
         .assert()
         .success();
@@ -88,7 +88,7 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
     )
     .unwrap();
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+    enabled(ctx(&temp).args(["doctor"]))
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -197,9 +197,7 @@ fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
         "disabled"
     );
     assert!(disabled.get("local_usage").is_none());
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     assert!(!temp.path().join("usage.sqlite").exists());
 
     let enabled_report =
@@ -221,9 +219,7 @@ fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
     .success();
     assert!(!temp.path().join("usage.sqlite").exists());
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let reset = json_output(enabled(ctx(&temp).args([
         "status",
         "--usage",
@@ -259,9 +255,7 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
         assert!(!temp.path().join("usage.sqlite").exists());
     }
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let usage_path = temp.path().join("usage.sqlite");
     let before_bytes = fs::read(&usage_path).unwrap();
     let before_modified = fs::metadata(&usage_path).unwrap().modified().unwrap();
@@ -351,9 +345,7 @@ fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_i
 #[test]
 fn reset_rejects_constraint_bypassed_rows_without_deleting_them() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let path = temp.path().join("usage.sqlite");
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "ignore_check_constraints", true)
@@ -520,9 +512,7 @@ fn human_usage_actions_report_effective_override_and_cleared_vs_missing() {
         .success()
         .stdout(predicates::str::contains("local_usage_store: missing"));
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     enabled(ctx(&temp).args(["status", "--usage", "reset"]))
         .assert()
         .success()
@@ -532,10 +522,7 @@ fn human_usage_actions_report_effective_override_and_cleared_vs_missing() {
 #[test]
 fn environment_disable_creates_no_sidecar() {
     let temp = tempdir();
-    ctx(&temp)
-        .args(["doctor", "--progress", "none"])
-        .assert()
-        .success();
+    ctx(&temp).args(["doctor"]).assert().success();
     assert!(!temp.path().join("usage.sqlite").exists());
 }
 
@@ -564,9 +551,7 @@ fn foreground_failure_is_recorded_once_as_not_applicable() {
 #[test]
 fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let conn = Connection::open(temp.path().join("usage.sqlite")).unwrap();
     conn.execute_batch(
         r#"
@@ -636,9 +621,7 @@ fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
 #[test]
 fn detailed_usage_operations_are_complete_deterministic_and_at_most_eighty_columns() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let long_version = "v".repeat(64);
     let calls = i64::MAX;
     let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
@@ -694,7 +677,7 @@ fn ordinary_record_failure_is_silent_and_does_not_change_command_success() {
     let temp = tempdir();
     fs::create_dir(temp.path().join("usage.sqlite")).unwrap();
 
-    let output = enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+    let output = enabled(ctx(&temp).args(["doctor"]))
         .assert()
         .success()
         .get_output()
