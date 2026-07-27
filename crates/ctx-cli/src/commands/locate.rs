@@ -6,7 +6,6 @@ use ctx_history_core::database_path;
 
 use crate::analytics::LocateTelemetry;
 use crate::output::{locate_json_output, print_json};
-use crate::pro::ResourceKindArg;
 use crate::provider_args::ProviderArg;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::{
@@ -46,35 +45,6 @@ pub(crate) fn run_locate(
                 print_locate_event_text(&value)?;
             }
         }
-        LocateTarget::Commit(args) => {
-            return run_resource(args, ResourceKindArg::Commit, data_root)
-        }
-        LocateTarget::PullRequest(args) => {
-            return run_resource(args, ResourceKindArg::PullRequest, data_root)
-        }
-        LocateTarget::Issue(args) => return run_resource(args, ResourceKindArg::Issue, data_root),
-        LocateTarget::File(args) => {
-            return run_resource(args.into(), ResourceKindArg::File, data_root)
-        }
-        LocateTarget::Branch(args) => {
-            return run_resource(args, ResourceKindArg::Branch, data_root)
-        }
-        LocateTarget::Repository(args) => {
-            return run_resource(args, ResourceKindArg::Repository, data_root)
-        }
     }
     Ok(())
-}
-
-fn run_resource(
-    args: crate::commands::work_graph::ResourceValueArgs,
-    kind: ResourceKindArg,
-    data_root: PathBuf,
-) -> Result<()> {
-    crate::commands::work_graph::run(
-        args.into_work_graph(kind),
-        data_root,
-        ctx_pro_host_protocol::QueryKind::Locate,
-        "pro_location",
-    )
 }

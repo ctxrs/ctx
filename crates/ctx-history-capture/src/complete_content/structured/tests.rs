@@ -1,7 +1,6 @@
 use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{ContentRef, EventRole, Fidelity};
+use ctx_history_core::ContentRef;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -13,7 +12,7 @@ use crate::complete_content::structured::source_access::{
 };
 use crate::complete_content::{
     AuthorizedSourceRoute, CompleteContentSourceLocator, SourceAccessBroker, SourceSnapshot,
-    VerifiedContentLocatorsV1, VerifiedContentRouteStatus, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+    VerifiedContentRouteStatus,
 };
 
 fn format_for(provider: CaptureProvider) -> &'static str {
@@ -27,6 +26,50 @@ fn format_for(provider: CaptureProvider) -> &'static str {
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
         _ => panic!("test requested a non-structured provider"),
     }
+}
+
+fn released_structured_locator_value(
+    provider: CaptureProvider,
+    ordinal: u64,
+    subrecord: u32,
+    native_id: &str,
+) -> Vec<u8> {
+    let provider = provider.as_str().as_bytes();
+    let native_id = native_id.as_bytes();
+    let mut value = Vec::with_capacity(4 + 1 + provider.len() + 8 + 4 + 2 + native_id.len());
+    value.extend_from_slice(b"SC\0\x01");
+    value.push(u8::try_from(provider.len()).unwrap());
+    value.extend_from_slice(provider);
+    value.extend_from_slice(&ordinal.to_be_bytes());
+    value.extend_from_slice(&subrecord.to_be_bytes());
+    value.extend_from_slice(&u16::try_from(native_id.len()).unwrap().to_be_bytes());
+    value.extend_from_slice(native_id);
+    value
+}
+
+#[allow(clippy::too_many_arguments)]
+fn released_structured_result_locator_value(
+    provider: CaptureProvider,
+    ordinal: u64,
+    source_subrecord: u32,
+    history_item: u32,
+    tool_state: u32,
+    native_id: &str,
+) -> Vec<u8> {
+    let provider = provider.as_str().as_bytes();
+    let native_id = native_id.as_bytes();
+    let mut value =
+        Vec::with_capacity(4 + 1 + provider.len() + 8 + 4 + 4 + 4 + 2 + native_id.len());
+    value.extend_from_slice(b"SR\0\x01");
+    value.push(u8::try_from(provider.len()).unwrap());
+    value.extend_from_slice(provider);
+    value.extend_from_slice(&ordinal.to_be_bytes());
+    value.extend_from_slice(&source_subrecord.to_be_bytes());
+    value.extend_from_slice(&history_item.to_be_bytes());
+    value.extend_from_slice(&tool_state.to_be_bytes());
+    value.extend_from_slice(&u16::try_from(native_id.len()).unwrap().to_be_bytes());
+    value.extend_from_slice(native_id);
+    value
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -105,7 +148,7 @@ fn try_request(
         source_locator: Some(
             CompleteContentSourceLocator::new(
                 STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
-                encode_structured_locator(provider, ordinal, subrecord, native_id).unwrap(),
+                released_structured_locator_value(provider, ordinal, subrecord, native_id),
             )
             .unwrap(),
         ),
@@ -165,7 +208,7 @@ fn result_request(
         .to_owned(),
         source_locator: CompleteContentSourceLocator::new(
             STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
-            encode_structured_locator(provider, ordinal, subrecord, native_id).unwrap(),
+            released_structured_locator_value(provider, ordinal, subrecord, native_id),
         )
         .unwrap(),
         source_record_ordinal: ordinal,
@@ -244,69 +287,36 @@ fn capability_table_is_exhaustive_and_routes_exactly_seven_providers() {
 }
 
 #[test]
-fn persisted_locator_is_bounded_path_free_and_only_attached_to_truncated_messages() {
-    let complete_text = format!("unicode λ\n{}", "z".repeat(PROVIDER_MAX_TEXT_CHARS + 1));
-    let record = br#"{"message":"native record"}"#;
-    let mut event = ProviderEventEnvelope {
-        provider_event_index: 12,
-        provider_event_hash: Some("native-12".to_owned()),
-        cursor: Some("local cursor that is not persisted in the locator".to_owned()),
-        event_type: EventType::Message,
-        role: Some(EventRole::Assistant),
-        occurred_at: DateTime::<Utc>::UNIX_EPOCH,
-        fidelity: Fidelity::Imported,
-        idempotency_key: None,
-        artifacts: Vec::new(),
-        payload: json!({"text": "bounded"}),
-        metadata: json!({}),
-    };
-    attach_structured_complete_content_locator(
-        CaptureProvider::RovoDev,
-        &mut event,
-        9,
-        3,
-        "native-12",
-        record,
-        &complete_text,
-    )
-    .unwrap();
-    let value = event
-        .metadata
-        .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
-        .unwrap();
-    let encoded = serde_json::to_vec(value).unwrap();
-    assert!(encoded.len() <= 4 * 1024);
-    assert!(!String::from_utf8_lossy(&encoded).contains("/home/"));
-    let persisted = VerifiedContentLocatorsV1::from_metadata_value(value).unwrap();
-    let persisted = persisted.locator(VerifiedContentRole::MessageBody).unwrap();
-    assert_eq!(persisted.family(), CompleteContentSourceFamily::Structured);
-    assert_eq!(persisted.native_record_id(), "native-12");
-    let decoded = decode_structured_locator(persisted.source_locator().unwrap().value()).unwrap();
+fn decodes_released_structured_locator_versions() {
+    let message = released_structured_locator_value(CaptureProvider::RovoDev, 9, 3, "native-12");
     assert_eq!(
-        decoded,
+        decode_structured_locator(&message).unwrap(),
         (CaptureProvider::RovoDev, 9, 3, "native-12".to_owned())
     );
 
-    let mut short = event.clone();
-    short.metadata = json!({});
-    attach_structured_complete_content_locator(
-        CaptureProvider::RovoDev,
-        &mut short,
-        9,
-        3,
-        "native-12",
-        record,
-        "short",
-    )
-    .unwrap();
-    assert!(short
-        .metadata
-        .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
-        .is_none());
+    let result = released_structured_result_locator_value(
+        CaptureProvider::Continue,
+        11,
+        2,
+        7,
+        4,
+        "history-7:tool-4:result",
+    );
+    assert_eq!(
+        decode_structured_result_locator(&result).unwrap(),
+        (
+            CaptureProvider::Continue,
+            11,
+            2,
+            7,
+            4,
+            "history-7:tool-4:result".to_owned(),
+        )
+    );
 }
 
 #[test]
-fn result_locator_persists_only_a_reference_and_resolves_exact_structured_subrecords() {
+fn resolves_exact_structured_result_subrecords() {
     let directory = TempDir::new().unwrap();
     let content = "structured result λ\nsecond line";
     let rovo_bytes = serde_json::to_vec(&json!({
@@ -319,32 +329,6 @@ fn result_locator_persists_only_a_reference_and_resolves_exact_structured_subrec
     .unwrap();
     let rovo_path = directory.path().join("session_context.json");
     write(&rovo_path, &rovo_bytes);
-
-    let mut event = ProviderEventEnvelope {
-        provider_event_index: 0,
-        provider_event_hash: Some("rovo-result-1".to_owned()),
-        cursor: None,
-        event_type: EventType::ToolOutput,
-        role: Some(EventRole::Tool),
-        occurred_at: DateTime::<Utc>::UNIX_EPOCH,
-        fidelity: Fidelity::Imported,
-        idempotency_key: None,
-        artifacts: Vec::new(),
-        payload: json!({"result_outcome": "success"}),
-        metadata: json!({}),
-    };
-    attach_structured_result_content_locator(
-        CaptureProvider::RovoDev,
-        &mut event,
-        0,
-        0,
-        "rovo-result-1",
-        &rovo_bytes,
-        content,
-    )
-    .unwrap();
-    assert!(!event.payload.to_string().contains(content));
-    assert!(event.payload["result_content_ref"].get("sha256").is_some());
 
     let mut request = result_request(
         CaptureProvider::RovoDev,
@@ -581,6 +565,35 @@ fn continue_message_locator_uses_interleaved_citation_and_native_identity() {
         .text,
         text
     );
+}
+
+#[test]
+fn continue_message_without_native_id_uses_released_payload_hash_authority() {
+    let directory = TempDir::new().unwrap();
+    let text = "Continue fallback-hash message";
+    let item = json!({"message": {"role": "user", "content": text}});
+    let bytes = serde_json::to_vec(&json!({"history": [item.clone()]})).unwrap();
+    let path = directory.path().join("continue-fallback.json");
+    write(&path, &bytes);
+
+    let mut hydration = request(
+        CaptureProvider::Continue,
+        &path,
+        None,
+        "continue-fallback",
+        0,
+        0,
+        "history:continue-fallback:0",
+        &bytes,
+        text,
+    );
+    let (event_type, payload) =
+        crate::provider::providers::continue_cli::continue_history_item_canonical_payload(&item);
+    assert_eq!(event_type, EventType::Message);
+    hydration.expected_hash_authority = CompleteContentHashAuthority::NormalizedPayloadFallback;
+    hydration.expected_provider_event_hash = crate::compute_payload_hash(&payload).unwrap();
+
+    assert_eq!(resolve_one_message(hydration).text, text);
 }
 
 #[test]

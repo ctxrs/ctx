@@ -1,3 +1,100 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SemanticFailureClass {
+    Retryable,
+    Permanent,
+    CorruptSidecar,
+    ResourcePressure,
+}
+
+impl SemanticFailureClass {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Permanent => "permanent",
+            Self::CorruptSidecar => "corrupt_sidecar",
+            Self::ResourcePressure => "resource_pressure",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "retryable" => Some(Self::Retryable),
+            "permanent" => Some(Self::Permanent),
+            "corrupt_sidecar" => Some(Self::CorruptSidecar),
+            "resource_pressure" => Some(Self::ResourcePressure),
+            _ => None,
+        }
+    }
+
+    pub(super) fn retries_with_backoff(self) -> bool {
+        self == Self::Retryable
+    }
+
+    pub(super) fn blocks_until_restart(self) -> bool {
+        matches!(self, Self::Permanent | Self::CorruptSidecar)
+    }
+}
+
+pub(super) fn classify_semantic_failure(error: &anyhow::Error) -> SemanticFailureClass {
+    if error.downcast_ref::<SemanticModelLoadDeferred>().is_some() {
+        return SemanticFailureClass::ResourcePressure;
+    }
+    if let Some(kind) = semantic_vector_failure_kind(error) {
+        return match kind {
+            SemanticVectorFailureKind::Unavailable => SemanticFailureClass::Retryable,
+            SemanticVectorFailureKind::ResetRequired => SemanticFailureClass::CorruptSidecar,
+            SemanticVectorFailureKind::StorageConflict | SemanticVectorFailureKind::NewerSchema => {
+                SemanticFailureClass::Permanent
+            }
+        };
+    }
+    if semantic_model_acquisition_integrity_error(error) {
+        return SemanticFailureClass::Permanent;
+    }
+    if let Some(code) = semantic_sqlite_error_code(error) {
+        return match code {
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+                SemanticFailureClass::CorruptSidecar
+            }
+            rusqlite::ErrorCode::DiskFull => SemanticFailureClass::ResourcePressure,
+            rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::PermissionDenied => {
+                SemanticFailureClass::Permanent
+            }
+            _ => SemanticFailureClass::Retryable,
+        };
+    }
+    if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return SemanticFailureClass::Permanent;
+    }
+    SemanticFailureClass::Retryable
+}
+
+fn semantic_sqlite_error_code(error: &anyhow::Error) -> Option<rusqlite::ErrorCode> {
+    let error = error.downcast_ref::<rusqlite::Error>()?;
+    let rusqlite::Error::SqliteFailure(failure, _) = error else {
+        return None;
+    };
+    Some(failure.code)
+}
+
+pub(super) fn annotate_semantic_failure(mut job: Value, class: SemanticFailureClass) -> Value {
+    job["failure_class"] = Value::String(class.as_str().to_owned());
+    job["retryable"] = Value::Bool(matches!(
+        class,
+        SemanticFailureClass::Retryable | SemanticFailureClass::ResourcePressure
+    ));
+    job
+}
+
+pub(super) fn semantic_failure_class_from_job(job: &Value) -> Option<SemanticFailureClass> {
+    job.get("failure_class")
+        .and_then(Value::as_str)
+        .and_then(SemanticFailureClass::parse)
+}
+
 #[derive(Debug, Default)]
 pub(super) struct DaemonRetryBackoff {
     pub(super) consecutive_failures: u32,
@@ -71,3 +168,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use ctx_history_core::utc_now;
 use serde_json::Value;
+
+use super::{
+    health_search::semantic_model_acquisition_integrity_error,
+    model_contract::SemanticModelLoadDeferred,
+    vector_store_schema::{semantic_vector_failure_kind, SemanticVectorFailureKind},
+};

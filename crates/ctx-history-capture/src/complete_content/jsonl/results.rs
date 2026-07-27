@@ -317,7 +317,7 @@ mod tests {
         expected: &'static str,
     }
 
-    fn cases() -> [ResultCase; 7] {
+    fn cases() -> [ResultCase; 5] {
         [
             ResultCase {
                 provider: CaptureProvider::Gemini,
@@ -336,18 +336,6 @@ mod tests {
                 source_format: crate::FACTORY_DROID_SOURCE_FORMAT,
                 record: json!({"id":"droid-result","type":"message","content":[{"type":"tool_result","content":"droid reopened"}]}),
                 expected: "droid reopened",
-            },
-            ResultCase {
-                provider: CaptureProvider::Cursor,
-                source_format: crate::CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                record: json!({"id":"cursor-result","role":"user","message":{"content":[{"type":"tool_result","content":"cursor reopened"}]}}),
-                expected: "cursor reopened",
-            },
-            ResultCase {
-                provider: CaptureProvider::Qoder,
-                source_format: crate::QODER_SOURCE_FORMAT,
-                record: json!({"id":"qoder-result","type":"user","toolUseResult":"qoder reopened"}),
-                expected: "qoder reopened",
             },
             ResultCase {
                 provider: CaptureProvider::CopilotCli,

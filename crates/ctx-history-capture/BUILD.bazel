@@ -2,8 +2,11 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
 
 package(default_visibility = ["//visibility:public"])
+
+loc_check_inputs(name = "loc_check_inputs")
 
 filegroup(
     name = "cargo_package_data",
@@ -94,10 +97,10 @@ ctx_rust_test(
 )
 
 ctx_rust_test(
-    name = "captured_batch_characterization_tests",
-    srcs = ["tests/captured_batch_characterization.rs"],
-    crate_name = "captured_batch_characterization",
-    crate_root = "tests/captured_batch_characterization.rs",
+    name = "codex_tail_nativepath_tests",
+    srcs = ["tests/codex_tail_nativepath.rs"],
+    crate_name = "codex_tail_nativepath",
+    crate_root = "tests/codex_tail_nativepath.rs",
     edition = crate_edition(),
     aliases = aliases(
         normal_dev = True,

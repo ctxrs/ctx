@@ -7,6 +7,7 @@ use crate::schema::ddl::{table_exists, CREATE_TABLES_SQL};
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::provider_session_identity::PROVIDER_SESSION_INVARIANTS_SQL;
 use crate::schema::rebuild::sanitize_v44_result_event_payloads;
+use crate::schema::semantic_projection_epoch::install as install_semantic_projection_epoch;
 use crate::search::projections::{
     event_scriptgram_table_ready, event_search_lookup_table_ready,
     populate_event_search_projection_from_query, rebuild_search_projection,
@@ -91,6 +92,7 @@ pub(super) fn migrate_to_v47(conn: &Connection) -> Result<()> {
         conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch(PROVIDER_SESSION_INVARIANTS_SQL)?;
         conn.execute_batch(FINAL_SCHEMA_SQL)?;
+        install_semantic_projection_epoch(conn)?;
         // v46 may contain a silently partial projection left by an interrupted
         // legacy autocommit rebuild. Rebuild once inside this final migration
         // transaction so v47 never blesses that state as initialized.

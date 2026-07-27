@@ -224,6 +224,10 @@ new_case untracked-over-limit
 make_lines "${current_case}/src/large.rs" 1001
 expect_fail 'untracked oversized file' 'src/large.rs (source): 1001 lines > limit 1000'
 
+new_case untracked-nested-bzl-over-limit
+make_lines "${current_case}/tools/build_defs/cache_probe.bzl" 1001
+expect_fail 'untracked nested Starlark file' 'tools/build_defs/cache_probe.bzl (source): 1001 lines > limit 1000'
+
 new_case untracked-exception
 make_lines "${current_case}/src/large.rs" 1001
 add_valid_temporary_row src/large.rs source 1001

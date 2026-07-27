@@ -1,6 +1,6 @@
 use crate::tests::support::assertions::{
-    assert_event_type_count, assert_event_with_role, assert_events_have_provider_citations,
-    assert_search_hits_provider, assert_search_misses,
+    assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
+    assert_search_misses,
 };
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::{
@@ -221,7 +221,7 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
 
     assert_eq!(first.failed, 0, "{first:?}");
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 7);
+    assert_eq!(first.imported_events, 6);
     assert!(store
         .search_event_hits("qoder jsonl oracle prompt", 10)
         .unwrap()
@@ -245,13 +245,10 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
         .iter()
         .any(|event| event.event_type == EventType::ToolCall
             && event.role == Some(EventRole::Assistant)));
-    let tool_output = events
+    assert!(!events
         .iter()
-        .find(|event| {
-            event.event_type == EventType::ToolOutput && event.role == Some(EventRole::User)
-        })
-        .expect("tool output metadata event imported");
-    assert!(!tool_output.payload.to_string().contains("qoder import ok"));
+        .any(|event| event.event_type == EventType::ToolOutput));
+    assert!(store.export_archive().unwrap().runs.is_empty());
 
     let second = import_qoder_history(
         &fixture,
@@ -267,7 +264,7 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 7);
+    assert_eq!(second.skipped_events, 6);
 }
 
 #[test]
@@ -312,41 +309,29 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     assert_eq!(first.failures[0].line, 2);
     assert!(first.failures[0].error.contains("malformed JSONL"));
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 6);
+    assert_eq!(first.imported_events, 5);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-native-session-1");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 5);
+    assert_eq!(events.len(), 4);
     assert_event_type_count(&events, EventType::Message, 2);
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_event_type_count(&events, EventType::Summary, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::User);
     assert_events_have_provider_citations(&events);
-    let tool_output = events
-        .iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("Cursor tool result imported");
-    let rendered = tool_output.payload.to_string();
-    assert!(rendered.contains("0123456789abcdef0123456789abcdef01234567"));
-    assert!(rendered.contains("https://github.com/ctxrs/ctx/pull/456"));
-    assert!(rendered.contains("tool-1"));
-    assert!(!rendered.contains("token=cursor-secret"));
-    assert!(!rendered.contains("fragment"));
-    assert!(!rendered.contains("cursor-tool-output-sentinel"));
-
-    let journal = store.projection_journal_snapshot(None).unwrap();
-    let canonical_tool_output = journal
+    assert!(!serde_json::to_string(&events)
+        .unwrap()
+        .contains("cursor-tool-output-sentinel"));
+    assert!(store
+        .projection_journal_snapshot(None)
+        .unwrap()
         .records
         .iter()
-        .find(|record| record.stable_entity_id == tool_output.id)
-        .and_then(|record| record.canonical_payload.as_ref())
-        .expect("Cursor tool result reaches the canonical projection journal");
-    assert_eq!(
-        canonical_tool_output["result"]["outcome"], "unknown",
-        "Cursor's observed tool_result shape does not prove success"
-    );
+        .all(|record| !record
+            .canonical_payload
+            .as_ref()
+            .is_some_and(|payload| payload.to_string().contains("cursor-tool-output-sentinel"))));
 
     let malformed_id =
         stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-malformed-session");
@@ -369,6 +354,7 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     assert_search_misses(&store, "cursor-tool-input-sentinel");
 
     let archive = store.export_archive().unwrap();
+    assert!(archive.runs.is_empty());
     assert!(archive
         .files_touched
         .iter()
@@ -388,7 +374,7 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 2);
-    assert_eq!(second.skipped_events, 6);
+    assert_eq!(second.skipped_events, 5);
 }
 
 #[test]
@@ -410,51 +396,45 @@ fn native_cursor_policy_upgrade_repairs_once_then_is_terminal_noop() {
 
     let first = import_cursor_native_history(&transcript, &mut store, options.clone()).unwrap();
     assert_eq!(first.failed, 0, "{first:?}");
-    assert_eq!(first.imported_events, 5);
+    assert_eq!(first.imported_events, 4);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-native-session-1");
-    let output = store
+    let repaired_message = store
         .events_for_session(session_id)
         .unwrap()
         .into_iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("Cursor result exists before simulated legacy upgrade");
+        .find(|event| {
+            event.event_type == EventType::Message
+                && event.payload.to_string().contains("proof file was written")
+        })
+        .expect("Cursor assistant message exists before simulated policy upgrade");
     let stream = only_provider_cursor_stream(&database, machine_id);
     let policy_revision = delete_event_and_downgrade_provider_policy_cursor(
-        &database, &store, machine_id, &stream, output.id,
+        &database,
+        &store,
+        machine_id,
+        &stream,
+        repaired_message.id,
     );
 
     let repaired = import_cursor_native_history(&transcript, &mut store, options.clone()).unwrap();
     assert_eq!(repaired.failed, 0, "{repaired:?}");
     assert_eq!(repaired.imported_events, 1);
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 5);
+    assert_eq!(store.events_for_session(session_id).unwrap().len(), 4);
     assert_provider_policy_cursor_restored(&store, machine_id, &stream, policy_revision);
-    let repaired_output = store
-        .events_for_session(session_id)
-        .unwrap()
-        .into_iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("Cursor result was restored by the policy rebuild");
-    let repaired_ref = serde_json::from_value::<ctx_history_core::ContentRef>(
-        repaired_output.payload["body"]["result_content_ref"].clone(),
-    )
-    .expect("policy rebuild restores compact result identity");
-    let repaired_locators =
-        crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
-            &repaired_output.sync.metadata
-                [crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
-        )
-        .expect("policy rebuild restores verified content locators");
-    let repaired_locator = repaired_locators
-        .locator(crate::complete_content::VerifiedContentRole::ResultBody)
-        .expect("policy rebuild restores the result-body locator");
-    assert_eq!(repaired_locator.content_ref(), &repaired_ref);
+    let repaired_events = store.events_for_session(session_id).unwrap();
+    assert!(repaired_events
+        .iter()
+        .any(|event| event.payload.to_string().contains("proof file was written")));
+    assert!(!repaired_events
+        .iter()
+        .any(|event| event.event_type == EventType::ToolOutput));
 
     let terminal = import_cursor_native_history(&transcript, &mut store, options).unwrap();
     assert_eq!(terminal.failed, 0, "{terminal:?}");
     assert_eq!(terminal.imported_events, 0);
-    assert_eq!(terminal.skipped_events, 5);
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 5);
+    assert_eq!(terminal.skipped_events, 4);
+    assert_eq!(store.events_for_session(session_id).unwrap().len(), 4);
 }
 
 #[test]

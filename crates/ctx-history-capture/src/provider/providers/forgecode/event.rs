@@ -1,18 +1,19 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, Confidence, EventRole, EventType, FileChangeKind};
+use ctx_history_core::{Confidence, EventRole, EventType, FileChangeKind};
+use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::provider::file_touches::{normalized_key, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT};
+use crate::provider::file_touches::normalized_key;
 use crate::provider::normalization::{
-    provider_line_from_index, provider_normalized_result_value, provider_role,
+    provider_capped_json, provider_capped_json_value, provider_line_from_index,
+    provider_normalized_result_value, provider_policy_body, provider_policy_event_text,
+    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
     provider_timestamp_value, provider_value_text,
 };
 use crate::provider::providers::goose::goose_timestamp;
-use crate::{ProviderFileTouchedEnvelope, FORGECODE_SQLITE_SOURCE_FORMAT};
-
-use super::source::ForgeCodeConversationRow;
+use crate::{compute_payload_hash, FORGECODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ForgeCodeMessageParts<'a> {
@@ -62,6 +63,23 @@ pub(super) fn forgecode_event_type(parts: ForgeCodeMessageParts<'_>) -> EventTyp
     }
 }
 
+pub(super) fn forgecode_tool_result_is_error(parts: ForgeCodeMessageParts<'_>) -> Option<bool> {
+    (parts.variant == "tool")
+        .then(|| {
+            parts
+                .body
+                .pointer("/output/is_error")
+                .and_then(Value::as_bool)
+        })
+        .flatten()
+}
+
+pub(super) fn forgecode_tool_result_call_id(parts: ForgeCodeMessageParts<'_>) -> Option<String> {
+    (parts.variant == "tool")
+        .then(|| parts.body.get("call_id").and_then(forgecode_scalar_text))
+        .flatten()
+}
+
 pub(super) fn forgecode_event_role(parts: ForgeCodeMessageParts<'_>) -> Option<EventRole> {
     match parts.variant {
         "text" => forgecode_role_text(parts).map(|role| provider_role(Some(&role))),
@@ -99,6 +117,81 @@ pub(super) fn forgecode_message_text(
         "image" => forgecode_image_text(parts.body),
         _ => provider_value_text(parts.body).unwrap_or_default(),
     }
+}
+
+pub(super) fn forgecode_event(
+    provider_session_id: &str,
+    entry: &Value,
+    provider_event_index: u64,
+    occurred_at: DateTime<Utc>,
+) -> ForgeCodeNativeEvent {
+    let parts = forgecode_message_parts(entry);
+    let event_type = forgecode_event_type(parts);
+    let text = forgecode_message_text(parts, event_type);
+    let body = json!({
+        "message_index": provider_event_index,
+        "message_variant": parts.variant,
+        "message": entry,
+        "usage": parts.usage,
+    });
+    let retained_text = provider_policy_event_text(event_type, &text, &body);
+    let retained_body = provider_policy_body(event_type, &body);
+    ForgeCodeNativeEvent {
+        provider_event_index,
+        provider_event_hash: compute_payload_hash(entry).ok(),
+        cursor: format!("conversation:{provider_session_id}:message:{provider_event_index}"),
+        event_type,
+        role: forgecode_event_role(parts),
+        occurred_at,
+        payload: json!({
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
+            "result_evidence": provider_result_identifier_evidence(event_type, &text, &body),
+            "result_outcome": provider_result_outcome_evidence(event_type, &body),
+            "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
+            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+        }),
+        metadata: json!({
+            "source": "forgecode_conversations",
+            "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
+            "conversation_id": provider_session_id,
+            "message_index": provider_event_index,
+            "message_variant": parts.variant,
+            "role": forgecode_role_text(parts),
+            "model": forgecode_text_body(parts)
+                .and_then(|body| body.get("model"))
+                .and_then(provider_value_text),
+            "usage": parts.usage
+                .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ForgeCodeNativeEvent {
+    pub(super) provider_event_index: u64,
+    pub(super) provider_event_hash: Option<String>,
+    pub(super) cursor: String,
+    pub(super) event_type: EventType,
+    pub(super) role: Option<EventRole>,
+    pub(super) occurred_at: DateTime<Utc>,
+    pub(super) payload: Value,
+    pub(super) metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ForgeCodeFileTouch {
+    pub(super) provider_touch_index: u64,
+    pub(super) provider_event_index: Option<u64>,
+    pub(super) raw_source_path: Option<String>,
+    pub(super) source_root: Option<String>,
+    pub(super) path: String,
+    pub(super) change_kind: Option<FileChangeKind>,
+    pub(super) old_path: Option<String>,
+    pub(super) line_count_delta: Option<i64>,
+    pub(super) confidence: Confidence,
+    pub(super) occurred_at: DateTime<Utc>,
+    pub(super) metadata: Value,
 }
 
 pub(super) fn forgecode_text_message_text(body: &Value, _event_type: EventType) -> String {
@@ -265,13 +358,14 @@ fn forgecode_scalar_text(value: &Value) -> Option<String> {
         .or_else(|| provider_value_text(value))
 }
 
-pub(super) fn forgecode_for_each_metric_file_touch<E>(
-    row: &ForgeCodeConversationRow,
+pub(super) fn forgecode_for_each_metric_file_touch_with_limit<E>(
     metrics: &Value,
     raw_source_path: &str,
     fallback: DateTime<Utc>,
-    mut emit: impl FnMut((usize, ProviderFileTouchedEnvelope)) -> std::result::Result<(), E>,
+    touch_limit: usize,
+    mut emit: impl FnMut((usize, ForgeCodeFileTouch)) -> std::result::Result<(), E>,
 ) -> std::result::Result<bool, E> {
+    let touch_limit = u64::try_from(touch_limit).unwrap_or(u64::MAX);
     let occurred_at = metrics
         .get("started_at")
         .map(|value| provider_timestamp_value(Some(value), fallback))
@@ -293,7 +387,7 @@ pub(super) fn forgecode_for_each_metric_file_touch<E>(
             if seen.contains(&key) {
                 continue;
             }
-            if emitted_count == MAX_PROVIDER_FILE_TOUCHES_PER_EVENT as u64 {
+            if emitted_count == touch_limit {
                 return Ok(true);
             }
             seen.insert(key);
@@ -308,9 +402,7 @@ pub(super) fn forgecode_for_each_metric_file_touch<E>(
             let touch_index = 0x0400_0000_0000_u64.saturating_add(emitted_count);
             emit((
                 provider_line_from_index(touch_index),
-                ProviderFileTouchedEnvelope {
-                    provider: CaptureProvider::ForgeCode,
-                    provider_session_id: row.conversation_id.clone(),
+                ForgeCodeFileTouch {
                     provider_touch_index: touch_index,
                     provider_event_index: None,
                     raw_source_path: Some(raw_source_path.to_owned()),
@@ -321,7 +413,6 @@ pub(super) fn forgecode_for_each_metric_file_touch<E>(
                     line_count_delta,
                     confidence: Confidence::Explicit,
                     occurred_at,
-                    source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
                     metadata: json!({
                         "source": "forgecode_metrics_files_changed",
                         "tool": tool,
@@ -345,16 +436,14 @@ pub(super) fn forgecode_for_each_metric_file_touch<E>(
             if seen.contains(&key) {
                 continue;
             }
-            if emitted_count == MAX_PROVIDER_FILE_TOUCHES_PER_EVENT as u64 {
+            if emitted_count == touch_limit {
                 return Ok(true);
             }
             seen.insert(key);
             let touch_index = 0x0500_0000_0000_u64.saturating_add(emitted_count);
             emit((
                 provider_line_from_index(touch_index),
-                ProviderFileTouchedEnvelope {
-                    provider: CaptureProvider::ForgeCode,
-                    provider_session_id: row.conversation_id.clone(),
+                ForgeCodeFileTouch {
                     provider_touch_index: touch_index,
                     provider_event_index: None,
                     raw_source_path: Some(raw_source_path.to_owned()),
@@ -365,7 +454,6 @@ pub(super) fn forgecode_for_each_metric_file_touch<E>(
                     line_count_delta: None,
                     confidence: Confidence::Explicit,
                     occurred_at,
-                    source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
                     metadata: json!({
                         "source": "forgecode_metrics_files_accessed",
                     }),

@@ -136,6 +136,61 @@ fn ordinary_uninstall_is_local_without_commercial_configuration_or_vault() {
 }
 
 #[test]
+fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
+    for (root_kind, create_root) in [("missing", false), ("empty", true)] {
+        for choice in ["--delete-data", "--keep-data"] {
+            let parent = tempdir().unwrap();
+            let data_root = parent.path().join(root_kind);
+            if create_root {
+                fs::create_dir(&data_root).unwrap();
+                fs::write(
+                    data_root.join("install.json"),
+                    br#"{
+  "schema_version": 1,
+  "install_id": "6a1de1ab-c732-45ed-b3f8-bbf6ab1048e8",
+  "created_at": "2026-07-23T00:00:00Z"
+}"#,
+                )
+                .unwrap();
+                fs::write(data_root.join("work.sqlite"), b"canonical history").unwrap();
+            }
+
+            let output = Command::cargo_bin("ctx")
+                .unwrap()
+                .env("CTX_ANALYTICS_ENABLED", "false")
+                .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                .env_remove("XDG_RUNTIME_DIR")
+                .arg("--data-root")
+                .arg(&data_root)
+                .args(["pro", "uninstall", choice, "--json"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{root_kind} {choice}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["local_pro_data"], "absent");
+            assert_eq!(value["helper_removed"], false);
+            assert_eq!(value["next_action"], serde_json::Value::Null);
+            assert!(
+                !data_root.join("pro").exists(),
+                "{root_kind} {choice} created a Pro root"
+            );
+            if create_root {
+                assert_eq!(
+                    fs::read(data_root.join("work.sqlite")).unwrap(),
+                    b"canonical history"
+                );
+            } else {
+                assert!(!data_root.exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn pro_help_documents_bare_setup_and_the_explicit_synonym() {
     Command::cargo_bin("ctx")
         .unwrap()

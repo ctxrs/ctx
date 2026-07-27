@@ -1,10 +1,13 @@
 param(
     [string]$Ctx = "ctx.exe",
+    [string]$BuildInfo = "",
     [string]$RuntimeArchive = "",
+    [string]$RuntimeMode = "onnxruntime",
     [string]$RuntimePlatform = "",
     [string]$DataRoot = "",
     [string]$ProofOutput = "",
     [int]$TimeoutSeconds = 900,
+    [switch]$SignedProvisioned,
     [switch]$RequireAuthoritative,
     [switch]$KeepRoot
 )
@@ -67,10 +70,72 @@ if ($RuntimePlatform -ne "windows-x64") {
     throw "RuntimePlatform must be windows-x64"
 }
 
-$runtimeVersion = "1.27.0"
-$expectedRuntimeAsset = "ctx-onnxruntime-windows-x64.zip"
+function Get-WindowsRuntimeContract {
+    param([string]$Mode)
+
+    switch -CaseSensitive ($Mode) {
+        "onnxruntime" {
+            return [PSCustomObject]@{
+                Mode = "onnxruntime"
+                Version = "1.27.0"
+                Asset = "ctx-onnxruntime-windows-x64.zip"
+                EmbeddingBackend = "cpu"
+                BackendPreference = "cpu"
+                StatusBackend = "cpu"
+                ExecutionProvider = "CPUExecutionProvider"
+                Files = @(
+                    "LICENSE",
+                    "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
+                    "ThirdPartyNotices.txt",
+                    "VERSION_NUMBER",
+                    "GIT_COMMIT_ID",
+                    "lib/onnxruntime.dll",
+                    "lib/msvcp140.dll",
+                    "lib/msvcp140_1.dll",
+                    "lib/vcruntime140.dll",
+                    "lib/vcruntime140_1.dll"
+                )
+            }
+        }
+        "windows-ml" {
+            return [PSCustomObject]@{
+                Mode = "windows-ml"
+                Version = "2.1.74"
+                Asset = "ctx-windowsml-windows-x64.zip"
+                EmbeddingBackend = "windows-ml"
+                BackendPreference = "windowsml"
+                StatusBackend = "windows_ml"
+                ExecutionProvider = "WindowsML:DmlExecutionProvider:GPU"
+                Files = @(
+                    "LICENSE",
+                    "ThirdPartyNotices.txt",
+                    "lib/Microsoft.Windows.AI.MachineLearning.dll",
+                    "lib/onnxruntime.dll",
+                    "lib/DirectML.dll"
+                )
+            }
+        }
+        default {
+            throw "RuntimeMode must be exactly onnxruntime or windows-ml"
+        }
+    }
+}
+
+$runtimeContract = Get-WindowsRuntimeContract -Mode $RuntimeMode
+$signedWindowsMl = $RuntimeMode -ceq "windows-ml" -and $SignedProvisioned
+if ($RuntimeMode -ceq "windows-ml" -and -not $SignedProvisioned) {
+    throw "Windows ML proof requires -SignedProvisioned after hosted signed model/runtime provisioning"
+}
+if ($SignedProvisioned -and $RuntimeMode -cne "windows-ml") {
+    throw "-SignedProvisioned is only valid with -RuntimeMode windows-ml"
+}
+if ($signedWindowsMl -and [string]::IsNullOrWhiteSpace($DataRoot)) {
+    throw "Signed Windows ML proof requires the exact provisioned DataRoot"
+}
+$runtimeVersion = $runtimeContract.Version
+$expectedRuntimeAsset = $runtimeContract.Asset
 if ([System.IO.Path]::GetFileName($RuntimeArchive) -ne $expectedRuntimeAsset) {
-    throw "RuntimeArchive for windows-x64 must be named $expectedRuntimeAsset"
+    throw "RuntimeArchive for $RuntimeMode must be named $expectedRuntimeAsset"
 }
 $runtimeArchivePath = (Resolve-Path -LiteralPath $RuntimeArchive).Path
 $runtimeShaPath = "$runtimeArchivePath.sha256"
@@ -89,25 +154,14 @@ if ($actualRuntimeSha -ne $expectedRuntimeSha.ToLowerInvariant()) {
 function Assert-WindowsRuntimeArchive {
     param(
         [string]$ArchivePath,
-        [string]$ExpectedVersion
+        [PSCustomObject]$Contract
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $expectedFiles = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::Ordinal
     )
-    @(
-        "LICENSE",
-        "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
-        "ThirdPartyNotices.txt",
-        "VERSION_NUMBER",
-        "GIT_COMMIT_ID",
-        "lib/onnxruntime.dll",
-        "lib/msvcp140.dll",
-        "lib/msvcp140_1.dll",
-        "lib/vcruntime140.dll",
-        "lib/vcruntime140_1.dll"
-    ) | ForEach-Object { [void]$expectedFiles.Add($_) }
+    @($Contract.Files) | ForEach-Object { [void]$expectedFiles.Add($_) }
     $seenFiles = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
@@ -171,34 +225,106 @@ function Assert-WindowsRuntimeArchive {
         if ($missing.Count -gt 0 -or $seenFiles.Count -ne $expectedFiles.Count) {
             throw "Runtime archive entries do not match the expected files; missing: $($missing -join ', ')"
         }
-        if ($null -eq $versionEntry) {
-            throw "Runtime archive is missing VERSION_NUMBER"
-        }
-
-        $versionStream = $versionEntry.Open()
-        try {
-            $memory = [System.IO.MemoryStream]::new()
-            try {
-                $versionStream.CopyTo($memory)
-                $versionText = [System.Text.UTF8Encoding]::new($false, $true).GetString($memory.ToArray())
-            } finally {
-                $memory.Dispose()
+        if ($Contract.Mode -ceq "onnxruntime") {
+            if ($null -eq $versionEntry) {
+                throw "Runtime archive is missing VERSION_NUMBER"
             }
-        } finally {
-            $versionStream.Dispose()
-        }
-        if ($versionText -cne ($ExpectedVersion + "`n")) {
-            throw "Runtime archive VERSION_NUMBER is not exactly $ExpectedVersion"
+            $versionStream = $versionEntry.Open()
+            try {
+                $memory = [System.IO.MemoryStream]::new()
+                try {
+                    $versionStream.CopyTo($memory)
+                    $versionText = [System.Text.UTF8Encoding]::new($false, $true).GetString($memory.ToArray())
+                } finally {
+                    $memory.Dispose()
+                }
+            } finally {
+                $versionStream.Dispose()
+            }
+            if ($versionText -cne ($Contract.Version + "`n")) {
+                throw "Runtime archive VERSION_NUMBER is not exactly $($Contract.Version)"
+            }
         }
     } finally {
         $archive.Dispose()
     }
 }
 
-Assert-WindowsRuntimeArchive -ArchivePath $runtimeArchivePath -ExpectedVersion $runtimeVersion
+function Get-BoundWindowsBuildInfoSha256 {
+    param(
+        [string]$ArtifactPath,
+        [string]$ExpectedArtifactSha256,
+        [string]$BuildInfoPath,
+        [string]$MatrixPath
+    )
+
+    foreach ($inputFile in @(
+        [PSCustomObject]@{ Path = $ArtifactPath; Label = "Windows release artifact"; Maximum = 268435456 },
+        [PSCustomObject]@{ Path = $BuildInfoPath; Label = "Windows release build-info"; Maximum = 65536 },
+        [PSCustomObject]@{ Path = $MatrixPath; Label = "release-target matrix"; Maximum = 262144 }
+    )) {
+        if (-not (Test-Path -LiteralPath $inputFile.Path -PathType Leaf)) {
+            throw "$($inputFile.Label) is unavailable: $($inputFile.Path)"
+        }
+        $item = Get-Item -LiteralPath $inputFile.Path -Force
+        if (
+            ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Length -le 0 -or
+            $item.Length -gt $inputFile.Maximum
+        ) {
+            throw "$($inputFile.Label) is not an allowed regular file: $($inputFile.Path)"
+        }
+    }
+
+    $artifactSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArtifactPath).Hash.ToLowerInvariant()
+    if ($artifactSha256 -cne $ExpectedArtifactSha256) {
+        throw "Windows release build-info artifact changed before validation"
+    }
+    $buildInfo = Get-Content -LiteralPath $BuildInfoPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    $matrix = Get-Content -LiteralPath $MatrixPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    $targets = @($matrix.targets | Where-Object { $_.id -ceq "windows-x64" })
+    if ($matrix.schema_version -ne 1 -or $targets.Count -ne 1) {
+        throw "release-target matrix does not contain the exact Windows target"
+    }
+    $target = $targets[0]
+    $source = $buildInfo.PSObject.Properties["source"].Value
+    $gates = $buildInfo.PSObject.Properties["gates"].Value
+    $sourceCommit = $source.PSObject.Properties["commit"].Value
+    $sourceClean = $source.PSObject.Properties["clean"].Value
+    $buildLinux = $buildInfo.PSObject.Properties["linux_build"]
+    $targetLinux = $target.PSObject.Properties["linux_build"]
+    if (
+        $buildInfo.schema_version -ne 1 -or
+        $buildInfo.platform -cne "windows-x64" -or
+        $buildInfo.target -cne $target.public_rust_target -or
+        $buildInfo.artifact_sha256 -cne $artifactSha256 -or
+        $buildInfo.cargo_lock_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $sourceClean -ne $true -or
+        $sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+        $sourceCommit -ceq "0000000000000000000000000000000000000000" -or
+        $gates.static -cne "passed" -or
+        $gates.static_abi -cne "passed" -or
+        $null -eq $buildLinux -or
+        $null -eq $targetLinux -or
+        $null -ne $buildLinux.Value -or
+        $null -ne $targetLinux.Value
+    ) {
+        throw "Windows release build-info does not bind the clean exact matrix artifact"
+    }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $BuildInfoPath).Hash.ToLowerInvariant()
+}
+
+Assert-WindowsRuntimeArchive -ArchivePath $runtimeArchivePath -Contract $runtimeContract
 
 $ctxCommand = Get-Command -Name $Ctx -CommandType Application -ErrorAction Stop
 $Ctx = $ctxCommand.Source
+$ctxSource = $Ctx
+$ctxBuildInfoPath = if ([string]::IsNullOrWhiteSpace($BuildInfo)) {
+    "$ctxSource.build-info.json"
+} else {
+    (Resolve-Path -LiteralPath $BuildInfo).Path
+}
+$releaseTargetMatrix = Join-Path (Split-Path -Parent $PSScriptRoot) "contracts\release-targets-v1.json"
 
 function New-UniqueRunRoot {
     param([string]$Parent)
@@ -231,7 +357,7 @@ $environmentVariableNames = @(
     "CTX_ANALYTICS_ENDPOINT", "CTX_ANALYTICS_DRY_RUN", "CTX_ANALYTICS_DEBUG",
     "CTX_UPGRADE_AUTO",
     "CTX_UPGRADE_CHANNEL", "CTX_UPGRADE_FUNCTIONS_BASE",
-    "CTX_UPGRADE_INTERVAL_SECONDS", "CTX_UPGRADE_TARGET", "CTX_UPGRADE_BACKGROUND_CHILD",
+    "CTX_UPGRADE_INTERVAL_SECONDS", "CTX_UPGRADE_TARGET",
     "CTX_SEMANTIC_CACHE_DIR", "FASTEMBED_CACHE_DIR", "HF_HOME", "HF_HUB_CACHE",
     "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
     "CTX_RUNTIME_DIR", "CTX_ONNXRUNTIME_DYLIB", "ORT_DYLIB_PATH",
@@ -260,6 +386,7 @@ function Set-ProcessEnvironmentVariable {
 }
 
 $runRoot = ""
+$ownsRunRoot = $false
 $daemon = $null
 
 function Invoke-Ctx {
@@ -346,19 +473,28 @@ function Read-OwnedDaemonStatus {
 }
 
 try {
-    if ([string]::IsNullOrWhiteSpace($DataRoot)) {
-        $dataRootParent = [System.IO.Path]::GetTempPath()
-    } else {
-        if (Test-Path -LiteralPath $DataRoot -PathType Leaf) {
-            throw "DataRoot parent is a file: $DataRoot"
+    if ($signedWindowsMl) {
+        if (-not (Test-Path -LiteralPath $DataRoot -PathType Container)) {
+            throw "Signed Windows ML DataRoot is not an existing directory: $DataRoot"
         }
-        New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
-        $dataRootParent = (Resolve-Path -LiteralPath $DataRoot).Path
+        $DataRoot = (Resolve-Path -LiteralPath $DataRoot).Path
+        $runRoot = $DataRoot
+    } else {
+        if ([string]::IsNullOrWhiteSpace($DataRoot)) {
+            $dataRootParent = [System.IO.Path]::GetTempPath()
+        } else {
+            if (Test-Path -LiteralPath $DataRoot -PathType Leaf) {
+                throw "DataRoot parent is a file: $DataRoot"
+            }
+            New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
+            $dataRootParent = (Resolve-Path -LiteralPath $DataRoot).Path
+        }
+        $runRoot = New-UniqueRunRoot -Parent $dataRootParent
+        $ownsRunRoot = $true
+        $DataRoot = Join-Path $runRoot "data"
+        New-Item -ItemType Directory -Path $DataRoot | Out-Null
+        $DataRoot = [System.IO.Path]::GetFullPath($DataRoot)
     }
-    $runRoot = New-UniqueRunRoot -Parent $dataRootParent
-    $DataRoot = Join-Path $runRoot "data"
-    New-Item -ItemType Directory -Path $DataRoot | Out-Null
-    $DataRoot = [System.IO.Path]::GetFullPath($DataRoot)
 
     $fixtureDir = Join-Path $DataRoot "smoke-fixture"
     $fixturePath = Join-Path $fixtureDir "history.jsonl"
@@ -367,77 +503,118 @@ try {
     $smokeConfig = Join-Path $DataRoot "config-home"
     $smokeLocalAppData = Join-Path $DataRoot "local-app-data"
     $smokeAppData = Join-Path $DataRoot "app-data"
-    $semanticCache = Join-Path $DataRoot "semantic-cache"
+    $semanticCache = if ($signedWindowsMl) {
+        Join-Path $DataRoot "semantic-model-cache"
+    } else {
+        Join-Path $DataRoot "semantic-cache"
+    }
     New-Item -ItemType Directory -Path $fixtureDir -Force | Out-Null
     New-Item -ItemType Directory -Path $smokeHome -Force | Out-Null
     New-Item -ItemType Directory -Path $smokeCache -Force | Out-Null
     New-Item -ItemType Directory -Path $smokeConfig -Force | Out-Null
     New-Item -ItemType Directory -Path $smokeLocalAppData -Force | Out-Null
     New-Item -ItemType Directory -Path $smokeAppData -Force | Out-Null
-    New-Item -ItemType Directory -Path $semanticCache -Force | Out-Null
+    if ($signedWindowsMl) {
+        if (-not (Test-Path -LiteralPath $semanticCache -PathType Container)) {
+            throw "Signed Windows ML model cache is missing: $semanticCache"
+        }
+    } else {
+        New-Item -ItemType Directory -Path $semanticCache -Force | Out-Null
+    }
 
     Write-Host "ctx semantic smoke: run_root=$runRoot"
     Write-Host "ctx semantic smoke: data_root=$DataRoot"
 
     $runtimeRoot = Join-Path $DataRoot "runtime"
     $runtimeInstallDir = Join-Path $runtimeRoot ("onnxruntime\" + $runtimeVersion + "\" + $RuntimePlatform)
-    $releaseArtifactDir = Join-Path $runRoot "release-artifacts"
-    $installBinDir = Join-Path $runRoot "installed\bin"
-    $releaseMetadata = Join-Path $runRoot "release-metadata.env"
-    New-Item -ItemType Directory -Path $releaseArtifactDir -Force | Out-Null
-    New-Item -ItemType Directory -Path $installBinDir -Force | Out-Null
 
     $versionLine = (& $Ctx --version | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or $versionLine -notmatch '^ctx\s+(\S+)') {
         throw "Could not determine ctx version from $Ctx"
     }
     $ctxVersion = $Matches[1]
-    $releaseBinary = "ctx-windows-x64.exe"
-    Copy-Item -LiteralPath $Ctx -Destination (Join-Path $releaseArtifactDir $releaseBinary) -Force
-    Copy-Item -LiteralPath $runtimeArchivePath -Destination (Join-Path $releaseArtifactDir $expectedRuntimeAsset) -Force
-    Copy-Item -LiteralPath $runtimeShaPath -Destination (Join-Path $releaseArtifactDir "$expectedRuntimeAsset.sha256") -Force
-    $binarySha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $releaseArtifactDir $releaseBinary)).Hash.ToLowerInvariant()
-    $metadataLines = @(
-        "CTX_RELEASE_SCHEMA_VERSION=1",
-        "CTX_RELEASE_VERSION=$ctxVersion",
-        "CTX_RELEASE_BASE_URL=https://release-smoke.invalid",
-        "CTX_RELEASE_ARTIFACT_windows_x64=$releaseBinary",
-        "CTX_RELEASE_SHA256_windows_x64=$binarySha",
-        "CTX_RELEASE_ONNXRUNTIME_VERSION=$runtimeVersion",
-        "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_windows_x64=$expectedRuntimeAsset",
-        "CTX_RELEASE_ONNXRUNTIME_SHA256_windows_x64=$actualRuntimeSha"
-    )
-    [System.IO.File]::WriteAllLines($releaseMetadata, $metadataLines, [System.Text.UTF8Encoding]::new($false))
+    $binarySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $ctxSource).Hash.ToLowerInvariant()
+    $buildInfoSha = Get-BoundWindowsBuildInfoSha256 `
+        -ArtifactPath $ctxSource `
+        -ExpectedArtifactSha256 $binarySha `
+        -BuildInfoPath $ctxBuildInfoPath `
+        -MatrixPath $releaseTargetMatrix
+    if (-not $signedWindowsMl) {
+        $releaseArtifactDir = Join-Path $runRoot "release-artifacts"
+        $installBinDir = Join-Path $runRoot "installed\bin"
+        $releaseMetadata = Join-Path $runRoot "release-metadata.env"
+        New-Item -ItemType Directory -Path $releaseArtifactDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $installBinDir -Force | Out-Null
+        $releaseBinary = "ctx-windows-x64.exe"
+        Copy-Item -LiteralPath $Ctx -Destination (Join-Path $releaseArtifactDir $releaseBinary) -Force
+        Copy-Item -LiteralPath $runtimeArchivePath -Destination (Join-Path $releaseArtifactDir $expectedRuntimeAsset) -Force
+        Copy-Item -LiteralPath $runtimeShaPath -Destination (Join-Path $releaseArtifactDir "$expectedRuntimeAsset.sha256") -Force
+        $metadataLines = @(
+            "CTX_RELEASE_SCHEMA_VERSION=1",
+            "CTX_RELEASE_VERSION=$ctxVersion",
+            "CTX_RELEASE_BASE_URL=https://release-smoke.invalid",
+            "CTX_RELEASE_ARTIFACT_windows_x64=$releaseBinary",
+            "CTX_RELEASE_SHA256_windows_x64=$binarySha",
+            "CTX_RELEASE_ONNXRUNTIME_VERSION=$runtimeVersion",
+            "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_windows_x64=$expectedRuntimeAsset",
+            "CTX_RELEASE_ONNXRUNTIME_SHA256_windows_x64=$actualRuntimeSha"
+        )
+        [System.IO.File]::WriteAllLines(
+            $releaseMetadata,
+            $metadataLines,
+            [System.Text.UTF8Encoding]::new($false)
+        )
 
-    & (Join-Path $PSScriptRoot "install.ps1") `
-        -Metadata $releaseMetadata `
-        -ArtifactDir $releaseArtifactDir `
-        -Platform $RuntimePlatform `
-        -BinDir $installBinDir `
-        -RuntimeDir $runtimeRoot `
-        -NoSetup -NoSkill -NoModifyPath | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Explicit-metadata installer failed with status $LASTEXITCODE"
+        & (Join-Path $PSScriptRoot "install.ps1") `
+            -Metadata $releaseMetadata `
+            -ArtifactDir $releaseArtifactDir `
+            -Platform $RuntimePlatform `
+            -BinDir $installBinDir `
+            -RuntimeDir $runtimeRoot `
+            -NoSetup -NoSkill -NoModifyPath | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Explicit-metadata installer failed with status $LASTEXITCODE"
+        }
+        $Ctx = Join-Path $installBinDir "ctx.exe"
     }
 
-    $Ctx = Join-Path $installBinDir "ctx.exe"
     $runtimeDylib = Join-Path $runtimeInstallDir "lib\onnxruntime.dll"
     if (
         -not (Test-Path -LiteralPath $Ctx -PathType Leaf) -or
         -not (Test-Path -LiteralPath $runtimeDylib -PathType Leaf)
     ) {
-        throw "Explicit-metadata installer did not create the expected binary/runtime layout"
+        throw "Semantic proof input does not contain the expected binary/runtime layout"
     }
     $runtimeDylib = [System.IO.Path]::GetFullPath($runtimeDylib)
     $binaryMarker = Get-Content -LiteralPath "$Ctx.install.json" -Raw | ConvertFrom-Json
     $runtimeMarker = Get-Content -LiteralPath (Join-Path $runtimeInstallDir "ctx-runtime-install.json") -Raw | ConvertFrom-Json
-    if (
-        $binaryMarker.manager -cne "ctx-explicit-metadata-installer" -or
-        $binaryMarker.metadata_trust -cne "explicit-unsigned" -or
-        $runtimeMarker.manager -cne "ctx-explicit-metadata-installer" -or
-        $runtimeMarker.metadata_trust -cne "explicit-unsigned"
-    ) {
-        throw "Explicit-metadata install provenance marker is missing or incorrect"
+    if ($signedWindowsMl) {
+        if (
+            $binaryMarker.manager -cne "ctx-hosted-installer" -or
+            $binaryMarker.platform -cne "windows-x64" -or
+            $binaryMarker.version -cne $ctxVersion -or
+            $binaryMarker.sha256 -cne $binarySha
+        ) {
+            throw "Signed hosted binary install provenance marker is missing or incorrect"
+        }
+        if (
+            $runtimeMarker.manager -cne "ctx-hosted-installer" -or
+            $runtimeMarker.metadata_trust -cne "signed-release-metadata" -or
+            $runtimeMarker.runtime -cne "windows-ml" -or
+            $runtimeMarker.version -cne $runtimeVersion -or
+            $runtimeMarker.sha256 -cne $actualRuntimeSha
+        ) {
+            throw "Signed Windows ML runtime install provenance marker is missing or incorrect"
+        }
+    } else {
+        if (
+            $binaryMarker.manager -cne "ctx-explicit-metadata-installer" -or
+            $binaryMarker.metadata_trust -cne "explicit-unsigned" -or
+            $runtimeMarker.manager -cne "ctx-explicit-metadata-installer" -or
+            $runtimeMarker.metadata_trust -cne "explicit-unsigned"
+        ) {
+            throw "Explicit-metadata binary/runtime install provenance marker is missing or incorrect"
+        }
     }
 
     foreach ($name in $environmentVariableNames) {
@@ -457,7 +634,9 @@ try {
     Set-ProcessEnvironmentVariable -Name "CTX_UPGRADE_AUTO" -Value "off"
     Set-ProcessEnvironmentVariable -Name "CTX_DAEMON_ENABLED" -Value "true"
     Set-ProcessEnvironmentVariable -Name "CTX_SEARCH_SEMANTIC" -Value "true"
-    Set-ProcessEnvironmentVariable -Name "CTX_INTERNAL_SEMANTIC_BACKEND" -Value "cpu"
+    Set-ProcessEnvironmentVariable `
+        -Name "CTX_INTERNAL_SEMANTIC_BACKEND" `
+        -Value $runtimeContract.BackendPreference
     Set-ProcessEnvironmentVariable -Name "CTX_RUNTIME_DIR" -Value $runtimeRoot
     Set-ProcessEnvironmentVariable -Name "PATH" -Value $savedEnvironment["PATH"]
 
@@ -476,10 +655,15 @@ try {
     if ($RequireAuthoritative -and $runtimeAuthority -cne "authoritative") {
         throw "Windows semantic smoke requires native AMD64 execution; probe was $machineProbe"
     }
+    $installerProof = if ($RuntimeMode -ceq "onnxruntime") {
+        "explicit-metadata"
+    } else {
+        "signed-hosted-provisioning"
+    }
     $runtimeProofLines = @(
-        "runtime=onnxruntime",
+        "runtime=$($runtimeContract.Mode)",
         "version=$runtimeVersion",
-        "embedding_backend=cpu",
+        "embedding_backend=$($runtimeContract.EmbeddingBackend)",
         "platform=$RuntimePlatform",
         "host_system=Windows_NT",
         "host_arch=$hostArch",
@@ -489,13 +673,14 @@ try {
         "runtime_authority=$runtimeAuthority",
         "artifact=$Ctx",
         "artifact_sha256=$binarySha",
+        "build_info_sha256=$buildInfoSha",
         "archive=$runtimeArchivePath",
         "runtime_archive_sha256=$actualRuntimeSha",
         "CTX_RUNTIME_DIR=$runtimeRoot",
         "runtime_dylib=$runtimeDylib",
         "loader_overrides=unset",
         "CTX_SEMANTIC_CACHE_DIR=$semanticCache",
-        "installer=explicit-metadata"
+        "installer=$installerProof"
     )
 
     $marker = "ctx-release-semantic-smoke-" + [System.Guid]::NewGuid().ToString("n")
@@ -630,6 +815,28 @@ try {
                         $lastStatusOutput = $finalStatusReport.Text
                         $lastStatusError = $finalStatusReport.Error
                         if ($finalStatusReport.Ready) {
+                            $embeddingRuntime = $finalStatusReport.Json.daemon.jobs.semantic_index.embedding_runtime
+                            if (
+                                $null -eq $embeddingRuntime -or
+                                $embeddingRuntime.backend -cne $runtimeContract.StatusBackend -or
+                                $embeddingRuntime.preference -cne $runtimeContract.BackendPreference -or
+                                $embeddingRuntime.execution_provider -cne $runtimeContract.ExecutionProvider
+                            ) {
+                                throw "Daemon did not report the selected $RuntimeMode embedding runtime"
+                            }
+                            $runtimeArtifactIdentity = [string]$embeddingRuntime.runtime_artifact_identity
+                            if (
+                                $RuntimeMode -ceq "windows-ml" -and (
+                                    $embeddingRuntime.canary -cne "passed" -or
+                                    $runtimeArtifactIdentity.IndexOf(
+                                        "sha256=$actualRuntimeSha",
+                                        [System.StringComparison]::Ordinal
+                                    ) -lt 0
+                                )
+                            ) {
+                                throw "Windows ML runtime did not pass the exact-archive semantic contract canary"
+                            }
+
                             $runtimeLibDir = [System.IO.Path]::GetFullPath((Join-Path $runtimeInstallDir "lib"))
                             $daemonModules = @(Get-Process -Id $daemon.Id -Module -ErrorAction Stop)
                             $onnxRuntimeModules = @(
@@ -642,25 +849,55 @@ try {
                             if (-not $actualOnnxRuntime.Equals($runtimeDylib, [System.StringComparison]::OrdinalIgnoreCase)) {
                                 throw "Loaded onnxruntime.dll from $actualOnnxRuntime instead of $runtimeDylib"
                             }
-                            foreach ($dependencyName in @(
-                                "msvcp140.dll",
-                                "msvcp140_1.dll",
-                                "vcruntime140.dll",
-                                "vcruntime140_1.dll"
-                            )) {
-                                $dependencyModules = @(
-                                    $daemonModules | Where-Object { $_.ModuleName -ieq $dependencyName }
-                                )
-                                if ($dependencyModules.Count -ne 1) {
-                                    throw "Expected exactly one loaded $dependencyName module, got $($dependencyModules.Count)"
+                            if ($RuntimeMode -ceq "onnxruntime") {
+                                foreach ($dependencyName in @(
+                                    "msvcp140.dll",
+                                    "msvcp140_1.dll",
+                                    "vcruntime140.dll",
+                                    "vcruntime140_1.dll"
+                                )) {
+                                    $dependencyModules = @(
+                                        $daemonModules | Where-Object { $_.ModuleName -ieq $dependencyName }
+                                    )
+                                    if ($dependencyModules.Count -ne 1) {
+                                        throw "Expected exactly one loaded $dependencyName module, got $($dependencyModules.Count)"
+                                    }
+                                    $actualDependency = [System.IO.Path]::GetFullPath($dependencyModules[0].FileName)
+                                    $expectedDependency = [System.IO.Path]::GetFullPath((Join-Path $runtimeLibDir $dependencyName))
+                                    if (-not $actualDependency.Equals($expectedDependency, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                        throw "Loaded $dependencyName from $actualDependency instead of $expectedDependency"
+                                    }
+                                    $proofName = [System.IO.Path]::GetFileNameWithoutExtension($dependencyName)
+                                    $runtimeProofLines += "runtime_dependency_$proofName=$actualDependency"
                                 }
-                                $actualDependency = [System.IO.Path]::GetFullPath($dependencyModules[0].FileName)
-                                $expectedDependency = [System.IO.Path]::GetFullPath((Join-Path $runtimeLibDir $dependencyName))
-                                if (-not $actualDependency.Equals($expectedDependency, [System.StringComparison]::OrdinalIgnoreCase)) {
-                                    throw "Loaded $dependencyName from $actualDependency instead of $expectedDependency"
+                            } else {
+                                foreach ($moduleContract in @(
+                                    [PSCustomObject]@{
+                                        Name = "Microsoft.Windows.AI.MachineLearning.dll"
+                                        Proof = "runtime_module_windows_ml"
+                                    },
+                                    [PSCustomObject]@{
+                                        Name = "DirectML.dll"
+                                        Proof = "runtime_module_directml"
+                                    }
+                                )) {
+                                    $matchingModules = @(
+                                        $daemonModules | Where-Object { $_.ModuleName -ieq $moduleContract.Name }
+                                    )
+                                    if ($matchingModules.Count -ne 1) {
+                                        throw "Expected exactly one loaded $($moduleContract.Name) module, got $($matchingModules.Count)"
+                                    }
+                                    $actualModule = [System.IO.Path]::GetFullPath($matchingModules[0].FileName)
+                                    $expectedModule = [System.IO.Path]::GetFullPath(
+                                        (Join-Path $runtimeLibDir $moduleContract.Name)
+                                    )
+                                    if (-not $actualModule.Equals($expectedModule, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                        throw "Loaded $($moduleContract.Name) from $actualModule instead of $expectedModule"
+                                    }
+                                    $runtimeProofLines += "$($moduleContract.Proof)=$actualModule"
                                 }
-                                $proofName = [System.IO.Path]::GetFileNameWithoutExtension($dependencyName)
-                                $runtimeProofLines += "runtime_dependency_$proofName=$actualDependency"
+                                $runtimeProofLines += "runtime_artifact_identity=$runtimeArtifactIdentity"
+                                $runtimeProofLines += "semantic_contract_canary=passed"
                             }
                             $runtimeProofLines += @(
                                 "daemon_status=running",
@@ -719,7 +956,7 @@ $daemonError
         Stop-Process -InputObject $daemon -Force -ErrorAction SilentlyContinue
         $daemon.WaitForExit()
     }
-    if (-not $KeepRoot -and -not [string]::IsNullOrWhiteSpace($runRoot)) {
+    if (-not $KeepRoot -and $ownsRunRoot -and -not [string]::IsNullOrWhiteSpace($runRoot)) {
         Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     foreach ($name in $environmentVariableNames) {

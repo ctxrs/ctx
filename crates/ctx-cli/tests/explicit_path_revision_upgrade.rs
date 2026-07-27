@@ -211,7 +211,7 @@ fn explicit_codex_path_repairs_a_legacy_cursor_once() {
         )
         .unwrap();
     drop(connection);
-    let current = downgrade_certified_cursor(&database, "codex", Some(7), Some(3));
+    let current = downgrade_certified_cursor(&database, "codex", Some(8), Some(3));
 
     let repaired = explicit_import(&temp, "codex", source);
     assert_eq!(repaired["totals"]["imported_events"], 1, "{repaired:#}");
@@ -279,7 +279,7 @@ fn explicit_codex_tree_keeps_catalog_noop_and_revision_repair() {
         )
         .unwrap();
     drop(connection);
-    let current = downgrade_certified_cursor(&database, "codex", Some(7), Some(3));
+    let current = downgrade_certified_cursor(&database, "codex", Some(8), Some(3));
 
     let repaired = explicit_import(&temp, "codex", source);
     assert_eq!(repaired["totals"]["imported_events"], 1, "{repaired:#}");

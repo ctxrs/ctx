@@ -6,6 +6,7 @@ pub(crate) mod provider_checks;
 pub(crate) mod provider_session_identity;
 pub(crate) mod rebuild;
 pub(crate) mod scriptgram;
+pub(crate) mod semantic_projection_epoch;
 #[cfg(test)]
 mod tests;
 pub(crate) mod views;

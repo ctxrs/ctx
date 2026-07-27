@@ -315,6 +315,38 @@ impl Store {
             .optional()?
             .is_some())
     }
+
+    pub(crate) fn get_session_edge(&self, id: Uuid) -> Result<SessionEdge> {
+        self.conn
+            .query_row(
+                "SELECT id, from_session_id, to_session_id, edge_type, confidence,
+                        source_id, created_at_ms, updated_at_ms, visibility, fidelity,
+                        sync_state, sync_version, deleted_at_ms, metadata_json
+                 FROM session_edges WHERE id = ?1",
+                params![id.to_string()],
+                |row| {
+                    Ok(SessionEdge {
+                        id: parse_uuid(row.get::<_, String>(0)?)?,
+                        from_session_id: parse_uuid(row.get::<_, String>(1)?)?,
+                        to_session_id: parse_uuid(row.get::<_, String>(2)?)?,
+                        edge_type: parse_text_enum::<ctx_history_core::SessionEdgeType>(
+                            row.get::<_, String>(3)?,
+                        )?,
+                        confidence: parse_text_enum::<ctx_history_core::Confidence>(
+                            row.get::<_, String>(4)?,
+                        )?,
+                        source_id: parse_optional_uuid(row.get(5)?)?,
+                        timestamps: EntityTimestamps {
+                            created_at: ms_to_time(row.get(6)?)?,
+                            updated_at: ms_to_time(row.get(7)?)?,
+                        },
+                        sync: sync_metadata_from_row(row, 8, 9, 10, 11, 12, 13)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound(id))
+    }
 }
 
 pub(crate) fn session_select_sql(tail: &str) -> String {

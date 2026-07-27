@@ -3,14 +3,18 @@ FROM ${UBUNTU_IMAGE} AS builder
 
 ARG UBUNTU_IMAGE
 ARG UBUNTU_SNAPSHOT="20260701T000000Z"
+ARG GLIBC_BASELINE="2.35"
 ARG RUST_TOOLCHAIN="1.97.1"
+ARG RUST_COMMIT="8bab26f4f68e0e26f0bb7960be334d5b520ea452"
 ARG RUSTUP_VERSION="1.28.2"
 ARG RUSTUP_INIT_X86_64_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
 ARG RUSTUP_INIT_AARCH64_SHA256="e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c"
 
 LABEL org.ctx.release.base-image="${UBUNTU_IMAGE}"
 LABEL org.ctx.release.ubuntu-snapshot="${UBUNTU_SNAPSHOT}"
+LABEL org.ctx.release.glibc-baseline="${GLIBC_BASELINE}"
 LABEL org.ctx.release.rust-toolchain="${RUST_TOOLCHAIN}"
+LABEL org.ctx.release.rust-commit="${RUST_COMMIT}"
 LABEL org.ctx.release.rustup-version="${RUSTUP_VERSION}"
 LABEL org.ctx.release.role="builder"
 
@@ -69,6 +73,13 @@ RUN case "$(dpkg --print-architecture)" in \
     --default-toolchain "${RUST_TOOLCHAIN}" \
   && rm /tmp/rustup-init \
   && rustup target list --installed | grep -Fx "${rustup_target}" \
+  && test "$(getconf GNU_LIBC_VERSION)" = "glibc ${GLIBC_BASELINE}" \
+  && test "$(rustc -Vv | sed -n 's/^release: //p')" = "${RUST_TOOLCHAIN}" \
+  && test "$(rustc -Vv | sed -n 's/^commit-hash: //p')" = "${RUST_COMMIT}" \
+  && test "$(rustc -Vv | sed -n 's/^host: //p')" = "${rustup_target}" \
+  && test "$(rustc --print sysroot)" = "/opt/rustup/toolchains/${RUST_TOOLCHAIN}-${rustup_target}" \
+  && test "$(rustc --print target-libdir --target "${rustup_target}")" = \
+    "/opt/rustup/toolchains/${RUST_TOOLCHAIN}-${rustup_target}/lib/rustlib/${rustup_target}/lib" \
   && chmod -R a+rX /opt/cargo /opt/rustup
 
 ENV CARGO_HOME=/tmp/cargo-home

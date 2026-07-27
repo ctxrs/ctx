@@ -2,285 +2,263 @@ mod support;
 
 use support::*;
 
+fn initialize_request() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "ctx-pro-test", "version": "0" }
+        }
+    })
+}
+
+fn initialized_notification() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })
+}
+
 #[test]
-fn mcp_always_advertises_the_stable_pro_surface() {
+fn mcp_advertises_read_only_status_and_locally_mutating_blame() {
+    let disclosure = "Blame may perform bounded local catch-up that updates the canonical Core index, writes the encrypted derived Pro graph, and writes the projection acknowledgement. It never writes provider history or repositories.";
     let temp = tempdir();
     let responses = mcp_roundtrip_with_env(
         &temp,
         &[
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": { "name": "ctx-pro-test", "version": "0" }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }),
+            initialize_request(),
+            initialized_notification(),
             json!({
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/list"
             }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": { "name": "pro_status", "arguments": {} }
-            }),
         ],
-        &[("CTX_PRO_CHANNEL", "staging")],
+        &[],
     );
-
+    assert!(responses[0]["result"]["instructions"]
+        .as_str()
+        .is_some_and(|instructions| instructions.contains(disclosure)));
     let tools = responses[1]["result"]["tools"].as_array().unwrap();
-    for expected in [
-        "pro_status",
+    let blame = tools.iter().find(|tool| tool["name"] == "blame").unwrap();
+    let pro_status = tools
+        .iter()
+        .find(|tool| tool["name"] == "pro_status")
+        .unwrap();
+    for removed in [
         "show_resource",
         "locate_resource",
-        "blame",
         "timeline",
         "related",
         "facts",
     ] {
         assert!(
-            tools.iter().any(|tool| tool["name"] == expected),
-            "missing stable Pro tool {expected}"
+            tools.iter().all(|tool| tool["name"] != removed),
+            "obsolete Pro tool {removed} remained advertised"
         );
     }
-    assert!(tools.iter().all(|tool| !matches!(
-        tool["name"].as_str(),
-        Some("materialize" | "pro_install" | "pro_update")
-    )));
-    for tool in tools.iter().filter(|tool| {
-        matches!(
-            tool["name"].as_str(),
-            Some("show_resource" | "locate_resource" | "blame" | "timeline" | "related" | "facts")
-        )
-    }) {
-        assert_eq!(tool["annotations"]["readOnlyHint"], false);
-        assert_eq!(tool["annotations"]["idempotentHint"], true);
-    }
-    let status = &responses[2]["result"]["structuredContent"];
-    assert_eq!(status["installed"], false);
-    assert_eq!(status["error_code"], "pro_not_installed");
-    assert_eq!(status["access_state"], serde_json::Value::Null);
-    assert_eq!(status["refresh_after_unix"], serde_json::Value::Null);
-    assert_eq!(status["access_deadline_unix"], serde_json::Value::Null);
-    assert_eq!(status["grace_deadline_unix"], serde_json::Value::Null);
-
-    let facts = tools.iter().find(|tool| tool["name"] == "facts").unwrap();
-    let target = &facts["inputSchema"]["properties"]["target"]["properties"];
+    assert_eq!(pro_status["annotations"]["readOnlyHint"], true);
+    assert_eq!(blame["annotations"]["readOnlyHint"], false);
+    assert_eq!(blame["annotations"]["destructiveHint"], false);
+    assert_eq!(blame["annotations"]["idempotentHint"], true);
+    assert!(blame["description"]
+        .as_str()
+        .is_some_and(|description| description.contains(disclosure)));
+    assert_eq!(blame["inputSchema"]["properties"]["limit"]["default"], 8);
+    assert_eq!(blame["inputSchema"]["properties"]["limit"]["maximum"], 8);
     assert_eq!(
-        target["kind"]["enum"],
-        serde_json::json!(ctx_pro_host_protocol::ResourceKind::ALL
-            .into_iter()
-            .map(ctx_pro_host_protocol::ResourceKind::wire_name)
-            .collect::<Vec<_>>())
+        blame["inputSchema"]["properties"]["target"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(3)
     );
-    assert!(target["value"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("Resource value"));
-    assert!(target["repository"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("forge:github.com/ctxrs/ctx"));
-    assert!(target["line"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("only when kind is file"));
-    assert!(facts["inputSchema"]["properties"]["limit"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("Maximum cited records"));
 }
 
 #[test]
-fn mcp_rejects_line_for_non_file_resources_with_a_typed_error() {
+fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
     let temp = tempdir();
-    let mut requests = vec![
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": { "name": "ctx-pro-test", "version": "0" }
-            }
-        }),
-        json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        }),
+    let cases = [
+        (
+            "issue",
+            json!({"target": {"kind": "issue", "selector": "42"}}),
+            "target.kind must be file, commit, or pull_request",
+        ),
+        (
+            "numeric-pr-without-repository",
+            json!({"target": {"kind": "pull_request", "selector": "42"}}),
+            "pull request number requires a repository selector",
+        ),
+        (
+            "zero-pr",
+            json!({"target": {"kind": "pull_request", "selector": "0", "repository": "ctxrs/ctx"}}),
+            "pull request selector must be a positive decimal number or canonical supported PR URL",
+        ),
+        (
+            "malformed-pr-url",
+            json!({"target": {"kind": "pull_request", "selector": "https://gitlab.example.com/a/b/merge_requests/42"}}),
+            "pull request selector must be a positive decimal number or canonical supported PR URL",
+        ),
+        (
+            "bad-lines",
+            json!({"target": {"kind": "file", "path": "src/lib.rs", "lines": {"start": 9, "end": 2}}}),
+            "line range must be positive and inclusive",
+        ),
+        (
+            "limit",
+            json!({"target": {"kind": "commit", "oid": "abc"}, "limit": 9}),
+            "limit must be between 1 and 8",
+        ),
     ];
-    for (id, kind) in ["commit", "pull_request", "issue", "session", "run"]
-        .into_iter()
-        .enumerate()
-    {
-        requests.push(json!({
+    let mut requests = vec![initialize_request(), initialized_notification()];
+    requests.extend(cases.iter().map(|(id, arguments, _)| {
+        json!({
             "jsonrpc": "2.0",
-            "id": id + 2,
+            "id": id,
             "method": "tools/call",
-            "params": {
-                "name": "facts",
-                "arguments": {
-                    "target": { "kind": kind, "value": "example", "line": 42 }
-                }
-            }
-        }));
-    }
-
+            "params": { "name": "blame", "arguments": arguments }
+        })
+    }));
     let responses = mcp_roundtrip_with_env(&temp, &requests, &[]);
-    for response in &responses[1..] {
+    for (response, (_, _, expected)) in responses[1..].iter().zip(cases) {
         let result = &response["result"];
         assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["error"], "invalid_request");
         assert_eq!(result["structuredContent"]["error_code"], "invalid_request");
-        assert_eq!(result["content"][0]["text"], "invalid_request");
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(expected)),
+            "{result:#?}"
+        );
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn mcp_locate_resource_uses_the_distinct_locate_operation() {
+fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
     let temp = tempdir();
-    let helper = temp.path().join("ctx-pro-locate");
-    write_locate_helper(&helper);
-    let requests = || {
-        vec![
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": { "name": "ctx-pro-test", "version": "0" }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }),
+    initialize_current_query_store(temp.path());
+    let helper = temp.path().join("ctx-pro-blame");
+    write_blame_helper(&helper);
+    let responses = mcp_roundtrip_with_env(
+        &temp,
+        &[
+            initialize_request(),
+            initialized_notification(),
             json!({
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "locate_resource",
+                    "name": "blame",
                     "arguments": {
-                        "target": { "kind": "pull_request", "value": "ctxrs/ctx#42" }
+                        "target": {"kind": "commit", "oid": "0123456789abcdef"}
                     }
                 }
             }),
-        ]
-    };
-    let missing = mcp_roundtrip_with_env(
-        &temp,
-        &requests(),
+        ],
         &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
     );
-    let missing = &missing[1]["result"];
-    assert_eq!(missing["isError"], true);
-    assert_eq!(missing["structuredContent"]["error"], "source_unavailable");
+    let result = &responses[1]["result"];
+    assert!(result["isError"].is_null());
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["target"]["kind"], "commit");
+    assert_eq!(structured["matches"][0]["kind"], "commit");
+    assert_eq!(structured["evidence"].as_array().map(Vec::len), Some(1));
+    assert!(structured.get("payload_type").is_none());
 
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("matches: 1"));
+    assert!(text.contains("object.display: session-producer"));
+    assert!(text.contains("event_id: 00000000-0000-0000-0000-000000000001"));
+    assert!(!text.contains("omitted"));
+    assert!(!text.contains("payload_type"));
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
+    let temp = tempdir();
     initialize_current_query_store(temp.path());
+    let helper = temp.path().join("ctx-pro-blame");
+    write_oversized_blame_helper(&helper);
     let responses = mcp_roundtrip_with_env(
         &temp,
-        &requests(),
+        &[
+            initialize_request(),
+            initialized_notification(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "blame",
+                    "arguments": {
+                        "target": {"kind": "commit", "oid": "0123456789abcdef"}
+                    }
+                }
+            }),
+        ],
         &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
     );
-
-    let result = &responses[1]["result"];
-    assert_eq!(result["structuredContent"]["payload_type"], "pro_location");
+    let response = &responses[1];
+    let result = &response["result"];
+    assert_eq!(result["isError"], true, "{response:#}");
     assert_eq!(
-        result["structuredContent"]["target"]["kind"],
-        "pull_request"
+        result["structuredContent"]["error_code"],
+        "invalid_response"
     );
-    assert_eq!(
-        result["structuredContent"]["results"][0]["resource"]["kind"],
-        "pull_request"
-    );
-    assert_eq!(
-        result["structuredContent"]["results"][0]["summary"],
-        "Exact canonical evidence location"
-    );
-    let text = result["content"][0]["text"].as_str().unwrap();
-    assert_eq!(
-        text,
-        "ctx locate resource\npayload_type: pro_location\nschema_version: 1\ntarget.kind: pull_request\ntarget.value: ctxrs/ctx#42\nstale: false\nresults: 1\ncitations: 1\npagination.truncated: false\n\n1. ctxrs/ctx#42\n   resource.id: pull_request:ctxrs/ctx#42\n   resource.kind: pull_request\n   resource.display: ctxrs/ctx#42\n   summary: Exact canonical evidence location\n   occurred_at_ms: 1\n   facts: 0\n   citations: 1\n   record_citation 1\n      event_id: 00000000-0000-0000-0000-000000000001\n      event_seq: 1\n\nsuggested_next_commands: 2\n1. command: ctx facts pr 'ctxrs/ctx#42'\n2. command: ctx timeline pr 'ctxrs/ctx#42'\n"
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("lower `limit`")));
+    assert!(result["structuredContent"].get("matches").is_none());
+    assert!(result["structuredContent"].get("evidence").is_none());
+    assert!(result["structuredContent"].get("next").is_none());
+    assert!(
+        serde_json::to_vec(response).unwrap().len() < 1024 * 1024,
+        "oversize replacement escaped the final MCP cap"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn mcp_preserves_typed_key_store_codes_without_helper_details_or_paths() {
-    for error_code in ["key_store_unavailable", "key_store_locked"] {
-        let temp = tempdir();
-        initialize_empty_store(&temp);
-        initialize_pro_installation_identity(temp.path());
-        let helper = temp.path().join(format!("ctx-pro-{error_code}"));
-        write_startup_error_helper(&helper, error_code);
-        let responses = mcp_roundtrip_with_env(
-            &temp,
-            &[
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-11-25",
-                        "capabilities": {},
-                        "clientInfo": { "name": "ctx-pro-test", "version": "0" }
-                    }
-                }),
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized"
-                }),
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": { "name": "pro_status", "arguments": {} }
-                }),
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "facts",
-                        "arguments": {
-                            "target": { "kind": "commit", "value": "abc" }
+fn mcp_pr_activity_does_not_claim_commit_membership() {
+    let temp = tempdir();
+    initialize_current_query_store(temp.path());
+    let helper = temp.path().join("ctx-pro-blame");
+    write_blame_helper(&helper);
+    let responses = mcp_roundtrip_with_env(
+        &temp,
+        &[
+            initialize_request(),
+            initialized_notification(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "blame",
+                    "arguments": {
+                        "target": {
+                            "kind": "pull_request",
+                            "selector": "https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42"
                         }
                     }
-                }),
-            ],
-            &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
-        );
-
-        let status = &responses[1]["result"]["structuredContent"];
-        assert_eq!(status["installed"], true);
-        assert_eq!(status["ready"], false);
-        assert_eq!(status["error_code"], error_code);
-        assert!(status.get("helper_path").is_none());
-
-        let result = &responses[2]["result"];
-        assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["error"], error_code);
-        assert_eq!(result["structuredContent"]["error_code"], error_code);
-        assert_eq!(result["content"][0]["text"], error_code);
-
-        let serialized = serde_json::to_string(&responses).unwrap();
-        assert!(!serialized.contains("private helper detail"));
-        assert!(!serialized.contains("/secret/key-store/path"));
-        assert!(!serialized.contains(helper.to_str().unwrap()));
-        assert!(!serialized.contains("helper_crashed"));
-    }
+                }
+            }),
+        ],
+        &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
+    );
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(
+        structured["matches"][0]["value"]["relationship"]["kind"],
+        "activity"
+    );
+    assert!(structured["matches"].as_array().is_some_and(|matches| {
+        matches
+            .iter()
+            .all(|value| value["value"]["relationship"]["kind"] != "commit")
+    }));
 }

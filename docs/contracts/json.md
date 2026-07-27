@@ -22,18 +22,20 @@ Writes local storage and returns:
 - `data_root`;
 - `database_path`;
 - `config_path`;
-- `mode`, either `ready` or `catalog_only`;
+- `mode`, either `ready`, `background`, or `catalog_only`;
 - `indexed_items`;
 - `sources`;
 - `inventory`;
 - `catalog`;
 - `catalog_sources`;
 - `import`;
+- `background_indexing`;
 - `network_required: false`;
 - `repo_writes: false`.
 
-`import.ran` is true for the default setup path and false for
-`ctx setup --catalog-only`. When it runs, `import.outcome`,
+`import.ran` is true when setup imports in the foreground, including
+`ctx setup --wait` and daemon-disabled or `--no-daemon` runs. It is false when
+setup queues background indexing or uses `--catalog-only`. When it runs, `import.outcome`,
 `import.failure_scope`, `import.failure_type`, `import.totals`, and
 `import.sources` use the same semantics and shapes as `ctx import --json`.
 Setup still uses top-level schema version 1; these nested fields are additive.
@@ -48,10 +50,22 @@ sources. It includes `sources`, `units`, `source_files`, `source_bytes`,
 `catalog` and `catalog_sources` blocks are retained for Codex session catalog
 consumers.
 
-Non-JSON `ctx setup` may opportunistically start the ctx-owned background daemon
-maintenance profile after foreground setup work when `[daemon].enabled` is true.
-`ctx setup --no-daemon`, `ctx setup --catalog-only`, and any `ctx setup --json`
-run do not autostart daemon maintenance. The daemon, when started, reports
+`background_indexing.enabled` reports whether setup queued indexing work rather
+than whether daemon autostart was requested. Machine-readable setup never
+starts or nudges the daemon, so
+`background_indexing.daemon_autostart.status` is `not_needed` with reason
+`machine_readable_output`. The other `not_needed` reasons are
+`explicit_opt_out`, `daemon_disabled`, and `catalog_only`.
+Use `ctx daemon status --json` for process state. That status distinguishes the
+current config request from the last config the running daemon actually
+applied. A semantic opt-in is not live merely because
+`background_indexing.semantic_enabled` is true.
+
+`ctx setup` may opportunistically start the ctx-owned background daemon
+maintenance profile after setup output when `[daemon].enabled` is true,
+including for empty and `--wait` human-readable setup runs. Machine-readable
+setup, `ctx setup --no-daemon`, and `ctx setup --catalog-only` do not autostart
+daemon maintenance. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "setup"` through status surfaces.
 
 ## Status
@@ -148,21 +162,46 @@ nullable may be omitted when unavailable:
   or `manual` for explicit daemon runs;
 - `trigger_command`, nullable/omitted, currently `setup` or `import` for
   automatic starts;
+- `semantic_runtime_active`, true only while the running daemon owns its
+  semantic query service;
+- `config_reload`, with `status`, `out_of_sync`, `requested`, `applied`,
+  `last_attempt_at_ms`, `last_applied_at_ms`, and optional `last_error`;
 - `lock_path`;
 - `status_path`;
 - `jobs`.
 
+`config_reload.status` is `applied`, `pending`, `failed`,
+`activation_failed`, or `unknown`. `requested` reflects the current effective
+daemon/semantic configuration read by the status command. `applied` is the last
+configuration acknowledged by the running daemon. A changed config remains
+`pending` with `out_of_sync: true` until the daemon reloads it. Parse/read
+failures retain the last applied runtime and report `failed`; inability to
+establish newly requested semantic runtime ownership reports
+`activation_failed`. `ctx daemon status` remains available while the config is
+malformed so this retained failure can be diagnosed.
+
 `daemon.jobs.semantic_index` mirrors live semantic coverage and includes
-`status`, `enabled`, optional current `reason`, optional
+`status`, `enabled`, `runtime_active`, `semantic_enabled`,
+`daemon_configured`, `semantic_configured`, `config_reload_status`,
+`configuration_pending`, optional current `reason`, optional
 `last_run_at_ms`, optional `last_run_status`, optional `last_run_reason`,
 optional `last_error`, optional `indexed_chunks`, `model_cache_available`,
 `worker_status`, and `coverage` with `searchable_items`, `completed_items`,
 `embedded_items`, `embedded_chunks`, `dirty_items`, and
 `queued_items_estimate`. Current
-`status`/`reason` are derived from live coverage; `last_run_*` fields preserve
-the persisted result from the last daemon iteration. When the daemon is disabled
-for ordinary status reporting, the semantic job reports `enabled: false`,
-`status: "disabled"`, and `reason: "daemon_disabled"`.
+`status`/`reason` are derived from live coverage and daemon runtime ownership;
+`last_run_*` fields preserve the persisted result from the last daemon
+iteration. `enabled` retains its released meaning: daemon and semantic
+configuration are enabled and the platform supports semantic service.
+`runtime_active` separately reports observed query-service ownership. Before
+reload they therefore may differ. A pending opt-in reports `enabled: true`,
+`runtime_active: false`, `status: "pending"`, and
+`reason: "daemon_config_reload_pending"`; failed query-service activation
+reports `status: "failed"` and `reason: "semantic_activation_failed"`. A config
+parse/read failure remains in `config_reload` and does not replace the retained
+semantic runtime's job `status`, `reason`, or `last_error`. When the daemon is
+disabled for ordinary status reporting, the semantic job reports
+`enabled: false`, `status: "disabled"`, and `reason: "daemon_disabled"`.
 
 `ctx daemon status --json` returns `schema_version`, `daemon`, `pro`, and
 `local_only`. `ctx daemon enable --json` and `ctx daemon disable --json` return
@@ -183,7 +222,11 @@ ctx sources --json
 Returns:
 
 - `schema_version`;
-- `sources[]`.
+- `scope`, either `default` or `all`;
+- `hidden_missing_sources`;
+- `sources[]`;
+- `issues[]`;
+- `issues_truncated`.
 
 Each source includes:
 
@@ -207,6 +250,15 @@ search refresh. `unknown` means the bounded
 provider-specific transcript probe hit its scan budget before proving the
 source available or empty. `unsupported_reason` is a string for unsupported,
 empty, or unknown rows and otherwise null.
+
+`issues[]` reports provider discovery configurations that could not safely
+produce a source row. It is additive to `sources[]`, contains at most 64 rows,
+and each row includes `provider`, nullable `path`, stable `code`, `message`,
+and `message_truncated`. Messages are capped at 512 UTF-8 bytes. Stable issue
+codes are `no_disk_history`, `selector_unreconstructible`, and
+`insufficient_official_evidence`. `issues_truncated` is true when additional
+issue rows were omitted. Invalid history-source plugin manifests remain
+non-importable rows in `sources[]`; they are not provider discovery issues.
 
 ## Import
 
@@ -250,12 +302,15 @@ failures. `sources_completed_with_rejections` counts sources that committed
 accepted content while rejecting other records. `resume_mode` is currently `idempotent_rescan` when
 `--resume` is passed and `normal_scan` otherwise.
 
-Non-JSON native imports that target discovered/default provider sources may
-opportunistically start the ctx-owned background daemon maintenance profile
-after foreground import work when `[daemon].enabled` is true. `ctx import --no-daemon`, custom JSONL
-imports, explicit history-source-only imports, and any `ctx import --json` run
-do not autostart daemon maintenance. The daemon, when started, reports
+Human-readable native imports that target discovered/default provider sources
+may opportunistically start the ctx-owned background daemon maintenance profile
+after foreground import work when `[daemon].enabled` is true. JSON output never
+starts or nudges the daemon. `ctx import --no-daemon`, custom JSONL imports, and explicit
+history-source-only imports do not autostart daemon maintenance. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "import"` through status surfaces.
+Import result schema version 2 does not embed daemon process state. Use
+`ctx daemon status --json` to inspect an already-running or explicitly started
+daemon.
 
 ## Progress
 
@@ -507,6 +562,7 @@ returns:
 - `schema_version`;
 - `payload_type: "sql_result"`;
 - `read_only: true`;
+- `share_safe: false`;
 - `columns[]`, ordered selected column names;
 - `rows[]`, ordered arrays matching `columns[]`;
 - `returned_rows`;
@@ -525,6 +581,12 @@ the configured value cap. Truncated text values are encoded as objects with
 encoded as objects with `type: "blob"`, `bytes`, `preview_hex`, and
 `truncated`.
 
+`share_safe` is required and is always `false` for schema-version-1 SQL
+results. `read_only: true` describes database mutation only; selected rows can
+still contain prompts, transcript content, command arguments, and local paths.
+Clients must not infer that SQL output is safe to share from its read-only
+status.
+
 Use stable `ctx_*` views for scripts when possible: `ctx_sessions`,
 `ctx_events`, `ctx_files_touched`, and `ctx_sources`. Internal tables remain
 queryable for advanced local inspection but are not the preferred compatibility
@@ -533,7 +595,10 @@ surface.
 ## MCP Tool Results
 
 `ctx mcp serve` exposes read-only MCP tools over stdio for status, sources,
-search, SQL, showing sessions, and showing events. Tool results include
+search, SQL, showing sessions and events, and Pro status. Pro blame can perform
+bounded local catch-up that updates the canonical Core index, writes the
+encrypted derived Pro graph, and writes the projection acknowledgement. It
+never writes provider history or repositories. Tool results include
 `structuredContent` JSON using the same private local fields as CLI JSON. MCP
 output may include absolute paths, source metadata, snippets, and transcript
 text, and the MCP host may log or forward it.
@@ -543,8 +608,20 @@ lexical search path only. It also excludes the active Codex session tree by
 default when `CODEX_THREAD_ID` is set; pass `include_current_session: true` to
 opt back in.
 
+The MCP `sources` tool includes the same bounded `issues` and
+`issues_truncated` fields as `ctx sources --json`.
+
 The MCP `sql` tool uses the same `sql_result` JSON contract as `ctx sql
---json`, always read-only.
+--json`, always read-only. Its `structuredContent` must include the same
+required `read_only: true` and `share_safe: false` fields and preserve the CLI
+column, row, truncation, and limit semantics. CLI and MCP consumers must treat
+a missing or non-false `share_safe` value as incompatible SQL-result output,
+not as permission to share it.
+
+Tool-level argument validation failures set `isError: true`, preserve the
+diagnostic `error`, and add stable `error_code: "invalid_request"` in
+`structuredContent`. JSON-RPC framing and envelope failures retain the
+protocol-level parse-error or invalid-params responses.
 
 ## Integrations
 
@@ -653,10 +730,11 @@ ctx upgrade status --json
 binary has a matching official installer sidecar. Unmanaged installs report
 `managed: false` and a `reason`.
 
-Background upgrade checks do not write JSON to stdout. They write
-`upgrade-state.json` and `logs/upgrade.log` under the ctx data root. Windows
-self-upgrade can report `scheduled` with `applied: false` while a helper waits
-for the running `ctx.exe` to exit and then replaces the binary and sidecar.
+Daemon-owned automatic upgrade does not write JSON to foreground stdout. Its
+single scheduler state and replacement journal live beside the managed
+executable. Windows self-upgrade can report `scheduled` with `applied: false`
+while a helper waits for the running `ctx.exe` to exit and then replaces the
+binary and sidecar.
 
 ## Citation Fields
 
@@ -702,60 +780,76 @@ idempotent setup path, report operation `setup`, and return the
 `ctx pro uninstall (--delete-data|--keep-data) --json` return the `pro_manage`
 and `pro_uninstall` payload types respectively.
 Materialization is an internal,
-idempotent part of setup, daemon freshness, and graph-query catch-up.
+idempotent part of setup, daemon freshness, and blame catch-up.
 The `pro_manage` payload includes `portal_url`, `browser_opened`, and the same
 nonsecret access state/deadline fields. A locked account preserves canonical
 history, encrypted derived data, and keys; successful resubscription followed
 by `ctx pro` restores access.
-`pro_uninstall` reports `helper_removed`, `local_pro_data` (`preserved` or
-`deleted`), `canonical_history_preserved`, and an actionable `next_action`.
+`pro_uninstall` reports `helper_removed`, `local_pro_data` (`preserved`,
+`deleted`, or `absent`), `canonical_history_preserved`, and `next_action`.
 Explicit `--delete-data` reports `local_pro_data: "deleted"` only after the
 authoritative local Pro inventory has been verified absent. JSON callers must
-provide one of the two data-choice flags and are never prompted.
+provide one of the two data-choice flags and are never prompted. Missing,
+never-Pro, and already-empty roots report `absent` with `next_action: null` and
+do not create a Pro root or preservation marker. `absent` means no graph-family
+file existed at deletion time; an initialized or helper-present root can still
+delete and verify root-scoped credentials and graph-key records before
+returning that classification. Corrupt credential inventory fails before any
+deletion and emits no success payload. An interrupted deletion retains
+root-local retry metadata; setup and `--keep-data` fail until a later
+`--delete-data` verifies and completes the same installation-scoped cleanup.
 
-Successful `show`/`locate` resource queries and `blame`, `timeline`, and `facts`
-JSON return:
+Successful `ctx blame file|commit|pr --json` and MCP `blame` return the protocol
+`BlameResult` directly, with no payload wrapper, prose summary, or suggested
+claims:
 
-- `schema_version: 1`;
-- `payload_type`, identifying the query view;
-- `target`, with `kind`, `value`, optional `repository`, and optional `line`;
-- `results`, bounded cited resource records and facts; each record's `resource`
-  has an opaque stable `id`, `kind`, and human-readable `display`;
-- `citations`, a flattened convenience list;
-- `pagination.next_cursor` and `pagination.truncated`;
-- `stale`;
-- `suggested_next_commands`.
+- `target`, a resolved tagged `file`, `commit`, or `pull_request` target;
+- `git_snapshot`, required for file results and null for commit/PR results;
+- `matches`, typed `file`, `commit`, or `pull_request` matches corresponding to
+  the resolved target;
+- `evidence`, a complete deduplicated table numbered contiguously from one;
+- `next`, null or an opaque cursor plus `more_matches` or
+  `more_committed_lines` reason.
 
-Facts include stable IDs, predicate/object data, confidence, state, owning root
-session, direct actor session, and at least one usable canonical citation.
-An unscoped query can return multiple resources. A caller may choose one
-`results[].resource` and reuse its opaque `id` as the same resource kind's
-`value` in a later query. The ID must not be parsed. Query `target.repository`
-is an optional logical identity, not a local path, and the current public
-resource record does not expose it as a separate field. `target.line` is a
-positive 1-based source line and is valid only when `target.kind` is `file`.
+File matches contain an inclusive committed line range, commit reference,
+line-level evidence numbers, and zero or more typed production attributions.
+Commit matches use a closed fact type and predicate vocabulary and preserve
+confidence and state. Human rendering groups them as `Produced by`,
+`Possible producers`, and `Also recorded`, so inspection and reference facts
+cannot be mistaken for production.
 
-MCP text rendering dispatches on this `payload_type`. The six query payloads
-`pro_resource`, `pro_location`, `pro_blame`, `pro_timeline`, `pro_related`, and
-`pro_facts` retain distinct text views and the typed fact/citation vocabulary
-above. An unrecognized Pro query payload is reported as
-`unsupported_payload_type`; it is never coerced into a search result merely
-because it contains `results`.
+PR matches contain exactly one activity or commit-membership relationship.
+Activity actions are typed and remain separate from production. A PR commit
+relationship is present only when recognized structured captured forge evidence
+binds the canonical PR identity and exact Git object ID in the same record.
+Co-occurring standalone URL/OID identifiers or prose are insufficient; when no
+structured proof exists, associated commits are explicitly unproven.
 
-`facts` and `timeline` cursors are authenticated, query-bound, and
-graph-state-bound. Tampering returns `invalid_request`; changing the graph makes
-an old cursor return `stale_fact`. Only `facts` and `timeline` accept a
-continuation cursor in the CLI; MCP also offers a paged `related` operation.
-`show`, `locate`, and `blame` are bounded, unpaged point views; their
-`pagination.next_cursor` is null and their CLI/MCP inputs do not offer a cursor.
+Each evidence-number list is nonempty, sorted, unique, and resolves into the
+page's evidence table. Every table entry is referenced by at least one returned
+match. MCP returns at most 8 complete matches per page; CLI defaults to 20 and
+permits at most 100. MCP additionally caps the final serialized blame JSON-RPC
+response at 1 MiB after adding exact `structuredContent` and its text fallback.
+An over-cap helper page fails with `invalid_response` and guidance to lower
+`limit` or use CLI JSON; MCP does not truncate matches or evidence and does not
+invent a continuation cursor. Under the cap, typed structured content is exact.
+Neither surface clips evidence for a returned match.
+Continuation cursors are authenticated and bound to the request and graph
+state. Tampering returns `invalid_request`; a changed snapshot returns
+`stale_snapshot`.
+
+OSS `show` and `locate` JSON for session/event retrieval is unchanged. There
+are no Pro `show`, `locate`, `timeline`, `facts`, or `related` payloads or
+compatibility aliases.
 
 CLI failures exit nonzero with a stable error token on stderr. MCP failures set
 `isError: true` and return `error` plus `error_code` in `structuredContent`.
 Stable codes include `pro_not_installed`, `commercial_unavailable`,
 `entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
 `key_store_locked`, `not_materialized`, `protocol_mismatch`,
-`source_unavailable`, `repository_unavailable`, `stale_fact`, `ambiguous`,
-`corrupt_graph`, `invalid_request`, `invalid_response`, `cancelled`,
+`source_unavailable`, `repository_unavailable`, `line_out_of_range`,
+`stale_snapshot`, `stale_fact`, `ambiguous`, `corrupt_graph`,
+`invalid_request`, `invalid_response`, `cancelled`,
 `helper_crashed`, and `helper_timeout`.
 Native key-store failures use only `key_store_unavailable` and
 `key_store_locked`. Unshipped `credential_vault_*` spellings are not aliases.

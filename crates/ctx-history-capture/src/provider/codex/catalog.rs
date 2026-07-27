@@ -19,10 +19,46 @@ use crate::{
     OrdinaryFileObservation, ProviderImportFailure, Result, CODEX_SESSION_SOURCE_FORMAT,
 };
 
-use crate::provider::codex::session::{
-    apply_codex_session_import_bounds, contains_bytes, CODEX_CAPTURE_REVISION,
-    CODEX_POLICY_REVISION,
-};
+use crate::provider::codex::{CODEX_CAPTURE_REVISION, CODEX_POLICY_REVISION};
+
+fn apply_codex_session_import_bounds(
+    paths: &mut Vec<PathBuf>,
+    max_files: Option<usize>,
+    max_total_bytes: Option<u64>,
+) -> Result<usize> {
+    paths.sort();
+    if max_files.is_none() && max_total_bytes.is_none() {
+        return Ok(0);
+    }
+
+    let original_len = paths.len();
+    let mut selected = Vec::new();
+    let mut total_bytes = 0_u64;
+    for path in paths.iter().rev() {
+        if max_files.is_some_and(|limit| selected.len() >= limit) {
+            continue;
+        }
+        let len = std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if max_total_bytes.is_some_and(|limit| total_bytes.saturating_add(len) > limit) {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(len);
+        selected.push(path.clone());
+    }
+    selected.sort();
+    let skipped = original_len.saturating_sub(selected.len());
+    *paths = selected;
+    Ok(skipped)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
 
 pub fn catalog_codex_session_tree(
     root: impl AsRef<Path>,

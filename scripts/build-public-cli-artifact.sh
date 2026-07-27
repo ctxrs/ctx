@@ -15,6 +15,7 @@ LINUX_RELEASE_UBUNTU_SNAPSHOT="20260701T000000Z"
 LINUX_X64_QEMU_CPU_PROFILE="qemu64"
 MACOS_DEPLOYMENT_TARGET="13.0"
 RUST_TOOLCHAIN_VERSION="1.97.1"
+RUST_TOOLCHAIN_COMMIT="8bab26f4f68e0e26f0bb7960be334d5b520ea452"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -30,6 +31,19 @@ if [[ -z "${platform}" || "${platform}" == "-h" || "${platform}" == "--help" ]];
   usage
   exit 2
 fi
+if [[ -n "${CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD+x}" ]]; then
+  echo "error: forbidden public release environment variable: CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD" >&2
+  exit 1
+fi
+if [[ -n "${CTX_LLVM_READOBJ+x}" ]]; then
+  echo "error: forbidden public release environment variable: CTX_LLVM_READOBJ" >&2
+  exit 1
+fi
+if [[ -n "${CTX_LLVM_OBJDUMP+x}" ]]; then
+  echo "error: forbidden public release environment variable: CTX_LLVM_OBJDUMP" >&2
+  exit 1
+fi
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-linux-release-environment.sh"
 
 case "${platform}" in
   linux-x64)
@@ -71,6 +85,13 @@ esac
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${root_dir}"
 
+source_commit="$(git rev-parse --verify HEAD)"
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  echo "error: public release construction requires a clean checkout" >&2
+  exit 1
+fi
+source_clean=true
+
 freebsd_build_strategy=""
 if [[ "${platform}" == "freebsd-x64" ]]; then
   freebsd_build_strategy="$(sh scripts/public-cli-freebsd-build-strategy.sh \
@@ -78,11 +99,9 @@ if [[ "${platform}" == "freebsd-x64" ]]; then
 fi
 
 inspector_roots=()
-cleanup_inspector_roots() {
+freebsd_release_cargo_home=""
+cleanup_release_temps() {
   local root
-  if (( ${#inspector_roots[@]} == 0 )); then
-    return 0
-  fi
   for root in "${inspector_roots[@]}"; do
     case "$root" in
       "${TMPDIR:-/tmp}"/ctx-public-inspector.*)
@@ -90,8 +109,15 @@ cleanup_inspector_roots() {
         ;;
     esac
   done
+  case "${freebsd_release_cargo_home}" in
+    "${TMPDIR:-/tmp}"/ctx-freebsd-release-cargo.*)
+      [[ -d "${freebsd_release_cargo_home}" \
+        && ! -L "${freebsd_release_cargo_home}" ]] \
+        && rm -rf -- "${freebsd_release_cargo_home}"
+      ;;
+  esac
 }
-trap cleanup_inspector_roots EXIT
+trap cleanup_release_temps EXIT
 
 stage_inspector_root() {
   local artifact_dir="$1"
@@ -117,6 +143,14 @@ release_rustc_version() {
   else
     rustc "+${RUST_TOOLCHAIN_VERSION}" --version
   fi
+}
+
+prepare_freebsd_ort_release_source() {
+  CARGO_NET_OFFLINE=false release_cargo fetch --locked --target "${target}"
+  scripts/prepare-freebsd-ort-release-source.sh \
+    "${CARGO_HOME}" \
+    "${root_dir}/tools/bazel/patches/ort-freebsd-release-env-order.patch"
+  export CARGO_NET_OFFLINE=true
 }
 
 ensure_release_rust() {
@@ -310,19 +344,12 @@ run_linux_container_build() {
     echo "error: ${platform} artifacts must be built from Linux" >&2
     exit 1
   fi
-  local linux_runtime_authority="authoritative"
   case "${platform}:$(uname -m)" in
     linux-x64:x86_64|linux-x64:amd64|linux-aarch64:aarch64|linux-aarch64:arm64)
       ;;
     *)
-      if [[ "${CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD:-}" != "1" ]]; then
-        echo "error: ${platform} artifacts must be built on matching Linux, got $(uname -m)" >&2
-        echo "error: tests may opt in to Docker/QEMU with CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD=1" >&2
-        exit 1
-      fi
-      linux_runtime_authority="non_authoritative"
-      printf 'warning: test-only emulated %s build on %s; native release proof remains required\n' \
-        "${platform}" "$(uname -m)" >&2
+      echo "error: ${platform} artifacts must be built on matching Linux, got $(uname -m)" >&2
+      exit 1
       ;;
   esac
   if ! command -v docker >/dev/null 2>&1; then
@@ -351,7 +378,7 @@ run_linux_container_build() {
   local inspector_image="ctx-public-cli-linux:${platform}-inspector-ubuntu-${LINUX_RELEASE_IMAGE_UBUNTU}"
   local out_dir="${CTX_PUBLIC_CLI_ARTIFACT_DIR:-target/public-cli-artifacts}"
   local final_target_dir="${CARGO_TARGET_DIR:-target/public-cli-linux/${platform}}"
-  local prepared_dir="${CTX_PUBLIC_CLI_PREPARED_DIR:-target/public-cli-prepared/${platform}}"
+  local prepared_dir="target/public-cli-prepared/${platform}"
   local docker_platform
   case "${platform}" in
     linux-x64) docker_platform="linux/amd64" ;;
@@ -367,23 +394,13 @@ run_linux_container_build() {
     esac
   done
 
-  local source_commit source_clean
-  source_commit="$(git rev-parse --verify HEAD)"
   local version
   version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "ctx"))')"
   if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-    source_clean=false
-  else
-    source_clean=true
+    echo "error: Linux release construction requires a clean checkout" >&2
+    exit 1
   fi
-  if [[ "${source_clean}" != "true" ]]; then
-    if [[ "${CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD:-}" != "1" ]]; then
-      echo "error: Linux release construction requires a clean checkout" >&2
-      echo "error: tests may opt in with CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD=1" >&2
-      exit 1
-    fi
-    echo "warning: test-only dirty release build; evidence will record source_clean=false" >&2
-  fi
+  source_clean=true
 
   rm -rf "${prepared_dir}" "${final_target_dir}"
   mkdir -p "${out_dir}" "${prepared_dir}" "${final_target_dir}"
@@ -409,7 +426,9 @@ run_linux_container_build() {
     --provenance=false \
     --build-arg "UBUNTU_IMAGE=${base_image}" \
     --build-arg "UBUNTU_SNAPSHOT=${LINUX_RELEASE_UBUNTU_SNAPSHOT}" \
+    --build-arg "GLIBC_BASELINE=${LINUX_GLIBC_BASELINE}" \
     --build-arg "RUST_TOOLCHAIN=${rust_toolchain}" \
+    --build-arg "RUST_COMMIT=${RUST_TOOLCHAIN_COMMIT}" \
     -t "${builder_image}" \
     -f scripts/docker/linux-release.Dockerfile \
     scripts/docker
@@ -429,8 +448,14 @@ run_linux_container_build() {
     -t "${inspector_image}" \
     -f scripts/docker/linux-release.Dockerfile \
     scripts/docker
-  local builder_base_label builder_image_id builder_recipe_sha256 runtime_base_label runtime_image_id inspector_base_label inspector_image_id
+  local builder_base_label builder_glibc_label builder_image_id builder_recipe_sha256
+  local builder_rust_commit_label builder_rust_label builder_snapshot_label
+  local runtime_base_label runtime_image_id inspector_base_label inspector_image_id
   builder_base_label="$(docker image inspect "${builder_image}" --format '{{index .Config.Labels "org.ctx.release.base-image"}}')"
+  builder_snapshot_label="$(docker image inspect "${builder_image}" --format '{{index .Config.Labels "org.ctx.release.ubuntu-snapshot"}}')"
+  builder_glibc_label="$(docker image inspect "${builder_image}" --format '{{index .Config.Labels "org.ctx.release.glibc-baseline"}}')"
+  builder_rust_label="$(docker image inspect "${builder_image}" --format '{{index .Config.Labels "org.ctx.release.rust-toolchain"}}')"
+  builder_rust_commit_label="$(docker image inspect "${builder_image}" --format '{{index .Config.Labels "org.ctx.release.rust-commit"}}')"
   builder_image_id="$(docker image inspect "${builder_image}" --format '{{.Id}}')"
   runtime_base_label="$(docker image inspect "${runtime_image}" --format '{{index .Config.Labels "org.ctx.release.base-image"}}')"
   runtime_image_id="$(docker image inspect "${runtime_image}" --format '{{.Id}}')"
@@ -440,6 +465,13 @@ run_linux_container_build() {
   if [[ "${builder_base_label}" != "${base_image}" ]]; then
     printf 'error: Linux builder base label mismatch: expected %s, got %s\n' \
       "${base_image}" "${builder_base_label:-missing}" >&2
+    exit 1
+  fi
+  if [[ "${builder_snapshot_label}" != "${LINUX_RELEASE_UBUNTU_SNAPSHOT}" \
+    || "${builder_glibc_label}" != "${LINUX_GLIBC_BASELINE}" \
+    || "${builder_rust_label}" != "${rust_toolchain}" \
+    || "${builder_rust_commit_label}" != "${RUST_TOOLCHAIN_COMMIT}" ]]; then
+    echo "error: Linux builder snapshot, GLIBC, or Rust labels differ from the release contract" >&2
     exit 1
   fi
   if [[ "${runtime_base_label}" != "${base_image}" || "${inspector_base_label}" != "${base_image}" ]]; then
@@ -474,11 +506,6 @@ run_linux_container_build() {
     --security-opt no-new-privileges \
     --read-only \
     --tmpfs /tmp:rw,exec,nosuid,nodev \
-    -e CTX_PUBLIC_CLI_IN_CONTAINER=1 \
-    -e CTX_PUBLIC_CLI_PHASE=final \
-    -e CTX_PUBLIC_CLI_ARTIFACT_DIR=/artifacts \
-    -e CTX_PUBLIC_CLI_PREPARED_DIR=/prepared \
-    -e CARGO_TARGET_DIR=/release-target \
     -e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}" \
     -e HOME=/tmp/home \
     -v "${root_dir}:/work:ro" \
@@ -487,7 +514,7 @@ run_linux_container_build() {
     -v "${root_dir}/${out_dir}:/artifacts:rw" \
     -w /work \
     "${builder_image_id}" \
-    bash scripts/build-public-cli-artifact.sh "${platform}"
+    bash scripts/build-linux-release-offline.sh "${platform}" "${target}"
 
   local staged_host="${root_dir}/${out_dir}/${binary_name}"
   if [[ ! -f "${root_dir}/scripts/run-native-candidate-smoke.sh" ]]; then
@@ -577,29 +604,30 @@ run_linux_container_build() {
     --builder-recipe-sha256 "${builder_recipe_sha256}" \
     --runtime-image-id "${runtime_image_id}" \
     --inspector-image-id "${inspector_image_id}" \
+    --linux-builder-image "${base_image}" \
+    --linux-ubuntu-snapshot "${LINUX_RELEASE_UBUNTU_SNAPSHOT}" \
+    --linux-glibc-max "${LINUX_GLIBC_BASELINE}" \
+    --linux-rust-toolchain "${rust_toolchain}" \
+    --linux-rust-commit "${RUST_TOOLCHAIN_COMMIT}" \
+    --linux-rust-sysroot "/opt/rustup/toolchains/${rust_toolchain}-${target}" \
     --qemu-version "${qemu_version}" \
     --qemu-cpu-profile "${qemu_cpu_profile}" \
     --static-status passed \
     --local-runtime-status passed \
-    --local-runtime-authority "${linux_runtime_authority}"
+    --local-runtime-authority authoritative
 
   printf 'built %s for %s with verified offline inputs and runtime evidence\n' \
     "${staged_host}" "${platform}"
 }
 
-if [[ "${platform}" == linux-* && "${CTX_PUBLIC_CLI_IN_CONTAINER:-}" != "1" ]]; then
+if [[ "${platform}" == linux-* ]]; then
+  bash scripts/check-linux-release-environment.sh
   run_linux_container_build
   exit 0
 fi
 
 out_dir="${CTX_PUBLIC_CLI_ARTIFACT_DIR:-target/public-cli-artifacts}"
 case "${out_dir}" in
-  /artifacts)
-    if [[ "${CTX_PUBLIC_CLI_IN_CONTAINER:-}" != "1" ]]; then
-      echo "error: absolute artifact directory is reserved for the release container" >&2
-      exit 1
-    fi
-    ;;
   /*|..|../*|*/../*|*/..)
     echo "error: public CLI artifact directory must stay under the checkout: ${out_dir}" >&2
     exit 1
@@ -613,18 +641,14 @@ rm -f \
   "${out_dir}/${binary_name}.build-info.json"
 
 if [[ "${platform}" != linux-* ]]; then
-  source_commit="$(git rev-parse --verify HEAD)"
-  if [[ -z "$(git status --porcelain --untracked-files=all)" ]]; then
-    source_clean=true
-  else
-    source_clean=false
-  fi
-  if [[ "${source_clean}" != true && "${CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD:-}" != 1 ]]; then
-    echo "error: public release construction requires a clean checkout" >&2
-    echo "error: tests may opt in with CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD=1" >&2
-    exit 1
-  fi
   ensure_release_rust
+fi
+if [[ "${platform}" == "freebsd-x64" ]]; then
+  freebsd_release_cargo_home="$(
+    mktemp -d "${TMPDIR:-/tmp}/ctx-freebsd-release-cargo.XXXXXX"
+  )"
+  export CARGO_HOME="${freebsd_release_cargo_home}"
+  export PATH="${CARGO_HOME}/bin:${PATH}"
 fi
 version="$(if [[ "${platform}" == linux-* ]]; then cargo metadata --no-deps --format-version 1; else release_cargo metadata --no-deps --format-version 1; fi | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "ctx"))')"
 if [[ -z "${version}" ]]; then
@@ -633,41 +657,23 @@ if [[ -z "${version}" ]]; then
 fi
 echo "building ctx ${version} for ${platform}"
 
-if [[ "${platform}" == linux-* ]]; then
-  if [[ "$(uname -s)" != "Linux" ]]; then
-    echo "error: ${platform} artifacts must be built on native Linux" >&2
-    exit 1
-  fi
-  case "${platform}:$(uname -m)" in
-    linux-x64:x86_64|linux-x64:amd64|linux-aarch64:aarch64|linux-aarch64:arm64)
-      ;;
-    *)
-      echo "error: ${platform} artifacts must be built on matching native Linux, got $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-fi
-
 build_target_dir="${CARGO_TARGET_DIR:-target}"
 
 if [[ "${platform}" == macos-* ]]; then
   export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-${MACOS_DEPLOYMENT_TARGET}}"
 fi
 
-if [[ "${platform}" == linux-* ]]; then
-  if [[ "${CTX_PUBLIC_CLI_PHASE:-}" != "final" || -z "${CTX_PUBLIC_CLI_PREPARED_DIR:-}" ]]; then
-    echo "error: Linux release compilation must use the prepared offline container phase" >&2
-    exit 1
-  fi
-  scripts/build-linux-release-offline.sh \
-    "${platform}" "${build_target}" "${CTX_PUBLIC_CLI_PREPARED_DIR}" "${build_target_dir}"
-elif [[ "${platform}" == macos-* && "$(uname -s)" != "Darwin" ]]; then
+if [[ "${platform}" == macos-* && "$(uname -s)" != "Darwin" ]]; then
   ensure_darwin_cross_tools
   release_cargo zigbuild -p ctx --release --target "${build_target}" --locked
 elif [[ "${platform}" == "freebsd-x64" ]]; then
   case "${freebsd_build_strategy}" in
     native-freebsd)
+      prepare_freebsd_ort_release_source
       release_cargo build -p ctx --release --target "${target}" --locked
+      scripts/prepare-freebsd-ort-release-source.sh \
+        "${CARGO_HOME}" \
+        "${root_dir}/tools/bazel/patches/ort-freebsd-release-env-order.patch"
       ;;
     linux-cross)
       if ! command -v cross >/dev/null 2>&1 \
@@ -682,8 +688,12 @@ elif [[ "${platform}" == "freebsd-x64" ]]; then
         export CARGO_TARGET_DIR="target/public-cli-cross/${platform}"
         build_target_dir="${CARGO_TARGET_DIR}"
       fi
+      prepare_freebsd_ort_release_source
       RUSTUP_TOOLCHAIN="${RUST_TOOLCHAIN_VERSION}" \
         cross build -p ctx --release --target "${target}" --locked
+      scripts/prepare-freebsd-ort-release-source.sh \
+        "${CARGO_HOME}" \
+        "${root_dir}/tools/bazel/patches/ort-freebsd-release-env-order.patch"
       ;;
     *)
       printf 'error: unsupported FreeBSD build strategy: %s\n' \

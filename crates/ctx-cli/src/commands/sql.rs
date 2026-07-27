@@ -217,6 +217,7 @@ pub(crate) fn raw_sql_result_json(result: &RawSqlResult) -> Value {
         "schema_version": 1,
         "payload_type": "sql_result",
         "read_only": true,
+        "share_safe": false,
         "columns": result.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>(),
         "rows": result
             .rows

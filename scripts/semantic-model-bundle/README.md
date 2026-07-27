@@ -33,7 +33,7 @@ python scripts/semantic-model-bundle/produce.py \
   --bundle-version 1.0.0 \
   --document-batch-size 16 --query-batch-size 1 --sequence-length 512 \
   --output-dir /artifacts/ctx-e5-coreml-1.0.0 \
-  --archive /artifacts/ctx-e5-coreml-1.0.0.tar.xz
+  --archive /artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz
 ```
 
 The document and query packages have distinct fixed contracts: document inputs
@@ -45,7 +45,9 @@ runtime uses the document model for queries.
 
 The producer rejects tool-version drift, symlinks, unknown source revisions,
 and existing output paths. Tar member order, modes, owners, and mtimes are
-normalized, so identical inputs produce an identical manifest and archive.
+normalized, so identical inputs produce an identical manifest and archive. It
+also emits `<archive>.asset.json`, the canonical signed-catalog input for the
+validated Core ML archive.
 
 Verify without importing Core ML or loading model weights:
 
@@ -57,3 +59,42 @@ The manifest intentionally excludes itself from `files`; every other regular
 file is listed with its complete lowercase SHA-256 and exact byte size. Empty
 directories, symlinks, special files, unlisted payloads, and paths outside the
 small allowlist are rejected.
+
+## ONNX model release archives
+
+The CPU and accelerator ONNX archives use the same pinned model revision and
+tokenizer/config files; only `onnx/model.onnx` differs. From an already
+downloaded public snapshot containing `LICENSE`, the four tokenizer/config
+files, and the selected ONNX file, construct each deterministic archive:
+
+```bash
+python scripts/semantic-release-assets.py build-model \
+  --variant cpu-fp32 --source /public/fp32-snapshot --output-dir /artifacts
+python scripts/semantic-release-assets.py build-model \
+  --variant accelerator-o4-fp16 \
+  --source /public/o4-fp16-snapshot --output-dir /artifacts
+```
+
+These commands produce and re-validate
+`ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz` and
+`ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz`, their checksums, and
+canonical asset records. They do not download model files.
+
+After all model and runtime builders have populated one artifact directory,
+`scripts/construct-semantic-release-catalog.sh` independently validates every
+archive and emits the six `CTX_RELEASE_SEMANTIC_*` fields that are appended to
+the release metadata before that complete metadata file is signed.
+
+The public release matrix gathers the ten archives, their checksums, and their
+canonical `.asset.json` records with
+`scripts/stage-semantic-release-handoff.sh`. That handoff includes
+`semantic-release.env`; release assembly passes the unsigned base metadata,
+that field file, and a new output path to
+`scripts/append-semantic-release-metadata.sh`. A trusted release environment
+validates the handoff and signs the resulting complete metadata bytes. These
+helpers stop after producing unsigned release inputs.
+
+CUDA archive validation includes a static `DT_NEEDED` closure check across the
+bundled ELF libraries. A real NVIDIA GPU execution-provider model session is
+intentionally deferred to release qualification; it is not a producer or CI
+requirement in this pass.

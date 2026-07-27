@@ -11,7 +11,7 @@ use clap::ValueEnum;
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    discover_provider_sources_for_provider, CaptureError, ProviderImportSummary,
+    discover_provider_sources_for_provider, CaptureError, ImportProfile, ProviderImportSummary,
     ProviderSourceStatus,
 };
 use ctx_history_core::database_path;
@@ -22,11 +22,14 @@ use crate::analytics::{
     ProviderRefreshTrigger, RefreshStatus, SearchTelemetry,
 };
 use crate::commands::import::{
-    error_summary, import_error_scope, import_history_source_plugin,
-    import_one_source_for_background_refresh, import_one_source_for_search_refresh,
-    import_totals_json, inventory_import_sources, one_line_error, rejected_source_summary,
-    should_parallelize_import, ImportFailureScope, ImportSourceOutcome, ImportTotals,
-    ProviderRefreshCollector, SourceStats,
+    error_summary, finish_pro_output_inventory, import_error_scope, import_history_source_plugin,
+    import_one_source_for_background_refresh_with_profile,
+    import_one_source_for_search_refresh_with_profile, import_totals_json,
+    inventory_import_sources, one_line_error, output_inventory_can_finish,
+    progress_canonical_pro_after_core_source_attempt, rejected_source_summary,
+    should_parallelize_import, CanonicalProSourceProgression, ImportFailureScope,
+    ImportSourceOutcome, ImportTotals, ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
+    SourceStats,
 };
 use crate::commands::setup::{
     analytics_preflight, indexed_history_item_count, insert_db_size_bucket,
@@ -158,7 +161,7 @@ pub(crate) fn run_search(
     let backend_override = args.backend;
     let requested_backend = resolve_search_backend(backend_override, config)?;
     let semantic_enabled = config.semantic_search_enabled();
-    if args.refresh == RefreshArg::Background && config.daemon.enabled {
+    if args.refresh == RefreshArg::Background && config.daemon.enabled && !args.json {
         semantic::maybe_autostart_daemon_for_search(&data_root, config);
     }
     if args.refresh == RefreshArg::Background
@@ -402,7 +405,8 @@ pub(crate) fn refresh_before_search(
             }
             Err(err) => return Err(err.context("search refresh failed")),
         };
-    if sources.is_empty() && plugin_sources.is_empty() {
+    let output_inventory_complete = args.provider.is_none() && source_identity.is_empty();
+    if sources.is_empty() && plugin_sources.is_empty() && !output_inventory_complete {
         if args.refresh == RefreshArg::Wait {
             return Err(anyhow!(
                 "wait search refresh found no supported discovered native provider or enabled auto history-source plugin sources; rerun the search with --refresh off to use the existing index"
@@ -419,7 +423,9 @@ pub(crate) fn refresh_before_search(
         args.json,
         provider_refreshes,
         config,
+        output_inventory_complete,
     ) {
+        Ok(_) if source_count == 0 => Ok(SearchRefreshReport::skipped(args.refresh, "no_sources")),
         Ok(totals) => Ok(SearchRefreshReport::completed(
             args.refresh,
             source_count,
@@ -472,6 +478,14 @@ pub(crate) fn search_refresh_plugin_sources(
         .collect())
 }
 
+pub(crate) fn progress_search_refresh_canonical_pro<P: CanonicalProSourceProgression>(
+    pro_output: Option<&mut P>,
+    successful_summary: Option<&ProviderImportSummary>,
+) {
+    progress_canonical_pro_after_core_source_attempt(pro_output, successful_summary);
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn refresh_sources_for_search(
     data_root: &Path,
     sources: Vec<SourceInfo>,
@@ -480,6 +494,7 @@ pub(crate) fn refresh_sources_for_search(
     json_output: bool,
     provider_refreshes: &mut ProviderRefreshCollector,
     config: &config::AppConfig,
+    output_inventory_complete: bool,
 ) -> Result<ImportTotals> {
     let _ = config;
     fs::create_dir_all(data_root)?;
@@ -487,14 +502,19 @@ pub(crate) fn refresh_sources_for_search(
     let db_path = database_path(data_root.to_path_buf());
     let store = Store::open(&db_path)?;
     let had_indexed_content = store.indexed_history_item_count()? > 0;
-    let inventory = inventory_import_sources(&store, sources, false, false)?;
+    let mut pro_output = crate::pro::ProOutputImport::begin_if_available(data_root);
+    let pro_output_enabled = pro_output.is_some();
+    let inventory =
+        inventory_import_sources(&store, sources, pro_output_enabled, pro_output_enabled)?;
     let planned_sources = inventory.sources;
     let inventory_failures = inventory.failures;
     let planned_total_bytes = inventory.totals.source_bytes;
     drop(store);
-    if planned_sources.is_empty() && inventory_failures.is_empty() && plugin_sources.is_empty() {
-        return Ok(ImportTotals::default());
-    }
+    let output_inventory_complete = output_inventory_complete && inventory_failures.is_empty();
+    let import_profile = pro_output
+        .as_ref()
+        .map(|output| output.profile().clone())
+        .unwrap_or(ImportProfile::CoreOnly);
 
     let progress_arg = match refresh {
         RefreshArg::Wait if json_output => ProgressArg::Json,
@@ -507,6 +527,12 @@ pub(crate) fn refresh_sources_for_search(
         "search-refresh",
         planned_total_bytes,
     );
+    if planned_sources.is_empty() && inventory_failures.is_empty() && plugin_sources.is_empty() {
+        if output_inventory_complete {
+            finish_pro_output_inventory(pro_output, &progress);
+        }
+        return Ok(ImportTotals::default());
+    }
     let mut totals = ImportTotals::default();
     let mut refresh_failures = Vec::<String>::new();
     for failure in inventory_failures {
@@ -547,39 +573,57 @@ pub(crate) fn refresh_sources_for_search(
                 );
                 let join_source = plan.source.clone();
                 let join_stats = plan.stats;
-                let handle = thread::spawn(move || -> Result<ImportSourceOutcome> {
-                    let mut store = Store::open(&db_path)?;
-                    let summary = if refresh == RefreshArg::Background {
-                        import_one_source_for_background_refresh(
-                            &mut store,
-                            &plan.source,
-                            progress_callback,
-                            &plan.preinventory,
-                        )?
-                    } else {
-                        import_one_source_for_search_refresh(
-                            &mut store,
-                            &plan.source,
-                            progress_callback,
-                            &plan.preinventory,
-                        )?
-                    };
-                    Ok(ImportSourceOutcome {
-                        index,
-                        source: plan.source,
-                        stats: plan.stats,
-                        summary,
-                    })
-                });
+                let import_profile = import_profile.clone();
+                let handle =
+                    thread::spawn(move || -> (Result<ImportSourceOutcome>, StdDuration) {
+                        let provider_started = Instant::now();
+                        let mut result = (|| {
+                            let mut store = Store::open(&db_path)?;
+                            let summary = if refresh == RefreshArg::Background {
+                                import_one_source_for_background_refresh_with_profile(
+                                    &mut store,
+                                    &plan.source,
+                                    progress_callback,
+                                    &plan.preinventory,
+                                    &import_profile,
+                                )?
+                            } else {
+                                import_one_source_for_search_refresh_with_profile(
+                                    &mut store,
+                                    &plan.source,
+                                    progress_callback,
+                                    &plan.preinventory,
+                                    &import_profile,
+                                )?
+                            };
+                            Ok(ImportSourceOutcome {
+                                index,
+                                source: plan.source,
+                                stats: plan.stats,
+                                summary,
+                                runtime_facts: None,
+                            })
+                        })();
+                        let duration = provider_started.elapsed();
+                        if let Ok(outcome) = &mut result {
+                            outcome.runtime_facts =
+                                Some(ProviderRefreshRuntimeFacts::observed_success(
+                                    duration,
+                                    &outcome.summary,
+                                ));
+                        }
+                        (result, duration)
+                    });
                 (join_source, join_stats, handle)
             })
             .collect::<Vec<_>>();
 
         let mut outcomes = Vec::with_capacity(handles.len());
         for (source, stats, handle) in handles {
-            let result = match handle.join() {
+            let (result, provider_duration) = match handle.join() {
                 Ok(result) => result,
                 Err(_) => {
+                    progress_search_refresh_canonical_pro(pro_output.as_mut(), None);
                     provider_refreshes.record_failure(
                         source.provider,
                         ProviderRefreshTrigger::Search,
@@ -590,26 +634,44 @@ pub(crate) fn refresh_sources_for_search(
                     return Err(CaptureError::WorkerPanicked("provider import").into());
                 }
             };
+            progress_search_refresh_canonical_pro(
+                pro_output.as_mut(),
+                result.as_ref().ok().map(|outcome| &outcome.summary),
+            );
             match result {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(err) if import_error_scope(&err) == ImportFailureScope::Source => {
+                    let failure_scope = import_error_scope(&err);
+                    let failure_type = crate::commands::import::import_failure_type(&err);
                     refresh_failures.push(error_summary(&err));
                     add_refresh_source_failure(&mut totals, &SourceStats::default(), &err);
-                    provider_refreshes.record_failure(
+                    provider_refreshes.record_failure_with_facts(
                         source.provider,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::Discovered,
                         &stats,
                         rejected_source_summary(&err).as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_duration,
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                 }
                 Err(err) => {
-                    provider_refreshes.record_failure(
+                    let failure_scope = import_error_scope(&err);
+                    let failure_type = crate::commands::import::import_failure_type(&err);
+                    provider_refreshes.record_failure_with_facts(
                         source.provider,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::Discovered,
                         &stats,
                         rejected_source_summary(&err).as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_duration,
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     return Err(err);
                 }
@@ -624,12 +686,10 @@ pub(crate) fn refresh_sources_for_search(
                 &outcome.summary,
             );
             totals.add(&outcome.summary, &outcome.stats);
-            provider_refreshes.record_success(
-                outcome.source.provider,
+            provider_refreshes.record_import_outcome(
                 ProviderRefreshTrigger::Search,
                 ProviderRefreshSourceMode::Discovered,
-                &outcome.summary,
-                &outcome.stats,
+                &outcome,
             );
         }
     } else {
@@ -643,21 +703,25 @@ pub(crate) fn refresh_sources_for_search(
             let source_progress =
                 progress.codex_import_callback(&plan.source, completed_source_bytes);
             completed_source_bytes = completed_source_bytes.saturating_add(plan.stats.bytes);
+            let provider_started = Instant::now();
             let import_result = if refresh == RefreshArg::Background {
-                import_one_source_for_background_refresh(
+                import_one_source_for_background_refresh_with_profile(
                     &mut store,
                     &plan.source,
                     source_progress,
                     &plan.preinventory,
+                    &import_profile,
                 )
             } else {
-                import_one_source_for_search_refresh(
+                import_one_source_for_search_refresh_with_profile(
                     &mut store,
                     &plan.source,
                     source_progress,
                     &plan.preinventory,
+                    &import_profile,
                 )
             };
+            progress_search_refresh_canonical_pro(pro_output.as_mut(), import_result.as_ref().ok());
             match import_result {
                 Ok(summary) => {
                     warn_on_rejected_records(
@@ -667,12 +731,16 @@ pub(crate) fn refresh_sources_for_search(
                         &summary,
                     );
                     totals.add(&summary, &plan.stats);
-                    provider_refreshes.record_success(
+                    provider_refreshes.record_success_with_facts(
                         plan.source.provider,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::Discovered,
                         &summary,
                         &plan.stats,
+                        ProviderRefreshRuntimeFacts::observed_success(
+                            provider_started.elapsed(),
+                            &summary,
+                        ),
                     );
                     progress.done(
                         "refreshing",
@@ -684,12 +752,19 @@ pub(crate) fn refresh_sources_for_search(
                     let error = error_summary(&err);
                     refresh_failures.push(error.clone());
                     add_refresh_source_failure(&mut totals, &plan.stats, &err);
-                    provider_refreshes.record_failure(
+                    let failure_scope = import_error_scope(&err);
+                    let failure_type = crate::commands::import::import_failure_type(&err);
+                    provider_refreshes.record_failure_with_facts(
                         plan.source.provider,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::Discovered,
                         &plan.stats,
                         rejected_source_summary(&err).as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_started.elapsed(),
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     progress.done(
                         "refreshing",
@@ -702,12 +777,19 @@ pub(crate) fn refresh_sources_for_search(
                     );
                 }
                 Err(err) => {
-                    provider_refreshes.record_failure(
+                    let failure_scope = import_error_scope(&err);
+                    let failure_type = crate::commands::import::import_failure_type(&err);
+                    provider_refreshes.record_failure_with_facts(
                         plan.source.provider,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::Discovered,
                         &plan.stats,
                         rejected_source_summary(&err).as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_started.elapsed(),
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     return Err(err);
                 }
@@ -722,6 +804,7 @@ pub(crate) fn refresh_sources_for_search(
                 "refreshing",
                 format!("running history source plugin {}", plugin_source.label()),
             );
+            let provider_started = Instant::now();
             let import_result =
                 import_history_source_plugin(&mut store, &plugin_source, data_root, false)
                     .with_context(|| {
@@ -736,12 +819,16 @@ pub(crate) fn refresh_sources_for_search(
                         &summary,
                     );
                     totals.add(&summary, &stats);
-                    provider_refreshes.record_success(
+                    provider_refreshes.record_success_with_facts(
                         ctx_history_core::CaptureProvider::Custom,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::HistorySourcePlugin,
                         &summary,
                         &stats,
+                        ProviderRefreshRuntimeFacts::observed_success(
+                            provider_started.elapsed(),
+                            &summary,
+                        ),
                     );
                     progress.done(
                         "refreshing",
@@ -753,12 +840,19 @@ pub(crate) fn refresh_sources_for_search(
                     let error = error_summary(&err);
                     refresh_failures.push(error.clone());
                     add_refresh_source_failure(&mut totals, &SourceStats::default(), &err);
-                    provider_refreshes.record_failure(
+                    let failure_scope = import_error_scope(&err);
+                    let failure_type = crate::commands::import::import_failure_type(&err);
+                    provider_refreshes.record_failure_with_facts(
                         ctx_history_core::CaptureProvider::Custom,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::HistorySourcePlugin,
                         &SourceStats::default(),
                         rejected_source_summary(&err).as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_started.elapsed(),
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     progress.done(
                         "refreshing",
@@ -771,12 +865,19 @@ pub(crate) fn refresh_sources_for_search(
                     );
                 }
                 Err(err) => {
-                    provider_refreshes.record_failure(
+                    let failure_scope = import_error_scope(&err);
+                    let failure_type = crate::commands::import::import_failure_type(&err);
+                    provider_refreshes.record_failure_with_facts(
                         ctx_history_core::CaptureProvider::Custom,
                         ProviderRefreshTrigger::Search,
                         ProviderRefreshSourceMode::HistorySourcePlugin,
                         &SourceStats::default(),
                         rejected_source_summary(&err).as_ref(),
+                        ProviderRefreshRuntimeFacts::observed_failure(
+                            provider_started.elapsed(),
+                            failure_scope,
+                            failure_type,
+                        ),
                     );
                     return Err(err);
                 }
@@ -821,6 +922,9 @@ pub(crate) fn refresh_sources_for_search(
             "{failure_count} search refresh source failure(s) after attempting all planned sources: {failures}"
         ));
     }
+    if output_inventory_can_finish(output_inventory_complete, &totals) {
+        finish_pro_output_inventory(pro_output, &progress);
+    }
     Ok(totals)
 }
 
@@ -833,6 +937,36 @@ fn add_refresh_source_failure(
         totals.add_rejected_source(&summary, stats);
     } else {
         totals.add_source_failure(stats);
+    }
+}
+
+#[cfg(test)]
+mod canonical_pro_progression_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct TestCanonicalProProgression {
+        frontier_checks: usize,
+    }
+
+    impl CanonicalProSourceProgression for TestCanonicalProProgression {
+        fn progress_to_committed_core_frontier(&mut self) {
+            self.frontier_checks += 1;
+        }
+    }
+
+    #[test]
+    fn search_refresh_progresses_after_changed_or_failed_core_attempts() {
+        let mut changed = ProviderImportSummary::default();
+        changed.imported = 1;
+        let no_op = ProviderImportSummary::default();
+        let mut progression = TestCanonicalProProgression::default();
+
+        progress_search_refresh_canonical_pro(Some(&mut progression), Some(&changed));
+        progress_search_refresh_canonical_pro(Some(&mut progression), Some(&no_op));
+        progress_search_refresh_canonical_pro(Some(&mut progression), None);
+
+        assert_eq!(progression.frontier_checks, 2);
     }
 }
 

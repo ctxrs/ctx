@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(in crate::semantic) enum DaemonQueryEndpoint {
     #[cfg(unix)]
     Unix { path: PathBuf, token: String },
@@ -8,6 +8,25 @@ pub(in crate::semantic) enum DaemonQueryEndpoint {
     #[allow(dead_code)]
     Unsupported,
 }
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(in crate::semantic) struct DaemonQueryEndpointIdentity {
+    pub(in crate::semantic) endpoint: DaemonQueryEndpoint,
+    pub(in crate::semantic) owner_pid: u32,
+}
+
+#[derive(Debug)]
+pub(in crate::semantic) struct DaemonQueryServiceUnavailable;
+
+impl fmt::Display for DaemonQueryServiceUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "daemon semantic query service is unavailable; run `ctx daemon run --force` in another terminal or retry with `--refresh background`",
+        )
+    }
+}
+
+impl std::error::Error for DaemonQueryServiceUnavailable {}
 
 impl DaemonQueryEndpoint {
     pub(in crate::semantic) fn token(&self) -> &str {
@@ -61,29 +80,62 @@ pub(in crate::semantic) fn remove_daemon_query_endpoint(data_root: &Path) {
     let _ = fs::remove_file(daemon_query_endpoint_path(data_root));
 }
 
+#[cfg(test)]
 pub(in crate::semantic) fn read_daemon_query_endpoint(
     data_root: &Path,
 ) -> Result<Option<DaemonQueryEndpoint>> {
+    Ok(read_daemon_query_endpoint_identity(data_root)?.map(|identity| identity.endpoint))
+}
+
+pub(in crate::semantic) fn read_daemon_query_endpoint_identity(
+    data_root: &Path,
+) -> Result<Option<DaemonQueryEndpointIdentity>> {
     let path = daemon_query_endpoint_path(data_root);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    let Some(parent) = path.parent() else {
+        return Err(anyhow!("daemon query endpoint has no parent directory"));
+    };
+    match verify_private_directory(parent) {
+        Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("read daemon query endpoint {}", path.display()));
+                .with_context(|| format!("verify daemon query directory {}", parent.display()));
+        }
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open daemon query endpoint {}", path.display()));
         }
     };
+    #[cfg(windows)]
+    verify_private_file_handle(&file)
+        .with_context(|| format!("verify daemon query endpoint {}", path.display()))?;
+    #[cfg(not(windows))]
+    verify_private_file(&path)
+        .with_context(|| format!("verify daemon query endpoint {}", path.display()))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("read daemon query endpoint {}", path.display()))?;
     let value: Value = serde_json::from_str(&text)
         .with_context(|| format!("parse daemon query endpoint {}", path.display()))?;
     if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Ok(None);
     }
-    read_daemon_query_endpoint_value(value)
+    read_daemon_query_endpoint_identity_value(value)
 }
 
-pub(in crate::semantic) fn read_daemon_query_endpoint_value(
+pub(in crate::semantic) fn read_daemon_query_endpoint_identity_value(
     value: Value,
-) -> Result<Option<DaemonQueryEndpoint>> {
+) -> Result<Option<DaemonQueryEndpointIdentity>> {
     let Some(token) = value
         .get("token")
         .and_then(Value::as_str)
@@ -92,11 +144,19 @@ pub(in crate::semantic) fn read_daemon_query_endpoint_value(
     else {
         return Ok(None);
     };
-    match value.get("transport").and_then(Value::as_str) {
+    let Some(owner_pid) = value
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid != 0)
+    else {
+        return Ok(None);
+    };
+    let endpoint = match value.get("transport").and_then(Value::as_str) {
         #[cfg(unix)]
         Some("unix") => {
             let path = value.get("path").and_then(Value::as_str).map(PathBuf::from);
-            Ok(path.map(|path| DaemonQueryEndpoint::Unix { path, token }))
+            path.map(|path| DaemonQueryEndpoint::Unix { path, token })
         }
         #[cfg(windows)]
         Some("windows_named_pipe") => {
@@ -105,11 +165,39 @@ pub(in crate::semantic) fn read_daemon_query_endpoint_value(
                 .and_then(Value::as_str)
                 .filter(|pipe_name| windows_named_pipe_name_is_local(pipe_name))
                 .map(str::to_owned);
-            Ok(pipe_name
-                .map(|pipe_name| DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, token }))
+            pipe_name.map(|pipe_name| DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, token })
         }
-        _ => Ok(None),
+        _ => None,
+    };
+    Ok(endpoint.map(|endpoint| DaemonQueryEndpointIdentity {
+        endpoint,
+        owner_pid,
+    }))
+}
+
+pub(in crate::semantic) fn remove_daemon_query_endpoint_if_matches(
+    data_root: &Path,
+    expected: &DaemonQueryEndpointIdentity,
+) {
+    // The daemon owns this guard for the endpoint lifetime. Acquiring it makes
+    // the identity re-read and unlink atomic with a replacement daemon start.
+    let guard_path = pid_lock_guard_path(&daemon_lock_path(data_root));
+    let Ok((guard, _)) = open_or_create_pid_lock_file(&guard_path) else {
+        return;
+    };
+    if secure_private_file_permissions(&guard_path).is_err() {
+        return;
     }
+    let Ok(true) = try_lock_pid_file(&guard) else {
+        return;
+    };
+    let current = read_daemon_query_endpoint_identity(data_root)
+        .ok()
+        .flatten();
+    if current.as_ref() == Some(expected) {
+        let _ = fs::remove_file(daemon_query_endpoint_path(data_root));
+    }
+    let _ = fs2::FileExt::unlock(&guard);
 }
 
 pub(in crate::semantic) fn daemon_query_request(
@@ -118,12 +206,21 @@ pub(in crate::semantic) fn daemon_query_request(
     timeout: StdDuration,
     max_response_bytes: u64,
 ) -> Result<Option<Value>> {
-    let Some(endpoint) = read_daemon_query_endpoint(data_root)? else {
+    let Some(identity) = read_daemon_query_endpoint_identity(data_root)? else {
         return Ok(None);
     };
+    let endpoint = &identity.endpoint;
     request["token"] = Value::String(endpoint.token().to_owned());
     let request = format!("{}\n", serde_json::to_string(&compact_json(request))?);
-    let body = daemon_query_roundtrip(&endpoint, request.as_bytes(), timeout, max_response_bytes)?;
+    let body =
+        match daemon_query_roundtrip(endpoint, request.as_bytes(), timeout, max_response_bytes) {
+            Ok(body) => body,
+            Err(error) if daemon_query_roundtrip_error_is_unavailable(endpoint, &error) => {
+                remove_daemon_query_endpoint_if_matches(data_root, &identity);
+                return Err(DaemonQueryServiceUnavailable.into());
+            }
+            Err(error) => return Err(error),
+        };
     let response: Value = serde_json::from_str(&body).context("parse daemon query response")?;
     Ok(Some(response))
 }
@@ -137,9 +234,6 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
     match endpoint {
         #[cfg(unix)]
         DaemonQueryEndpoint::Unix { path, .. } => {
-            if !path.exists() {
-                return Err(anyhow!("daemon query socket does not exist"));
-            }
             let mut stream = UnixStream::connect(path)
                 .with_context(|| format!("connect daemon query socket {}", path.display()))?;
             stream
@@ -168,6 +262,75 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
             "daemon query service is not supported on this platform"
         )),
     }
+}
+
+pub(in crate::semantic) fn daemon_query_roundtrip_error_is_unavailable(
+    endpoint: &DaemonQueryEndpoint,
+    error: &anyhow::Error,
+) -> bool {
+    let Some(io_error) = error.downcast_ref::<std::io::Error>() else {
+        return false;
+    };
+    match endpoint {
+        #[cfg(unix)]
+        DaemonQueryEndpoint::Unix { .. } => {
+            daemon_query_unix_io_error_is_unavailable(io_error.kind())
+        }
+        #[cfg(windows)]
+        DaemonQueryEndpoint::WindowsNamedPipe { .. } => {
+            daemon_query_windows_io_error_is_unavailable(io_error.kind(), io_error.raw_os_error())
+        }
+        #[cfg(not(any(unix, windows)))]
+        DaemonQueryEndpoint::Unsupported => false,
+    }
+}
+
+#[cfg(any(unix, test))]
+pub(in crate::semantic) fn daemon_query_unix_io_error_is_unavailable(
+    kind: std::io::ErrorKind,
+) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
+#[cfg(any(windows, test))]
+pub(in crate::semantic) fn daemon_query_windows_io_error_is_unavailable(
+    kind: std::io::ErrorKind,
+    raw_os_error: Option<i32>,
+) -> bool {
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    const ERROR_BAD_PIPE: i32 = 230;
+    const ERROR_NO_DATA: i32 = 232;
+    const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NotConnected
+    ) || matches!(
+        raw_os_error,
+        Some(
+            ERROR_FILE_NOT_FOUND
+                | ERROR_PATH_NOT_FOUND
+                | ERROR_BROKEN_PIPE
+                | ERROR_BAD_PIPE
+                | ERROR_NO_DATA
+                | ERROR_PIPE_NOT_CONNECTED
+        )
+    )
 }
 
 pub(in crate::semantic) fn read_daemon_query_request<S: std::io::Read>(
@@ -613,28 +776,40 @@ mod windows_query_transport_tests {
     }
 }
 use std::{
-    fs,
+    fmt, fs,
+    io::Read,
     path::{Path, PathBuf},
     process,
     time::Duration as StdDuration,
 };
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::{
-    io::{Read, Write},
-    net::Shutdown,
-    os::unix::net::UnixStream,
+    io::Write, net::Shutdown, os::unix::fs::OpenOptionsExt, os::unix::net::UnixStream,
     time::Instant,
 };
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_core::platform_security::verify_private_directory;
+#[cfg(not(windows))]
+use ctx_history_core::platform_security::verify_private_file;
+#[cfg(windows)]
+use ctx_history_core::platform_security::verify_private_file_handle;
 use serde_json::{json, Value};
 #[cfg(windows)]
 use uuid::Uuid;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
 use crate::compact_json;
 
 use super::super::{
-    paths_status::{daemon_root_path, write_private_json_file},
+    health_search::secure_private_file_permissions,
+    paths_status::{
+        daemon_lock_path, daemon_root_path, open_or_create_pid_lock_file, pid_lock_guard_path,
+        try_lock_pid_file, write_private_json_file,
+    },
     runtime_limits::DAEMON_QUERY_ENDPOINT_FILE,
 };

@@ -1,6 +1,5 @@
 use ctx_history_core::{
-    compact_result_payload, CaptureProvider, EventType, ProviderEventEnvelope, Run, RunStatus,
-    RunType,
+    compact_result_payload, CaptureProvider, EventType, Fidelity, Run, RunStatus, RunType,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -10,42 +9,67 @@ use crate::{CaptureError, Result};
 
 use super::ids::{provider_run_uuid, provider_source_run_uuid, provider_sync_metadata, timestamps};
 
-/// Removes provider result bodies and previews before the canonical Store write.
-/// Typed correlation/outcome/content identity survive; source bytes do not.
+/// Removes provider result bodies before the canonical Store write.
+///
+/// Typed correlation and outcome metadata survive. Sparse failures and
+/// timeouts may also retain one bounded preview; successful and unknown
+/// outputs never do.
 pub(crate) fn compact_provider_result_payload(event_type: EventType, payload: &Value) -> Value {
     if !matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
         return payload.clone();
     }
-    compact_result_payload(payload)
+    let mut compact = compact_result_payload(payload);
+    let retained_failure = compact
+        .get("result_outcome")
+        .and_then(Value::as_str)
+        .is_some_and(|outcome| outcome == "failure")
+        || compact
+            .get("timed_out")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || compact
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .is_some_and(|exit_code| exit_code != 0);
+    if retained_failure {
+        let preview = payload
+            .get("output_preview")
+            .or_else(|| {
+                payload
+                    .get("body")
+                    .and_then(|body| body.get("output_preview"))
+            })
+            .and_then(Value::as_str)
+            .filter(|preview| !preview.trim().is_empty())
+            .map(|preview| {
+                preview
+                    .chars()
+                    .take(crate::PROVIDER_MAX_PREVIEW_CHARS)
+                    .collect::<String>()
+            });
+        if let (Some(compact), Some(preview)) = (compact.as_object_mut(), preview) {
+            compact.insert("output_preview".to_owned(), Value::String(preview));
+        }
+    }
+    compact
 }
 
-pub(crate) struct ProviderCommandRunInput<'a> {
-    pub(crate) provider: CaptureProvider,
-    pub(crate) provider_session_id: &'a str,
-    pub(crate) session_id: Uuid,
-    pub(crate) source_id: Uuid,
-    pub(crate) run_source_id: Option<Uuid>,
-    pub(crate) history_record_id: Option<Uuid>,
-    pub(crate) event: &'a ProviderEventEnvelope,
-    pub(crate) payload: &'a Value,
-    pub(crate) event_hash: &'a str,
-}
-
-pub(crate) fn provider_command_run_from_event(
-    input: ProviderCommandRunInput<'_>,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn provider_command_run(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    session_id: Uuid,
+    source_id: Uuid,
+    run_source_id: Option<Uuid>,
+    history_record_id: Option<Uuid>,
+    event_type: EventType,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    fidelity: Fidelity,
+    provider_event_index: u64,
+    payload: &Value,
+    event_hash: &str,
 ) -> Result<Option<Run>> {
-    let ProviderCommandRunInput {
-        provider,
-        provider_session_id,
-        session_id,
-        source_id,
-        run_source_id,
-        history_record_id,
-        event,
-        payload,
-        event_hash,
-    } = input;
-    if event.event_type != EventType::CommandOutput {
+    if event_type != EventType::CommandOutput {
         return Ok(None);
     }
     let arguments_preview = payload.get("arguments_preview");
@@ -64,8 +88,8 @@ pub(crate) fn provider_command_run_from_event(
         .or_else(|| arguments_preview.and_then(tool_input::working_directory));
     let call_id = payload.get("call_id").and_then(Value::as_str);
     let key = call_id.unwrap_or(event_hash);
-    let started_at = provider_event_started_at(event, payload)?;
-    let ended_at = Some(event.occurred_at);
+    let started_at = provider_event_started_at(event_type, occurred_at, payload)?;
+    let ended_at = Some(occurred_at);
     Ok(Some(Run {
         id: run_source_id
             .map(|source_id| provider_source_run_uuid(source_id, key))
@@ -84,13 +108,13 @@ pub(crate) fn provider_command_run_from_event(
         command_preview,
         input_blob_id: None,
         output_blob_id: None,
-        timestamps: timestamps(event.occurred_at),
+        timestamps: timestamps(occurred_at),
         source_id: Some(source_id),
         sync: provider_sync_metadata(
-            event.fidelity,
+            fidelity,
             json!({
                 "provider_session_id": provider_session_id,
-                "provider_event_index": event.provider_event_index,
+                "provider_event_index": provider_event_index,
                 "provider_event_hash": event_hash,
                 "call_id": call_id,
                 "source": "provider_command_output",
@@ -99,16 +123,13 @@ pub(crate) fn provider_command_run_from_event(
     }))
 }
 
-pub(crate) fn validate_provider_event_for_import(event: &ProviderEventEnvelope) -> Result<()> {
-    provider_event_started_at(event, &event.payload).map(|_| ())
-}
-
 fn provider_event_started_at(
-    event: &ProviderEventEnvelope,
+    event_type: EventType,
+    occurred_at: chrono::DateTime<chrono::Utc>,
     payload: &Value,
 ) -> Result<chrono::DateTime<chrono::Utc>> {
-    if event.event_type != EventType::CommandOutput {
-        return Ok(event.occurred_at);
+    if event_type != EventType::CommandOutput {
+        return Ok(occurred_at);
     }
     Ok(match provider_command_duration_ms(payload)? {
         Some(duration) => {
@@ -118,16 +139,13 @@ fn provider_event_started_at(
                     "duration_ms is not representable as milliseconds: {duration_value}"
                 ))
             })?;
-            event
-                .occurred_at
-                .checked_sub_signed(duration)
-                .ok_or_else(|| {
-                    CaptureError::InvalidPayload(format!(
-                        "duration_ms moves command start before representable time: {duration_value}"
-                    ))
-                })?
+            occurred_at.checked_sub_signed(duration).ok_or_else(|| {
+                CaptureError::InvalidPayload(format!(
+                    "duration_ms moves command start before representable time: {duration_value}"
+                ))
+            })?
         }
-        None => event.occurred_at,
+        None => occurred_at,
     })
 }
 
@@ -160,7 +178,25 @@ pub(crate) fn provider_command_run_status(payload: &Value) -> RunStatus {
     match payload.get("exit_code").and_then(Value::as_i64) {
         Some(0) => RunStatus::Succeeded,
         Some(_) => RunStatus::Failed,
-        None => RunStatus::Partial,
+        None => {
+            let outcome = payload
+                .get("result_outcome")
+                .or_else(|| payload.get("outcome"))
+                .or_else(|| payload.get("status"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(str::to_ascii_lowercase);
+            match outcome.as_deref() {
+                Some("timeout" | "timed_out" | "timedout" | "cancelled" | "canceled") => {
+                    RunStatus::Cancelled
+                }
+                Some("failure" | "failed" | "error" | "errored") => RunStatus::Failed,
+                Some("success" | "succeeded" | "complete" | "completed" | "ok" | "passed") => {
+                    RunStatus::Succeeded
+                }
+                _ => RunStatus::Partial,
+            }
+        }
     }
 }
 
@@ -195,6 +231,26 @@ mod tests {
         assert_eq!(
             compact_provider_result_payload(EventType::Message, &malformed),
             malformed
+        );
+    }
+
+    #[test]
+    fn explicit_status_classifies_runs_without_inventing_exit_codes() {
+        assert_eq!(
+            provider_command_run_status(&json!({"status": "FAILED"})),
+            RunStatus::Failed
+        );
+        assert_eq!(
+            provider_command_run_status(&json!({"result_outcome": "timeout"})),
+            RunStatus::Cancelled
+        );
+        assert_eq!(
+            provider_command_run_status(&json!({"outcome": "completed"})),
+            RunStatus::Succeeded
+        );
+        assert_eq!(
+            provider_command_run_status(&json!({"status": "running"})),
+            RunStatus::Partial
         );
     }
 }

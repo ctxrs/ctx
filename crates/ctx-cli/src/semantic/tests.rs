@@ -4,6 +4,17 @@ use ctx_history_core::{
     Session, SessionStatus, SyncMetadata, SyncState, Visibility,
 };
 
+fn reconcile_committed_semantic_work(
+    data_root: &Path,
+    store: &Store,
+) -> Result<SemanticReconciliationOutcome> {
+    reconcile_committed_semantic_work_with_state(
+        data_root,
+        store,
+        &mut SemanticReconciliationSweepState::default(),
+    )
+}
+
 fn test_embedding(first: f32, second: f32) -> Vec<f32> {
     let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
     embedding[0] = first;
@@ -167,13 +178,11 @@ fn daemon_history_completed_test_job() -> Value {
     )
 }
 
-fn daemon_semantic_indexed_test_job(data_root: &Path) -> Value {
-    let report = semantic_worker_report_for_daemon(data_root);
+fn daemon_semantic_indexed_test_job(_data_root: &Path) -> Value {
     daemon_semantic_job_json(
         "budget_exhausted",
         None,
         utc_now().timestamp_millis(),
-        &report,
         Some(1),
         None,
     )
@@ -196,17 +205,13 @@ fn test_chunk_at(
     seq: u64,
     source_hash: &str,
     chunk_index: usize,
-    chunk_count: usize,
+    _chunk_count: usize,
 ) -> SemanticChunkDocument {
     SemanticChunkDocument {
         event_id,
-        history_record_id: None,
-        session_id: None,
         seq,
         chunk_index,
-        chunk_count,
         source_text_hash: source_hash.to_owned(),
-        chunk_text_hash: format!("{source_hash}-chunk-{chunk_index}"),
         text: String::new(),
         start_char: chunk_index.saturating_mul(10),
         end_char: chunk_index.saturating_mul(10).saturating_add(12),
@@ -215,12 +220,17 @@ fn test_chunk_at(
 
 #[cfg(ctx_semantic_fastembed)]
 fn write_test_semantic_cache(root: &Path) -> Result<()> {
+    write_test_semantic_cache_variant(root, SemanticOrtModelVariant::CpuFp32)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn write_test_semantic_cache_variant(root: &Path, variant: SemanticOrtModelVariant) -> Result<()> {
     let snapshot = root
         .join(SEMANTIC_HF_MODEL_CACHE_DIR)
         .join("snapshots")
         .join(SEMANTIC_MODEL_REVISION);
     fs::create_dir_all(&snapshot)?;
-    for file in SEMANTIC_REQUIRED_MODEL_FILES {
+    for file in variant.required_files() {
         let path = snapshot.join(file.path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;

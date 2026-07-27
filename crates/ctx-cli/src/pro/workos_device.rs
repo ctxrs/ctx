@@ -18,6 +18,11 @@ const MAX_DEVICE_CODE_BYTES: usize = 1024;
 const MAX_USER_CODE_BYTES: usize = 64;
 const MAX_DEVICE_LIFETIME_SECONDS: u64 = 15 * 60;
 const MAX_POLL_INTERVAL_SECONDS: u64 = 30;
+const MAX_USER_PROFILE_FIELDS: usize = 32;
+const MAX_USER_PROFILE_DEPTH: usize = 8;
+const MAX_USER_PROFILE_NODES: usize = 256;
+const MAX_USER_PROFILE_STRING_BYTES: usize = 16 * 1024;
+const MAX_USER_PROFILE_KEY_BYTES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub(super) struct WorkOsConfig {
@@ -66,11 +71,21 @@ impl Drop for WorkOsTokens {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct WorkOsUser {
+    #[serde(rename = "object")]
+    _object: WorkOsUserObject,
     id: String,
+    // WorkOS user profiles contain non-security display and metadata fields.
+    // Keep those bounded separately while parsing the identity fields above
+    // with their exact documented types.
     #[serde(flatten)]
     ignored: std::collections::BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Deserialize)]
+enum WorkOsUserObject {
+    #[serde(rename = "user")]
+    User,
 }
 
 #[derive(Deserialize)]
@@ -226,8 +241,8 @@ impl WorkOsDeviceClient {
         validate_secret(&tokens.refresh_token, "refresh token")?;
         validate_identifier(&tokens.organization_id, "organization")?;
         validate_identifier(&tokens.user.id, "user")?;
-        if tokens.ignored_fields() > 32 {
-            bail!("authentication_invalid: WorkOS token response has too many user fields");
+        if !tokens.user_profile_is_bounded() {
+            bail!("authentication_invalid: WorkOS user profile is outside allowed bounds");
         }
         if tokens
             .authentication_method
@@ -255,6 +270,35 @@ impl WorkOsDeviceClient {
 impl WorkOsTokens {
     fn ignored_fields(&self) -> usize {
         self.user.ignored.len()
+    }
+
+    fn user_profile_is_bounded(&self) -> bool {
+        if self.ignored_fields() > MAX_USER_PROFILE_FIELDS {
+            return false;
+        }
+        let mut remaining_nodes = MAX_USER_PROFILE_NODES;
+        self.user.ignored.iter().all(|(key, value)| {
+            key.len() <= MAX_USER_PROFILE_KEY_BYTES
+                && bounded_json_value(value, 0, &mut remaining_nodes)
+        })
+    }
+}
+
+fn bounded_json_value(value: &Value, depth: usize, remaining_nodes: &mut usize) -> bool {
+    if depth > MAX_USER_PROFILE_DEPTH || *remaining_nodes == 0 {
+        return false;
+    }
+    *remaining_nodes -= 1;
+    match value {
+        Value::String(value) => value.len() <= MAX_USER_PROFILE_STRING_BYTES,
+        Value::Array(values) => values
+            .iter()
+            .all(|value| bounded_json_value(value, depth + 1, remaining_nodes)),
+        Value::Object(values) => values.iter().all(|(key, value)| {
+            key.len() <= MAX_USER_PROFILE_KEY_BYTES
+                && bounded_json_value(value, depth + 1, remaining_nodes)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
     }
 }
 
@@ -420,11 +464,110 @@ fn safe_http_error(error: ureq::Error, operation: &str) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    fn token_response() -> Value {
+        serde_json::json!({
+            "access_token": "access.secret",
+            "refresh_token": "refresh-secret",
+            "organization_id": "org_123",
+            "authentication_method": "Password",
+            "user": {
+                "object": "user",
+                "id": "user_123",
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "profile_picture_url": null,
+                "email": "ada@example.test",
+                "email_verified": true,
+                "external_id": null,
+                "metadata": {},
+                "last_sign_in_at": "2026-07-23T12:00:00.000Z",
+                "locale": "en-US",
+                "created_at": "2026-07-23T12:00:00.000Z",
+                "updated_at": "2026-07-23T12:00:00.000Z"
+            }
+        })
+    }
+
     fn jwt(claims: Value) -> String {
         format!(
             "e30.{}.signature",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
         )
+    }
+
+    #[test]
+    fn parses_documented_token_response() {
+        let tokens: WorkOsTokens = serde_json::from_value(token_response()).unwrap();
+
+        assert_eq!(tokens.organization_id, "org_123");
+        assert_eq!(tokens.user.id, "user_123");
+        assert_eq!(tokens.ignored_fields(), 11);
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_token_field() {
+        let mut response = token_response();
+        response["unexpected"] = Value::Bool(true);
+
+        let error = serde_json::from_value::<WorkOsTokens>(response).unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn rejects_non_string_user_object() {
+        for invalid in [Value::Null, Value::Bool(true)] {
+            let mut response = token_response();
+            response["user"]["object"] = invalid;
+
+            assert!(serde_json::from_value::<WorkOsTokens>(response).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_missing_user_object() {
+        let mut response = token_response();
+        response["user"].as_object_mut().unwrap().remove("object");
+
+        assert!(serde_json::from_value::<WorkOsTokens>(response).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_user_object_literal() {
+        let mut response = token_response();
+        response["user"]["object"] = Value::String("organization".to_owned());
+
+        assert!(serde_json::from_value::<WorkOsTokens>(response).is_err());
+    }
+
+    #[test]
+    fn token_debug_redacts_secrets() {
+        let tokens: WorkOsTokens = serde_json::from_value(token_response()).unwrap();
+        let debug = format!("{tokens:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("access.secret"));
+        assert!(!debug.contains("refresh-secret"));
+    }
+
+    #[test]
+    fn rejects_excessive_user_profile_depth_and_size() {
+        let mut deeply_nested = Value::Null;
+        for _ in 0..=MAX_USER_PROFILE_DEPTH {
+            deeply_nested = serde_json::json!({"nested": deeply_nested});
+        }
+        let mut deep_response = token_response();
+        deep_response["user"]["metadata"] = deeply_nested;
+        let deep_tokens: WorkOsTokens = serde_json::from_value(deep_response).unwrap();
+        assert!(!deep_tokens.user_profile_is_bounded());
+
+        let mut wide_response = token_response();
+        let user = wide_response["user"].as_object_mut().unwrap();
+        for index in 0..=MAX_USER_PROFILE_FIELDS {
+            user.insert(format!("field_{index}"), Value::Null);
+        }
+        let wide_tokens: WorkOsTokens = serde_json::from_value(wide_response).unwrap();
+        assert!(!wide_tokens.user_profile_is_bounded());
     }
 
     #[test]

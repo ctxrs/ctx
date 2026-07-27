@@ -1,19 +1,27 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
 };
 
-use anyhow::{anyhow, Result};
-use ctx_history_core::default_data_root;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+use std::fs;
 
-#[cfg(target_os = "windows")]
-use anyhow::Context;
+use anyhow::{anyhow, Context, Result};
+use ctx_history_core::default_data_root;
 
 use crate::semantic::health_search::env_path;
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-use std::fs;
+#[cfg(ctx_semantic_fastembed)]
+mod cuda_dependencies;
+#[cfg(ctx_semantic_fastembed)]
+mod verified_runtime;
+#[cfg(ctx_semantic_fastembed)]
+pub(super) use verified_runtime::{
+    installed_accelerator_runtime_identity, revalidate_loaded_accelerator_runtime,
+};
+#[cfg(ctx_semantic_fastembed)]
+use verified_runtime::{validate_runtime_candidate, verified_accelerator_runtime_candidates};
 
 #[cfg(ctx_semantic_fastembed)]
 pub(super) const CTX_ONNXRUNTIME_DYLIB_ENV: &str = "CTX_ONNXRUNTIME_DYLIB";
@@ -27,7 +35,6 @@ pub(super) const CTX_RUNTIME_DIR_ENV: &str = "CTX_RUNTIME_DIR";
 pub(super) const ORT_DYLIB_PATH_ENV: &str = "ORT_DYLIB_PATH";
 #[cfg(ctx_semantic_fastembed)]
 pub(super) const SEMANTIC_ONNXRUNTIME_VERSION: &str = "1.27.0";
-
 #[cfg(all(ctx_semantic_fastembed, target_os = "windows"))]
 pub(super) const SEMANTIC_ONNXRUNTIME_DYLIB: &str = "onnxruntime.dll";
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
@@ -38,6 +45,80 @@ pub(super) const SEMANTIC_ONNXRUNTIME_DYLIB: &str = "libonnxruntime.dylib";
     not(target_os = "macos")
 ))]
 pub(super) const SEMANTIC_ONNXRUNTIME_DYLIB: &str = "libonnxruntime.so";
+
+#[cfg(ctx_semantic_fastembed)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OnnxRuntimeFlavor {
+    Cpu,
+    Cuda,
+    WindowsMl,
+}
+
+#[cfg(ctx_semantic_fastembed)]
+impl OnnxRuntimeFlavor {
+    pub(super) fn runtime_name(self) -> &'static str {
+        match self {
+            Self::Cpu | Self::Cuda => "onnxruntime",
+            Self::WindowsMl => "windows-ml",
+        }
+    }
+
+    pub(super) fn version(self) -> &'static str {
+        match self {
+            Self::Cpu | Self::Cuda => SEMANTIC_ONNXRUNTIME_VERSION,
+            Self::WindowsMl => "2.1.74",
+        }
+    }
+
+    pub(super) fn platform_dir(self) -> Result<&'static str> {
+        match self {
+            Self::Cpu => Ok(semantic_onnxruntime_platform_dir()),
+            Self::Cuda => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                {
+                    Ok("linux-x64-cuda12")
+                }
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+                {
+                    Err(anyhow!("the CUDA semantic runtime requires Linux x86_64"))
+                }
+            }
+            Self::WindowsMl => {
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                {
+                    Ok("windows-x64")
+                }
+                #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+                {
+                    Err(anyhow!(
+                        "the Windows ML semantic runtime requires Windows x86_64"
+                    ))
+                }
+            }
+        }
+    }
+
+    pub(super) fn asset_name(self) -> &'static str {
+        match self {
+            Self::Cpu => "ctx-onnxruntime-cpu",
+            Self::Cuda => "ctx-onnxruntime-linux-x64-cuda12.tar.zst",
+            Self::WindowsMl => "ctx-windowsml-windows-x64.zip",
+        }
+    }
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[derive(Debug, Clone)]
+pub(super) struct LoadedOnnxRuntime {
+    pub(super) path: PathBuf,
+    pub(super) artifact_identity: String,
+    flavor: OnnxRuntimeFlavor,
+}
+
+#[cfg(ctx_semantic_fastembed)]
+static LOADED_RUNTIME: OnceLock<LoadedOnnxRuntime> = OnceLock::new();
+#[cfg(ctx_semantic_fastembed)]
+static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(ctx_semantic_fastembed)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,21 +158,79 @@ impl SemanticOnnxRuntimeEnv {
 
 #[cfg(ctx_semantic_fastembed)]
 pub(super) fn ensure_semantic_onnxruntime_loaded(model_cache_dir: &Path) -> Result<PathBuf> {
-    static INIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    static INIT_LOCK: Mutex<()> = Mutex::new(());
-
-    if let Some(path) = INIT.get() {
-        return Ok(path.clone());
+    if let Some(runtime) = LOADED_RUNTIME.get() {
+        if runtime.flavor != OnnxRuntimeFlavor::Cpu {
+            return same_verified_runtime(runtime, runtime.flavor).map(|runtime| runtime.path);
+        }
+        return Ok(runtime.path.clone());
     }
-
-    let _lock = INIT_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    if let Some(path) = INIT.get() {
-        return Ok(path.clone());
+    let _lock = RUNTIME_INIT_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(runtime) = LOADED_RUNTIME.get() {
+        if runtime.flavor != OnnxRuntimeFlavor::Cpu {
+            return same_verified_runtime(runtime, runtime.flavor).map(|runtime| runtime.path);
+        }
+        return Ok(runtime.path.clone());
     }
-
     let path = load_semantic_onnxruntime(model_cache_dir, &SemanticOnnxRuntimeEnv::current())?;
-    let _ = INIT.set(path.clone());
+    let _ = LOADED_RUNTIME.set(LoadedOnnxRuntime {
+        path: path.clone(),
+        artifact_identity: format!("legacy-cpu|path={}", path.display()),
+        flavor: OnnxRuntimeFlavor::Cpu,
+    });
     Ok(path)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+pub(super) fn loaded_runtime_artifact_identity() -> Option<String> {
+    LOADED_RUNTIME
+        .get()
+        .map(|runtime| runtime.artifact_identity.clone())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+pub(super) fn ensure_semantic_accelerator_runtime_loaded(
+    model_cache_dir: &Path,
+    flavor: OnnxRuntimeFlavor,
+) -> Result<LoadedOnnxRuntime> {
+    if flavor == OnnxRuntimeFlavor::Cpu {
+        return Err(anyhow!(
+            "accelerator runtime loader does not accept the CPU flavor"
+        ));
+    }
+    if let Some(runtime) = LOADED_RUNTIME.get() {
+        return same_verified_runtime(runtime, flavor);
+    }
+    let _lock = RUNTIME_INIT_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(runtime) = LOADED_RUNTIME.get() {
+        return same_verified_runtime(runtime, flavor);
+    }
+    let runtime = load_verified_accelerator_runtime(model_cache_dir, flavor)?;
+    let _ = LOADED_RUNTIME.set(runtime.clone());
+    Ok(runtime)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn same_verified_runtime(
+    runtime: &LoadedOnnxRuntime,
+    requested: OnnxRuntimeFlavor,
+) -> Result<LoadedOnnxRuntime> {
+    if runtime.flavor != requested {
+        return Err(anyhow!(
+            "ONNX Runtime was already initialized for {:?}; refusing an in-process switch to {requested:?}",
+            runtime.flavor
+        ));
+    }
+    let identity = validate_runtime_candidate(&runtime.path, requested)?;
+    if identity != runtime.artifact_identity {
+        return Err(anyhow!(
+            "verified ONNX Runtime artifact identity changed after loading"
+        ));
+    }
+    Ok(runtime.clone())
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -137,6 +276,88 @@ pub(super) fn load_semantic_onnxruntime(
         )
     };
     Err(anyhow!(detail))
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn load_verified_accelerator_runtime(
+    model_cache_dir: &Path,
+    flavor: OnnxRuntimeFlavor,
+) -> Result<LoadedOnnxRuntime> {
+    let mut failures = Vec::new();
+    for path in verified_accelerator_runtime_candidates(model_cache_dir, flavor)? {
+        if !path.exists() {
+            continue;
+        }
+        let identity = match validate_runtime_candidate(&path, flavor) {
+            Ok(identity) => identity,
+            Err(error) => {
+                failures.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        #[cfg(target_os = "windows")]
+        if let Err(error) = preload_windows_onnxruntime(&path) {
+            failures.push(format!("{}: {error}", path.display()));
+            continue;
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if flavor == OnnxRuntimeFlavor::Cuda {
+            if let Err(error) = cuda_dependencies::preload(&path) {
+                failures.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        }
+        match ort::init_from(&path) {
+            Ok(builder) => {
+                let after_load = validate_runtime_candidate(&path, flavor)
+                    .context("revalidate accelerator runtime after dynamic load")?;
+                if after_load != identity {
+                    return Err(anyhow!(
+                        "accelerator runtime identity changed during dynamic load"
+                    ));
+                }
+                if !builder.commit() {
+                    return Err(anyhow!(
+                        "ONNX Runtime was initialized before the verified accelerator runtime"
+                    ));
+                }
+                return Ok(LoadedOnnxRuntime {
+                    path,
+                    artifact_identity: identity,
+                    flavor,
+                });
+            }
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    let detail = if failures.is_empty() {
+        format!(
+            "verified {} is not installed for {}; run the signed setup or upgrade provisioning flow",
+            flavor.asset_name(),
+            flavor.platform_dir()?,
+        )
+    } else {
+        format!(
+            "verified {} is unusable: {}",
+            flavor.asset_name(),
+            failures.join("; ")
+        )
+    };
+    Err(anyhow!(detail))
+}
+
+#[cfg(all(test, ctx_semantic_fastembed))]
+pub(crate) fn load_missing_semantic_onnxruntime_for_test(
+    model_cache_dir: &Path,
+    missing_dylib: &Path,
+) -> Result<PathBuf> {
+    load_semantic_onnxruntime(
+        model_cache_dir,
+        &SemanticOnnxRuntimeEnv {
+            ctx_dylib: Some(missing_dylib.to_path_buf()),
+            ..SemanticOnnxRuntimeEnv::default()
+        },
+    )
 }
 
 #[cfg(all(ctx_semantic_fastembed, target_os = "windows"))]
@@ -274,6 +495,23 @@ pub(super) fn semantic_onnxruntime_default_cache_dir(model_cache_dir: &Path) -> 
     model_cache_dir.join("semantic-runtime")
 }
 
+#[cfg(all(ctx_semantic_fastembed, target_os = "linux", target_arch = "x86_64"))]
+pub(super) fn nvidia_accelerator_present() -> bool {
+    nvidia_accelerator_present_in(Path::new("/proc"), Path::new("/sys"))
+}
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+fn nvidia_accelerator_present_in(proc_root: &Path, sys_root: &Path) -> bool {
+    proc_root.join("driver/nvidia/version").is_file()
+        || sys_root.join("module/nvidia").is_dir()
+        || fs::read_dir(sys_root.join("class/drm")).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                fs::read_to_string(entry.path().join("device/vendor"))
+                    .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case("0x10de"))
+            })
+        })
+}
+
 #[cfg(ctx_semantic_fastembed)]
 pub(super) fn push_onnxruntime_cache_candidates(
     candidates: &mut Vec<SemanticOnnxRuntimeCandidate>,
@@ -372,6 +610,21 @@ mod ort_runtime_tests {
             PathBuf::from("/tmp/ctx-test")
         };
         root.join(path)
+    }
+
+    #[test]
+    fn nvidia_probe_accepts_driver_and_drm_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let proc_root = temp.path().join("proc");
+        let sys_root = temp.path().join("sys");
+        fs::create_dir_all(proc_root.join("driver/nvidia")).unwrap();
+        fs::write(proc_root.join("driver/nvidia/version"), b"test").unwrap();
+        assert!(nvidia_accelerator_present_in(&proc_root, &sys_root));
+
+        fs::remove_file(proc_root.join("driver/nvidia/version")).unwrap();
+        fs::create_dir_all(sys_root.join("class/drm/card0/device")).unwrap();
+        fs::write(sys_root.join("class/drm/card0/device/vendor"), b"0x10de\n").unwrap();
+        assert!(nvidia_accelerator_present_in(&proc_root, &sys_root));
     }
 
     #[test]

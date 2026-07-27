@@ -1,7 +1,7 @@
 use crate::provider::providers::trae::{TRAE_CN_INPUT_HISTORY_KEY, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 use crate::tests::support::assertions::{
-    assert_event_type_count, assert_event_with_role, assert_events_have_provider_citations,
-    assert_search_hits_provider, assert_search_misses,
+    assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
+    assert_search_misses,
 };
 use crate::tests::support::paths::{copy_dir_all, provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::stored_provider_session_id;
@@ -84,7 +84,7 @@ fn native_openclaw_contentless_message_does_not_fabricate_search_text() {
 }
 
 #[test]
-fn native_openclaw_tool_output_is_metadata_only_and_not_searchable() {
+fn native_openclaw_successful_tool_output_is_absent_and_not_searchable() {
     let temp = tempdir();
     let root = temp.path().join("openclaw/sessions");
     fs::create_dir_all(&root).unwrap();
@@ -136,12 +136,12 @@ fn native_openclaw_tool_output_is_metadata_only_and_not_searchable() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.imported_events, 1);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::OpenClaw, "openclaw-tool-output");
     let events = store.events_for_session(session_id).unwrap();
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_eq!(events.len(), 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&events);
     assert_search_hits_provider(
         &store,
@@ -152,6 +152,7 @@ fn native_openclaw_tool_output_is_metadata_only_and_not_searchable() {
     assert!(!serde_json::to_string(&events)
         .unwrap()
         .contains("OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"));
+    assert!(store.runs_for_session(session_id).unwrap().is_empty());
 }
 
 #[test]
@@ -676,14 +677,14 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 4);
+    assert_eq!(first.imported_events, 3);
     let session_id = stored_provider_session_id(
         &store,
         CaptureProvider::Firebender,
         "firebender-fixture-session",
     );
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     assert!(events
         .iter()
         .any(|event| event.role == Some(EventRole::User)));
@@ -691,8 +692,7 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
         .iter()
         .any(|event| event.role == Some(EventRole::Assistant)));
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&events);
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("firebender fixture oracle prompt"));
@@ -704,6 +704,7 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Firebender)));
     assert_search_misses(&store, "FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
+    assert!(store.runs_for_session(session_id).unwrap().is_empty());
 
     let source = store
         .capture_source_by_external_session(
@@ -730,7 +731,7 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 4);
+    assert_eq!(second.skipped_events, 3);
 }
 #[test]
 fn provider_sources_discovers_auggie_default_sessions() {

@@ -5,6 +5,19 @@ use std::{
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+const DEFAULT_CONTROL_ENV_KEYS: &[&str] = &[
+    "CTX_ANALYTICS_ENABLED",
+    "CTX_ANALYTICS_OFF",
+    "CTX_DISABLE_ANALYTICS",
+    "CTX_INSTALL_DIAGNOSTICS_OFF",
+    "CTX_UPGRADE_AUTO",
+    "CTX_UPGRADE_OFF",
+    "CTX_DISABLE_AUTO_UPGRADE",
+    "CTX_DAEMON_ENABLED",
+    "CTX_DAEMON_OFF",
+    "CTX_DISABLE_DAEMON",
+    "CTX_SEARCH_SEMANTIC",
+];
 
 struct EnvGuard {
     _lock: MutexGuard<'static, ()>,
@@ -64,7 +77,9 @@ enabled = false
         "https://cli.ctx.rs/functions/v1/analytics"
     );
     assert!(config.analytics.enabled);
-    assert_eq!(config.upgrade.auto, "off");
+    assert_eq!(config.upgrade.auto, AUTO_UPGRADE_DEFAULT_MODE);
+    assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
+    assert!(config.auto_upgrade_enabled());
     assert_eq!(config.search.semantic, None);
     config.apply_values(&values).unwrap();
     assert!(!config.analytics.enabled);
@@ -107,33 +122,100 @@ fn parses_search_semantic_false() {
 
 #[test]
 fn load_without_config_file_uses_defaults() {
-    let _env_guard = EnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+    let _env_guard = EnvGuard::new(DEFAULT_CONTROL_ENV_KEYS);
     let temp = tempfile::tempdir().unwrap();
 
     let config = AppConfig::load(temp.path()).unwrap();
 
     assert!(config.analytics.enabled);
-    assert_eq!(config.upgrade.auto, "off");
+    assert_eq!(config.upgrade.auto, AUTO_UPGRADE_DEFAULT_MODE);
+    assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
+    assert!(config.auto_upgrade_enabled());
     assert_eq!(config.upgrade.channel, "stable");
     assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
     assert!(config.daemon.enabled);
+    assert_eq!(config.search.semantic, None);
     assert!(!config.semantic_search_enabled());
 }
 
 #[test]
-fn legacy_config_without_daemon_key_adopts_enabled_default() {
-    let _env_guard = EnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+fn empty_config_runtime_defaults_match_public_control_inventory() {
+    let _env_guard = EnvGuard::new(DEFAULT_CONTROL_ENV_KEYS);
+    let temp = tempfile::tempdir().unwrap();
+    let config = AppConfig::load(temp.path()).unwrap();
+    let contract: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/public-control-surface-v1.json"
+    ))
+    .unwrap();
+    let released = |config_key: &str| {
+        contract["controls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|control| control["config_key"] == config_key)
+            .unwrap()["released_default"]["value"]
+            .clone()
+    };
+
+    assert_eq!(
+        released("analytics.enabled"),
+        serde_json::json!(config.analytics.enabled)
+    );
+    assert_eq!(
+        released("upgrade.auto"),
+        serde_json::json!(config.auto_upgrade_mode().as_str())
+    );
+    assert_eq!(
+        released("daemon.enabled"),
+        serde_json::json!(config.daemon.enabled)
+    );
+    assert_eq!(
+        released("search.semantic"),
+        serde_json::json!(config.semantic_search_enabled())
+    );
+}
+
+#[test]
+fn legacy_config_without_runtime_control_keys_adopts_public_defaults() {
+    let _env_guard = EnvGuard::new(DEFAULT_CONTROL_ENV_KEYS);
     let temp = tempfile::tempdir().unwrap();
     fs::write(
         temp.path().join(CONFIG_FILE),
-        "[analytics]\nenabled = false\n\n[upgrade]\nauto = \"off\"\n",
+        "[upgrade]\nchannel = \"stable\"\n",
     )
     .unwrap();
 
     let config = AppConfig::load(temp.path()).unwrap();
 
+    assert!(config.analytics.enabled);
+    assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
+    assert!(config.auto_upgrade_enabled());
     assert!(config.daemon.enabled);
     assert!(!config.semantic_search_enabled());
+}
+
+#[test]
+fn explicit_auto_upgrade_opt_out_wins_over_default_and_env_enable() {
+    let env_guard = EnvGuard::new(&[
+        "CTX_UPGRADE_AUTO",
+        "CTX_UPGRADE_OFF",
+        "CTX_DISABLE_AUTO_UPGRADE",
+    ]);
+    let temp = tempfile::tempdir().unwrap();
+
+    env_guard.set("CTX_UPGRADE_AUTO", "off");
+    let environment_opt_out = AppConfig::load(temp.path()).unwrap();
+    assert_eq!(
+        environment_opt_out.auto_upgrade_mode(),
+        AutoUpgradeMode::Off
+    );
+    assert!(!environment_opt_out.auto_upgrade_enabled());
+
+    fs::write(temp.path().join(CONFIG_FILE), "[upgrade]\nauto = \"off\"\n").unwrap();
+    env_guard.set("CTX_UPGRADE_AUTO", "apply");
+    let persisted_opt_out = AppConfig::load(temp.path()).unwrap();
+    assert_eq!(persisted_opt_out.auto_upgrade_mode(), AutoUpgradeMode::Off);
+    assert!(!persisted_opt_out.auto_upgrade_enabled());
 }
 
 #[test]
@@ -255,6 +337,26 @@ fn set_daemon_enabled_rewrites_or_adds_config_key() {
     assert!(enabled.daemon.enabled);
     let text = fs::read_to_string(temp.path().join(CONFIG_FILE)).unwrap();
     assert!(text.contains("enabled = true"));
+}
+
+#[test]
+fn set_semantic_search_enabled_is_durable_preserving_and_idempotent() {
+    let _env_guard = EnvGuard::new(&["CTX_SEARCH_SEMANTIC"]);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(CONFIG_FILE);
+    let original =
+        "# retained comment\n[analytics]\nenabled = false\n\n[search]\nsemantic = false\n";
+    fs::write(&path, original).unwrap();
+
+    set_semantic_search_enabled(temp.path(), true).unwrap();
+    let enabled = AppConfig::load(temp.path()).unwrap();
+    assert!(enabled.semantic_search_enabled());
+    let once = fs::read_to_string(&path).unwrap();
+    assert!(once.starts_with("# retained comment\n[analytics]\nenabled = false\n"));
+    assert!(once.contains("[search]\nsemantic = true\n"));
+
+    set_semantic_search_enabled(temp.path(), true).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), once);
 }
 
 #[test]

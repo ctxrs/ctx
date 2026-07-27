@@ -6,7 +6,7 @@
   "surface": "daemon",
   "operation": "liveness",
   "outcome": "success",
-  "duration_bucket": "gte_30s",
+  "duration_bucket": "gte_1h",
   "properties": {
     "start_mode": "auto",
     "supervisor": "cli_autostart",

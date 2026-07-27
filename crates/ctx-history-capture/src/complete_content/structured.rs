@@ -10,11 +10,7 @@ mod result;
 pub(super) mod source_access;
 mod verification;
 
-pub(crate) use contracts::{
-    attach_continue_result_content_locator, attach_structured_complete_content_locator,
-    attach_structured_result_content_locator, decode_structured_locator,
-    decode_structured_result_locator,
-};
+pub(crate) use contracts::{decode_structured_locator, decode_structured_result_locator};
 use verification::StructuredBounds;
 
 pub const STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND: &str = "structured-message-v1";
@@ -48,11 +44,7 @@ use super::{
 #[cfg(test)]
 use crate::provider::providers::openhands::decode_openhands_event;
 #[cfg(test)]
-use crate::PROVIDER_MAX_TEXT_CHARS;
-#[cfg(test)]
-use contracts::encode_structured_locator;
-#[cfg(test)]
-use ctx_history_core::{CaptureProvider, EventType, ProviderEventEnvelope};
+use ctx_history_core::{CaptureProvider, EventType};
 #[cfg(test)]
 use verification::digest_bytes;
 

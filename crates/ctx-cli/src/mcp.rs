@@ -13,7 +13,6 @@ use ctx_history_store::{
     RAW_SQL_MAX_COLUMNS_CAP, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
     RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
-use ctx_pro_host_protocol::QueryKind;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -26,27 +25,31 @@ mod telemetry;
 mod text;
 
 use input::{read_mcp_input_line, McpInputLine};
-use pro::{pro_query_tool, tool_pro_blame, tool_pro_query, tool_pro_status};
+use pro::{pro_blame_tool, tool_pro_blame, tool_pro_status, MCP_BLAME_MAX_OUTPUT_BYTES};
 use response::{
-    error_response, invalid_request_response, json_rpc_error, success_response, tool_error_result,
-    tool_result,
+    error_response, invalid_request_response, invalid_tool_request, json_rpc_error,
+    success_response, tool_error_result, tool_result,
 };
-use response_bound::{bound_complete_content_mcp_response, is_complete_content_tool_call};
+use response_bound::{
+    bound_blame_mcp_response, bound_complete_content_mcp_response, is_blame_tool_call,
+    is_complete_content_tool_call,
+};
 use show::{tool_show_event, tool_show_session};
 use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
 
 use super::{
     cli_supported_provider, compact_json, config, config::CONFIG_FILE,
-    discovered_plugin_sources_json, discovered_sources, event_window, event_window_json,
-    raw_sql_result_json, search_filters, search_has_intent, session_transcript_json, sources_json,
-    OutputFormat, ProviderArg, RefreshArg, SearchBackendArg, SearchDto, SearchFilterInput,
-    SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode,
-    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    discovered_plugin_sources_json, event_window, event_window_json, raw_sql_result_json,
+    search_filters, search_has_intent, session_transcript_json, sources_json, OutputFormat,
+    ProviderArg, RefreshArg, SearchBackendArg, SearchDto, SearchFilterInput, SearchIntentInput,
+    SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode, MAX_EVENT_WINDOW,
+    MAX_SEARCH_LIMIT,
 };
 use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use crate::commands::search::resolve_search_backend;
 use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
+use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
 use crate::semantic::{
     daemon_report, search_packet_with_backend, semantic_worker_report_cached,
     semantic_worker_report_configured_json,
@@ -68,7 +71,7 @@ pub(crate) struct McpArgs {
 enum McpCommand {
     #[command(
         about = "Serve local ctx tools over stdio",
-        long_about = "Serve local ctx tools over newline-delimited stdio JSON-RPC. Materialize updates only the derived Pro graph; all other tools are read-only.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
+        long_about = "Serve local ctx tools over newline-delimited stdio JSON-RPC. Blame may perform bounded local catch-up that updates the canonical Core index, writes the encrypted derived Pro graph, and writes the projection acknowledgement. It never writes provider history or repositories. pro_status remains read-only.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
     )]
     Serve(McpServeArgs),
 }
@@ -236,6 +239,7 @@ fn handle_message(
         return McpHandled::plain(Some(invalid_request_response(object.get("id"))));
     }
     let bound_complete_content = is_complete_content_tool_call(&message);
+    let bound_blame = is_blame_tool_call(&message);
     let id = message
         .as_object()
         .and_then(|object| object.get("id"))
@@ -312,6 +316,8 @@ fn handle_message(
                 response_id,
                 MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
             )
+        } else if bound_blame {
+            bound_blame_mcp_response(response, response_id, MCP_BLAME_MAX_OUTPUT_BYTES)
         } else {
             response
         }),
@@ -332,7 +338,7 @@ fn initialize_result(params: &Value) -> Value {
             "name": "ctx",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "instructions": "Local access to the ctx index and optional Pro work graph. Tool output may include absolute paths, source metadata, snippets, transcript text, and raw SQL query results; MCP hosts may log or forward it. Materialize updates only the derived local Pro graph. Other tools are read-only. No tool writes provider history or repositories."
+        "instructions": "Local access to the ctx index and optional Pro work graph. Tool output may include absolute paths, source metadata, snippets, transcript text, and raw SQL query results; MCP hosts may log or forward it. Blame may perform bounded local catch-up that updates the canonical Core index, writes the encrypted derived Pro graph, and writes the projection acknowledgement. It never writes provider history or repositories. pro_status and the other tools are read-only."
     })
 }
 
@@ -367,101 +373,27 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<McpHandled<Value
         ));
     }
 
+    let Some(allowed_arguments) = allowed_tool_arguments(name) else {
+        return Err(json_rpc_error(
+            -32602,
+            "Invalid params",
+            Some(json!({ "error": format!("unknown tool {name}") })),
+        ));
+    };
+    if let Err(error) = validate_argument_keys(&arguments, allowed_arguments) {
+        return Ok(McpHandled::plain(tool_error_result(error)));
+    }
+
     let handled = match name {
-        "status" => {
-            validate_argument_keys(&arguments, &[])?;
-            McpHandled::plain(tool_status(data_root))
-        }
-        "sources" => {
-            validate_argument_keys(&arguments, &[])?;
-            McpHandled::plain(tool_sources(data_root))
-        }
-        "search" => {
-            validate_argument_keys(
-                &arguments,
-                &[
-                    "query",
-                    "limit",
-                    "provider",
-                    "history_source",
-                    "provider_key",
-                    "source_id",
-                    "source_format",
-                    "workspace",
-                    "since",
-                    "primary_only",
-                    "include_subagents",
-                    "event_type",
-                    "file",
-                    "session",
-                    "events",
-                    "include_current_session",
-                    "backend",
-                    "semantic_weight",
-                ],
-            )?;
-            McpHandled::plain(tool_search(&arguments, data_root))
-        }
-        "sql" => {
-            validate_argument_keys(
-                &arguments,
-                &[
-                    "sql",
-                    "max_rows",
-                    "max_columns",
-                    "max_value_bytes",
-                    "max_sql_bytes",
-                    "timeout_ms",
-                ],
-            )?;
-            McpHandled::plain(tool_sql(&arguments, data_root))
-        }
-        "show_session" => {
-            validate_argument_keys(&arguments, &["ctx_session_id", "mode", "content"])?;
-            McpHandled::plain(tool_show_session(&arguments, data_root))
-        }
-        "show_event" => {
-            validate_argument_keys(
-                &arguments,
-                &["ctx_event_id", "before", "after", "window", "content"],
-            )?;
-            McpHandled::plain(tool_show_event(&arguments, data_root))
-        }
-        "pro_status" => {
-            validate_argument_keys(&arguments, &[])?;
-            tool_pro_status(data_root)
-        }
-        "show_resource" => {
-            validate_argument_keys(&arguments, &["target", "limit"])?;
-            tool_pro_query(&arguments, data_root, QueryKind::Show, "pro_resource")
-        }
-        "locate_resource" => {
-            validate_argument_keys(&arguments, &["target", "limit"])?;
-            tool_pro_query(&arguments, data_root, QueryKind::Locate, "pro_location")
-        }
-        "blame" => {
-            validate_argument_keys(&arguments, &["target", "limit"])?;
-            tool_pro_blame(&arguments, data_root)
-        }
-        "timeline" => {
-            validate_argument_keys(&arguments, &["target", "limit", "cursor"])?;
-            tool_pro_query(&arguments, data_root, QueryKind::Timeline, "pro_timeline")
-        }
-        "related" => {
-            validate_argument_keys(&arguments, &["target", "limit", "cursor"])?;
-            tool_pro_query(&arguments, data_root, QueryKind::Related, "pro_related")
-        }
-        "facts" => {
-            validate_argument_keys(&arguments, &["target", "limit", "cursor"])?;
-            tool_pro_query(&arguments, data_root, QueryKind::Facts, "pro_facts")
-        }
-        _ => {
-            return Err(json_rpc_error(
-                -32602,
-                "Invalid params",
-                Some(json!({ "error": format!("unknown tool {name}") })),
-            ))
-        }
+        "status" => McpHandled::plain(tool_status(data_root)),
+        "sources" => McpHandled::plain(tool_sources(data_root)),
+        "search" => McpHandled::plain(tool_search(&arguments, data_root)),
+        "sql" => McpHandled::plain(tool_sql(&arguments, data_root)),
+        "show_session" => McpHandled::plain(tool_show_session(&arguments, data_root)),
+        "show_event" => McpHandled::plain(tool_show_event(&arguments, data_root)),
+        "pro_status" => tool_pro_status(data_root),
+        "blame" => tool_pro_blame(&arguments, data_root),
+        _ => unreachable!("known tool was validated above"),
     };
 
     Ok(McpHandled {
@@ -580,12 +512,15 @@ fn tool_status(data_root: &Path) -> Result<Value> {
 }
 
 fn tool_sources(data_root: &Path) -> Result<Value> {
-    let sources = discovered_sources();
-    let mut source_values = sources_json(&sources);
+    let report = discovered_sources_report();
+    let mut source_values = sources_json(&report.sources);
     source_values.extend(discovered_plugin_sources_json(data_root)?);
+    let (issues, issues_truncated) = discovery_report_issues_json(&report);
     Ok(json!({
         "schema_version": 1,
         "sources": source_values,
+        "issues": issues,
+        "issues_truncated": issues_truncated,
         "read_only": true,
     }))
 }
@@ -594,7 +529,9 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
     let query = optional_string(arguments, "query")?.unwrap_or_default();
     let limit = optional_usize(arguments, "limit")?.unwrap_or(20);
     if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
-        return Err(anyhow!("limit must be between 1 and {MAX_SEARCH_LIMIT}"));
+        return Err(invalid_tool_request(format!(
+            "limit must be between 1 and {MAX_SEARCH_LIMIT}"
+        )));
     }
     let provider = optional_provider(arguments, "provider")?;
     let history_source = optional_string(arguments, "history_source")?;
@@ -608,23 +545,39 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
     let include_subagents = optional_bool(arguments, "include_subagents")?.unwrap_or(false);
     let event_type = optional_string(arguments, "event_type")?;
     let file = optional_string(arguments, "file")?.map(PathBuf::from);
-    let config = config::AppConfig::load(data_root)?;
-    let backend = resolve_search_backend(optional_search_backend(arguments, "backend")?, &config)?;
+    let events = optional_bool(arguments, "events")?.unwrap_or(false) || session.is_some();
+    let include_current_session =
+        optional_bool(arguments, "include_current_session")?.unwrap_or(false);
+    let backend = optional_search_backend(arguments, "backend")?;
     let semantic_weight = optional_f32(arguments, "semantic_weight")?.unwrap_or(0.35);
     if !(0.0..=1.0).contains(&semantic_weight) || !semantic_weight.is_finite() {
-        return Err(anyhow!("semantic_weight must be between 0.0 and 1.0"));
+        return Err(invalid_tool_request(
+            "semantic_weight must be between 0.0 and 1.0",
+        ));
     }
+    let source_identity = SourceIdentityFilterArgs {
+        history_source,
+        provider_key,
+        source_id,
+        source_format,
+    };
+    validate_search_filter_arguments(
+        provider.as_ref(),
+        &source_identity,
+        session.as_deref(),
+        since.as_deref(),
+        event_type.as_deref(),
+    )?;
     if !search_has_intent(SearchIntentInput {
         query: Some(&query),
         terms: &[],
         file: file.as_deref(),
     }) {
-        return Err(anyhow!("search needs a query or file"));
+        return Err(invalid_tool_request("search needs a query or file"));
     }
+    let config = config::AppConfig::load(data_root)?;
+    let backend = resolve_search_backend(backend, &config)?;
     let store = open_existing_store(data_root)?;
-    let events = optional_bool(arguments, "events")?.unwrap_or(false) || session.is_some();
-    let include_current_session =
-        optional_bool(arguments, "include_current_session")?.unwrap_or(false);
 
     let options = ctx_history_search::PacketOptions {
         limit,
@@ -632,12 +585,7 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
             SearchFilterInput {
                 session,
                 provider,
-                source_identity: SourceIdentityFilterArgs {
-                    history_source,
-                    provider_key,
-                    source_id,
-                    source_format,
-                },
+                source_identity,
                 workspace,
                 since,
                 primary_only,
@@ -678,8 +626,8 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
 }
 
 fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
-    let store = open_existing_store(data_root)?;
-    let sql = optional_string(arguments, "sql")?.ok_or_else(|| anyhow!("sql is required"))?;
+    let sql = optional_string(arguments, "sql")?
+        .ok_or_else(|| invalid_tool_request("sql is required"))?;
     let max_rows = optional_usize(arguments, "max_rows")?.unwrap_or(RAW_SQL_DEFAULT_MAX_ROWS);
     let max_columns =
         optional_usize(arguments, "max_columns")?.unwrap_or(RAW_SQL_DEFAULT_MAX_COLUMNS);
@@ -688,9 +636,12 @@ fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
     let max_sql_bytes =
         optional_usize(arguments, "max_sql_bytes")?.unwrap_or(RAW_SQL_DEFAULT_MAX_SQL_BYTES);
     let timeout_ms = optional_usize(arguments, "timeout_ms")?
-        .map(|value| u64::try_from(value).map_err(|_| anyhow!("timeout_ms is too large")))
+        .map(|value| {
+            u64::try_from(value).map_err(|_| invalid_tool_request("timeout_ms is too large"))
+        })
         .transpose()?
         .unwrap_or_else(|| duration_millis_u64(RAW_SQL_DEFAULT_TIMEOUT));
+    let store = open_existing_store(data_root)?;
     let result = store.raw_sql_query(
         &sql,
         RawSqlOptions {
@@ -807,48 +758,7 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": object_schema(json!({}), vec![]),
             "annotations": { "readOnlyHint": true },
         }),
-        pro_query_tool(
-            "show_resource",
-            "Show Resource",
-            "Resolve a resource to cited work-graph records.",
-            None,
-            false,
-        ),
-        pro_query_tool(
-            "locate_resource",
-            "Locate Resource",
-            "Locate the exact canonical evidence behind a work-graph resource.",
-            None,
-            false,
-        ),
-        pro_query_tool(
-            "blame",
-            "Agent Blame",
-            "Show Git and agent provenance for a file or line.",
-            Some("file"),
-            false,
-        ),
-        pro_query_tool(
-            "timeline",
-            "Timeline",
-            "Return ordered cited work history for a resource.",
-            None,
-            true,
-        ),
-        pro_query_tool(
-            "related",
-            "Related Resources",
-            "Return typed neighboring resources and sessions.",
-            None,
-            true,
-        ),
-        pro_query_tool(
-            "facts",
-            "Facts",
-            "Return stable machine-oriented cited facts for a resource.",
-            None,
-            true,
-        ),
+        pro_blame_tool(),
     ]
 }
 
@@ -885,7 +795,7 @@ fn optional_string(arguments: &Value, key: &str) -> Result<Option<String>> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(anyhow!("{key} must be a string")),
+        Some(_) => Err(invalid_tool_request(format!("{key} must be a string"))),
     }
 }
 
@@ -897,7 +807,7 @@ fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(anyhow!("{key} must be a boolean")),
+        Some(_) => Err(invalid_tool_request(format!("{key} must be a boolean"))),
     }
 }
 
@@ -905,14 +815,16 @@ fn optional_usize(arguments: &Value, key: &str) -> Result<Option<usize>> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(value)) => {
-            let value = value
-                .as_u64()
-                .ok_or_else(|| anyhow!("{key} must be a non-negative integer"))?;
+            let value = value.as_u64().ok_or_else(|| {
+                invalid_tool_request(format!("{key} must be a non-negative integer"))
+            })?;
             usize::try_from(value)
                 .map(Some)
-                .map_err(|_| anyhow!("{key} is too large"))
+                .map_err(|_| invalid_tool_request(format!("{key} is too large")))
         }
-        Some(_) => Err(anyhow!("{key} must be a non-negative integer")),
+        Some(_) => Err(invalid_tool_request(format!(
+            "{key} must be a non-negative integer"
+        ))),
     }
 }
 
@@ -922,19 +834,22 @@ fn optional_f32(arguments: &Value, key: &str) -> Result<Option<f32>> {
         Some(Value::Number(value)) => value
             .as_f64()
             .map(|value| value as f32)
-            .ok_or_else(|| anyhow!("{key} must be a number"))
+            .ok_or_else(|| invalid_tool_request(format!("{key} must be a number")))
             .map(Some),
-        Some(_) => Err(anyhow!("{key} must be a number")),
+        Some(_) => Err(invalid_tool_request(format!("{key} must be a number"))),
     }
 }
 
 fn required_uuid(arguments: &Value, key: &str) -> Result<Uuid> {
-    optional_uuid(arguments, key)?.ok_or_else(|| anyhow!("{key} is required"))
+    optional_uuid(arguments, key)?.ok_or_else(|| invalid_tool_request(format!("{key} is required")))
 }
 
 fn optional_uuid(arguments: &Value, key: &str) -> Result<Option<Uuid>> {
     optional_string(arguments, key)?
-        .map(|value| Uuid::parse_str(&value).with_context(|| format!("invalid {key}")))
+        .map(|value| {
+            Uuid::parse_str(&value)
+                .map_err(|error| invalid_tool_request(format!("invalid {key}: {error}")))
+        })
         .transpose()
 }
 
@@ -945,7 +860,12 @@ fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>
     ProviderArg::parse_name(&provider)
         .filter(|provider| cli_supported_provider(provider.capture_provider()))
         .map(Some)
-        .ok_or_else(|| anyhow!("provider must be one of {}", provider_names().join(", ")))
+        .ok_or_else(|| {
+            invalid_tool_request(format!(
+                "provider must be one of {}",
+                provider_names().join(", ")
+            ))
+        })
 }
 
 fn optional_search_backend(arguments: &Value, key: &str) -> Result<Option<SearchBackendArg>> {
@@ -956,28 +876,96 @@ fn optional_search_backend(arguments: &Value, key: &str) -> Result<Option<Search
         "hybrid" => Ok(Some(SearchBackendArg::Hybrid)),
         "lexical" => Ok(Some(SearchBackendArg::Lexical)),
         "semantic" => Ok(Some(SearchBackendArg::Semantic)),
-        _ => Err(anyhow!("backend must be one of hybrid, semantic, lexical")),
+        _ => Err(invalid_tool_request(
+            "backend must be one of hybrid, semantic, lexical",
+        )),
     }
 }
 
-fn validate_argument_keys(arguments: &Value, allowed: &[&str]) -> std::result::Result<(), Value> {
-    let Some(object) = arguments.as_object() else {
-        return Err(json_rpc_error(
-            -32602,
-            "Invalid params",
-            Some(json!({ "error": "tools/call params.arguments must be an object" })),
-        ));
-    };
+fn allowed_tool_arguments(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "status" | "sources" | "pro_status" => Some(&[]),
+        "search" => Some(&[
+            "query",
+            "limit",
+            "provider",
+            "history_source",
+            "provider_key",
+            "source_id",
+            "source_format",
+            "workspace",
+            "since",
+            "primary_only",
+            "include_subagents",
+            "event_type",
+            "file",
+            "session",
+            "events",
+            "include_current_session",
+            "backend",
+            "semantic_weight",
+        ]),
+        "sql" => Some(&[
+            "sql",
+            "max_rows",
+            "max_columns",
+            "max_value_bytes",
+            "max_sql_bytes",
+            "timeout_ms",
+        ]),
+        "show_session" => Some(&["ctx_session_id", "mode", "content"]),
+        "show_event" => Some(&["ctx_event_id", "before", "after", "window", "content"]),
+        "blame" => Some(&["target", "limit", "cursor"]),
+        _ => None,
+    }
+}
+
+fn validate_argument_keys(arguments: &Value, allowed: &[&str]) -> Result<()> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| invalid_tool_request("arguments must be an object"))?;
     if let Some(key) = object
         .keys()
         .find(|key| !allowed.iter().any(|allowed| allowed == &key.as_str()))
     {
-        return Err(json_rpc_error(
-            -32602,
-            "Invalid params",
-            Some(json!({ "error": format!("unknown argument {key}") })),
+        return Err(invalid_tool_request(format!("unknown argument {key}")));
+    }
+    Ok(())
+}
+
+fn validate_search_filter_arguments(
+    provider: Option<&ProviderArg>,
+    source_identity: &SourceIdentityFilterArgs,
+    session: Option<&str>,
+    since: Option<&str>,
+    event_type: Option<&str>,
+) -> Result<()> {
+    let normalized =
+        crate::search_filters::normalize_source_identity_filters(source_identity.clone())
+            .map_err(|error| invalid_tool_request(error.to_string()))?;
+    if !normalized.is_empty()
+        && provider.is_some_and(|provider| !matches!(provider, ProviderArg::Custom))
+    {
+        return Err(invalid_tool_request(
+            "custom history source filters can only be combined with --provider custom",
         ));
     }
+    if let Some(value) = session {
+        let value = value.trim();
+        if Uuid::parse_str(value).is_err() {
+            crate::transcript::normalize_uuid_prefix(value, "session")
+                .map_err(|error| invalid_tool_request(error.to_string()))?;
+        }
+    }
+    if let Some(value) = since {
+        crate::search_filters::parse_since_filter(value)
+            .map_err(|error| invalid_tool_request(error.to_string()))?;
+    }
+    if let Some(value) = event_type {
+        value
+            .parse::<EventType>()
+            .map_err(|error| invalid_tool_request(error.to_string()))?;
+    };
     Ok(())
 }
 
@@ -989,6 +977,6 @@ fn optional_transcript_mode(arguments: &Value, key: &str) -> Result<Option<Trans
         "full" => Ok(Some(TranscriptMode::Full)),
         "lite" => Ok(Some(TranscriptMode::Lite)),
         "log" => Ok(Some(TranscriptMode::Log)),
-        _ => Err(anyhow!("mode must be one of full, lite, log")),
+        _ => Err(invalid_tool_request("mode must be one of full, lite, log")),
     }
 }

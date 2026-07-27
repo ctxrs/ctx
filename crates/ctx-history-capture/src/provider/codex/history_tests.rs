@@ -1,94 +1,37 @@
-use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+};
 
-use crate::captured_batch::{CapturedBatchBuilder, NativeLocator, NativePosition};
-use crate::test_support_paths::tempdir;
+use chrono::DateTime;
+use ctx_history_core::{CaptureProvider, SyncCursor};
+use ctx_history_store::{decode_native_path_committed_cursor, Store};
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::{
+    native_source::NativePosition,
+    provider::importer::{
+        provider_path_identity, provider_source_cursor_stream_for_path, timestamps,
+        BoundedParserCheckpoint, CertifiedProviderCursor,
+    },
+    test_support_paths::tempdir,
+    CaptureWorkLimit, ImportProfile, OutputSourceIdentity, ProOutputMaterializationPage,
+    ProOutputPageResult, ProOutputProgress, ProOutputSink, ProOutputSinkError,
+    ProviderImportSummary, ProviderImportWorkResult,
+};
 
 use super::*;
 
-fn test_context(source_path: impl Into<PathBuf>) -> ProviderAdapterContext {
-    ProviderAdapterContext {
-        machine_id: "codex-history-batch-test-machine".to_owned(),
-        source_path: Some(source_path.into()),
-        source_root: None,
-        imported_at: "2026-07-18T12:00:00Z".parse().unwrap(),
-    }
-}
-
-fn test_source(length: usize) -> SourceObservation {
-    SourceObservation::new(
-        CaptureProvider::Codex,
-        CODEX_HISTORY_SOURCE_FORMAT,
-        "codex-history-file:test",
-        format!("test-revision:{length}"),
-        "provider:codex:codex_history_jsonl:source:test",
-        CODEX_HISTORY_CAPTURE_REVISION,
-        CODEX_HISTORY_POLICY_REVISION,
-        None,
-    )
-    .unwrap()
-}
-
-fn test_position(offset: u64) -> NativePosition {
-    NativePosition::new(
-        "codex-history-test-position-v1",
-        offset.to_be_bytes().to_vec(),
-    )
-    .unwrap()
-}
-
-fn test_record(ordinal: u64, bytes: impl AsRef<[u8]>) -> CapturedRecord {
-    CapturedRecord::content(
-        ordinal,
-        NativeLocator::new(
-            "codex-history-test-locator-v1",
-            ordinal.to_be_bytes().to_vec(),
-        )
-        .unwrap(),
-        ProviderRecordKind::new(CODEX_HISTORY_RECORD_KIND).unwrap(),
-        bytes.as_ref().to_vec(),
-    )
-    .unwrap()
-}
-
-fn test_batch(records: Vec<CapturedRecord>) -> CapturedBatch {
-    let end = records
-        .last()
-        .map_or(0, |record| record.ordinal().saturating_add(1));
-    let mut builder = CapturedBatchBuilder::new(test_source(end as usize), test_position(0));
-    for record in records {
-        builder.push(record).unwrap();
-    }
-    builder.finish(test_position(end)).unwrap()
-}
-
-#[derive(Default)]
-struct TestProjectionOutput {
-    normalizations: Vec<ProviderNormalizationResult>,
-    rejections: Vec<(usize, String)>,
-}
-
-impl ProviderProjectionOutput for TestProjectionOutput {
-    fn emit_normalization(
-        &mut self,
-        normalization: ProviderNormalizationResult,
-    ) -> ProviderProjectionResult<()> {
-        self.normalizations.push(normalization);
-        Ok(())
-    }
-
-    fn reject_record(&mut self, line_number: usize, reason: String) {
-        self.rejections.push((line_number, reason));
-    }
-}
-
-fn project(
-    projector: &mut CodexHistoryCapturedBatchProjector,
-    record: &CapturedRecord,
-) -> TestProjectionOutput {
-    let mut output = TestProjectionOutput::default();
-    projector.project_record(record, &mut output).unwrap();
-    output
-}
+const MACHINE: &str = "codex-prompt-history-nativepath-test-machine";
+const SOURCE_FORMAT: &str = "codex_history_jsonl";
+const SUCCESSFUL_OUTPUT_SECRET: &str = "successful-output-must-not-enter-core";
 
 fn history_line(session_id: &str, timestamp: i64, text: &str) -> String {
     serde_json::to_string(&json!({
@@ -96,232 +39,663 @@ fn history_line(session_id: &str, timestamp: i64, text: &str) -> String {
         "ts": timestamp,
         "text": text,
     }))
-    .unwrap()
+    .expect("history line")
 }
 
-fn history_file(records: usize, session_id: &str) -> String {
-    let mut contents = String::new();
-    for index in 0..records {
-        contents.push_str(&history_line(
-            session_id,
-            1_784_371_200 + index as i64,
-            &format!("prompt {index}"),
-        ));
-        contents.push('\n');
-    }
-    contents
+fn history_line_with_output_field(session_id: &str, timestamp: i64, text: &str) -> String {
+    serde_json::to_string(&json!({
+        "session_id": session_id,
+        "ts": timestamp,
+        "text": text,
+        "successful_output": SUCCESSFUL_OUTPUT_SECRET,
+        "exit_code": 0,
+    }))
+    .expect("history line")
+}
+
+fn write_lines(path: &Path, lines: &[String]) {
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    fs::write(path, contents).expect("write prompt history");
 }
 
 fn import_options(path: &Path) -> CodexHistoryImportOptions {
     CodexHistoryImportOptions {
-        machine_id: "codex-history-batch-test-machine".to_owned(),
+        machine_id: MACHINE.to_owned(),
         source_path: Some(path.to_path_buf()),
-        imported_at: "2026-07-18T12:00:00Z".parse().unwrap(),
+        imported_at: "2026-07-25T12:00:00Z".parse().expect("timestamp"),
         history_record_id: None,
-        capture_work_limit: crate::CaptureWorkLimit::Drain,
+        capture_work_limit: CaptureWorkLimit::Drain,
         inventory_observation_token: None,
+        import_profile: ImportProfile::CoreOnly,
     }
 }
 
-#[test]
-fn projector_preserves_prompt_log_projection_and_rejects_bad_rows() {
-    let mut projector =
-        CodexHistoryCapturedBatchProjector::fresh(test_context("/logical/codex/history.jsonl"));
-    let accepted = project(
-        &mut projector,
-        &test_record(
-            0,
-            history_line("codex-history-session", 1_784_371_200, "private prompt"),
-        ),
-    );
-    assert!(accepted.rejections.is_empty());
-    assert_eq!(accepted.normalizations.len(), 1);
-    let capture = &accepted.normalizations[0].captures[0].1;
-    assert_eq!(
-        capture.source.raw_source_path.as_deref(),
-        Some("/logical/codex/history.jsonl")
-    );
-    assert_eq!(
-        capture.source.source_root.as_deref(),
-        Some("/logical/codex/history.jsonl")
-    );
-    assert_eq!(capture.source.fidelity, Fidelity::SummaryOnly);
-    assert_eq!(
-        capture.session.started_at,
-        capture.event.as_ref().unwrap().occurred_at
-    );
-    assert_eq!(capture.event.as_ref().unwrap().role, Some(EventRole::User));
-    assert_eq!(capture.event.as_ref().unwrap().provider_event_index, 0);
-    assert_eq!(
-        capture.event.as_ref().unwrap().payload["text"],
-        "private prompt"
-    );
-
-    let malformed = project(&mut projector, &test_record(1, br#"{"session_id""#));
-    assert!(malformed.normalizations.is_empty());
-    assert_eq!(malformed.rejections.len(), 1);
-
-    let empty_session = project(
-        &mut projector,
-        &test_record(2, history_line(" ", 1_784_371_202, "empty session")),
-    );
-    assert_eq!(empty_session.rejections[0].0, 3);
-
-    let blank = project(&mut projector, &test_record(3, b" \t"));
-    assert!(blank.normalizations.is_empty());
-    assert!(blank.rejections.is_empty());
-}
-
-#[test]
-fn checkpoint_is_bounded_and_replay_counts_valid_failed_and_blank_records() {
-    let records = vec![
-        test_record(0, history_line("session-a", 1_784_371_200, "a")),
-        test_record(1, br#"{"session_id""#),
-        test_record(2, b""),
-        test_record(3, history_line("session-b", 1_784_371_203, "b")),
-    ];
-    let batch = test_batch(records);
-    let mut projector =
-        CodexHistoryCapturedBatchProjector::fresh(test_context("/logical/codex/history.jsonl"));
-    for record in batch.records() {
-        let _ = project(&mut projector, record);
-    }
-    let cursor = match projector.finish_cursor(&batch).unwrap() {
-        CapturedBatchCursorFinish::Advance(cursor) => cursor,
-        CapturedBatchCursorFinish::RetainPrior => {
-            panic!("Codex history checkpoint should always be safe")
-        }
-    };
-    assert!(cursor.parser_checkpoint().as_bytes().len() < 1024);
-    let resumed = CodexHistoryCapturedBatchProjector::resume(
-        test_context("/logical/codex/history.jsonl"),
-        &cursor,
+fn import(path: &Path, store: &mut Store, work_limit: CaptureWorkLimit) -> ProviderImportSummary {
+    import_codex_history_jsonl(
+        path,
+        store,
+        CodexHistoryImportOptions {
+            capture_work_limit: work_limit,
+            ..import_options(path)
+        },
     )
-    .unwrap();
-    let replay = resumed.replay_summary().unwrap();
-    assert_eq!(replay.skipped_sessions, 2);
-    assert_eq!(replay.skipped_events, 2);
-    assert_eq!(replay.failed, 1);
+    .expect("import prompt history")
 }
 
-#[test]
-fn import_crosses_record_batches_in_one_pass_and_replays_from_certified_cursor() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    fs::write(&path, history_file(70, "codex-history-batched")).unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-    let (first, source_opens) = count_codex_history_source_file_opens(|| {
-        import_codex_history_jsonl(&path, &mut store, import_options(&path))
-    });
-    let first = first.unwrap();
-    assert_eq!(source_opens, 1);
-    assert_eq!(first.imported_events, 70);
-    assert_eq!(first.failed, 0);
-    let session = store
-        .session_by_external_session(CaptureProvider::Codex, "codex-history-batched")
-        .unwrap()
-        .unwrap();
-    let first_prompt_at = DateTime::from_timestamp(1_784_371_200, 0).unwrap();
-    assert_eq!(session.started_at, first_prompt_at);
-    let source = store.list_capture_sources().unwrap().pop().unwrap();
-    assert_eq!(source.started_at, first_prompt_at);
-
-    let stream = provider_source_cursor_stream_for_path(
+fn cursor_stream(path: &Path) -> String {
+    provider_source_cursor_stream_for_path(
         CaptureProvider::Codex,
-        CODEX_HISTORY_SOURCE_FORMAT,
-        &provider_path_identity(&path).unwrap(),
-    );
-    let stored_cursor = store
-        .get_sync_cursor(None, "codex-history-batch-test-machine", &stream)
-        .unwrap()
-        .unwrap();
-    let certified = CertifiedProviderCursor::decode(&stored_cursor.cursor).unwrap();
-    assert_eq!(
-        jsonl_position_offset(certified.native_position()).unwrap(),
-        fs::metadata(&path).unwrap().len()
-    );
-    let checkpoint: CodexHistoryParserCheckpoint =
-        certified.parser_checkpoint().deserialize().unwrap();
-    assert_eq!(checkpoint.next_ordinal, 70);
+        SOURCE_FORMAT,
+        &provider_path_identity(path).expect("path identity"),
+    )
+}
 
-    let replay = import_codex_history_jsonl(&path, &mut store, import_options(&path)).unwrap();
-    assert_eq!(replay.imported_events, 0);
-    assert_eq!(replay.skipped_events, 70);
-    assert_eq!(replay.failed, 0);
+fn session(store: &Store, external_id: &str) -> ctx_history_core::Session {
+    store
+        .session_by_external_session(CaptureProvider::Codex, external_id)
+        .expect("session lookup")
+        .expect("session")
 }
 
 #[test]
-fn import_resumes_verified_append_and_keeps_logical_source_identity() {
-    let temp = tempdir().unwrap();
+fn nativepath_fresh_bounded_restart_noop_append_and_core_output_privacy() {
+    let temp = tempdir().expect("tempdir");
     let path = temp.path().join("history.jsonl");
-    let logical_path = temp.path().join("configured-history.jsonl");
-    fs::write(&path, history_file(2, "codex-history-append")).unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let options = CodexHistoryImportOptions {
-        source_path: Some(logical_path.clone()),
-        ..import_options(&path)
-    };
+    let store_path = temp.path().join("core.sqlite");
+    let mut lines = vec![history_line_with_output_field(
+        "bounded-session",
+        1_784_371_200,
+        "private prompt 0",
+    )];
+    lines.extend((1..70).map(|index| {
+        history_line(
+            "bounded-session",
+            1_784_371_200 + index,
+            &format!("private prompt {index}"),
+        )
+    }));
+    write_lines(&path, &lines);
+    let mut store = Store::open(&store_path).expect("store");
 
-    let first = import_codex_history_jsonl(&path, &mut store, options.clone()).unwrap();
-    assert_eq!(first.imported_events, 2);
-    let source = store.list_capture_sources().unwrap().pop().unwrap();
-    let logical_display = logical_path.display().to_string();
-    assert_eq!(
-        source.descriptor.raw_source_path.as_deref(),
-        Some(logical_display.as_str())
-    );
-    assert_eq!(
-        source.descriptor.source_root.as_deref(),
-        Some(logical_display.as_str())
-    );
+    let first = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
+    assert_eq!(first.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(first.imported_events, 60);
+    assert!(first.work_remaining);
 
-    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    drop(store);
+    let mut store = Store::open(&store_path).expect("restart store");
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let next = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
+        if !next.work_remaining {
+            break;
+        }
+        assert!(
+            attempts < 5,
+            "bounded import did not reach a terminal cursor"
+        );
+    }
+
+    let imported_session = session(&store, "bounded-session");
+    let events = store
+        .events_for_session(imported_session.id)
+        .expect("session events");
+    assert_eq!(events.len(), 70);
+    assert_eq!(
+        imported_session.started_at,
+        DateTime::from_timestamp(1_784_371_200, 0).expect("event timestamp")
+    );
+    for event in &events {
+        assert_eq!(event.role, Some(ctx_history_core::EventRole::User));
+        let retained = serde_json::to_string(&(event.payload.clone(), event.sync.metadata.clone()))
+            .expect("retained event JSON");
+        assert!(!retained.contains(SUCCESSFUL_OUTPUT_SECRET));
+    }
+
+    let stored_cursor = store
+        .get_sync_cursor(None, MACHINE, &cursor_stream(&path))
+        .expect("cursor lookup")
+        .expect("cursor");
+    decode_native_path_committed_cursor(&stored_cursor.cursor).expect("NativePath cursor");
+
+    let replay = import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(replay.skipped_events, 70);
+
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append history");
     writeln!(
         file,
         "{}",
-        history_line("codex-history-append", 1_784_371_202, "appended prompt")
+        history_line("bounded-session", 1_784_371_270, "appended prompt")
     )
-    .unwrap();
-    file.sync_all().unwrap();
+    .expect("append line");
+    file.sync_all().expect("sync history");
 
-    let appended = import_codex_history_jsonl(&path, &mut store, options).unwrap();
+    let appended = import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(appended.work_result(), ProviderImportWorkResult::Changed);
     assert_eq!(appended.imported_events, 1);
-    assert_eq!(appended.skipped_events, 0);
-    let session = store
-        .session_by_external_session(CaptureProvider::Codex, "codex-history-append")
-        .unwrap()
-        .unwrap();
-    assert_eq!(store.events_for_session(session.id).unwrap().len(), 3);
+    assert_eq!(
+        store
+            .events_for_session(imported_session.id)
+            .expect("appended events")
+            .iter()
+            .filter(|event| event.sync.deleted_at.is_none())
+            .count(),
+        71
+    );
 }
 
 #[test]
-fn production_import_retains_the_global_first_seen_session_timestamp() {
-    let temp = tempdir().unwrap();
+fn corrupt_lines_are_bounded_failures_and_do_not_block_valid_prompts() {
+    let temp = tempdir().expect("tempdir");
     let path = temp.path().join("history.jsonl");
     fs::write(
         &path,
         format!(
-            "{}\n{}\n{}\n",
-            history_line("session-a", 1_784_371_300, "later a"),
-            history_line("session-b", 1_784_371_250, "b"),
-            history_line("session-a", 1_784_371_200, "earlier a"),
+            "{}\n{{\"session_id\"\n \t\n{}\n{}\n",
+            history_line("corrupt-session", 1_784_371_200, "first"),
+            history_line("corrupt-session", i64::MAX, "bad timestamp"),
+            history_line("corrupt-session", 1_784_371_202, "second"),
         ),
     )
-    .unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    .expect("write corrupt history");
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
 
-    let summary = import_codex_history_jsonl(&path, &mut store, import_options(&path)).unwrap();
-
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_events, 3);
-    let session_a = store
-        .session_by_external_session(CaptureProvider::Codex, "session-a")
-        .unwrap()
-        .unwrap();
+    let summary = import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.failed, 2);
+    assert_eq!(summary.failures.len(), 2);
     assert_eq!(
-        session_a.started_at,
-        DateTime::from_timestamp(1_784_371_200, 0).unwrap()
+        store
+            .events_for_session(session(&store, "corrupt-session").id)
+            .expect("events")
+            .len(),
+        2
     );
-    assert_eq!(store.events_for_session(session_a.id).unwrap().len(), 2);
+
+    let replay = import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(replay.failed, 2);
+    assert_eq!(replay.skipped_events, 2);
+}
+
+#[test]
+fn configured_logical_path_owns_identity_while_physical_path_owns_locator() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("physical-history.jsonl");
+    let logical_path = temp.path().join("configured-history.jsonl");
+    write_lines(
+        &path,
+        &[history_line("logical-session", 1_784_371_200, "prompt")],
+    );
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    import_codex_history_jsonl(
+        &path,
+        &mut store,
+        CodexHistoryImportOptions {
+            source_path: Some(logical_path.clone()),
+            ..import_options(&path)
+        },
+    )
+    .expect("logical path import");
+
+    let source = store
+        .list_capture_sources()
+        .expect("capture sources")
+        .pop()
+        .expect("capture source");
+    let logical = logical_path.display().to_string();
+    assert_eq!(
+        source.descriptor.raw_source_path.as_deref(),
+        Some(logical.as_str())
+    );
+    assert_eq!(
+        source.descriptor.source_root.as_deref(),
+        Some(logical.as_str())
+    );
+    let event = store
+        .events_for_session(session(&store, "logical-session").id)
+        .expect("events")
+        .pop()
+        .expect("event");
+    let route = store
+        .authorized_source_route_for_event(event.id)
+        .expect("authorized physical route");
+    assert_eq!(route.path(), path);
+
+    let logical_stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::Codex,
+        SOURCE_FORMAT,
+        &provider_path_identity(&logical_path).expect("logical identity"),
+    );
+    let cursor = store
+        .get_sync_cursor(None, MACHINE, &logical_stream)
+        .expect("cursor lookup")
+        .expect("logical route cursor");
+    decode_native_path_committed_cursor(&cursor.cursor).expect("NativePath cursor");
+
+    let tokenized = import_codex_history_jsonl(
+        &path,
+        &mut store,
+        CodexHistoryImportOptions {
+            source_path: Some(logical_path),
+            inventory_observation_token: Some("inventory-generation-2".to_owned()),
+            ..import_options(&path)
+        },
+    )
+    .expect("inventory-authorized revision");
+    assert_eq!(tokenized.work_result(), ProviderImportWorkResult::Changed);
+}
+
+#[test]
+fn rewrite_truncation_replacement_and_restore_use_source_generations() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("history.jsonl");
+    let replacement = temp.path().join("replacement.jsonl");
+    write_lines(
+        &path,
+        &[
+            history_line("session-a", 1_784_371_300, "alpha"),
+            history_line("session-b", 1_784_371_250, "bravo"),
+            history_line("session-a", 1_784_371_200, "later-first-seen"),
+        ],
+    );
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).imported_events,
+        3
+    );
+    let session_a = session(&store, "session-a");
+    let session_b = session(&store, "session-b");
+
+    write_lines(
+        &path,
+        &[
+            history_line("session-a", 1_784_371_300, "omega"),
+            history_line("session-a", 1_784_371_200, "later-first-seen"),
+        ],
+    );
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert!(
+        store
+            .get_session(session_b.id)
+            .expect("retired session")
+            .sync
+            .deleted_at
+            .is_some(),
+        "rewrite omission must retire the missing session"
+    );
+    assert_eq!(
+        store
+            .events_for_session(session_a.id)
+            .expect("rewritten events")
+            .iter()
+            .filter(|event| event.sync.deleted_at.is_none())
+            .count(),
+        2
+    );
+
+    write_lines(&path, &[history_line("session-a", 1_784_371_300, "omega")]);
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert_eq!(
+        store
+            .events_for_session(session_a.id)
+            .expect("truncated events")
+            .iter()
+            .filter(|event| event.sync.deleted_at.is_none())
+            .count(),
+        1
+    );
+
+    let current = fs::read(&path).expect("current history");
+    fs::write(&replacement, &current).expect("replacement history");
+    fs::rename(&replacement, &path).expect("replace history inode");
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::Changed,
+        "same bytes at a replacement inode are a new source generation"
+    );
+
+    write_lines(
+        &path,
+        &[
+            history_line("session-a", 1_784_371_300, "omega"),
+            history_line("session-b", 1_784_371_250, "bravo"),
+        ],
+    );
+    import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert!(
+        store
+            .get_session(session_b.id)
+            .expect("restored session")
+            .sync
+            .deleted_at
+            .is_none(),
+        "a later generation must restore a retained session"
+    );
+}
+
+#[test]
+fn disappearance_retires_omitted_entities_and_route_then_reappearance_restores_them() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("history.jsonl");
+    let line = history_line("missing-session", 1_784_371_200, "prompt");
+    write_lines(&path, std::slice::from_ref(&line));
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    import(&path, &mut store, CaptureWorkLimit::Drain);
+    let imported_session = session(&store, "missing-session");
+    let event_id = store
+        .events_for_session(imported_session.id)
+        .expect("events")[0]
+        .id;
+
+    fs::remove_file(&path).expect("remove history");
+    let missing = import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(missing.work_result(), ProviderImportWorkResult::Changed);
+    assert!(store
+        .get_session(imported_session.id)
+        .expect("retired session")
+        .sync
+        .deleted_at
+        .is_some());
+    assert!(store.authorized_source_route_for_event(event_id).is_err());
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+
+    write_lines(&path, &[line]);
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert!(store
+        .get_session(imported_session.id)
+        .expect("restored session")
+        .sync
+        .deleted_at
+        .is_none());
+    store
+        .authorized_source_route_for_event(event_id)
+        .expect("restored source route");
+}
+
+#[test]
+fn disappearance_during_bounded_core_finishes_partial_then_empty_generations() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("history.jsonl");
+    let lines = (0..70)
+        .map(|index| {
+            history_line(
+                "partial-missing-session",
+                1_784_371_200 + index,
+                &format!("prompt {index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    write_lines(&path, &lines);
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    let partial = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
+    assert!(partial.work_remaining);
+    assert_eq!(partial.imported_events, 60);
+    let imported_session = session(&store, "partial-missing-session");
+
+    fs::remove_file(&path).expect("remove partial history");
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let missing = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
+        if !missing.work_remaining {
+            break;
+        }
+        assert!(
+            attempts < 7,
+            "bounded disappearance did not reach a terminal cursor"
+        );
+    }
+    assert!(store
+        .get_session(imported_session.id)
+        .expect("retired partial session")
+        .sync
+        .deleted_at
+        .is_some());
+
+    write_lines(&path, &lines);
+    let restored = import(&path, &mut store, CaptureWorkLimit::OneSafeGroup);
+    assert!(restored.work_remaining);
+    let drained = import(&path, &mut store, CaptureWorkLimit::Drain);
+    assert_eq!(drained.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(
+        store
+            .events_for_session(imported_session.id)
+            .expect("restored events")
+            .iter()
+            .filter(|event| event.sync.deleted_at.is_none())
+            .count(),
+        70
+    );
+}
+
+#[test]
+fn only_certified_released_cursors_are_migrated_to_nativepath() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("history.jsonl");
+    write_lines(
+        &path,
+        &[history_line("migration-session", 1_784_371_200, "prompt")],
+    );
+    let imported_at = import_options(&path).imported_at;
+    let stream = cursor_stream(&path);
+    let released = CertifiedProviderCursor::new(
+        "released-codex-prompt-history-revision",
+        1,
+        1,
+        NativePosition::new("released-codex-history-position-v1", vec![0])
+            .expect("released position"),
+        BoundedParserCheckpoint::from_serializable(&()).expect("released checkpoint"),
+    )
+    .expect("released cursor")
+    .encode()
+    .expect("encoded released cursor");
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+    store
+        .upsert_sync_cursor(&SyncCursor {
+            id: Uuid::new_v4(),
+            team_id: None,
+            device_id: MACHINE.to_owned(),
+            stream: stream.clone(),
+            cursor: released,
+            last_synced_at: Some(imported_at),
+            timestamps: timestamps(imported_at),
+        })
+        .expect("seed released cursor");
+
+    assert_eq!(
+        import(&path, &mut store, CaptureWorkLimit::Drain).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let migrated = store
+        .get_sync_cursor(None, MACHINE, &stream)
+        .expect("cursor lookup")
+        .expect("migrated cursor");
+    decode_native_path_committed_cursor(&migrated.cursor).expect("NativePath migration");
+
+    let invalid_temp = tempdir().expect("invalid tempdir");
+    let invalid_path = invalid_temp.path().join("history.jsonl");
+    write_lines(
+        &invalid_path,
+        &[history_line("invalid-session", 1_784_371_200, "prompt")],
+    );
+    let mut invalid_store =
+        Store::open(invalid_temp.path().join("core.sqlite")).expect("invalid store");
+    invalid_store
+        .upsert_sync_cursor(&SyncCursor {
+            id: Uuid::new_v4(),
+            team_id: None,
+            device_id: MACHINE.to_owned(),
+            stream: cursor_stream(&invalid_path),
+            cursor: "uncertified-provider-cursor".to_owned(),
+            last_synced_at: Some(imported_at),
+            timestamps: timestamps(imported_at),
+        })
+        .expect("seed invalid cursor");
+    let error = import_codex_history_jsonl(
+        &invalid_path,
+        &mut invalid_store,
+        import_options(&invalid_path),
+    )
+    .expect_err("uncertified cursor must fail closed");
+    assert!(error
+        .to_string()
+        .contains("neither NativePath nor a released"));
+}
+
+struct RecordingSink {
+    store_path: std::path::PathBuf,
+    progress: Mutex<HashMap<OutputSourceIdentity, ProOutputProgress>>,
+    pages: AtomicUsize,
+    behind: AtomicUsize,
+    fail_next: AtomicBool,
+    saw_committed_core: AtomicBool,
+}
+
+impl RecordingSink {
+    fn new(store_path: std::path::PathBuf, fail_next: bool) -> Self {
+        Self {
+            store_path,
+            progress: Mutex::new(HashMap::new()),
+            pages: AtomicUsize::new(0),
+            behind: AtomicUsize::new(0),
+            fail_next: AtomicBool::new(fail_next),
+            saw_committed_core: AtomicBool::new(false),
+        }
+    }
+}
+
+impl ProOutputSink for RecordingSink {
+    fn inventory_generation(&self) -> u64 {
+        7
+    }
+
+    fn materializer_revision(&self) -> &str {
+        "codex-prompt-history-test-materializer-v1"
+    }
+
+    fn observe_source(
+        &self,
+        source: &OutputSourceIdentity,
+    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
+        Ok(self.progress.lock().expect("progress").get(source).cloned())
+    }
+
+    fn materialize_page(
+        &self,
+        page: ProOutputMaterializationPage,
+    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
+        let core = Store::open_read_only(&self.store_path)
+            .map_err(|error| ProOutputSinkError::new("test_core", error.to_string()))?;
+        if !core
+            .list_sessions()
+            .map_err(|error| ProOutputSinkError::new("test_sessions", error.to_string()))?
+            .is_empty()
+        {
+            self.saw_committed_core.store(true, Ordering::SeqCst);
+        }
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(ProOutputSinkError::new(
+                "injected",
+                "injected output failure",
+            ));
+        }
+        if !page.observations.is_empty() {
+            return Err(ProOutputSinkError::new(
+                "unexpected_output",
+                "prompt history must publish an empty output page",
+            ));
+        }
+        self.pages.fetch_add(1, Ordering::SeqCst);
+        let committed_cursor = page.next_safe_cursor.clone();
+        self.progress.lock().expect("progress").insert(
+            page.source.clone(),
+            ProOutputProgress {
+                source_epoch: page.source_epoch,
+                observed_revision: page.observed_revision.clone(),
+                cursor: Some(committed_cursor.clone()),
+                parser_revision: page.parser_revision.clone(),
+                materializer_revision: page.materializer_revision.clone(),
+                terminal: page.terminal,
+            },
+        );
+        Ok(ProOutputPageResult {
+            source_epoch: page.source_epoch,
+            committed_cursor,
+            accepted_outputs: 0,
+            materialized_facts: 0,
+            replayed: false,
+        })
+    }
+
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn pro_replay_is_independent_empty_and_observes_committed_core_first() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("history.jsonl");
+    let store_path = temp.path().join("core.sqlite");
+    write_lines(
+        &path,
+        &[history_line("pro-session", 1_784_371_200, "prompt")],
+    );
+    let mut store = Store::open(&store_path).expect("store");
+    let sink = Arc::new(RecordingSink::new(store_path.clone(), true));
+    let core = import_codex_history_jsonl(
+        &path,
+        &mut store,
+        CodexHistoryImportOptions {
+            import_profile: ImportProfile::CoreAndPro(sink.clone()),
+            ..import_options(&path)
+        },
+    )
+    .expect("Core survives Pro failure");
+    assert_eq!(core.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(core.imported_events, 1);
+    assert_eq!(sink.behind.load(Ordering::SeqCst), 1);
+    assert!(sink.saw_committed_core.load(Ordering::SeqCst));
+
+    let replay = import_codex_history_jsonl(
+        &path,
+        &mut store,
+        CodexHistoryImportOptions {
+            import_profile: ImportProfile::ProReplayOnly(sink.clone()),
+            ..import_options(&path)
+        },
+    )
+    .expect("independent Pro replay");
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(sink.pages.load(Ordering::SeqCst), 1);
+
+    import_codex_history_jsonl(
+        &path,
+        &mut store,
+        CodexHistoryImportOptions {
+            import_profile: ImportProfile::ProReplayOnly(sink.clone()),
+            ..import_options(&path)
+        },
+    )
+    .expect("terminal Pro no-op");
+    assert_eq!(sink.pages.load(Ordering::SeqCst), 1);
 }

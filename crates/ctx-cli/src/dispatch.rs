@@ -55,7 +55,6 @@ pub(crate) fn run_cli() -> Result<()> {
         }
     }
     let json_output = command_json_output(&cli.command);
-    let allow_background_upgrade = command_allows_background_upgrade(&cli.command);
     let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
     let mut analytics_draft = ClientOperationDraft::from_command(&cli.command, json_output);
     let mut provider_refreshes = ProviderRefreshCollector::default();
@@ -66,7 +65,17 @@ pub(crate) fn run_cli() -> Result<()> {
         .map(Ok)
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root")?;
-    let config = AppConfig::load_with_deprecated_controls(&data_root, &deprecated_controls)?;
+    let mut config =
+        match AppConfig::load_with_deprecated_controls(&data_root, &deprecated_controls) {
+            Ok(config) => config,
+            Err(_) if command_can_report_malformed_config(&cli.command) => {
+                // Daemon status reads retained lifecycle/config-reload state. Keep
+                // that diagnostic available when the malformed file is itself the
+                // reload failure being diagnosed; ordinary commands remain strict.
+                AppConfig::default()
+            }
+            Err(error) => return Err(error),
+        };
     if let Some(draft) = analytics_draft.as_mut() {
         draft.set_deprecated_controls(deprecated_controls.nonprivacy_analytics_ids().as_deref());
     }
@@ -81,7 +90,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .setup_mut(),
             &mut provider_refreshes,
             quiet,
-            &config,
+            &mut config,
         ),
         CommandRoot::Status(args) => run_status(
             args,
@@ -146,19 +155,7 @@ pub(crate) fn run_cli() -> Result<()> {
             &config,
         ),
         CommandRoot::Pro(args) => pro::run_lifecycle(args, data_root.clone()),
-        CommandRoot::Blame(args) => crate::commands::work_graph::run_blame(args, data_root.clone()),
-        CommandRoot::Timeline(args) => crate::commands::work_graph::run(
-            args,
-            data_root.clone(),
-            ctx_pro_host_protocol::QueryKind::Timeline,
-            "pro_timeline",
-        ),
-        CommandRoot::Facts(args) => crate::commands::work_graph::run(
-            args,
-            data_root.clone(),
-            ctx_pro_host_protocol::QueryKind::Facts,
-            "pro_facts",
-        ),
+        CommandRoot::Blame(args) => crate::commands::blame::run(args, data_root.clone()),
         CommandRoot::Sql(args) => run_sql(
             args,
             data_root.clone(),
@@ -201,23 +198,17 @@ pub(crate) fn run_cli() -> Result<()> {
                 .doctor_mut(),
         ),
     };
-    if result.is_ok() && allow_background_upgrade {
-        let auto_upgrade = upgrade::maybe_spawn_auto_upgrade(&data_root, &config);
-        if let Some(draft) = analytics_draft.as_mut() {
-            draft.set_auto_upgrade(auto_upgrade);
-        }
-    }
     let duration = started.elapsed();
     let mut events = provider_refreshes.finish();
     if let Some(draft) = analytics_draft {
-        events.push(draft.finish(result.is_ok(), duration));
+        if draft.should_emit() {
+            events.push(draft.finish(result.is_ok(), duration));
+        }
     }
-    if !events.is_empty() {
-        analytics::send_batch(&data_root, &config, &events);
-    }
+    analytics::send_batch(&data_root, &config, &events);
     if result.is_ok() {
         if let Some(trigger) = daemon_autostart_trigger {
-            semantic::maybe_autostart_daemon(&data_root, &config, trigger, json_output);
+            semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
     if json_output {
@@ -247,8 +238,7 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Locate(args) => locate_json_output(args),
         CommandRoot::Search(args) => args.json,
         CommandRoot::Pro(args) => args.json_output(),
-        CommandRoot::Blame(args) => args.json,
-        CommandRoot::Timeline(args) | CommandRoot::Facts(args) => args.json,
+        CommandRoot::Blame(args) => args.json_output(),
         CommandRoot::Sql(args) => args.output_format() == SqlFormat::Json,
         CommandRoot::Docs(args) => args.json_output(),
         CommandRoot::Integrations(args) => args.json_output(),
@@ -268,12 +258,6 @@ fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
         ShowTarget::Session(args) => args.json || args.format == OutputFormat::Json,
         ShowTarget::Event(args) => args.json || args.format == OutputFormat::Json,
-        ShowTarget::Commit(args)
-        | ShowTarget::PullRequest(args)
-        | ShowTarget::Issue(args)
-        | ShowTarget::Branch(args)
-        | ShowTarget::Repository(args) => args.json,
-        ShowTarget::File(args) => args.json,
     }
 }
 
@@ -281,56 +265,58 @@ fn locate_json_output(args: &LocateArgs) -> bool {
     match &args.target {
         LocateTarget::Session(args) => args.json || args.format == LocateFormat::Json,
         LocateTarget::Event(args) => args.json || args.format == LocateFormat::Json,
-        LocateTarget::Commit(args)
-        | LocateTarget::PullRequest(args)
-        | LocateTarget::Issue(args)
-        | LocateTarget::Branch(args)
-        | LocateTarget::Repository(args) => args.json,
-        LocateTarget::File(args) => args.json,
     }
 }
 
-fn command_allows_background_upgrade(command: &CommandRoot) -> bool {
-    !matches!(
-        command,
-        CommandRoot::Status(_)
-            | CommandRoot::Index(_)
-            | CommandRoot::Docs(_)
-            | CommandRoot::Mcp(_)
-            | CommandRoot::Sql(_)
-            | CommandRoot::Upgrade(_)
-            | CommandRoot::Daemon(_)
-            | CommandRoot::Pro(_)
-            | CommandRoot::Blame(_)
-            | CommandRoot::Timeline(_)
-            | CommandRoot::Facts(_)
-    )
+fn command_machine_readable_output(command: &CommandRoot, json_output: bool) -> bool {
+    if json_output {
+        return true;
+    }
+    match command {
+        CommandRoot::Setup(args) => args.progress == crate::progress::ProgressArg::Json,
+        CommandRoot::Import(args) => args.progress == crate::progress::ProgressArg::Json,
+        CommandRoot::Show(args) => {
+            matches!(
+                &args.target,
+                ShowTarget::Session(args) if args.format == OutputFormat::Jsonl
+            ) || matches!(
+                &args.target,
+                ShowTarget::Event(args) if args.format == OutputFormat::Jsonl
+            )
+        }
+        CommandRoot::Sql(args) => args.output_format() != SqlFormat::Table,
+        CommandRoot::Mcp(_) => true,
+        CommandRoot::Doctor(args) => args.progress == crate::progress::ProgressArg::Json,
+        _ => false,
+    }
 }
 
 pub(crate) fn command_deprecation_warning_eligible(command: &CommandRoot) -> bool {
-    if command_json_output(command) {
+    if command_machine_readable_output(command, command_json_output(command)) {
         return false;
     }
-    match command {
-        CommandRoot::Mcp(_) | CommandRoot::Daemon(_) => false,
-        CommandRoot::Upgrade(args) if args.background() => false,
-        CommandRoot::Setup(args) => args.progress != crate::progress::ProgressArg::Json,
-        CommandRoot::Import(args) => args.progress != crate::progress::ProgressArg::Json,
-        CommandRoot::Doctor(args) => args.progress != crate::progress::ProgressArg::Json,
-        _ => true,
-    }
+    !matches!(command, CommandRoot::Mcp(_) | CommandRoot::Daemon(_))
 }
 
 fn command_daemon_autostart_trigger(command: &CommandRoot) -> Option<DaemonTriggerCommandArg> {
+    if command_machine_readable_output(command, command_json_output(command)) {
+        return None;
+    }
     match command {
-        CommandRoot::Setup(args) if !args.catalog_only && !args.no_daemon => {
-            Some(DaemonTriggerCommandArg::Setup)
-        }
         CommandRoot::Import(args) if import_should_autostart_daemon(args) => {
             Some(DaemonTriggerCommandArg::Import)
         }
         _ => None,
     }
+}
+
+fn command_can_report_malformed_config(command: &CommandRoot) -> bool {
+    matches!(
+        command,
+        CommandRoot::Daemon(crate::DaemonArgs {
+            command: DaemonCommand::Status(_),
+        })
+    )
 }
 
 fn import_should_autostart_daemon(args: &ImportArgs) -> bool {
@@ -352,4 +338,36 @@ fn env_truthy(key: &str) -> bool {
             "" | "0" | "false" | "no" | "off"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
+        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        command_daemon_autostart_trigger(&cli.command)
+    }
+
+    #[test]
+    fn setup_handoff_is_owned_by_setup_and_machine_import_does_not_autostart() {
+        for args in [
+            &["setup"][..],
+            &["setup", "--json"][..],
+            &["setup", "--progress", "json"],
+            &["import", "--json"],
+            &["import", "--progress", "json"],
+        ] {
+            assert!(daemon_autostart_trigger(args).is_none(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn human_import_retains_post_command_daemon_autostart() {
+        assert!(matches!(
+            daemon_autostart_trigger(&["import"]),
+            Some(DaemonTriggerCommandArg::Import)
+        ));
+    }
 }

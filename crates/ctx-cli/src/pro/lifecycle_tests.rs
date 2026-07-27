@@ -167,6 +167,51 @@ fn reconcile(data_root: &Path) -> Result<Option<ValidatedPair>> {
     )
 }
 
+fn classify_explicit_setup(data_root: &Path) -> Result<SetupInstallation> {
+    let target = default_helper_path(data_root);
+    let _lifecycle_lock = LifecycleLock::acquire(&target, true)?
+        .ok_or_else(|| anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
+    reconcile_setup_installation_locked(&target, TEST_PUBLIC_KEY_PEM, &mut Persistence::default())
+}
+
+fn repair_bundle(bundle: &SignedBundle, data_root: &Path) -> Result<serde_json::Value> {
+    let target = default_helper_path(data_root);
+    let _lifecycle_lock = LifecycleLock::acquire(&target, true)?
+        .ok_or_else(|| anyhow!("invalid_request: failed to create Pro lifecycle lock"))?;
+    let installation = reconcile_setup_installation_locked(
+        &target,
+        TEST_PUBLIC_KEY_PEM,
+        &mut Persistence::default(),
+    )?;
+    install_for_setup_with_key_locked(
+        &bundle.args,
+        data_root,
+        installation,
+        TEST_PUBLIC_KEY_PEM,
+        &mut Persistence::default(),
+    )
+}
+
+fn assert_automated_repair_status(data_root: &Path) {
+    let value = lifecycle_status_json_with_key(data_root, TEST_PUBLIC_KEY_PEM);
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["state"], "repair_required");
+    assert_eq!(value["installed"], false);
+    assert_eq!(value["error_code"], "invalid_response");
+    assert_eq!(value["next_action"]["command"], "ctx pro");
+    assert_eq!(value["next_action"]["reason"], "helper_artifacts_invalid");
+}
+
+fn assert_manual_diagnosis_status(data_root: &Path) {
+    let value = lifecycle_status_json_with_key(data_root, TEST_PUBLIC_KEY_PEM);
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["state"], "unavailable");
+    assert_eq!(value["installed"], false);
+    assert_eq!(value["error_code"], "invalid_response");
+    assert_eq!(value["next_action"]["command"], Value::Null);
+    assert_eq!(value["next_action"]["reason"], "manual_diagnosis_required");
+}
+
 fn installed_pair(data_root: &Path) -> ValidatedPair {
     reconcile(data_root).unwrap().unwrap()
 }
@@ -759,6 +804,11 @@ fn committed_stage_tamper_falls_back_to_known_good_and_journal_is_bounded() {
     file.set_len(MAX_TRANSACTION_JOURNAL_BYTES + 1).unwrap();
     let error = reconcile(temp.path()).unwrap_err().to_string();
     assert!(error.contains("transaction journal exceeds maximum size"));
+    let status = lifecycle_status_json_with_key(temp.path(), TEST_PUBLIC_KEY_PEM);
+    assert_eq!(status["state"], "unavailable");
+    assert_eq!(status["error_code"], "invalid_request");
+    assert_eq!(status["next_action"]["command"], Value::Null);
+    assert_eq!(status["next_action"]["reason"], "manual_diagnosis_required");
     assert_eq!(target_bytes(temp.path()), b"first helper");
     fs::remove_file(journal_path).unwrap();
     assert_eq!(installed_pair(temp.path()).manifest.version, "1.0.0");
@@ -794,6 +844,396 @@ fn mismatched_or_tampered_signed_pairs_are_never_accepted() {
     let error = reconcile(temp.path()).unwrap_err().to_string();
     assert!(error.starts_with("invalid_response:"));
     assert!(!error.contains("tampered"));
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InvalidCurrentPair {
+    MissingHelper,
+    MissingMarker,
+    CorruptHelper,
+    CorruptMarker,
+}
+
+fn assert_explicit_setup_repairs_invalid_current_pair(case: InvalidCurrentPair) {
+    let temp = TempDir::new().unwrap();
+    let initial = write_bundle(
+        temp.path(),
+        "initial",
+        b"initial helper",
+        manifest(b"initial helper", "1.0.0"),
+    );
+    install_bundle(&initial, temp.path(), false).unwrap();
+
+    let layout = ProFilesystemLayout::new(temp.path());
+    let target = layout.helper_path();
+    let marker = layout.helper_marker_path();
+    let previous_helper = layout.previous_helper_path();
+    let previous_marker = layout.previous_marker_path();
+    assert!(!previous_helper.exists());
+    assert!(!previous_marker.exists());
+
+    let graph = layout.graph_path();
+    fs::write(&graph, b"encrypted graph data").unwrap();
+    let canonical = temp.path().join("work.sqlite");
+    fs::write(&canonical, b"canonical history").unwrap();
+    crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
+
+    match case {
+        InvalidCurrentPair::MissingHelper => fs::remove_file(&target).unwrap(),
+        InvalidCurrentPair::MissingMarker => fs::remove_file(&marker).unwrap(),
+        InvalidCurrentPair::CorruptHelper => fs::write(&target, b"corrupt helper").unwrap(),
+        InvalidCurrentPair::CorruptMarker => fs::write(&marker, b"{}").unwrap(),
+    }
+    let invalid_helper = fs::read(&target).ok();
+    let invalid_marker = fs::read(&marker).ok();
+
+    let strict_error = reconcile(temp.path()).unwrap_err().to_string();
+    assert!(strict_error.starts_with("invalid_response:"));
+    assert_automated_repair_status(temp.path());
+    assert!(matches!(
+        classify_explicit_setup(temp.path()).unwrap(),
+        SetupInstallation::RepairRequired
+    ));
+    assert_eq!(fs::read(&target).ok(), invalid_helper);
+    assert_eq!(fs::read(&marker).ok(), invalid_marker);
+
+    let bad_replacement = write_bundle(
+        temp.path(),
+        "bad-replacement",
+        b"wrong replacement bytes",
+        manifest(b"right replacement bytes", "2.0.0"),
+    );
+    let bad_artifact = fs::read(&bad_replacement.args.artifact).unwrap();
+    let error = repair_bundle(&bad_replacement, temp.path())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("artifact digest does not match signed manifest"));
+    assert_eq!(fs::read(&target).ok(), invalid_helper);
+    assert_eq!(fs::read(&marker).ok(), invalid_marker);
+    assert_eq!(
+        fs::read(&bad_replacement.args.artifact).unwrap(),
+        bad_artifact
+    );
+    assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
+    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    assert!(
+        crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
+    );
+
+    let replacement = write_bundle(
+        temp.path(),
+        "replacement",
+        b"verified replacement helper",
+        manifest(b"verified replacement helper", "2.0.0"),
+    );
+    let result = repair_bundle(&replacement, temp.path()).unwrap();
+    assert_eq!(result["installed"], true);
+    assert_eq!(result["updated"], true);
+    assert_eq!(installed_pair(temp.path()).manifest.version, "2.0.0");
+    assert_eq!(target_bytes(temp.path()), b"verified replacement helper");
+    assert!(!previous_helper.exists());
+    assert!(!previous_marker.exists());
+    assert_eq!(fs::read(graph).unwrap(), b"encrypted graph data");
+    assert_eq!(fs::read(canonical).unwrap(), b"canonical history");
+    assert_eq!(
+        fs::read(&bad_replacement.args.artifact).unwrap(),
+        bad_artifact
+    );
+    assert!(
+        crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
+    );
+    assert_no_transaction_files(temp.path());
+}
+
+#[test]
+fn explicit_setup_repairs_a_missing_current_helper_without_a_previous_pair() {
+    assert_explicit_setup_repairs_invalid_current_pair(InvalidCurrentPair::MissingHelper);
+}
+
+#[test]
+fn explicit_setup_repairs_a_missing_current_marker_without_a_previous_pair() {
+    assert_explicit_setup_repairs_invalid_current_pair(InvalidCurrentPair::MissingMarker);
+}
+
+#[test]
+fn explicit_setup_repairs_a_corrupt_current_helper_without_a_previous_pair() {
+    assert_explicit_setup_repairs_invalid_current_pair(InvalidCurrentPair::CorruptHelper);
+}
+
+#[test]
+fn explicit_setup_repairs_a_corrupt_current_marker_without_a_previous_pair() {
+    assert_explicit_setup_repairs_invalid_current_pair(InvalidCurrentPair::CorruptMarker);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InvalidRollbackPair {
+    MissingHelper,
+    MissingMarker,
+    CorruptHelper,
+    CorruptMarker,
+}
+
+fn assert_explicit_setup_repairs_invalid_rollback_pair(case: InvalidRollbackPair) {
+    let temp = TempDir::new().unwrap();
+    let initial = write_bundle(
+        temp.path(),
+        "initial",
+        b"initial helper",
+        manifest(b"initial helper", "1.0.0"),
+    );
+    let update = write_bundle(
+        temp.path(),
+        "update",
+        b"updated helper",
+        manifest(b"updated helper", "2.0.0"),
+    );
+    install_bundle(&initial, temp.path(), false).unwrap();
+    install_bundle(&update, temp.path(), true).unwrap();
+
+    let layout = ProFilesystemLayout::new(temp.path());
+    let target = layout.helper_path();
+    let marker = layout.helper_marker_path();
+    let previous_helper = layout.previous_helper_path();
+    let previous_marker = layout.previous_marker_path();
+    fs::write(&target, b"corrupt current helper").unwrap();
+    fs::write(&marker, b"corrupt current marker").unwrap();
+    match case {
+        InvalidRollbackPair::MissingHelper => fs::remove_file(&previous_helper).unwrap(),
+        InvalidRollbackPair::MissingMarker => fs::remove_file(&previous_marker).unwrap(),
+        InvalidRollbackPair::CorruptHelper => {
+            fs::write(&previous_helper, b"corrupt rollback helper").unwrap()
+        }
+        InvalidRollbackPair::CorruptMarker => {
+            fs::write(&previous_marker, b"corrupt rollback marker").unwrap()
+        }
+    }
+
+    let graph = layout.graph_path();
+    fs::write(&graph, b"encrypted graph data").unwrap();
+    let canonical = temp.path().join("work.sqlite");
+    fs::write(&canonical, b"canonical history").unwrap();
+    crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
+
+    let invalid_helper = fs::read(&target).ok();
+    let invalid_marker = fs::read(&marker).ok();
+    let invalid_previous_helper = fs::read(&previous_helper).ok();
+    let invalid_previous_marker = fs::read(&previous_marker).ok();
+
+    let strict_error = reconcile(temp.path()).unwrap_err().to_string();
+    assert!(strict_error.starts_with("invalid_response:"));
+    assert_automated_repair_status(temp.path());
+    assert!(matches!(
+        classify_explicit_setup(temp.path()).unwrap(),
+        SetupInstallation::RepairRequired
+    ));
+    assert_eq!(fs::read(&target).ok(), invalid_helper);
+    assert_eq!(fs::read(&marker).ok(), invalid_marker);
+    assert_eq!(fs::read(&previous_helper).ok(), invalid_previous_helper);
+    assert_eq!(fs::read(&previous_marker).ok(), invalid_previous_marker);
+
+    let bad_replacement = write_bundle(
+        temp.path(),
+        "bad-replacement",
+        b"wrong replacement bytes",
+        manifest(b"right replacement bytes", "3.0.0"),
+    );
+    let bad_artifact = fs::read(&bad_replacement.args.artifact).unwrap();
+    let error = repair_bundle(&bad_replacement, temp.path())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("artifact digest does not match signed manifest"));
+    assert_eq!(fs::read(&target).ok(), invalid_helper);
+    assert_eq!(fs::read(&marker).ok(), invalid_marker);
+    assert_eq!(fs::read(&previous_helper).ok(), invalid_previous_helper);
+    assert_eq!(fs::read(&previous_marker).ok(), invalid_previous_marker);
+    assert_eq!(
+        fs::read(&bad_replacement.args.artifact).unwrap(),
+        bad_artifact
+    );
+    assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
+    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    assert!(
+        crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
+    );
+
+    let replacement = write_bundle(
+        temp.path(),
+        "replacement",
+        b"verified replacement helper",
+        manifest(b"verified replacement helper", "3.0.0"),
+    );
+    let result = repair_bundle(&replacement, temp.path()).unwrap();
+    assert_eq!(result["installed"], true);
+    assert_eq!(result["updated"], true);
+    assert_eq!(installed_pair(temp.path()).manifest.version, "3.0.0");
+    assert_eq!(target_bytes(temp.path()), b"verified replacement helper");
+    assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
+    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    assert_eq!(
+        fs::read(&bad_replacement.args.artifact).unwrap(),
+        bad_artifact
+    );
+    assert!(
+        crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
+    );
+    assert_no_transaction_files(temp.path());
+}
+
+#[test]
+fn explicit_setup_repairs_a_missing_rollback_helper() {
+    assert_explicit_setup_repairs_invalid_rollback_pair(InvalidRollbackPair::MissingHelper);
+}
+
+#[test]
+fn explicit_setup_repairs_a_missing_rollback_marker() {
+    assert_explicit_setup_repairs_invalid_rollback_pair(InvalidRollbackPair::MissingMarker);
+}
+
+#[test]
+fn explicit_setup_repairs_a_corrupt_rollback_helper() {
+    assert_explicit_setup_repairs_invalid_rollback_pair(InvalidRollbackPair::CorruptHelper);
+}
+
+#[test]
+fn explicit_setup_repairs_a_corrupt_rollback_marker() {
+    assert_explicit_setup_repairs_invalid_rollback_pair(InvalidRollbackPair::CorruptMarker);
+}
+
+#[test]
+fn explicit_setup_repairs_an_unrecoverable_committed_journal() {
+    let temp = TempDir::new().unwrap();
+    let initial = write_bundle(
+        temp.path(),
+        "initial",
+        b"initial helper",
+        manifest(b"initial helper", "1.0.0"),
+    );
+    install_bundle(&initial, temp.path(), false).unwrap();
+
+    let layout = ProFilesystemLayout::new(temp.path());
+    let target = layout.helper_path();
+    let marker = layout.helper_marker_path();
+    fs::write(&target, b"corrupt current helper").unwrap();
+    fs::write(&marker, b"corrupt current marker").unwrap();
+    let journal_path = transaction_journal_path(&target).unwrap();
+    let journal = InstallTransaction {
+        schema_version: 1,
+        transaction_id: uuid::Uuid::new_v4(),
+        state: TransactionState::Committed,
+        old: None,
+        new: PairIdentity {
+            artifact_size: 17,
+            artifact_sha256: "a".repeat(64),
+            marker_sha256: "b".repeat(64),
+            version: "2.0.0".to_owned(),
+        },
+    };
+    fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+
+    let graph = layout.graph_path();
+    fs::write(&graph, b"encrypted graph data").unwrap();
+    let canonical = temp.path().join("work.sqlite");
+    fs::write(&canonical, b"canonical history").unwrap();
+    crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
+
+    let invalid_helper = fs::read(&target).unwrap();
+    let invalid_marker = fs::read(&marker).unwrap();
+    let invalid_journal = fs::read(&journal_path).unwrap();
+    let strict_error = reconcile(temp.path()).unwrap_err().to_string();
+    assert!(strict_error.contains("no recoverable signed helper pair"));
+    assert_automated_repair_status(temp.path());
+    assert!(matches!(
+        classify_explicit_setup(temp.path()).unwrap(),
+        SetupInstallation::RepairRequired
+    ));
+    assert_eq!(fs::read(&target).unwrap(), invalid_helper);
+    assert_eq!(fs::read(&marker).unwrap(), invalid_marker);
+    assert_eq!(fs::read(&journal_path).unwrap(), invalid_journal);
+
+    let bad_replacement = write_bundle(
+        temp.path(),
+        "bad-replacement",
+        b"wrong replacement bytes",
+        manifest(b"right replacement bytes", "3.0.0"),
+    );
+    let bad_artifact = fs::read(&bad_replacement.args.artifact).unwrap();
+    let error = repair_bundle(&bad_replacement, temp.path())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("artifact digest does not match signed manifest"));
+    assert_eq!(fs::read(&target).unwrap(), invalid_helper);
+    assert_eq!(fs::read(&marker).unwrap(), invalid_marker);
+    assert_eq!(fs::read(&journal_path).unwrap(), invalid_journal);
+    assert_eq!(
+        fs::read(&bad_replacement.args.artifact).unwrap(),
+        bad_artifact
+    );
+    assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
+    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    assert!(
+        crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
+    );
+
+    let replacement = write_bundle(
+        temp.path(),
+        "replacement",
+        b"verified replacement helper",
+        manifest(b"verified replacement helper", "3.0.0"),
+    );
+    let result = repair_bundle(&replacement, temp.path()).unwrap();
+    assert_eq!(result["installed"], true);
+    assert_eq!(result["updated"], true);
+    assert_eq!(installed_pair(temp.path()).manifest.version, "3.0.0");
+    assert_eq!(target_bytes(temp.path()), b"verified replacement helper");
+    assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
+    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    assert_eq!(
+        fs::read(&bad_replacement.args.artifact).unwrap(),
+        bad_artifact
+    );
+    assert!(
+        crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
+    );
+    assert_no_transaction_files(temp.path());
+}
+
+#[test]
+fn malformed_journals_remain_fail_closed_for_explicit_setup() {
+    let temp = TempDir::new().unwrap();
+    let initial = write_bundle(
+        temp.path(),
+        "initial",
+        b"initial helper",
+        manifest(b"initial helper", "1.0.0"),
+    );
+    install_bundle(&initial, temp.path(), false).unwrap();
+    let journal_path = transaction_journal_path(&default_helper_path(temp.path())).unwrap();
+    fs::write(&journal_path, b"{").unwrap();
+
+    let strict_error = reconcile(temp.path()).unwrap_err().to_string();
+    assert!(strict_error.contains("parse Pro transaction journal"));
+    let setup_error = classify_explicit_setup(temp.path())
+        .unwrap_err()
+        .to_string();
+    assert!(setup_error.contains("parse Pro transaction journal"));
+    assert_manual_diagnosis_status(temp.path());
+    assert_eq!(fs::read(journal_path).unwrap(), b"{");
+}
+
+#[test]
+fn unsafe_installation_types_remain_fail_closed_for_explicit_setup() {
+    let temp = TempDir::new().unwrap();
+    let target = default_helper_path(temp.path());
+    fs::create_dir_all(&target).unwrap();
+
+    let strict_error = reconcile(temp.path()).unwrap_err().to_string();
+    assert!(strict_error.contains("unsafe file type"));
+    let setup_error = classify_explicit_setup(temp.path())
+        .unwrap_err()
+        .to_string();
+    assert!(setup_error.contains("unsafe file type"));
+    assert_manual_diagnosis_status(temp.path());
+    assert!(target.is_dir());
 }
 
 #[test]

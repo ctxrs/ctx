@@ -1,21 +1,21 @@
 use chrono::{DateTime, Utc};
-use ctx_history_capture::{
-    complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY, import_codex_session_jsonl,
-    import_shelley_sqlite, CodexSessionImportOptions, ShelleySqliteImportOptions,
-};
 use ctx_history_core::{
     AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
     EntityTimestamps, Event, EventRole, EventType, Fidelity, Session, SessionStatus, SyncMetadata,
 };
-use rusqlite::Connection;
 use serde_json::json;
-use std::{cell::Cell, collections::BTreeMap, fs};
+use std::{cell::Cell, fs};
 use tempfile::tempdir;
 
 use super::*;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::{
+    os::fd::AsRawFd,
+    time::{Duration, Instant},
+};
 
 fn now() -> DateTime<Utc> {
     "2026-07-22T00:00:00Z".parse().expect("valid fixture time")
@@ -89,6 +89,271 @@ fn session(id: Uuid, source_id: Uuid) -> Session {
     }
 }
 
+fn exact_journal_sync_response(request: &JournalSyncRequest) -> HelperMessage {
+    let committed_through = request.committed_checkpoint();
+    HelperMessage::JournalSynced(JournalSyncResult {
+        frozen_complete: committed_through == request.frozen_through,
+        committed_through,
+        accepted_records: u32::try_from(request.records.len()).expect("bounded records"),
+        replayed: false,
+    })
+}
+
+#[test]
+fn nativepath_session_requires_the_complete_existing_capability_set() {
+    assert_eq!(
+        nativepath_pro_capabilities(),
+        BTreeSet::from([
+            Capability::Status,
+            Capability::JournalSync,
+            Capability::OutputMaterialization,
+        ])
+    );
+}
+
+#[test]
+fn target_bounded_pages_exclude_a_concurrent_later_core_commit() {
+    let temp = tempdir().expect("temp dir");
+    let store = Store::open(temp.path().join("ctx.db")).expect("open Store");
+    let source_id = Uuid::from_u128(2);
+    let session_id = Uuid::from_u128(3);
+    store
+        .upsert_capture_source(&source(source_id))
+        .expect("source");
+    store
+        .upsert_session(&session(session_id, source_id))
+        .expect("session");
+    let genesis = store
+        .activate_projection_journal(PROTOCOL_FINGERPRINT)
+        .expect("activate journal");
+    store
+        .upsert_event(&event(Uuid::from_u128(4), session_id, source_id))
+        .expect("target event");
+    let target = store
+        .projection_journal_snapshot(None)
+        .expect("target snapshot")
+        .frozen_through;
+    let mut later = event(Uuid::from_u128(5), session_id, source_id);
+    later.seq = 2;
+    store.upsert_event(&later).expect("later Core event");
+
+    let snapshot = coalesced_journal_snapshot_through(
+        &store,
+        StoreJournalPosition {
+            generation: genesis.position.generation,
+            sequence: 0,
+        },
+        &target,
+    )
+    .expect("bounded snapshot");
+
+    assert_eq!(snapshot.frozen_through, target);
+    assert_eq!(snapshot.next_position, target.position);
+    assert!(!snapshot.has_more);
+    assert!(snapshot
+        .records
+        .iter()
+        .all(|record| record.sequence <= target.position.sequence));
+    assert!(
+        store
+            .projection_journal_snapshot(Some(target.position))
+            .expect("retained later suffix")
+            .records
+            .iter()
+            .any(|record| record.sequence > target.position.sequence),
+        "later Core record was not retained beyond the bounded target"
+    );
+}
+
+#[test]
+fn forged_store_target_coordinates_and_digest_are_rejected_before_helper_io() {
+    let temp = tempdir().expect("temp dir");
+    let store = Store::open(temp.path().join("ctx.db")).expect("open Store");
+    let target = store
+        .activate_projection_journal(PROTOCOL_FINGERPRINT)
+        .expect("activate journal");
+    let forged = [
+        StoreJournalCheckpoint {
+            cumulative_digest: "a".repeat(64),
+            ..target.clone()
+        },
+        StoreJournalCheckpoint {
+            position: StoreJournalPosition {
+                generation: target.position.generation.saturating_add(1),
+                sequence: target.position.sequence,
+            },
+            ..target.clone()
+        },
+        StoreJournalCheckpoint {
+            position: StoreJournalPosition {
+                generation: target.position.generation,
+                sequence: target.position.sequence.saturating_add(1),
+            },
+            ..target.clone()
+        },
+        StoreJournalCheckpoint {
+            contract_fingerprint: "f".repeat(64),
+            ..target
+        },
+    ];
+    for forged in forged {
+        let helper_called = Cell::new(false);
+        sync_nativepath_group_through(&store, &forged, &mut |_, _| {
+            helper_called.set(true);
+            bail!("helper must not be called")
+        })
+        .expect_err("forged target must fail closed");
+        assert!(!helper_called.get());
+    }
+}
+
+#[test]
+fn nativepath_sync_stops_and_prunes_at_the_receipt_then_retries_idempotently() {
+    let temp = tempdir().expect("temp dir");
+    let store = Store::open(temp.path().join("ctx.db")).expect("open Store");
+    let source_id = Uuid::from_u128(12);
+    let session_id = Uuid::from_u128(13);
+    store
+        .upsert_capture_source(&source(source_id))
+        .expect("source");
+    store
+        .upsert_session(&session(session_id, source_id))
+        .expect("session");
+    let active = store
+        .activate_projection_journal(PROTOCOL_FINGERPRINT)
+        .expect("activate journal");
+    store
+        .upsert_event(&event(Uuid::from_u128(14), session_id, source_id))
+        .expect("target event");
+    let target = store
+        .projection_journal_snapshot(None)
+        .expect("target snapshot")
+        .frozen_through;
+    let mut later = event(Uuid::from_u128(15), session_id, source_id);
+    later.seq = 2;
+    store.upsert_event(&later).expect("later event");
+    let later_checkpoint = store
+        .projection_journal_snapshot(None)
+        .expect("later checkpoint")
+        .frozen_through;
+    let helper_prior = JournalCheckpoint {
+        position: JournalPosition {
+            generation: active.position.generation,
+            sequence: 0,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: initial_journal_digest(active.position.generation),
+    };
+    let sent_pages = Cell::new(0_u32);
+    let disposition =
+        sync_nativepath_group_through(&store, &target, &mut |message, _| match message {
+            HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
+                state: GraphState::Ready,
+                checkpoint: Some(helper_prior.clone()),
+            })),
+            HostMessage::SyncJournal(request) => {
+                sent_pages.set(sent_pages.get() + 1);
+                assert_eq!(
+                    store_checkpoint(&request.frozen_through),
+                    target,
+                    "request escaped the Core receipt target"
+                );
+                assert!(request
+                    .records
+                    .iter()
+                    .all(|record| record.sequence <= target.position.sequence));
+                Ok(exact_journal_sync_response(&request))
+            }
+            _ => bail!("unexpected helper request"),
+        })
+        .expect("bounded canonical sync");
+    assert_eq!(disposition, NativeProAdvanceDisposition::Advanced);
+    assert!(sent_pages.get() > 0);
+
+    let retained = store
+        .projection_journal_snapshot(None)
+        .expect("retained suffix");
+    assert_eq!(retained.frozen_through, later_checkpoint);
+    assert!(retained
+        .records
+        .iter()
+        .all(|record| record.sequence > target.position.sequence));
+
+    let retry_sync_called = Cell::new(false);
+    let retry = sync_nativepath_group_through(&store, &target, &mut |message, _| match message {
+        HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
+            state: GraphState::Ready,
+            checkpoint: Some(protocol_checkpoint(target.clone())),
+        })),
+        HostMessage::SyncJournal(_) => {
+            retry_sync_called.set(true);
+            bail!("AlreadyCommitted Core retry must not replay canonical pages")
+        }
+        _ => bail!("unexpected helper request"),
+    })
+    .expect("idempotent Core retry");
+    assert_eq!(retry, NativeProAdvanceDisposition::AlreadyAdvanced);
+    assert!(!retry_sync_called.get());
+
+    let beyond = sync_nativepath_group_through(&store, &target, &mut |message, _| match message {
+        HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
+            state: GraphState::Ready,
+            checkpoint: Some(protocol_checkpoint(later_checkpoint.clone())),
+        })),
+        HostMessage::SyncJournal(_) => bail!("verified later helper checkpoint must not replay"),
+        _ => bail!("unexpected helper request"),
+    })
+    .expect("verified later helper checkpoint");
+    assert_eq!(beyond, NativeProAdvanceDisposition::AlreadyAdvanced);
+}
+
+#[test]
+fn core_only_can_remain_inactive_and_later_activation_builds_the_exact_baseline() {
+    let inactive_temp = tempdir().expect("inactive temp dir");
+    let inactive = Store::open(inactive_temp.path().join("ctx.db")).expect("inactive Store");
+    assert!(inactive.projection_journal_snapshot(None).is_err());
+
+    let temp = tempdir().expect("activation temp dir");
+    let store = Store::open(temp.path().join("ctx.db")).expect("activation Store");
+    let source_id = Uuid::from_u128(22);
+    let session_id = Uuid::from_u128(23);
+    store
+        .upsert_capture_source(&source(source_id))
+        .expect("source");
+    store
+        .upsert_session(&session(session_id, source_id))
+        .expect("session");
+    store
+        .upsert_event(&event(Uuid::from_u128(24), session_id, source_id))
+        .expect("canonical event");
+    let pages = Cell::new(0_u32);
+    let checkpoint =
+        prepare_nativepath_projection_journal(&store, &mut |message, _| match message {
+            HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
+                state: GraphState::NotMaterialized,
+                checkpoint: None,
+            })),
+            HostMessage::SyncJournal(request) => {
+                pages.set(pages.get() + 1);
+                Ok(exact_journal_sync_response(&request))
+            }
+            _ => bail!("unexpected helper request"),
+        })
+        .expect("later activation");
+
+    assert!(checkpoint.position.sequence > 0);
+    assert!(pages.get() > 0);
+    assert_eq!(
+        protocol_checkpoint(
+            store
+                .projection_journal_snapshot(None)
+                .expect("active checkpoint")
+                .frozen_through
+        ),
+        checkpoint
+    );
+}
+
 #[test]
 fn store_pages_validate_as_exact_protocol_v1_journal_requests() {
     let temp = tempdir().expect("temp dir");
@@ -137,7 +402,6 @@ fn store_pages_validate_as_exact_protocol_v1_journal_requests() {
             .into_iter()
             .map(protocol_journal_record)
             .collect(),
-        result_contents: Vec::new(),
     };
     request.validate().expect("Store page matches protocol");
     assert_eq!(request.committed_checkpoint(), request.frozen_through);
@@ -146,532 +410,6 @@ fn store_pages_validate_as_exact_protocol_v1_journal_requests() {
     ))
     .expect("public journal golden JSON");
     assert_eq!(serde_json::to_value(&request).unwrap(), golden);
-}
-
-#[test]
-fn codex_result_hydration_is_source_verified_transient_and_fail_open() {
-    let temp = tempdir().expect("temp dir");
-    let source_path = temp.path().join("rollout.jsonl");
-    let secret = "RESULT-BODY-SECRET-8d23a0";
-    let second_secret = "RESULT-BODY-SECRET-4c71be";
-    let oversized_result = format!(
-        "OVERSIZED-RESULT-{}",
-        "x".repeat(MAX_RESULT_CONTENT_BYTES_PER_ITEM)
-    );
-    let transcript = [
-        json!({
-            "timestamp": "2026-07-22T00:00:00Z",
-            "type": "session_meta",
-            "payload": {
-                "id": "source-backed-session",
-                "timestamp": "2026-07-22T00:00:00Z",
-                "cwd": "/workspace/project",
-                "originator": "codex-cli"
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-22T00:00:01Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "call_id": "call-source-backed",
-                "arguments": "{\"cmd\":\"printf secret\"}"
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-22T00:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call-source-backed",
-                "output": format!("{secret}\nProcess exited with code 0")
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-22T00:00:03Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "call_id": "call-source-backed-2",
-                "arguments": "{\"cmd\":\"printf second-secret\"}"
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-22T00:00:04Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call-source-backed-2",
-                "output": format!("{second_secret}\nProcess exited with code 0")
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-22T00:00:05Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "call_id": "call-source-backed-oversized",
-                "arguments": "{\"cmd\":\"emit oversized output\"}"
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-22T00:00:06Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call-source-backed-oversized",
-                "output": oversized_result
-            }
-        }),
-    ]
-    .into_iter()
-    .map(|value| format!("{}\n", serde_json::to_string(&value).unwrap()))
-    .collect::<String>();
-    fs::write(&source_path, &transcript).expect("write Codex source");
-    let database = temp.path().join("ctx.db");
-    let mut store = Store::open(&database).expect("open Store");
-    let imported = import_codex_session_jsonl(
-        &source_path,
-        &mut store,
-        CodexSessionImportOptions::default(),
-    )
-    .expect("import source");
-    assert_eq!(imported.failed, 0, "{:?}", imported.failures);
-    let session = store
-        .session_by_external_session(CaptureProvider::Codex, "source-backed-session")
-        .expect("session query")
-        .expect("imported session");
-    let outputs = store
-        .events_for_session(session.id)
-        .expect("events")
-        .into_iter()
-        .filter(|event| event.event_type == EventType::CommandOutput)
-        .collect::<Vec<_>>();
-    assert_eq!(outputs.len(), 3);
-    for output in outputs {
-        let stored_payload = serde_json::to_string(&output.payload).unwrap();
-        assert!(!stored_payload.contains(secret));
-        assert!(!stored_payload.contains(second_secret));
-        assert!(!stored_payload.contains("OVERSIZED-RESULT"));
-        assert!(!stored_payload.contains("output_preview"));
-    }
-    assert!(store.search_event_hits(secret, 10).unwrap().is_empty());
-    assert!(store
-        .search_event_hits(second_secret, 10)
-        .unwrap()
-        .is_empty());
-
-    let genesis = store
-        .activate_projection_journal(PROTOCOL_FINGERPRINT)
-        .expect("activate journal");
-    let snapshot = store
-        .projection_journal_snapshot(None)
-        .expect("journal snapshot");
-    let mut request = JournalSyncRequest {
-        mode: JournalSyncMode::FullBaseline,
-        canonical_schema_version: snapshot.canonical_schema_version,
-        canonical_schema_identity: snapshot.canonical_schema_identity,
-        projection_contract_version: snapshot.projection_contract_version,
-        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-        prior_checkpoint: JournalCheckpoint {
-            position: JournalPosition {
-                generation: genesis.position.generation,
-                sequence: 0,
-            },
-            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: initial_journal_digest(genesis.position.generation),
-        },
-        frozen_through: protocol_checkpoint(snapshot.frozen_through),
-        authorized_repository_roots: snapshot.authorized_repository_roots,
-        records: snapshot
-            .records
-            .into_iter()
-            .map(protocol_journal_record)
-            .collect(),
-        result_contents: Vec::new(),
-    };
-    let durable_json = serde_json::to_string(&request.records).unwrap();
-    assert!(!durable_json.contains(secret));
-    assert!(!durable_json.contains(second_secret));
-    assert!(!durable_json.contains("OVERSIZED-RESULT"));
-    assert!(!durable_json.contains("output_preview"));
-    let counts = hydrate_result_contents(&store, &mut request);
-    assert_eq!(
-        counts,
-        ResultHydrationCounts {
-            hydrated: 2,
-            omitted: 1,
-            resolver_batches: 1,
-        }
-    );
-    assert_eq!(request.result_contents.len(), 2);
-    assert!(request
-        .result_contents
-        .iter()
-        .any(|sidecar| sidecar.content.contains(secret)));
-    assert!(request
-        .result_contents
-        .iter()
-        .any(|sidecar| sidecar.content.contains(second_secret)));
-    request.validate().expect("hydrated request");
-
-    fs::write(
-        &source_path,
-        transcript.replace(secret, "ALTERD-BODY-SECRET-8d23a0"),
-    )
-    .expect("change source");
-    let changed = hydrate_result_contents(&store, &mut request);
-    assert_eq!(
-        changed,
-        ResultHydrationCounts {
-            hydrated: 1,
-            omitted: 2,
-            resolver_batches: 1,
-        }
-    );
-    assert_eq!(request.result_contents.len(), 1);
-    assert!(request.result_contents[0].content.contains(second_secret));
-    assert!(!request.result_contents[0]
-        .content
-        .contains("ALTERD-BODY-SECRET-8d23a0"));
-    request
-        .validate()
-        .expect("changed source omission is valid");
-
-    fs::remove_file(&source_path).expect("remove source");
-    let missing = hydrate_result_contents(&store, &mut request);
-    assert_eq!(
-        missing,
-        ResultHydrationCounts {
-            hydrated: 0,
-            omitted: 3,
-            resolver_batches: 0,
-        }
-    );
-    assert!(request.result_contents.is_empty());
-    request
-        .validate()
-        .expect("missing source omission is valid");
-}
-
-#[test]
-fn shelley_result_hydrates_from_canonical_journal_through_sqlite_locator() {
-    let temp = tempdir().expect("temp dir");
-    let source_path = temp.path().join("shelley.db");
-    let secret = "SHELLEY-EXACT-RESULT-6f3a82";
-    let conn = Connection::open(&source_path).expect("open Shelley fixture");
-    conn.execute_batch(
-        "create table conversations (
-             conversation_id text primary key, slug text, created_at text, updated_at text
-         );
-         create table messages (
-             message_id text primary key, conversation_id text not null,
-             sequence_id integer not null, type text not null, user_data text, created_at text
-         );
-         create index idx_messages_conversation_sequence
-             on messages(conversation_id, sequence_id);
-         insert into conversations values (
-             'shelley-sidecar-session', 'sidecar fixture',
-             '2026-07-22T00:00:00Z', '2026-07-22T00:01:00Z'
-         );",
-    )
-    .expect("create Shelley fixture");
-    conn.execute(
-        "insert into messages values (
-             'shelley-sidecar-result', 'shelley-sidecar-session', 1, 'tool', ?1,
-             '2026-07-22T00:00:01Z'
-         )",
-        [json!({"ToolResult": {"Text": secret}}).to_string()],
-    )
-    .expect("insert Shelley result");
-    drop(conn);
-
-    let database = temp.path().join("ctx.db");
-    let mut store = Store::open(&database).expect("open Store");
-    let imported = import_shelley_sqlite(
-        &source_path,
-        &mut store,
-        ShelleySqliteImportOptions {
-            machine_id: "shelley-sidecar-machine".to_owned(),
-            source_path: Some(source_path.clone()),
-            imported_at: now(),
-            ..ShelleySqliteImportOptions::default()
-        },
-    )
-    .expect("import Shelley source");
-    assert_eq!(imported.failed, 0, "{:?}", imported.failures);
-    let session = store
-        .session_by_external_session(CaptureProvider::Shelley, "shelley-sidecar-session")
-        .expect("session query")
-        .expect("imported Shelley session");
-    let result = store
-        .events_for_session(session.id)
-        .expect("Shelley events")
-        .into_iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .expect("Shelley result event");
-    assert!(result.payload.pointer("/body/result_content_ref").is_some());
-    assert!(!serde_json::to_string(&result.payload)
-        .expect("stored payload JSON")
-        .contains(secret));
-
-    let genesis = store
-        .activate_projection_journal(PROTOCOL_FINGERPRINT)
-        .expect("activate journal");
-    let snapshot = store
-        .projection_journal_snapshot(None)
-        .expect("journal snapshot");
-    let mut request = JournalSyncRequest {
-        mode: JournalSyncMode::FullBaseline,
-        canonical_schema_version: snapshot.canonical_schema_version,
-        canonical_schema_identity: snapshot.canonical_schema_identity,
-        projection_contract_version: snapshot.projection_contract_version,
-        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-        prior_checkpoint: JournalCheckpoint {
-            position: JournalPosition {
-                generation: genesis.position.generation,
-                sequence: 0,
-            },
-            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: initial_journal_digest(genesis.position.generation),
-        },
-        frozen_through: protocol_checkpoint(snapshot.frozen_through),
-        authorized_repository_roots: snapshot.authorized_repository_roots,
-        records: snapshot
-            .records
-            .into_iter()
-            .map(protocol_journal_record)
-            .collect(),
-        result_contents: Vec::new(),
-    };
-    let result_record = request
-        .records
-        .iter()
-        .find(|record| {
-            record
-                .canonical_payload
-                .as_ref()
-                .is_some_and(|payload| payload.pointer("/result/content_ref").is_some())
-        })
-        .expect("canonical Shelley result record");
-    assert_eq!(result_record.stable_entity_id, result.id);
-    assert!(!serde_json::to_string(&request.records)
-        .expect("durable journal JSON")
-        .contains(secret));
-
-    let counts = hydrate_result_contents(&store, &mut request);
-    assert_eq!(
-        counts,
-        ResultHydrationCounts {
-            hydrated: 1,
-            omitted: 0,
-            resolver_batches: 1,
-        }
-    );
-    assert_eq!(request.result_contents.len(), 1);
-    assert_eq!(request.result_contents[0].stable_entity_id, result.id);
-    assert_eq!(request.result_contents[0].content, secret);
-    request.validate().expect("hydrated Shelley request");
-}
-
-#[test]
-fn result_hydration_releases_failed_reservations_for_later_valid_results() {
-    let temp = tempdir().expect("temp dir");
-    let database = temp.path().join("ctx.db");
-    let mut store = Store::open(&database).expect("open Store");
-    let mut result_ids = Vec::new();
-    for index in 0..5 {
-        let source_path = temp.path().join(format!("rollout-{index}.jsonl"));
-        let prefix = format!("source-{index}:");
-        let output = format!(
-            "{prefix}{}",
-            "x".repeat(MAX_RESULT_CONTENT_BYTES_PER_ITEM - prefix.len())
-        );
-        let transcript = [
-            json!({
-                "timestamp": "2026-07-22T00:00:00Z",
-                "type": "session_meta",
-                "payload": {
-                    "id": format!("aggregate-budget-session-{index}"),
-                    "timestamp": "2026-07-22T00:00:00Z",
-                    "cwd": "/workspace/project",
-                    "originator": "codex-cli"
-                }
-            }),
-            json!({
-                "timestamp": "2026-07-22T00:00:01Z",
-                "type": "response_item",
-                "payload": {
-                    "type": "function_call",
-                    "name": "exec_command",
-                    "call_id": format!("aggregate-budget-call-{index}"),
-                    "arguments": "{\"cmd\":\"emit bounded result\"}"
-                }
-            }),
-            json!({
-                "timestamp": "2026-07-22T00:00:02Z",
-                "type": "response_item",
-                "payload": {
-                    "type": "function_call_output",
-                    "call_id": format!("aggregate-budget-call-{index}"),
-                    "output": output
-                }
-            }),
-        ]
-        .into_iter()
-        .map(|value| format!("{}\n", serde_json::to_string(&value).unwrap()))
-        .collect::<String>();
-        fs::write(&source_path, transcript).expect("write Codex source");
-        let imported = import_codex_session_jsonl(
-            &source_path,
-            &mut store,
-            CodexSessionImportOptions::default(),
-        )
-        .expect("import source");
-        assert_eq!(imported.failed, 0, "{:?}", imported.failures);
-        let session = store
-            .session_by_external_session(
-                CaptureProvider::Codex,
-                &format!("aggregate-budget-session-{index}"),
-            )
-            .expect("session query")
-            .expect("imported session");
-        let result = store
-            .events_for_session(session.id)
-            .expect("events")
-            .into_iter()
-            .find(|event| event.event_type == EventType::CommandOutput)
-            .expect("result event");
-        result_ids.push((
-            result.id,
-            result.capture_source_id.expect("result capture source"),
-            index,
-        ));
-    }
-
-    result_ids.sort_by_key(|(_, capture_source_id, _)| *capture_source_id);
-    let invalid_result_id = result_ids[0].0;
-    let later_valid_result_id = result_ids[4].0;
-    let later_valid_source_index = result_ids[4].2;
-    let mut invalid = store
-        .get_event(invalid_result_id)
-        .expect("first result for invalid digest");
-    assert!(
-        invalid
-            .payload
-            .pointer("/body/result_content_ref")
-            .is_some(),
-        "{:?}",
-        invalid.payload
-    );
-    invalid.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY]["locators"][0]["content_ref"]
-        ["sha256"] = json!("0".repeat(64));
-    invalid.payload["body"]["result_content_ref"]["sha256"] = json!("0".repeat(64));
-    invalid.dedupe_key = None;
-    store
-        .upsert_event(&invalid)
-        .expect("persist invalid locator digest");
-
-    let genesis = store
-        .activate_projection_journal(PROTOCOL_FINGERPRINT)
-        .expect("activate journal");
-    let snapshot = store
-        .projection_journal_snapshot(None)
-        .expect("journal snapshot");
-    let first_result_id = snapshot
-        .records
-        .iter()
-        .find_map(|record| {
-            record
-                .canonical_payload
-                .as_ref()?
-                .pointer("/result/content_ref")?;
-            result_ids
-                .iter()
-                .any(|(result_id, _, _)| *result_id == record.stable_entity_id)
-                .then_some(record.stable_entity_id)
-        })
-        .expect("first budget-reserved result");
-    assert_eq!(
-        first_result_id, invalid_result_id,
-        "the invalid large result must precede valid results"
-    );
-    let mut request = JournalSyncRequest {
-        mode: JournalSyncMode::FullBaseline,
-        canonical_schema_version: snapshot.canonical_schema_version,
-        canonical_schema_identity: snapshot.canonical_schema_identity,
-        projection_contract_version: snapshot.projection_contract_version,
-        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-        prior_checkpoint: JournalCheckpoint {
-            position: JournalPosition {
-                generation: genesis.position.generation,
-                sequence: 0,
-            },
-            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: initial_journal_digest(genesis.position.generation),
-        },
-        frozen_through: protocol_checkpoint(snapshot.frozen_through),
-        authorized_repository_roots: snapshot.authorized_repository_roots,
-        records: snapshot
-            .records
-            .into_iter()
-            .map(protocol_journal_record)
-            .collect(),
-        result_contents: Vec::new(),
-    };
-    let invalid_record = request
-        .records
-        .iter()
-        .find(|record| record.stable_entity_id == invalid_result_id)
-        .expect("invalid result journal record");
-    let invalid_content_ref = invalid_record
-        .canonical_payload
-        .as_ref()
-        .and_then(|payload| payload.pointer("/result/content_ref"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .expect("invalid result content ref");
-    assert!(
-        result_content::result_content_request(
-            &store,
-            invalid_result_id,
-            invalid_content_ref,
-            &mut BTreeMap::new(),
-        )
-        .is_some(),
-        "the invalid resolver request must pass route and locator admission"
-    );
-    let counts = hydrate_result_contents(&store, &mut request);
-    assert_eq!(
-        counts,
-        ResultHydrationCounts {
-            hydrated: 4,
-            omitted: 1,
-            resolver_batches: 5,
-        }
-    );
-    assert_eq!(
-        request
-            .result_contents
-            .iter()
-            .map(|content| content.content.len())
-            .sum::<usize>(),
-        4 * MAX_RESULT_CONTENT_BYTES_PER_ITEM
-    );
-    assert!(!request
-        .result_contents
-        .iter()
-        .any(|content| content.stable_entity_id == invalid_result_id));
-    assert!(request
-        .result_contents
-        .iter()
-        .any(|content| content.stable_entity_id == later_valid_result_id));
-    assert!(request.result_contents.iter().any(|content| content
-        .content
-        .contains(&format!("source-{later_valid_source_index}:"))));
-    request.validate().expect("bounded request");
 }
 
 #[test]
@@ -795,7 +533,6 @@ fn journal_page_is_trimmed_against_the_complete_maximum_envelope() {
         frozen_through: frozen,
         authorized_repository_roots: roots,
         records: vec![first, second],
-        result_contents: Vec::new(),
     };
     assert!(journal_sync_envelope_bytes(&request).unwrap() > MAX_JOURNAL_SYNC_ENVELOPE_BYTES);
 
@@ -808,14 +545,28 @@ fn journal_page_is_trimmed_against_the_complete_maximum_envelope() {
 }
 
 #[test]
-fn query_capabilities_are_exact_and_blame_also_requires_git() {
+fn blame_capabilities_require_git_only_for_file_targets() {
     assert_eq!(
-        required_query_capabilities(QueryKind::Show),
+        required_blame_capabilities(&BlameTarget::File {
+            path: "src/lib.rs".to_owned(),
+            repository: None,
+            lines: None,
+        }),
+        BTreeSet::from([Capability::Query, Capability::GitRead])
+    );
+    assert_eq!(
+        required_blame_capabilities(&BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        }),
         BTreeSet::from([Capability::Query])
     );
     assert_eq!(
-        required_query_capabilities(QueryKind::Blame),
-        BTreeSet::from([Capability::Query, Capability::GitRead])
+        required_blame_capabilities(&BlameTarget::PullRequest {
+            selector: "https://github.com/ctxrs/ctx/pull/42".to_owned(),
+            repository: None,
+        }),
+        BTreeSet::from([Capability::Query])
     );
 }
 
@@ -843,11 +594,19 @@ fn journal_ack_requires_the_exact_checkpoint_and_counts() {
 }
 
 #[test]
-fn repository_semantic_rebuild_retry_is_bounded_to_one_retry() {
+fn retryable_rebuild_contention_is_bounded_to_one_retry() {
+    let contention = || {
+        let mut error = ctx_pro_host_protocol::ProtocolError::new(
+            ctx_pro_host_protocol::ErrorClass::NotMaterialized,
+            "untrusted rebuild-owner detail",
+        );
+        error.retryable = true;
+        protocol_error(error)
+    };
     let calls = Cell::new(0_u32);
     let result = retry_materialization_once(|| {
         calls.set(calls.get() + 1);
-        Err::<(), _>(anyhow!("not_materialized"))
+        Err::<(), _>(contention())
     });
     assert!(result.is_err());
     assert_eq!(calls.get(), 2);
@@ -855,12 +614,89 @@ fn repository_semantic_rebuild_retry_is_bounded_to_one_retry() {
     let calls = Cell::new(0_u32);
     let result = retry_materialization_once(|| {
         calls.set(calls.get() + 1);
-        (calls.get() == 2)
-            .then_some(())
-            .ok_or_else(|| anyhow!("not_materialized"))
+        (calls.get() == 2).then_some(()).ok_or_else(contention)
     });
     assert!(result.is_ok());
     assert_eq!(calls.get(), 2);
+}
+
+#[test]
+fn unchanged_ready_graph_skips_a_second_journal_sync() {
+    let checkpoint = JournalCheckpoint {
+        position: JournalPosition {
+            generation: 1,
+            sequence: 7,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: "a".repeat(64),
+    };
+
+    assert!(!journal_sync_required(
+        GraphState::Ready,
+        true,
+        &checkpoint,
+        &checkpoint,
+        0,
+    ));
+    assert!(journal_sync_required(
+        GraphState::Ready,
+        false,
+        &checkpoint,
+        &checkpoint,
+        0,
+    ));
+}
+
+#[test]
+fn empty_unmaterialized_graph_still_sends_its_initial_baseline() {
+    let checkpoint = JournalCheckpoint {
+        position: JournalPosition {
+            generation: 1,
+            sequence: 0,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: initial_journal_digest(1),
+    };
+
+    assert!(journal_sync_required(
+        GraphState::NotMaterialized,
+        false,
+        &checkpoint,
+        &checkpoint,
+        0,
+    ));
+}
+
+#[test]
+fn publication_requires_the_canonical_frontier_to_remain_frozen() {
+    let temp = tempdir().expect("temp dir");
+    let db_path = database_path(temp.path().to_path_buf());
+    let store = Store::open(&db_path).expect("open Store");
+    store
+        .activate_projection_journal(PROTOCOL_FINGERPRINT)
+        .expect("activate journal");
+    let expected = protocol_checkpoint(
+        store
+            .projection_journal_snapshot(None)
+            .expect("read initial frontier")
+            .frozen_through,
+    );
+    verify_canonical_frontier(temp.path(), &expected).expect("unchanged frontier");
+
+    let source_id = Uuid::from_u128(99);
+    let session_id = Uuid::from_u128(100);
+    store
+        .upsert_capture_source(&source(source_id))
+        .expect("append source");
+    store
+        .upsert_session(&session(session_id, source_id))
+        .expect("append session");
+    store
+        .upsert_event(&event(Uuid::from_u128(101), session_id, source_id))
+        .expect("advance canonical journal");
+    let error = verify_canonical_frontier(temp.path(), &expected)
+        .expect_err("advanced canonical history must prevent publication");
+    assert_eq!(stable_error_code(&error), Some("not_materialized"));
 }
 
 #[test]
@@ -997,6 +833,362 @@ send(status, 'status', {{'state':'ready','checkpoint':None}})
     );
     fs::write(path, script).expect("write helper");
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("make helper executable");
+}
+
+#[cfg(unix)]
+fn write_graph_key_deletion_helper(
+    path: &Path,
+    key_present_before: bool,
+    key_present_after: bool,
+    challenge_base64url: &str,
+) {
+    let before = if key_present_before { "True" } else { "False" };
+    let after = if key_present_after { "True" } else { "False" };
+    let script = format!(
+        r#"#!/usr/bin/python3
+import json, struct, sys
+
+def receive():
+    header = sys.stdin.buffer.read(12)
+    if len(header) != 12 or header[:8] != b'CTXPRO\x00\x01':
+        sys.exit(20)
+    size = struct.unpack('>I', header[8:12])[0]
+    return json.loads(sys.stdin.buffer.read(size))
+
+def send(request, kind, body):
+    value = {{'sequence':request['sequence'],'request_id':request['request_id'],
+             'message':{{'kind':kind,'body':body}}}}
+    payload = json.dumps(value, separators=(',', ':')).encode()
+    sys.stdout.buffer.write(b'CTXPRO\x00\x01' + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.flush()
+
+hello = receive()
+send(hello, 'hello', {{
+    'protocol_version':1,
+    'protocol_fingerprint':'{PROTOCOL_FINGERPRINT}',
+    'helper_version':'graph-key-deletion-test',
+    'capabilities':['graph_key_deletion'],
+    'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+}})
+prepare = receive()
+if prepare['message']['kind'] != 'prepare_graph_key_deletion':
+    sys.exit(21)
+challenge = '{challenge_base64url}'
+send(prepare, 'graph_key_deletion_prepared', {{
+    'challenge_base64url':challenge,
+    'expires_at_unix':2000000000,
+    'key_present':{before}
+}})
+if not {before}:
+    sys.exit(0)
+confirm = receive()
+if confirm['message']['kind'] != 'confirm_graph_key_deletion':
+    sys.exit(22)
+if confirm['message']['body']['authorization']['challenge_base64url'] != challenge:
+    sys.exit(23)
+send(confirm, 'graph_key_deleted', {{'deleted':True}})
+verify = receive()
+if verify['message']['kind'] != 'prepare_graph_key_deletion':
+    sys.exit(24)
+send(verify, 'graph_key_deletion_prepared', {{
+    'challenge_base64url':challenge,
+    'expires_at_unix':2000000000,
+    'key_present':{after}
+}})
+"#
+    );
+    fs::write(path, script).expect("write graph-key deletion helper");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .expect("make graph-key deletion helper executable");
+}
+
+#[cfg(target_os = "linux")]
+fn write_nonreading_journal_helper(path: &Path) {
+    let script = format!(
+        r#"#!/usr/bin/python3
+import json, os, struct, sys, time
+
+def receive():
+    header = sys.stdin.buffer.read(12)
+    if len(header) != 12 or header[:8] != b'CTXPRO\x00\x01':
+        sys.exit(20)
+    size = struct.unpack('>I', header[8:12])[0]
+    return json.loads(sys.stdin.buffer.read(size))
+
+def send(request, kind, body):
+    value = {{'sequence':request['sequence'],'request_id':request['request_id'],
+             'message':{{'kind':kind,'body':body}}}}
+    payload = json.dumps(value, separators=(',', ':')).encode()
+    sys.stdout.buffer.write(b'CTXPRO\x00\x01' + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.flush()
+
+hello = receive()
+with open(sys.argv[0] + '.pid', 'w', encoding='ascii') as pid_file:
+    pid_file.write(str(os.getpid()))
+send(hello, 'hello', {{
+    'protocol_version':1,
+    'protocol_fingerprint':'{PROTOCOL_FINGERPRINT}',
+    'helper_version':'nonreading-journal-test',
+    'capabilities':['journal_sync'],
+    'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+}})
+while True:
+    time.sleep(3600)
+"#
+    );
+    fs::write(path, script).expect("write non-reading helper");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .expect("make non-reading helper executable");
+}
+
+#[cfg(target_os = "linux")]
+fn valid_large_journal_request(payload_bytes: usize) -> JournalSyncRequest {
+    let initial_digest = initial_journal_digest(1);
+    let payload = json!({"body": "x".repeat(payload_bytes)});
+    let stable_entity_id = Uuid::from_u128(101);
+    let provenance = JournalProvenanceIdentity {
+        entity_kind: JournalEntityKind::Event,
+        stable_entity_id,
+        capture_source_id: None,
+        provider: None,
+        provider_external_id: None,
+    };
+    let mut record = JournalRecord {
+        generation: 1,
+        sequence: 1,
+        projection_contract_version: ctx_pro_host_protocol::PROJECTION_CONTRACT_VERSION,
+        entity_kind: JournalEntityKind::Event,
+        stable_entity_id,
+        entity_revision: 1,
+        operation: JournalOperation::Upsert,
+        canonical_payload: Some(payload.clone()),
+        payload_sha256: ctx_pro_host_protocol::sha256_hex(
+            &ctx_pro_host_protocol::canonical_payload_bytes(&payload)
+                .expect("encode canonical payload"),
+        ),
+        evidence: Vec::new(),
+        provenance,
+        cumulative_digest: "0".repeat(64),
+    };
+    record.cumulative_digest =
+        ctx_pro_host_protocol::journal_record_digest(&initial_digest, &record)
+            .expect("chain journal record");
+    let request = JournalSyncRequest {
+        mode: JournalSyncMode::FullBaseline,
+        canonical_schema_version: 1,
+        canonical_schema_identity: "ctx-store-schema-test".to_owned(),
+        projection_contract_version: ctx_pro_host_protocol::PROJECTION_CONTRACT_VERSION,
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        prior_checkpoint: JournalCheckpoint {
+            position: JournalPosition {
+                generation: 1,
+                sequence: 0,
+            },
+            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+            cumulative_digest: initial_digest,
+        },
+        frozen_through: JournalCheckpoint {
+            position: JournalPosition {
+                generation: 1,
+                sequence: 1,
+            },
+            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+            cumulative_digest: record.cumulative_digest.clone(),
+        },
+        authorized_repository_roots: Vec::new(),
+        records: vec![record],
+    };
+    request.validate().expect("large journal request is valid");
+    request
+}
+
+#[cfg(unix)]
+#[test]
+fn graph_key_deletion_uses_challenge_and_verifies_selected_record_absent() {
+    let temp = tempdir().expect("temp dir");
+    crate::identity::installation_id(temp.path()).expect("installation identity");
+    let helper = temp.path().join("ctx-pro-delete-key");
+    let challenge = ctx_pro_host_protocol::base64url(&[4; GRAPH_KEY_DELETION_CHALLENGE_BYTES]);
+    write_graph_key_deletion_helper(&helper, true, false, &challenge);
+    let required = BTreeSet::from([Capability::GraphKeyDeletion]);
+    let mut client = ProClient::connect_to_path_with_authorization_mode(
+        temp.path(),
+        &helper,
+        None,
+        &required,
+        None,
+        false,
+    )
+    .expect("helper handshake");
+    let authorization = RecordingAuthorization {
+        calls: Cell::new(0),
+    };
+    delete_graph_key_with_client(
+        &mut client,
+        &ctx_pro_host_protocol::base64url(&[8; 32]),
+        |value| authorization.authorization_for_challenge(value),
+    )
+    .expect("delete and verify graph key");
+    assert_eq!(authorization.calls.get(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn graph_key_deletion_is_idempotent_without_loading_authorization() {
+    let temp = tempdir().expect("temp dir");
+    crate::identity::installation_id(temp.path()).expect("installation identity");
+    let helper = temp.path().join("ctx-pro-delete-missing-key");
+    let challenge = ctx_pro_host_protocol::base64url(&[5; GRAPH_KEY_DELETION_CHALLENGE_BYTES]);
+    write_graph_key_deletion_helper(&helper, false, false, &challenge);
+    let required = BTreeSet::from([Capability::GraphKeyDeletion]);
+    let mut client = ProClient::connect_to_path_with_authorization_mode(
+        temp.path(),
+        &helper,
+        None,
+        &required,
+        None,
+        false,
+    )
+    .expect("helper handshake");
+    let authorization = RecordingAuthorization {
+        calls: Cell::new(0),
+    };
+    delete_graph_key_with_client(
+        &mut client,
+        &ctx_pro_host_protocol::base64url(&[9; 32]),
+        |value| authorization.authorization_for_challenge(value),
+    )
+    .expect("accept missing graph key");
+    assert_eq!(authorization.calls.get(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn graph_key_deletion_fails_closed_when_post_delete_key_is_present() {
+    let temp = tempdir().expect("temp dir");
+    crate::identity::installation_id(temp.path()).expect("installation identity");
+    let helper = temp.path().join("ctx-pro-retained-key");
+    let challenge = ctx_pro_host_protocol::base64url(&[6; GRAPH_KEY_DELETION_CHALLENGE_BYTES]);
+    write_graph_key_deletion_helper(&helper, true, true, &challenge);
+    let required = BTreeSet::from([Capability::GraphKeyDeletion]);
+    let mut client = ProClient::connect_to_path_with_authorization_mode(
+        temp.path(),
+        &helper,
+        None,
+        &required,
+        None,
+        false,
+    )
+    .expect("helper handshake");
+    let authorization = RecordingAuthorization {
+        calls: Cell::new(0),
+    };
+    let error = delete_graph_key_with_client(
+        &mut client,
+        &ctx_pro_host_protocol::base64url(&[10; 32]),
+        |value| authorization.authorization_for_challenge(value),
+    )
+    .expect_err("retained key must fail verification");
+    assert_eq!(stable_error_code(&error), Some("key_store_unavailable"));
+    assert_eq!(authorization.calls.get(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn graph_key_deletion_rejects_invalid_helper_challenge_before_authorization() {
+    let temp = tempdir().expect("temp dir");
+    crate::identity::installation_id(temp.path()).expect("installation identity");
+    let helper = temp.path().join("ctx-pro-invalid-delete-challenge");
+    write_graph_key_deletion_helper(&helper, true, false, "invalid");
+    let required = BTreeSet::from([Capability::GraphKeyDeletion]);
+    let mut client = ProClient::connect_to_path_with_authorization_mode(
+        temp.path(),
+        &helper,
+        None,
+        &required,
+        None,
+        false,
+    )
+    .expect("helper handshake");
+    let authorization = RecordingAuthorization {
+        calls: Cell::new(0),
+    };
+    let error = delete_graph_key_with_client(
+        &mut client,
+        &ctx_pro_host_protocol::base64url(&[11; 32]),
+        |value| authorization.authorization_for_challenge(value),
+    )
+    .expect_err("invalid challenge must fail");
+    assert_eq!(stable_error_code(&error), Some("invalid_response"));
+    assert_eq!(authorization.calls.get(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exchange_deadline_covers_a_request_write_blocked_by_a_nonreading_helper() {
+    let temp = tempdir().expect("temp dir");
+    crate::identity::installation_id(temp.path()).expect("installation identity");
+    let helper = temp.path().join("ctx-pro-nonreading-journal");
+    write_nonreading_journal_helper(&helper);
+
+    let required = BTreeSet::from([Capability::JournalSync]);
+    let mut client = ProClient::connect_to_path_with_authorization_mode(
+        temp.path(),
+        &helper,
+        None,
+        &required,
+        None,
+        false,
+    )
+    .expect("helper handshake");
+    let stdin = client.stdin.as_ref().expect("helper stdin");
+    let pipe_capacity = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_GETPIPE_SZ) };
+    assert!(
+        pipe_capacity > 0,
+        "read helper pipe capacity: {}",
+        std::io::Error::last_os_error()
+    );
+    let pipe_capacity = usize::try_from(pipe_capacity).expect("positive pipe capacity");
+    let request = valid_large_journal_request(pipe_capacity + 256 * 1024);
+    let encoded = serde_json::to_vec(&HostEnvelope {
+        sequence: client.sequence,
+        request_id: Uuid::from_u128(1),
+        message: HostMessage::SyncJournal(request.clone()),
+    })
+    .expect("encode framed request");
+    assert!(
+        encoded.len() > pipe_capacity,
+        "request payload {} must exceed helper pipe capacity {pipe_capacity}",
+        encoded.len()
+    );
+
+    let started = Instant::now();
+    let error = client
+        .exchange(
+            HostMessage::SyncJournal(request),
+            Duration::from_millis(250),
+        )
+        .expect_err("blocked write must time out");
+    assert_eq!(stable_error_code(&error), Some("helper_timeout"));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "blocked exchange outlived its bounded cleanup"
+    );
+    assert!(client.stdin.is_none(), "timed-out helper stdin stayed open");
+
+    let pid: i32 = fs::read_to_string(format!("{}.pid", helper.display()))
+        .expect("read helper pid")
+        .parse()
+        .expect("parse helper pid");
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "timed-out non-reading helper remained alive"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
 }
 
 #[cfg(unix)]

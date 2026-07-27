@@ -1,0 +1,20 @@
+diff --git a/src/environment.rs b/src/environment.rs
+--- a/src/environment.rs
++++ b/src/environment.rs
+@@ -76 +76 @@
+-unsafe extern "C" fn release_env_on_exit(#[cfg(target_vendor = "apple")] _: *const ()) {
++unsafe extern "C" fn release_env_on_exit(#[cfg(any(target_vendor = "apple", target_os = "freebsd"))] _: *const ()) {
+@@ -81 +81 @@
+-#[cfg(all(not(windows), not(target_vendor = "apple"), not(target_arch = "wasm32")))]
++#[cfg(all(not(windows), not(target_vendor = "apple"), not(target_os = "freebsd"), not(target_arch = "wasm32")))]
+@@ -100,3 +100,4 @@
+-// __cxa_atexit. And if you register it too early in the program (i.e. in __mod_init_func), it'll fire *after* C++
+-// destructors. So we call this after we create the environment instead. This shit took years off my life.
+-#[cfg(target_vendor = "apple")]
++// __cxa_atexit. FreeBSD's generic `.fini_array` path also runs after ONNX Runtime's C++ teardown has started. If the
++// handler is registered too early in the program, it'll fire *after* C++ destructors. Register it after creating the
++// environment on both targets so `ReleaseEnv` runs before the runtime's destructors.
++#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+@@ -259 +260 @@
+-	#[cfg(target_vendor = "apple")]
++	#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]

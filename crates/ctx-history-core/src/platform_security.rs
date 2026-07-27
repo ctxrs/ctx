@@ -5,8 +5,31 @@ use std::{io, path::Path};
 #[cfg(unix)]
 use std::fs;
 
+#[cfg(unix)]
+mod unix_private_directory;
 #[cfg(windows)]
 mod windows_acl;
+
+/// Creates missing pathname components with an owner-only directory policy,
+/// then verifies the final directory without repairing pre-existing objects.
+pub fn create_private_directory_all(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix_private_directory::create_private_directory_all(path)
+    }
+    #[cfg(windows)]
+    {
+        windows_acl::create_private_directory_all(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private directory creation is unavailable on this platform",
+        ))
+    }
+}
 
 /// Applies and verifies an owner-only directory policy.
 pub fn restrict_private_directory(path: &Path) -> io::Result<()> {
@@ -43,6 +66,29 @@ pub fn restrict_private_file(path: &Path) -> io::Result<()> {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private file policy is unavailable on this platform",
+        ))
+    }
+}
+
+/// Applies and verifies an owner-only regular-file policy through an already
+/// open handle.
+pub fn restrict_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        handle.set_permissions(fs::Permissions::from_mode(0o600))?;
+        verify_private_file_handle(handle)
+    }
+    #[cfg(windows)]
+    {
+        windows_acl::restrict_private_file_handle(handle)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = handle;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "private file policy is unavailable on this platform",
@@ -167,11 +213,31 @@ pub fn verify_private_directory_handle(handle: &std::fs::File) -> io::Result<()>
     windows_acl::verify_private_directory_handle(handle)
 }
 
-/// Verifies an already-open Windows regular-file handle without reopening its
+/// Verifies an already-open regular-file handle without reopening its
 /// pathname. Executables use the same exact protected DACL on Windows.
-#[cfg(windows)]
 pub fn verify_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
-    windows_acl::verify_private_file_handle(handle)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = handle.metadata()?;
+        if metadata.is_file() && metadata.permissions().mode() & 0o177 == 0 {
+            Ok(())
+        } else {
+            Err(private_policy_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        windows_acl::verify_private_file_handle(handle)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = handle;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private file verification is unavailable on this platform",
+        ))
+    }
 }
 
 #[cfg(unix)]
@@ -212,6 +278,48 @@ mod windows_tests {
     }
 
     #[test]
+    fn recursive_creation_is_private_at_creation_under_a_permissive_parent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let status = Command::new("icacls.exe")
+            .arg(parent.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        if !status.success() {
+            return Err("failed to make inherited ACL fixture permissive".into());
+        }
+        let first = parent.path().join("private");
+        let nested = first.join("state");
+
+        create_private_directory_all(&nested)?;
+
+        verify_private_directory(&first)?;
+        verify_private_directory(&nested)?;
+        fs::write(nested.join("usable"), b"ok")?;
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_creation_rejects_insecure_existing_target_without_repair(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let status = Command::new("icacls.exe")
+            .arg(parent.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        if !status.success() {
+            return Err("failed to make inherited ACL fixture permissive".into());
+        }
+        let target = parent.path().join("insecure");
+        fs::create_dir(&target)?;
+        assert!(verify_private_directory(&target).is_err());
+
+        assert!(create_private_directory_all(&target).is_err());
+        assert!(verify_private_directory(&target).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn directory_reparse_points_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;
         let target = parent.path().join("target");
@@ -230,6 +338,8 @@ mod windows_tests {
         let nested = target.join("nested");
         fs::create_dir(&nested)?;
         assert!(restrict_private_directory(&junction.join("nested")).is_err());
+        assert!(create_private_directory_all(&junction.join("created")).is_err());
+        assert!(!target.join("created").exists());
         Ok(())
     }
 

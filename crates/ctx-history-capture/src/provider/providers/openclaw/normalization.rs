@@ -1,93 +1,43 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderEventEnvelope, ProviderSourceTrust,
-};
+use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 
 use crate::{
     provider::normalization::{
-        native_event, native_provider_capture, provider_capped_json, provider_role,
-        provider_value_text, NativeEventDraft, NativeSessionDraft,
+        provider_capped_json, provider_policy_body, provider_policy_event_text,
+        provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
+        provider_value_text,
     },
-    ProviderAdapterContext, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-pub(super) struct OpenClawCaptureDraft<'a> {
-    pub(super) provider_session_id: &'a str,
-    pub(super) agent_id: Option<&'a str>,
-    pub(super) started_at: DateTime<Utc>,
-    pub(super) ended_at: Option<DateTime<Utc>>,
-    pub(super) cwd: Option<String>,
-    pub(super) path: &'a Path,
-    pub(super) index: Value,
-    pub(super) header_raw: Value,
-    pub(super) event: Option<ProviderEventEnvelope>,
-}
-
-pub(super) fn capture(
-    draft: OpenClawCaptureDraft<'_>,
-    context: &ProviderAdapterContext,
-) -> ProviderCaptureEnvelope {
-    let OpenClawCaptureDraft {
-        provider_session_id,
-        agent_id,
-        started_at,
-        ended_at,
-        cwd,
-        path,
-        index,
-        header_raw,
-        event,
-    } = draft;
-    native_provider_capture(
-        NativeSessionDraft {
-            provider: CaptureProvider::OpenClaw,
-            source_format: OPENCLAW_SOURCE_FORMAT,
-            provider_session_id: provider_session_id.to_owned(),
-            parent_provider_session_id: index
-                .get("parentSessionId")
-                .or_else(|| index.get("parent_session_id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            root_provider_session_id: None,
-            external_agent_id: agent_id.map(str::to_owned),
-            agent_type: AgentType::Primary,
-            role_hint: Some("personal-agent".to_owned()),
-            is_primary: true,
-            started_at,
-            ended_at,
-            cwd,
-            fidelity: Fidelity::Partial,
-            raw_source_path: path.display().to_string(),
-            trust: ProviderSourceTrust::ProviderNative,
-            source_metadata: json!({
-                "adapter": OPENCLAW_SOURCE_FORMAT,
-                "index": provider_capped_json(&index, PROVIDER_MAX_PREVIEW_CHARS),
-                "header": provider_capped_json(&header_raw, PROVIDER_MAX_PREVIEW_CHARS),
-                "support_level": "beta",
-            }),
-            session_metadata: json!({
-                "source_format": OPENCLAW_SOURCE_FORMAT,
-                "agent_id": agent_id,
-                "session_index": provider_capped_json(&index, PROVIDER_MAX_PREVIEW_CHARS),
-                "fidelity_gap": "OpenClaw session JSONL is current native storage, but upstream keeps a storage-neutral accessor for future schema changes",
-            }),
-        },
-        context,
-        event,
-    )
+pub(crate) struct OpenClawEventFact {
+    pub(crate) provider_event_index: u64,
+    pub(crate) provider_event_hash: Option<String>,
+    pub(crate) cursor: String,
+    pub(crate) event_type: EventType,
+    pub(crate) role: Option<EventRole>,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) payload: Value,
+    pub(crate) metadata: Value,
 }
 
 pub(crate) fn event(
-    provider_session_id: &str,
+    _provider_session_id: &str,
     event_index: u64,
     line_number: usize,
     row: &Value,
     occurred_at: DateTime<Utc>,
-) -> ProviderEventEnvelope {
+) -> OpenClawEventFact {
+    event_fact(event_index, line_number, row, occurred_at)
+}
+
+pub(super) fn event_fact(
+    event_index: u64,
+    line_number: usize,
+    row: &Value,
+    occurred_at: DateTime<Utc>,
+) -> OpenClawEventFact {
     let row_type = row.get("type").and_then(Value::as_str).unwrap_or("message");
     let message = row.get("message").unwrap_or(row);
     let role = message
@@ -109,18 +59,23 @@ pub(crate) fn event(
         .or_else(|| message.get("output"))
         .and_then(provider_value_text)
         .unwrap_or_default();
-    native_event(NativeEventDraft {
-        provider: CaptureProvider::OpenClaw,
-        source_format: OPENCLAW_SOURCE_FORMAT,
-        provider_session_id: provider_session_id.to_owned(),
+    let retained_text = provider_policy_event_text(event_type, &text, row);
+    let body = provider_policy_body(event_type, row);
+    OpenClawEventFact {
         provider_event_index: event_index,
         provider_event_hash: row.get("id").and_then(Value::as_str).map(str::to_owned),
         cursor: format!("line:{line_number}"),
         event_type,
         role,
         occurred_at,
-        text,
-        body: row.clone(),
+        payload: json!({
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
+            "result_evidence": provider_result_identifier_evidence(event_type, &text, row),
+            "result_outcome": provider_result_outcome_evidence(event_type, row),
+            "source_format": OPENCLAW_SOURCE_FORMAT,
+            "body": provider_capped_json(&body, PROVIDER_MAX_PREVIEW_CHARS),
+        }),
         metadata: json!({
             "source": "openclaw_jsonl",
             "source_format": OPENCLAW_SOURCE_FORMAT,
@@ -128,5 +83,5 @@ pub(crate) fn event(
             "message_id": row.get("id").and_then(Value::as_str),
             "parent_id": row.get("parentId").or_else(|| row.get("parent_id")).cloned(),
         }),
-    })
+    }
 }

@@ -2,9 +2,26 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-smoke="${repo_root}/scripts/smoke-daemon-semantic-release.sh"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-release-smoke-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
+
+release_root="${tmp}/release-root"
+mkdir -p "${release_root}/contracts" "${release_root}/scripts"
+for release_script in \
+  check-public-cli-build-info.py \
+  dev-install-from-metadata.sh \
+  public-cli-host-runtime-evidence.sh \
+  public-cli-runtime-authority.sh \
+  smoke-daemon-semantic-release.sh; do
+  cp -L "${repo_root}/scripts/${release_script}" \
+    "${release_root}/scripts/${release_script}"
+done
+chmod 0755 "${release_root}/scripts/"*
+cp -L "${repo_root}/contracts/release-targets-v1.json" \
+  "${release_root}/contracts/release-targets-v1.json"
+test -f "${release_root}/contracts/release-targets-v1.json"
+test ! -L "${release_root}/contracts/release-targets-v1.json"
+smoke="${release_root}/scripts/smoke-daemon-semantic-release.sh"
 
 fake_ctx="${tmp}/ctx-macos-artifact"
 cat > "${fake_ctx}" <<'EOF'
@@ -45,6 +62,10 @@ done
 
 case "${command}" in
   import)
+    if find "${CTX_SEMANTIC_CACHE_DIR}" -mindepth 1 -print -quit | grep -q .; then
+      printf 'foreground import observed non-empty semantic cache\n' >&2
+      exit 1
+    fi
     fixture=""
     while (($# > 0)); do
       if [[ "$1" == "--path" ]]; then
@@ -62,6 +83,9 @@ case "${command}" in
     shift || true
     case "${subcommand}" in
       run)
+        mkdir -p "${CTX_SEMANTIC_CACHE_DIR}/fake-verified-model"
+        printf 'daemon-owned verified model\n' \
+          > "${CTX_SEMANTIC_CACHE_DIR}/fake-verified-model/complete"
         printf '%s\n' "$$" > "${data_root}/fake-daemon-pid"
         trap 'exit 0' TERM INT
         while :; do sleep 1; done
@@ -190,6 +214,9 @@ grep -Fxq 'compute_mode=all' "${proof}"
 grep -Fxq 'model=intfloat/multilingual-e5-small' "${proof}"
 grep -Fxq 'acquisition_source=download' "${proof}"
 grep -Fxq 'acquisition_fallback=none' "${proof}"
+grep -Fxq 'model_cache_start=empty' "${proof}"
+grep -Fxq 'foreground_model_download=absent' "${proof}"
+grep -Fxq 'daemon_model_acquisition=download' "${proof}"
 grep -Fxq 'semantic_search=passed' "${proof}"
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -216,6 +243,31 @@ sed \
   -e 's/"backend":"coreml","compute_mode":"all"/"backend":"cpu","preference":"cpu"/g' \
   "${fake_ctx}" > "${cpu_ctx}"
 chmod 755 "${cpu_ctx}"
+printf 'synthetic lock\n' > "${tmp}/Cargo.lock"
+python3 "${repo_root}/scripts/write-public-cli-build-info.py" \
+  --output "${cpu_ctx}.build-info.json" \
+  --artifact "${cpu_ctx}" \
+  --cargo-lock "${tmp}/Cargo.lock" \
+  --platform linux-x64 \
+  --target x86_64-unknown-linux-gnu \
+  --source-commit 0123456789abcdef0123456789abcdef01234567 \
+  --source-clean true \
+  --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-14)" \
+  --expected-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 \
+  --actual-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 \
+  --builder-image-id sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --builder-recipe-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --runtime-image-id sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --inspector-image-id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --linux-builder-image docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 \
+  --linux-ubuntu-snapshot 20260701T000000Z \
+  --linux-glibc-max 2.35 \
+  --linux-rust-toolchain 1.97.1 \
+  --linux-rust-commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452 \
+  --linux-rust-sysroot /opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu \
+  --static-status passed \
+  --local-runtime-status passed \
+  --local-runtime-authority authoritative
 
 runtime_payload="${tmp}/runtime-payload"
 mkdir -p "${runtime_payload}/lib"
@@ -249,6 +301,16 @@ fi
 grep -Fxq 'runtime=onnxruntime' "${onnx_proof}"
 grep -Fxq 'embedding_backend=cpu' "${onnx_proof}"
 grep -Fxq 'runtime_authority=authoritative' "${onnx_proof}"
+grep -Fxq 'acquisition_source=download' "${onnx_proof}"
+grep -Fxq 'model_cache_start=empty' "${onnx_proof}"
+grep -Fxq 'foreground_model_download=absent' "${onnx_proof}"
+grep -Fxq 'daemon_model_acquisition=download' "${onnx_proof}"
+if command -v sha256sum >/dev/null 2>&1; then
+  expected_build_info_sha="$(sha256sum "${cpu_ctx}.build-info.json" | awk '{ print $1 }')"
+else
+  expected_build_info_sha="$(shasum -a 256 "${cpu_ctx}.build-info.json" | awk '{ print $1 }')"
+fi
+grep -Fxq "build_info_sha256=${expected_build_info_sha}" "${onnx_proof}"
 grep -Fxq 'semantic_search=passed' "${onnx_proof}"
 
 printf 'daemon semantic release smoke contract tests passed\n'

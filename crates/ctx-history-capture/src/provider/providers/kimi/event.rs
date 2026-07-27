@@ -1,23 +1,38 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
+use ctx_history_core::{EventRole, EventType, Fidelity};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::normalization::{
-    native_event, provider_explicit_result_value_text, provider_role,
-    provider_timestamp_seconds_to_datetime, provider_value_text, NativeEventDraft,
+    provider_capped_json, provider_explicit_result_value_text, provider_policy_body,
+    provider_policy_event_text, provider_result_identifier_evidence,
+    provider_result_outcome_evidence, provider_role, provider_timestamp_seconds_to_datetime,
+    provider_value_text,
 };
-use crate::KIMI_CODE_CLI_SOURCE_FORMAT;
+use crate::{KIMI_CODE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct KimiCoreEvent {
+    pub(super) provider_event_index: u64,
+    pub(super) provider_event_hash: Option<String>,
+    pub(super) cursor: String,
+    pub(super) event_type: EventType,
+    pub(super) role: Option<EventRole>,
+    pub(super) occurred_at: DateTime<Utc>,
+    pub(super) fidelity: Fidelity,
+    pub(super) payload: Value,
+    pub(super) metadata: Value,
+}
 
 pub(crate) fn kimi_event(
-    provider_session_id: &str,
     line_number: usize,
     value: &Value,
     occurred_at: DateTime<Utc>,
     path: &Path,
-) -> ProviderEventEnvelope {
+) -> KimiCoreEvent {
     let record_type = value
         .get("type")
         .and_then(Value::as_str)
@@ -25,10 +40,11 @@ pub(crate) fn kimi_event(
     let event_type = kimi_event_type(record_type, value);
     let role = kimi_event_role(record_type, value, event_type);
     let text = kimi_event_text(record_type, value, event_type);
-    native_event(NativeEventDraft {
-        provider: CaptureProvider::KimiCodeCli,
-        source_format: KIMI_CODE_CLI_SOURCE_FORMAT,
-        provider_session_id: provider_session_id.to_owned(),
+    let retained_text = provider_policy_event_text(event_type, &text, value);
+    let retained_body = provider_policy_body(event_type, value);
+    let result_evidence = provider_result_identifier_evidence(event_type, &text, value);
+    let result_outcome = provider_result_outcome_evidence(event_type, value);
+    KimiCoreEvent {
         provider_event_index: (line_number - 1) as u64,
         provider_event_hash: Some(format!(
             "{}:{}",
@@ -43,8 +59,15 @@ pub(crate) fn kimi_event(
         event_type,
         role: Some(role),
         occurred_at,
-        text,
-        body: value.clone(),
+        fidelity: Fidelity::Imported,
+        payload: json!({
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
+            "result_evidence": result_evidence,
+            "result_outcome": result_outcome,
+            "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
+            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+        }),
         metadata: json!({
             "source": "kimi_code_cli_wire_jsonl",
             "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
@@ -53,7 +76,7 @@ pub(crate) fn kimi_event(
             "model": value.get("model").cloned(),
             "usage": value.get("usage").cloned(),
         }),
-    })
+    }
 }
 
 pub(crate) fn kimi_event_type(record_type: &str, value: &Value) -> EventType {

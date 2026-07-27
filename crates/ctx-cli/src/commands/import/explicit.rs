@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 
@@ -12,15 +15,15 @@ use crate::analytics::{
 use crate::commands::import::catalog::{import_record_for_custom_history, source_stats};
 use crate::commands::import::report::{
     custom_format_failure_json, custom_format_import_json, error_summary, import_error_scope,
-    import_failure_type, low_disk_space_warning, ImportFailureScope,
+    import_failure_type, low_disk_space_warning, ImportFailureScope, ImportFailureType,
 };
 use crate::commands::import::totals::ImportTotals;
-use crate::commands::import::ProviderRefreshCollector;
 use crate::commands::import::{
     cleanup_rejected_history_record, history_record_exists, provider_summary_has_imported_content,
     CatalogTotals, ImportReport, ImportRunOptions, InventoryTotals, PlannedImportSource,
     SourceStats,
 };
+use crate::commands::import::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
 use crate::progress::{format_bytes, format_count, plural, ProgressReporter};
 use crate::provider_args::ImportFormatArg;
 use crate::{
@@ -45,16 +48,28 @@ impl ExplicitFormatImportContext<'_> {
         path: &Path,
         stats: SourceStats,
         error: &anyhow::Error,
+        runtime_facts: Option<ProviderRefreshRuntimeFacts>,
     ) -> ImportReport {
         let mut totals = ImportTotals::default();
         totals.add_source_failure(&stats);
-        self.provider_refreshes.record_failure(
-            CaptureProvider::Custom,
-            self.refresh_trigger,
-            ProviderRefreshSourceMode::ExplicitFormat,
-            &stats,
-            None,
-        );
+        if let Some(facts) = runtime_facts {
+            self.provider_refreshes.record_failure_with_facts(
+                CaptureProvider::Custom,
+                self.refresh_trigger,
+                ProviderRefreshSourceMode::ExplicitFormat,
+                &stats,
+                None,
+                facts,
+            );
+        } else {
+            self.provider_refreshes.record_failure(
+                CaptureProvider::Custom,
+                self.refresh_trigger,
+                ProviderRefreshSourceMode::ExplicitFormat,
+                &stats,
+                None,
+            );
+        }
         insert_explicit_format_analytics(self.telemetry, &stats, &totals);
         ImportReport {
             resume: self.args.resume,
@@ -101,7 +116,7 @@ pub(crate) fn run_explicit_format_import(
             return Err(error);
         }
         Err(error) => {
-            return Ok(context.failure_report(&path, SourceStats::default(), &error));
+            return Ok(context.failure_report(&path, SourceStats::default(), &error, None));
         }
     };
     context.telemetry.sources_seen = Some(count_bucket(1));
@@ -142,6 +157,7 @@ pub(crate) fn run_explicit_format_import(
     let record_existed = history_record_exists(&context.store, record_id)?;
     context.store.upsert_record(&record)?;
     progress.message("indexing", format!("importing {}", context.format.as_str()));
+    let provider_started = Instant::now();
     let import_result = match context.format {
         ImportFormatArg::CtxHistoryJsonlV1 => import_custom_history_jsonl_v1(
             &path,
@@ -154,42 +170,66 @@ pub(crate) fn run_explicit_format_import(
         )
         .map_err(anyhow::Error::from),
     };
+    let provider_duration = provider_started.elapsed();
     let summary = match import_result {
         Ok(summary) => summary,
         Err(error) if import_error_scope(&error) == ImportFailureScope::System => {
-            context.provider_refreshes.record_failure(
+            let failure_type = import_failure_type(&error);
+            context.provider_refreshes.record_failure_with_facts(
                 CaptureProvider::Custom,
                 context.refresh_trigger,
                 ProviderRefreshSourceMode::ExplicitFormat,
                 &stats,
                 None,
+                ProviderRefreshRuntimeFacts::observed_failure(
+                    provider_duration,
+                    ImportFailureScope::System,
+                    failure_type,
+                ),
             );
             return Err(error);
         }
         Err(error) => {
             cleanup_rejected_history_record(&context.store, record_id, record_existed)?;
-            return Ok(context.failure_report(&path, stats, &error));
+            let failure_scope = import_error_scope(&error);
+            let failure_type = import_failure_type(&error);
+            return Ok(context.failure_report(
+                &path,
+                stats,
+                &error,
+                Some(ProviderRefreshRuntimeFacts::observed_failure(
+                    provider_duration,
+                    failure_scope,
+                    failure_type,
+                )),
+            ));
         }
     };
     let mut totals = ImportTotals::default();
     if summary.failed > 0 && !provider_summary_has_imported_content(&summary) {
         cleanup_rejected_history_record(&context.store, record_id, record_existed)?;
         totals.add_rejected_source(&summary, &stats);
-        context.provider_refreshes.record_failure(
+        context.provider_refreshes.record_failure_with_facts(
             CaptureProvider::Custom,
             context.refresh_trigger,
             ProviderRefreshSourceMode::ExplicitFormat,
             &stats,
             Some(&summary),
+            ProviderRefreshRuntimeFacts::observed_failure(
+                provider_duration,
+                ImportFailureScope::Source,
+                ImportFailureType::RecordRejection,
+            ),
         );
     } else {
         totals.add(&summary, &stats);
-        context.provider_refreshes.record_success(
+        context.provider_refreshes.record_success_with_facts(
             CaptureProvider::Custom,
             context.refresh_trigger,
             ProviderRefreshSourceMode::ExplicitFormat,
             &summary,
             &stats,
+            ProviderRefreshRuntimeFacts::observed_success(provider_duration, &summary),
         );
     }
     if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {

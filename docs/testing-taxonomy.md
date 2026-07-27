@@ -1,6 +1,8 @@
 # Testing Taxonomy
 
-Public verification focuses on fast local confidence for the search CLI.
+Public verification starts with fast local confidence and expands as needed.
+All normal commands use repository-owned wrappers; direct `bazel` and broad raw
+Cargo commands are not routine entry points.
 
 ## Modes
 
@@ -11,14 +13,25 @@ Public verification focuses on fast local confidence for the search CLI.
 | `presubmit` | `fast` plus the complete native Rust unit and integration graph. |
 | `ci` | Buildkite gate: native clippy, `presubmit`, SDK packaging, and release/content audit. |
 
+During editing, run the smallest owning test and then the affected selector.
+Use `presubmit` when the build graph changes or selection is uncertain, and
+`ci` for the complete public check. Stress, network-dependent, external,
+platform-native, and release/manual checks are separate from the default
+public development loop.
+
 ## Commands
 
 ```bash
-bash scripts/check.sh --mode=fast
-bash scripts/check.sh --mode=smoke
-bash scripts/check.sh --mode=presubmit
-bash scripts/check.sh --mode=ci
+scripts/check.sh --mode=fast
+scripts/check.sh --mode=smoke
+scripts/check.sh --mode=presubmit
+scripts/check.sh --mode=ci
+scripts/check.sh --mode=ci --force-rerun
+scripts/bazel-affected.sh origin/main
 ```
+
+`--force-rerun` passes `--cache_test_results=no` only to Bazel test actions;
+shared compilation and repository caches remain available.
 
 Use direct Bazel targets when a narrower check is enough:
 
@@ -30,9 +43,26 @@ scripts/bazelw test //:local_transcript_oracle --config=test
 scripts/bazelw test //:package_audit_release --config=release
 ```
 
+Routine labels must be real Bazel tests or test suites. `bazel run` remains
+appropriate for a generator or explicit operation, but not for an ordinary
+check whose successful result should be reusable.
+
 All default public tests must be hermetic. They must not require API keys,
 network access, provider accounts, hidden model calls, or writes into source
 repositories.
+
+## Cache reuse and diagnostics
+
+Bazel reuses a passing result when its declared source, graph, configuration,
+toolchain, platform, and target inputs are identical. Do not force reruns merely
+to make a test execute again. Rerun when an input differs, the affected selector
+fails or cannot classify a change, or a flake is being investigated.
+
+When comparison with Cargo is necessary to diagnose Bazel parity, use
+`scripts/cargo-diagnostic.sh <cargo arguments...>`. It bounds build jobs to one
+quarter of available CPUs (maximum eight), bounds default Rust test threads to
+four, and uses `debug=0` unless `CTX_CARGO_DIAGNOSTIC_DEBUG=1`. Cargo diagnostic
+output does not replace the owning Bazel test.
 
 ## Upgrade Compatibility
 

@@ -35,7 +35,7 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 4);
+    assert_eq!(first.imported_events, 3);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Warp, "warp-conversation-1");
@@ -47,11 +47,14 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
     assert!(!rendered_session.contains("warp-server-token-fixture"));
 
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0].role, Some(EventRole::User));
     assert_eq!(events[1].role, Some(EventRole::Assistant));
     assert_eq!(events[2].event_type, EventType::ToolCall);
-    assert_eq!(events[3].event_type, EventType::ToolOutput);
+    assert!(events
+        .iter()
+        .all(|event| event.event_type != EventType::ToolOutput));
+    assert!(store.runs_for_session(session_id).unwrap().is_empty());
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("warp sqlite oracle prompt"));
     assert!(rendered.contains("Warp sqlite oracle answer"));
@@ -75,7 +78,7 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 4);
+    assert_eq!(second.skipped_events, 3);
 }
 
 #[test]
@@ -113,7 +116,7 @@ fn native_warp_import_reads_committed_wal_content() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 4);
+    assert_eq!(summary.imported_events, 3);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Warp, "warp-conversation-1");
     let session = store.get_session(session_id).unwrap();
@@ -121,6 +124,15 @@ fn native_warp_import_reads_committed_wal_content() {
     assert!(rendered_session.contains("Warp WAL Agent"));
     assert!(rendered_session.contains("server_conversation_token_present"));
     assert!(!rendered_session.contains("warp-server-token-preserved"));
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == EventType::ToolCall));
+    assert!(events
+        .iter()
+        .all(|event| event.event_type != EventType::ToolOutput));
+    assert!(store.runs_for_session(session_id).unwrap().is_empty());
     assert_eq!(sqlite_file_snapshot(&live_db), before_import);
     drop(writer);
 }

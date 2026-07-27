@@ -12,9 +12,13 @@ Usage:
   scripts/build-onnxruntime-sidecar.sh PLATFORM [OUTPUT_DIR]
   scripts/build-onnxruntime-sidecar.sh --validate PLATFORM ARCHIVE
 
-Builds or validates the ONNX Runtime 1.27.0 CPU sidecar for one public ctx
-platform. Official Microsoft release archives are checksum-pinned. macos-x64
-is built from checksum-pinned source and requires a native Intel macOS host.
+Builds or validates one pinned public ctx native runtime sidecar. CPU and CUDA
+use ONNX Runtime 1.27.0. The legacy windows-x64 lane retains its pinned
+app-local VC runtime; windows-x64-windowsml is a separate self-contained
+Windows ML 2.1.74 asset. The CUDA artifact includes its pinned CUDA 12 and
+cuDNN user-space libraries, leaving only the NVIDIA driver on the host. Every
+official input is checksum-pinned. macos-x64 is built from checksum-pinned
+source and requires a native Intel macOS host.
 freebsd-x64 is built from that same checksum-pinned source on a native x64
 FreeBSD 14 host. Its two compatibility patches are checksum-pinned to FreeBSD
 ports commit 7c1f125705820cd2b776056f2c492ed605f3b5e3. CMake is forced to fetch
@@ -23,8 +27,8 @@ distinfo instead of using mutable installed packages, and the resulting library
 records its source, recipe, ABI, OS, compiler, and CMake provenance in
 OrtGetBuildInfoString.
 
-Platforms: linux-x64, linux-aarch64, macos-arm64, macos-x64, windows-x64,
-freebsd-x64.
+Platforms: linux-x64, linux-x64-cuda12, linux-aarch64, macos-arm64,
+macos-x64, windows-x64, windows-x64-windowsml, freebsd-x64.
 
 Environment:
   CTX_ONNXRUNTIME_CACHE_DIR       Download cache (default: target/onnxruntime-sidecar-cache)
@@ -37,9 +41,6 @@ Native FreeBSD build requirements:
   (gpatch), make, and network access to the checksum-declared source inputs.
   The OS/compiler/CMake versions are recorded, not supplied by environment.
 
-Windows sidecar build requirement:
-  cabextract, used to extract checksum-pinned app-local VC runtime files from
-  Microsoft's checksum-pinned redistributable bundle.
 USAGE
 }
 
@@ -130,13 +131,63 @@ if [[ "${platform}" == macos-* ]]; then
 fi
 
 package_path="${package_dir}/${asset_name}"
+archive_args=()
+for provider_library in ${provider_libraries}; do
+  archive_args+=(--extra-library "${provider_library}")
+done
+for extra_document in ${extra_documents}; do
+  archive_args+=(--extra-document "${extra_document}")
+done
+for exact_file in ${archive_exact_files}; do
+  archive_args+=(--exact-file "${exact_file}")
+done
 python3 "${sidecar_tools}/archive_tool.py" create \
   --kind "${archive_kind}" \
   --library "${library_name}" \
   --source "${stage_dir}" \
   --output "${package_path}" \
-  --source-date-epoch "${SOURCE_DATE_EPOCH}"
+  --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+  "${archive_args[@]}"
 bash "${sidecar_tools}/validate_sidecar.sh" "${platform}" "${package_path}"
+
+signed_files=()
+if [[ -n "${archive_exact_files}" ]]; then
+  read -r -a signed_files <<<"${archive_exact_files}"
+else
+  signed_files=(
+    LICENSE
+    ThirdPartyNotices.txt
+    VERSION_NUMBER
+    GIT_COMMIT_ID
+  )
+  for extra_document in ${extra_documents}; do
+    signed_files+=("${extra_document}")
+  done
+  signed_files+=("lib/${library_name}")
+  for provider_library in ${provider_libraries}; do
+    signed_files+=("lib/${provider_library}")
+  done
+fi
+mapfile -t signed_files < <(printf '%s\n' "${signed_files[@]}" | LC_ALL=C sort -u)
+metadata_args=()
+for signed_file in "${signed_files[@]}"; do
+  metadata_args+=(--file "${signed_file}")
+done
+package_metadata=""
+if [[ "${semantic_catalog_asset}" == "1" ]]; then
+  package_metadata="${package_path}.asset.json"
+  python3 "${script_dir}/semantic-release-assets.py" record \
+    --asset-id "${asset_id}" \
+    --role "${catalog_role}" \
+    --backend "${catalog_backend}" \
+    --version "${runtime_version}" \
+    --platform "${archive_platform}" \
+    --archive-format "${archive_kind}" \
+    --archive "${package_path}" \
+    --root "${stage_dir}" \
+    --output "${package_metadata}" \
+    "${metadata_args[@]}"
+fi
 
 mkdir -p "${output_dir}"
 temporary_output="${output_dir%/}/.${asset_name}.tmp.$$"
@@ -146,6 +197,13 @@ chmod 644 "${temporary_output}"
 mv "${temporary_output}" "${output_dir%/}/${asset_name}"
 sha256_file "${output_dir%/}/${asset_name}" > "${output_dir%/}/${asset_name}.sha256.tmp.$$"
 mv "${output_dir%/}/${asset_name}.sha256.tmp.$$" "${output_dir%/}/${asset_name}.sha256"
+if [[ -n "${package_metadata}" ]]; then
+  temporary_metadata="${output_dir%/}/.${asset_name}.asset.json.tmp.$$"
+  rm -f "${temporary_metadata}"
+  cp "${package_metadata}" "${temporary_metadata}"
+  chmod 644 "${temporary_metadata}"
+  mv "${temporary_metadata}" "${output_dir%/}/${asset_name}.asset.json"
+fi
 if [[ "${platform}" == macos-* && "${macos_signing_mode}" == required ]]; then
   python3 "${script_dir}/macos-release-signing-evidence.py" bind-archive \
     --evidence "${output_dir%/}/ctx-onnxruntime-${platform}.signing.json" \

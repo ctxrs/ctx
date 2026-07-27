@@ -256,6 +256,10 @@ mkdir -p \
   "${smoke_cache}" \
   "${smoke_config}" \
   "${semantic_cache}"
+if find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
+  echo "error: semantic smoke cache was not clean at startup" >&2
+  exit 1
+fi
 
 printf 'ctx semantic smoke: run_root=%s\n' "${run_root}"
 printf 'ctx semantic smoke: data_root=%s\n' "${data_root}"
@@ -296,6 +300,20 @@ else
   echo "error: sha256sum or shasum is required to verify the ctx artifact" >&2
   exit 127
 fi
+build_info_proof_line=""
+case "${runtime_platform}" in
+  linux-*|freebsd-x64)
+    build_info_path="${ctx_source}.build-info.json"
+    build_info_sha="$(
+      python3 -I "${script_dir}/check-public-cli-build-info.py" \
+        --artifact "${ctx_source}" \
+        --build-info "${build_info_path}" \
+        --matrix "${script_dir}/../contracts/release-targets-v1.json" \
+        --platform "${runtime_platform}"
+    )"
+    build_info_proof_line="build_info_sha256=${build_info_sha}"
+    ;;
+esac
 runtime_authority="$(
   "${script_dir}/public-cli-runtime-authority.sh" \
     "${runtime_platform}" "${host_system}" "${host_arch}" passed \
@@ -431,7 +449,6 @@ isolated_env=(
   -u CTX_UPGRADE_FUNCTIONS_BASE
   -u CTX_UPGRADE_INTERVAL_SECONDS
   -u CTX_UPGRADE_TARGET
-  -u CTX_UPGRADE_BACKGROUND_CHILD
   -u CTX_SEMANTIC_CACHE_DIR
   -u FASTEMBED_CACHE_DIR
   -u HF_HOME
@@ -487,6 +504,10 @@ else
   printf 'ctx semantic smoke: packaged_runtime=%s\n' "${runtime_dylib}"
 fi
 run_ctx import --no-daemon --format ctx-history-jsonl-v1 --path "${fixture_path}" >/dev/null
+if find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
+  echo "error: foreground import initialized or downloaded semantic model state" >&2
+  exit 1
+fi
 
 cat > "${data_root}/config.toml" <<'EOF'
 [analytics]
@@ -551,6 +572,12 @@ if coreml_mode != "1":
         raise SystemExit(2)
     if runtime.get("model_id") != expected_model:
         print(f"ONNX smoke reported model {runtime.get('model_id')!r}", file=sys.stderr)
+        raise SystemExit(2)
+    if runtime.get("acquisition_source") != "download":
+        print(
+            f"ONNX smoke reported acquisition source {runtime.get('acquisition_source')!r}",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     raise SystemExit(0)
 
@@ -661,6 +688,10 @@ while ((SECONDS < deadline)); do
     if search_json_matches; then
       if run_ctx daemon status --json > "${daemon_status_json}" 2> "${daemon_status_error}" && \
         daemon_status_matches; then
+        if ! find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
+          echo "error: daemon reported a downloaded model without populating the clean cache" >&2
+          exit 1
+        fi
         if [[ "${coreml_mode}" == "1" ]]; then
           runtime_fields="$(python3 -I - "${daemon_status_json}" <<'PY'
 import json
@@ -698,6 +729,9 @@ compute_mode=${coreml_compute_mode}
 model=${coreml_model}
 acquisition_source=${coreml_acquisition_source}
 acquisition_fallback=none
+model_cache_start=empty
+foreground_model_download=absent
+daemon_model_acquisition=download
 CTX_SEMANTIC_CACHE_DIR=${semantic_cache}
 daemon_status=running
 daemon_pid=${daemon_pid}
@@ -718,11 +752,16 @@ native_arch_probe=${native_arch_probe}
 runtime_authority=${runtime_authority}
 artifact=${ctx_source}
 artifact_sha256=${binary_sha}
+${build_info_proof_line}
 archive=${runtime_archive}
 runtime_archive_sha256=${actual_runtime_sha}
 CTX_RUNTIME_DIR=${runtime_root}
 runtime_dylib=${runtime_dylib}
 loader_overrides=unset
+acquisition_source=download
+model_cache_start=empty
+foreground_model_download=absent
+daemon_model_acquisition=download
 CTX_SEMANTIC_CACHE_DIR=${semantic_cache}
 daemon_status=running
 daemon_pid=${daemon_pid}

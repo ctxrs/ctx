@@ -1,11 +1,24 @@
 mod command;
+mod diagnostics;
+mod download;
 mod install;
 mod metadata;
 mod path;
 mod state;
+mod version;
 
-pub use command::{maybe_spawn_auto_upgrade, run, UpgradeArgs};
+pub(crate) use command::{
+    finish_daemon_auto_upgrade, prepare_daemon_auto_upgrade, PreparedDaemonUpgrade,
+};
+pub use command::{run, UpgradeArgs};
+pub(crate) use diagnostics::upgrade_diagnostics;
 pub(crate) use install::is_valid_install_attempt_id;
+pub(crate) use state::{
+    active_installation_upgrade_attempt_id, installation_daemon_coordination_paths,
+    installation_daemon_coordination_paths_for, installation_executable_path,
+    installation_upgrade_is_active, is_valid_upgrade_attempt_id,
+    terminal_installation_upgrade_attempt_id,
+};
 
 use std::env;
 
@@ -22,11 +35,14 @@ struct UpgradePlan {
     pub(super) artifact_url: String,
     pub(super) artifact_sha256: String,
     pub(super) install_path: std::path::PathBuf,
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(super) install_fingerprint: install::InstallFingerprint,
     pub(super) update_available: bool,
     pub(super) managed: bool,
     pub(super) warnings: Vec<String>,
     pub(super) path: path::PathDiagnostics,
     pub(super) metadata: metadata::ReleaseMetadata,
+    pub(super) semantic_provisioning: Option<metadata::SelectedSemanticProvisioning>,
 }
 
 impl UpgradePlan {
@@ -38,6 +54,14 @@ impl UpgradePlan {
                 runtime.artifact
             )
         })
+    }
+
+    fn semantic_artifact_url(&self, artifact: &str) -> String {
+        format!(
+            "{}/{}",
+            self.metadata.base_url.trim_end_matches('/'),
+            artifact
+        )
     }
 }
 
@@ -74,16 +98,5 @@ fn env_flag(key: &str) -> bool {
 }
 
 fn version_gt(left: &str, right: &str) -> bool {
-    let left = version_parts(left);
-    let right = version_parts(right);
-    left > right
-}
-
-fn version_parts(value: &str) -> Vec<u64> {
-    value
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .take(4)
-        .map(|part| part.parse::<u64>().unwrap_or(0))
-        .collect()
+    version::version_gt(left, right)
 }

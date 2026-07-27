@@ -1,42 +1,35 @@
 //! Byte-range complete-message recovery for newline-delimited JSON sources.
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, ContentRef, EventType, ProviderEventEnvelope};
+use ctx_history_core::{CaptureProvider, EventType};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
-    attach_verified_content_locator, verified_content_address_supported, verified_content_profile,
-    verified_content_route_supported, CompleteContentBodyDigest, CompleteContentError,
-    CompleteContentErrorKind, CompleteContentHashAuthority, CompleteContentResolver,
-    CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessage,
-    CompleteMessageRequest, SourceVerification, VerifiedContentLocatorV1, VerifiedContentRole,
-    COMPLETE_CONTENT_MAX_BODY_BYTES,
+    verified_content_address_supported, verified_content_route_supported,
+    CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
+    CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
+    CompleteContentSourceLocator, CompleteMessage, CompleteMessageRequest, SourceVerification,
+    VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES,
 };
-use crate::captured_batch::jsonl::jsonl_locator_range;
-use crate::captured_batch::{CapturedRecord, CapturedRecordPayload};
 use crate::provider::codex::events::{
     codex_content_text, codex_message_event, codex_session_line_timestamp,
 };
-use crate::provider::providers::native_jsonl::result_content::native_jsonl_result_content_profile;
 use crate::provider::providers::native_jsonl::{
-    native_jsonl_event, native_jsonl_event_id, native_jsonl_event_text, native_jsonl_event_type,
+    native_jsonl_event_id, native_jsonl_event_text, native_jsonl_event_type,
+    native_jsonl_normalized_payload,
 };
 use crate::{
-    compute_payload_hash, CaptureError, Result as CaptureResult, CODEBUDDY_SOURCE_FORMAT,
-    CODEX_SESSION_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT,
-    MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    compute_payload_hash, CODEBUDDY_SOURCE_FORMAT, CODEX_SESSION_SOURCE_FORMAT,
+    JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT,
+    OPENCLAW_SOURCE_FORMAT,
 };
 
 mod junie;
 mod mux;
 mod results;
-pub(crate) use results::result_content_and_id;
 
 pub(crate) use junie::valid_junie_record_set_locator;
-pub(crate) use junie::{
-    attach_junie_record_set_locator, JunieRecordSetBinding, JunieRecordSetTarget,
-};
 
 pub const JSONL_COMPLETE_CONTENT_LOCATOR_KIND: &str = "jsonl-range-v1";
 /// Exact routes use a distinct kind because the legacy range locator deliberately
@@ -148,403 +141,7 @@ impl CompleteContentResolver for JsonlCompleteContentResolver {
     }
 }
 
-pub(crate) use mux::{attach_mux_verified_content_locator, valid_mux_locator};
-
-/// Adds the local-only locator consumed by complete-message show.
-///
-/// Only truncated ordinary messages receive a locator. Untruncated messages
-/// remain on the canonical fast path and all other content categories remain
-/// explicitly ineligible.
-pub(crate) fn attach_jsonl_complete_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    raw_value: &Value,
-    record: &CapturedRecord,
-    line_number: usize,
-) -> CaptureResult<()> {
-    if event.event_type != EventType::Message
-        || !verified_content_address_supported(
-            provider,
-            source_format,
-            CompleteContentSourceFamily::Jsonl,
-            VerifiedContentRole::MessageBody,
-            JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        )
-    {
-        return Ok(());
-    }
-    let Some((text, native_record_id)) =
-        complete_message_text_and_id(provider, source_format, raw_value, line_number)
-    else {
-        return Ok(());
-    };
-    if text.chars().count() <= PROVIDER_MAX_TEXT_CHARS
-        || text.len() > COMPLETE_CONTENT_MAX_BODY_BYTES
-    {
-        return Ok(());
-    }
-    let CapturedRecordPayload::NativeBytes(record_bytes) = record.payload() else {
-        return Err(CaptureError::SystemInvariant(
-            "JSONL complete-content locator requires native bytes",
-        ));
-    };
-    let (byte_start, byte_end_exclusive) = jsonl_locator_range(record.locator())
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let range = JsonlRange {
-        byte_start,
-        byte_end_exclusive,
-    };
-    let record_sha256 = digest_bytes(record_bytes);
-    let Some(content_ref) = ContentRef::from_bytes(text.as_bytes()) else {
-        return Ok(());
-    };
-    let Some(profile) = verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::MessageBody,
-    ) else {
-        return Err(CaptureError::SystemInvariant(
-            "supported JSONL message route must have a verified-content profile",
-        ));
-    };
-    let Some(locator) = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Jsonl,
-        JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        &range.encode(),
-        native_record_id,
-        record_sha256,
-    ) else {
-        return Ok(());
-    };
-    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(())
-}
-
-pub(crate) fn attach_exact_jsonl_complete_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    raw_value: &Value,
-    record: &CapturedRecord,
-    line_number: usize,
-    binding: &ExactJsonlSourceBinding,
-) -> CaptureResult<()> {
-    if event.event_type != EventType::Message
-        || !verified_content_address_supported(
-            provider,
-            source_format,
-            CompleteContentSourceFamily::Jsonl,
-            VerifiedContentRole::MessageBody,
-            EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        )
-    {
-        return Ok(());
-    }
-    let Some((text, native_record_id)) =
-        complete_message_text_and_id(provider, source_format, raw_value, line_number)
-    else {
-        return Ok(());
-    };
-    if text.chars().count() <= PROVIDER_MAX_TEXT_CHARS
-        || text.len() > COMPLETE_CONTENT_MAX_BODY_BYTES
-    {
-        return Ok(());
-    }
-    let CapturedRecordPayload::NativeBytes(record_bytes) = record.payload() else {
-        return Err(CaptureError::SystemInvariant(
-            "exact JSONL complete-content locator requires native bytes",
-        ));
-    };
-    let (byte_start, byte_end_exclusive) = jsonl_locator_range(record.locator())
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let encoded = DecodedJsonlLocator {
-        range: JsonlRange {
-            byte_start,
-            byte_end_exclusive,
-        },
-        binding: Some(binding.clone()),
-    }
-    .encode_exact();
-    let Some(content_ref) = ContentRef::from_bytes(text.as_bytes()) else {
-        return Ok(());
-    };
-    let Some(profile) = verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::MessageBody,
-    ) else {
-        return Err(CaptureError::SystemInvariant(
-            "supported exact JSONL message route must have a verified-content profile",
-        ));
-    };
-    let Some(locator) = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Jsonl,
-        EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        &encoded,
-        native_record_id,
-        digest_bytes(record_bytes),
-    ) else {
-        return Ok(());
-    };
-    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(())
-}
-
-/// Adds a local-only immutable-record locator for a Codex result body.
-///
-/// This locator is intentionally separate from complete-message eligibility;
-/// public complete show remains message-only.
-pub(crate) fn attach_codex_result_content_locator(
-    event: &mut ProviderEventEnvelope,
-    content_ref: &ContentRef,
-    record: &CapturedRecord,
-    line_number: usize,
-) -> CaptureResult<()> {
-    let attached = attach_jsonl_result_content_locator_with_ref(
-        event,
-        content_ref,
-        CaptureProvider::Codex,
-        CODEX_SESSION_SOURCE_FORMAT,
-        format!("line-{line_number}"),
-        record,
-        None,
-    )?;
-    if !attached {
-        clear_result_content_ref(event);
-    }
-    Ok(())
-}
-
-/// Adds a local-only result locator for a direct native JSONL provider. The
-/// normalizer has already extracted the exact result bytes and computed the
-/// sole `ContentRef`; this path reuses that reference and never re-extracts or
-/// re-hashes the result body.
-pub(crate) fn attach_native_jsonl_result_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    raw_value: &Value,
-    record: &CapturedRecord,
-    line_number: usize,
-    content_ref: Option<&ContentRef>,
-) -> CaptureResult<()> {
-    if event.event_type != EventType::ToolOutput {
-        return Ok(());
-    }
-    let Some(content_ref) = content_ref else {
-        return Ok(());
-    };
-    let Some(payload) = event.payload.as_object() else {
-        return Ok(());
-    };
-    if payload.contains_key("result_content_ref") {
-        return Err(CaptureError::SystemInvariant(
-            "native JSONL result ContentRef was published before locator validation",
-        ));
-    }
-    let content_ref_value = serde_json::to_value(content_ref).map_err(|_| {
-        CaptureError::SystemInvariant("native JSONL result ContentRef is malformed")
-    })?;
-    let Some(profile) = native_jsonl_result_content_profile(provider) else {
-        return Ok(());
-    };
-    if verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::ResultBody,
-    ) != Some(profile)
-    {
-        return Ok(());
-    }
-    let attached = attach_jsonl_result_content_locator_with_ref(
-        event,
-        content_ref,
-        provider,
-        source_format,
-        native_jsonl_event_id(provider, raw_value, line_number),
-        record,
-        None,
-    )?;
-    if attached {
-        event
-            .payload
-            .as_object_mut()
-            .expect("native JSONL result payload was validated as an object")
-            .insert("result_content_ref".to_owned(), content_ref_value);
-    }
-    Ok(())
-}
-
-fn attach_jsonl_result_content_locator_with_ref(
-    event: &mut ProviderEventEnvelope,
-    content_ref: &ContentRef,
-    provider: CaptureProvider,
-    source_format: &str,
-    native_record_id: String,
-    record: &CapturedRecord,
-    binding: Option<&ExactJsonlSourceBinding>,
-) -> CaptureResult<bool> {
-    if !matches!(
-        event.event_type,
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        return Ok(false);
-    }
-    let CapturedRecordPayload::NativeBytes(record_bytes) = record.payload() else {
-        return Err(CaptureError::SystemInvariant(
-            "JSONL result-content locator requires native bytes",
-        ));
-    };
-    let (byte_start, byte_end_exclusive) = jsonl_locator_range(record.locator())
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let range = JsonlRange {
-        byte_start,
-        byte_end_exclusive,
-    };
-    let Some(profile) = verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::ResultBody,
-    ) else {
-        return Ok(false);
-    };
-    let (kind, encoded) = match binding {
-        Some(binding) => (
-            EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-            DecodedJsonlLocator {
-                range,
-                binding: Some(binding.clone()),
-            }
-            .encode_exact()
-            .to_vec(),
-        ),
-        None => (JSONL_COMPLETE_CONTENT_LOCATOR_KIND, range.encode().to_vec()),
-    };
-    let Some(locator) = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::ResultBody,
-        profile,
-        content_ref.clone(),
-        CompleteContentSourceFamily::Jsonl,
-        kind,
-        &encoded,
-        native_record_id,
-        digest_bytes(record_bytes),
-    ) else {
-        return Ok(false);
-    };
-    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(true)
-}
-
-/// Adds a verified result-body locator and publishes its content reference only
-/// after every locator field has validated.
-pub(crate) fn attach_jsonl_result_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    content: &str,
-    native_record_id: &str,
-    record: &CapturedRecord,
-) -> CaptureResult<()> {
-    attach_standalone_jsonl_result_content_locator(
-        event,
-        provider,
-        source_format,
-        content,
-        native_record_id,
-        record,
-        None,
-    )
-}
-
-/// Exact-source variant used by providers whose result meaning depends on
-/// provider-owned auxiliary state in addition to the addressed JSONL record.
-pub(crate) fn attach_exact_jsonl_result_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    content: &str,
-    native_record_id: &str,
-    record: &CapturedRecord,
-    binding: &ExactJsonlSourceBinding,
-) -> CaptureResult<()> {
-    attach_standalone_jsonl_result_content_locator(
-        event,
-        provider,
-        source_format,
-        content,
-        native_record_id,
-        record,
-        Some(binding),
-    )
-}
-
-fn attach_standalone_jsonl_result_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    content: &str,
-    native_record_id: &str,
-    record: &CapturedRecord,
-    binding: Option<&ExactJsonlSourceBinding>,
-) -> CaptureResult<()> {
-    let Some(content_ref) = ContentRef::from_bytes(content.as_bytes()) else {
-        return Ok(());
-    };
-    let content_ref_value = serde_json::to_value(&content_ref)
-        .map_err(|_| CaptureError::SystemInvariant("result ContentRef is malformed"))?;
-    let payload = event
-        .payload
-        .as_object()
-        .ok_or(CaptureError::SystemInvariant(
-            "provider result event payload must be an object",
-        ))?;
-    if payload.contains_key("result_content_ref") {
-        return Err(CaptureError::SystemInvariant(
-            "result ContentRef was published before locator validation",
-        ));
-    }
-    let attached = attach_jsonl_result_content_locator_with_ref(
-        event,
-        &content_ref,
-        provider,
-        source_format,
-        native_record_id.to_owned(),
-        record,
-        binding,
-    )?;
-    if attached {
-        event
-            .payload
-            .as_object_mut()
-            .expect("result payload was validated as an object")
-            .insert("result_content_ref".to_owned(), content_ref_value);
-    }
-    Ok(())
-}
-
-fn clear_result_content_ref(event: &mut ProviderEventEnvelope) {
-    if let Some(payload) = event.payload.as_object_mut() {
-        payload.insert("result_content_ref".to_owned(), Value::Null);
-    }
-}
+pub(crate) use mux::valid_mux_locator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DecodedJsonlLocator {
@@ -575,15 +172,6 @@ impl DecodedJsonlLocator {
             }),
         })
     }
-
-    fn encode_exact(&self) -> [u8; EXACT_JSONL_LOCATOR_BYTES] {
-        let mut value = [0_u8; EXACT_JSONL_LOCATOR_BYTES];
-        value[..16].copy_from_slice(&self.range.encode());
-        let binding = self.binding.as_ref().expect("exact locator has a binding");
-        value[16..48].copy_from_slice(&binding.source_revision_digest);
-        value[48..80].copy_from_slice(&binding.path_identity_digest);
-        value
-    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct JsonlRange {
@@ -598,6 +186,7 @@ impl JsonlRange {
             .and_then(|length| usize::try_from(length).ok())
     }
 
+    #[cfg(test)]
     fn encode(self) -> [u8; JSONL_RANGE_LOCATOR_BYTES] {
         let mut value = [0_u8; JSONL_RANGE_LOCATOR_BYTES];
         value[..8].copy_from_slice(&self.byte_start.to_be_bytes());
@@ -864,9 +453,11 @@ fn normalized_message_payload(
             "body": {"kind": "UserPromptEvent", "prompt": prompt},
         }));
     }
-    let occurred_at = DateTime::<Utc>::from_timestamp(0, 0)?;
-    native_jsonl_event(provider, source_format, value, line_number, occurred_at)
-        .map(|event| event.payload)
+    Some(native_jsonl_normalized_payload(
+        provider,
+        value,
+        line_number,
+    ))
 }
 
 fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {
@@ -877,6 +468,7 @@ fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {
     digest.finalize().into()
 }
 
+#[cfg(test)]
 fn digest_bytes(bytes: &[u8]) -> CompleteContentBodyDigest {
     CompleteContentBodyDigest::parse(format!("{:x}", Sha256::digest(bytes)))
         .expect("SHA-256 formatting is valid")

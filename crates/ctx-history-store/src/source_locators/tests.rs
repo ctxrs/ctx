@@ -369,6 +369,207 @@ fn exact_alias_binding_disambiguates_shared_identity_and_follows_relocation() {
 }
 
 #[test]
+fn exact_route_replay_reproves_capture_source_and_current_locator() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source.jsonl");
+    std::fs::write(&source_path, b"source").unwrap();
+    let store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let source = observation(&source_path, "source", "source-cursor", "source-revision");
+    let binding = store
+        .reconcile_provider_source_locator(&source)
+        .unwrap()
+        .route_binding();
+    let source_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+    insert_source_event(
+        &store,
+        source_id,
+        event_id,
+        &source_path,
+        &source.proposed_source_identity,
+        1,
+    );
+
+    store
+        .bind_capture_source_provider_route(source_id, &binding)
+        .unwrap();
+    store
+        .bind_capture_source_provider_route(source_id, &binding)
+        .expect("an exact committed route replays");
+
+    let mut conflicting_provider = binding.clone();
+    conflicting_provider.provider = CaptureProvider::Claude;
+    assert!(matches!(
+        store.bind_capture_source_provider_route(source_id, &conflicting_provider),
+        Err(StoreError::CaptureSourceProviderRouteConflict { .. })
+    ));
+
+    store
+        .conn
+        .execute(
+            "UPDATE capture_sources SET source_identity = 'mismatched-source'
+             WHERE id = ?1",
+            [source_id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.bind_capture_source_provider_route(source_id, &binding),
+        Err(StoreError::CaptureSourceProviderRouteConflict { .. })
+    ));
+    store
+        .conn
+        .execute(
+            "UPDATE capture_sources SET source_identity = ?2 WHERE id = ?1",
+            params![source_id.to_string(), source.proposed_source_identity],
+        )
+        .unwrap();
+
+    store
+        .conn
+        .execute(
+            "UPDATE provider_source_locators SET is_current = 0
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND alias_group_identity = ?4",
+            params![
+                binding.provider.as_str(),
+                binding.source_format,
+                binding.machine_id,
+                binding.alias_group_identity,
+            ],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.bind_capture_source_provider_route(source_id, &binding),
+        Err(StoreError::CaptureSourceProviderRouteConflict { .. })
+    ));
+    store
+        .conn
+        .execute(
+            "UPDATE provider_source_locators SET is_current = 1
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND alias_group_identity = ?4",
+            params![
+                binding.provider.as_str(),
+                binding.source_format,
+                binding.machine_id,
+                binding.alias_group_identity,
+            ],
+        )
+        .unwrap();
+    store
+        .bind_capture_source_provider_route(source_id, &binding)
+        .expect("restored authoritative rows allow replay");
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(event_id)
+            .unwrap()
+            .path(),
+        source_path
+    );
+}
+
+#[test]
+fn retired_sole_locator_restores_exact_authority_idempotently() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source.jsonl");
+    std::fs::write(&source_path, b"source").unwrap();
+    let store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let mut source = observation(&source_path, "source", "source-cursor", "revision-1");
+    source.proposed_source_identity = "stable-source-identity".to_owned();
+    let first = store.reconcile_provider_source_locator(&source).unwrap();
+    let source_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+    insert_source_event(
+        &store,
+        source_id,
+        event_id,
+        &source_path,
+        &source.proposed_source_identity,
+        1,
+    );
+    store
+        .bind_capture_source_provider_route(source_id, &first.route_binding())
+        .unwrap();
+
+    let retirement = ProviderSourceRouteRetirement {
+        provider: source.provider,
+        source_format: source.source_format.clone(),
+        machine_id: source.machine_id.clone(),
+        locator_identity: source.locator_identity.clone(),
+        cursor_stream: source.cursor_stream.clone(),
+        expected_canonical_source_identity: source.proposed_source_identity.clone(),
+        expected_source_revision: source.source_revision.clone(),
+        retired_at_ms: 2,
+        reason: ProviderSourceRouteRetirementReason::SourceMissing,
+    };
+    store.begin_immediate_batch().unwrap();
+    assert_eq!(
+        store.retire_provider_source_route_tx(&retirement).unwrap(),
+        ProviderSourceRouteRetirementDisposition::Retired
+    );
+    store.commit_batch().unwrap();
+    assert!(matches!(
+        store.authorized_source_route_for_event(event_id),
+        Err(StoreError::AuthorizedSourceRouteUnavailable { .. })
+    ));
+
+    source.source_revision = "revision-2".to_owned();
+    source.observed_at_ms = 3;
+    let restored = store
+        .reconcile_provider_source_locator(&source)
+        .expect("the exact retired locator may become authoritative again");
+    assert!(!restored.relocated);
+    assert_eq!(
+        restored.canonical_source_identity,
+        source.proposed_source_identity
+    );
+    store
+        .bind_capture_source_provider_route(source_id, &restored.route_binding())
+        .unwrap();
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(event_id)
+            .unwrap()
+            .source_revision(),
+        "revision-2"
+    );
+
+    let replay = store
+        .reconcile_provider_source_locator(&source)
+        .expect("restoring the same exact locator is idempotent");
+    store
+        .bind_capture_source_provider_route(source_id, &replay.route_binding())
+        .unwrap();
+
+    let second_retirement = ProviderSourceRouteRetirement {
+        expected_source_revision: source.source_revision.clone(),
+        retired_at_ms: 4,
+        ..retirement
+    };
+    store.begin_immediate_batch().unwrap();
+    assert_eq!(
+        store
+            .retire_provider_source_route_tx(&second_retirement)
+            .unwrap(),
+        ProviderSourceRouteRetirementDisposition::Retired
+    );
+    store.commit_batch().unwrap();
+
+    let mut canonical_drift = source.clone();
+    canonical_drift.proposed_source_identity = "different-source-identity".to_owned();
+    assert!(matches!(
+        store.reconcile_provider_source_locator(&canonical_drift),
+        Err(StoreError::ProviderSourceRelocationAmbiguous { .. })
+    ));
+    let mut cursor_drift = source.clone();
+    cursor_drift.cursor_stream = "different-cursor".to_owned();
+    assert!(matches!(
+        store.reconcile_provider_source_locator(&cursor_drift),
+        Err(StoreError::ProviderSourceRelocationAmbiguous { .. })
+    ));
+}
+
+#[test]
 fn missing_conflicting_and_ambiguous_routes_fail_closed_without_journaling() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");

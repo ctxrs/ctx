@@ -1,8 +1,8 @@
-use crate::provider::providers::hermes::import_hermes_sqlite_batched;
+use crate::provider::providers::hermes::import_hermes_nativepath;
 use crate::tests::support::paths::tempdir;
 use crate::{
-    import_hermes_sqlite, HermesSqliteImportOptions, NormalizedProviderImportOptions,
-    ProviderAdapterContext, ProviderImportSummary, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    import_hermes_sqlite, HermesSqliteImportOptions, ProviderAdapterContext, ProviderImportOptions,
+    ProviderImportSummary, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 use chrono::{DateTime, Utc};
 use ctx_history_store::Store;
@@ -26,7 +26,7 @@ fn test_imported_at() -> DateTime<Utc> {
 }
 
 fn import_hermes_captured(path: &Path, store: &mut Store) -> ProviderImportSummary {
-    import_hermes_sqlite_batched(
+    import_hermes_nativepath(
         path,
         store,
         ProviderAdapterContext {
@@ -35,11 +35,10 @@ fn import_hermes_captured(path: &Path, store: &mut Store) -> ProviderImportSumma
             source_root: None,
             imported_at: test_imported_at(),
         },
-        NormalizedProviderImportOptions {
-            fast_event_inserts: true,
+        ProviderImportOptions {
             capture_work_limit: crate::CaptureWorkLimit::Drain,
             inventory_observation_token: None,
-            ..NormalizedProviderImportOptions::default()
+            ..ProviderImportOptions::default()
         },
     )
     .unwrap()

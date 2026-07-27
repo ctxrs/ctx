@@ -59,6 +59,9 @@ steps:
       - "target/public-cli-artifacts/ctx.build-info.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz"
       - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst.asset.json"
       - "target/public-cli-artifacts/ctx-linux-x64.native-runtime-proof.txt"
       - "target/public-cli-native-smoke/linux-x64/smoke.log"
       - "target/public-cli-native-smoke/linux-x64/**/daemon-smoke.log"
@@ -97,6 +100,9 @@ steps:
       - "target/public-cli-artifacts/ctx-linux-aarch64.build-info.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz"
       - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.zst.asset.json"
       - "target/public-cli-artifacts/ctx-linux-aarch64.native-runtime-proof.txt"
       - "target/public-cli-native-smoke/linux-aarch64/smoke.log"
       - "target/public-cli-native-smoke/linux-aarch64/**/daemon-smoke.log"
@@ -107,29 +113,14 @@ steps:
     key: "public-cli-windows-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
-      if ! command -v cabextract >/dev/null 2>&1; then
-        command -v apt-get >/dev/null 2>&1 || {
-          echo "apt-get is required to provision cabextract on the managed release worker" >&2
-          exit 127
-        }
-        privilege=()
-        if [ "$(id -u)" -ne 0 ]; then
-          command -v sudo >/dev/null 2>&1 || {
-            echo "sudo is required to provision cabextract as a non-root worker" >&2
-            exit 127
-          }
-          privilege=(sudo)
-        fi
-        "${privilege[@]}" apt-get -o DPkg::Lock::Timeout=300 update
-        "${privilege[@]}" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends cabextract
-      fi
-      scripts/build-public-cli-artifact.sh windows-x64
-      scripts/build-onnxruntime-sidecar.sh windows-x64
+      bash scripts/build-public-cli-artifact.sh windows-x64
+      bash scripts/build-onnxruntime-sidecar.sh windows-x64
     agents:
-      queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
-      os: "linux"
+      queue: "windows-x64"
+      os: "windows"
       arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-windows-native"
     timeout_in_minutes: 60
     artifact_paths:
       - "target/public-cli-artifacts/ctx.exe"
@@ -145,17 +136,26 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       scripts/build-public-cli-artifact.sh freebsd-x64
+      scripts/build-onnxruntime-sidecar.sh freebsd-x64
+      scripts/stage-github-release-assets.sh --transcode-runtime freebsd-x64
     agents:
-      queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
-      os: "linux"
+      queue: "freebsd-x64"
+      ctx-runner-class: "release-freebsd-x64-stage"
+      os: "freebsd"
       arch: "x86_64"
-    timeout_in_minutes: 60
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-freebsd-native"
+    timeout_in_minutes: 120
     artifact_paths:
       - "target/public-cli-artifacts/ctx-freebsd-x64"
       - "target/public-cli-artifacts/ctx-freebsd-x64.sha256"
       - "target/public-cli-artifacts/ctx-freebsd-x64.version"
       - "target/public-cli-artifacts/ctx-freebsd-x64.build-info.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.zst.asset.json"
 
   - label: ":package: public CLI macos-arm64"
     key: "public-cli-macos-arm64"
@@ -224,6 +224,9 @@ steps:
       - "target/public-cli-artifacts/ctx-macos-arm64.notary-*"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.zst.asset.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.signing.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.cms"
@@ -336,6 +339,9 @@ steps:
     artifact_paths:
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst.asset.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.signing.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.json"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.cms"
@@ -363,7 +369,7 @@ steps:
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-runtime-upgrade-extractor.ps1 -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/tests/run-native-candidate-smoke-test.ps1
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-native-candidate-smoke.ps1 -Binary target/public-cli-artifacts/ctx.exe -Fixture tests/fixtures/custom-history-jsonl/basic.jsonl -ExpectedVersionFile target/public-cli-artifacts/ctx.exe.expected-version -ResultPath target/public-cli-native-smoke/windows-x64/candidate-smoke.json
-      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-daemon-semantic-release.ps1 -Ctx target/public-cli-artifacts/ctx.exe -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip -RuntimePlatform windows-x64 -DataRoot target/public-cli-native-smoke/windows-x64 -ProofOutput target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt -RequireAuthoritative -KeepRoot
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-daemon-semantic-release.ps1 -Ctx target/public-cli-artifacts/ctx.exe -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip -RuntimeMode onnxruntime -RuntimePlatform windows-x64 -DataRoot target/public-cli-native-smoke/windows-x64-onnxruntime -ProofOutput target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt -RequireAuthoritative -KeepRoot
     agents:
       queue: "windows-x64"
       os: "windows"
@@ -374,5 +380,168 @@ steps:
     artifact_paths:
       - "target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt"
       - "target/public-cli-native-smoke/windows-x64/candidate-smoke.json"
-      - "target/public-cli-native-smoke/windows-x64/**/packaged-runtime-proof.txt"
-      - "target/public-cli-native-smoke/windows-x64/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/windows-x64-onnxruntime/**/packaged-runtime-proof.txt"
+      - "target/public-cli-native-smoke/windows-x64-onnxruntime/**/daemon-smoke.log"
+
+  - label: ":package: Semantic ONNX models"
+    key: "semantic-model-archives"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      mkdir -p target/public-cli-artifacts
+      python3 scripts/semantic-release-assets.py build-model \
+        --variant cpu-fp32 \
+        --source "${CTX_SEMANTIC_MODEL_CPU_SOURCE:?set CTX_SEMANTIC_MODEL_CPU_SOURCE to the pinned offline fp32 snapshot}" \
+        --output-dir target/public-cli-artifacts
+      python3 scripts/semantic-release-assets.py build-model \
+        --variant accelerator-o4-fp16 \
+        --source "${CTX_SEMANTIC_MODEL_ACCELERATOR_SOURCE:?set CTX_SEMANTIC_MODEL_ACCELERATOR_SOURCE to the pinned offline O4 fp16 snapshot}" \
+        --output-dir target/public-cli-artifacts
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz.sha256"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz.asset.json"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz.sha256"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz.asset.json"
+
+  - label: ":package: Semantic Core ML bundle"
+    key: "semantic-coreml-archive"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      mkdir -p target/public-cli-artifacts
+      python3 scripts/semantic-model-bundle/produce.py \
+        --tokenizer "${CTX_SEMANTIC_COREML_TOKENIZER:?set CTX_SEMANTIC_COREML_TOKENIZER to the pinned offline tokenizer}" \
+        --document-model "${CTX_SEMANTIC_COREML_DOCUMENT_MODEL:?set CTX_SEMANTIC_COREML_DOCUMENT_MODEL to the pinned document mlpackage}" \
+        --query-model "${CTX_SEMANTIC_COREML_QUERY_MODEL:?set CTX_SEMANTIC_COREML_QUERY_MODEL to the pinned query mlpackage}" \
+        --model-license "${CTX_SEMANTIC_COREML_MODEL_LICENSE:?set CTX_SEMANTIC_COREML_MODEL_LICENSE to the pinned model license}" \
+        --bundle-version 1.0.0 \
+        --document-batch-size 16 \
+        --query-batch-size 1 \
+        --sequence-length 512 \
+        --output-dir target/semantic-coreml-bundle \
+        --archive target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz
+    agents:
+      queue: "mac-shared"
+      os: "darwin"
+      arch: "arm64"
+    concurrency: 1
+    concurrency_group: "ctx-public-semantic-coreml"
+    timeout_in_minutes: 120
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz.sha256"
+      - "target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz.asset.json"
+
+  - label: ":package: Semantic CUDA runtime"
+    key: "semantic-runtime-linux-cuda12"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      scripts/build-onnxruntime-sidecar.sh linux-x64-cuda12
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst.asset.json"
+
+  - label: ":package: Semantic Windows ML runtime"
+    key: "semantic-runtime-windows-ml"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      bash scripts/build-onnxruntime-sidecar.sh windows-x64-windowsml
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-semantic-smoke-contract.ps1
+    agents:
+      queue: "windows-x64"
+      os: "windows"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-semantic-windows-native"
+    timeout_in_minutes: 90
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-windowsml-windows-x64.zip"
+      - "target/public-cli-artifacts/ctx-windowsml-windows-x64.zip.sha256"
+      - "target/public-cli-artifacts/ctx-windowsml-windows-x64.zip.asset.json"
+
+  - label: ":package: Semantic macos-x64 runtime"
+    key: "semantic-runtime-macos-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      export CTX_MACOS_RELEASE_SIGNING=required
+      export CTX_MACOS_SIGNING_SECRET_SOURCE=infisical
+      scripts/build-onnxruntime-sidecar.sh macos-x64
+    agents:
+      queue: "ctx-mac-gui-shared-x64"
+      os: "darwin"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-macos-intel-native"
+    timeout_in_minutes: 120
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst.asset.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.signing.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.cms"
+
+  - label: ":package: gather unsigned Semantic release handoff"
+    key: "semantic-release-handoff"
+    depends_on:
+      - "public-cli-linux-x64"
+      - "public-cli-linux-aarch64"
+      - "public-cli-freebsd-x64"
+      - "public-cli-macos-arm64"
+      - "semantic-model-archives"
+      - "semantic-coreml-archive"
+      - "semantic-runtime-linux-cuda12"
+      - "semantic-runtime-windows-ml"
+      - "semantic-runtime-macos-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      mkdir -p target/public-cli-artifacts
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst*" . \
+        --step public-cli-linux-x64
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.zst*" . \
+        --step public-cli-linux-aarch64
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.zst*" . \
+        --step public-cli-freebsd-x64
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.zst*" . \
+        --step public-cli-macos-arm64
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-*" . \
+        --step semantic-model-archives
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-*" . \
+        --step semantic-coreml-archive
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst*" . \
+        --step semantic-runtime-linux-cuda12
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-windowsml-windows-x64.zip*" . \
+        --step semantic-runtime-windows-ml
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst*" . \
+        --step semantic-runtime-macos-x64
+      scripts/stage-semantic-release-handoff.sh \
+        target/public-cli-artifacts target/semantic-release-handoff
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/semantic-release-handoff/*"

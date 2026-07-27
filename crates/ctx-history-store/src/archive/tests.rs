@@ -186,7 +186,7 @@ fn archive_version_validation_rejects_future_version() {
 }
 
 #[test]
-fn every_event_write_boundary_keeps_result_bodies_source_backed() {
+fn event_write_boundaries_drop_success_bodies_and_bound_failure_diagnostics() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("ctx.db")).unwrap();
     let direct_canary = "DIRECT-RESULT-BODY-CANARY-79ef";
@@ -237,7 +237,7 @@ fn every_event_write_boundary_keeps_result_bodies_source_backed() {
         events: vec![archived.clone(), message.clone()],
         ..SessionHistoryArchive::default()
     };
-    // This is the same Store transaction used by nested spool archives.
+    // Exercise result normalization through the canonical archive transaction.
     store.import_archive(&archive, false).unwrap();
 
     assert_eq!(
@@ -262,6 +262,7 @@ fn every_event_write_boundary_keeps_result_bodies_source_backed() {
                 "call_id": "call-archive",
                 "exit_code": 1,
                 "result_outcome": "failure",
+                "output_preview": archive_canary,
             }
         })
     );
@@ -273,14 +274,14 @@ fn every_event_write_boundary_keeps_result_bodies_source_backed() {
         .search_event_hits(direct_canary, 10)
         .unwrap()
         .is_empty());
-    assert!(store
-        .search_event_hits(archive_canary, 10)
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        store.search_event_hits(archive_canary, 10).unwrap().len(),
+        1
+    );
 
     let exported = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
     assert!(!exported.contains(direct_canary));
-    assert!(!exported.contains(archive_canary));
+    assert!(exported.contains(archive_canary));
     assert!(exported.contains(message_canary));
 }
 

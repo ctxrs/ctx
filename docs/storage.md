@@ -42,10 +42,6 @@ Default root:
     onnxruntime/
       <runtime-version>/
         <platform>/
-  upgrade-state.json
-  upgrade.lock
-  logs/
-    upgrade.log
 ```
 
 `CTX_DATA_ROOT` or `--data-root` may point ctx somewhere else. The configured
@@ -96,12 +92,23 @@ Local Pro uses one public, exact root-relative layout: the root identity is
 `install.json`, the signed helper pair and transaction files are under
 `pro/bin`, downloads are staged under `pro/downloads`, the encrypted derived
 graph is `pro/ctx-pro.db`, and the persistent installer coordination lock is
-`pro/.ctx-pro.lifecycle.lock`. A nonsecret
+`pro/.ctx-pro.lifecycle.lock`. The private, nonsecret
+`pro/.ctx-pro.initialized` marker is durably published before setup or account
+management may write native-vault records, so interrupted initialization
+remains deletable even when no helper or graph file was created. Destructive
+uninstall durably publishes the bounded, nonsecret, installation-bound
+`pro/.ctx-pro.graph-key-cleanup.json` phase before deleting any recorded graph
+key. It retains only the exact root identity and sorted public-key thumbprints,
+survives interrupted graph-key, credential, or helper cleanup, and is removed
+only after those deletion phases verify. Setup and keep-data uninstall fail
+closed while that deletion phase remains. A separate nonsecret
 `pro/.ctx-pro.data-preserved` lifecycle marker distinguishes deliberate
-keep-data uninstall from first use. The canonical `work.sqlite` history remains
-separate and usable without Pro. The operating-system key store stores the
-WorkOS session, an installation-scoped signing key, and a signed entitlement;
-ctx has no plaintext credential fallback.
+keep-data uninstall from first use, but it is created only when encrypted graph
+data actually exists. The canonical `work.sqlite` history remains separate and
+usable without Pro. The operating-system key store stores an anonymous-trial
+credential, an optional WorkOS session used only after paid conversion, an
+installation-scoped signing key, and a signed entitlement; ctx has no plaintext
+credential fallback.
 
 Key-store record identifiers are opaque hashes scoped to the root-local opaque
 installation UUID and commercial environment, never to an absolute path.
@@ -117,12 +124,28 @@ commercial configuration, network access, or the native key store is
 unavailable. `ctx pro uninstall --delete-data` uses a public delete-only native
 key-store adapter to remove and verify the complete local Pro inventory. It
 does not need the helper and remains available after an earlier `--keep-data`
-uninstall.
+uninstall. Initialization or helper evidence causes deletion to derive only
+this root identity's production/staging record IDs, collect the thumbprints
+recorded in its installation-key and entitlement records, and delete and verify
+those graph keys even when no graph file was completed. A corrupt record makes
+that inventory unverifiable and fails the operation before any graph key or
+graph file is deleted. Once the cleanup phase is published, a retry uses its
+exact thumbprints instead of broad vault enumeration or now-deleted credential
+records.
 Interactive use asks whether to delete; noninteractive callers must explicitly
 choose `--delete-data` or `--keep-data`. Neither form deletes canonical history.
+On a root that has never contained Pro data, either explicit choice is an
+idempotent no-op and reports `local_pro_data: "absent"` without creating a Pro
+directory, initialization or preservation marker, vault access, or restore
+action. `absent` classifies graph-file state; verified deletion can still remove
+interrupted setup credentials or a pre-database graph key before returning it.
 A small installation-bound anti-rollback watermark may remain in the native key
 store. It contains no graph key, transcript content, account token, or
 entitlement body and does not make `ctx pro` report Pro as installed.
+After successful deletion the initialization and cleanup-phase files are gone;
+after a failed deletion they may remain as truthful retry metadata until the
+same identity-aware `--delete-data` operation completes. The nonsecret
+`pro/.ctx-pro.lifecycle.lock` coordination file may remain after success.
 
 ## What ctx Avoids By Default
 
@@ -177,19 +200,19 @@ analytics marker described under network behavior.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, SQLite index, and optional daemon lock/status/job files when daemon autostart runs |
+| `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
 | `ctx status` | data root metadata, existing SQLite store, semantic sidecar/status metadata, ctx-owned daemon lock/status/job metadata, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate canonical history or local Pro graph data |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when daemon autostart runs |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
 | `ctx show session` / `ctx show event` | SQLite index; with explicit `--content complete`, selected recorded provider source files | selected `--out` path for `show session` when provided |
 | `ctx locate` | SQLite index and raw source path metadata | none |
-| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status files when background refresh autostarts maintenance; semantic-enabled search may also create query endpoint files |
+| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status files when eligible human-readable background refresh autostarts maintenance; semantic-enabled search may also create query endpoint files |
 | `ctx sql` | existing SQLite index only | none |
 | `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, canonical history | key store, signed helper installation, and encrypted derived graph; the explicit `setup` form is a synonym |
 | `ctx pro manage` | key store and commercial account state | may refresh the WorkOS session in the key store and open a hosted billing-portal URL |
-| `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro data, while `--delete-data` removes and verifies local Pro data |
+| `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots remain unchanged |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
-| `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, `upgrade-state.json`, `upgrade.lock`, and `logs/upgrade.log` |
+| `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | SQLite index, data root metadata, semantic sidecar/status metadata, and ctx-owned daemon lock/status/job metadata | none |
 | `ctx daemon status` | semantic sidecar/status metadata and ctx-owned daemon lock/status/job metadata | none |
 | `ctx daemon enable` / `ctx daemon disable` | `config.toml` | `config.toml` |
@@ -199,11 +222,13 @@ Setup, import, and default search do not require source repository writes, model
 APIs, API keys, or remote accounts. Without semantic opt-in they do not download
 models or runtime assets; with semantic enabled, installer/runtime acquisition
 and daemon maintenance may acquire the local ONNX Runtime asset and embedding
-model when the installed build supports that path. Non-JSON setup and native provider imports may opportunistically start
-the default-on ctx-owned background daemon maintenance profile when `[daemon].enabled` is true; use
-`ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
-`ctx setup --catalog-only`, `ctx setup --json`, and `ctx import --json` do not
-autostart daemon maintenance.
+model when the installed build supports that path. Setup and native provider
+imports may opportunistically start the default-on ctx-owned background daemon
+maintenance profile when `[daemon].enabled` is true and output is
+human-readable. Machine-readable commands never start or nudge it; use
+`ctx setup --no-daemon` or `ctx import --no-daemon` for a human-readable
+one-run opt-out.
+`ctx setup --catalog-only` does not autostart daemon maintenance.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or write
 the main store or semantic sidecar. Default `--backend hybrid --refresh off`
@@ -249,8 +274,10 @@ Daemon maintenance is enabled by default. Disable it durably with:
 enabled = false
 ```
 
-`daemon.enabled = true` allows non-JSON setup and native provider imports to
-opportunistically start the ctx-owned background daemon maintenance profile.
+`daemon.enabled = true` allows eligible human-readable setup and native
+provider imports to opportunistically start the ctx-owned background daemon
+maintenance profile. Machine-readable foreground commands do not start or
+nudge it.
 Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 `ctx daemon enable` and `ctx daemon disable` write only the `[daemon] enabled`
 override. An explicit disabled override continues to win after CLI upgrades and
@@ -267,9 +294,11 @@ semantic = true
 If daemon maintenance was previously disabled, re-enable it before enabling
 semantic search.
 
-Background auto-upgrade is disabled by default. `ctx upgrade enable` writes the
-explicit `upgrade.auto = "apply"` opt-in for official installer-managed
-binaries with a valid install sidecar. Unmanaged installs do not self-upgrade.
+The enabled daemon is the sole automatic-upgrade authority and uses
+`upgrade.auto = "apply"` by default for official installer-managed binaries
+with a valid install sidecar. With the daemon disabled, no automatic upgrade
+network or filesystem work occurs. `ctx upgrade disable` writes an explicit
+`upgrade.auto = "off"` opt-out. Unmanaged installs do not self-upgrade.
 
 ## Index Lifecycle
 
@@ -389,11 +418,23 @@ ctx status --json
 Delete all ctx data:
 
 ```bash
+ctx pro uninstall --delete-data
 rm -rf ~/.ctx
 ```
 
-This removes ctx's local index, config, and logs for the default root. It does
-not remove provider-owned history such as `~/.codex/sessions`.
+Run the identity-aware Pro deletion command first, while the root-local
+`install.json` identity still exists. Only after it succeeds should you remove
+the Core root. For a custom root, pass the same root to both operations, for
+example `ctx --data-root /path/to/ctx pro uninstall --delete-data` before
+removing `/path/to/ctx`. Deleting the directory first can orphan Pro credentials
+or graph keys in the operating-system key store because their opaque record IDs
+depend on that identity.
+
+The final directory removal deletes ctx's local index, config, logs, lifecycle
+lock, and any remaining root-local metadata. It does not remove provider-owned
+history such as `~/.codex/sessions`. The small installation-bound anti-rollback
+watermark described above may remain in the native key store after verified Pro
+deletion; it is security metadata outside the user-deletable Pro inventory.
 
 ## Privacy Truth
 
@@ -417,10 +458,13 @@ originally produced provider transcripts may have used the network according to
 their own configuration; ctx indexing those transcripts does not repeat that
 behavior.
 
-Local Pro setup and renewal contact WorkOS for identity, the ctx commercial API
-for normalized billing state and signed entitlements, and the signed artifact
-service for helper installation. `ctx pro manage` creates a hosted Stripe portal
-session. These requests do not include transcript text, source content,
+Local Pro trial setup and renewal contact the ctx commercial API and signed
+artifact service without an account. WorkOS and Stripe are contacted only for
+paid conversion and account management. Trial setup sends challenge-bound,
+application-specific device-anchor digests produced by the signed helper; raw
+platform identifiers never leave it, and the service stores separately keyed
+anti-repeat tokens rather than the submitted evidence. `ctx pro manage` creates
+a hosted Stripe portal session after sign-in. These requests do not include transcript text, source content,
 repository paths, facts, graph rows, queries, or query results. Valid offline
 grants keep local graph operations usable when renewal is temporarily
 unavailable.
@@ -430,11 +474,12 @@ canonical history, encrypted graph data, or key material. Resubscription plus
 `ctx pro` refreshes the entitlement and restores the preserved graph.
 
 Official installer-managed binaries can contact the signed release metadata
-endpoint for an explicit `ctx upgrade` command. After `ctx upgrade enable`,
-they can also perform background auto-upgrade checks after successful normal
-commands. These checks are skipped for `ctx status`, JSON
-commands, MCP, `ctx docs`, `ctx sql`, `ctx upgrade`, CI, unmanaged installs, and
-the process-level `CTX_UPGRADE_AUTO=off` opt-out. Upgrade metadata checks do not send provider
+endpoint for an explicit `ctx upgrade` command. When the daemon and automatic
+upgrades are enabled, the daemon alone performs cadenced automatic checks and
+application. Foreground commands, including machine-readable commands and MCP,
+never schedule this work. A disabled daemon, unmanaged install, or
+process-level `CTX_UPGRADE_AUTO=off` opt-out performs no automatic upgrade
+network or filesystem work. Upgrade metadata checks do not send provider
 transcript text, search queries, result snippets, source paths, repository
 names, or command output.
 

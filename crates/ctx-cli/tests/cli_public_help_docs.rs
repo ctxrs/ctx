@@ -174,14 +174,12 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
 }
 
 #[test]
-fn work_graph_help_explains_resource_selectors_and_bounds() {
+fn blame_help_explains_launch_targets_and_bounds() {
     let temp = tempdir();
     for args in [
-        vec!["show", "commit", "--help"],
-        vec!["locate", "file", "--help"],
-        vec!["facts", "--help"],
-        vec!["timeline", "--help"],
-        vec!["blame", "--help"],
+        vec!["blame", "file", "--help"],
+        vec!["blame", "commit", "--help"],
+        vec!["blame", "pr", "--help"],
     ] {
         let output = ctx(&temp)
             .args(&args)
@@ -192,7 +190,8 @@ fn work_graph_help_explains_resource_selectors_and_bounds() {
             .clone();
         let help = String::from_utf8(output).unwrap();
         assert!(
-            help.contains("logical repository identity"),
+            help.to_ascii_lowercase()
+                .contains("logical repository identity"),
             "{args:?} help omitted repository semantics:\n{help}"
         );
         assert!(
@@ -200,64 +199,34 @@ fn work_graph_help_explains_resource_selectors_and_bounds() {
             "{args:?} help omitted a concrete logical identity:\n{help}"
         );
         assert!(
-            help.contains("Maximum cited records to return, from 1 to 500"),
+            help.contains("Maximum complete matches to return, from 1 to 100"),
             "{args:?} help omitted the limit contract:\n{help}"
         );
-        if args.as_slice() != ["show", "commit", "--help"] {
+        assert!(help.contains("--cursor <CURSOR>"));
+        if args.as_slice() == ["blame", "file", "--help"] {
             assert!(
-                help.contains("--line <LINE>"),
-                "{args:?} help omitted line semantics:\n{help}"
+                help.contains("--lines <START[:END]>"),
+                "{args:?} help omitted line-range semantics:\n{help}"
             );
         } else {
             assert!(
-                !help.contains("--line"),
-                "non-file point-query help advertised --line:\n{help}"
+                !help.contains("--lines"),
+                "non-file blame help advertised --lines:\n{help}"
             );
         }
-    }
-
-    for args in [
-        vec!["show", "commit", "--help"],
-        vec!["locate", "file", "--help"],
-        vec!["facts", "--help"],
-        vec!["timeline", "--help"],
-    ] {
-        let output = ctx(&temp)
-            .args(&args)
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        let help = String::from_utf8(output).unwrap();
-        assert!(
-            help.contains("<VALUE>"),
-            "{args:?} help omitted VALUE:\n{help}"
-        );
-        assert!(
-            help.contains("Resource value"),
-            "{args:?} help did not explain VALUE:\n{help}"
-        );
     }
 }
 
 #[test]
-fn cli_rejects_line_for_non_file_resources_before_local_pro_access() {
+fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
     let temp = tempdir();
-    for args in [
-        vec!["show", "commit", "abc123", "--line", "42"],
-        vec!["show", "pr", "42", "--line", "42"],
-        vec!["locate", "issue", "42", "--line", "42"],
-        vec!["facts", "session", "ses_123", "--line", "42"],
-        vec!["timeline", "run", "run_123", "--line", "42"],
-    ] {
-        let stderr = failure_stderr(ctx(&temp).args(&args));
-        assert_eq!(
-            stderr,
-            "Error: invalid_request: resource selector line is valid only for file targets\n",
-            "unexpected typed line error for {args:?}"
-        );
-    }
+    let stderr = failure_stderr(ctx(&temp).args(["blame", "file", "src/lib.rs", "--lines", "0"]));
+    assert!(stderr.contains("line number must be positive"));
+    let stderr =
+        failure_stderr(ctx(&temp).args(["blame", "file", "src/lib.rs", "--lines", "60:42"]));
+    assert!(stderr.contains("END >= START"));
+    let stderr = failure_stderr(ctx(&temp).args(["blame", "pr", "0", "--repository", "ctxrs/ctx"]));
+    assert!(stderr.contains("positive decimal number"));
 }
 
 #[test]
@@ -392,7 +361,15 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
 fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
     let temp = tempdir();
     for (command, required) in [
-        ("setup", vec!["Usage: ctx setup", "--json"]),
+        (
+            "setup",
+            vec![
+                "Usage: ctx setup",
+                "--semantic",
+                "Enable local semantic search in config",
+                "--json",
+            ],
+        ),
         ("status", vec!["Usage: ctx status", "--json"]),
         (
             "index",
@@ -680,10 +657,13 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
         .contains("ctx integrations install mcp"));
 
     let upgrade = json_output(ctx(&temp).args(["docs", "show", "upgrade", "--format", "json"]));
-    assert!(upgrade["body"]
-        .as_str()
-        .unwrap()
-        .contains("ctx upgrade status"));
+    let upgrade_body = upgrade["body"].as_str().unwrap();
+    assert!(upgrade_body.contains("ctx upgrade status"));
+    assert!(upgrade_body.contains("on by default (`upgrade.auto = \"apply\"`)"));
+    assert!(upgrade_body.contains("CTX_UPGRADE_AUTO=off"));
+    assert!(upgrade_body.contains("ctx upgrade disable"));
+    assert!(upgrade_body.contains("Foreground commands and MCP"));
+    assert!(upgrade_body.contains("never schedule an upgrade"));
 
     let missing_topic = failure_stderr(ctx(&temp).args(["docs", "show", "cli"]));
     assert!(missing_topic.contains("unknown ctx docs topic: cli"));
@@ -701,6 +681,41 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     let man = String::from_utf8(man).unwrap();
     assert!(man.contains(".TH ctx"));
     assert!(man.contains("Search local agent history"));
+}
+
+#[test]
+fn status_and_doctor_report_effective_upgrade_auto_mode() {
+    let temp = tempdir();
+    for command in ["status", "doctor"] {
+        let default = json_output(
+            ctx(&temp)
+                .args([command, "--json"])
+                .env_remove("CTX_UPGRADE_AUTO"),
+        );
+        assert_eq!(default["upgrade"]["auto"], "apply");
+        assert_eq!(default["upgrade"]["auto_enabled"], true);
+
+        let process_opt_out = json_output(
+            ctx(&temp)
+                .args([command, "--json"])
+                .env("CTX_UPGRADE_AUTO", "off"),
+        );
+        assert_eq!(process_opt_out["upgrade"]["auto"], "off");
+        assert_eq!(process_opt_out["upgrade"]["auto_enabled"], false);
+    }
+
+    fs::write(
+        temp.path().join("config.toml"),
+        "[upgrade]\nauto = \"off\"\n",
+    )
+    .unwrap();
+    let persistent_opt_out = json_output(
+        ctx(&temp)
+            .args(["status", "--json"])
+            .env("CTX_UPGRADE_AUTO", "apply"),
+    );
+    assert_eq!(persistent_opt_out["upgrade"]["auto"], "off");
+    assert_eq!(persistent_opt_out["upgrade"]["auto_enabled"], false);
 }
 
 #[test]
@@ -836,6 +851,8 @@ fn removed_public_commands_are_rejected() {
         "validate",
         "materialize",
         "related",
+        "timeline",
+        "facts",
     ] {
         assert!(
             !commands.contains(removed),
@@ -850,6 +867,8 @@ fn removed_public_commands_are_rejected() {
         vec!["validate", "--json"],
         vec!["materialize", "--json"],
         vec!["related", "commit", "abc"],
+        vec!["timeline", "commit", "abc"],
+        vec!["facts", "commit", "abc"],
     ] {
         ctx(&temp).args(args.clone()).assert().failure().stderr(
             predicate::str::contains("unrecognized subcommand")

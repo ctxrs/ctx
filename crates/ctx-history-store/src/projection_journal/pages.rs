@@ -14,6 +14,9 @@ use super::{
 };
 use crate::{Result, Store, StoreError, CANONICAL_PROJECTION_SCHEMA_IDENTITY, SCHEMA_VERSION};
 
+// Schema 47's persisted chunk constraint is 64. Group collection batches to
+// that physical bound (which remains within the publication protocol's
+// <=512-record chunk ceiling) without changing the frozen public schema.
 pub(super) const PROJECTION_JOURNAL_CHUNK_SIZE: usize = 64;
 
 impl Store {

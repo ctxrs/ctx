@@ -77,108 +77,6 @@ impl Store {
         collect_rows(rows)
     }
 
-    pub fn event_embedding_documents_matching_terms(
-        &self,
-        terms: &[String],
-        limit: usize,
-    ) -> Result<Vec<EventEmbeddingDocument>> {
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
-        let next_user_predicate =
-            semantic_lite_turn_user_eligible_predicate("next_user", "next_user_search");
-        let clauses = terms
-            .iter()
-            .map(|_| {
-                format!(
-                    r#"
-                (
-                    lower(anchor_search.preview_text) LIKE ? ESCAPE '\'
-                    OR EXISTS (
-                        SELECT 1
-                        FROM events AS candidate
-                        JOIN event_search_lookup AS candidate_search
-                          ON candidate_search.event_id = candidate.id
-                         AND length(trim(candidate_search.preview_text)) > 0
-                        WHERE candidate.event_type = 'message'
-                          AND candidate.role = 'assistant'
-                          AND candidate.deleted_at_ms IS NULL
-                          AND candidate.visibility != 'withheld'
-                          AND candidate.sync_state != 'withheld'
-                          AND length(trim(candidate.payload_json)) > 2
-                          AND lower(candidate_search.preview_text) LIKE ? ESCAPE '\'
-                          AND (
-                                (anchor.run_id IS NOT NULL AND candidate.run_id = anchor.run_id)
-                                OR (
-                                    anchor.run_id IS NULL
-                                    AND anchor.session_id IS NOT NULL
-                                    AND candidate.run_id IS NULL
-                                    AND candidate.session_id = anchor.session_id
-                                )
-                          )
-                          AND (
-                                candidate.occurred_at_ms > anchor.occurred_at_ms
-                                OR (candidate.occurred_at_ms = anchor.occurred_at_ms AND candidate.seq > anchor.seq)
-                                OR (candidate.occurred_at_ms = anchor.occurred_at_ms AND candidate.seq = anchor.seq AND candidate.id > anchor.id)
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM events AS next_user
-                              JOIN event_search_lookup AS next_user_search
-                                ON next_user_search.event_id = next_user.id
-                               AND length(trim(next_user_search.preview_text)) > 0
-                              WHERE {next_user_predicate}
-                                AND (
-                                      (anchor.run_id IS NOT NULL AND next_user.run_id = anchor.run_id)
-                                      OR (
-                                          anchor.run_id IS NULL
-                                          AND anchor.session_id IS NOT NULL
-                                          AND next_user.run_id IS NULL
-                                          AND next_user.session_id = anchor.session_id
-                                      )
-                                )
-                                AND (
-                                      next_user.occurred_at_ms > anchor.occurred_at_ms
-                                      OR (next_user.occurred_at_ms = anchor.occurred_at_ms AND next_user.seq > anchor.seq)
-                                      OR (next_user.occurred_at_ms = anchor.occurred_at_ms AND next_user.seq = anchor.seq AND next_user.id > anchor.id)
-                                )
-                                AND (
-                                      next_user.occurred_at_ms < candidate.occurred_at_ms
-                                      OR (next_user.occurred_at_ms = candidate.occurred_at_ms AND next_user.seq < candidate.seq)
-                                      OR (next_user.occurred_at_ms = candidate.occurred_at_ms AND next_user.seq = candidate.seq AND next_user.id < candidate.id)
-                                )
-                          )
-                    )
-                )
-                "#
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let sql = semantic_lite_turn_document_select_sql(
-            &format!(
-                r#"
-                WHERE {}
-                  AND ({clauses})
-                ORDER BY anchor.seq DESC
-                LIMIT ?
-                "#,
-                semantic_lite_turn_anchor_eligible_predicate()
-            ),
-            "ORDER BY seq DESC",
-        );
-        let mut params = Vec::new();
-        for term in terms {
-            let pattern = format!("%{}%", escape_like_term(&term.to_lowercase()));
-            params.push(pattern.clone());
-            params.push(pattern);
-        }
-        params.push(limit.max(1).to_string());
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(params), event_embedding_document_from_row)?;
-        collect_rows(rows)
-    }
-
     pub fn event_embedding_documents_by_ids(
         &self,
         event_ids: &[Uuid],
@@ -521,10 +419,4 @@ pub(super) fn semantic_lite_turn_source_chunk(
         .skip(start_char)
         .take(end_char.saturating_sub(start_char))
         .collect())
-}
-
-fn escape_like_term(term: &str) -> String {
-    term.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
 }

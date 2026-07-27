@@ -841,8 +841,14 @@ fn event_search_indexes_policy_allowed_agent_content_only() {
         store.search_event_hits("toolnestoracle", 10).unwrap().len(),
         1
     );
+    assert_eq!(
+        store
+            .search_event_hits("failure-output-oracle", 10)
+            .unwrap()
+            .len(),
+        1
+    );
     for result_text in [
-        "failure-output-oracle",
         "failed-native-output-oracle",
         "failed-v2-native-output-oracle",
         "success-output-oracle",
@@ -978,14 +984,6 @@ fn semantic_embedding_documents_use_user_assistant_lite_turns() {
         .unwrap();
     assert_eq!(
         by_ids.iter().map(|doc| doc.event_id).collect::<Vec<_>>(),
-        vec![user.id]
-    );
-
-    let matching = store
-        .event_embedding_documents_matching_terms(&["deterministic".to_owned()], 10)
-        .unwrap();
-    assert_eq!(
-        matching.iter().map(|doc| doc.event_id).collect::<Vec<_>>(),
         vec![user.id]
     );
 
@@ -1210,12 +1208,6 @@ fn semantic_lite_turn_control_user_messages_do_not_split_turns() {
         .contains("assistant:\nFinal answer includes the actual status cache fix."));
     assert!(!user_doc.text.contains("Initial draft should be replaced."));
     assert!(!docs.iter().any(|doc| doc.event_id == control.id));
-
-    let term_docs = store
-        .event_embedding_documents_matching_terms(&["actual".to_owned(), "cache".to_owned()], 10)
-        .unwrap();
-    assert!(term_docs.iter().any(|doc| doc.event_id == user.id));
-    assert!(!term_docs.iter().any(|doc| doc.event_id == control.id));
 }
 
 #[test]

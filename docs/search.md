@@ -207,10 +207,12 @@ opportunistically start daemon maintenance after their foreground indexing work.
 Use `ctx setup --no-daemon` or `ctx import --no-daemon` for one foreground run
 without autostart, `ctx daemon run` for the same work in the foreground,
 `ctx daemon disable` to prevent automatic starts, and `ctx daemon run --force`
-for explicit troubleshooting while disabled. Catalog-only setup and JSON-output
-setup/import do not autostart daemon maintenance. Setup/import autostart runs
-the normal ctx-owned background daemon profile and exits after it becomes idle;
-explicit `ctx daemon run` runs the same coordinator in the foreground.
+for explicit troubleshooting while disabled. Catalog-only setup does not
+autostart daemon maintenance; machine-readable foreground commands never start
+or nudge the daemon.
+Setup/import autostart runs the normal ctx-owned background daemon profile and
+exits after it becomes idle; explicit `ctx daemon run` runs the same coordinator
+in the foreground.
 
 `ctx search` reads the sidecar coverage that already exists and reports semantic
 coverage and worker state in JSON. With semantic enabled and default
@@ -267,9 +269,10 @@ read, events scored, hydration time, stale-vector drops, and semantic candidate 
 `source_exists: false` means ctx can return indexed text, but the raw provider
 file was not available at the stored path when the result was built.
 
-JSON setup and import do not autostart daemon maintenance. JSON search follows
-its requested refresh mode: default `background` may autostart, while `off`
-never does.
+Machine-readable setup, import, and search never start or nudge daemon
+maintenance. For human-readable commands, `--no-daemon`,
+catalog-only/explicit import modes, and search `--refresh off` remain the
+explicit ways to avoid autostart.
 
 Search output is local/private by default and is not redacted for sharing.
 Review and redact copied snippets, JSON, or transcripts before sending them

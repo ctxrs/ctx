@@ -22,14 +22,33 @@ for triple in \
   aarch64-unknown-linux-gnu \
   x86_64-apple-darwin \
   x86_64-pc-windows-msvc \
+  x86_64-unknown-freebsd \
   x86_64-unknown-linux-gnu; do
-  grep -F "${triple}" "${bazel_cfg}" >/dev/null
+  awk -v selector="@rules_rust//rust/platform:${triple}" '
+    index($0, selector) {
+      selected = 1
+      active = 1
+    }
+    active && index($0, "--cfg=ctx_semantic_fastembed") {
+      fastembed = 1
+    }
+    active && index($0, "--cfg=ctx_sqlite_vec") {
+      sqlite_vec = 1
+    }
+    active && $0 == "    ]," {
+      active = 0
+    }
+    END {
+      exit !(selected && fastembed && sqlite_vec)
+    }
+  ' "${bazel_cfg}"
 done
 
 for platform_clause in \
   '("linux", "x86_64" | "aarch64")' \
   '("macos", "x86_64" | "aarch64")' \
-  '("windows", "x86_64")'; do
+  '("windows", "x86_64")' \
+  '("freebsd", "x86_64")'; do
   grep -F "${platform_clause}" "${build_rs}" >/dev/null
 done
 

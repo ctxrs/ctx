@@ -1,4 +1,7 @@
-use super::{support::*, write_codex_setup_session};
+use super::{
+    assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
+    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
+};
 
 use std::{
     sync::{
@@ -46,6 +49,101 @@ fn setup_does_not_write_default_config_and_preserves_existing_config() {
         fs::read_to_string(&config_path).unwrap(),
         user_config,
         "setup must not overwrite an existing user config"
+    );
+}
+
+#[test]
+fn setup_without_semantic_flag_preserves_explicit_search_setting() {
+    for enabled in [false, true] {
+        let temp = tempdir();
+        let config_path = temp.path().join("config.toml");
+        let original = format!("[search]\nsemantic = {enabled}\n");
+        fs::write(&config_path, &original).unwrap();
+
+        let setup = json_output(ctx(&temp).args(["setup", "--json", "--progress", "none"]));
+        assert_eq!(
+            setup["background_indexing"]["semantic_enabled"], enabled,
+            "{setup:#}"
+        );
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+        assert_no_daemon_autostart_mutation(&temp);
+    }
+}
+
+#[test]
+fn setup_semantic_persists_opt_in_and_machine_output_does_not_autostart() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--semantic", "--json", "--progress", "none"]));
+    assert_eq!(setup["background_indexing"]["semantic_enabled"], true);
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["reason"],
+        "machine_readable_output"
+    );
+    assert_no_daemon_autostart_mutation(&temp);
+
+    let config_path = temp.path().join("config.toml");
+    let once = fs::read_to_string(&config_path).unwrap();
+    assert!(once.contains("[search]\nsemantic = true\n"), "{once}");
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["semantic"]["enabled"], true);
+    assert_eq!(status["semantic"]["config_source"], "config");
+
+    json_output(ctx(&temp).args(["setup", "--semantic", "--json", "--progress", "none"]));
+    assert_eq!(fs::read_to_string(config_path).unwrap(), once);
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn setup_semantic_rejects_disabled_daemon_without_mutating_config_or_store() {
+    let temp = tempdir();
+    let config_path = temp.path().join("config.toml");
+    let original = "[daemon]\nenabled = false\n";
+    fs::write(&config_path, original).unwrap();
+
+    let stderr =
+        failure_stderr(ctx(&temp).args(["setup", "--semantic", "--json", "--progress", "none"]));
+    assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
+    assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    assert!(!temp.path().join("work.sqlite").exists());
+    assert_no_daemon_autostart_mutation(&temp);
+
+    let explicit_opt_out = tempdir();
+    let stderr = failure_stderr(ctx(&explicit_opt_out).args([
+        "setup",
+        "--semantic",
+        "--no-daemon",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
+    assert!(!explicit_opt_out.path().join("config.toml").exists());
+    assert!(!explicit_opt_out.path().join("work.sqlite").exists());
+    assert_no_daemon_autostart_mutation(&explicit_opt_out);
+}
+
+#[test]
+fn setup_semantic_clean_cache_queues_daemon_without_foreground_download() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let semantic_cache = temp.path().join("clean-semantic-cache");
+
+    let setup = json_output(
+        ctx(&temp)
+            .args(["setup", "--json", "--progress", "none"])
+            .env("CTX_SEARCH_SEMANTIC", "true")
+            .env("CTX_SEMANTIC_CACHE_DIR", &semantic_cache),
+    );
+
+    assert_eq!(setup["background_indexing"]["semantic_enabled"], true);
+    assert_eq!(setup["background_indexing"]["semantic_supported"], true);
+    assert_eq!(setup["network_required"], false);
+    assert!(
+        !semantic_cache.exists(),
+        "foreground setup must leave clean semantic cache acquisition to the daemon"
     );
 }
 
@@ -278,6 +376,14 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     assert_eq!(setup["catalog"]["source_files"], 1);
     assert_eq!(setup["catalog"]["failed_sessions"], 0);
     assert_eq!(setup["import"]["ran"], false);
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["status"],
+        "not_needed"
+    );
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["reason"],
+        "catalog_only"
+    );
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["inventory_units"], 1);
@@ -296,6 +402,7 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
         .clone();
     let human_setup = String::from_utf8(human_setup).unwrap();
     assert!(human_setup.contains("ctx local history inventory is ready; import is still pending"));
+    assert!(human_setup.contains("Catalog-only setup does not autostart daemon maintenance."));
     assert!(human_setup.contains("  ctx import --all"));
     assert!(!human_setup.contains("ctx search \"test failure\""));
 }
@@ -412,11 +519,11 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     assert_eq!(setup["background_indexing"]["units"], 1);
     assert_eq!(
         setup["background_indexing"]["daemon_autostart"]["status"],
-        "skipped"
+        "not_needed"
     );
     assert_eq!(
         setup["background_indexing"]["daemon_autostart"]["reason"],
-        "json_output"
+        "machine_readable_output"
     );
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
@@ -439,6 +546,14 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     assert_eq!(ready["import"]["ran"], true);
     assert_eq!(ready["import"]["totals"]["failed_sources"], 0);
     assert_eq!(ready["import"]["totals"]["imported_sessions"], 1);
+    assert_eq!(
+        ready["background_indexing"]["daemon_autostart"]["status"],
+        "not_needed"
+    );
+    assert_eq!(
+        ready["background_indexing"]["daemon_autostart"]["reason"],
+        "machine_readable_output"
+    );
     assert!(
         ready["import"]["totals"]["imported_events"]
             .as_u64()
@@ -467,6 +582,8 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     let human_setup = String::from_utf8(human_setup).unwrap();
     assert!(human_setup.contains("ctx local agent history search is ready"));
     assert!(human_setup.contains("from 1 source."));
+    assert!(human_setup
+        .contains("Daemon autostart is disabled for this process; setup ran in the foreground."));
     assert!(human_setup.contains("  ctx search \"test failure\""));
 }
 
@@ -480,12 +597,31 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
     assert_eq!(setup["mode"], "ready");
     assert_eq!(setup["import"]["ran"], true);
     assert_eq!(setup["background_indexing"]["enabled"], false);
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["status"],
+        "not_needed"
+    );
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["reason"],
+        "explicit_opt_out"
+    );
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["daemon"]["enabled"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
     assert!(!temp.path().join("config.toml").exists());
+
+    let human_setup = ctx(&temp)
+        .args(["setup", "--no-daemon", "--progress", "none"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human_setup = String::from_utf8(human_setup).unwrap();
+    assert!(human_setup
+        .contains("Daemon autostart was skipped for this setup because --no-daemon was used."));
 }
 
 #[test]
@@ -591,13 +727,23 @@ fn setup_autostart_records_spawn_failure_status() {
     write_codex_setup_session(&temp);
     let missing_exe = temp.path().join("missing-ctx-binary");
 
-    ctx(&temp)
-        .args(["setup", "--progress", "none"])
+    let output = ctx(&temp)
+        .args(["--quiet", "setup", "--progress", "none"])
         .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
         .env_remove("CI")
         .env_remove("CTX_DAEMON_AUTOSTART_OFF")
         .assert()
-        .success();
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("ctx daemon did not start"), "{stderr}");
+    assert!(stderr.contains("ctx daemon status --json"), "{stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "failed quiet setup must not print success or queued output: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
     let status = json_output(ctx(&temp).args(["daemon", "status", "--json"]));
     assert_eq!(status["daemon"]["status"], "failed");
@@ -607,6 +753,91 @@ fn setup_autostart_records_spawn_failure_status() {
     assert!(status["daemon"]["last_error"]
         .as_str()
         .is_some_and(|error| !error.is_empty()));
+}
+
+#[test]
+fn machine_readable_setup_preserves_json_without_autostarting_daemon() {
+    let temp = tempdir();
+    let missing_exe = temp.path().join("missing-ctx-binary");
+    write_active_daemon_upgrade_handoff(&temp);
+
+    let setup = json_output(
+        ctx(&temp)
+            .args(["setup", "--json", "--progress", "none"])
+            .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
+            .env_remove("CI")
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF"),
+    );
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["status"],
+        "not_needed"
+    );
+    assert_eq!(setup["mode"], "ready");
+    assert_eq!(setup["background_indexing"]["enabled"], false);
+    assert_eq!(
+        setup["background_indexing"]["daemon_autostart"]["reason"],
+        "machine_readable_output"
+    );
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn progress_json_setup_does_not_autostart_or_nudge_daemon() {
+    let temp = tempdir();
+    write_active_daemon_upgrade_handoff(&temp);
+
+    let output = ctx(&temp)
+        .args(["setup", "--progress", "json"])
+        .env_remove("CI")
+        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "Daemon autostart was skipped because machine-readable output was requested."
+        ),
+        "{stdout}"
+    );
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn human_setup_starts_a_reported_daemon_process() {
+    let temp = tempdir();
+    let binary = copied_ctx_binary(&temp);
+
+    let output = ctx_from_binary(&temp, &binary)
+        .args(["setup", "--progress", "none"])
+        .env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2")
+        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
+        .env("CTX_UPGRADE_AUTO", "off")
+        .env_remove("CI")
+        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("background maintenance handoff is verified"),
+        "{stdout}"
+    );
+
+    let running = json_output(ctx(&temp).args(["daemon", "status", "--json"]));
+    assert_eq!(running["daemon"]["status"], "running", "{running:#}");
+    assert_eq!(running["daemon"]["running"], true, "{running:#}");
+    assert_eq!(running["daemon"]["trigger_command"], "setup", "{running:#}");
+    assert_eq!(running["daemon"]["start_mode"], "auto");
+    let pid = running["daemon"]["pid"].as_u64().unwrap() as u32;
+    assert_daemon_process_running(pid);
+
+    let completed = wait_for_daemon_status(&temp, "completed", false, "setup");
+    assert_eq!(completed["daemon"]["pid"], pid);
+    assert!(completed["daemon"]["finished_at_ms"].as_i64().unwrap() > 0);
 }
 
 #[test]

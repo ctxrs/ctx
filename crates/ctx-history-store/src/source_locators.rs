@@ -62,6 +62,46 @@ pub struct ProviderSourceRouteBinding {
     alias_group_identity: String,
 }
 
+/// Exact provider-owned authority required to retire one physical source route.
+///
+/// Retirement revokes only current local reopening authority. Canonical Core
+/// rows and provider cursors remain historical evidence and upgrade state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSourceRouteRetirement {
+    pub provider: CaptureProvider,
+    pub source_format: String,
+    pub machine_id: String,
+    pub locator_identity: String,
+    pub cursor_stream: String,
+    pub expected_canonical_source_identity: String,
+    pub expected_source_revision: String,
+    pub retired_at_ms: i64,
+    pub reason: ProviderSourceRouteRetirementReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSourceRouteRetirementReason {
+    SourceMissing,
+    RootMissing,
+    Replaced,
+}
+
+impl ProviderSourceRouteRetirementReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceMissing => "source_missing",
+            Self::RootMissing => "root_missing",
+            Self::Replaced => "replaced",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSourceRouteRetirementDisposition {
+    Retired,
+    AlreadyRetired,
+}
+
 impl fmt::Debug for ProviderSourceRouteBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -91,6 +131,55 @@ pub struct ProviderSourceLocatorResolution {
 impl ProviderSourceLocatorResolution {
     pub fn route_binding(&self) -> ProviderSourceRouteBinding {
         self.route_binding.clone()
+    }
+}
+
+impl ProviderSourceLocatorObservation {
+    pub(crate) fn native_path_bound_value_bytes(&self) -> usize {
+        self.provider
+            .as_str()
+            .len()
+            .saturating_add(self.source_format.len())
+            .saturating_add(self.machine_id.len())
+            .saturating_add(self.locator_identity.len())
+            .saturating_add(self.cursor_stream.len())
+            .saturating_add(self.proposed_source_identity.len())
+            .saturating_add(
+                self.raw_source_path
+                    .as_deref()
+                    .map(str::len)
+                    .unwrap_or_default(),
+            )
+            .saturating_add(self.source_revision.len())
+            .saturating_add(std::mem::size_of::<i64>())
+    }
+}
+
+impl ProviderSourceRouteBinding {
+    pub(crate) fn native_path_bound_value_bytes(&self) -> usize {
+        self.provider
+            .as_str()
+            .len()
+            .saturating_add(self.source_format.len())
+            .saturating_add(self.machine_id.len())
+            .saturating_add(self.canonical_source_identity.len())
+            .saturating_add(self.alias_group_identity.len())
+    }
+}
+
+impl ProviderSourceRouteRetirement {
+    pub(crate) fn native_path_bound_value_bytes(&self) -> usize {
+        self.provider
+            .as_str()
+            .len()
+            .saturating_add(self.source_format.len())
+            .saturating_add(self.machine_id.len())
+            .saturating_add(self.locator_identity.len())
+            .saturating_add(self.cursor_stream.len())
+            .saturating_add(self.expected_canonical_source_identity.len())
+            .saturating_add(self.expected_source_revision.len())
+            .saturating_add(std::mem::size_of::<i64>())
+            .saturating_add(self.reason.as_str().len())
     }
 }
 
@@ -189,6 +278,7 @@ impl fmt::Debug for AuthorizedSourceRoute {
 #[derive(Debug)]
 struct LocatorRow {
     locator_identity: String,
+    cursor_stream: String,
     canonical_source_identity: String,
     alias_group_identity: String,
     raw_source_path: Option<String>,
@@ -225,11 +315,17 @@ impl Store {
         }
     }
 
-    fn reconcile_provider_source_locator_tx(
+    pub(crate) fn reconcile_provider_source_locator_tx(
         &self,
         observation: &ProviderSourceLocatorObservation,
     ) -> Result<ProviderSourceLocatorResolution> {
         if let Some(exact) = self.provider_source_locator_by_identity(observation)? {
+            if exact.cursor_stream != observation.cursor_stream {
+                return Err(StoreError::ProviderSourceRelocationAmbiguous {
+                    provider: observation.provider.as_str().to_owned(),
+                    source_format: observation.source_format.clone(),
+                });
+            }
             if exact.is_current {
                 self.update_provider_source_locator(
                     &exact,
@@ -239,12 +335,41 @@ impl Store {
                 )?;
                 return Ok(resolution(observation, &exact, exact.is_relocation_alias));
             }
-            let current = self
-                .current_provider_source_locator(observation, &exact.alias_group_identity)?
-                .ok_or_else(|| StoreError::ProviderSourceRelocationAmbiguous {
-                    provider: observation.provider.as_str().to_owned(),
-                    source_format: observation.source_format.clone(),
-                })?;
+            let Some(current) =
+                self.current_provider_source_locator(observation, &exact.alias_group_identity)?
+            else {
+                if exact.canonical_source_identity != observation.proposed_source_identity {
+                    return Err(StoreError::ProviderSourceRelocationAmbiguous {
+                        provider: observation.provider.as_str().to_owned(),
+                        source_format: observation.source_format.clone(),
+                    });
+                }
+                let stale_route_count = self.conn.query_row(
+                    "SELECT COUNT(*) FROM capture_source_provider_routes
+                     WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+                       AND alias_group_identity = ?4",
+                    params![
+                        observation.provider.as_str(),
+                        observation.source_format,
+                        observation.machine_id,
+                        exact.alias_group_identity,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                if stale_route_count != 0 {
+                    return Err(StoreError::ProviderSourceRelocationAmbiguous {
+                        provider: observation.provider.as_str().to_owned(),
+                        source_format: observation.source_format.clone(),
+                    });
+                }
+                self.update_provider_source_locator(
+                    &exact,
+                    observation,
+                    true,
+                    exact.is_relocation_alias,
+                )?;
+                return Ok(resolution(observation, &exact, exact.is_relocation_alias));
+            };
             if current.source_revision != observation.source_revision
                 || !exact_locator_is_missing(current.raw_source_path.as_deref())
             {
@@ -320,8 +445,255 @@ impl Store {
         binding: &ProviderSourceRouteBinding,
     ) -> Result<()> {
         self.with_import_batch_write(|| {
-            self.bind_capture_source_provider_route_inner(capture_source_id, binding)
+            self.bind_capture_source_provider_route_tx(capture_source_id, binding)
         })
+    }
+
+    pub(crate) fn bind_capture_source_provider_route_tx(
+        &self,
+        capture_source_id: Uuid,
+        binding: &ProviderSourceRouteBinding,
+    ) -> Result<()> {
+        if self.capture_source_provider_route_is_authorized(capture_source_id, binding)? {
+            return Ok(());
+        }
+        if self.insert_capture_source_provider_route_if_authorized(capture_source_id, binding)? {
+            return Ok(());
+        }
+        self.bind_capture_source_provider_route_inner(capture_source_id, binding)
+    }
+
+    /// Revokes the exact current physical route without deleting canonical
+    /// source, session, event, run, touch, or cursor history.
+    pub(crate) fn retire_provider_source_route_tx(
+        &self,
+        retirement: &ProviderSourceRouteRetirement,
+    ) -> Result<ProviderSourceRouteRetirementDisposition> {
+        let locator_identity = locator_storage_key(&retirement.locator_identity);
+        let locator = self
+            .conn
+            .query_row(
+                "SELECT cursor_stream, canonical_source_identity,
+                        alias_group_identity, source_revision, is_current
+                 FROM provider_source_locators
+                 WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+                   AND locator_identity = ?4",
+                params![
+                    retirement.provider.as_str(),
+                    retirement.source_format,
+                    retirement.machine_id,
+                    locator_identity,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            cursor_stream,
+            canonical_source_identity,
+            alias_group_identity,
+            source_revision,
+            is_current,
+        )) = locator
+        else {
+            return Err(self.provider_source_route_retirement_conflict(retirement));
+        };
+        if cursor_stream != retirement.cursor_stream
+            || canonical_source_identity != retirement.expected_canonical_source_identity
+            || source_revision != retirement.expected_source_revision
+        {
+            return Err(self.provider_source_route_retirement_conflict(retirement));
+        }
+
+        let current_count = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM provider_source_locators
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND alias_group_identity = ?4 AND is_current = 1",
+            params![
+                retirement.provider.as_str(),
+                retirement.source_format,
+                retirement.machine_id,
+                alias_group_identity,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let route_count = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM capture_source_provider_routes route
+             JOIN capture_sources source ON source.id = route.capture_source_id
+             WHERE route.provider = ?1 AND route.source_format = ?2
+               AND route.machine_id = ?3 AND route.alias_group_identity = ?4
+               AND source.provider = ?1 AND source.source_format = ?2
+               AND source.machine_id = ?3 AND source.source_identity = ?5",
+            params![
+                retirement.provider.as_str(),
+                retirement.source_format,
+                retirement.machine_id,
+                alias_group_identity,
+                retirement.expected_canonical_source_identity,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let all_route_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM capture_source_provider_routes
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND alias_group_identity = ?4",
+            params![
+                retirement.provider.as_str(),
+                retirement.source_format,
+                retirement.machine_id,
+                alias_group_identity,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if route_count != all_route_count {
+            return Err(self.provider_source_route_retirement_conflict(retirement));
+        }
+
+        if !is_current {
+            if current_count == 0 && route_count == 0 {
+                return Ok(ProviderSourceRouteRetirementDisposition::AlreadyRetired);
+            }
+            return Err(self.provider_source_route_retirement_conflict(retirement));
+        }
+        if current_count != 1 {
+            return Err(self.provider_source_route_retirement_conflict(retirement));
+        }
+
+        let retired = self.conn.execute(
+            "UPDATE provider_source_locators
+             SET is_current = 0, observed_at_ms = ?5
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND locator_identity = ?4 AND cursor_stream = ?6
+               AND canonical_source_identity = ?7
+               AND alias_group_identity = ?8 AND source_revision = ?9
+               AND is_current = 1",
+            params![
+                retirement.provider.as_str(),
+                retirement.source_format,
+                retirement.machine_id,
+                locator_identity,
+                retirement.retired_at_ms,
+                retirement.cursor_stream,
+                retirement.expected_canonical_source_identity,
+                alias_group_identity,
+                retirement.expected_source_revision,
+            ],
+        )?;
+        if retired != 1 {
+            return Err(self.provider_source_route_retirement_conflict(retirement));
+        }
+        self.conn.execute(
+            "DELETE FROM capture_source_provider_routes
+             WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
+               AND alias_group_identity = ?4",
+            params![
+                retirement.provider.as_str(),
+                retirement.source_format,
+                retirement.machine_id,
+                alias_group_identity,
+            ],
+        )?;
+        Ok(ProviderSourceRouteRetirementDisposition::Retired)
+    }
+
+    fn provider_source_route_retirement_conflict(
+        &self,
+        retirement: &ProviderSourceRouteRetirement,
+    ) -> StoreError {
+        StoreError::ProviderSourceRouteRetirementConflict {
+            provider: retirement.provider.as_str().to_owned(),
+            source_format: retirement.source_format.clone(),
+        }
+    }
+
+    fn capture_source_provider_route_is_authorized(
+        &self,
+        capture_source_id: Uuid,
+        binding: &ProviderSourceRouteBinding,
+    ) -> Result<bool> {
+        // A matching route row is caller-controlled evidence, not authority.
+        // Re-prove both the canonical capture source and its current physical
+        // locator before taking the common replay path.
+        let mut statement = self.conn.prepare_cached(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM capture_source_provider_routes route
+                 JOIN capture_sources cs ON cs.id = route.capture_source_id
+                 JOIN provider_source_locators locator
+                   ON locator.provider = route.provider
+                  AND locator.source_format = route.source_format
+                  AND locator.machine_id = route.machine_id
+                  AND locator.alias_group_identity = route.alias_group_identity
+                  AND locator.is_current = 1
+                 WHERE route.capture_source_id = ?1
+                   AND route.provider = ?2
+                   AND route.source_format = ?3
+                   AND route.machine_id = ?4
+                   AND route.alias_group_identity = ?5
+                   AND cs.provider = ?2
+                   AND cs.source_format = ?3
+                   AND cs.machine_id = ?4
+                   AND cs.source_identity = ?6
+                   AND locator.canonical_source_identity = ?6
+             )",
+        )?;
+        Ok(statement.query_row(
+            params![
+                capture_source_id.to_string(),
+                binding.provider.as_str(),
+                binding.source_format,
+                binding.machine_id,
+                binding.alias_group_identity,
+                binding.canonical_source_identity,
+            ],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
+    }
+
+    fn insert_capture_source_provider_route_if_authorized(
+        &self,
+        capture_source_id: Uuid,
+        binding: &ProviderSourceRouteBinding,
+    ) -> Result<bool> {
+        // The first binding is written only from the same authoritative join.
+        // A zero-row result retains the complete conflict/rename slow path.
+        let mut statement = self.conn.prepare_cached(
+            "INSERT INTO capture_source_provider_routes
+                 (capture_source_id, provider, source_format, machine_id,
+                  alias_group_identity)
+             SELECT cs.id, ?2, ?3, ?4, ?5
+             FROM capture_sources cs
+             JOIN provider_source_locators locator
+               ON locator.provider = ?2
+              AND locator.source_format = ?3
+              AND locator.machine_id = ?4
+              AND locator.canonical_source_identity = ?6
+              AND locator.alias_group_identity = ?5
+              AND locator.is_current = 1
+             WHERE cs.id = ?1
+               AND cs.provider = ?2
+               AND cs.source_format = ?3
+               AND cs.machine_id = ?4
+               AND cs.source_identity = ?6
+             ON CONFLICT(capture_source_id) DO NOTHING",
+        )?;
+        Ok(statement.execute(params![
+            capture_source_id.to_string(),
+            binding.provider.as_str(),
+            binding.source_format,
+            binding.machine_id,
+            binding.alias_group_identity,
+            binding.canonical_source_identity,
+        ])? == 1)
     }
 
     fn bind_capture_source_provider_route_inner(
@@ -363,6 +735,7 @@ impl Store {
                  SELECT 1 FROM provider_source_locators
                  WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
                    AND canonical_source_identity = ?4 AND alias_group_identity = ?5
+                   AND is_current = 1
              )",
             params![
                 binding.provider.as_str(),
@@ -526,8 +899,9 @@ impl Store {
         let locator_identity = locator_storage_key(&observation.locator_identity);
         self.conn
             .query_row(
-                "SELECT locator_identity, canonical_source_identity, alias_group_identity,
-                        raw_source_path, source_revision, is_current, is_relocation_alias
+                "SELECT locator_identity, cursor_stream, canonical_source_identity,
+                        alias_group_identity, raw_source_path, source_revision,
+                        is_current, is_relocation_alias
                  FROM provider_source_locators
                  WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
                    AND locator_identity = ?4",
@@ -550,8 +924,9 @@ impl Store {
     ) -> Result<Option<LocatorRow>> {
         self.conn
             .query_row(
-                "SELECT locator_identity, canonical_source_identity, alias_group_identity,
-                        raw_source_path, source_revision, is_current, is_relocation_alias
+                "SELECT locator_identity, cursor_stream, canonical_source_identity,
+                        alias_group_identity, raw_source_path, source_revision,
+                        is_current, is_relocation_alias
                  FROM provider_source_locators
                  WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
                    AND alias_group_identity = ?4 AND is_current = 1",
@@ -572,8 +947,9 @@ impl Store {
         observation: &ProviderSourceLocatorObservation,
     ) -> Result<Vec<LocatorRow>> {
         let mut statement = self.conn.prepare(
-            "SELECT locator_identity, canonical_source_identity, alias_group_identity,
-                    raw_source_path, source_revision, is_current, is_relocation_alias
+            "SELECT locator_identity, cursor_stream, canonical_source_identity,
+                    alias_group_identity, raw_source_path, source_revision,
+                    is_current, is_relocation_alias
              FROM provider_source_locators
              WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
                AND source_revision = ?4 AND is_current = 1
@@ -687,7 +1063,7 @@ impl Store {
     }
 }
 
-fn locator_storage_key(identity: &str) -> String {
+pub(crate) fn locator_storage_key(identity: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"ctx-provider-locator-storage-v1\0");
     hasher.update((identity.len() as u64).to_be_bytes());
@@ -698,12 +1074,13 @@ fn locator_storage_key(identity: &str) -> String {
 fn locator_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
     Ok(LocatorRow {
         locator_identity: row.get(0)?,
-        canonical_source_identity: row.get(1)?,
-        alias_group_identity: row.get(2)?,
-        raw_source_path: row.get(3)?,
-        source_revision: row.get(4)?,
-        is_current: row.get::<_, i64>(5)? != 0,
-        is_relocation_alias: row.get::<_, i64>(6)? != 0,
+        cursor_stream: row.get(1)?,
+        canonical_source_identity: row.get(2)?,
+        alias_group_identity: row.get(3)?,
+        raw_source_path: row.get(4)?,
+        source_revision: row.get(5)?,
+        is_current: row.get::<_, i64>(6)? != 0,
+        is_relocation_alias: row.get::<_, i64>(7)? != 0,
     })
 }
 

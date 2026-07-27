@@ -49,7 +49,11 @@ pub(super) fn resolve_message(
     let normalized_payload_hash = crate::compute_payload_hash(&resolved.event.payload).ok();
     Ok(ResolvedSqliteMessage {
         text: resolved.text,
-        native_record_id: native_record_id(&resolved.event),
+        native_record_id: native_record_id(
+            resolved.event.provider_event_index,
+            resolved.event.provider_event_hash.as_deref(),
+            Some(resolved.event.cursor.as_str()),
+        ),
         provider_event_hash,
         normalized_payload_hash,
         record_digest: resolved.record_digest,
@@ -72,7 +76,11 @@ pub(super) fn resolve_result(
     if !matches!(
         resolved.event.event_type,
         EventType::ToolOutput | EventType::CommandOutput
-    ) || native_record_id(&resolved.event) != request.expected_native_record_id
+    ) || native_record_id(
+        resolved.event.provider_event_index,
+        resolved.event.provider_event_hash.as_deref(),
+        Some(resolved.event.cursor.as_str()),
+    ) != request.expected_native_record_id
         || resolved.record_digest != request.expected_record_digest
         || !request
             .expected_content_ref

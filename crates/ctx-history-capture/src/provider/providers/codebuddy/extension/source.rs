@@ -10,8 +10,8 @@ use crate::common::io::{ensure_regular_provider_transcript_file, read_json_file_
 use crate::provider::provider_safe_path_segment;
 use crate::provider::providers::task_json::{task_json_string_field, task_json_time_field};
 use crate::{
-    CaptureError, ProviderImportFailure, ProviderImportSummary, ProviderNormalizationResult,
-    Result, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, ProviderImportFailure, ProviderImportSummary, Result,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::super::source::{CodeBuddyFrozenFile, CodeBuddyRevisionHasher};
@@ -25,8 +25,6 @@ pub(super) struct CodeBuddyExtensionMetadata {
     pub(super) project_dir: PathBuf,
     pub(super) native_session_id: String,
     pub(super) project_hash: String,
-    pub(super) provider_session_id: String,
-    pub(super) source_path: String,
     pub(super) project_index: Option<Value>,
     pub(super) conversation: Option<Value>,
     pub(super) session_index: Value,
@@ -46,7 +44,6 @@ impl CodeBuddyExtensionMetadata {
 pub(super) struct CodeBuddyExtensionObservation {
     pub(super) canonical_session_dir: PathBuf,
     pub(super) source_revision: String,
-    pub(super) record_count: u64,
 }
 
 impl CodeBuddyExtensionObservation {
@@ -56,24 +53,12 @@ impl CodeBuddyExtensionObservation {
         summary: &mut ProviderImportSummary,
     ) -> Result<Self> {
         let canonical_session_dir = fs::canonicalize(&metadata.session_dir)?;
-        let (source_revision, record_count) =
+        let (source_revision, _) =
             codebuddy_extension_source_revision(metadata, session_ordinal, Some(summary))?;
         Ok(Self {
             canonical_session_dir,
             source_revision,
-            record_count,
         })
-    }
-
-    pub(super) fn revalidate(&self, session_dir: &Path) -> Result<bool> {
-        let (Some(metadata), _) = codebuddy_extension_metadata(session_dir, 0)? else {
-            return Ok(false);
-        };
-        let (source_revision, record_count) =
-            codebuddy_extension_source_revision(&metadata, 0, None)?;
-        Ok(fs::canonicalize(session_dir)? == self.canonical_session_dir
-            && source_revision == self.source_revision
-            && record_count == self.record_count)
     }
 }
 
@@ -113,23 +98,18 @@ pub(super) fn codebuddy_extension_metadata(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("unknown-session")
         .to_owned();
-    let provider_session_id = format!("{project_hash}/{native_session_id}");
-    let mut normalization = ProviderNormalizationResult::default();
     let (project_index, conversation) = codebuddy_project_index_and_conversation(
         &project_dir,
         &native_session_id,
-        &mut normalization,
+        &mut summary,
         session_ordinal,
     );
-    summary.merge(normalization.summary);
     Ok((
         Some(CodeBuddyExtensionMetadata {
             session_dir: session_dir.to_path_buf(),
             project_dir,
             native_session_id,
             project_hash,
-            provider_session_id,
-            source_path: session_dir.display().to_string(),
             project_index,
             conversation,
             session_index,
@@ -259,7 +239,7 @@ pub(super) fn codebuddy_extension_metadata_text(
 fn codebuddy_project_index_and_conversation(
     project_dir: &Path,
     native_session_id: &str,
-    result: &mut ProviderNormalizationResult,
+    summary: &mut ProviderImportSummary,
     line: usize,
 ) -> (Option<Value>, Option<Value>) {
     let path = project_dir.join("index.json");
@@ -273,8 +253,7 @@ fn codebuddy_project_index_and_conversation(
         }) {
             Ok(value) => value,
             Err(err) => {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                summary.record_failure(ProviderImportFailure {
                     line,
                     error: format!("project index.json: {err}"),
                 });
@@ -283,8 +262,7 @@ fn codebuddy_project_index_and_conversation(
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (None, None),
         Err(err) => {
-            result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            summary.record_failure(ProviderImportFailure {
                 line,
                 error: format!("project index.json: {err}"),
             });

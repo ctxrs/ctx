@@ -1,0 +1,16 @@
+PR          ctxrs/ctx#42
+repository  ctxrs/ctx
+
+Code produced
+  contains_commit  commit deadbeef
+    membership evidence  [1]
+    agent production     not proven
+
+PR activity
+  No cited activity on this page.
+
+Evidence
+  [1] ctx show event 00000000-0000-0000-0000-000000000001
+
+1 matches shown; more matches are available.
+continue  ctx blame pr 42 --repository ctxrs/ctx --cursor activity-page

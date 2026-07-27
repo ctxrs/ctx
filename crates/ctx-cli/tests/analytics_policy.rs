@@ -31,16 +31,6 @@ fn analytics_sends_coarse_cli_metadata_by_default() {
         event["events"][0]["properties"]["finding_count_bucket"],
         "2-5"
     );
-    assert_eq!(
-        event["events"][0]["properties"]["auto_upgrade_spawn_status"],
-        "auto_disabled"
-    );
-    assert_eq!(event["events"][0]["properties"]["auto_upgrade_probe"], true);
-    assert_eq!(event["events"][0]["properties"]["auto_upgrade_due"], false);
-    assert_eq!(
-        event["events"][0]["properties"]["auto_upgrade_spawned"],
-        false
-    );
     assert_capability_snapshot_is_coarse(analytics_event_properties(&event));
     assert_analytics_properties_are_allowlisted(analytics_event_properties(&event));
     for forbidden in [

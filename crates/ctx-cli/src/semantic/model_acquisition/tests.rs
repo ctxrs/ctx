@@ -36,7 +36,7 @@ fn cache_only_probe_never_reads_artifact_url() {
 }
 
 #[test]
-fn archive_hash_mismatch_is_an_integrity_failure() {
+fn signed_archive_hash_mismatch_fails_closed_without_publication() {
     let temp = tempfile::tempdir().unwrap();
     let archive = temp
         .path()
@@ -47,6 +47,11 @@ fn archive_hash_mismatch_is_an_integrity_failure() {
     let error = acquire_coreml_bundle_for(temp.path(), &descriptor).unwrap_err();
     assert!(model_acquisition_integrity_error(&error));
     assert!(format!("{error:#}").contains("SHA-256"));
+    let installed = content_addressed_bundle_path(temp.path(), descriptor.manifest_sha256).unwrap();
+    assert!(
+        !installed.exists(),
+        "unverified signed bundle bytes must never be published"
+    );
 }
 
 #[test]
@@ -125,7 +130,7 @@ fn macos_versions_compare_numerically() {
 }
 
 #[test]
-fn verified_archive_installs_content_addressed_and_then_uses_cache_only() {
+fn daemon_signed_acquisition_installs_clean_cache_then_uses_cache_only() {
     let temp = tempfile::tempdir().unwrap();
     let (archive_path, archive_sha256, manifest_sha256) = create_test_bundle_archive(temp.path());
     let artifact_url = format!("file://{}", archive_path.display());

@@ -6,6 +6,8 @@ use ring::{
 };
 use serde_json::json;
 use std::{
+    env,
+    ffi::OsString,
     fs,
     io::Cursor,
     path::{Path, PathBuf},
@@ -17,7 +19,7 @@ use flate2::{write::GzEncoder, Compression};
 #[cfg(unix)]
 use tar::{Builder as TarBuilder, EntryType, Header};
 
-use super::file_url;
+use super::{copied_ctx_binary, file_url};
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -437,7 +439,82 @@ pub(crate) fn fake_release_env<'a>(
     release: &FakeRelease,
 ) -> &'a mut Command {
     command
-        .env("CTX_UPGRADE_TARGET", &release.target)
+        .env("CTX_UPGRADE_TEST_TARGET", &release.target)
+        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
+        .env(
+            "CTX_RELEASE_METADATA_SIGNATURE_URL",
+            file_url(&release.signature),
+        )
+        .env(
+            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+            TEST_RELEASE_PUBLIC_KEY_PEM,
+        )
+}
+
+#[cfg(unix)]
+pub(crate) fn managed_candidate(temp: &TempDir, install_attempt_id: &str) -> PathBuf {
+    managed_candidate_in(temp, "candidate-bin", install_attempt_id)
+}
+
+#[cfg(unix)]
+pub(crate) fn managed_candidate_in(
+    temp: &TempDir,
+    directory: &str,
+    install_attempt_id: &str,
+) -> PathBuf {
+    let copied = copied_ctx_binary(temp);
+    let bin_dir = temp.path().join(directory);
+    let target = bin_dir.join("ctx");
+    fs::create_dir(&bin_dir).unwrap();
+    fs::rename(copied, &target).unwrap();
+    if fs::metadata(&target).unwrap().len() > 128 * 1024 * 1024 {
+        let stripped = std::process::Command::new("strip")
+            .arg("-S")
+            .arg(&target)
+            .status()
+            .expect("run strip for the temporary managed debug candidate");
+        assert!(
+            stripped.success(),
+            "strip temporary managed debug candidate"
+        );
+    }
+    let current = fs::read(&target).unwrap();
+    fs::write(
+        install_marker_path(&target),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+            "install_attempt_id": install_attempt_id,
+            "install_path": target,
+            "platform": test_platform_key().replace('_', "-"),
+            "channel": "stable",
+            "version": env!("CARGO_PKG_VERSION"),
+            "sha256": sha256_hex(&current),
+            "metadata_url": null,
+            "artifact_url": null,
+            "installed_at": ctx_history_core::utc_now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    target
+}
+
+#[cfg(unix)]
+pub(crate) fn managed_release_env<'a>(
+    command: &'a mut Command,
+    release: &FakeRelease,
+    binary: &Path,
+) -> &'a mut Command {
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    paths.extend(env::split_paths(&inherited_path));
+    let path = env::join_paths(paths).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"));
+    command
+        .env_remove("CTX_UPGRADE_AUTO")
+        .env("PATH", path)
+        .env("CTX_UPGRADE_INTERVAL_SECONDS", "0")
         .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
         .env(
             "CTX_RELEASE_METADATA_SIGNATURE_URL",

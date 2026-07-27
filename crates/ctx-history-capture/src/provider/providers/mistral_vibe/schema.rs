@@ -1,23 +1,19 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderEventEnvelope, ProviderSourceTrust,
-};
+use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
 use crate::common::io::read_text_file_limited;
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::normalization::{
-    native_event, native_provider_capture, provider_capped_json, provider_capped_json_value,
-    provider_explicit_result_value_text, provider_local_preview, provider_role,
-    provider_value_text, NativeEventDraft, NativeSessionDraft,
+    provider_capped_json, provider_explicit_result_value_text, provider_local_preview,
+    provider_value_text,
 };
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportSummary, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES, MISTRAL_VIBE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, ProviderImportSummary, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
+    PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 use super::source::MistralVibeSessionSource;
@@ -121,111 +117,6 @@ fn bounded_mistral_vibe_identity(
         });
     }
     Ok(Some(value))
-}
-
-pub(super) struct MistralVibeCaptureDraft<'a> {
-    pub(super) provider_session_id: String,
-    pub(super) parent_provider_session_id: Option<String>,
-    pub(super) agent_type: AgentType,
-    pub(super) role_hint: String,
-    pub(super) is_primary: bool,
-    pub(super) started_at: DateTime<Utc>,
-    pub(super) ended_at: Option<DateTime<Utc>>,
-    pub(super) cwd: Option<String>,
-    pub(super) metadata: &'a Value,
-    pub(super) source: &'a MistralVibeSessionSource,
-    pub(super) event: Option<ProviderEventEnvelope>,
-}
-
-pub(super) fn mistral_vibe_capture(
-    draft: MistralVibeCaptureDraft<'_>,
-    context: &ProviderAdapterContext,
-) -> ProviderCaptureEnvelope {
-    native_provider_capture(
-        NativeSessionDraft {
-            provider: CaptureProvider::MistralVibe,
-            source_format: MISTRAL_VIBE_SOURCE_FORMAT,
-            provider_session_id: draft.provider_session_id.clone(),
-            parent_provider_session_id: draft.parent_provider_session_id.clone(),
-            root_provider_session_id: draft.parent_provider_session_id.clone(),
-            external_agent_id: mistral_vibe_metadata_pointer_string(
-                draft.metadata,
-                &["/agent_profile/name"],
-            ),
-            agent_type: draft.agent_type,
-            role_hint: Some(draft.role_hint),
-            is_primary: draft.is_primary,
-            started_at: draft.started_at,
-            ended_at: draft.ended_at,
-            cwd: draft.cwd,
-            fidelity: Fidelity::Imported,
-            raw_source_path: draft.source.messages_path.display().to_string(),
-            trust: ProviderSourceTrust::ProviderNative,
-            source_metadata: json!({
-                "adapter": MISTRAL_VIBE_SOURCE_FORMAT,
-                "source_path": draft.source.messages_path.display().to_string(),
-                "metadata_path": draft.source.metadata_path.display().to_string(),
-                "session_dir": draft.source.session_dir.display().to_string(),
-            }),
-            session_metadata: json!({
-                "source_format": MISTRAL_VIBE_SOURCE_FORMAT,
-                "provider": CaptureProvider::MistralVibe.as_str(),
-                "session_id": draft.provider_session_id,
-                "title": mistral_vibe_metadata_string(draft.metadata, "title"),
-                "title_source": mistral_vibe_metadata_string(draft.metadata, "title_source"),
-                "git_branch": mistral_vibe_metadata_string(draft.metadata, "git_branch"),
-                "git_commit": mistral_vibe_metadata_string(draft.metadata, "git_commit"),
-                "total_messages": draft.metadata.get("total_messages").and_then(Value::as_u64),
-                "agent_profile": draft.metadata.get("agent_profile").cloned(),
-                "stats": draft.metadata.get("stats").cloned(),
-                "loops": draft.metadata.get("loops").cloned(),
-                "experiments": draft.metadata.get("experiments").cloned(),
-            }),
-        },
-        context,
-        draft.event,
-    )
-}
-
-pub(super) fn mistral_vibe_event(
-    provider_session_id: &str,
-    line_number: usize,
-    value: &Value,
-    occurred_at: DateTime<Utc>,
-    path: &Path,
-    metadata: &Value,
-) -> ProviderEventEnvelope {
-    let role = value
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let event_type = mistral_vibe_event_type(role, value);
-    native_event(NativeEventDraft {
-        provider: CaptureProvider::MistralVibe,
-        source_format: MISTRAL_VIBE_SOURCE_FORMAT,
-        provider_session_id: provider_session_id.to_owned(),
-        provider_event_index: (line_number - 1) as u64,
-        provider_event_hash: Some(mistral_vibe_event_id(value, line_number, role)),
-        cursor: format!("{}:line:{line_number}", path.display()),
-        event_type,
-        role: Some(provider_role(Some(role))),
-        occurred_at,
-        text: mistral_vibe_event_text(role, value, event_type),
-        body: value.clone(),
-        metadata: json!({
-            "source": MISTRAL_VIBE_SOURCE_FORMAT,
-            "source_format": MISTRAL_VIBE_SOURCE_FORMAT,
-            "line": line_number,
-            "role": role,
-            "message_id": value.get("message_id").and_then(Value::as_str),
-            "reasoning_message_id": value.get("reasoning_message_id").and_then(Value::as_str),
-            "tool_call_id": value.get("tool_call_id").and_then(Value::as_str),
-            "name": value.get("name").and_then(Value::as_str),
-            "tool_calls": value.get("tool_calls").map(|calls| provider_capped_json_value(calls, PROVIDER_MAX_PREVIEW_CHARS)),
-            "images": value.get("images").map(|images| provider_capped_json_value(images, PROVIDER_MAX_PREVIEW_CHARS)),
-            "agent_profile": metadata.pointer("/agent_profile/name").and_then(Value::as_str),
-        }),
-    })
 }
 
 pub(super) fn mistral_vibe_event_type(role: &str, value: &Value) -> EventType {

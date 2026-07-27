@@ -29,6 +29,7 @@ use pages::{digest_at_position, prune_chunks_through};
 #[cfg(test)]
 use protocol_validity::MAX_AUTHORIZED_REPOSITORY_ROOTS;
 use records::append_baseline;
+pub(crate) use records::GroupJournalCollector;
 use support::{current_time_ms, nonnegative_u64, to_i64};
 
 /// Drops the replaceable handoff before a canonical same-version schema rewrite.
@@ -177,6 +178,7 @@ impl Store {
         &self,
         contract_fingerprint: &str,
     ) -> Result<JournalCheckpoint> {
+        self.reject_projection_journal_lifecycle_in_native_path_group()?;
         validate_contract_fingerprint(contract_fingerprint)?;
         let result = self.with_atomic_write(|| {
             install_projection_writer_fence(&self.conn)?;
@@ -200,6 +202,7 @@ impl Store {
         &self,
         helper_checkpoint: Option<&JournalCheckpoint>,
     ) -> Result<JournalCheckpoint> {
+        self.reject_projection_journal_lifecycle_in_native_path_group()?;
         self.with_atomic_write(|| {
             let state = active_state(&self.conn)?.ok_or(StoreError::ProjectionJournalInactive)?;
             let Some(helper) = helper_checkpoint else {
@@ -228,6 +231,7 @@ impl Store {
     /// The checkpoint update and deletion share one SQLite transaction, so a crash
     /// leaves either the complete old prefix or the complete retained suffix.
     pub fn acknowledge_projection_journal(&self, acknowledged: &JournalCheckpoint) -> Result<()> {
+        self.reject_projection_journal_lifecycle_in_native_path_group()?;
         self.with_atomic_write(|| {
             let state = active_state(&self.conn)?.ok_or(StoreError::ProjectionJournalInactive)?;
             acknowledge_checkpoint(&self.conn, &state, acknowledged)
@@ -236,6 +240,7 @@ impl Store {
 
     /// Deletes every derived handoff record while retaining only the next-generation counter.
     pub fn disable_projection_journal(&self) -> Result<()> {
+        self.reject_projection_journal_lifecycle_in_native_path_group()?;
         let result = self.with_atomic_write(|| {
             drop_projection_writer_fence(&self.conn)?;
             self.conn
@@ -274,6 +279,43 @@ impl Store {
         if self.batch_depth.get() > 0 {
             self.projection_journal_active_in_batch.set(Some(active));
         }
+    }
+
+    fn reject_projection_journal_lifecycle_in_native_path_group(&self) -> Result<()> {
+        if self.native_path_group_token.get().is_some() {
+            self.poison_native_path_group();
+            return Err(StoreError::NativePathJournalLifecycleDuringGroup);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn projection_journal_checkpoint_in_transaction(
+        &self,
+    ) -> Result<Option<JournalCheckpoint>> {
+        active_state(&self.conn).map(|state| state.as_ref().map(checkpoint))
+    }
+
+    pub(crate) fn verify_projection_journal_checkpoint_in_transaction(
+        &self,
+        candidate: Option<&JournalCheckpoint>,
+    ) -> Result<bool> {
+        let Some(state) = active_state(&self.conn)? else {
+            return Ok(candidate.is_none());
+        };
+        let Some(candidate) = candidate else {
+            return Ok(false);
+        };
+        if candidate.contract_fingerprint != state.contract_fingerprint
+            || candidate.position.generation != state.generation
+            || candidate.position.sequence < state.acknowledged_sequence
+            || candidate.position.sequence > state.high_water_sequence
+        {
+            return Ok(false);
+        }
+        Ok(
+            digest_at_position(&self.conn, &state, candidate.position.sequence)?
+                == candidate.cumulative_digest,
+        )
     }
 }
 

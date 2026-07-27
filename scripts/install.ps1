@@ -8,6 +8,7 @@ param(
     [switch]$NoRuntime,
     [switch]$NoModifyPath,
     [switch]$NoSetup,
+    [switch]$NoDaemon,
     [switch]$NoSkill,
     [string[]]$SkillAgent = @(),
     [switch]$AllSkillAgents,
@@ -471,6 +472,7 @@ try {
     }
 
     $runSetup = -not $NoSetup -and $env:CTX_INSTALL_NO_SETUP -ne "1"
+    $setupNoDaemon = [bool]$NoDaemon -or $env:CTX_INSTALL_NO_DAEMON -eq "1"
     $runSkill = -not $noSkillRequested
     $installRuntime = -not $NoRuntime -and $env:CTX_INSTALL_NO_RUNTIME -ne "1"
     if (-not $runSetup -and -not $explicitSkillRequest) {
@@ -583,10 +585,15 @@ try {
         }
         Write-Host ""
         Write-Host "Indexing local agent history..."
-        & $installPath setup --progress $SetupProgress
+        $setupArgs = @("setup", "--progress", $SetupProgress)
+        if ($setupNoDaemon) {
+            $setupArgs += "--no-daemon"
+        }
+        & $installPath @setupArgs
         if ($LASTEXITCODE -ne 0) {
             $setupStatus = $LASTEXITCODE
-            Write-Warning "ctx setup failed after install; run $installPath setup --progress $SetupProgress to retry"
+            $retryNoDaemon = if ($setupNoDaemon) { " --no-daemon" } else { "" }
+            Write-Warning "ctx setup failed after install; run $installPath setup --progress $SetupProgress$retryNoDaemon to retry"
         }
     } else {
         Write-Host ""

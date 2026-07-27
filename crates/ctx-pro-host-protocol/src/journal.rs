@@ -1,12 +1,8 @@
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{
-    ContentRef, ErrorClass, ProtocolError, PROJECTION_CONTRACT_VERSION, PROTOCOL_FINGERPRINT,
-};
+use crate::{ErrorClass, ProtocolError, PROJECTION_CONTRACT_VERSION, PROTOCOL_FINGERPRINT};
 
 pub const MAX_JOURNAL_RECORDS_PER_BATCH: usize = 512;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
@@ -18,10 +14,6 @@ pub const MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES: usize = 256 * 1024;
 /// The complete JSON `HostEnvelope` carrying one journal request is capped at
 /// four MiB, independently of the larger generic framing limit.
 pub const MAX_JOURNAL_SYNC_ENVELOPE_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_RESULT_CONTENT_ITEMS_PER_REQUEST: usize = MAX_JOURNAL_RECORDS_PER_BATCH;
-pub const MAX_RESULT_CONTENT_BYTES_PER_ITEM: usize = 256 * 1024;
-pub const MAX_RESULT_CONTENT_TOTAL_BYTES: usize = 1024 * 1024;
-
 const JOURNAL_INITIAL_DIGEST_DOMAIN: &[u8] = b"ctx-pro-journal-initial-v1\0";
 const JOURNAL_RECORD_DIGEST_DOMAIN: &[u8] = b"ctx-pro-journal-record-v1\0";
 
@@ -163,31 +155,6 @@ pub struct JournalRecord {
     pub cumulative_digest: String,
 }
 
-/// Complete normalized result bytes carried only for one helper request.
-///
-/// These bytes are excluded from canonical payload hashes, record digests,
-/// cumulative digests, and durable journal chunks.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResultContentSidecar {
-    pub journal_sequence: u64,
-    pub stable_entity_id: Uuid,
-    pub content_ref: ContentRef,
-    pub content: String,
-}
-
-impl std::fmt::Debug for ResultContentSidecar {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResultContentSidecar")
-            .field("journal_sequence", &self.journal_sequence)
-            .field("stable_entity_id", &self.stable_entity_id)
-            .field("content_ref", &self.content_ref)
-            .field("content", &"<redacted>")
-            .finish()
-    }
-}
-
 impl JournalRecord {
     pub fn validate(&self, prior_digest: &str) -> Result<(), ProtocolError> {
         if self.generation == 0 || self.sequence == 0 || self.entity_revision == 0 {
@@ -270,7 +237,6 @@ pub struct JournalSyncRequest {
     /// body permissions and do not authorize filesystem discovery.
     pub authorized_repository_roots: Vec<String>,
     pub records: Vec<JournalRecord>,
-    pub result_contents: Vec<ResultContentSidecar>,
 }
 
 impl JournalSyncRequest {
@@ -343,7 +309,6 @@ impl JournalSyncRequest {
                 ),
             ));
         }
-        self.validate_result_contents()?;
         let mut sequence = self.prior_checkpoint.position.sequence;
         let mut digest = self.prior_checkpoint.cumulative_digest.as_str();
         for record in &self.records {
@@ -382,74 +347,6 @@ impl JournalSyncRequest {
                 ErrorClass::Bounds,
                 "journal request exceeds its dedicated envelope byte bound",
             ));
-        }
-        Ok(())
-    }
-
-    fn validate_result_contents(&self) -> Result<(), ProtocolError> {
-        if self.result_contents.len() > MAX_RESULT_CONTENT_ITEMS_PER_REQUEST {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "journal request exceeds its result-content item bound",
-            ));
-        }
-        let mut total_bytes = 0_usize;
-        let mut bindings = BTreeSet::new();
-        for sidecar in &self.result_contents {
-            let bytes = sidecar.content.as_bytes();
-            if sidecar.journal_sequence == 0
-                || sidecar.stable_entity_id.is_nil()
-                || bytes.len() > MAX_RESULT_CONTENT_BYTES_PER_ITEM
-            {
-                return Err(ProtocolError::new(
-                    ErrorClass::Bounds,
-                    "result content has an invalid identity or exceeds its item byte bound",
-                ));
-            }
-            total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
-                ProtocolError::new(ErrorClass::Bounds, "result-content byte total overflowed")
-            })?;
-            if total_bytes > MAX_RESULT_CONTENT_TOTAL_BYTES {
-                return Err(ProtocolError::new(
-                    ErrorClass::Bounds,
-                    "journal request exceeds its result-content total byte bound",
-                ));
-            }
-            if !bindings.insert((sidecar.journal_sequence, sidecar.stable_entity_id)) {
-                return Err(ProtocolError::new(
-                    ErrorClass::InvalidRequest,
-                    "result content must bind uniquely to one journal record",
-                ));
-            }
-            if !sidecar.content_ref.verifies(bytes) {
-                return Err(ProtocolError::new(
-                    ErrorClass::Corrupt,
-                    "result content does not match its SHA-256 and byte length",
-                ));
-            }
-            let Some(record) = self.records.iter().find(|record| {
-                record.sequence == sidecar.journal_sequence
-                    && record.stable_entity_id == sidecar.stable_entity_id
-            }) else {
-                return Err(ProtocolError::new(
-                    ErrorClass::InvalidRequest,
-                    "result content does not bind to a record in this request",
-                ));
-            };
-            let canonical_ref = record
-                .canonical_payload
-                .as_ref()
-                .and_then(|payload| payload.pointer("/result/content_ref"))
-                .and_then(|value| serde_json::from_value::<ContentRef>(value.clone()).ok());
-            if record.entity_kind != JournalEntityKind::Event
-                || record.operation != JournalOperation::Upsert
-                || canonical_ref.as_ref() != Some(&sidecar.content_ref)
-            {
-                return Err(ProtocolError::new(
-                    ErrorClass::Corrupt,
-                    "result content reference does not match the canonical result contract",
-                ));
-            }
         }
         Ok(())
     }

@@ -1,10 +1,7 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, ContentRef, EventRole, EventType, Fidelity, ProviderEventEnvelope,
-    SessionStatus,
-};
+use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType, SessionStatus};
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
@@ -15,11 +12,13 @@ use crate::provider::normalization::{
 };
 use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
-use super::result_content::{
-    extract_native_jsonl_result_content, native_jsonl_result_content_profile,
+use super::native_path::{
+    factory_droid_event_text, factory_droid_event_type, factory_droid_header_cwd,
+    factory_droid_header_session_id, factory_droid_model, factory_droid_role,
+    factory_droid_session_relationships, windsurf_event_role, windsurf_event_text,
+    windsurf_event_type,
 };
-use super::windsurf::{windsurf_event_body, windsurf_event_text};
-
+use super::result_content::native_jsonl_result_content_profile;
 pub(crate) fn antigravity_tool_call_text(value: &Value) -> Option<String> {
     value.as_array().and_then(|calls| {
         let names: Vec<&str> = calls
@@ -37,29 +36,18 @@ pub(crate) fn native_jsonl_header_session_id(
     provider: CaptureProvider,
     value: &Value,
 ) -> Option<String> {
+    if provider == CaptureProvider::FactoryAiDroid {
+        return factory_droid_header_session_id(value);
+    }
     match provider {
         CaptureProvider::Gemini | CaptureProvider::Tabnine => {
             value.get("sessionId").and_then(Value::as_str)
         }
-        CaptureProvider::FactoryAiDroid => (value.get("type").and_then(Value::as_str)
-            == Some("session_start"))
-        .then(|| {
-            value
-                .get("sessionId")
-                .or_else(|| value.get("id"))
-                .and_then(Value::as_str)
-        })
-        .flatten(),
         CaptureProvider::CopilotCli => (value.get("type").and_then(Value::as_str)
             == Some("session.start"))
         .then(|| value.pointer("/data/sessionId").and_then(Value::as_str))
         .flatten(),
         CaptureProvider::QwenCode => value.get("sessionId").and_then(Value::as_str),
-        CaptureProvider::Qoder => value.get("sessionId").and_then(Value::as_str),
-        CaptureProvider::Cursor => (value.get("role").is_some()
-            || value.get("event").is_some()
-            || value.get("message").is_some())
-        .then_some("cursor-path-session"),
         _ => None,
     }
     .filter(|id| !id.trim().is_empty())
@@ -82,16 +70,17 @@ pub(crate) fn native_jsonl_header_start_time(
 }
 
 pub(crate) fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<String> {
+    if provider == CaptureProvider::FactoryAiDroid {
+        return factory_droid_header_cwd(value);
+    }
     match provider {
         CaptureProvider::Gemini | CaptureProvider::Tabnine => value
             .get("directories")
             .and_then(Value::as_array)
             .and_then(|dirs| dirs.first())
             .and_then(Value::as_str),
-        CaptureProvider::FactoryAiDroid => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::CopilotCli => value.pointer("/data/context/cwd").and_then(Value::as_str),
         CaptureProvider::QwenCode => value.get("cwd").and_then(Value::as_str),
-        CaptureProvider::Qoder => value.get("cwd").and_then(Value::as_str),
         _ => None,
     }
     .filter(|cwd| !cwd.trim().is_empty())
@@ -121,37 +110,7 @@ pub(crate) fn native_jsonl_path_session(
             (native_session_id.to_owned(), None, None, AgentType::Primary)
         }
         CaptureProvider::FactoryAiDroid => {
-            let parent = header
-                .get("parent")
-                .or_else(|| header.get("callingSessionId"))
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .map(str::to_owned);
-            let agent_type = if parent.is_some()
-                || header.get("decompSessionType").and_then(Value::as_str) == Some("worker")
-            {
-                AgentType::Subagent
-            } else {
-                AgentType::Primary
-            };
-            (
-                native_session_id.to_owned(),
-                parent,
-                header
-                    .get("decompMissionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                agent_type,
-            )
-        }
-        CaptureProvider::Cursor => {
-            let session = path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                .unwrap_or(native_session_id)
-                .to_owned();
-            (session, None, None, AgentType::Primary)
+            factory_droid_session_relationships(header, native_session_id)
         }
         _ => (native_session_id.to_owned(), None, None, AgentType::Primary),
     }
@@ -179,13 +138,6 @@ pub(crate) fn antigravity_session_id_from_path(path: &Path) -> Option<String> {
                 .filter(|stem| !stem.trim().is_empty())
                 .map(str::to_owned)
         })
-}
-
-pub(crate) fn windsurf_session_id_from_path(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.trim().is_empty())
-        .map(str::to_owned)
 }
 
 pub(crate) fn native_jsonl_timestamp(value: &Value) -> Option<DateTime<Utc>> {
@@ -239,58 +191,23 @@ pub(super) fn native_jsonl_session_metadata_from_normalized_header(
     })
 }
 
-pub(crate) fn native_jsonl_event(
+pub(crate) fn native_jsonl_normalized_payload(
     provider: CaptureProvider,
-    source_format: &str,
     value: &Value,
     line_number: usize,
-    occurred_at: DateTime<Utc>,
-) -> Option<ProviderEventEnvelope> {
-    native_jsonl_event_with_result_content_ref(
-        provider,
-        source_format,
-        value,
-        line_number,
-        occurred_at,
-    )
-    .map(|(event, _)| event)
-}
-
-pub(super) fn native_jsonl_event_with_result_content_ref(
-    provider: CaptureProvider,
-    source_format: &str,
-    value: &Value,
-    line_number: usize,
-    occurred_at: DateTime<Utc>,
-) -> Option<(ProviderEventEnvelope, Option<ContentRef>)> {
+) -> Value {
     let event_type = native_jsonl_event_type(provider, value);
     let entry_type = native_jsonl_entry_type(provider, value);
-    let role = native_jsonl_role(provider, value);
-    let result_profile = (event_type == EventType::ToolOutput)
-        .then(|| native_jsonl_result_content_profile(provider))
-        .flatten();
-    let result_content = result_profile.and_then(|profile| {
-        extract_native_jsonl_result_content(profile, value)
-            .ok()
-            .flatten()
-    });
-    let text = if result_profile.is_some() {
-        result_content.clone().unwrap_or_default()
+    let text = if event_type == EventType::ToolOutput
+        && native_jsonl_result_content_profile(provider).is_some()
+    {
+        String::new()
     } else {
         native_jsonl_event_text(provider, value, event_type, &entry_type)
     };
-    let result_content_ref = result_content
-        .as_deref()
-        .filter(|content| content.len() <= crate::complete_content::COMPLETE_CONTENT_MAX_BODY_BYTES)
-        .and_then(|content| ContentRef::from_bytes(content.as_bytes()));
-    let body_value = if provider == CaptureProvider::Windsurf {
-        windsurf_event_body(value)
-    } else {
-        value.clone()
-    };
-    let retained_text = provider_policy_event_text(event_type, &text, &body_value);
-    let result_evidence = provider_result_identifier_evidence(event_type, &text, &body_value);
-    let result_outcome = provider_result_outcome_evidence(event_type, &body_value);
+    let retained_text = provider_policy_event_text(event_type, &text, value);
+    let result_evidence = provider_result_identifier_evidence(event_type, &text, value);
+    let result_outcome = provider_result_outcome_evidence(event_type, value);
     let event_id = native_jsonl_event_id(provider, value, line_number);
     let tool_calls = if provider == CaptureProvider::Antigravity {
         value.get("tool_calls").map(|calls| {
@@ -302,46 +219,20 @@ pub(super) fn native_jsonl_event_with_result_content_ref(
     } else {
         None
     };
-    let body = provider_capped_json(
-        &provider_policy_body(event_type, &body_value),
-        PROVIDER_MAX_PREVIEW_CHARS,
-    );
-
-    let event = ProviderEventEnvelope {
-        provider_event_index: (line_number - 1) as u64,
-        provider_event_hash: Some(event_id.clone()),
-        cursor: Some(event_id.clone()),
-        event_type,
-        role: Some(role),
-        occurred_at,
-        fidelity: Fidelity::Imported,
-        idempotency_key: Some(format!(
-            "provider-event:{}:{source_format}:{event_id}",
-            provider.as_str()
-        )),
-        artifacts: Vec::new(),
-        payload: json!({
-            "entry_type": entry_type,
-            "event_id": event_id,
-            "native_step_index": value.get("step_index").and_then(Value::as_u64),
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "tool_calls": tool_calls,
-            "body": body,
-        }),
-        metadata: json!({
-            "source": source_format,
-            "source_format": source_format,
-            "line": line_number,
-            "entry_type": entry_type,
-            "status": value.get("status").and_then(Value::as_str),
-            "model": native_jsonl_model(provider, value),
-            "tokens": native_jsonl_tokens(provider, value),
-        }),
-    };
-    Some((event, result_content_ref))
+    json!({
+        "entry_type": entry_type,
+        "event_id": event_id,
+        "native_step_index": value.get("step_index").and_then(Value::as_u64),
+        "text": retained_text.text,
+        "text_retention": retained_text.retention.as_json(),
+        "result_evidence": result_evidence,
+        "result_outcome": result_outcome,
+        "tool_calls": tool_calls,
+        "body": provider_capped_json(
+            &provider_policy_body(event_type, value),
+            PROVIDER_MAX_PREVIEW_CHARS,
+        ),
+    })
 }
 
 pub(crate) fn native_jsonl_event_id(
@@ -420,14 +311,7 @@ pub(crate) fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) 
                 }
             }
         }
-        CaptureProvider::FactoryAiDroid => match value.get("type").and_then(Value::as_str) {
-            Some("message") if droid_content_has(value, "tool_use") => EventType::ToolCall,
-            Some("message") if droid_content_has(value, "tool_result") => EventType::ToolOutput,
-            Some("message") => EventType::Message,
-            Some("compaction_state") => EventType::Summary,
-            Some("todo_state" | "session_start") => EventType::Notice,
-            _ => EventType::Notice,
-        },
+        CaptureProvider::FactoryAiDroid => factory_droid_event_type(value),
         CaptureProvider::CopilotCli => match value.get("type").and_then(Value::as_str) {
             Some("user.message" | "assistant.message") => EventType::Message,
             Some("tool.execution_start") => EventType::ToolCall,
@@ -436,39 +320,7 @@ pub(crate) fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) 
             Some("abort") => EventType::Notice,
             _ => EventType::Notice,
         },
-        CaptureProvider::Cursor => {
-            if native_jsonl_content_has(value, "tool_result") {
-                EventType::ToolOutput
-            } else if native_jsonl_content_has(value, "tool_use") {
-                EventType::ToolCall
-            } else {
-                match value
-                    .get("event")
-                    .or_else(|| value.get("type"))
-                    .or_else(|| value.get("role"))
-                    .and_then(Value::as_str)
-                {
-                    Some("turn_ended" | "summary") => EventType::Summary,
-                    Some("user" | "assistant") => EventType::Message,
-                    _ => EventType::Notice,
-                }
-            }
-        }
-        CaptureProvider::Windsurf => match value.get("type").and_then(Value::as_str) {
-            Some("user_input" | "planner_response") => EventType::Message,
-            Some("code_action") => EventType::ToolCall,
-            Some("summary" | "checkpoint") => EventType::Summary,
-            _ => EventType::Notice,
-        },
-        CaptureProvider::Qoder => match value.get("type").and_then(Value::as_str) {
-            Some("assistant") if native_jsonl_content_has(value, "tool_use") => EventType::ToolCall,
-            Some("user") if native_jsonl_content_has(value, "tool_result") => EventType::ToolOutput,
-            Some("user" | "assistant") => EventType::Message,
-            Some("progress") => EventType::Notice,
-            Some("session_meta") => EventType::Notice,
-            _ if value.get("toolUseResult").is_some() => EventType::ToolOutput,
-            _ => EventType::Notice,
-        },
+        CaptureProvider::Windsurf => windsurf_event_type(value),
         CaptureProvider::QwenCode => match value.get("type").and_then(Value::as_str) {
             Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
                 EventType::ToolCall
@@ -503,36 +355,14 @@ pub(crate) fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> Eve
                 _ => EventRole::System,
             }
         }
-        CaptureProvider::FactoryAiDroid => provider_role(
-            value
-                .get("role")
-                .or_else(|| value.pointer("/message/role"))
-                .and_then(Value::as_str),
-        ),
+        CaptureProvider::FactoryAiDroid => factory_droid_role(value),
         CaptureProvider::CopilotCli => match value.get("type").and_then(Value::as_str) {
             Some("user.message") => EventRole::User,
             Some("assistant.message") => EventRole::Assistant,
             Some("tool.execution_start" | "tool.execution_complete") => EventRole::Tool,
             _ => EventRole::System,
         },
-        CaptureProvider::Cursor => provider_role(
-            value
-                .get("role")
-                .or_else(|| value.pointer("/message/role"))
-                .and_then(Value::as_str),
-        ),
-        CaptureProvider::Windsurf => match value.get("type").and_then(Value::as_str) {
-            Some("user_input") => EventRole::User,
-            Some("planner_response") => EventRole::Assistant,
-            Some("code_action") => EventRole::Tool,
-            _ => EventRole::Unknown,
-        },
-        CaptureProvider::Qoder => provider_role(
-            value
-                .pointer("/message/role")
-                .or_else(|| value.get("type"))
-                .and_then(Value::as_str),
-        ),
+        CaptureProvider::Windsurf => windsurf_event_role(value),
         CaptureProvider::QwenCode => provider_role(
             value
                 .pointer("/message/role")
@@ -546,7 +376,7 @@ pub(crate) fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> Eve
 pub(crate) fn native_jsonl_event_text(
     provider: CaptureProvider,
     value: &Value,
-    event_type: EventType,
+    _event_type: EventType,
     entry_type: &str,
 ) -> String {
     match provider {
@@ -575,18 +405,7 @@ pub(crate) fn native_jsonl_event_text(
                     .map(|id| format!("rewind to {id}"))
             })
             .unwrap_or_default(),
-        CaptureProvider::FactoryAiDroid => value
-            .get("content")
-            .or_else(|| value.pointer("/message/content"))
-            .and_then(provider_value_text)
-            .or_else(|| {
-                value
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| value.get("items").and_then(provider_value_text))
-            .unwrap_or_default(),
+        CaptureProvider::FactoryAiDroid => factory_droid_event_text(value),
         CaptureProvider::CopilotCli => value
             .pointer("/data/content")
             .and_then(Value::as_str)
@@ -610,28 +429,7 @@ pub(crate) fn native_jsonl_event_text(
                     .map(|tool| format!("tool {tool}"))
             })
             .unwrap_or_default(),
-        CaptureProvider::Cursor => value
-            .pointer("/message/content")
-            .or_else(|| value.get("content"))
-            .and_then(provider_value_text)
-            .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_default(),
         CaptureProvider::Windsurf => windsurf_event_text(value, entry_type),
-        CaptureProvider::Qoder => {
-            let primary = if event_type == EventType::ToolOutput {
-                value
-                    .get("toolUseResult")
-                    .or_else(|| value.pointer("/message/content"))
-            } else {
-                value
-                    .pointer("/message/content")
-                    .or_else(|| value.get("toolUseResult"))
-            };
-            primary
-                .or_else(|| value.pointer("/data/content"))
-                .and_then(provider_value_text)
-                .unwrap_or_default()
-        }
         CaptureProvider::QwenCode => value
             .pointer("/message/content")
             .or_else(|| value.get("message"))
@@ -647,17 +445,9 @@ pub(crate) fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Op
     match provider {
         CaptureProvider::Antigravity => value.get("model").cloned(),
         CaptureProvider::Gemini | CaptureProvider::Tabnine => value.get("model").cloned(),
-        CaptureProvider::FactoryAiDroid => value
-            .get("model")
-            .cloned()
-            .or_else(|| value.pointer("/message/model").cloned())
-            .or_else(|| value.pointer("/metadata/model").cloned()),
+        CaptureProvider::FactoryAiDroid => factory_droid_model(value),
         CaptureProvider::CopilotCli => value.pointer("/data/selectedModel").cloned(),
         CaptureProvider::QwenCode => value
-            .get("model")
-            .cloned()
-            .or_else(|| value.pointer("/message/model").cloned()),
-        CaptureProvider::Qoder => value
             .get("model")
             .cloned()
             .or_else(|| value.pointer("/message/model").cloned()),
@@ -677,19 +467,6 @@ pub(crate) fn gemini_tool_calls_have_result(value: &Value) -> bool {
         .get("toolCalls")
         .and_then(Value::as_array)
         .map(|calls| calls.iter().any(|call| call.get("result").is_some()))
-        .unwrap_or(false)
-}
-
-pub(crate) fn droid_content_has(value: &Value, expected: &str) -> bool {
-    value
-        .get("content")
-        .or_else(|| value.pointer("/message/content"))
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
-        })
         .unwrap_or(false)
 }
 

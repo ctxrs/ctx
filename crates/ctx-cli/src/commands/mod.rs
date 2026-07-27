@@ -1,3 +1,4 @@
+pub(crate) mod blame;
 pub(crate) mod doctor;
 pub(crate) mod import;
 pub(crate) mod index;
@@ -8,4 +9,3 @@ pub(crate) mod show;
 pub(crate) mod sources;
 pub(crate) mod sql;
 pub(crate) mod status;
-pub(crate) mod work_graph;

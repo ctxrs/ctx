@@ -44,7 +44,7 @@ fn native_crush_fixture_imports_searches_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 4);
+    assert_eq!(first.imported_events, 3);
     assert_eq!(first.imported_edges, 1);
     let parent_id = stored_provider_session_id(&store, CaptureProvider::Crush, "crush-root");
     let child_id = stored_provider_session_id(&store, CaptureProvider::Crush, "crush-child");
@@ -59,7 +59,7 @@ fn native_crush_fixture_imports_searches_and_reimports() {
         .iter()
         .any(|event| event.event_type == EventType::CommandOutput));
     let child_events = store.events_for_session(child_id).unwrap();
-    assert!(child_events
+    assert!(!child_events
         .iter()
         .any(|event| event.event_type == EventType::CommandOutput));
     assert!(store
@@ -84,7 +84,7 @@ fn native_crush_fixture_imports_searches_and_reimports() {
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.imported_edges, 0);
     assert_eq!(second.skipped_sessions, 2);
-    assert_eq!(second.skipped_events, 4);
+    assert_eq!(second.skipped_events, 3);
     assert_eq!(second.skipped_edges, 1);
 }
 
@@ -110,7 +110,7 @@ fn native_goose_fixture_imports_searches_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 2);
     let session_id = stored_provider_session_id(&store, CaptureProvider::Goose, "goose-root");
     store.get_session(session_id).unwrap();
     let source = store
@@ -127,22 +127,9 @@ fn native_goose_fixture_imports_searches_and_reimports() {
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    assert!(events
+    assert!(!events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
-    let tool_output = events
-        .iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .unwrap();
-    assert!(tool_output.payload["body"]["result_content_ref"].is_object());
-    let locators = crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
-        &tool_output.sync.metadata[crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
-    )
-    .unwrap();
-    assert!(locators
-        .locator(crate::complete_content::VerifiedContentRole::ResultBody)
-        .is_some());
-    assert!(!tool_output.payload.to_string().contains("fixture oracle"));
     assert!(store
         .search_event_hits("goose oracle", 10)
         .unwrap()
@@ -161,7 +148,7 @@ fn native_goose_fixture_imports_searches_and_reimports() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert_eq!(second.skipped_events, 2);
 }
 
 #[test]
@@ -342,7 +329,7 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 5);
+    assert_eq!(first.imported_events, 4);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Junie, "session-260607-100000-acme");
@@ -362,14 +349,14 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
     );
 
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 5);
+    assert_eq!(events.len(), 4);
     assert!(events
         .iter()
         .any(|event| event.role == Some(EventRole::User)));
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    assert!(events
+    assert!(!events
         .iter()
         .any(|event| event.event_type == EventType::CommandOutput));
     let rendered = serde_json::to_string(&events).unwrap();
@@ -410,7 +397,7 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 5);
+    assert_eq!(second.skipped_events, 4);
 }
 
 #[test]
@@ -478,7 +465,7 @@ fn native_zed_fixture_imports_searches_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 6);
+    assert_eq!(first.imported_events, 5);
     assert_eq!(first.imported_edges, 1);
 
     let parent_id = stored_provider_session_id(&store, CaptureProvider::Zed, "zed-root");
@@ -488,23 +475,18 @@ fn native_zed_fixture_imports_searches_and_reimports() {
         Some(parent_id)
     );
     let parent_events = store.events_for_session(parent_id).unwrap();
-    assert_eq!(parent_events.len(), 4);
+    assert_eq!(parent_events.len(), 3);
     assert_eq!(
         parent_events
             .iter()
             .map(|event| event.event_type)
             .collect::<Vec<_>>(),
-        vec![
-            EventType::Message,
-            EventType::ToolCall,
-            EventType::ToolOutput,
-            EventType::Summary,
-        ]
+        vec![EventType::Message, EventType::ToolCall, EventType::Summary,]
     );
     assert!(parent_events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    assert!(parent_events
+    assert!(!parent_events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
     assert!(parent_events
@@ -514,17 +496,9 @@ fn native_zed_fixture_imports_searches_and_reimports() {
         .iter()
         .find(|event| event.event_type == EventType::ToolCall)
         .unwrap();
-    let tool_output = parent_events
-        .iter()
-        .find(|event| event.event_type == EventType::ToolOutput)
-        .unwrap();
     assert_eq!(
         tool_call.sync.metadata["metadata"]["provider_event_identity_index"].as_u64(),
         Some(1)
-    );
-    assert_eq!(
-        tool_output.sync.metadata["metadata"]["provider_event_identity_index"].as_u64(),
-        Some(1_000_001)
     );
     let rendered = serde_json::to_string(&parent_events).unwrap();
     assert!(rendered.contains("zed sqlite oracle prompt"));
@@ -564,7 +538,7 @@ fn native_zed_fixture_imports_searches_and_reimports() {
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.imported_edges, 0);
     assert_eq!(second.skipped_sessions, 2);
-    assert_eq!(second.skipped_events, 6);
+    assert_eq!(second.skipped_events, 5);
     assert_eq!(second.skipped_edges, 1);
 }
 
@@ -775,14 +749,14 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 2);
     let session_id = stored_provider_session_id(&store, CaptureProvider::ForgeCode, "forge-root");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    assert!(events
+    assert!(!events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
     assert!(store
@@ -813,7 +787,7 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert_eq!(second.skipped_events, 2);
     let file_touch_count_after: i64 = Connection::open(&store_path)
         .unwrap()
         .query_row(
@@ -858,24 +832,21 @@ fn native_deepagents_fixture_imports_searches_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 2);
     let session_id = stored_provider_session_id(
         &store,
         CaptureProvider::DeepAgents,
         "deepagents-fixture-thread",
     );
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert!(events
         .iter()
         .any(|event| event.role == Some(EventRole::User)));
     assert!(events
         .iter()
         .any(|event| event.role == Some(EventRole::Assistant)));
-    assert!(events
-        .iter()
-        .any(|event| event.role == Some(EventRole::Tool)));
-    assert!(events
+    assert!(!events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
     assert!(events.iter().all(|event| {

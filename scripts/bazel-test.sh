@@ -122,10 +122,12 @@ case "${mode}" in
     run bash scripts/tests/macos-release-signing-test.sh
     ;;
   loc_check)
+    run bash scripts/tests/check_loc_bazel_inputs_test.sh
     run bash scripts/tests/check_loc_test.sh
     run bash scripts/check-loc.sh
     ;;
   public_control_surface_check)
+    run bash scripts/tests/check-public-control-surface-test.sh
     run python3 scripts/check-public-control-surface.py
     ;;
   source_diff_check)

@@ -1,10 +1,12 @@
-use chrono::{DateTime, Utc};
 use ctx_history_core::EventType;
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::provider::normalization::{provider_explicit_result_value_text, provider_value_text};
-
-use super::claude_event;
+use crate::provider::normalization::{
+    provider_capped_json, provider_explicit_result_value_text, provider_policy_body,
+    provider_policy_event_text, provider_result_identifier_evidence,
+    provider_result_outcome_evidence, provider_value_text,
+};
+use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 #[allow(dead_code)] // Registered by the universal locator integration branch.
 pub(crate) const CLAUDE_RESULT_CONTENT_PROFILE: &str = "claude.result-body.v1";
@@ -72,7 +74,7 @@ pub(crate) fn claude_complete_content_message_record(
 /// Claude ordinary message without copying provider parsing into the resolver.
 pub(crate) fn claude_complete_content_normalized_payload(
     value: &Value,
-    line_number: usize,
+    _line_number: usize,
 ) -> Option<Value> {
     let entry_type = value
         .get("type")
@@ -82,8 +84,37 @@ pub(crate) fn claude_complete_content_normalized_payload(
     if claude_event_type(entry_type, message) != EventType::Message {
         return None;
     }
-    claude_event(value, line_number, DateTime::<Utc>::from_timestamp(0, 0)?)
-        .map(|event| event.payload)
+    let message_role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("role").and_then(Value::as_str));
+    let null = Value::Null;
+    let content = message.get("content").unwrap_or(&null);
+    let event_type = EventType::Message;
+    let text = provider_value_text(content).unwrap_or_default();
+    let retained_text = provider_policy_event_text(event_type, &text, content);
+    let result_source = json!({
+        "content": content,
+        "tool_use_result": value.get("toolUseResult"),
+    });
+    let result_evidence = provider_result_identifier_evidence(event_type, &text, &result_source);
+    let result_outcome = provider_result_outcome_evidence(event_type, &result_source);
+    Some(json!({
+        "entry_type": entry_type,
+        "uuid": value.get("uuid").and_then(Value::as_str),
+        "parent_uuid": value.get("parentUuid").and_then(Value::as_str),
+        "message_id": message.get("id").and_then(Value::as_str),
+        "request_id": value.get("requestId").and_then(Value::as_str),
+        "role": message_role,
+        "text": retained_text.text,
+        "text_retention": retained_text.retention.as_json(),
+        "result_evidence": result_evidence,
+        "result_outcome": result_outcome,
+        "content_preview": provider_capped_json(
+            &provider_policy_body(event_type, content),
+            PROVIDER_MAX_PREVIEW_CHARS,
+        ),
+    }))
 }
 
 /// Returns only explicit Claude tool-result content, with no tool-name or

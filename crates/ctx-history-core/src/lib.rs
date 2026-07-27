@@ -121,7 +121,7 @@ mod result_compaction;
 pub mod source;
 pub mod sync;
 
-pub use archive::{CaptureEnvelope, SessionHistoryArchive};
+pub use archive::SessionHistoryArchive;
 pub use content_ref::ContentRef;
 pub use dtos::{
     AgentType, Artifact, ArtifactKind, CitationReference, Confidence, ContextCitation,
@@ -142,13 +142,10 @@ pub use paths::{
     logs_dir, object_dir, spool_dir,
 };
 pub use provider::{
-    provider_capture_envelope_schema_version, provider_support_matrix_schema_version,
-    ProviderArtifactDescriptor, ProviderCaptureEnvelope, ProviderCursorCheckpoint,
-    ProviderCursorRange, ProviderEventEnvelope, ProviderFidelityClaims, ProviderId,
-    ProviderPathKind, ProviderSessionEnvelope, ProviderSourceEnvelope, ProviderSourceTrust,
+    provider_support_matrix_schema_version, ProviderArtifactDescriptor, ProviderCursorCheckpoint,
+    ProviderCursorRange, ProviderFidelityClaims, ProviderId, ProviderPathKind, ProviderSourceTrust,
     ProviderSupportEntry, ProviderSupportMatrixDocument, ProviderSupportPath,
-    ProviderSupportStatus, PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
-    PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
+    ProviderSupportStatus, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
 };
 pub use result_compaction::compact_result_payload;
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};

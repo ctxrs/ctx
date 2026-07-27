@@ -14,7 +14,7 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -46,7 +46,7 @@ const FTS_CRISISMERGE_DEFAULT: i64 = 16;
 // that clamp does not protect the total ceiling (GitHub #181). Keep the normal
 // safe crisis guard while disabling only automerge. Ordinary bounded
 // maintenance should keep it from firing; it remains the in-transaction safety
-// net if one unusually dense captured batch creates many segments at once.
+// net if one unusually dense publication group creates many segments at once.
 const FTS5_MAX_SEGMENTS: i64 = 2_000;
 const FTS_BULK_CRISISMERGE: i64 = FTS_CRISISMERGE_DEFAULT;
 const FTS5_SEGMENT_GUARD: i64 = 1_024;
@@ -97,6 +97,20 @@ pub struct EventSearchBulkGuard {
     depth_counted: bool,
 }
 
+/// One-use proof that the outer bulk-search coordinator admitted another
+/// bounded publication group after auditing WAL and FTS maintenance.
+///
+/// The token intentionally cannot be cloned. Consuming it to begin a Store
+/// publication group prevents a caller from admitting several groups against
+/// one stale WAL check.
+#[doc(hidden)]
+pub struct EventSearchBulkGroupAdmission {
+    store_path: PathBuf,
+    depth: Arc<AtomicUsize>,
+    outstanding: Arc<AtomicBool>,
+    consumed: bool,
+}
+
 pub struct SourceInventoryGuard {
     lock_conn: Connection,
 }
@@ -114,6 +128,14 @@ impl Drop for EventSearchBulkGuard {
         }
         if self.depth_counted {
             self.depth.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for EventSearchBulkGroupAdmission {
+    fn drop(&mut self) {
+        if !self.consumed {
+            self.outstanding.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -138,6 +160,10 @@ impl Store {
 
     /// Acquire the bulk-import lock and persist merge suppression.
     pub fn begin_event_search_bulk_mode(&self) -> Result<EventSearchBulkGuard> {
+        if self.native_path_group_token.get().is_some() {
+            self.poison_native_path_group();
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
         if self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) > 0 {
             if let Err(error) = self.enforce_bulk_wal_bound() {
                 self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
@@ -206,6 +232,72 @@ impl Store {
         Ok(guard)
     }
 
+    /// Audits the group/lineage boundary and returns a one-use admission token.
+    ///
+    /// Once the WAL reaches the hard threshold, this refuses admission until a
+    /// required truncating checkpoint succeeds. A pinned reader therefore
+    /// cannot be bypassed by starting the next bounded group.
+    #[doc(hidden)]
+    pub fn admit_event_search_bulk_group(
+        &self,
+        guard: &EventSearchBulkGuard,
+    ) -> Result<EventSearchBulkGroupAdmission> {
+        if self.native_path_group_token.get().is_some() {
+            self.poison_native_path_group();
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
+        if guard.store_path != self.path
+            || guard.lock_conn.is_none()
+            || !Arc::ptr_eq(&guard.depth, &self.event_search_bulk_depth)
+            || !guard.depth_counted
+            || guard.depth.load(Ordering::SeqCst) != 1
+            || !self.conn.is_autocommit()
+            || !bulk_mode_pending(self)?
+        {
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
+        self.enforce_bulk_wal_bound()?;
+        self.run_event_search_maintenance_if_due()?;
+        self.ensure_event_search_segment_headroom()?;
+        self.enforce_bulk_wal_bound()?;
+        if self
+            .event_search_bulk_group_admission_outstanding
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(StoreError::BulkSearchGroupAdmissionOutstanding);
+        }
+        Ok(EventSearchBulkGroupAdmission {
+            store_path: self.path.clone(),
+            depth: Arc::clone(&self.event_search_bulk_depth),
+            outstanding: Arc::clone(&self.event_search_bulk_group_admission_outstanding),
+            consumed: false,
+        })
+    }
+
+    pub(crate) fn consume_event_search_bulk_group_admission(
+        &self,
+        mut admission: EventSearchBulkGroupAdmission,
+    ) -> Result<()> {
+        if !bulk_mode_pending(self)?
+            || admission.store_path != self.path
+            || !Arc::ptr_eq(&admission.depth, &self.event_search_bulk_depth)
+            || !Arc::ptr_eq(
+                &admission.outstanding,
+                &self.event_search_bulk_group_admission_outstanding,
+            )
+            || admission.depth.load(Ordering::SeqCst) != 1
+            || admission
+                .outstanding
+                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return Err(StoreError::InvalidBulkSearchGroupAdmission);
+        }
+        admission.consumed = true;
+        Ok(())
+    }
+
     /// Restore merge settings and durably schedule bounded maintenance.
     ///
     /// FTS rows were committed in the same transactions as their events, so
@@ -213,6 +305,10 @@ impl Store {
     /// compaction here. Keeping this handoff small avoids a full positive-merge
     /// drain and strict WAL truncation for every four-batch publication group.
     pub fn finish_event_search_bulk_mode(&self, guard: &EventSearchBulkGuard) -> Result<()> {
+        if self.native_path_group_token.get().is_some() {
+            self.poison_native_path_group();
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
         if guard.store_path != self.path {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
@@ -220,6 +316,13 @@ impl Store {
             return Ok(());
         }
         if guard.depth_counted && guard.depth.load(Ordering::SeqCst) != 1 {
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
+        if self
+            .event_search_bulk_group_admission_outstanding
+            .load(Ordering::SeqCst)
+        {
+            self.poison_native_path_group();
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if !bulk_mode_pending(self)? {

@@ -50,6 +50,8 @@ copy_regular "$source_root/scripts/check-release-binary-compat.sh" \
   "$output_dir/scripts/check-release-binary-compat.sh" 0555
 copy_regular "$source_root/scripts/run-native-candidate-smoke.sh" \
   "$output_dir/scripts/run-native-candidate-smoke.sh" 0555
+copy_regular "$source_root/contracts/public-control-surface-v1.json" \
+  "$output_dir/contracts/public-control-surface-v1.json" 0444
 copy_regular "$source_root/tests/fixtures/custom-history-jsonl/basic.jsonl" \
   "$output_dir/tests/fixtures/custom-history-jsonl/basic.jsonl" 0444
 copy_regular "$artifact_dir/$binary_name" "$output_dir/artifacts/$binary_name" 0555

@@ -10,7 +10,8 @@ use crate::config::AppConfig;
 pub(crate) enum ProHostOperationV1 {
     Lifecycle(ProLifecycleTelemetryV1),
     Materialize(ProMaterializationTelemetryV1),
-    Query(ProQueryTelemetryV1),
+    Status(ProStatusTelemetryV1),
+    Blame(ProBlameTelemetryV1),
 }
 
 impl ProHostOperationV1 {
@@ -18,7 +19,8 @@ impl ProHostOperationV1 {
         match self {
             Self::Lifecycle(_) => "lifecycle",
             Self::Materialize(_) => "materialize",
-            Self::Query(_) => "query",
+            Self::Status(_) => "status",
+            Self::Blame(_) => "blame",
         }
     }
 
@@ -26,7 +28,8 @@ impl ProHostOperationV1 {
         match self {
             Self::Lifecycle(value) => value.insert_properties(properties),
             Self::Materialize(value) => value.insert_properties(properties),
-            Self::Query(value) => value.insert_properties(properties),
+            Self::Status(value) => value.insert_properties(properties),
+            Self::Blame(value) => value.insert_properties(properties),
         }
     }
 }
@@ -61,18 +64,6 @@ pub(crate) enum ProAccessStateV1 {
 }
 
 impl ProAccessStateV1 {
-    pub(crate) const fn from_protocol(
-        state: ctx_pro_host_protocol::EntitlementAccessState,
-    ) -> Self {
-        match state {
-            ctx_pro_host_protocol::EntitlementAccessState::Trial => Self::Trial,
-            ctx_pro_host_protocol::EntitlementAccessState::Active => Self::Active,
-            ctx_pro_host_protocol::EntitlementAccessState::CancelingPaid => Self::CancelingPaid,
-            ctx_pro_host_protocol::EntitlementAccessState::OfflineGrace => Self::OfflineGrace,
-            ctx_pro_host_protocol::EntitlementAccessState::Locked => Self::Locked,
-        }
-    }
-
     pub(crate) fn from_safe_name(value: &str) -> Option<Self> {
         match value {
             "trial" => Some(Self::Trial),
@@ -207,7 +198,6 @@ impl ProCommitOutcomeV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProFreshnessV1 {
     Current,
-    Stale,
     Unknown,
 }
 
@@ -215,7 +205,6 @@ impl ProFreshnessV1 {
     fn as_str(self) -> &'static str {
         match self {
             Self::Current => "current",
-            Self::Stale => "stale",
             Self::Unknown => "unknown",
         }
     }
@@ -236,73 +225,42 @@ impl ProMaterializationResultV1 {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProQueryKindV1 {
-    Show,
-    Locate,
-    Blame,
-    Timeline,
-    Related,
-    Facts,
-    Status,
-    Other,
+pub(crate) enum ProBlameTargetV1 {
+    File,
+    Commit,
+    PullRequest,
 }
 
-impl ProQueryKindV1 {
-    pub(crate) const fn from_protocol(kind: ctx_pro_host_protocol::QueryKind) -> Self {
-        match kind {
-            ctx_pro_host_protocol::QueryKind::Show => Self::Show,
-            ctx_pro_host_protocol::QueryKind::Locate => Self::Locate,
-            ctx_pro_host_protocol::QueryKind::Blame => Self::Blame,
-            ctx_pro_host_protocol::QueryKind::Timeline => Self::Timeline,
-            ctx_pro_host_protocol::QueryKind::Related => Self::Related,
-            ctx_pro_host_protocol::QueryKind::Facts => Self::Facts,
+impl ProBlameTargetV1 {
+    pub(crate) const fn from_protocol(target: &ctx_pro_host_protocol::BlameTarget) -> Self {
+        match target {
+            ctx_pro_host_protocol::BlameTarget::File { .. } => Self::File,
+            ctx_pro_host_protocol::BlameTarget::Commit { .. } => Self::Commit,
+            ctx_pro_host_protocol::BlameTarget::PullRequest { .. } => Self::PullRequest,
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
-            Self::Show => "show",
-            Self::Locate => "locate",
-            Self::Blame => "blame",
-            Self::Timeline => "timeline",
-            Self::Related => "related",
-            Self::Facts => "facts",
-            Self::Status => "status",
-            Self::Other => "other",
+            Self::File => "file",
+            Self::Commit => "commit",
+            Self::PullRequest => "pull_request",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProQuerySurfaceV1 {
+pub(crate) enum ProSurfaceV1 {
     Cli,
     Mcp,
 }
 
-impl ProQuerySurfaceV1 {
+impl ProSurfaceV1 {
     fn as_str(self) -> &'static str {
         match self {
             Self::Cli => "cli",
             Self::Mcp => "mcp",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProAutoMaterializationV1 {
-    NotNeeded,
-    Completed,
-    Failed,
-}
-
-impl ProAutoMaterializationV1 {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::NotNeeded => "not_needed",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
         }
     }
 }
@@ -530,47 +488,21 @@ impl ProLifecycleTelemetryV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProQueryTelemetryV1 {
-    pub(crate) kind: ProQueryKindV1,
-    pub(crate) surface: ProQuerySurfaceV1,
+pub(crate) struct ProStatusTelemetryV1 {
+    pub(crate) surface: ProSurfaceV1,
     pub(crate) access_state: Option<ProAccessStateV1>,
     pub(crate) helper_connection: ProHelperConnectionOutcomeV1,
-    pub(crate) result_count: Option<CountBucket>,
-    pub(crate) empty: Option<bool>,
-    pub(crate) truncated: Option<bool>,
-    pub(crate) freshness: Option<ProFreshnessV1>,
-    pub(crate) auto_materialization: ProAutoMaterializationV1,
-    pub(crate) materialization: Option<ProMaterializationTelemetryV1>,
     pub(crate) failure: Option<ProFailureBucketV1>,
 }
 
-impl ProQueryTelemetryV1 {
-    pub(crate) fn new(kind: ProQueryKindV1, surface: ProQuerySurfaceV1) -> Self {
+impl ProStatusTelemetryV1 {
+    pub(crate) fn new(surface: ProSurfaceV1) -> Self {
         Self {
-            kind,
             surface,
             access_state: None,
             helper_connection: ProHelperConnectionOutcomeV1::NotAttempted,
-            result_count: None,
-            empty: None,
-            truncated: None,
-            freshness: None,
-            auto_materialization: ProAutoMaterializationV1::NotNeeded,
-            materialization: None,
             failure: None,
         }
-    }
-
-    pub(crate) fn complete(&mut self, result_count: usize, truncated: bool, stale: bool) {
-        self.result_count = Some(count_bucket(result_count as u64));
-        self.empty = Some(result_count == 0);
-        self.truncated = Some(truncated);
-        self.freshness = Some(if stale {
-            ProFreshnessV1::Stale
-        } else {
-            ProFreshnessV1::Current
-        });
-        self.failure = None;
     }
 
     pub(crate) fn fail(&mut self, code: Option<&str>) {
@@ -578,8 +510,7 @@ impl ProQueryTelemetryV1 {
     }
 
     fn insert_properties(&self, properties: &mut Map<String, Value>) {
-        insert_str(properties, "query_kind", self.kind.as_str());
-        insert_str(properties, "query_surface", self.surface.as_str());
+        insert_str(properties, "status_surface", self.surface.as_str());
         insert_optional_str(
             properties,
             "access_state",
@@ -590,27 +521,58 @@ impl ProQueryTelemetryV1 {
             "helper_connection_outcome",
             self.helper_connection.as_str(),
         );
-        insert_optional_count(properties, "query_result_count_bucket", self.result_count);
-        insert_optional_bool(properties, "query_empty", self.empty);
-        insert_optional_bool(properties, "query_truncated", self.truncated);
         insert_optional_str(
             properties,
-            "query_freshness",
-            self.freshness.map(ProFreshnessV1::as_str),
-        );
-        insert_str(
-            properties,
-            "query_auto_materialization",
-            self.auto_materialization.as_str(),
-        );
-        insert_optional_str(
-            properties,
-            "query_failure_bucket",
+            "status_failure_bucket",
             self.failure.map(ProFailureBucketV1::as_str),
         );
-        if let Some(materialization) = self.materialization {
-            materialization.insert_properties(properties);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProBlameTelemetryV1 {
+    pub(crate) target: Option<ProBlameTargetV1>,
+    pub(crate) surface: ProSurfaceV1,
+    pub(crate) result_count: Option<CountBucket>,
+    pub(crate) has_more: Option<bool>,
+    pub(crate) failure: Option<ProFailureBucketV1>,
+}
+
+impl ProBlameTelemetryV1 {
+    pub(crate) fn new(target: Option<ProBlameTargetV1>, surface: ProSurfaceV1) -> Self {
+        Self {
+            target,
+            surface,
+            result_count: None,
+            has_more: None,
+            failure: None,
         }
+    }
+
+    pub(crate) fn complete(&mut self, result_count: usize, has_more: bool) {
+        self.result_count = Some(count_bucket(result_count as u64));
+        self.has_more = Some(has_more);
+        self.failure = None;
+    }
+
+    pub(crate) fn fail(&mut self, code: Option<&str>) {
+        self.failure = Some(pro_failure_bucket(code));
+    }
+
+    fn insert_properties(&self, properties: &mut Map<String, Value>) {
+        insert_optional_str(
+            properties,
+            "blame_target_kind",
+            self.target.map(ProBlameTargetV1::as_str),
+        );
+        insert_str(properties, "blame_surface", self.surface.as_str());
+        insert_optional_count(properties, "blame_result_count_bucket", self.result_count);
+        insert_optional_bool(properties, "blame_has_more", self.has_more);
+        insert_optional_str(
+            properties,
+            "blame_failure_bucket",
+            self.failure.map(ProFailureBucketV1::as_str),
+        );
     }
 }
 
@@ -623,7 +585,8 @@ pub(crate) fn pro_failure_bucket(code: Option<&str>) -> ProFailureBucketV1 {
         Some("protocol_mismatch" | "corrupt_graph") => ProFailureBucketV1::Protocol,
         Some("source_unavailable") => ProFailureBucketV1::Source,
         Some("repository_unavailable") => ProFailureBucketV1::Repository,
-        Some("stale_fact") => ProFailureBucketV1::Stale,
+        Some("stale_fact" | "stale_snapshot") => ProFailureBucketV1::Stale,
+        Some("line_out_of_range") => ProFailureBucketV1::InvalidRequest,
         Some("ambiguous") => ProFailureBucketV1::Ambiguous,
         Some("invalid_request") => ProFailureBucketV1::InvalidRequest,
         Some("invalid_response") => ProFailureBucketV1::InvalidResponse,
@@ -727,27 +690,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_properties_are_closed_bucketed_and_content_free() {
-        let mut materialization = ProMaterializationTelemetryV1::started();
-        materialization.mode = Some(ProMaterializationModeV1::Resume);
-        materialization.helper_connection = ProHelperConnectionOutcomeV1::Connected;
-        materialization.complete(2, 17, 17, 1, 42);
-        let mut query = ProQueryTelemetryV1::new(ProQueryKindV1::Facts, ProQuerySurfaceV1::Mcp);
-        query.helper_connection = ProHelperConnectionOutcomeV1::Connected;
-        query.auto_materialization = ProAutoMaterializationV1::Completed;
-        query.materialization = Some(materialization);
-        query.complete(3, true, false);
+    fn blame_properties_are_closed_bucketed_and_content_free() {
+        let mut blame =
+            ProBlameTelemetryV1::new(Some(ProBlameTargetV1::PullRequest), ProSurfaceV1::Mcp);
+        blame.complete(3, true);
 
         let mut properties = Map::new();
-        ProHostOperationV1::Query(query).insert_properties(&mut properties);
-        assert_eq!(properties["query_kind"], "facts");
-        assert_eq!(properties["query_surface"], "mcp");
-        assert_eq!(properties["query_result_count_bucket"], "2-5");
-        assert_eq!(properties["materialization_input_count_bucket"], "6-20");
-        assert_eq!(properties["materialization_lag_bucket"], "21-100");
+        ProHostOperationV1::Blame(blame).insert_properties(&mut properties);
+        assert_eq!(properties["blame_target_kind"], "pull_request");
+        assert_eq!(properties["blame_surface"], "mcp");
+        assert_eq!(properties["blame_result_count_bucket"], "2-5");
+        assert_eq!(properties["blame_has_more"], true);
         assert!(properties
             .values()
             .all(|value| value.is_string() || value.is_boolean()));
+        assert_eq!(properties.len(), 4);
         for forbidden in [
             "selector",
             "repository",
@@ -763,6 +720,20 @@ mod tests {
         ] {
             assert!(!properties.keys().any(|key| key.contains(forbidden)));
         }
+    }
+
+    #[test]
+    fn status_properties_are_separate_from_blame() {
+        let mut status = ProStatusTelemetryV1::new(ProSurfaceV1::Mcp);
+        status.access_state = Some(ProAccessStateV1::Trial);
+        status.helper_connection = ProHelperConnectionOutcomeV1::Connected;
+
+        let mut properties = Map::new();
+        ProHostOperationV1::Status(status).insert_properties(&mut properties);
+        assert_eq!(properties["status_surface"], "mcp");
+        assert_eq!(properties["access_state"], "trial");
+        assert_eq!(properties["helper_connection_outcome"], "connected");
+        assert!(!properties.keys().any(|key| key.starts_with("blame_")));
     }
 
     #[test]
