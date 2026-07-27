@@ -251,6 +251,13 @@ pub(super) fn validated_installed_helper_path(data_root: &Path) -> Result<PathBu
     validated_installed_helper(data_root).map(|helper| helper.path().to_path_buf())
 }
 
+pub(super) fn acquire_commercial_lifecycle_lock(
+    data_root: &Path,
+    create_pro_root: bool,
+) -> Result<Option<impl Drop>> {
+    LifecycleLock::acquire(&default_helper_path(data_root), create_pro_root)
+}
+
 pub(super) fn validated_installed_helper(data_root: &Path) -> Result<VerifiedHelperExecutable> {
     let target = default_helper_path(data_root);
     if !installation_artifacts_present(data_root) {

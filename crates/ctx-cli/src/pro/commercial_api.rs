@@ -26,10 +26,104 @@ const MAX_CHECKOUT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MAX_RETRY_AFTER_SECONDS: u64 = 30 * 60;
 const MAX_TRIAL_CHALLENGE_LIFETIME_SECONDS: i64 = 10 * 60;
 pub(super) const COMMERCIAL_ACCEPT: &str = "application/json, application/problem+json";
+const STAGING_ACCESS_ORIGIN: &str = "https://pro-staging.ctx.rs/";
+const MAX_ACCESS_HEADER_BYTES: usize = 4096;
+const CLOUDFLARE_ACCESS_CLIENT_ID_HEADER: &str = "CF-Access-Client-Id";
+const CLOUDFLARE_ACCESS_CLIENT_SECRET_HEADER: &str = "CF-Access-Client-Secret";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+pub(super) struct CloudflareAccessCredentials {
+    client_id: Zeroizing<String>,
+    client_secret: Zeroizing<String>,
+}
+
+impl CloudflareAccessCredentials {
+    pub(super) fn new(client_id: String, client_secret: String) -> Result<Self> {
+        validate_access_header_value(&client_id)?;
+        validate_access_header_value(&client_secret)?;
+        Ok(Self {
+            client_id: Zeroizing::new(client_id),
+            client_secret: Zeroizing::new(client_secret),
+        })
+    }
+}
+
+impl fmt::Debug for CloudflareAccessCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloudflareAccessCredentials")
+            .field("client_id", &"[REDACTED]")
+            .field("client_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct CommercialApiConfig {
-    pub(super) origin: Url,
+    origin: Url,
+    staging_access: Option<CloudflareAccessCredentials>,
+}
+
+impl fmt::Debug for CommercialApiConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommercialApiConfig")
+            .field("origin", &self.origin)
+            .field(
+                "staging_access",
+                &self.staging_access.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl CommercialApiConfig {
+    pub(super) fn new(
+        origin: Url,
+        staging_access: Option<CloudflareAccessCredentials>,
+    ) -> Result<Self> {
+        validate_origin(&origin)?;
+        if staging_access.is_some() && origin.as_str() != STAGING_ACCESS_ORIGIN {
+            bail!(
+                "invalid_request: staging Cloudflare Access credentials require the fixed staging origin"
+            );
+        }
+        Ok(Self {
+            origin,
+            staging_access,
+        })
+    }
+
+    pub(super) fn origin(&self) -> &Url {
+        &self.origin
+    }
+
+    pub(super) fn apply_transport_credentials(
+        &self,
+        request: ureq::Request,
+        url: &Url,
+    ) -> Result<ureq::Request> {
+        if url.origin() != self.origin.origin() {
+            bail!("invalid_request: commercial request escaped its fixed origin");
+        }
+        let Some(access) = &self.staging_access else {
+            return Ok(request);
+        };
+        if self.origin.as_str() != STAGING_ACCESS_ORIGIN {
+            bail!(
+                "invalid_request: staging Cloudflare Access credentials require the fixed staging origin"
+            );
+        }
+        Ok(request
+            .set(
+                CLOUDFLARE_ACCESS_CLIENT_ID_HEADER,
+                access.client_id.as_str(),
+            )
+            .set(
+                CLOUDFLARE_ACCESS_CLIENT_SECRET_HEADER,
+                access.client_secret.as_str(),
+            ))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +241,12 @@ pub(super) struct CheckoutResult {
 pub(super) struct PortalResult {
     pub(super) kind: String,
     pub(super) url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkOsBootstrapResult {
+    organization_id: String,
 }
 
 #[derive(Deserialize, ZeroizeOnDrop)]
@@ -319,6 +419,11 @@ pub(super) struct CommercialApiClient {
 impl CommercialApiClient {
     pub(super) fn new(config: CommercialApiConfig) -> Result<Self> {
         validate_origin(&config.origin)?;
+        if config.staging_access.is_some() && config.origin.as_str() != STAGING_ACCESS_ORIGIN {
+            bail!(
+                "invalid_request: staging Cloudflare Access credentials require the fixed staging origin"
+            );
+        }
         Ok(Self {
             config,
             agent: ureq::AgentBuilder::new()
@@ -361,6 +466,16 @@ impl CommercialApiClient {
         }
         urls::validate_portal_url(&result.url)?;
         Ok(result)
+    }
+
+    pub(super) fn bootstrap_workos_personal_organization(
+        &self,
+        access_token: &str,
+    ) -> Result<String> {
+        let result: WorkOsBootstrapResult =
+            self.post("/v1/identity/bootstrap", access_token, &EmptyRequest {})?;
+        validate_identifier(&result.organization_id, "organization")?;
+        Ok(result.organization_id)
     }
 
     pub(super) fn entitlement(
@@ -442,19 +557,22 @@ impl CommercialApiClient {
         Ok(refresh)
     }
 
-    pub(super) fn origin(&self) -> &str {
-        self.config.origin.as_str()
+    pub(super) fn config(&self) -> &CommercialApiConfig {
+        &self.config
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, access_token: &str) -> Result<T> {
         let url = self.endpoint(path)?;
         let response = {
             let authorization = bearer_authorization(access_token)?;
-            self.agent
-                .get(url.as_str())
-                .set("accept", COMMERCIAL_ACCEPT)
-                .set("authorization", authorization.as_str())
-                .call()
+            let request = self.config.apply_transport_credentials(
+                self.agent
+                    .get(url.as_str())
+                    .set("accept", COMMERCIAL_ACCEPT)
+                    .set("authorization", authorization.as_str()),
+                &url,
+            )?;
+            request.call()
         };
         self.finish(response, "commercial API request")
     }
@@ -482,12 +600,14 @@ impl CommercialApiClient {
             body.zeroize();
             bail!("invalid_request: commercial request is too large");
         }
-        let mut request = self
-            .agent
-            .post(url.as_str())
-            .set("accept", COMMERCIAL_ACCEPT)
-            .set("content-type", "application/json")
-            .set("idempotency-key", &new_idempotency_key("cli")?);
+        let mut request = self.config.apply_transport_credentials(
+            self.agent
+                .post(url.as_str())
+                .set("accept", COMMERCIAL_ACCEPT)
+                .set("content-type", "application/json")
+                .set("idempotency-key", &new_idempotency_key("cli")?),
+            &url,
+        )?;
         if let Some(authorization) = authorization.as_deref() {
             validate_authorization_header(authorization)?;
             request = request.set("authorization", authorization);
@@ -658,6 +778,16 @@ fn validate_origin(origin: &Url) -> Result<()> {
         || origin.password().is_some()
     {
         bail!("invalid_request: commercial API must be an HTTPS origin");
+    }
+    Ok(())
+}
+
+fn validate_access_header_value(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_ACCESS_HEADER_BYTES
+        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        bail!("invalid_request: staging Cloudflare Access credential is invalid");
     }
     Ok(())
 }

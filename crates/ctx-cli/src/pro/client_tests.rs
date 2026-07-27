@@ -1312,8 +1312,8 @@ fn dual_namespace_graph_key_deletion_uses_each_exact_vault_authorization() {
     fs::set_permissions(&backend_marker, fs::Permissions::from_mode(0o600))
         .expect("protect backend marker");
 
-    let production_issuer = "https://commercial.ctx.rs";
-    let staging_issuer = "https://commercial.staging.ctx.rs";
+    let production_issuer = "https://pro.ctx.rs";
+    let staging_issuer = "https://pro-staging.ctx.rs";
     let (production_thumbprint, production_public_key) = store_namespace(
         root.path(),
         CredentialVaultNamespace::Production,

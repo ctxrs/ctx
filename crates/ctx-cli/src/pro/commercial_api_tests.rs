@@ -7,10 +7,116 @@ use super::*;
 use ctx_pro_host_protocol::{EntitlementAccessKind, EntitlementGrant, ENTITLEMENT_SCHEMA_VERSION};
 
 fn test_client() -> CommercialApiClient {
-    CommercialApiClient::new(CommercialApiConfig {
-        origin: Url::parse("https://pro.ctx.test/").unwrap(),
-    })
+    CommercialApiClient::new(
+        CommercialApiConfig::new(Url::parse("https://pro.ctx.test/").unwrap(), None).unwrap(),
+    )
     .unwrap()
+}
+
+#[test]
+fn staging_access_pair_is_attached_only_to_the_exact_fixed_staging_origin() {
+    let client_id = "access-client-id-123";
+    let client_secret = "access-client-secret-456";
+    let credentials =
+        CloudflareAccessCredentials::new(client_id.to_owned(), client_secret.to_owned()).unwrap();
+    let config = CommercialApiConfig::new(
+        Url::parse(STAGING_ACCESS_ORIGIN).unwrap(),
+        Some(credentials.clone()),
+    )
+    .unwrap();
+    let url = Url::parse("https://pro-staging.ctx.rs/v1/account").unwrap();
+    let request = config
+        .apply_transport_credentials(ureq::get(url.as_str()), &url)
+        .unwrap();
+    assert_eq!(
+        request.header(CLOUDFLARE_ACCESS_CLIENT_ID_HEADER),
+        Some(client_id)
+    );
+    assert_eq!(
+        request.header(CLOUDFLARE_ACCESS_CLIENT_SECRET_HEADER),
+        Some(client_secret)
+    );
+
+    let stable =
+        CommercialApiConfig::new(Url::parse("https://pro.ctx.rs/").unwrap(), None).unwrap();
+    let stable_url = Url::parse("https://pro.ctx.rs/v1/account").unwrap();
+    let stable_request = stable
+        .apply_transport_credentials(ureq::get(stable_url.as_str()), &stable_url)
+        .unwrap();
+    assert!(stable_request
+        .header(CLOUDFLARE_ACCESS_CLIENT_ID_HEADER)
+        .is_none());
+    assert!(stable_request
+        .header(CLOUDFLARE_ACCESS_CLIENT_SECRET_HEADER)
+        .is_none());
+
+    assert!(CommercialApiConfig::new(
+        Url::parse("https://pro.ctx.rs/").unwrap(),
+        Some(credentials)
+    )
+    .is_err());
+    assert!(config
+        .apply_transport_credentials(
+            ureq::get("https://example.test/v1/account"),
+            &Url::parse("https://example.test/v1/account").unwrap(),
+        )
+        .is_err());
+}
+
+#[test]
+fn staging_access_credentials_are_bounded_and_redacted() {
+    let client_id = "do-not-log-client-id";
+    let client_secret = "do-not-log-client-secret";
+    let credentials =
+        CloudflareAccessCredentials::new(client_id.to_owned(), client_secret.to_owned()).unwrap();
+    let config = CommercialApiConfig::new(
+        Url::parse(STAGING_ACCESS_ORIGIN).unwrap(),
+        Some(credentials.clone()),
+    )
+    .unwrap();
+    for debug in [format!("{credentials:?}"), format!("{config:?}")] {
+        assert!(!debug.contains(client_id));
+        assert!(!debug.contains(client_secret));
+        assert!(debug.contains("[REDACTED]"));
+    }
+    for invalid in [
+        "",
+        "line\nbreak",
+        "tab\tvalue",
+        "space value",
+        "non-ascii-é",
+    ] {
+        assert!(
+            CloudflareAccessCredentials::new(invalid.to_owned(), "valid-secret".to_owned())
+                .is_err()
+        );
+        assert!(
+            CloudflareAccessCredentials::new("valid-id".to_owned(), invalid.to_owned()).is_err()
+        );
+    }
+}
+
+#[test]
+fn workos_bootstrap_response_contains_only_a_bounded_organization_id() {
+    let result: WorkOsBootstrapResult = serde_json::from_value(serde_json::json!({
+        "organization_id": "org_personal_123"
+    }))
+    .unwrap();
+    validate_identifier(&result.organization_id, "organization").unwrap();
+
+    assert!(
+        serde_json::from_value::<WorkOsBootstrapResult>(serde_json::json!({
+            "organization_id": "org_personal_123",
+            "user_id": "user_caller_controlled"
+        }))
+        .is_err()
+    );
+    let too_long = "x".repeat(129);
+    for invalid in ["", "org with spaces", too_long.as_str()] {
+        let parsed: WorkOsBootstrapResult =
+            serde_json::from_value(serde_json::json!({ "organization_id": invalid })).unwrap();
+        assert!(validate_identifier(&parsed.organization_id, "organization").is_err());
+    }
 }
 
 fn test_response(

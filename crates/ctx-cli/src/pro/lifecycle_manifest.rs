@@ -8,6 +8,18 @@ pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SIGNATURE_BYTES: u64 = 16 * 1024;
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 pub(super) const MAX_INSTALL_MARKER_BYTES: u64 = 128 * 1024;
+pub(super) const PRO_RELEASE_STABLE_KEY_ID: &str = "ctx-pro-release-stable-2026-07-27";
+pub(super) const PRO_RELEASE_STABLE_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
+MIIBigKCAYEAq2vmUvoGcm0bAJhCdjzqzLF9SAALDA33KQOHWI3JeKFjxHTLs3hP
+88b3WfUfWgd/Bj6pVWpAI/S6MnrT5IQ8VMxPMe9VMM97F4TMN+ZMwo9y4sxefGwJ
++GI/7SJP3hnRLMV2xme9RRMERuaAEL1ComPdqKwcAMzvZSpAHnDrWnjLrhBFyahl
+2n8JoxvNr4sNHGJBdK0voDBgHmgoJvL23zrRDoo+yA7M7F0gQJc0hwxXUeku7rxb
+hlPU7WPZGwDbaNEzoVJBinlXoLuFT3cR7ImwnfPOARSa7q7KZaIoaeljqM3d6lTa
+abVHhCI+EJy1XX4ydQxFbqccMzhsz5g6Wim8q7pKliKT97uwV3r80f3DpjBUiG3e
++6QpMkxZqVaIgK85Za1stYKPfy9wOZyKkXthHeRbhKjozuogyK8cp03TjY6K6pw2
+VNd6soFZl6R0F8V4tNR5CXwlMjgFogl6t2sKIGHUhHC7y1U01lYlRJNqmvCClD2N
+uvdK7q5ndg1XAgMBAAE=
+-----END RSA PUBLIC KEY-----"#;
 pub(super) const PRO_RELEASE_STAGING_KEY_ID: &str = "ctx-pro-release-staging-2026-07-21";
 pub(super) const PRO_RELEASE_STAGING_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAzhEEzfwq/hJtK8l0G+K722eEUy9vNyTFvRLK2rIOkTBDwZQs1tgp
@@ -50,9 +62,11 @@ pub(crate) fn release_trust(channel: ReleaseChannel) -> Result<ReleaseTrust> {
             key_id: PRO_RELEASE_STAGING_KEY_ID,
             public_key_pem: PRO_RELEASE_STAGING_PUBLIC_KEY_PEM,
         }),
-        ReleaseChannel::Stable => {
-            bail!("commercial_unavailable: ctx Pro stable release trust is not configured")
-        }
+        ReleaseChannel::Stable => Ok(ReleaseTrust {
+            channel,
+            key_id: PRO_RELEASE_STABLE_KEY_ID,
+            public_key_pem: PRO_RELEASE_STABLE_PUBLIC_KEY_PEM,
+        }),
     }
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -354,12 +368,46 @@ mod release_tests {
     }
 
     #[test]
-    fn stable_release_registry_is_unavailable_without_production_key() {
-        let error = release_trust(ReleaseChannel::Stable).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "commercial_unavailable: ctx Pro stable release trust is not configured"
-        );
+    fn release_registry_has_distinct_channel_bound_public_keys() {
+        let stable = release_trust(ReleaseChannel::Stable).unwrap();
+        let staging = release_trust(ReleaseChannel::Staging).unwrap();
+        assert_eq!(stable.channel, ReleaseChannel::Stable);
+        assert_eq!(stable.key_id, "ctx-pro-release-stable-2026-07-27");
+        assert_eq!(staging.channel, ReleaseChannel::Staging);
+        assert_ne!(stable.key_id, staging.key_id);
+        assert_ne!(stable.public_key_pem, staging.public_key_pem);
+    }
+
+    #[test]
+    fn release_selector_rejects_cross_channel_material_before_signature_validation() {
+        let stable_selector = serde_json::json!({
+            "schema_version": 1,
+            "channel": "stable",
+            "release_key_id": PRO_RELEASE_STABLE_KEY_ID,
+        });
+        let staging_selector = serde_json::json!({
+            "schema_version": 1,
+            "channel": "staging",
+            "release_key_id": PRO_RELEASE_STAGING_KEY_ID,
+        });
+        for (selector, trust) in [
+            (
+                serde_json::to_vec(&stable_selector).unwrap(),
+                release_trust(ReleaseChannel::Staging).unwrap(),
+            ),
+            (
+                serde_json::to_vec(&staging_selector).unwrap(),
+                release_trust(ReleaseChannel::Stable).unwrap(),
+            ),
+        ] {
+            let error = verified_manifest_for_trust(&selector, b"not-a-signature", trust)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                "invalid_response: signed manifest does not match the selected release channel"
+            );
+        }
     }
 
     #[test]

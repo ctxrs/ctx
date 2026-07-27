@@ -12,8 +12,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::{
     commercial_api::{ReferralCreateResult, ReferralPayoutResult, ReferralStatusResult},
-    commercial_config::CommercialConfig,
+    commercial_config::selected_channel,
     commercial_lifecycle::{open_browser, CommercialLifecycleService},
+    lifecycle::lifecycle_manifest::ReleaseChannel,
 };
 use crate::output::JsonOutputFormat;
 
@@ -21,7 +22,7 @@ const REFERRAL_TAGLINE: &str = "Refer a developer. Earn $10/month toward your ag
 const REFERRAL_SECONDARY: &str = "Up to $120 per friend.";
 const REFERRAL_CODENAME_MIN_BYTES: usize = 3;
 const REFERRAL_CODENAME_MAX_BYTES: usize = 32;
-const REFERRAL_CTA_MARKER: &str = ".referral-cta-v1.shown";
+const REFERRAL_CTA_MARKER_PREFIX: &str = ".referral-cta-v1";
 pub(crate) const REFERRAL_CTA: &str = "Refer a developer. Earn $10/month toward your agent bill.\n\
 Up to $120 per friend.\n\
 ctx referral create <codename>";
@@ -245,50 +246,66 @@ impl ReferralService for CommercialLifecycleService {
 
 pub(crate) fn run(args: ReferralArgs, data_root: PathBuf) -> Result<()> {
     args.validate_invocation()?;
-    CommercialConfig::ensure_referrals_available()?;
     let json_output = args.json_output();
     prepare_referral_identity(&data_root, json_output)?;
+    let _lifecycle_lock =
+        super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?.ok_or_else(
+            || {
+                anyhow::anyhow!(
+                    "authentication_required: rerun the referral command without --json to sign in"
+                )
+            },
+        )?;
     let mut service = CommercialLifecycleService::production(&data_root)?;
     run_with_service(args, &mut service, &mut io::stdout().lock(), &open_browser)
 }
 
 pub(crate) fn show_cta_once(data_root: &Path, eligible: bool, output: &mut impl io::Write) -> bool {
-    show_cta_once_when_available(
-        data_root,
-        eligible,
-        CommercialConfig::referrals_available(),
-        output,
-    )
+    let Ok(channel) = selected_channel() else {
+        return false;
+    };
+    show_cta_once_for_channel(data_root, eligible, channel, output)
 }
 
-fn show_cta_once_when_available(
+fn show_cta_once_for_channel(
     data_root: &Path,
     eligible: bool,
-    available: bool,
+    channel: ReleaseChannel,
     output: &mut impl io::Write,
 ) -> bool {
-    if !available || !eligible || !claim_cta_marker(data_root) {
+    if !eligible || !claim_cta_marker(data_root, channel) {
         return false;
     }
     let rendered = format!("\n{REFERRAL_CTA}\n");
     if output.write_all(rendered.as_bytes()).is_ok() {
         true
     } else {
-        rollback_cta_marker(data_root);
+        rollback_cta_marker(data_root, channel);
         false
     }
 }
 
-fn claim_cta_marker(data_root: &Path) -> bool {
+fn cta_marker(data_root: &Path, channel: ReleaseChannel) -> PathBuf {
+    data_root.join(format!(
+        "{REFERRAL_CTA_MARKER_PREFIX}.{}.shown",
+        channel.wire_name()
+    ))
+}
+
+fn claim_cta_marker(data_root: &Path, channel: ReleaseChannel) -> bool {
     use ctx_history_core::platform_security::{
         restrict_private_file, verify_private_directory, verify_private_file,
     };
 
-    let marker = data_root.join(REFERRAL_CTA_MARKER);
+    let marker = cta_marker(data_root, channel);
     if verify_private_directory(data_root).is_err() {
         return false;
     }
-    let temporary = data_root.join(format!(".referral-cta-v1.{}.tmp", Uuid::new_v4().simple()));
+    let temporary = data_root.join(format!(
+        "{REFERRAL_CTA_MARKER_PREFIX}.{}.{}.tmp",
+        channel.wire_name(),
+        Uuid::new_v4().simple()
+    ));
     let result = (|| -> std::io::Result<bool> {
         crate::identity::create_private_file(&temporary, b"shown\n")?;
         restrict_private_file(&temporary).map_err(std::io::Error::other)?;
@@ -308,8 +325,8 @@ fn claim_cta_marker(data_root: &Path) -> bool {
     result.unwrap_or(false)
 }
 
-fn rollback_cta_marker(data_root: &Path) {
-    let marker = data_root.join(REFERRAL_CTA_MARKER);
+fn rollback_cta_marker(data_root: &Path, channel: ReleaseChannel) {
+    let marker = cta_marker(data_root, channel);
     if fs::remove_file(marker).is_ok() {
         #[cfg(unix)]
         let _ = fs::File::open(data_root).and_then(|directory| directory.sync_all());
@@ -872,5 +889,20 @@ mod tests {
         let debug = format!("{value:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("secret-agent"));
+    }
+
+    #[test]
+    fn interactive_referral_prepares_the_private_pro_lifecycle_root() {
+        let root = tempfile::tempdir().unwrap();
+        prepare_referral_identity(root.path(), false).unwrap();
+
+        let _lock = super::super::lifecycle::acquire_commercial_lifecycle_lock(root.path(), true)
+            .unwrap()
+            .expect("interactive referrals create the Pro lifecycle root");
+
+        ctx_history_core::platform_security::verify_private_directory(
+            &ctx_pro_host_protocol::ProFilesystemLayout::new(root.path()).pro_root(),
+        )
+        .unwrap();
     }
 }
