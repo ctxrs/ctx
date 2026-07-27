@@ -148,6 +148,57 @@ def db_footprint_bytes(data_root: Path) -> int:
     return sum(sqlite_footprint(data_root).values())
 
 
+def reshape_data_root_to_released_store(data_root: Path) -> dict[str, object]:
+    """Rewrites an imported data root into the shape a released v0.25 store has.
+
+    Every perf arm before this one imports into a data root the same build
+    created, so none of them exercise what every existing user does on their
+    first 0.26 import: publish into a store that already holds another
+    release's rows. A released store carries no projection journal, no
+    NativePath publication cursors, and capture-source identities the current
+    importer cannot reuse, so the first publication group re-journals canonical
+    observations that predate the run.
+    """
+    database = data_root / "work.sqlite"
+    if not database.is_file():
+        raise HarnessError(f"released-store reshape found no database at {database}")
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        triggers = [
+            name
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND name LIKE 'ctx_projection_writer_fence_%'"
+            )
+        ]
+        for trigger in triggers:
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        before = {}
+        for table in ("events", "sessions", "capture_sources"):
+            before[table] = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        connection.execute("DELETE FROM sync_cursors")
+        connection.execute("DELETE FROM projection_journal_entities")
+        connection.execute("DELETE FROM projection_journal_chunks")
+        connection.execute(
+            "UPDATE projection_journal_state SET active = 0, contract_fingerprint = NULL, "
+            "high_water_sequence = 0, acknowledged_sequence = 0, activated_at_ms = NULL "
+            "WHERE singleton = 1"
+        )
+        connection.execute(
+            "UPDATE capture_sources "
+            "SET source_identity = '46b1b4bc-66b2-773d-89ef-30b895fef4a2'"
+        )
+        connection.execute("UPDATE sessions SET role_hint = NULL")
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "dropped_writer_fence_triggers": len(triggers),
+        "released_rows": before,
+    }
+
+
 def storage_sample(label: str, data_root: Path, corpus_events: int) -> dict[str, object]:
     files = sqlite_footprint(data_root)
     footprint = sum(files.values())

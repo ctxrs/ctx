@@ -26,8 +26,9 @@ HELPERS = (
     HELPER_ROOT / "validation.sh",
 )
 REPO_ROOT = SCRIPT.parents[2]
-# This is the embedded Python body from base 8f5cf123. Update it only alongside
-# an intentional harness behavior or artifact-schema change.
+# The embedded Python body. Update it only alongside an intentional harness
+# behavior or artifact-schema change. Last updated to add the released-store
+# upgrade arm, which imports into a data root another release already wrote.
 FROZEN_PYTHON_SOURCE_SHA256 = (
     "d97ffb5ebe8181153cfb8cb0ec2a836c4f6ce3976a3f09fe33967a9a8c3c4391"
 )
@@ -121,6 +122,7 @@ MOCK_CTX = r"""
 #!/usr/bin/env python3
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -131,6 +133,38 @@ VERSION = "ctx 0.25.0" if ROLE == "baseline-v0.25" else "ctx 0.26.0"
 
 def emit(value):
     print(json.dumps(value, sort_keys=True))
+
+
+def ensure_mock_store(data_root):
+    # Creates the canonical tables the released-store upgrade arm reshapes.
+    connection = sqlite3.connect(data_root / 'work.sqlite')
+    try:
+        connection.executescript(
+            '''
+            CREATE TABLE IF NOT EXISTS sync_cursors (id TEXT PRIMARY KEY, cursor TEXT);
+            CREATE TABLE IF NOT EXISTS capture_sources (
+                id TEXT PRIMARY KEY, source_identity TEXT);
+            CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, role_hint TEXT);
+            CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS projection_journal_entities (
+                stable_entity_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS projection_journal_chunks (
+                first_sequence INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS projection_journal_state (
+                singleton INTEGER PRIMARY KEY, active INTEGER NOT NULL DEFAULT 0,
+                contract_fingerprint TEXT, high_water_sequence INTEGER NOT NULL DEFAULT 0,
+                acknowledged_sequence INTEGER NOT NULL DEFAULT 0, activated_at_ms INTEGER);
+            INSERT OR IGNORE INTO projection_journal_state (singleton, active) VALUES (1, 1);
+            CREATE TRIGGER IF NOT EXISTS ctx_projection_writer_fence_events_insert
+            BEFORE INSERT ON events
+            BEGIN
+              SELECT RAISE(ABORT, 'ctx projection journal requires a current writer');
+            END;
+            '''
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def corpus_snapshot(root):
@@ -167,6 +201,7 @@ if ROLE == "baseline-v0.25":
     time.sleep(0.25)
 
 if args and args[0] == "import":
+    ensure_mock_store(data_root)
     corpus_root = args[args.index("--path") + 1]
     current, source_bytes = corpus_snapshot(corpus_root)
     previous = json.loads(state_path.read_text()) if state_path.exists() else {}

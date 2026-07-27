@@ -369,6 +369,52 @@ def run_one(
         ),
     )
 
+    # The released-store upgrade arm. It mutates the data root irreversibly, so
+    # it runs last and no earlier arm observes it. Only the candidate can be
+    # upgraded into: the v0.25 baseline is the release this arm upgrades from.
+    released_upgrade_profile: dict[str, object] | None = None
+    if resolved_role == "candidate":
+        released_shape = reshape_data_root_to_released_store(data_root)
+        upgrade_result = run_ctx(
+            ctx_bin,
+            import_command(corpus_root),
+            env,
+            data_root,
+            sampling_interval_ms,
+        )
+        upgrade_summary = profile_summary(upgrade_result["packet"])
+        upgrade_noop_result = run_ctx(
+            ctx_bin,
+            import_command(corpus_root),
+            env,
+            data_root,
+            sampling_interval_ms,
+        )
+        upgrade_noop_summary = profile_summary(upgrade_noop_result["packet"])
+        if upgrade_noop_summary["imported_events"] != 0:
+            raise HarnessError(
+                "repeat import after a released-store upgrade was not a no-op: "
+                f"{upgrade_noop_summary}"
+            )
+        released_upgrade_profile = {
+            **command_profile(ctx_bin, import_command(corpus_root), [upgrade_result]),
+            "released_store": released_shape,
+            "totals": upgrade_summary,
+            "repeat_after_upgrade": {
+                **command_profile(
+                    ctx_bin, import_command(corpus_root), [upgrade_noop_result]
+                ),
+                "totals": upgrade_noop_summary,
+            },
+        }
+        storage_samples.append(
+            storage_sample(
+                "after_released_store_upgrade_import",
+                data_root,
+                generated_events + total_changed_events + total_replacement_events,
+            )
+        )
+
     profiles: dict[str, object] = {
         "generation": {"duration_ms": round2(generation_ms)},
         "initial_import": {
@@ -417,6 +463,7 @@ def run_one(
         "append_incremental_import": append_profile,
         "replacement_import": replacement_profile,
         "concurrent_refresh_off_search": concurrent_profile,
+        "released_store_upgrade_import": released_upgrade_profile,
         "show_session_lite": {
             **show_profile,
             "session_id": session_id,
