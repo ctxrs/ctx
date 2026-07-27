@@ -39,10 +39,10 @@ stable complete-content error codes as the CLI JSON contract.
 Two use the optional local Pro helper:
 
 - `pro_status`, inspect helper availability, capabilities, nonsecret access
-  state, and applicable refresh/access/grace deadlines without returning the
-  helper path;
-- `blame`, return typed, fully cited provenance for a committed file or line
-  range, commit, or pull request.
+  state, applicable refresh/access/grace deadlines, and compact local usage
+  aggregates without returning the helper or usage-store path;
+- `blame`, return typed, fully cited provenance for an exact `file`, `commit`,
+  or `pull_request` target.
 
 The `blame` target is exactly one of `file`, `commit`, or `pull_request`.
 `target.repository` is an optional logical identity such as
@@ -73,6 +73,28 @@ result explicitly contains no PR-commit relationship. MCP Pro errors use stable
 Helper/graph readiness and subscription access are separate fields. Access is
 `trial`, `active`, `canceling_paid`, `offline_grace`, `locked`, or null when it
 cannot be determined.
+
+`pro_status` may include a `$15/month` continuation action during a trial and a
+neutral, unpriced `pro_restore_access` action with `graph_preserved: true` when
+access is locked. It does not show a purchase action for paid active,
+`canceling_paid`, or `offline_grace` access and does not replace the existing
+`next_action`. Status never opens a browser.
+
+Local usage aggregation counts only recognized `tools/call` requests after the
+complete JSON-RPC response has serialized, written, and flushed. Initialize,
+ping, tool listing, malformed or invalid-ID envelopes, notifications,
+pre-initialization protocol errors, unknown tools, and automatic daemon work
+are not counted. Recognized tool/argument failures may count; invalid blame
+targets use an N/A target class. MCP blame creates one local observation
+enriched with its Pro result even though generic MCP and Pro remote event
+reporting may independently observe the same boundary. The compact report’s
+`mcp_response_bytes` is factual serialized transport bytes, including the
+newline—not tokens or savings. Local recording has no network path, is
+independent of remote event reporting, and fails silently without changing MCP
+output; explicit `pro_status` reports stable content-free usage-store errors
+instead of raw paths or causes. The server re-resolves the dedicated local
+control for every delivered call; an explicit `false` takes effect before store
+I/O, while an unrelated config read/parse failure retains the last known state.
 
 MCP search and SQL query the existing index only. They do not refresh provider
 history, import files, initialize storage, or write provider data. MCP search

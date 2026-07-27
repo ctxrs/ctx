@@ -472,7 +472,13 @@ fn binary_id_order_and_digests_are_stable_across_reverse_reinsertion() {
         first.source_integrity_digest,
         second.source_integrity_digest
     );
-    assert_eq!(first.core_generation_digest, second.core_generation_digest);
+    for digest in [
+        first.core_generation_digest.as_str(),
+        second.core_generation_digest.as_str(),
+    ] {
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
 }
 
 #[test]

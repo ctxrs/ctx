@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     privacy::{
-        is_result_label, is_result_shape_label, preclassify_result, preflight_record,
-        RawRecordPreflight, RawResultClassification,
+        is_result_label, is_result_shape_label, preflight_record, RawRecordPreflight,
+        RawResultClassification,
     },
     rows::{
         ClaudeEventIdentity, ClaudeEventKind, ClaudeFileTouch, ClaudeNativeOrder,
@@ -38,13 +38,6 @@ impl ResultClassification {
     pub(super) fn is_result(self) -> bool {
         self.tagged_command_output || self.result_block || self.result_like_shape
     }
-
-    fn merge(&mut self, other: Self) {
-        self.tagged_command_output |= other.tagged_command_output;
-        self.result_block |= other.result_block;
-        self.result_like_shape |= other.result_like_shape;
-        self.top_level_result |= other.top_level_result;
-    }
 }
 
 impl From<RawResultClassification> for ResultClassification {
@@ -56,255 +49,6 @@ impl From<RawResultClassification> for ResultClassification {
             top_level_result: value.top_level_result,
         }
     }
-}
-
-#[derive(Debug)]
-pub(super) struct RecordClassification {
-    pub(super) result: ResultClassification,
-    pub(super) preallocation_exclusion: bool,
-    pub(super) native_record_id: Option<String>,
-    pub(super) session_id: Option<String>,
-    pub(super) timestamp: Option<String>,
-    pub(super) cwd: Option<String>,
-    pub(super) version: Option<String>,
-    pub(super) git_branch: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct ClassificationRecord {
-    result: ResultClassification,
-    native_record_id: Option<String>,
-    session_id: Option<String>,
-    timestamp: Option<String>,
-    cwd: Option<String>,
-    version: Option<String>,
-    git_branch: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for ClassificationRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(ClassificationRecordVisitor)
-    }
-}
-
-struct ClassificationRecordVisitor;
-
-impl<'de> Visitor<'de> for ClassificationRecordVisitor {
-    type Value = ClassificationRecord;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a Claude JSONL record")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut record = ClassificationRecord::default();
-        while let Some(field) = map.next_key::<RecordField>()? {
-            match field {
-                RecordField::EntryType => {
-                    let label = map.next_value::<ClassifiedLabel>()?;
-                    record.result.merge(label.result);
-                }
-                RecordField::SessionId => {
-                    record.session_id = map.next_value::<BoundedString>()?.0;
-                }
-                RecordField::Uuid => {
-                    record.native_record_id = map.next_value::<BoundedString>()?.0;
-                }
-                RecordField::Timestamp => {
-                    record.timestamp = map.next_value::<BoundedString>()?.0;
-                }
-                RecordField::Cwd => {
-                    record.cwd = map.next_value::<BoundedString>()?.0;
-                }
-                RecordField::Version => {
-                    record.version = map.next_value::<BoundedString>()?.0;
-                }
-                RecordField::GitBranch => {
-                    record.git_branch = map.next_value::<BoundedString>()?.0;
-                }
-                RecordField::Message => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-                RecordField::Content | RecordField::Summary => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-                RecordField::ResultLike => {
-                    record.result.result_like_shape = true;
-                    map.next_value::<IgnoredAny>()?;
-                }
-                RecordField::Other => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-        }
-        Ok(record)
-    }
-}
-
-enum RecordField {
-    EntryType,
-    SessionId,
-    Uuid,
-    Timestamp,
-    Cwd,
-    Version,
-    GitBranch,
-    Message,
-    Content,
-    Summary,
-    ResultLike,
-    Other,
-}
-
-impl<'de> Deserialize<'de> for RecordField {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_identifier(RecordFieldVisitor)
-    }
-}
-
-struct RecordFieldVisitor;
-
-impl Visitor<'_> for RecordFieldVisitor {
-    type Value = RecordField;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a Claude record field")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(match value {
-            "type" => RecordField::EntryType,
-            "sessionId" => RecordField::SessionId,
-            "uuid" => RecordField::Uuid,
-            "timestamp" => RecordField::Timestamp,
-            "cwd" => RecordField::Cwd,
-            "version" => RecordField::Version,
-            "gitBranch" => RecordField::GitBranch,
-            "message" => RecordField::Message,
-            "content" => RecordField::Content,
-            "summary" => RecordField::Summary,
-            _ if is_result_label(value) => RecordField::ResultLike,
-            _ => RecordField::Other,
-        })
-    }
-}
-
-#[derive(Debug, Default)]
-struct BoundedString(Option<String>);
-
-impl<'de> Deserialize<'de> for BoundedString {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(BoundedStringVisitor)
-    }
-}
-
-struct BoundedStringVisitor;
-
-impl Visitor<'_> for BoundedStringVisitor {
-    type Value = BoundedString;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a bounded Claude metadata string")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(BoundedString(
-            (value.len() <= MAX_CLASSIFICATION_METADATA_BYTES).then(|| value.to_owned()),
-        ))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(BoundedString(
-            (value.len() <= MAX_CLASSIFICATION_METADATA_BYTES).then_some(value),
-        ))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(BoundedString(None))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(BoundedString(None))
-    }
-}
-
-#[derive(Debug, Default)]
-struct ClassifiedLabel {
-    result: ResultClassification,
-}
-
-impl<'de> Deserialize<'de> for ClassifiedLabel {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(ClassifiedLabelVisitor)
-    }
-}
-
-struct ClassifiedLabelVisitor;
-
-impl Visitor<'_> for ClassifiedLabelVisitor {
-    type Value = ClassifiedLabel;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a Claude type label")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(ClassifiedLabel {
-            result: ResultClassification {
-                result_block: is_result_label(value),
-                ..ResultClassification::default()
-            },
-        })
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(ClassifiedLabel::default())
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(ClassifiedLabel::default())
-    }
-}
-
-pub(super) fn classify_record(bytes: &[u8]) -> Result<RecordClassification, serde_json::Error> {
-    if let Some(result) = preclassify_result(bytes)? {
-        return Ok(RecordClassification {
-            result: result.into(),
-            preallocation_exclusion: true,
-            native_record_id: None,
-            session_id: None,
-            timestamp: None,
-            cwd: None,
-            version: None,
-            git_branch: None,
-        });
-    }
-    let record: ClassificationRecord = serde_json::from_slice(bytes)?;
-    Ok(RecordClassification {
-        result: record.result,
-        preallocation_exclusion: false,
-        native_record_id: record.native_record_id,
-        session_id: record.session_id,
-        timestamp: record.timestamp,
-        cwd: record.cwd,
-        version: record.version,
-        git_branch: record.git_branch,
-    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -619,15 +363,6 @@ impl<'de> Visitor<'de> for BoundedPatchVisitor {
         while sequence.next_element::<IgnoredAny>()?.is_some() {}
         Ok(BoundedPatch(None))
     }
-}
-
-pub(super) fn retain_record(
-    bytes: &[u8],
-    raw_ordinal: u64,
-    locator: &ClaudePhysicalLocator,
-) -> Result<Vec<ClaudeRetainedRow>, serde_json::Error> {
-    let record: SafeRecord = serde_json::from_slice(bytes)?;
-    Ok(retain_safe_record(record, raw_ordinal, locator, false))
 }
 
 fn retain_safe_record(

@@ -284,7 +284,12 @@ pub(super) fn import_lingma_native_path(
     };
 
     if options.import_profile.is_replay_only() {
-        replay_outputs_or_mark_behind(&authority, options.import_profile.sink().map(AsRef::as_ref));
+        replay_outputs_or_mark_behind(
+            store,
+            &context.machine_id,
+            &authority,
+            options.import_profile.sink().map(AsRef::as_ref),
+        );
         return Ok(ProviderImportSummary::default());
     }
 
@@ -308,7 +313,12 @@ pub(super) fn import_lingma_native_path(
         (Err(error), Ok(())) => return Err(error),
     };
 
-    replay_outputs_or_mark_behind(&authority, options.import_profile.sink().map(AsRef::as_ref));
+    replay_outputs_or_mark_behind(
+        store,
+        &context.machine_id,
+        &authority,
+        options.import_profile.sink().map(AsRef::as_ref),
+    );
     if summary.work_result() == ProviderImportWorkResult::Changed {
         summary.set_work_result(ProviderImportWorkResult::Changed);
     }
@@ -1458,11 +1468,16 @@ fn publish_event(
     Ok(())
 }
 
-fn replay_outputs_or_mark_behind(authority: &SourceAuthority, sink: Option<&dyn ProOutputSink>) {
+fn replay_outputs_or_mark_behind(
+    store: &Store,
+    machine_id: &str,
+    authority: &SourceAuthority,
+    sink: Option<&dyn ProOutputSink>,
+) {
     let Some(sink) = sink else {
         return;
     };
-    if let Err(error) = replay_outputs(authority, sink) {
+    if let Err(error) = replay_outputs(store, machine_id, authority, sink) {
         sink.mark_behind(ProOutputSinkError::new(
             "lingma_nativepath_output_replay",
             error.to_string(),
@@ -1470,7 +1485,13 @@ fn replay_outputs_or_mark_behind(authority: &SourceAuthority, sink: Option<&dyn 
     }
 }
 
-fn replay_outputs(authority: &SourceAuthority, sink: &dyn ProOutputSink) -> Result<()> {
+fn replay_outputs(
+    store: &Store,
+    machine_id: &str,
+    authority: &SourceAuthority,
+    sink: &dyn ProOutputSink,
+) -> Result<()> {
+    committed_replay_authority(store, machine_id, authority)?;
     let source = OutputSourceIdentity {
         provider: CaptureProvider::Lingma.as_str().to_owned(),
         namespace_id: authority.source_root.clone(),
@@ -1591,6 +1612,39 @@ fn replay_outputs(authority: &SourceAuthority, sink: &dyn ProOutputSink) -> Resu
     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
     let _ = process_pro_replay_only(replay, sink);
     Ok(())
+}
+
+fn committed_replay_authority(
+    store: &Store,
+    machine_id: &str,
+    authority: &SourceAuthority,
+) -> Result<CoreCheckpoint> {
+    let stored = store
+        .get_sync_cursor(None, machine_id, &authority.cursor_stream)?
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "Lingma output replay requires committed terminal NativePath Core".to_owned(),
+            )
+        })?;
+    let committed = decode_native_path_committed_cursor(&stored.cursor).map_err(|_| {
+        CaptureError::InvalidPayload(
+            "Lingma output replay requires a Store-committed NativePath Core cursor".to_owned(),
+        )
+    })?;
+    let checkpoint: CoreCheckpoint =
+        serde_json::from_str(committed.provider_cursor()).map_err(|_| {
+            CaptureError::InvalidPayload(
+                "Lingma output replay requires committed Lingma Core authority".to_owned(),
+            )
+        })?;
+    checkpoint.validate(&authority.locator_identity)?;
+    if !checkpoint.terminal || checkpoint.source_revision != authority.source_revision {
+        return Err(CaptureError::InvalidPayload(
+            "Lingma output replay source does not exactly match committed terminal Core authority"
+                .to_owned(),
+        ));
+    }
+    Ok(checkpoint)
 }
 
 #[derive(Clone)]
@@ -1726,9 +1780,11 @@ fn retire_missing_source(
                 NativePathCursorSetClassification::AllNextSameGroup { .. } => false,
             };
         group.commit()?;
-        let mut summary = ProviderImportSummary::default();
-        summary.skipped = usize::from(changed);
-        summary.skipped_sessions = usize::from(changed);
+        let mut summary = ProviderImportSummary {
+            skipped: usize::from(changed),
+            skipped_sessions: usize::from(changed),
+            ..ProviderImportSummary::default()
+        };
         summary.set_work_result(if changed {
             ProviderImportWorkResult::Changed
         } else {

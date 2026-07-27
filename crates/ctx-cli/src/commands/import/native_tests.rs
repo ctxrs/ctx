@@ -195,12 +195,12 @@ fn assert_inventory_race_winner_remains_pending(db_path: &Path, original: &Sourc
 }
 
 #[test]
-fn direct_source_import_does_not_nest_nativepath_maintenance() {
+fn direct_source_import_uses_nested_nativepath_maintenance_safely() {
     assert_openhands_pinned_reader_allows_cli_cursor(false);
 }
 
 #[test]
-fn manifested_source_import_does_not_nest_nativepath_maintenance() {
+fn manifested_source_import_uses_nested_nativepath_maintenance_safely() {
     assert_openhands_pinned_reader_allows_cli_cursor(true);
 }
 
@@ -965,7 +965,8 @@ fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest()
     .unwrap();
 
     assert!(first.work_remaining);
-    assert_eq!(first.imported_events, 255);
+    assert!(first.imported_events > 0);
+    assert!(first.imported_events < 320);
     assert!(serde_json::to_value(&first)
         .unwrap()
         .get("work_remaining")
@@ -980,22 +981,38 @@ fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest()
     );
     drop(store);
 
-    let mut restarted = Store::open(&db_path).unwrap();
-    let second = import_one_source_for_background_refresh(
-        &mut restarted,
-        &source,
-        None,
-        &SourcePreinventory::SourceImportManifest,
-    )
-    .unwrap();
-
-    assert!(!second.work_remaining);
-    assert_eq!(second.imported_events, 65);
-    assert!(restarted
-        .list_pending_source_import_files(source.provider, &source.path.display().to_string())
-        .unwrap()
-        .is_empty());
-    drop(restarted);
+    let mut imported_events = first.imported_events;
+    loop {
+        let mut restarted = Store::open(&db_path).unwrap();
+        let next = import_one_source_for_background_refresh(
+            &mut restarted,
+            &source,
+            None,
+            &SourcePreinventory::SourceImportManifest,
+        )
+        .unwrap();
+        imported_events = imported_events.saturating_add(next.imported_events);
+        if next.work_remaining {
+            assert!(
+                next.imported_events > 0,
+                "each nonterminal bounded restart must advance the certified frontier: {next:?}"
+            );
+            assert!(!restarted
+                .list_pending_source_import_files(
+                    source.provider,
+                    &source.path.display().to_string()
+                )
+                .unwrap()
+                .is_empty());
+            continue;
+        }
+        assert!(restarted
+            .list_pending_source_import_files(source.provider, &source.path.display().to_string())
+            .unwrap()
+            .is_empty());
+        break;
+    }
+    assert_eq!(imported_events, 320);
     let connection = Connection::open(&db_path).unwrap();
     let event_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))

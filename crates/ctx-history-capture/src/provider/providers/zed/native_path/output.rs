@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     acquire_immutable_snapshot,
-    dto::{ZedNativePage, ZedNativeSink},
+    dto::{ZedNativeGenerationAuthority, ZedNativePage, ZedNativeSink},
     query::scan_zed_native_snapshot,
     staging::ZedNativeStaging,
     ZedNativeResult, ZedSnapshotAcquisition,
@@ -44,33 +44,36 @@ struct ZedOutputState {
     next_output_ordinal: u64,
 }
 
+pub(super) struct ZedOutputReplayAuthority<'a> {
+    canonical_source_identity: &'a str,
+    source_revision: &'a str,
+    generation: &'a ZedNativeGenerationAuthority,
+}
+
+impl<'a> ZedOutputReplayAuthority<'a> {
+    pub(super) fn new(
+        canonical_source_identity: &'a str,
+        source_revision: &'a str,
+        generation: &'a ZedNativeGenerationAuthority,
+    ) -> Self {
+        Self {
+            canonical_source_identity,
+            source_revision,
+            generation,
+        }
+    }
+}
+
 pub(super) fn replay_zed_outputs_or_mark_behind(
     path: &Path,
     staging: &ZedNativeStaging,
-    evidence_path: &Path,
-    canonical_source_identity: &str,
-    source_revision: &str,
-    expected_snapshot_revision: &str,
-    expected_capability_digest: &str,
-    expected_source_integrity_digest: &str,
-    expected_core_generation_digest: &str,
+    authority: &ZedOutputReplayAuthority<'_>,
     sink: Option<&Arc<dyn ProOutputSink>>,
 ) {
     let Some(sink) = sink else {
         return;
     };
-    if let Err(error) = replay_zed_outputs(
-        path,
-        staging,
-        evidence_path,
-        canonical_source_identity,
-        source_revision,
-        expected_snapshot_revision,
-        expected_capability_digest,
-        expected_source_integrity_digest,
-        expected_core_generation_digest,
-        sink.as_ref(),
-    ) {
+    if let Err(error) = replay_zed_outputs(path, staging, authority, sink.as_ref()) {
         sink.mark_behind(error);
     }
 }
@@ -78,13 +81,7 @@ pub(super) fn replay_zed_outputs_or_mark_behind(
 fn replay_zed_outputs(
     path: &Path,
     staging: &ZedNativeStaging,
-    evidence_path: &Path,
-    canonical_source_identity: &str,
-    source_revision: &str,
-    expected_snapshot_revision: &str,
-    expected_capability_digest: &str,
-    expected_source_integrity_digest: &str,
-    expected_core_generation_digest: &str,
+    authority: &ZedOutputReplayAuthority<'_>,
     sink: &dyn ProOutputSink,
 ) -> Result<(), ProOutputSinkError> {
     let snapshot = match acquire_immutable_snapshot(path).map_err(output_source_error)? {
@@ -96,7 +93,7 @@ fn replay_zed_outputs(
             ));
         }
     };
-    if snapshot.snapshot_revision != expected_snapshot_revision {
+    if snapshot.snapshot_revision != authority.generation.snapshot_revision {
         return Err(ProOutputSinkError::new(
             "zed_output_revision_mismatch",
             "Zed output replay no longer matches the committed Core generation",
@@ -110,9 +107,9 @@ fn replay_zed_outputs(
         &mut discard,
     )
     .map_err(output_source_error)?;
-    if verification.capability_digest != expected_capability_digest
-        || verification.source_integrity_digest != expected_source_integrity_digest
-        || verification.core_generation_digest != expected_core_generation_digest
+    if verification.capability_digest != authority.generation.capability_digest
+        || verification.source_integrity_digest != authority.generation.source_integrity_digest
+        || verification.core_generation_digest != authority.generation.core_generation_digest
     {
         return Err(ProOutputSinkError::new(
             "zed_output_revision_mismatch",
@@ -123,7 +120,7 @@ fn replay_zed_outputs(
     let evidence = Connection::open_with_flags(
         // This provider-private index contains decoded thread identities only.
         // Successful output bytes remain solely in the immutable source snapshot.
-        evidence_path,
+        authority.generation.output_index.path(),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(output_sqlite_error)?;
@@ -131,7 +128,7 @@ fn replay_zed_outputs(
         "SELECT rowid, id, updated_at, data_type, data FROM threads WHERE id = ?1 COLLATE BINARY";
     let mut hydrate = snapshot
         .connection
-        .prepare(&hydration_sql)
+        .prepare(hydration_sql)
         .map_err(output_sqlite_error)?;
     let mut identities = evidence
         .prepare(
@@ -166,8 +163,8 @@ fn replay_zed_outputs(
             })?;
         replay_thread(
             path,
-            source_revision,
-            canonical_source_identity,
+            authority.source_revision,
+            authority.canonical_source_identity,
             parent_thread_id,
             root_thread_id,
             row,
@@ -210,7 +207,7 @@ fn replay_thread(
         namespace_id: canonical_source_identity.to_owned(),
         source_id: row.id.clone(),
     };
-    let progress = sink.observe_source(&output_source).map_err(|error| error)?;
+    let progress = sink.observe_source(&output_source)?;
     if progress.as_ref().is_some_and(|progress| {
         progress.observed_revision == source_revision
             && progress.parser_revision == ZED_OUTPUT_PARSER_REVISION

@@ -570,7 +570,7 @@ fn lifecycle_truncate_replace_relocate_copy_and_delete() {
     };
     assert!(matches!(
         open_pi_native_session(&copied_path, options).unwrap(),
-        PiNativeOpenOutcome::Deleted(_)
+        PiNativeOpenOutcome::Deleted
     ));
 }
 

@@ -32,6 +32,7 @@ pub(crate) struct ProviderFileTouchVisitOutcome {
 }
 
 impl ProviderFileTouchVisitOutcome {
+    #[allow(dead_code)]
     pub(crate) fn emitted(self) -> usize {
         self.emitted
     }

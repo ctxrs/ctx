@@ -304,10 +304,25 @@ fn pro_failure_never_blocks_or_rolls_back_core() {
         import_mux_native_path(&root, &mut store, context(&root), import_options).unwrap();
 
     assert_eq!(summary.imported_events, 1);
-    assert!(summary.failed >= 1);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        summary.failures[0].error,
+        "Mux Pro output replay is behind Core"
+    );
     assert!(sink.behind.load(Ordering::SeqCst));
+    let replay = Arc::new(TestSink::recording());
+    let mut replay_options = options();
+    replay_options.import_profile = ImportProfile::ProReplayOnly(replay.clone());
+    let replay_summary =
+        import_mux_native_path(&root, &mut store, context(&root), replay_options).unwrap();
+    assert_eq!(replay_summary.failed, 0);
+    assert_eq!(
+        replay.contents.lock().unwrap().as_slice(),
+        [SECRET.as_bytes()]
+    );
+
     drop(store);
-    let committed = Store::open_read_only(store_path).unwrap();
+    let committed = Store::open_read_only(&store_path).unwrap();
     let canonical = committed
         .session_by_external_session(CaptureProvider::Mux, "session-1")
         .unwrap()

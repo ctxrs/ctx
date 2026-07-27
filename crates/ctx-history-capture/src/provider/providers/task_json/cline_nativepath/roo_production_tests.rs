@@ -146,6 +146,46 @@ fn roo_core_commit_and_pro_output_replay_are_independent() {
 }
 
 #[test]
+fn roo_output_failure_never_fails_core_and_later_replay_catches_up() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("roo-storage");
+    let task = root.join("tasks").join("roo-output-failure-task");
+    write_task(
+        &task,
+        &[
+            message("user", "core-survives-output-failure"),
+            successful_output(OUTPUT_SENTINEL),
+        ],
+    );
+    let store_path = temp.path().join("core.sqlite");
+    let mut store = Store::open(&store_path).expect("store");
+    let failing_sink = Arc::new(RecordingSink::failing(store_path.clone()));
+
+    let core = import(
+        &root,
+        &mut store,
+        ImportProfile::CoreAndPro(failing_sink.clone()),
+    );
+    assert_eq!(core.work_result(), ProviderImportWorkResult::Changed);
+    assert!(failing_sink.saw_committed_core.load(Ordering::SeqCst));
+    assert!(failing_sink.behind.load(Ordering::SeqCst));
+    assert_core_has_no_successful_output_body(&store);
+
+    let replay_sink = Arc::new(RecordingSink::new(store_path));
+    let replay = import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(replay_sink.clone()),
+    );
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(replay_sink.outputs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        replay_sink.contents.lock().expect("contents").as_slice(),
+        [OUTPUT_SENTINEL.as_bytes()]
+    );
+}
+
+#[test]
 fn roo_command_failures_publish_canonical_runs() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("roo-storage");
@@ -192,6 +232,8 @@ struct RecordingSink {
     pages: AtomicUsize,
     outputs: AtomicUsize,
     saw_committed_core: AtomicBool,
+    fail_pages: bool,
+    behind: AtomicBool,
 }
 
 impl RecordingSink {
@@ -203,6 +245,15 @@ impl RecordingSink {
             pages: AtomicUsize::new(0),
             outputs: AtomicUsize::new(0),
             saw_committed_core: AtomicBool::new(false),
+            fail_pages: false,
+            behind: AtomicBool::new(false),
+        }
+    }
+
+    fn failing(store_path: PathBuf) -> Self {
+        Self {
+            fail_pages: true,
+            ..Self::new(store_path)
         }
     }
 }
@@ -236,6 +287,12 @@ impl ProOutputSink for RecordingSink {
         {
             self.saw_committed_core.store(true, Ordering::SeqCst);
         }
+        if self.fail_pages {
+            return Err(ProOutputSinkError::new(
+                "roo_test_output_failure",
+                "injected output failure",
+            ));
+        }
         self.pages.fetch_add(1, Ordering::SeqCst);
         self.outputs
             .fetch_add(page.observations.len(), Ordering::SeqCst);
@@ -263,6 +320,10 @@ impl ProOutputSink for RecordingSink {
             materialized_facts: 0,
             replayed: false,
         })
+    }
+
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.store(true, Ordering::SeqCst);
     }
 }
 

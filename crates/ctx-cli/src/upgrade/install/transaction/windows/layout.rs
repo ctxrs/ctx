@@ -1,3 +1,5 @@
+#![cfg_attr(all(test, not(windows)), allow(dead_code))]
+
 #[cfg(windows)]
 use std::path::PathBuf;
 use std::{fs, path::Path, time::Duration};

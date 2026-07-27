@@ -877,10 +877,12 @@ fn record_rejections(page: &GooseNativePage, summary: &mut ProviderImportSummary
 }
 
 fn skipped_page_summary(page: &GooseNativePage) -> ProviderImportSummary {
-    let mut summary = ProviderImportSummary::default();
-    summary.skipped_sessions = page.sessions.len();
-    summary.skipped_events = page.events.len();
-    summary.skipped = page.sessions.len().saturating_add(page.events.len());
+    let mut summary = ProviderImportSummary {
+        skipped_sessions: page.sessions.len(),
+        skipped_events: page.events.len(),
+        skipped: page.sessions.len().saturating_add(page.events.len()),
+        ..ProviderImportSummary::default()
+    };
     record_rejections(page, &mut summary);
     summary.set_work_result(ProviderImportWorkResult::NoOp);
     summary

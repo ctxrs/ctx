@@ -90,6 +90,9 @@ struct ReleasedClaudeSessionCheckpoint {
     git_branch: Option<String>,
 }
 
+// Both variants are persisted compatibility shapes; boxing would add allocation
+// to every cursor decode for a release-time size-only concern.
+#[allow(clippy::large_enum_variant)]
 enum ClaudeStoredCursor {
     Native(ClaudeStoreCursor),
     Released(String),
@@ -174,6 +177,7 @@ pub(crate) fn import_claude_nativepath_projects(
             ProviderSourceRouteRetirementReason::SourceMissing,
         );
     }
+    let authoritative_inventory = discovery.root.is_dir();
 
     let committed_store = Store::open_read_only(store.path())?;
     let bulk_guard = store.begin_event_search_bulk_mode()?;
@@ -197,7 +201,7 @@ pub(crate) fn import_claude_nativepath_projects(
                 break;
             }
         }
-        if !summary.work_remaining {
+        if !summary.work_remaining && authoritative_inventory {
             discovery.revalidate_inventory().map_err(map_native_error)?;
             let live = discovery
                 .sessions
@@ -448,9 +452,11 @@ fn publish_core_page(
     match group.classify_cursor_set(&publication_id, std::slice::from_ref(&transition))? {
         NativePathCursorSetClassification::AllNextSameGroup { .. } => {
             group.commit()?;
-            let mut summary = ProviderImportSummary::default();
-            summary.skipped_events = page.rows.len();
-            summary.skipped = page.rows.len();
+            let mut summary = ProviderImportSummary {
+                skipped_events: page.rows.len(),
+                skipped: page.rows.len(),
+                ..ProviderImportSummary::default()
+            };
             summary.set_work_result(ProviderImportWorkResult::NoOp);
             return Ok(summary);
         }
@@ -574,6 +580,9 @@ fn publish_core_page(
     Ok(summary)
 }
 
+// This constructor mirrors the persisted CaptureSource contract; bundling its
+// fields would obscure that boundary without reducing caller complexity.
+#[allow(clippy::too_many_arguments)]
 fn capture_source(
     source: &DiscoveredClaudeSession,
     source_id: Uuid,
@@ -760,6 +769,18 @@ fn publish_row(
     options: &ClaudeProjectsImportOptions,
     summary: &mut ProviderImportSummary,
 ) -> Result<()> {
+    let provider_event_index = if row.identity.source_subrecord_index == 0 {
+        row.identity.source_record_ordinal
+    } else {
+        row.identity
+            .source_record_ordinal
+            .checked_mul(u64::from(u16::MAX) + 1)
+            .and_then(|index| index.checked_add(row.identity.source_subrecord_index))
+            .map(|index| index | (1_u64 << 63))
+            .ok_or(CaptureError::SystemInvariant(
+                "Claude provider event identity index overflowed",
+            ))?
+    };
     let event_type = match row.kind {
         ClaudeEventKind::Message => EventType::Message,
         ClaudeEventKind::Summary => EventType::Summary,
@@ -778,7 +799,7 @@ fn publish_row(
     let payload = json!({
         "provider": CaptureProvider::Claude.as_str(),
         "provider_session_id": session.external_session_id,
-        "provider_event_index": row.identity.source_record_ordinal,
+        "provider_event_index": provider_event_index,
         "native_record_id": row.native_record_id,
         "parent_native_record_id": row.parent_native_record_id,
         "kind": row.kind,
@@ -812,8 +833,8 @@ fn publish_row(
         CaptureProvider::Claude,
         provider_session_id,
         source_id,
-        row.identity.source_record_ordinal,
-        row.identity.source_subrecord_index,
+        provider_event_index,
+        provider_event_index,
         &event_hash,
         None,
         Some(row.identity.source_record_ordinal),
@@ -844,8 +865,8 @@ fn publish_row(
             Fidelity::Imported,
             json!({
                 "provider_session_id": provider_session_id,
-                "provider_event_index": row.identity.source_record_ordinal,
-                "provider_event_sequence_index": row.identity.source_subrecord_index,
+                "provider_event_index": provider_event_index,
+                "provider_event_sequence_index": provider_event_index,
                 "provider_event_hash": event_hash,
                 "provider_event_hash_authority": match authority {
                     ProviderEventHashAuthority::ProviderSupplied => "provider_supplied",
@@ -873,21 +894,21 @@ fn publish_row(
 
     if let Some(call) = &row.tool_call {
         for (touch_index, touch) in call.file_touches.iter().enumerate() {
-            let packed = row
-                .identity
-                .source_record_ordinal
+            let touch_index = u64::try_from(touch_index)
+                .map_err(|_| CaptureError::SystemInvariant("Claude file-touch index overflowed"))?;
+            // Retain the historical packed identity while it fits. Compound
+            // event indices intentionally use the full-width event+touch key.
+            let provider_touch_index = provider_event_index
                 .checked_mul(u64::from(u16::MAX) + 1)
-                .and_then(|base| base.checked_add(u64::try_from(touch_index).ok()?))
-                .ok_or(CaptureError::SystemInvariant(
-                    "Claude file-touch identity overflowed",
-                ))?;
+                .and_then(|base| base.checked_add(touch_index))
+                .unwrap_or(touch_index);
             let id = provider_file_touch_import_id(
                 committed_store,
                 CaptureProvider::Claude,
                 provider_session_id,
                 source_id,
-                Some(row.identity.source_record_ordinal),
-                packed,
+                Some(provider_event_index),
+                provider_touch_index,
                 true,
             )?;
             group.upsert_file_touched(&FileTouched {
@@ -908,8 +929,11 @@ fn publish_row(
                     json!({
                         "provider": CaptureProvider::Claude.as_str(),
                         "provider_session_id": provider_session_id,
-                        "provider_touch_index": packed,
-                        "provider_event_index": row.identity.source_record_ordinal,
+                        "provider_touch_index": provider_touch_index,
+                        "provider_event_index": provider_event_index,
+                        "source_event_touch_index": touch_index,
+                        "source_record_ordinal": row.identity.source_record_ordinal,
+                        "source_record_subrecord_index": row.identity.source_subrecord_index,
                         "source_format": CLAUDE_PROJECTS_SOURCE_FORMAT,
                     }),
                 ),
@@ -1453,6 +1477,7 @@ fn hex(bytes: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fs::File,
         io::Write,
         sync::{
@@ -1560,6 +1585,115 @@ mod tests {
             .authorized_source_route_for_event(routed_event)
             .is_err());
         assert!(!store.events_for_session(session.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn multi_tool_record_publishes_distinct_touch_identities_and_event_links() {
+        const PRIVATE_TOOL_INPUT: &str = "CLAUDE_PRIVATE_TOOL_INPUT_MUST_NOT_PERSIST";
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join(".claude/projects");
+        let transcript = root.join("-workspace/multi-tool.jsonl");
+        write_records(
+            &transcript,
+            &[json!({
+                "sessionId": "multi-tool",
+                "type": "assistant",
+                "uuid": "multi-tool-record",
+                "timestamp": "2026-07-25T12:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call-a",
+                            "name": "Edit",
+                            "input": {
+                                "path": "src/a.rs",
+                                "command": PRIVATE_TOOL_INPUT
+                            }
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call-b",
+                            "name": "Write",
+                            "input": {
+                                "path": "src/b.rs",
+                                "command": PRIVATE_TOOL_INPUT
+                            }
+                        }
+                    ]
+                }
+            })],
+        );
+        let mut store = Store::open(temp.path().join("history.sqlite")).unwrap();
+
+        let summary = import(&root, &mut store, ImportProfile::CoreOnly).unwrap();
+        assert_eq!(summary.work_result(), ProviderImportWorkResult::Changed);
+        let events = store.events_for_session(claude_session(&store).id).unwrap();
+        let tool_events = events
+            .iter()
+            .filter(|event| !event.payload["tool_call"].is_null())
+            .collect::<Vec<_>>();
+        assert_eq!(tool_events.len(), 2);
+
+        let archive = store.export_archive().unwrap();
+        assert_eq!(archive.files_touched.len(), 2);
+        assert_eq!(
+            archive
+                .files_touched
+                .iter()
+                .map(|touch| touch.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        assert_eq!(
+            archive
+                .files_touched
+                .iter()
+                .filter_map(|touch| touch.event_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        for (path, call_id) in [("src/a.rs", "call-a"), ("src/b.rs", "call-b")] {
+            let event = tool_events
+                .iter()
+                .find(|event| event.payload["tool_call"]["call_id"] == call_id)
+                .unwrap();
+            let touch = archive
+                .files_touched
+                .iter()
+                .find(|touch| touch.path == path)
+                .unwrap();
+            assert_eq!(touch.event_id, Some(event.id));
+        }
+        assert!(!serde_json::to_string(&archive)
+            .unwrap()
+            .contains(PRIVATE_TOOL_INPUT));
+
+        let bindings = archive
+            .files_touched
+            .iter()
+            .map(|touch| (touch.id, touch.event_id, touch.path.clone()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            import(&root, &mut store, ImportProfile::CoreOnly)
+                .unwrap()
+                .work_result(),
+            ProviderImportWorkResult::NoOp
+        );
+        assert_eq!(
+            store
+                .export_archive()
+                .unwrap()
+                .files_touched
+                .iter()
+                .map(|touch| (touch.id, touch.event_id, touch.path.clone()))
+                .collect::<BTreeSet<_>>(),
+            bindings
+        );
     }
 
     #[test]

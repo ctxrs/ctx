@@ -667,12 +667,16 @@ pub(crate) fn process_pro_replay_only(
 
 #[derive(Debug)]
 pub(crate) struct NativeOutputPageReceipt {
+    #[allow(dead_code)]
     pub(crate) output_page_identity: NativeOutputPageIdentity,
+    // Retained for callers that need the sink's full acknowledgement contract.
+    #[allow(dead_code)]
     pub(crate) receipt: ProOutputPageResult,
 }
 
 #[derive(Debug)]
 pub(crate) struct NativeProReplayFailure {
+    #[allow(dead_code)]
     pub(crate) page: NativeProReplayPage,
     pub(crate) output_error: NativeOutputProFailure,
 }
@@ -687,7 +691,10 @@ pub(crate) struct NativeOutputReceiptIdentity {
 pub(crate) enum NativeOutputProFailure {
     Sink(ProOutputSinkError),
     ReceiptMismatch {
+        // Preserve both identities for typed retry diagnostics.
+        #[allow(dead_code)]
         expected: NativeOutputReceiptIdentity,
+        #[allow(dead_code)]
         actual: NativeOutputReceiptIdentity,
     },
 }

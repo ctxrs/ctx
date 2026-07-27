@@ -2,6 +2,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use rusqlite::Connection;
 use tempfile::tempdir;
 
 fn helper_name() -> &'static str {
@@ -142,7 +143,8 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
             let parent = tempdir().unwrap();
             let data_root = parent.path().join(root_kind);
             if create_root {
-                fs::create_dir(&data_root).unwrap();
+                ctx_history_core::platform_security::create_private_directory_all(&data_root)
+                    .unwrap();
                 fs::write(
                     data_root.join("install.json"),
                     br#"{
@@ -158,6 +160,7 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
             let output = Command::cargo_bin("ctx")
                 .unwrap()
                 .env("CTX_ANALYTICS_ENABLED", "false")
+                .env("CTX_LOCAL_USAGE_ENABLED", "true")
                 .env_remove("DBUS_SESSION_BUS_ADDRESS")
                 .env_remove("XDG_RUNTIME_DIR")
                 .arg("--data-root")
@@ -178,13 +181,26 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
                 !data_root.join("pro").exists(),
                 "{root_kind} {choice} created a Pro root"
             );
+            let usage_path = data_root.join("usage.sqlite");
+            assert!(
+                usage_path.is_file(),
+                "{root_kind} {choice} did not retain the eligible Core usage completion"
+            );
+            let usage = Connection::open(usage_path).unwrap();
+            let (operation, calls): (String, u64) = usage
+                .query_row("SELECT operation, calls FROM daily_usage", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(operation, "pro_uninstall");
+            assert_eq!(calls, 1);
             if create_root {
                 assert_eq!(
                     fs::read(data_root.join("work.sqlite")).unwrap(),
                     b"canonical history"
                 );
             } else {
-                assert!(!data_root.exists());
+                assert!(data_root.is_dir());
             }
         }
     }

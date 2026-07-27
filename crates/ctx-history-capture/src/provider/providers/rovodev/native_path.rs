@@ -445,13 +445,12 @@ fn import_source(
         Some(path) if !metadata_oversized => Some(fs::read(path)?),
         Some(_) | None => None,
     };
-    let metadata_source = match source.metadata_path.as_deref() {
-        Some(_) => Some((
+    let metadata_source = source.metadata_path.as_deref().map(|_| {
+        (
             metadata_bytes.as_deref(),
             observation.metadata_length().unwrap_or(0),
-        )),
-        None => None,
-    };
+        )
+    });
     if !observation.revalidate(source)? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -1760,6 +1759,8 @@ fn classify_cursor(
     }
 }
 
+// Cursor construction keeps all persisted identity components explicit.
+#[allow(clippy::too_many_arguments)]
 fn next_cursor(
     source_identity: &str,
     source_revision: &str,

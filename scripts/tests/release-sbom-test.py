@@ -50,7 +50,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         self.module_lock.write_text('{"lockFileVersion":21}\n', encoding="utf-8")
         self.target_inventory = self.root / "target-dependency-inventory.txt"
         self.target_inventory.write_text(
-            "//crates/ctx-cli:ctx\n"
+            "@@//crates/ctx-cli:ctx\n"
             "@@rules_rust~~crate~crates__dependency-1.2.3//:dependency\n",
             encoding="utf-8",
         )
@@ -195,18 +195,67 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         }
         self.assertNotIn("other-target-only", names)
 
-    def test_inventory_missing_selected_dependency_is_rejected(self) -> None:
+    def test_bazel_sanitized_semver_build_metadata_matches_cargo_lock(self) -> None:
+        updated_lock = self.cargo_lock.read_text(encoding="utf-8").replace(
+            "dependency 1.2.3 (registry+",
+            "dependency 1.2.3+deprecated (registry+",
+        ).replace(
+            'name = "dependency"\nversion = "1.2.3"\n',
+            'name = "dependency"\nversion = "1.2.3+deprecated"\n',
+        )
+        self.cargo_lock.write_text(updated_lock, encoding="utf-8")
         self.target_inventory.write_text(
-            "//crates/ctx-cli:ctx\n",
+            "@@//crates/ctx-cli:ctx\n"
+            "@@rules_rust~~crate~crates__dependency-1.2.3-deprecated//:dependency\n",
             encoding="utf-8",
         )
-        rejected = subprocess.run(
-            self.command("generate", output=self.sbom),
-            capture_output=True,
-            text=True,
+        value = json.loads(self.build_info.read_text(encoding="utf-8"))
+        value["cargo_lock_sha256"] = hashlib.sha256(
+            self.cargo_lock.read_bytes()
+        ).hexdigest()
+        self.build_info.write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
         )
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("inventory omits a dependency", rejected.stderr)
+
+        subprocess.run(
+            self.command("generate", output=self.sbom),
+            check=True,
+            capture_output=True,
+        )
+        dependency = next(
+            component
+            for component in json.loads(self.sbom.read_bytes())["components"]
+            if component["name"] == "dependency"
+        )
+        self.assertEqual(dependency["version"], "1.2.3+deprecated")
+
+    def test_inventory_excludes_non_target_dependency_edges(self) -> None:
+        self.target_inventory.write_text(
+            "@@//crates/ctx-cli:ctx\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            self.command("generate", output=self.sbom),
+            check=True,
+            capture_output=True,
+        )
+        document = json.loads(self.sbom.read_bytes())
+        self.assertNotIn(
+            "dependency",
+            {component["name"] for component in document["components"]},
+        )
+        ctx_ref = next(
+            component["bom-ref"]
+            for component in document["components"]
+            if component["name"] == "ctx"
+        )
+        ctx_dependencies = next(
+            dependency["dependsOn"]
+            for dependency in document["dependencies"]
+            if dependency["ref"] == ctx_ref
+        )
+        self.assertEqual(ctx_dependencies, [])
 
     def test_tampered_artifact_lock_or_sbom_is_rejected(self) -> None:
         subprocess.run(

@@ -165,7 +165,8 @@ fn nativepath_is_core_first_and_replays_outputs_independently() {
     );
     assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
     assert!(replay_store.list_sessions().unwrap().is_empty());
-    assert_eq!(replay_sink.outputs.load(Ordering::SeqCst), 2);
+    assert_eq!(replay_sink.pages.load(Ordering::SeqCst), 0);
+    assert_eq!(replay_sink.outputs.load(Ordering::SeqCst), 0);
 
     let failing_store_path = temp.path().join("failing.sqlite");
     let mut failing_store = Store::open(&failing_store_path).unwrap();
@@ -181,6 +182,107 @@ fn nativepath_is_core_first_and_replays_outputs_independently() {
     );
     assert_eq!(failing_store.list_sessions().unwrap().len(), 1);
     assert!(failing_sink.behind.load(Ordering::SeqCst));
+}
+
+#[test]
+fn pro_replay_waits_for_openclaw_append_rewrite_and_replacement_core() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let transcript = transcript_path(&root);
+    write_fixture(
+        &transcript,
+        &[
+            header("session-authority"),
+            message("initial", "user", "initial"),
+            tool_result("initial", 0, "initial-output"),
+        ],
+        "initial label",
+    );
+    let store_path = temp.path().join("core.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let sink = Arc::new(RecordingSink::new(store_path));
+
+    append_record(&transcript, &tool_result("append", 0, "append-output"));
+    import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(sink.clone()),
+    );
+    assert_eq!(sink.pages.load(Ordering::SeqCst), 0);
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(sink.clone()),
+    );
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 2);
+
+    let pages_after_append = sink.pages.load(Ordering::SeqCst);
+    write_fixture(
+        &transcript,
+        &[
+            header("session-authority"),
+            message("rewrite", "user", "rewrite"),
+            tool_result("rewrite", 0, "rewrite-output"),
+        ],
+        "rewrite label",
+    );
+    import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(sink.clone()),
+    );
+    assert_eq!(sink.pages.load(Ordering::SeqCst), pages_after_append);
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(sink.clone()),
+    );
+    assert!(sink.pages.load(Ordering::SeqCst) > pages_after_append);
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 3);
+
+    let pages_after_rewrite = sink.pages.load(Ordering::SeqCst);
+    let replacement = transcript.with_file_name("replacement.jsonl");
+    write_fixture(
+        &replacement,
+        &[
+            header("session-authority"),
+            message("replacement", "user", "replacement"),
+            tool_result("replacement", 0, "replacement-output"),
+        ],
+        "replacement label",
+    );
+    fs::remove_file(&transcript).unwrap();
+    fs::rename(&replacement, &transcript).unwrap();
+    import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(sink.clone()),
+    );
+    assert_eq!(sink.pages.load(Ordering::SeqCst), pages_after_rewrite);
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    import(
+        &root,
+        &mut store,
+        ImportProfile::ProReplayOnly(sink.clone()),
+    );
+    assert!(sink.pages.load(Ordering::SeqCst) > pages_after_rewrite);
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 4);
 }
 
 #[test]

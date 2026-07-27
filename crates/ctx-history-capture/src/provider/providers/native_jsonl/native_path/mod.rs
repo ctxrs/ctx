@@ -22,7 +22,8 @@ mod windsurf;
 pub(crate) use antigravity::import_antigravity_nativepath_tree;
 pub(crate) use copilot::import_copilot_nativepath_tree;
 pub(crate) use cursor::{
-    decode_direct_jsonl_cursor, decode_direct_jsonl_native_cursor,
+    committed_direct_jsonl_replay_authority, decode_direct_jsonl_cursor,
+    decode_direct_jsonl_native_cursor, direct_jsonl_checkpoint_is_covered_by,
     direct_jsonl_cursor_matches_publication, encode_direct_jsonl_cursor, DirectJsonlCursorDecode,
 };
 pub(crate) use cursor_provider::import_cursor_nativepath_tree;
@@ -45,6 +46,7 @@ pub(crate) use publication::{
     publish_direct_jsonl_group, DirectJsonlPendingPage, DirectJsonlPublicationContext,
 };
 pub(crate) use qoder::import_qoder_nativepath_tree;
+pub(crate) use qoder_parser::qoder_complete_content_message_record;
 pub(crate) use qwen_code::{
     import_qwen_code_nativepath_tree, qwen_code_event_identity, qwen_code_file_is_selected,
 };

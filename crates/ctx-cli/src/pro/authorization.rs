@@ -10,8 +10,8 @@ use ctx_pro_host_protocol::{
 use super::commercial_config::CommercialConfig;
 use super::commercial_lifecycle::{vault_error, CommercialLifecycleService};
 use super::credential_vault::{
-    CredentialRecord, CredentialRecordKind, PlatformCredentialVault,
-    VaultInstallationChallengeSigner,
+    CredentialRecord, CredentialRecordKind, CredentialVaultError, CredentialVaultNamespace,
+    PlatformCredentialVault, VaultInstallationChallengeSigner,
 };
 
 /// Supplies a challenge-bound authorization request to the Pro helper.
@@ -95,6 +95,43 @@ impl StoredAuthorizationProvider {
 
     pub(crate) fn load_for_status(data_root: &Path) -> Result<Self> {
         Self::load_without_refresh(data_root)
+    }
+
+    pub(crate) fn load_for_graph_key_deletion(
+        data_root: &Path,
+        namespace: CredentialVaultNamespace,
+        expected_thumbprint: &str,
+    ) -> Result<Self> {
+        let vault =
+            PlatformCredentialVault::production(data_root, namespace).map_err(vault_error)?;
+        let installation_key = match vault.load(CredentialRecordKind::InstallationSigningKey) {
+            Ok(CredentialRecord::InstallationSigningKey(seed)) => seed,
+            Ok(_) => bail!("key_store_unavailable: installation key record mismatch"),
+            Err(CredentialVaultError::NotFound) => {
+                bail!("key_store_unavailable: graph-key deletion installation key is missing")
+            }
+            Err(error) => return Err(vault_error(error)),
+        };
+        let entitlement = match vault.load(CredentialRecordKind::SignedEntitlement) {
+            Ok(CredentialRecord::SignedEntitlement(entitlement)) => entitlement.as_inner().clone(),
+            Ok(_) => bail!("key_store_unavailable: entitlement record mismatch"),
+            Err(CredentialVaultError::NotFound) => {
+                bail!("key_store_unavailable: graph-key deletion entitlement is missing")
+            }
+            Err(error) => return Err(vault_error(error)),
+        };
+        let public_key = ed25519_dalek::SigningKey::from_bytes(installation_key.expose())
+            .verifying_key()
+            .to_bytes();
+        let installation_thumbprint = installation_key_thumbprint(&public_key);
+        if installation_thumbprint != expected_thumbprint
+            || entitlement.grant.installation_key_thumbprint != expected_thumbprint
+        {
+            bail!(
+                "entitlement_invalid: graph-key deletion records do not match the requested installation key"
+            );
+        }
+        Ok(Self { vault, entitlement })
     }
 
     fn load_without_refresh(data_root: &Path) -> Result<Self> {

@@ -4,8 +4,125 @@ mod support;
 use support::*;
 
 #[cfg(unix)]
+use std::{
+    net::TcpListener,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+};
+
+#[cfg(unix)]
 fn scheduler_state_path(binary: &Path) -> PathBuf {
     binary.with_file_name(".ctx.upgrade-state.json")
+}
+
+#[cfg(unix)]
+struct MetadataRequestProbe {
+    endpoint: String,
+    requests: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl MetadataRequestProbe {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_requests = Arc::clone(&requests);
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    worker_requests.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\n\
+                          Content-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if worker_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) -> usize {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MetadataRequestProbe {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+const INSTALLER_UPGRADE_ENV: &[&str] = &[
+    "CTX_ALLOW_CUSTOM_RELEASE_BASE_URL",
+    "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+    "CTX_RELEASE_METADATA_SIGNATURE_URL",
+    "CTX_RELEASE_METADATA_URL",
+    "CTX_UPGRADE_AUTO",
+    "CTX_UPGRADE_CHANNEL",
+    "CTX_UPGRADE_FUNCTIONS_BASE",
+];
+
+#[cfg(unix)]
+fn remove_installer_upgrade_env(command: &mut Command) {
+    for name in INSTALLER_UPGRADE_ENV {
+        command.env_remove(name);
+    }
+}
+
+#[cfg(unix)]
+fn write_probe_config(temp: &TempDir, endpoint: &str) {
+    fs::write(
+        temp.path().join("config.toml"),
+        format!(
+            "[analytics]\n\
+             enabled = false\n\
+             [upgrade]\n\
+             auto = \"apply\"\n\
+             channel = \"stable\"\n\
+             functions_base = \"{endpoint}\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn mark_staging_dogfood(binary: &Path) {
+    let marker_path = install_marker_path(binary);
+    let mut marker: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    marker["channel"] = json!("dogfood-persistent-isolation");
+    marker["staging_dogfood"] = json!(true);
+    fs::write(marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
 }
 
 #[cfg(unix)]
@@ -1343,6 +1460,68 @@ fn upgrade_rejects_unmanaged_install_before_network() {
     assert!(
         !stderr.contains("download release metadata"),
         "unmanaged installs should fail before metadata fetch: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn staging_dogfood_marker_survives_fresh_process_and_blocks_stable_metadata() {
+    let temp = tempdir();
+    let binary = managed_candidate(&temp, "ia_staging_dogfood_isolation");
+    mark_staging_dogfood(&binary);
+    let probe = MetadataRequestProbe::start();
+    write_probe_config(&temp, &probe.endpoint);
+
+    let mut status_command = ctx_from_binary(&temp, &binary);
+    remove_installer_upgrade_env(&mut status_command);
+    let status = json_output(status_command.args(["upgrade", "status", "--json"]));
+    assert_eq!(status["install"]["managed"], true);
+    assert_eq!(status["auto_upgrade"]["mode"], "off");
+    assert_eq!(status["auto_upgrade"]["enabled"], false);
+
+    let mut check_command = ctx_from_binary(&temp, &binary);
+    remove_installer_upgrade_env(&mut check_command);
+    let stderr = failure_stderr(check_command.args(["upgrade", "check"]));
+    assert!(
+        stderr.contains("staging dogfood ctx installation is isolated from release upgrades"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("download release metadata"),
+        "staging isolation must fail before metadata download: {stderr}"
+    );
+    assert_eq!(
+        probe.finish(),
+        0,
+        "staging isolation contacted the configured stable metadata endpoint"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_hosted_install_marker_keeps_production_upgrade_behavior() {
+    let temp = tempdir();
+    let binary = managed_candidate(&temp, "ia_ordinary_hosted_install");
+    let probe = MetadataRequestProbe::start();
+    write_probe_config(&temp, &probe.endpoint);
+
+    let mut status_command = ctx_from_binary(&temp, &binary);
+    remove_installer_upgrade_env(&mut status_command);
+    let status = json_output(status_command.args(["upgrade", "status", "--json"]));
+    assert_eq!(status["install"]["managed"], true);
+    assert_eq!(status["auto_upgrade"]["mode"], "apply");
+    assert_eq!(status["auto_upgrade"]["enabled"], true);
+
+    let mut check_command = ctx_from_binary(&temp, &binary);
+    remove_installer_upgrade_env(&mut check_command);
+    let stderr = failure_stderr(check_command.args(["upgrade", "check"]));
+    assert!(
+        stderr.contains("download release metadata"),
+        "ordinary hosted installs must retain normal metadata planning: {stderr}"
+    );
+    assert!(
+        probe.finish() > 0,
+        "ordinary hosted install did not request stable metadata"
     );
 }
 

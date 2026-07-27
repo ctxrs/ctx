@@ -3,6 +3,18 @@ use super::*;
 #[cfg(any(unix, windows))]
 const TEST_QUERY_REQUEST_READ_TIMEOUT: StdDuration = StdDuration::from_millis(100);
 
+#[cfg(unix)]
+fn short_test_query_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
+    let socket_root = tempfile::Builder::new()
+        .prefix("ctx-query-test-")
+        .tempdir_in("/tmp")?;
+    let socket_path = socket_root.path().join("q.sock");
+    if socket_path.as_os_str().as_bytes().len() > DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES {
+        return Err(anyhow!("test daemon query socket path is too long"));
+    }
+    Ok((socket_root, socket_path))
+}
+
 #[cfg(any(unix, windows))]
 fn start_test_query_service(data_root: &Path) -> Result<DaemonQueryService> {
     start_daemon_query_service_with_request_timeout(
@@ -307,7 +319,7 @@ fn daemon_query_endpoint_roundtrips_unix_metadata() -> Result<()> {
 #[test]
 fn stale_unix_endpoint_is_sanitized_and_removed() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let socket_path = temp.path().join("private-stale-query.sock");
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
     write_daemon_query_endpoint(
         temp.path(),
         &DaemonQueryEndpoint::Unix {
@@ -340,7 +352,7 @@ fn stale_unix_endpoint_is_sanitized_and_removed() -> Result<()> {
 #[test]
 fn closed_unix_listener_is_sanitized_and_removed() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let socket_path = temp.path().join("closed-query.sock");
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
     let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
     drop(listener);
     write_daemon_query_endpoint(

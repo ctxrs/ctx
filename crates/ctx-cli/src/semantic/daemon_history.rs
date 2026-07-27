@@ -1,3 +1,33 @@
+use std::{path::Path, time::Instant};
+
+use anyhow::{anyhow, Result};
+use ctx_history_core::utc_now;
+use serde_json::{json, Value};
+
+use crate::{
+    analytics::PublicEventV1,
+    commands::{
+        import::{error_summary, import_totals_json, ImportTotals, ProviderRefreshCollector},
+        search::{
+            refresh_sources_for_search, search_refresh_plugin_sources, search_refresh_sources,
+            RefreshArg,
+        },
+    },
+    compact_json,
+    config::AppConfig,
+};
+
+use super::{
+    daemon::DaemonRuntime,
+    daemon_retry::DaemonRetryBackoff,
+    daemon_scheduler::{daemon_job_should_backoff, preserve_daemon_retry_state},
+    indexing::semantic_text_hash,
+    paths_status::{daemon_history_refresh_job_path, read_daemon_job_status},
+};
+
+#[cfg(all(test, ctx_sqlite_vec))]
+use super::daemon::daemon_test_job;
+
 pub(super) fn restore_daemon_history_runtime_state(runtime: &mut DaemonRuntime, data_root: &Path) {
     let status = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
     let status = status.as_ref();
@@ -304,10 +334,15 @@ pub(super) fn search_refresh_source_fingerprint(
 
 #[cfg(test)]
 mod canonical_pro_progression_tests {
-    use ctx_history_capture::ProviderImportSummary;
+    use ctx_history_capture::{CaptureWorkLimit, ProviderImportSummary};
 
     use crate::commands::{
-        import::CanonicalProSourceProgression, search::progress_search_refresh_canonical_pro,
+        import::{
+            import_custom_history_with_canonical_pro_progression, CanonicalProSourceProgression,
+        },
+        search::{
+            history_source_plugin_work_limit, progress_search_refresh_canonical_pro, RefreshArg,
+        },
     };
 
     #[derive(Default)]
@@ -336,33 +371,30 @@ mod canonical_pro_progression_tests {
 
         assert_eq!(progression.frontier_checks, 2);
     }
+
+    #[test]
+    fn daemon_plugin_refresh_progresses_one_core_page_before_followup() {
+        let mut progression = TestCanonicalProProgression::default();
+        let mut attempts = 0_usize;
+
+        // Daemon history refresh passes `Background` to
+        // `refresh_sources_for_search`, including for its selected plugin.
+        let summary = import_custom_history_with_canonical_pro_progression(
+            history_source_plugin_work_limit(RefreshArg::Background),
+            Some(&mut progression),
+            |work_limit| {
+                assert_eq!(work_limit, CaptureWorkLimit::OneSafeGroup);
+                attempts += 1;
+                let mut summary = ProviderImportSummary::default();
+                summary.imported = 1;
+                summary.work_remaining = true;
+                Ok(summary)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(attempts, 1);
+        assert_eq!(progression.frontier_checks, 1);
+        assert!(summary.work_remaining);
+    }
 }
-use std::{path::Path, time::Instant};
-
-use anyhow::{anyhow, Result};
-use ctx_history_core::utc_now;
-use serde_json::{json, Value};
-
-use crate::{
-    analytics::PublicEventV1,
-    commands::{
-        import::{error_summary, import_totals_json, ImportTotals, ProviderRefreshCollector},
-        search::{
-            refresh_sources_for_search, search_refresh_plugin_sources, search_refresh_sources,
-            RefreshArg,
-        },
-    },
-    compact_json,
-    config::AppConfig,
-};
-
-use super::{
-    daemon::DaemonRuntime,
-    daemon_retry::DaemonRetryBackoff,
-    daemon_scheduler::{daemon_job_should_backoff, preserve_daemon_retry_state},
-    indexing::semantic_text_hash,
-    paths_status::{daemon_history_refresh_job_path, read_daemon_job_status},
-};
-
-#[cfg(all(test, ctx_sqlite_vec))]
-use super::daemon::daemon_test_job;

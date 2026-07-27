@@ -10,6 +10,7 @@ use serde_json::Value;
 
 const MAX_MARKER_BYTES: u64 = 16 * 1024;
 const INSTALL_ATTRIBUTION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+const STAGING_DOGFOOD_FIELD: &str = "staging_dogfood";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveInstallAttribution {
@@ -22,7 +23,22 @@ pub fn current_exe_install_marker() -> Option<ActiveInstallAttribution> {
     read_install_marker(&install_marker_path(&exe))
 }
 
+pub(crate) fn current_exe_is_staging_dogfood() -> bool {
+    let Some(value) = env::current_exe()
+        .ok()
+        .and_then(|exe| read_install_marker_value(&install_marker_path(&exe)))
+    else {
+        return false;
+    };
+    is_staging_dogfood_marker(&value)
+}
+
 pub(crate) fn read_install_marker(path: &Path) -> Option<ActiveInstallAttribution> {
+    let value = read_install_marker_value(path)?;
+    active_install_attribution_from_value(&value, utc_now())
+}
+
+fn read_install_marker_value(path: &Path) -> Option<Value> {
     let metadata = fs::metadata(path).ok()?;
     if !metadata.is_file() || metadata.len() > MAX_MARKER_BYTES {
         return None;
@@ -33,15 +49,22 @@ pub(crate) fn read_install_marker(path: &Path) -> Option<ActiveInstallAttributio
     if reader.read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_MARKER_BYTES {
         return None;
     }
-    parse_install_marker_at(&bytes, utc_now())
+    serde_json::from_slice(&bytes).ok()
 }
 
+#[cfg(test)]
 pub(crate) fn parse_install_marker_at(
     bytes: &[u8],
     now: DateTime<Utc>,
 ) -> Option<ActiveInstallAttribution> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
     active_install_attribution_from_value(&value, now)
+}
+
+pub(crate) fn is_staging_dogfood_marker(value: &Value) -> bool {
+    value.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && value.get("manager").and_then(Value::as_str) == Some("ctx-hosted-installer")
+        && value.get(STAGING_DOGFOOD_FIELD).and_then(Value::as_bool) == Some(true)
 }
 
 pub(crate) fn active_install_attribution_from_value(
@@ -156,6 +179,32 @@ mod tests {
             install_marker_path(Path::new("/tmp/ctx.exe")),
             PathBuf::from("/tmp/ctx.exe.install.json")
         );
+    }
+
+    #[test]
+    fn recognizes_only_the_exact_hosted_staging_dogfood_signal() {
+        let marker = |signal: Value| {
+            serde_json::json!({
+                "schema_version": 1,
+                "manager": "ctx-hosted-installer",
+                "staging_dogfood": signal,
+            })
+        };
+
+        assert!(is_staging_dogfood_marker(&marker(Value::Bool(true))));
+        assert!(!is_staging_dogfood_marker(&marker(Value::Bool(false))));
+        assert!(!is_staging_dogfood_marker(&marker(Value::String(
+            "true".to_owned()
+        ))));
+        assert!(!is_staging_dogfood_marker(&serde_json::json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+        })));
+        assert!(!is_staging_dogfood_marker(&serde_json::json!({
+            "schema_version": 1,
+            "manager": "another-installer",
+            "staging_dogfood": true,
+        })));
     }
 
     #[test]

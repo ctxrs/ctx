@@ -38,22 +38,31 @@ pub(in crate::tests) fn assert_event_with_role(
     );
 }
 
-pub(in crate::tests) fn assert_events_have_provider_citations(events: &[Event]) {
+pub(in crate::tests) fn assert_events_have_provider_citations(store: &Store, events: &[Event]) {
     assert!(!events.is_empty(), "expected at least one event");
     for event in events {
+        let source_id = event
+            .capture_source_id
+            .unwrap_or_else(|| panic!("event {} is missing a capture source", event.id));
+        let source = store.get_capture_source(source_id).unwrap_or_else(|error| {
+            panic!("event {} has an invalid capture source: {error}", event.id)
+        });
         assert!(
-            event.capture_source_id.is_some(),
-            "event {} is missing a capture source",
+            source
+                .descriptor
+                .source_format
+                .as_deref()
+                .is_some_and(|source_format| !source_format.is_empty()),
+            "event {} capture source is missing its source format",
             event.id
         );
         assert!(
-            event.sync.metadata["source_format"].as_str().is_some(),
-            "event {} is missing source_format metadata",
-            event.id
-        );
-        assert!(
-            event.sync.metadata["cursor"].as_str().is_some(),
-            "event {} is missing cursor metadata",
+            source
+                .descriptor
+                .source_identity
+                .as_deref()
+                .is_some_and(|source_identity| !source_identity.is_empty()),
+            "event {} capture source is missing its source identity",
             event.id
         );
     }

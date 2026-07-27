@@ -48,6 +48,8 @@ thread_local! {
 }
 
 #[cfg(test)]
+// Retain the deterministic race-injection seam for focused revalidation tests.
+#[allow(dead_code)]
 pub(crate) struct NanoClawRevalidationHook;
 
 #[cfg(test)]
@@ -60,6 +62,7 @@ impl Drop for NanoClawRevalidationHook {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn set_before_source_set_revalidation(
     hook: impl FnOnce() + 'static,
 ) -> NanoClawRevalidationHook {

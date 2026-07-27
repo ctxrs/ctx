@@ -244,8 +244,10 @@ fn bounded_restart_and_append_resume_from_committed_native_cursor() {
     loop {
         groups += 1;
         let mut store = Store::open(&store_path).unwrap();
-        let mut options = ProviderImportOptions::default();
-        options.capture_work_limit = CaptureWorkLimit::OneSafeGroup;
+        let options = ProviderImportOptions {
+            capture_work_limit: CaptureWorkLimit::OneSafeGroup,
+            ..Default::default()
+        };
         let summary = import(&source_path, &mut store, options);
         if !summary.work_remaining {
             break;
@@ -273,8 +275,10 @@ fn bounded_restart_and_append_resume_from_committed_native_cursor() {
     loop {
         attempts += 1;
         let mut store = Store::open(&store_path).unwrap();
-        let mut options = ProviderImportOptions::default();
-        options.capture_work_limit = CaptureWorkLimit::OneSafeGroup;
+        let options = ProviderImportOptions {
+            capture_work_limit: CaptureWorkLimit::OneSafeGroup,
+            ..Default::default()
+        };
         if !import(&source_path, &mut store, options).work_remaining {
             break;
         }
@@ -361,11 +365,18 @@ fn output_failure_does_not_roll_back_core_and_replay_is_independent() {
     let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
     let sink = Arc::new(RecordingOutputSink::default());
     sink.fail_once.store(true, Ordering::SeqCst);
-    let mut options = ProviderImportOptions::default();
-    options.import_profile = ImportProfile::CoreAndPro(sink.clone());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::CoreAndPro(sink.clone()),
+        ..Default::default()
+    };
     let core = import(&source_path, &mut store, options);
     assert_eq!(core.imported_sessions, 1);
     assert_eq!(core.imported_events, 1);
+    assert_eq!(core.failed, 1);
+    assert_eq!(
+        core.failures[0].error,
+        "Deep Agents Pro output is behind committed Core"
+    );
     assert!(sink.behind.load(Ordering::SeqCst) > 0);
     let session = store
         .session_by_external_session(CaptureProvider::DeepAgents, "thread-a")
@@ -377,10 +388,13 @@ fn output_failure_does_not_roll_back_core_and_replay_is_independent() {
             .contains(SECRET)
     );
 
-    let mut replay_options = ProviderImportOptions::default();
-    replay_options.import_profile = ImportProfile::ProReplayOnly(sink.clone());
+    let replay_options = ProviderImportOptions {
+        import_profile: ImportProfile::ProReplayOnly(sink.clone()),
+        ..Default::default()
+    };
     let replay = import(&source_path, &mut store, replay_options);
     assert_eq!(replay.imported_events, 0);
+    assert_eq!(replay.failed, 0);
     assert!(sink
         .bodies
         .lock()
@@ -468,8 +482,10 @@ fn corrupt_write_advances_and_inventory_disappearance_retires_core() {
         .unwrap();
 
     std::fs::remove_file(&source_path).unwrap();
-    let mut options = ProviderImportOptions::default();
-    options.inventory_observation_token = Some("inventory-generation-2".to_owned());
+    let options = ProviderImportOptions {
+        inventory_observation_token: Some("inventory-generation-2".to_owned()),
+        ..Default::default()
+    };
     let retired = import(&source_path, &mut store, options.clone());
     assert_eq!(retired.work_result(), ProviderImportWorkResult::Changed);
     assert!(store

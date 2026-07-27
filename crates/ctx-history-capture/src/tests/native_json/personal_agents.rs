@@ -142,7 +142,7 @@ fn native_openclaw_successful_tool_output_is_absent_and_not_searchable() {
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 1);
     assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
     assert_search_hits_provider(
         &store,
         "openclaw tool output policy oracle",
@@ -693,7 +693,7 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
         .any(|event| event.role == Some(EventRole::Assistant)));
     assert_event_type_count(&events, EventType::ToolCall, 1);
     assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("firebender fixture oracle prompt"));
     assert!(rendered.contains("Firebender fixture oracle response"));
@@ -807,9 +807,16 @@ fn native_lingma_fixture_imports_searches_and_reimports() {
     let error_events = store.events_for_session(error_session).unwrap();
     assert_eq!(error_events.len(), 2);
     assert_eq!(error_events[1].event_type, EventType::Notice);
-    assert!(serde_json::to_string(&error_events)
+    assert_eq!(error_events[1].sync.fidelity, Fidelity::SummaryOnly);
+    let error_rendered = serde_json::to_string(&error_events).unwrap();
+    assert!(error_rendered.contains("\"body_kind\":\"error_result\""));
+    assert!(error_rendered.contains("assistant_content_caveat"));
+    assert!(!error_rendered.contains("sanitized Lingma error"));
+    assert!(store
+        .search_event_hits("sanitized Lingma error", 10)
         .unwrap()
-        .contains("sanitized Lingma error"));
+        .iter()
+        .all(|hit| !hit.preview.contains("sanitized Lingma error")));
 
     let second = import_lingma_sqlite(
         &fixture,

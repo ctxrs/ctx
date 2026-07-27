@@ -261,6 +261,8 @@ enum TraeLoadedKey {
     Active(TraeActiveKey),
 }
 
+// Keep decoded persisted authority inline while distinguishing absent and legacy cursor formats.
+#[allow(clippy::large_enum_variant)]
 enum StoredTraeCursor {
     None,
     Legacy {

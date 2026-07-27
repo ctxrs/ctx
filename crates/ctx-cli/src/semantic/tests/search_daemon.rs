@@ -1,5 +1,17 @@
 use super::*;
 
+#[cfg(all(ctx_semantic_fastembed, unix))]
+fn short_test_query_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
+    let socket_root = tempfile::Builder::new()
+        .prefix("ctx-query-test-")
+        .tempdir_in("/tmp")?;
+    let socket_path = socket_root.path().join("q.sock");
+    if socket_path.as_os_str().as_bytes().len() > DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES {
+        return Err(anyhow!("test daemon query socket path is too long"));
+    }
+    Ok((socket_root, socket_path))
+}
+
 #[test]
 fn hybrid_search_with_semantic_disabled_uses_lexical_without_sidecar() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -113,7 +125,7 @@ fn stale_daemon_endpoint_falls_back_without_leaking_local_details() -> Result<()
         test_embedding(1.0, 0.0),
     )])?;
     drop(vector_store);
-    let private_path = temp.path().join("private-stale-query.sock");
+    let (_socket_root, private_path) = short_test_query_socket_path()?;
     write_daemon_query_endpoint(
         temp.path(),
         &DaemonQueryEndpoint::Unix {

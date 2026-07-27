@@ -341,7 +341,12 @@ pub struct PullRequestBlameMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum BlameMatch {
     File(FileBlameMatch),
     Commit(CommitBlameMatch),
@@ -460,6 +465,146 @@ impl BlameResult {
                 ErrorClass::Corrupt,
                 "blame result contains unreferenced evidence",
             ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_request(&self, request: &BlameRequest) -> Result<(), ProtocolError> {
+        request.validate()?;
+        self.validate()?;
+        if self.matches.len() > request.limit as usize {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "blame result exceeds the requested match limit",
+            ));
+        }
+
+        match (&request.target, &self.target) {
+            (
+                BlameTarget::File {
+                    path: requested_path,
+                    repository: requested_repository,
+                    lines: requested_lines,
+                },
+                ResolvedBlameTarget::File {
+                    path: resolved_path,
+                    repository: resolved_repository,
+                    requested_lines: resolved_lines,
+                },
+            ) => {
+                if requested_path != resolved_path
+                    || !repository_selector_matches(
+                        requested_repository.as_deref(),
+                        resolved_repository,
+                    )
+                    || requested_lines != resolved_lines
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Corrupt,
+                        "resolved file target does not match the requested path, repository, and line range",
+                    ));
+                }
+                if let Some(requested_lines) = requested_lines {
+                    for blame_match in &self.matches {
+                        let BlameMatch::File(file) = blame_match else {
+                            return Err(ProtocolError::new(
+                                ErrorClass::Corrupt,
+                                "file blame request returned a non-file match",
+                            ));
+                        };
+                        if !line_range_contains(requested_lines, &file.lines) {
+                            return Err(ProtocolError::new(
+                                ErrorClass::Corrupt,
+                                "file blame match exceeds the requested line range",
+                            ));
+                        }
+                    }
+                }
+            }
+            (
+                BlameTarget::Commit {
+                    oid,
+                    repository: requested_repository,
+                },
+                ResolvedBlameTarget::Commit {
+                    commit: resolved_commit,
+                    repository: resolved_repository,
+                },
+            ) => {
+                if !commit_selector_matches(oid, &resolved_commit.display)
+                    || !repository_selector_matches(
+                        requested_repository.as_deref(),
+                        resolved_repository,
+                    )
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Corrupt,
+                        "resolved commit target does not match the requested object ID and repository",
+                    ));
+                }
+                for blame_match in &self.matches {
+                    let BlameMatch::Commit(commit) = blame_match else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "commit blame request returned a non-commit match",
+                        ));
+                    };
+                    if !same_resource_identity(&commit.subject, resolved_commit)
+                        && !commit
+                            .object
+                            .as_ref()
+                            .is_some_and(|object| same_resource_identity(object, resolved_commit))
+                    {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "commit blame match does not involve the resolved commit",
+                        ));
+                    }
+                }
+            }
+            (
+                BlameTarget::PullRequest {
+                    selector,
+                    repository: requested_repository,
+                },
+                ResolvedBlameTarget::PullRequest {
+                    selector: resolved_selector,
+                    pull_request: resolved_pull_request,
+                    repository: resolved_repository,
+                },
+            ) => {
+                if selector != resolved_selector
+                    || !repository_selector_matches(
+                        requested_repository.as_deref(),
+                        resolved_repository,
+                    )
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Corrupt,
+                        "resolved pull request target does not match the requested selector and repository",
+                    ));
+                }
+                for blame_match in &self.matches {
+                    let BlameMatch::PullRequest(pull_request) = blame_match else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "pull request blame request returned a non-pull-request match",
+                        ));
+                    };
+                    if !same_resource_identity(&pull_request.pull_request, resolved_pull_request) {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "pull request blame match does not reference the resolved pull request",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(ProtocolError::new(
+                    ErrorClass::Corrupt,
+                    "resolved blame target kind does not match the request target",
+                ));
+            }
         }
         Ok(())
     }
@@ -729,6 +874,45 @@ fn validate_resource_kind(
         ));
     }
     Ok(())
+}
+
+fn line_range_contains(outer: &LineRange, inner: &LineRange) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn same_resource_identity(left: &ResourceRef, right: &ResourceRef) -> bool {
+    left.kind == right.kind && left.id == right.id
+}
+
+fn commit_selector_matches(requested: &str, resolved: &str) -> bool {
+    requested.len() <= resolved.len()
+        && requested.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && resolved.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && resolved
+            .get(..requested.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(requested))
+}
+
+fn repository_selector_matches(requested: Option<&str>, resolved: &ResourceRef) -> bool {
+    requested.is_none_or(|requested| {
+        normalized_repository_selector(requested)
+            == normalized_repository_selector(&resolved.display)
+    })
+}
+
+fn normalized_repository_selector(value: &str) -> String {
+    let value = value
+        .strip_prefix("forge:")
+        .or_else(|| value.strip_prefix("https://"))
+        .unwrap_or(value)
+        .trim_end_matches('/');
+    let Some((host, path)) = value.split_once('/') else {
+        return value.to_owned();
+    };
+    if !host.contains('.') {
+        return value.to_owned();
+    }
+    format!("forge:{}/{path}", host.to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

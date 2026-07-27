@@ -223,9 +223,25 @@ fn one_safe_group_resumes_without_replaying_the_committed_prefix() {
     assert!(first.work_remaining);
     assert_eq!(lingma_events(&store).len(), 128);
 
+    let replay = Arc::new(RecordingSink::default());
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert!(replay.pages.lock().unwrap().is_empty());
+
     let second = import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreOnly)).unwrap();
     assert!(!second.work_remaining);
     assert_eq!(lingma_events(&store).len(), 140);
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(replay.pages.lock().unwrap().len(), 1);
     assert_eq!(
         import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreOnly))
             .unwrap()
@@ -313,6 +329,18 @@ fn pro_failure_never_blocks_core_and_later_activation_replays_independently() {
     drop(connection);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
+    let mut empty_store = Store::open(temp.path().join("empty.sqlite")).unwrap();
+    let empty_replay = Arc::new(RecordingSink::default());
+    let empty_summary = import_lingma_sqlite(
+        &db,
+        &mut empty_store,
+        options(ImportProfile::ProReplayOnly(empty_replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(empty_summary.work_result(), ProviderImportWorkResult::NoOp);
+    assert!(empty_store.list_sessions().unwrap().is_empty());
+    assert!(empty_replay.pages.lock().unwrap().is_empty());
+
     let failing = Arc::new(RecordingSink::failing());
     let summary =
         import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreAndPro(failing))).unwrap();
@@ -337,6 +365,115 @@ fn pro_failure_never_blocks_core_and_later_activation_replays_independently() {
     )
     .unwrap();
     assert_eq!(replay.pages.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn pro_replay_waits_for_lingma_append_rewrite_and_replacement_core() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let db = temp.path().join("local.db");
+    let connection = create_db(&db);
+    insert_row(
+        &connection,
+        "session",
+        "initial",
+        "initial prompt",
+        Some("initial summary"),
+        None,
+        1_700_000_000,
+        None,
+    );
+    drop(connection);
+    let mut store = Store::open(temp.path().join("core.sqlite")).unwrap();
+    assert_eq!(
+        import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreOnly))
+            .unwrap()
+            .work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let replay = Arc::new(RecordingSink::default());
+
+    let connection = Connection::open(&db).unwrap();
+    insert_row(
+        &connection,
+        "session",
+        "append",
+        "append prompt",
+        Some("append summary"),
+        None,
+        1_700_000_001,
+        None,
+    );
+    drop(connection);
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert!(replay.pages.lock().unwrap().is_empty());
+    import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreOnly)).unwrap();
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(replay.pages.lock().unwrap().len(), 1);
+
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "update chat_record set chat_prompt = 'rewrite prompt' where rowid = 1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(replay.pages.lock().unwrap().len(), 1);
+    import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreOnly)).unwrap();
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(replay.pages.lock().unwrap().len(), 2);
+
+    let replacement = temp.path().join("replacement.db");
+    let replacement_connection = create_db(&replacement);
+    insert_row(
+        &replacement_connection,
+        "replacement",
+        "replacement",
+        "replacement prompt",
+        Some("replacement summary"),
+        None,
+        1_700_000_100,
+        None,
+    );
+    drop(replacement_connection);
+    std::fs::remove_file(&db).unwrap();
+    std::fs::rename(&replacement, &db).unwrap();
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(replay.pages.lock().unwrap().len(), 2);
+    import_lingma_sqlite(&db, &mut store, options(ImportProfile::CoreOnly)).unwrap();
+    import_lingma_sqlite(
+        &db,
+        &mut store,
+        options(ImportProfile::ProReplayOnly(replay.clone())),
+    )
+    .unwrap();
+    assert_eq!(replay.pages.lock().unwrap().len(), 3);
 }
 
 #[test]

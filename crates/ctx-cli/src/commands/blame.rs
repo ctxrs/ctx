@@ -123,7 +123,11 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) json: bool,
 }
 
-pub(crate) fn run(args: BlameArgs, data_root: PathBuf) -> Result<()> {
+pub(crate) fn run(
+    args: BlameArgs,
+    data_root: PathBuf,
+    local_usage: &mut crate::local_usage::CliUsage,
+) -> Result<()> {
     let (target, limit, cursor, json) = match args.target {
         BlameTargetArgs::File(args) => (
             BlameTarget::File {
@@ -157,6 +161,7 @@ pub(crate) fn run(args: BlameArgs, data_root: PathBuf) -> Result<()> {
     target
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    local_usage.bind_blame_target(&target);
 
     let started = Instant::now();
     let target_kind = ProBlameTargetV1::from_protocol(&target);
@@ -165,9 +170,20 @@ pub(crate) fn run(args: BlameArgs, data_root: PathBuf) -> Result<()> {
         let result = crate::pro::blame(&data_root, target, limit, cursor)
             .map_err(crate::pro::actionable_error)?;
         telemetry.complete(result.matches.len(), result.next.is_some());
-        print_blame_result(&result, json)
+        emit_blame_result(&result, json, local_usage, print_blame_result)
     })();
     finish_blame_telemetry(&data_root, &mut telemetry, started, result)
+}
+
+fn emit_blame_result(
+    result: &ctx_pro_host_protocol::BlameResult,
+    json: bool,
+    local_usage: &mut crate::local_usage::CliUsage,
+    emit: impl FnOnce(&ctx_pro_host_protocol::BlameResult, bool) -> Result<()>,
+) -> Result<()> {
+    emit(result, json)?;
+    local_usage.set_blame_result(result);
+    Ok(())
 }
 
 fn finish_blame_telemetry(
@@ -233,6 +249,12 @@ fn parse_blame_limit(value: &str) -> std::result::Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser as _;
+    use ctx_pro_host_protocol::{
+        BlameResult, CommitBlameMatch, CommitFactType, CommitPredicate, FactConfidence, FactState,
+        ResolvedBlameTarget, ResourceKind, ResourceRef,
+    };
+
     use super::*;
 
     #[test]
@@ -245,5 +267,78 @@ mod tests {
         for invalid in ["0", "0:1", "4:3", "1:2:3", "-1", "x"] {
             assert!(parse_line_range(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn output_failure_does_not_retain_blame_result_or_citation_counts() {
+        let resource = |id: &str, kind| ResourceRef {
+            id: id.to_owned(),
+            kind,
+            display: id.to_owned(),
+        };
+        let commit = resource("commit:abc1234", ResourceKind::Commit);
+        let result = BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit: commit.clone(),
+                repository: resource("repository:ctx", ResourceKind::Repository),
+            },
+            git_snapshot: None,
+            matches: vec![ctx_pro_host_protocol::BlameMatch::Commit(
+                CommitBlameMatch {
+                    fact_id: "fact:1".to_owned(),
+                    fact_type: CommitFactType::Produced,
+                    predicate: CommitPredicate::ProducedBy,
+                    subject: commit,
+                    object: Some(resource("session:1", ResourceKind::Session)),
+                    fact_occurred_at_ms: None,
+                    confidence: FactConfidence::Explicit,
+                    state: FactState::Asserted,
+                    direct_actor: None,
+                    owning_root: None,
+                    evidence_numbers: Vec::new(),
+                },
+            )],
+            evidence: Vec::new(),
+            next: None,
+        };
+        let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+
+        let error = emit_blame_result(&result, true, &mut usage, |_, _| {
+            Err(anyhow!("simulated output failure"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "simulated output failure");
+
+        let completed = usage.completed(false, std::time::Duration::ZERO).unwrap();
+        assert_eq!(
+            completed.result_metadata_for_test(),
+            (crate::local_usage::ValueClass::NotApplicable, 0, 0)
+        );
+    }
+
+    #[test]
+    fn semantically_invalid_pr_keeps_the_cli_blame_target_not_applicable() {
+        let cli = crate::Cli::try_parse_from([
+            "ctx",
+            "blame",
+            "pr",
+            "0",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
+        ])
+        .unwrap();
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        let crate::cli::CommandRoot::Blame(args) = cli.command else {
+            panic!("expected blame command");
+        };
+
+        let error = run(args, PathBuf::from("/unused"), &mut usage).unwrap_err();
+        assert!(error.to_string().contains("invalid_request"));
+        let completed = usage.completed(false, std::time::Duration::ZERO).unwrap();
+        assert_eq!(
+            completed.target_type_for_test(),
+            crate::local_usage::TargetType::NotApplicable
+        );
     }
 }

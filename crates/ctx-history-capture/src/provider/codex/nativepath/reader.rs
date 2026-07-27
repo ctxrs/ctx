@@ -258,7 +258,6 @@ pub(crate) struct CodexSourceScan {
     pub(crate) next_raw_ordinal: u64,
     pub(crate) owner: Option<CodexSessionRow>,
     pending_tool_authorities: Vec<CodexPendingToolAuthority>,
-    #[cfg(test)]
     pub(crate) rejections: Vec<CodexRecordRejection>,
     pub(crate) incomplete_tail: Option<CodexIncompleteTail>,
     pub(crate) counters: CodexScanCounters,
@@ -433,7 +432,6 @@ impl CodexNativeScanner {
                 next_raw_ordinal: proof.checkpoint.next_raw_ordinal(),
                 owner: Some(proof.checkpoint.owner.clone()),
                 pending_tool_authorities: proof.checkpoint.pending_tool_authorities().to_vec(),
-                #[cfg(test)]
                 rejections: Vec::new(),
                 incomplete_tail,
                 counters: CodexScanCounters {
@@ -891,7 +889,6 @@ impl CodexNativeScanner {
             next_raw_ordinal: self.raw_ordinal,
             owner: self.owner,
             pending_tool_authorities: self.tool_authorities.into_values().collect(),
-            #[cfg(test)]
             rejections: self.rejections,
             incomplete_tail: self.incomplete_tail,
             counters: self.counters,

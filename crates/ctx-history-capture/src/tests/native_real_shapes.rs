@@ -495,7 +495,7 @@ fn native_junie_current_cli_failure_sessions_import_and_search() {
     .unwrap();
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_sessions, 2);
     assert_eq!(first.imported_events, 1);
     assert!(store
         .search_event_hits("junie-real-openrouter-free-ok", 10)
@@ -519,6 +519,6 @@ fn native_junie_current_cli_failure_sessions_import_and_search() {
     assert_eq!(second.failed, 0, "{:?}", second.failures);
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 1);
+    assert_eq!(second.skipped_sessions, 0);
     assert_eq!(second.skipped_events, 1);
 }

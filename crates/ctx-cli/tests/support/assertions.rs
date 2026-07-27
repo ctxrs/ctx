@@ -104,12 +104,15 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
         assert!(result["ctx_session_id"].is_string());
         assert!(result["provider_session_id"].is_string());
         assert!(result["source_path"].is_string());
-        assert!(result["cursor"].is_string());
         if expected_scope == "session" {
             assert!(result["session_importance"].is_number());
             assert!(result["more_matches_in_session"].is_number());
             assert_session_suggested_next_commands(result);
         } else {
+            assert!(
+                result["cursor"].is_string(),
+                "expected source cursor in event result {result:#}"
+            );
             assert_eq!(result.get("session_importance"), None);
             assert_eq!(result.get("more_matches_in_session"), None);
             assert_event_suggested_next_commands(result);

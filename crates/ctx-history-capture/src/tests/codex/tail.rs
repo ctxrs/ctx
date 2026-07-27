@@ -165,7 +165,7 @@ fn codex_session_full_then_tail_preserves_configured_source_root() {
     import_codex_session_jsonl_tail(&path, tail_start, &mut store, options).unwrap();
 
     let source = store
-        .capture_source_by_external_session(CaptureProvider::Codex, &session_id)
+        .capture_source_by_external_session(CaptureProvider::Codex, session_id)
         .unwrap()
         .unwrap();
     assert_eq!(

@@ -38,6 +38,7 @@ pub(super) enum WarpToolResultOutcome {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(super) struct WarpToolResultProto {
     pub(super) call_id: Option<String>,
     pub(super) tool_name: &'static str,
@@ -69,9 +70,10 @@ impl Default for WarpMessageProto {
 }
 
 pub(super) fn warp_decode_task(data: &[u8]) -> Result<WarpTaskProto> {
-    // Message-body reopening never needs tool-output bytes. NativePath owns
-    // output replay through its independent Pro fanout.
-    warp_decode_task_with_result_text(data, false)
+    // This decoder is used only by the verified complete-content reopening
+    // boundary (and provider-local tests). NativePath Core uses its separate
+    // decoder and never receives these result bodies.
+    warp_decode_task_with_result_text(data, true)
 }
 
 fn warp_decode_task_with_result_text(

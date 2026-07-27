@@ -1,6 +1,8 @@
 use std::{fmt, path::PathBuf, sync::Arc};
 
+use ctx_history_core::{Confidence, FileChangeKind};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{OutputOutcome, OutputOutcomeMetadata, ProOutputObservation};
@@ -8,6 +10,7 @@ use crate::{OutputOutcome, OutputOutcomeMetadata, ProOutputObservation};
 use super::source::{ClineComponent, ClineComponentObservation};
 
 const EVENT_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-event-v2\0";
+const EVENT_FILE_TOUCH_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-event-file-touches-v1\0";
 const ITEM_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-item-v2\0";
 const ARRAY_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-array-v2\0";
 const PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-native-ingestion-page-v1\0";
@@ -129,6 +132,15 @@ pub(crate) struct ClineSparseOutputDiagnostic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClineFileTouch {
+    pub(crate) path: Box<str>,
+    pub(crate) old_path: Option<Box<str>>,
+    pub(crate) change_kind: Option<FileChangeKind>,
+    pub(crate) confidence: Confidence,
+    pub(crate) metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClineEventRow {
     pub(crate) identity: ClineEventIdentity,
     pub(crate) native_order: ClineNativeOrder,
@@ -140,6 +152,7 @@ pub(crate) struct ClineEventRow {
     pub(crate) preview: Option<Box<str>>,
     pub(crate) tool_call: Option<ClineToolCall>,
     pub(crate) sparse_output: Option<ClineSparseOutputDiagnostic>,
+    pub(crate) file_touches: Box<[ClineFileTouch]>,
 }
 
 impl ClineEventRow {
@@ -165,6 +178,7 @@ impl ClineEventRow {
             preview: Some(preview.into_boxed_str()),
             tool_call: None,
             sparse_output: None,
+            file_touches: Box::default(),
         }
     }
 
@@ -202,6 +216,7 @@ impl ClineEventRow {
                 name: name.map(String::into_boxed_str),
             }),
             sparse_output: None,
+            file_touches: Box::default(),
         }
     }
 
@@ -237,7 +252,41 @@ impl ClineEventRow {
             preview: None,
             tool_call: None,
             sparse_output: Some(diagnostic),
+            file_touches: Box::default(),
         }
+    }
+
+    pub(super) fn attach_file_touches(&mut self, file_touches: Vec<ClineFileTouch>) {
+        if file_touches.is_empty() {
+            return;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(EVENT_FILE_TOUCH_HASH_DOMAIN);
+        hasher.update(self.content_hash);
+        for touch in &file_touches {
+            hash_field(&mut hasher, touch.path.as_bytes());
+            hash_field(
+                &mut hasher,
+                touch.old_path.as_deref().unwrap_or_default().as_bytes(),
+            );
+            hash_field(
+                &mut hasher,
+                touch
+                    .change_kind
+                    .map(FileChangeKind::as_str)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+            hash_field(&mut hasher, touch.confidence.as_str().as_bytes());
+            hash_field(
+                &mut hasher,
+                serde_json::to_string(&touch.metadata)
+                    .expect("file-touch metadata should serialize")
+                    .as_bytes(),
+            );
+        }
+        self.content_hash = hasher.finalize().into();
+        self.file_touches = file_touches.into_boxed_slice();
     }
 }
 
@@ -704,6 +753,7 @@ pub(crate) struct ClineCatalogCompletion {
     pub(crate) inventory_complete: bool,
     pub(crate) inventory_revalidated: bool,
     pub(crate) root_index: ClineCatalogIndex,
+    pub(crate) component_outcomes: Box<[ClineComponentReadOutcome]>,
     pub(crate) live_checkpoints: Box<[ClineTaskCheckpoint]>,
     pub(crate) missing_task_paths: Box<[PathBuf]>,
 }
@@ -780,6 +830,18 @@ pub(super) fn estimated_event_bytes(row: &ClineEventRow) -> usize {
                 .saturating_add(8)
                 .saturating_add(encoded_option_str(output.preview.as_deref()))
                 .saturating_add(encoded_option_str(output.call_id.as_deref()))
+        }))
+        .saturating_add(8)
+        .saturating_add(row.file_touches.iter().fold(0_usize, |bytes, touch| {
+            bytes
+                .saturating_add(encoded_str(&touch.path))
+                .saturating_add(encoded_option_str(touch.old_path.as_deref()))
+                .saturating_add(1)
+                .saturating_add(1)
+                .saturating_add(encoded_str(
+                    &serde_json::to_string(&touch.metadata)
+                        .expect("file-touch metadata should serialize"),
+                ))
         }))
 }
 

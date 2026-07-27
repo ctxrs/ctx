@@ -3,12 +3,27 @@ use crate::tests::support::provider_state::{
     provider_import_session_id_for_path, stored_provider_session_id,
 };
 #[cfg(unix)]
-use crate::{import_codex_session_jsonl, CaptureError};
+use crate::{import_codex_session_jsonl, CaptureError, ProviderImportSummary};
 use crate::{import_codex_session_paths, import_codex_session_tree, CodexSessionImportOptions};
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 use std::fs;
 use std::sync::Arc;
+
+#[cfg(unix)]
+fn assert_catalog_path_rejected(summary: &ProviderImportSummary, suffix: &str) {
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures.len(), 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures[0].line, 0);
+    assert!(
+        summary.failures[0].error.contains(suffix)
+            && summary.failures[0]
+                .error
+                .contains("invalid provider transcript path"),
+        "{:?}",
+        summary.failures
+    );
+}
 
 #[test]
 fn codex_session_tree_defers_cross_file_child_edges_until_parent_is_known() {
@@ -143,7 +158,7 @@ fn codex_session_paths_rejects_symlinked_jsonl_files() {
     symlink(&fixture, &link).unwrap();
 
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let err = import_codex_session_paths(
+    let summary = import_codex_session_paths(
         vec![link],
         &mut store,
         CodexSessionImportOptions {
@@ -151,14 +166,9 @@ fn codex_session_paths_rejects_symlinked_jsonl_files() {
             ..CodexSessionImportOptions::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(matches!(
-        err,
-        CaptureError::InvalidProviderTranscriptPath { path, reason }
-            if path.ends_with("linked-root.jsonl")
-                && reason == "symlinked provider transcript files are rejected"
-    ));
+    assert_catalog_path_rejected(&summary, "linked-root.jsonl");
     assert!(store.list_sessions().unwrap().is_empty());
 }
 
@@ -173,7 +183,7 @@ fn codex_session_file_rejects_symlinked_jsonl_files() {
     symlink(&fixture, &link).unwrap();
 
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let err = import_codex_session_jsonl(
+    let summary = import_codex_session_jsonl(
         &link,
         &mut store,
         CodexSessionImportOptions {
@@ -181,14 +191,9 @@ fn codex_session_file_rejects_symlinked_jsonl_files() {
             ..CodexSessionImportOptions::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(matches!(
-        err,
-        CaptureError::InvalidProviderTranscriptPath { path, reason }
-            if path.ends_with("linked-root.jsonl")
-                && reason == "symlinked provider transcript files are rejected"
-    ));
+    assert_catalog_path_rejected(&summary, "linked-root.jsonl");
     assert!(store.list_sessions().unwrap().is_empty());
 }
 
@@ -207,7 +212,7 @@ fn codex_session_file_rejects_symlinked_parent_components() {
     let linked_file = link_dir.join("root.jsonl");
 
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let err = import_codex_session_jsonl(
+    let summary = import_codex_session_jsonl(
         &linked_file,
         &mut store,
         CodexSessionImportOptions {
@@ -215,14 +220,9 @@ fn codex_session_file_rejects_symlinked_parent_components() {
             ..CodexSessionImportOptions::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(matches!(
-        err,
-        CaptureError::InvalidProviderTranscriptPath { path, reason }
-            if path.ends_with("linked-parent/root.jsonl")
-                && reason == "symlinked provider transcript path components are rejected"
-    ));
+    assert_catalog_path_rejected(&summary, "linked-parent/root.jsonl");
     assert!(store.list_sessions().unwrap().is_empty());
 }
 
@@ -252,7 +252,7 @@ fn codex_session_tree_rejects_symlinked_jsonl_files() {
         err,
         CaptureError::InvalidProviderTranscriptPath { path, reason }
             if path.ends_with("root.jsonl")
-                && reason == "symlinked provider transcript files are rejected"
+                && reason == "linked provider transcript path components are rejected"
     ));
     assert!(store.list_sessions().unwrap().is_empty());
 }

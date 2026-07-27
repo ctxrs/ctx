@@ -60,12 +60,15 @@ research agent.
   data; noninteractive callers must explicitly pass `--delete-data` or
   `--keep-data`. The keep path is local-only and preserves local Pro data;
   verified `--delete-data` remains idempotently available after the helper is
-  gone. Missing and never-Pro roots are unchanged and report that Pro data is
-  absent rather than preserved or deleted. Interrupted initialization remains
-  identity-aware and deletable before a helper or graph file exists. Destructive
-  uninstall fails before deletion on corrupt credential inventory and persists
-  an exact-root cleanup phase so retries remain verifiable after graph-key or
-  credential records are already absent.
+  gone. Missing and never-Pro roots leave Pro state unchanged and report that
+  Pro data is absent rather than preserved or deleted. This no-op statement is
+  Pro-state-only: `pro_uninstall` remains an eligible Core foreground operation,
+  so default-on local usage reporting may create or increment `usage.sqlite`.
+  Interrupted initialization remains identity-aware and deletable before a
+  helper or graph file exists. Destructive uninstall fails before deletion on
+  corrupt credential inventory and persists an exact-root cleanup phase so
+  retries remain verifiable after graph-key or credential records are already
+  absent.
 - Pro materialization is an internal idempotent capability invoked by setup,
   daemon freshness, and blame. Repository roots are inferred from
   canonical activity rather than accepted as setup flags.
@@ -98,6 +101,13 @@ research agent.
   autostart reports semantic status read-only; explicit `ctx daemon run` is the
   path that may perform semantic catch-up.
 - `ctx status` and `ctx doctor` report ctx-owned daemon coordinator state.
+- `ctx status` reports bounded local usage/value aggregates from the separate
+  owner-private `usage.sqlite` sidecar. This default-on product state is
+  independent of remote event reporting, has no network path or identity, keeps
+  only daily UTC content-free aggregates for approximately 400 days, and fails
+  open at foreground recording boundaries. Detail, enable, disable, and logical
+  reset remain options on the existing status surface rather than new top-level
+  commands.
 - JSON output supports local agents and scripts without daemon-start or
   daemon-nudge side effects. A daemon already running independently continues
   its own maintenance and automatic-upgrade cadence.
@@ -108,13 +118,20 @@ research agent.
 | --- | --- | --- |
 | trial | anonymous 14-day trial; no account or payment method | allowed |
 | active | paid monthly subscription | allowed |
-| canceling-paid | canceled at period end, but the current period is paid | allowed through the paid deadline |
-| grace | the bounded signed offline grant remains valid | allowed through the final grace deadline |
+| canceling_paid | canceled at period end, but the current period is paid | allowed through the paid deadline |
+| offline_grace | the bounded signed offline grant remains valid | allowed through the final grace deadline |
 | locked | no active access or valid grace remains | denied; encrypted graph is preserved for recovery |
 
 `ctx pro manage` handles cancellation, payment recovery, and resubscription.
 Core OSS setup, search, indexed show/locate, and SQL remain available in every
 state. Pro uninstall and explicit Pro data deletion also remain available.
+Explicit status, MCP `pro_status`, and Pro management may show the
+`$15/month` continuation action for trial access or a neutral
+unpriced `pro_restore_access` action for locked access that confirms the local
+graph is preserved. They do not show a purchase action for paid active,
+`canceling_paid`, or `offline_grace` access, do not replace the existing next
+action, do not open a browser from status, and never add marketing text to
+blame citations.
 Hosted traffic is limited to anonymous-trial challenge/evidence tokens,
 identity and billing after conversion, entitlements, signed release metadata,
 and authenticated artifact delivery. Trial evidence consists only of

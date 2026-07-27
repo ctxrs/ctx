@@ -12,7 +12,11 @@ use crate::deprecated_controls::DeprecatedControls;
 pub const CONFIG_FILE: &str = "config.toml";
 pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
 pub const DAEMON_DEFAULT_ENABLED: bool = true;
+pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
+
+#[cfg(test)]
+pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoUpgradeMode {
@@ -36,6 +40,7 @@ impl AutoUpgradeMode {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub analytics: AnalyticsConfig,
+    pub local_usage: LocalUsageConfig,
     pub upgrade: UpgradeConfig,
     pub daemon: DaemonConfig,
     pub search: SearchConfig,
@@ -45,6 +50,139 @@ pub struct AppConfig {
 pub struct AnalyticsConfig {
     pub enabled: bool,
     pub endpoint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalUsageConfig {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalUsageEnvOverride {
+    Unset,
+    Enabled,
+    Disabled,
+    Invalid,
+}
+
+impl LocalUsageEnvOverride {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unset => "none",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalUsageControl {
+    pub(crate) persisted_enabled: bool,
+    pub(crate) effective_enabled: bool,
+    pub(crate) environment_override: LocalUsageEnvOverride,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalUsageConfigState {
+    Resolved(bool),
+    Malformed,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalUsageResolution {
+    pub(crate) config_state: LocalUsageConfigState,
+    pub(crate) environment_override: LocalUsageEnvOverride,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalUsageConfigSource {
+    Missing,
+    Text(String),
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LocalUsageConfigResolver {
+    cached: Option<(LocalUsageConfigSource, LocalUsageConfigState)>,
+}
+
+impl LocalUsageConfigResolver {
+    pub(crate) fn resolve(&mut self, data_root: &Path) -> LocalUsageResolution {
+        let path = AppConfig::config_path(data_root);
+        let source = match fs::read_to_string(&path) {
+            Ok(text) => Some(LocalUsageConfigSource::Text(text)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Some(LocalUsageConfigSource::Missing)
+            }
+            Err(_) => None,
+        };
+        let config_state = match source {
+            Some(source) => {
+                if let Some((cached_source, cached_state)) = &self.cached {
+                    if *cached_source == source {
+                        *cached_state
+                    } else {
+                        self.cache_source(source)
+                    }
+                } else {
+                    self.cache_source(source)
+                }
+            }
+            None => LocalUsageConfigState::Unresolved,
+        };
+        LocalUsageResolution {
+            config_state,
+            environment_override: local_usage_env_override(),
+        }
+    }
+
+    fn cache_source(&mut self, source: LocalUsageConfigSource) -> LocalUsageConfigState {
+        let state = match &source {
+            LocalUsageConfigSource::Missing => {
+                LocalUsageConfigState::Resolved(LOCAL_USAGE_DEFAULT_ENABLED)
+            }
+            LocalUsageConfigSource::Text(text) => resolve_local_usage_config_text(text),
+        };
+        self.cached = Some((source, state));
+        state
+    }
+}
+
+impl LocalUsageResolution {
+    pub(crate) fn effective_on_startup(self) -> bool {
+        self.effective_after(None)
+    }
+
+    pub(crate) fn effective_after(self, previous: Option<bool>) -> bool {
+        if matches!(
+            self.environment_override,
+            LocalUsageEnvOverride::Disabled | LocalUsageEnvOverride::Invalid
+        ) {
+            return false;
+        }
+        match self.config_state {
+            LocalUsageConfigState::Resolved(persisted_enabled) => {
+                effective_local_usage_enabled(persisted_enabled, self.environment_override)
+            }
+            LocalUsageConfigState::Malformed => false,
+            LocalUsageConfigState::Unresolved => previous.unwrap_or(false),
+        }
+    }
+
+    fn control(self) -> Option<LocalUsageControl> {
+        let LocalUsageConfigState::Resolved(persisted_enabled) = self.config_state else {
+            return None;
+        };
+        Some(LocalUsageControl {
+            persisted_enabled,
+            effective_enabled: effective_local_usage_enabled(
+                persisted_enabled,
+                self.environment_override,
+            ),
+            environment_override: self.environment_override,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +210,10 @@ impl Default for AppConfig {
                 // Product analytics are default-on and can be disabled by config or env.
                 enabled: true,
                 endpoint: "https://cli.ctx.rs/functions/v1/analytics".to_owned(),
+            },
+            local_usage: LocalUsageConfig {
+                // Content-free local product-state aggregates are independent of analytics.
+                enabled: LOCAL_USAGE_DEFAULT_ENABLED,
             },
             upgrade: UpgradeConfig {
                 // Managed installs check and apply in the background unless explicitly disabled.
@@ -138,6 +280,9 @@ impl AppConfig {
             Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
         }
         config.apply_env(deprecated_controls)?;
+        if crate::install_marker::current_exe_is_staging_dogfood() {
+            config.upgrade.auto = AutoUpgradeMode::Off.as_str().to_owned();
+        }
         Ok(config)
     }
 
@@ -149,6 +294,9 @@ impl AppConfig {
                 }
                 "analytics.endpoint" => {
                     self.analytics.endpoint = parse_non_empty_string(key, value)?;
+                }
+                "local_usage.enabled" => {
+                    self.local_usage.enabled = parse_config_bool(key, value)?;
                 }
                 "upgrade.auto" => {
                     self.upgrade.auto = parse_upgrade_auto(value)?;
@@ -193,6 +341,8 @@ impl AppConfig {
                 self.analytics.endpoint = endpoint;
             }
         }
+        self.local_usage.enabled =
+            effective_local_usage_enabled(self.local_usage.enabled, local_usage_env_override());
         let upgrade_config_disabled = self.auto_upgrade_mode() == AutoUpgradeMode::Off;
         let upgrade_env_mode = match env::var("CTX_UPGRADE_AUTO") {
             Ok(auto) if !auto.trim().is_empty() => {
@@ -259,6 +409,238 @@ pub fn set_daemon_enabled(data_root: &Path, enabled: bool) -> Result<()> {
 
 pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()> {
     set_config_bool(data_root, "search", "semantic", enabled)
+}
+
+pub fn set_local_usage_enabled(data_root: &Path, enabled: bool) -> Result<()> {
+    set_config_bool(data_root, "local_usage", "enabled", enabled)
+}
+
+pub(crate) fn read_local_usage_control(data_root: &Path) -> Result<LocalUsageControl> {
+    let resolution = resolve_local_usage_control(data_root);
+    let Some(control) = resolution.control() else {
+        bail!("local usage configuration could not be resolved");
+    };
+    Ok(control)
+}
+
+pub(crate) fn resolve_local_usage_control(data_root: &Path) -> LocalUsageResolution {
+    LocalUsageConfigResolver::default().resolve(data_root)
+}
+
+fn effective_local_usage_enabled(
+    persisted_enabled: bool,
+    environment_override: LocalUsageEnvOverride,
+) -> bool {
+    persisted_enabled
+        && matches!(
+            environment_override,
+            LocalUsageEnvOverride::Unset | LocalUsageEnvOverride::Enabled
+        )
+}
+
+fn local_usage_env_override() -> LocalUsageEnvOverride {
+    match env::var_os("CTX_LOCAL_USAGE_ENABLED") {
+        None => LocalUsageEnvOverride::Unset,
+        Some(value) => match value.to_str() {
+            Some("true") => LocalUsageEnvOverride::Enabled,
+            Some("false") => LocalUsageEnvOverride::Disabled,
+            Some(_) | None => LocalUsageEnvOverride::Invalid,
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusedLocalUsageValue {
+    Absent,
+    Explicit(bool),
+    Malformed,
+}
+
+fn resolve_local_usage_config_text(text: &str) -> LocalUsageConfigState {
+    let focused = scan_local_usage_value(text);
+    if focused == FocusedLocalUsageValue::Malformed {
+        return LocalUsageConfigState::Malformed;
+    }
+    if focused == FocusedLocalUsageValue::Explicit(false) {
+        // An explicit local opt-out remains authoritative even if an unrelated
+        // part of the full config is malformed.
+        return LocalUsageConfigState::Resolved(false);
+    }
+    let Ok(values) = parse_toml_subset(text) else {
+        return LocalUsageConfigState::Unresolved;
+    };
+    let mut config = AppConfig::default();
+    if config.apply_values(&values).is_err() {
+        return LocalUsageConfigState::Unresolved;
+    }
+    LocalUsageConfigState::Resolved(match focused {
+        FocusedLocalUsageValue::Explicit(enabled) => enabled,
+        FocusedLocalUsageValue::Absent => LOCAL_USAGE_DEFAULT_ENABLED,
+        FocusedLocalUsageValue::Malformed => unreachable!(),
+    })
+}
+
+fn scan_local_usage_value(text: &str) -> FocusedLocalUsageValue {
+    let mut section = "";
+    let mut found = None;
+    let mut local_usage_table_declared = false;
+    for raw_line in text.lines() {
+        let line = strip_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            if !line.ends_with(']') {
+                if starts_with_local_usage_key(line.trim_start_matches('[')) {
+                    return FocusedLocalUsageValue::Malformed;
+                }
+                section = "";
+                continue;
+            }
+            let candidate = line[1..line.len() - 1].trim();
+            if candidate == "local_usage" {
+                if local_usage_table_declared || found.is_some() {
+                    return FocusedLocalUsageValue::Malformed;
+                }
+                local_usage_table_declared = true;
+                section = candidate;
+            } else if starts_with_local_usage_key(candidate.trim_start_matches('[')) {
+                return FocusedLocalUsageValue::Malformed;
+            } else {
+                section = candidate;
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            if section == "local_usage" || (section.is_empty() && starts_with_local_usage_key(line))
+            {
+                return FocusedLocalUsageValue::Malformed;
+            }
+            continue;
+        };
+        let key = key.trim();
+        let is_local_usage = (section == "local_usage" && key == "enabled")
+            || (section.is_empty() && key == "local_usage.enabled");
+        if (section == "local_usage" && key != "enabled")
+            || (section.is_empty() && starts_with_local_usage_key(key) && !is_local_usage)
+        {
+            return FocusedLocalUsageValue::Malformed;
+        }
+        if !is_local_usage {
+            continue;
+        }
+        if found.is_some() || (section.is_empty() && local_usage_table_declared) {
+            return FocusedLocalUsageValue::Malformed;
+        }
+        found = Some(match value.trim() {
+            "true" => true,
+            "false" => false,
+            _ => return FocusedLocalUsageValue::Malformed,
+        });
+    }
+    found.map_or(
+        FocusedLocalUsageValue::Absent,
+        FocusedLocalUsageValue::Explicit,
+    )
+}
+
+fn starts_with_local_usage_key(raw: &str) -> bool {
+    const LOCAL_USAGE_KEY: &str = "local_usage";
+
+    let candidate = raw.trim_start();
+    if let Some(rest) = candidate.strip_prefix(LOCAL_USAGE_KEY) {
+        return rest
+            .chars()
+            .next()
+            .is_none_or(|character| character.is_whitespace() || matches!(character, '.' | ']'));
+    }
+    if candidate.starts_with('"') {
+        return basic_quoted_key_starts_local_usage(candidate);
+    }
+    candidate.strip_prefix('\'').is_some_and(|quoted| {
+        let key = quoted.split_once('\'').map_or(quoted, |(key, _)| key);
+        key == LOCAL_USAGE_KEY || key.starts_with("local_usage.")
+    })
+}
+
+fn basic_quoted_key_starts_local_usage(candidate: &str) -> bool {
+    const LOCAL_USAGE_KEY: &str = "local_usage";
+    const MAX_BASIC_KEY_SCAN_BYTES: usize = 256;
+
+    let mut decoded = String::with_capacity(LOCAL_USAGE_KEY.len() + 1);
+    let mut chars = candidate[1..].chars();
+    let mut scanned_bytes = 1;
+    while let Some(character) = chars.next() {
+        scanned_bytes += character.len_utf8();
+        if scanned_bytes > MAX_BASIC_KEY_SCAN_BYTES {
+            return decoded == LOCAL_USAGE_KEY || decoded.starts_with("local_usage.");
+        }
+        let decoded_character = match character {
+            '"' => return decoded == LOCAL_USAGE_KEY || decoded.starts_with("local_usage."),
+            '\\' => {
+                let Some(escape) = chars.next() else {
+                    return decoded == LOCAL_USAGE_KEY || decoded.starts_with("local_usage.");
+                };
+                scanned_bytes += escape.len_utf8();
+                match escape {
+                    'b' => '\u{0008}',
+                    't' => '\t',
+                    'n' => '\n',
+                    'f' => '\u{000c}',
+                    'r' => '\r',
+                    '"' => '"',
+                    '\\' => '\\',
+                    'u' => {
+                        let Some(character) =
+                            decode_basic_key_unicode_escape(&mut chars, 4, &mut scanned_bytes)
+                        else {
+                            return decoded == LOCAL_USAGE_KEY
+                                || decoded.starts_with("local_usage.");
+                        };
+                        character
+                    }
+                    'U' => {
+                        let Some(character) =
+                            decode_basic_key_unicode_escape(&mut chars, 8, &mut scanned_bytes)
+                        else {
+                            return decoded == LOCAL_USAGE_KEY
+                                || decoded.starts_with("local_usage.");
+                        };
+                        character
+                    }
+                    _ => {
+                        return decoded == LOCAL_USAGE_KEY || decoded.starts_with("local_usage.");
+                    }
+                }
+            }
+            character if character.is_control() => {
+                return decoded == LOCAL_USAGE_KEY || decoded.starts_with("local_usage.");
+            }
+            character => character,
+        };
+        decoded.push(decoded_character);
+        if decoded.starts_with("local_usage.") {
+            return true;
+        }
+        if decoded != LOCAL_USAGE_KEY && !LOCAL_USAGE_KEY.starts_with(&decoded) {
+            return false;
+        }
+    }
+    decoded == LOCAL_USAGE_KEY || decoded.starts_with("local_usage.")
+}
+
+fn decode_basic_key_unicode_escape(
+    chars: &mut impl Iterator<Item = char>,
+    digits: usize,
+    scanned_bytes: &mut usize,
+) -> Option<char> {
+    let mut value = 0_u32;
+    for _ in 0..digits {
+        let digit = chars.next()?;
+        *scanned_bytes += digit.len_utf8();
+        value = value.checked_mul(16)?.checked_add(digit.to_digit(16)?)?;
+    }
+    char::from_u32(value)
 }
 
 fn set_config_bool(data_root: &Path, section: &str, key: &str, enabled: bool) -> Result<()> {

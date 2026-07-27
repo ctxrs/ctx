@@ -4,7 +4,6 @@ use crate::tests::support::assertions::{
 };
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::{
-    assert_provider_policy_cursor_restored, delete_event_and_downgrade_provider_policy_cursor,
     only_provider_cursor_stream, stored_provider_session_id,
 };
 use crate::{
@@ -15,7 +14,7 @@ use crate::{
     WindsurfCascadeHookImportOptions, ANTIGRAVITY_CLI_SOURCE_FORMAT,
 };
 use ctx_history_core::{CaptureProvider, Confidence, EventRole, EventType};
-use ctx_history_store::Store;
+use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use serde_json::Value;
 use std::fs;
 
@@ -58,7 +57,7 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
     );
     let archive = store.export_archive().unwrap();
     assert!(archive.files_touched.iter().any(|file| {
-        file.path == "/workspace/demo/README.md" && file.confidence == Confidence::High
+        file.path == "/workspace/demo/README.md" && file.confidence == Confidence::Explicit
     }));
     assert_eq!(
         tool.sync.metadata["metadata"]["source_format"].as_str(),
@@ -177,7 +176,7 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
 
     let archive = store.export_archive().unwrap();
     assert!(archive.files_touched.iter().any(|file| {
-        file.path == "src/windsurf_hook_oracle.py" && file.confidence == Confidence::High
+        file.path == "src/windsurf_hook_oracle.py" && file.confidence == Confidence::Explicit
     }));
 
     let second = import_windsurf_cascade_hook_transcripts(
@@ -319,7 +318,7 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     assert_event_type_count(&events, EventType::ToolCall, 1);
     assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_event_type_count(&events, EventType::Summary, 1);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
     assert!(!serde_json::to_string(&events)
         .unwrap()
         .contains("cursor-tool-output-sentinel"));
@@ -338,7 +337,7 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     let malformed_events = store.events_for_session(malformed_id).unwrap();
     assert_eq!(malformed_events.len(), 1);
     assert_event_type_count(&malformed_events, EventType::Message, 1);
-    assert_events_have_provider_citations(&malformed_events);
+    assert_events_have_provider_citations(&store, &malformed_events);
 
     assert_search_hits_provider(
         &store,
@@ -378,7 +377,7 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
 }
 
 #[test]
-fn native_cursor_policy_upgrade_repairs_once_then_is_terminal_noop() {
+fn native_cursor_commits_provider_cursor_then_is_terminal_noop() {
     let temp = tempdir();
     let database = temp.path().join("work.sqlite");
     let fixture = provider_history_fixture("cursor/2026.06.24");
@@ -399,36 +398,19 @@ fn native_cursor_policy_upgrade_repairs_once_then_is_terminal_noop() {
     assert_eq!(first.imported_events, 4);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-native-session-1");
-    let repaired_message = store
-        .events_for_session(session_id)
-        .unwrap()
-        .into_iter()
-        .find(|event| {
-            event.event_type == EventType::Message
-                && event.payload.to_string().contains("proof file was written")
-        })
-        .expect("Cursor assistant message exists before simulated policy upgrade");
     let stream = only_provider_cursor_stream(&database, machine_id);
-    let policy_revision = delete_event_and_downgrade_provider_policy_cursor(
-        &database,
-        &store,
-        machine_id,
-        &stream,
-        repaired_message.id,
+    let stored = store
+        .get_sync_cursor(None, machine_id, &stream)
+        .unwrap()
+        .expect("Cursor provider cursor exists after initial import");
+    let committed = decode_native_path_committed_cursor(&stored.cursor).unwrap();
+    let provider_cursor: Value = serde_json::from_str(committed.provider_cursor()).unwrap();
+    assert_eq!(provider_cursor["kind"].as_str(), Some("cursor-nativepath"));
+    assert_eq!(provider_cursor["version"].as_u64(), Some(1));
+    assert_eq!(
+        provider_cursor["checkpoint"]["terminal"].as_bool(),
+        Some(true)
     );
-
-    let repaired = import_cursor_native_history(&transcript, &mut store, options.clone()).unwrap();
-    assert_eq!(repaired.failed, 0, "{repaired:?}");
-    assert_eq!(repaired.imported_events, 1);
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 4);
-    assert_provider_policy_cursor_restored(&store, machine_id, &stream, policy_revision);
-    let repaired_events = store.events_for_session(session_id).unwrap();
-    assert!(repaired_events
-        .iter()
-        .any(|event| event.payload.to_string().contains("proof file was written")));
-    assert!(!repaired_events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolOutput));
 
     let terminal = import_cursor_native_history(&transcript, &mut store, options).unwrap();
     assert_eq!(terminal.failed, 0, "{terminal:?}");
@@ -493,6 +475,8 @@ fn native_claude_projects_reports_malformed_jsonl() {
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
-    assert!(summary.failures[0].error.contains("malformed JSONL"));
-    assert!(summary.failures[0].error.contains("claude-malformed.jsonl"));
+    assert!(summary.failures[0]
+        .error
+        .contains("malformed Claude JSONL record"));
+    assert_eq!(summary.failures[0].line, 2);
 }

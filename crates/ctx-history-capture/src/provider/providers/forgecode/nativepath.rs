@@ -9,8 +9,9 @@ use std::path::Path;
 use ctx_history_store::Store;
 
 use crate::{
-    CaptureError, CaptureWorkLimit, ImportProfile, ProviderAdapterContext, ProviderImportOptions,
-    ProviderImportSummary, ProviderImportWorkResult, Result,
+    CaptureError, CaptureWorkLimit, ImportProfile, ProOutputSinkError, ProviderAdapterContext,
+    ProviderImportFailure, ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
+    Result,
 };
 
 mod output;
@@ -62,10 +63,10 @@ pub(super) fn import_forgecode_nativepath(
                 &source.canonical_path.display().to_string(),
                 &source.schema_fingerprint,
             )?;
-            let mut delayed_output_error = None;
+            let mut output_behind = false;
             let mut output = match &import_options.import_profile {
                 ImportProfile::CoreOnly => None,
-                ImportProfile::CoreAndPro(sink) => {
+                ImportProfile::CoreAndPro(sink) | ImportProfile::ProReplayOnly(sink) => {
                     match ForgeCodeOutputReplay::new(
                         sink.as_ref(),
                         &context.machine_id,
@@ -73,20 +74,16 @@ pub(super) fn import_forgecode_nativepath(
                         &source.source_revision,
                     ) {
                         Ok(output) => Some(output),
-                        Err(error) => {
-                            // The Pro lane is independent: a progress-read failure
-                            // cannot prevent or roll back current Core publication.
-                            delayed_output_error = Some(error);
+                        Err(_) => {
+                            sink.mark_behind(ProOutputSinkError::new(
+                                "forgecode_output_progress",
+                                "ForgeCode Pro output progress is unavailable",
+                            ));
+                            output_behind = true;
                             None
                         }
                     }
                 }
-                ImportProfile::ProReplayOnly(sink) => Some(ForgeCodeOutputReplay::new(
-                    sink.as_ref(),
-                    &context.machine_id,
-                    &output_identity,
-                    &source.source_revision,
-                )?),
             };
             let replay_only = import_options.import_profile.is_replay_only();
             let output_start = output.as_ref().map(|(_, start)| start);
@@ -98,10 +95,10 @@ pub(super) fn import_forgecode_nativepath(
                 replay_only,
             );
             let Some(start) = start else {
-                if let Some(error) = delayed_output_error {
-                    return Err(error);
-                }
                 let mut summary = ProviderImportSummary::default();
+                if output_behind {
+                    record_output_behind(&mut summary);
+                }
                 summary.set_work_result(ProviderImportWorkResult::NoOp);
                 return Ok(summary);
             };
@@ -133,13 +130,14 @@ pub(super) fn import_forgecode_nativepath(
                         summary.merge_from(core);
                     }
                     let output_result = output.as_mut().map(|output| output.materialize(&mut page));
-                    if let Some(Err(error)) = output_result {
-                        if replay_only {
-                            return Err(error);
+                    if let Some(Err(_)) = output_result {
+                        if let Some(sink) = import_options.import_profile.sink() {
+                            sink.mark_behind(ProOutputSinkError::new(
+                                "forgecode_output_page",
+                                "ForgeCode Pro output page is behind committed Core",
+                            ));
                         }
-                        // Core has already committed and continues independently.
-                        // A later invocation restarts the output lane from its sink CAS.
-                        delayed_output_error = Some(error);
+                        output_behind = true;
                         output = None;
                     }
                     if !replay_only
@@ -150,14 +148,21 @@ pub(super) fn import_forgecode_nativepath(
                         break;
                     }
                 }
-                if let Some(error) = delayed_output_error {
-                    return Err(error);
+                if output_behind {
+                    record_output_behind(&mut summary);
                 }
                 Ok(summary)
             })();
             finish_bulk(store, &bulk_guard, scan)
         }
     }
+}
+
+fn record_output_behind(summary: &mut ProviderImportSummary) {
+    summary.record_failure(ProviderImportFailure {
+        line: 0,
+        error: "ForgeCode Pro output is behind committed Core".to_owned(),
+    });
 }
 
 fn select_scan_start(

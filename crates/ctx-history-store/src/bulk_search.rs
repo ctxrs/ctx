@@ -14,7 +14,7 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -94,6 +94,8 @@ pub struct EventSearchBulkGuard {
     lock_conn: Option<Connection>,
     store_path: PathBuf,
     depth: Arc<AtomicUsize>,
+    epoch: Arc<AtomicU64>,
+    root_epoch: u64,
     depth_counted: bool,
 }
 
@@ -107,6 +109,8 @@ pub struct EventSearchBulkGuard {
 pub struct EventSearchBulkGroupAdmission {
     store_path: PathBuf,
     depth: Arc<AtomicUsize>,
+    epoch: Arc<AtomicU64>,
+    root_epoch: u64,
     outstanding: Arc<AtomicBool>,
     consumed: bool,
 }
@@ -124,6 +128,12 @@ impl Drop for SourceInventoryGuard {
 impl Drop for EventSearchBulkGuard {
     fn drop(&mut self) {
         if let Some(lock_conn) = &self.lock_conn {
+            let _ = self.epoch.compare_exchange(
+                self.root_epoch,
+                self.root_epoch.wrapping_add(1),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
             let _ = lock_conn.execute_batch("ROLLBACK");
         }
         if self.depth_counted {
@@ -165,6 +175,11 @@ impl Store {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) > 0 {
+            let root_epoch = self.event_search_bulk_epoch.load(Ordering::SeqCst);
+            if root_epoch.is_multiple_of(2) {
+                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+                return Err(StoreError::InvalidBulkSearchGuard);
+            }
             if let Err(error) = self.enforce_bulk_wal_bound() {
                 self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
                 return Err(error);
@@ -173,6 +188,8 @@ impl Store {
                 lock_conn: None,
                 store_path: self.path.clone(),
                 depth: Arc::clone(&self.event_search_bulk_depth),
+                epoch: Arc::clone(&self.event_search_bulk_epoch),
+                root_epoch,
                 depth_counted: true,
             });
         }
@@ -247,10 +264,12 @@ impl Store {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if guard.store_path != self.path
-            || guard.lock_conn.is_none()
             || !Arc::ptr_eq(&guard.depth, &self.event_search_bulk_depth)
+            || !Arc::ptr_eq(&guard.epoch, &self.event_search_bulk_epoch)
+            || guard.root_epoch.is_multiple_of(2)
+            || guard.epoch.load(Ordering::SeqCst) != guard.root_epoch
             || !guard.depth_counted
-            || guard.depth.load(Ordering::SeqCst) != 1
+            || guard.depth.load(Ordering::SeqCst) == 0
             || !self.conn.is_autocommit()
             || !bulk_mode_pending(self)?
         {
@@ -270,6 +289,8 @@ impl Store {
         Ok(EventSearchBulkGroupAdmission {
             store_path: self.path.clone(),
             depth: Arc::clone(&self.event_search_bulk_depth),
+            epoch: Arc::clone(&self.event_search_bulk_epoch),
+            root_epoch: guard.root_epoch,
             outstanding: Arc::clone(&self.event_search_bulk_group_admission_outstanding),
             consumed: false,
         })
@@ -278,15 +299,18 @@ impl Store {
     pub(crate) fn consume_event_search_bulk_group_admission(
         &self,
         mut admission: EventSearchBulkGroupAdmission,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if !bulk_mode_pending(self)?
             || admission.store_path != self.path
             || !Arc::ptr_eq(&admission.depth, &self.event_search_bulk_depth)
+            || !Arc::ptr_eq(&admission.epoch, &self.event_search_bulk_epoch)
+            || admission.root_epoch.is_multiple_of(2)
+            || admission.epoch.load(Ordering::SeqCst) != admission.root_epoch
             || !Arc::ptr_eq(
                 &admission.outstanding,
                 &self.event_search_bulk_group_admission_outstanding,
             )
-            || admission.depth.load(Ordering::SeqCst) != 1
+            || admission.depth.load(Ordering::SeqCst) == 0
             || admission
                 .outstanding
                 .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -295,7 +319,7 @@ impl Store {
             return Err(StoreError::InvalidBulkSearchGroupAdmission);
         }
         admission.consumed = true;
-        Ok(())
+        Ok(admission.root_epoch)
     }
 
     /// Restore merge settings and durably schedule bounded maintenance.
@@ -309,7 +333,12 @@ impl Store {
             self.poison_native_path_group();
             return Err(StoreError::InvalidBulkSearchGuard);
         }
-        if guard.store_path != self.path {
+        if guard.store_path != self.path
+            || !Arc::ptr_eq(&guard.depth, &self.event_search_bulk_depth)
+            || !Arc::ptr_eq(&guard.epoch, &self.event_search_bulk_epoch)
+            || guard.root_epoch.is_multiple_of(2)
+            || guard.epoch.load(Ordering::SeqCst) != guard.root_epoch
+        {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if guard.lock_conn.is_none() {
@@ -601,12 +630,35 @@ impl Store {
              BEGIN IMMEDIATE",
         );
         match result {
-            Ok(()) => Ok(Some(EventSearchBulkGuard {
-                lock_conn: Some(lock_conn),
-                store_path: self.path.clone(),
-                depth: Arc::clone(&self.event_search_bulk_depth),
-                depth_counted: false,
-            })),
+            Ok(()) => {
+                let inactive_epoch = self.event_search_bulk_epoch.load(Ordering::SeqCst);
+                let Some(root_epoch) = inactive_epoch.checked_add(1) else {
+                    let _ = lock_conn.execute_batch("ROLLBACK");
+                    return Err(StoreError::InvalidBulkSearchGuard);
+                };
+                if !inactive_epoch.is_multiple_of(2)
+                    || self
+                        .event_search_bulk_epoch
+                        .compare_exchange(
+                            inactive_epoch,
+                            root_epoch,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_err()
+                {
+                    let _ = lock_conn.execute_batch("ROLLBACK");
+                    return Err(StoreError::InvalidBulkSearchGuard);
+                }
+                Ok(Some(EventSearchBulkGuard {
+                    lock_conn: Some(lock_conn),
+                    store_path: self.path.clone(),
+                    depth: Arc::clone(&self.event_search_bulk_depth),
+                    epoch: Arc::clone(&self.event_search_bulk_epoch),
+                    root_epoch,
+                    depth_counted: false,
+                }))
+            }
             Err(err) if sqlite_is_busy(&err) => Ok(None),
             Err(err) => Err(err.into()),
         }

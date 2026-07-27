@@ -268,6 +268,7 @@ fn pi_event_idempotency_key(
 pub(crate) enum PiNativeProfile {
     CoreOnly,
     CoreAndPro,
+    #[allow(dead_code)]
     ProReplayOnly,
 }
 
@@ -376,13 +377,7 @@ pub(crate) struct PiNativeScanOutcome {
 
 pub(crate) enum PiNativeOpenOutcome {
     Ready(Box<PiNativeScanner>),
-    Deleted(Box<PiNativeDeleted>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PiNativeDeleted {
-    pub(crate) core_checkpoint: Option<PiNativeCheckpoint>,
-    pub(crate) output_checkpoint: Option<PiNativeCheckpoint>,
+    Deleted,
 }
 
 #[derive(Debug)]
@@ -442,7 +437,6 @@ pub(crate) struct PiNativeScanner {
     native_source_identity: NativeSourceIdentity,
     output_source_identity: OutputSourceIdentity,
     locator_source_item: Vec<u8>,
-    profile: PiNativeProfile,
     core: Option<CoreLane>,
     output: Option<OutputLane>,
     header: Option<PiNativeSessionHeader>,
@@ -470,10 +464,7 @@ pub(crate) fn open_pi_native_session(
     let (file, source) = match PiFrozenSource::open(path) {
         Ok(source) => source,
         Err(PiNativePathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(PiNativeOpenOutcome::Deleted(Box::new(PiNativeDeleted {
-                core_checkpoint: options.resume.core,
-                output_checkpoint: options.resume.output,
-            })));
+            return Ok(PiNativeOpenOutcome::Deleted);
         }
         Err(error) => return Err(error),
     };
@@ -634,7 +625,6 @@ pub(crate) fn open_pi_native_session(
         native_source_identity,
         output_source_identity,
         locator_source_item,
-        profile: options.profile,
         core,
         output,
         header,

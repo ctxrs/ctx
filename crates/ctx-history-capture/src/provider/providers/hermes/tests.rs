@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -31,6 +31,7 @@ struct RecordingSink {
     outputs: Mutex<Vec<(OutputOutcome, Vec<u8>)>>,
     saw_core_before_output: AtomicBool,
     store_path: Mutex<Option<PathBuf>>,
+    behind: AtomicUsize,
 }
 
 impl RecordingSink {
@@ -100,6 +101,10 @@ impl ProOutputSink for RecordingSink {
             materialized_facts: 0,
             replayed: false,
         })
+    }
+
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -277,23 +282,35 @@ fn nativepath_core_is_bounded_idempotent_and_excludes_success_outputs() {
 }
 
 #[test]
-fn output_replay_is_independent_and_core_commits_before_sink_failure() {
+fn pro_output_failure_does_not_fail_unchanged_core_import() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("state.db");
     create_fixture(&path, "output-session", 0);
     let mut store = Store::open(temp.path().join("ctx.sqlite")).unwrap();
+    let initial = import(&path, &mut store, ImportProfile::CoreOnly).unwrap();
+    assert_eq!(initial.imported_events, 2);
+    let core_events_before = store
+        .events_for_session(store.list_sessions().unwrap()[0].id)
+        .unwrap()
+        .len();
     let sink = Arc::new(RecordingSink::for_store(&store));
     sink.fail_once.store(true, Ordering::SeqCst);
 
-    let failed = import(&path, &mut store, ImportProfile::CoreAndPro(sink.clone()));
-    assert!(failed.is_err());
+    let partial = import(&path, &mut store, ImportProfile::CoreAndPro(sink.clone())).unwrap();
+    assert_eq!(partial.imported, 0);
+    assert_eq!(partial.failed, 1);
+    assert_eq!(
+        partial.failures[0].error,
+        "Hermes Pro output is behind committed Core"
+    );
+    assert_eq!(sink.behind.load(Ordering::SeqCst), 1);
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     assert_eq!(
         store
             .events_for_session(store.list_sessions().unwrap()[0].id)
             .unwrap()
             .len(),
-        2
+        core_events_before
     );
 
     let replay = import(

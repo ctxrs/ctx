@@ -37,6 +37,7 @@ Default root:
 ```text
 ~/.ctx/
   work.sqlite
+  usage.sqlite
   config.toml
   runtime/
     onnxruntime/
@@ -57,6 +58,84 @@ binary, for example:
 
 The sidecar is outside the ctx data root because it describes ownership of the
 installed executable, not indexed provider history.
+
+## Local Usage Product State
+
+`usage.sqlite` is an owner-private SQLite sidecar under the selected ctx data
+root. It is separate from canonical history in `work.sqlite` and from the
+encrypted Local Pro graph. Local usage is product state, not telemetry: it has
+no network path or analytics identity and remains available when analytics are
+disabled.
+
+Version 1 stores daily UTC aggregate rows only. Its closed dimensions are UTC
+day, usage-definition version, ctx binary/client version, surface (`cli` or
+`mcp`), logical operation, technical outcome, result class, duration bucket,
+blame target type, and Pro blame outcome. Aggregate counters cover calls,
+content-free result/citation totals when a handler already has them, and
+serialized MCP response bytes. MCP response bytes are factual JSON-RPC
+transport bytes, including the delivered newline; they are not tokens, token
+savings, cost savings, or model context.
+
+The sidecar never stores a query, path, repository, selector, argument, prompt,
+session/event/citation ID, exact timestamp, transcript-derived data, output
+body, machine identity, or analytics identity. Result class is explicitly
+`result_bearing`, `empty`, or `not_applicable`; unclassified operations are not
+reported as empty. Pro blame outcomes are `produced`, `possible`, `none`, or
+`error`, broken down across the exact typed `file`, `commit`, and `pull_request`
+targets. `produced` requires an asserted `ProducedBy` fact; ambiguous,
+contradicted, and superseded facts are handled conservatively.
+Successful CLI blame and result-returning MCP tools must classify as nonempty
+or empty; successful operations without a stable result collection must use
+N/A. Failures always use N/A with zero result and citation totals. CLI status
+report/control operations are excluded from both recording and the persisted
+operation vocabulary.
+
+Only one completed foreground CLI command or recognized MCP `tools/call` is
+counted. MCP records after the complete response has serialized, written, and
+flushed. Initialization, ping, tool listing, notifications, unknown tools,
+automatic daemon cycles, liveness, and materialization are excluded. MCP Pro
+blame is one local observation enriched from the Pro result, not separate MCP
+and Pro observations.
+
+The sidecar uses WAL, `synchronous=NORMAL`, a short busy timeout, atomic
+upserts, a fixed application ID/schema version, and owner-only file behavior
+where the platform supports it. Recording is fail-open: contention or storage
+failure does not change the foreground command result. Reporting instead
+returns a stable content-free error code and never fabricates zero. Rows older
+than approximately 400 UTC days are deleted at most once per UTC day; recording
+does not compact or vacuum per call. A 4 KiB page size and 6 MiB main-database
+cap, plus a 1 MiB WAL limit and frequent automatic checkpoints, keep the
+quiescent `usage.sqlite`/WAL/SHM family below 8 MiB with headroom. Reaching the
+cap is another silent recording failure.
+
+Existing sidecars, data roots, and WAL/SHM members are preflighted as
+owner-private regular non-symlinks before SQLite access. Existing application
+ID, schema, 4 KiB page size, and current size are verified read-only before any
+persistent PRAGMA; every SQLite connection requests no-follow behavior. A
+complete new database is initialized privately and atomically published, so
+concurrent first writers never expose a partial schema. Unknown sidecars are
+not adopted or switched to WAL. Before any writable source open, a detached
+image validates every aggregate and maintenance row; a nonempty existing WAL or
+SHM is rejected without changing any family member. Ordinary recording remains
+fail-open, while explicit reset reports a stable failure. Report discovery
+opens the filesystem handle read-only. Reports query a checkpointed main
+database without creating or changing WAL/SHM. A nonempty auxiliary state that
+cannot be consumed portably without filesystem writes produces the explicit
+stable report error instead.
+
+The report path captures the main file twice through a retained native
+read-only handle, requires byte-for-byte equality with family identity and link
+checks before, between, and after the reads, and queries a detached read-only
+in-memory SQLite image with `query_only=ON` and `temp_store=MEMORY`.
+Initialization uses exactly eight fixed, owner-private no-replace staging
+slots. Productive opens reclaim stale slots older than one hour by exact name,
+independent of directory enumeration order; fresh or unsafe slots are left
+untouched.
+
+A future `daily_usage` UTC day is an integrity/clock error and blocks older
+upserts. A future maintenance-only retention marker is repaired to the current
+UTC day by the next productive aggregate write, so maintenance metadata alone
+cannot permanently disable retention.
 
 When release metadata includes ctx-managed ONNX Runtime assets, the official
 installer and development installer place those native runtime files under
@@ -135,10 +214,13 @@ records.
 Interactive use asks whether to delete; noninteractive callers must explicitly
 choose `--delete-data` or `--keep-data`. Neither form deletes canonical history.
 On a root that has never contained Pro data, either explicit choice is an
-idempotent no-op and reports `local_pro_data: "absent"` without creating a Pro
-directory, initialization or preservation marker, vault access, or restore
-action. `absent` classifies graph-file state; verified deletion can still remove
-interrupted setup credentials or a pre-database graph key before returning it.
+idempotent Pro-state no-op and reports `local_pro_data: "absent"` without
+creating a Pro directory, initialization or preservation marker, vault access,
+or restore action. The foreground `pro_uninstall` command remains eligible for
+independent default-on Core local usage reporting, so it may create or increment
+`usage.sqlite` unless local usage is disabled. `absent` classifies graph-file
+state; verified deletion can still remove interrupted setup credentials or a
+pre-database graph key before returning it.
 A small installation-bound anti-rollback watermark may remain in the native key
 store. It contains no graph key, transcript content, account token, or
 entitlement body and does not make `ctx pro` report Pro as installed.
@@ -195,8 +277,10 @@ is known.
 
 ## Command Read/Write Behavior
 
-This table describes core command effects. It excludes the optional first-party
-analytics marker described under network behavior.
+This table describes core command effects. It excludes the independent
+best-effort daily aggregate upsert to `usage.sqlite` and the optional
+first-party analytics marker described under network behavior. Disable the
+local upsert as described above.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
@@ -210,7 +294,7 @@ analytics marker described under network behavior.
 | `ctx sql` | existing SQLite index only | none |
 | `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, canonical history | key store, signed helper installation, and encrypted derived graph; the explicit `setup` form is a synonym |
 | `ctx pro manage` | key store and commercial account state | may refresh the WorkOS session in the key store and open a hosted billing-portal URL |
-| `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots remain unchanged |
+| `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots leave Pro state unchanged, while independent default-on Core usage reporting may create or increment `usage.sqlite` |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | SQLite index, data root metadata, semantic sidecar/status metadata, and ctx-owned daemon lock/status/job metadata | none |
@@ -266,6 +350,35 @@ not start it.
 `ctx setup`, `ctx import`, and `ctx search` do not create `config.toml` for
 implicit defaults. The config file is for user-managed overrides. Existing
 config files are read and left in place.
+
+Local usage aggregation is enabled by default and is independent of analytics:
+
+```toml
+[local_usage]
+enabled = false
+```
+
+Use the exact value `CTX_LOCAL_USAGE_ENABLED=false` for a process-level hard
+disable; the only accepted environment values are lowercase `true` and
+`false`. Invalid or non-Unicode values fail closed for recording. A
+persistent disable wins over `CTX_LOCAL_USAGE_ENABLED=true`. Disabled commands
+do not create `usage.sqlite`. The equivalent durable controls are
+`ctx status --usage disable` and `ctx status --usage enable`; use
+`ctx status --usage reset` to clear all aggregates without deleting canonical
+history or the Pro graph. `ctx status --usage detail` expands the local report.
+Reset is logical SQLite deletion followed by a best-effort truncate checkpoint;
+it is not a claim of forensic secure erasure on SSDs or other storage. The
+enable, disable, and reset control invocations are not themselves counted.
+Summary and detail are also uncounted and do not create the sidecar.
+
+The p99/unit bounds in this repository exercise 1,000 samples of the warm
+aggregate path (at most 10 ms p99 in an optimized release build), content
+refresh, lock contention, and quiescent family-size arithmetic. The
+debug/fastbuild warm-upsert smoke uses a coarse 500 ms runaway-I/O ceiling;
+optimized release qualification enforces the 10 ms p99 contract.
+Qualification on every supported filesystem/platform remains release evidence;
+the repository tests do not claim that cross-platform qualification has already
+been completed.
 
 Daemon maintenance is enabled by default. Disable it durably with:
 
