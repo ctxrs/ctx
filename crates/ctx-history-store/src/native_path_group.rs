@@ -35,13 +35,41 @@ use crate::{
     StoreError,
 };
 
+// Group admission bounds.
+//
+// A publication group is admitted before any of its work runs, so every limit
+// the Store enforces has to be a quantity admission already fixed. These four
+// are:
+//
+// * `page_count`, `source_count`, and `retained_page_bytes` are coordinator
+//   accounting, validated when the group opens and immutable afterwards;
+// * `attempted_mutation_units` counts typed calls, which the coordinator counts
+//   exactly from its own pages and the Store charges before each call runs.
+//
+// Two quantities the Store can measure are deliberately *not* limits here,
+// because only the Store can measure them and it measures them from content the
+// coordinator sized by a different, approximate measure. Enforcing them would
+// let the Store reject a group it had already admitted, which is what shipped
+// in 0.26 and what breaks every upgrade from a populated release store:
+//
+// * Core bound-value encoding bytes are the exact SQLite bind encoding of the
+//   canonical rows. It is systematically larger than the provider-serialized
+//   page bytes admission bounds, because it carries canonical columns the
+//   provider estimate does not model, so a group filled to the retained-page
+//   ceiling can exceed an equal Core ceiling.
+// * Projection-journal records and bytes are derived: one admitted Core
+//   mutation re-journals every canonical observation it changes, so its journal
+//   cost is a function of rows already in the Store. No coordinator can see it,
+//   and splitting the group does not reduce it.
+//
+// Both remain exactly measured and reported on the receipt. Transaction size
+// stays bounded by the limits above, and the journal stays bounded where the
+// resource actually is: `GroupJournalCollector` retains one physical chunk and
+// writes each completed chunk into the same publication transaction.
 pub const NATIVE_PATH_MAX_GROUP_PAGES: usize = 512;
 pub const NATIVE_PATH_MAX_GROUP_SOURCES: usize = 512;
 pub const NATIVE_PATH_MAX_RETAINED_PAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const NATIVE_PATH_MAX_MUTATION_UNITS: usize = 4_096;
-pub const NATIVE_PATH_MAX_CORE_BOUND_BYTES: usize = 8 * 1024 * 1024;
-pub const NATIVE_PATH_MAX_JOURNAL_RECORDS: usize = 4_096;
-pub const NATIVE_PATH_MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 
 const BOUND_MUTATION_HEADER_BYTES: usize = 8;
 const BOUND_TAG_BYTES: usize = 1;
@@ -696,7 +724,7 @@ impl NativePathPublicationGroup<'_> {
         ) {
             self.store.poison_native_path_group();
         }
-        if self.is_poisoned() || self.collector_overflowed() {
+        if self.is_poisoned() {
             self.rollback_internal()?;
             return Err(StoreError::NativePathGroupPoisoned);
         }
@@ -798,13 +826,19 @@ impl NativePathPublicationGroup<'_> {
         Ok(())
     }
 
+    /// Charges one typed mutation against the group's admitted budget before it
+    /// runs.
+    ///
+    /// Mutation units are a limit: the coordinator counts them exactly from its
+    /// own pages, so refusing here can only mean the coordinator overfilled the
+    /// group. Bound-value bytes are measured, not limited — see the bounds
+    /// comment at the top of this module.
     fn charge_core_mutations(&mut self, mutation_units: usize, encoded_bytes: usize) -> Result<()> {
         self.ensure_open()?;
         if self.is_poisoned() {
             return Err(StoreError::NativePathGroupPoisoned);
         }
         let next_units = self.attempted_mutation_units.saturating_add(mutation_units);
-        let next_bytes = self.core_bound_value_bytes.saturating_add(encoded_bytes);
         if let Err(error) = validate_limit(
             "attempted Store mutation units",
             next_units,
@@ -812,39 +846,23 @@ impl NativePathPublicationGroup<'_> {
         ) {
             return self.poison_with(error);
         }
-        if let Err(error) = validate_limit(
-            "Core bound-value encoding bytes",
-            next_bytes,
-            NATIVE_PATH_MAX_CORE_BOUND_BYTES,
-        ) {
-            return self.poison_with(error);
-        }
         self.attempted_mutation_units = next_units;
-        self.core_bound_value_bytes = next_bytes;
+        self.core_bound_value_bytes = self.core_bound_value_bytes.saturating_add(encoded_bytes);
         Ok(())
     }
 
+    /// Re-asserts at commit exactly the limits admission already fixed.
+    ///
+    /// Each limit here was validated before the mutation that could exceed it
+    /// ran, so this can only fail if that charging were bypassed. Nothing the
+    /// group merely measures may be enforced here, or a group could be admitted
+    /// and then rejected.
     fn validate_final_accounting(&self) -> Result<()> {
         self.coordinator.validate()?;
         validate_limit(
             "attempted Store mutation units",
             self.attempted_mutation_units,
             NATIVE_PATH_MAX_MUTATION_UNITS,
-        )?;
-        validate_limit(
-            "Core bound-value encoding bytes",
-            self.core_bound_value_bytes,
-            NATIVE_PATH_MAX_CORE_BOUND_BYTES,
-        )?;
-        validate_limit(
-            "actual journal records",
-            self.journal_records,
-            NATIVE_PATH_MAX_JOURNAL_RECORDS,
-        )?;
-        validate_limit(
-            "uncompressed journal encoding bytes",
-            self.journal_uncompressed_bytes,
-            NATIVE_PATH_MAX_JOURNAL_BYTES,
         )
     }
 
@@ -876,14 +894,6 @@ impl NativePathPublicationGroup<'_> {
         let result = operation(self.store);
         drop(scope);
         result
-    }
-
-    fn collector_overflowed(&self) -> bool {
-        self.store
-            .projection_journal_group_collector
-            .borrow()
-            .as_ref()
-            .is_some_and(|collector| collector.is_overflowed())
     }
 
     fn rollback_transaction(&self) -> Result<()> {

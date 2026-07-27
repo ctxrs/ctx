@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::encoding::{
     canonical_json, content_digest, record_chain_digest, sha256_hex, RecordDigestFields,
 };
-use super::pages::insert_record_chunk;
+use super::pages::{insert_record_chunk, PROJECTION_JOURNAL_CHUNK_SIZE};
 use super::protocol_validity::{parse_uuid, sanitize_canonical_observation};
 use super::support::{nonnegative_u64, to_i64};
 use super::{
@@ -18,93 +18,84 @@ use crate::canonical_observations::{
     canonical_observation_by_coordinate, canonical_observation_by_coordinate_including_deleted,
     canonical_semantic_digest, visit_live_canonical_event_observations, CanonicalObservation,
 };
-use crate::native_path_group::{NATIVE_PATH_MAX_JOURNAL_BYTES, NATIVE_PATH_MAX_JOURNAL_RECORDS};
 use crate::{Result, StoreError};
 
+/// Packs a publication group's journal records into physical chunks and writes
+/// each chunk as soon as it is complete.
+///
+/// The collector exists only to pack records densely into the schema's chunk
+/// shape; it is not a staging area for the whole group. A chunk is inserted
+/// into `projection_journal_chunks` the moment the next record would exceed
+/// the persisted chunk bound, so the collector never retains more than one
+/// in-flight chunk (at most `PROJECTION_JOURNAL_CHUNK_SIZE` records and
+/// `PROJECTION_JOURNAL_MAX_PAGE_BYTES` encoded bytes). This is the same
+/// streaming shape `append_baseline` already uses.
+///
+/// Every insert happens inside the caller's still-open publication
+/// transaction, so an abandoned group rolls the chunks back with the Core rows
+/// that produced them.
 #[derive(Debug, Default)]
 pub(crate) struct GroupJournalCollector {
-    chunks: Vec<Vec<ProjectionJournalRecord>>,
-    chunk_bytes: Vec<usize>,
+    chunk: Vec<ProjectionJournalRecord>,
+    chunk_bytes: usize,
     record_count: usize,
     uncompressed_bytes: usize,
     sealed: bool,
-    overflowed: bool,
 }
 
 impl GroupJournalCollector {
-    fn push(&mut self, record: ProjectionJournalRecord) -> Result<()> {
+    fn push(&mut self, conn: &rusqlite::Connection, record: ProjectionJournalRecord) -> Result<()> {
         if self.sealed {
             return Err(StoreError::NativePathJournalSealed);
         }
         let record_bytes = serde_json::to_vec(&record)?.len();
-        let append_to_current = self.chunks.last().is_some_and(|chunk| {
-            chunk.len() < super::pages::PROJECTION_JOURNAL_CHUNK_SIZE
-                && self
-                    .chunk_bytes
-                    .last()
-                    .copied()
-                    .unwrap_or(2)
-                    .saturating_add(1)
-                    .saturating_add(record_bytes)
-                    <= PROJECTION_JOURNAL_MAX_PAGE_BYTES
-        });
-        let added_bytes = if append_to_current {
-            1_usize.saturating_add(record_bytes)
-        } else {
-            2_usize.saturating_add(record_bytes)
-        };
-        let next_records = self.record_count.saturating_add(1);
-        let next_bytes = self.uncompressed_bytes.saturating_add(added_bytes);
-        if next_records > NATIVE_PATH_MAX_JOURNAL_RECORDS {
-            self.overflowed = true;
-            return Err(StoreError::NativePathGroupLimitExceeded {
-                limit: "actual journal records",
-                actual: next_records,
-                maximum: NATIVE_PATH_MAX_JOURNAL_RECORDS,
-            });
-        }
-        if next_bytes > NATIVE_PATH_MAX_JOURNAL_BYTES {
-            self.overflowed = true;
-            return Err(StoreError::NativePathGroupLimitExceeded {
-                limit: "uncompressed journal encoding bytes",
-                actual: next_bytes,
-                maximum: NATIVE_PATH_MAX_JOURNAL_BYTES,
-            });
+        let append_to_current = !self.chunk.is_empty()
+            && self.chunk.len() < PROJECTION_JOURNAL_CHUNK_SIZE
+            && self
+                .chunk_bytes
+                .saturating_add(1)
+                .saturating_add(record_bytes)
+                <= PROJECTION_JOURNAL_MAX_PAGE_BYTES;
+        if !append_to_current && !self.chunk.is_empty() {
+            self.flush_chunk(conn)?;
         }
         if append_to_current {
-            self.chunks
-                .last_mut()
-                .expect("checked current journal chunk")
-                .push(record);
-            let chunk_bytes = self
+            self.chunk_bytes = self
                 .chunk_bytes
-                .last_mut()
-                .expect("journal chunk byte accounting");
-            *chunk_bytes = chunk_bytes.saturating_add(1).saturating_add(record_bytes);
+                .saturating_add(1)
+                .saturating_add(record_bytes);
+            self.uncompressed_bytes = self
+                .uncompressed_bytes
+                .saturating_add(1)
+                .saturating_add(record_bytes);
         } else {
-            self.chunks.push(vec![record]);
-            self.chunk_bytes.push(2_usize.saturating_add(record_bytes));
+            self.chunk_bytes = 2_usize.saturating_add(record_bytes);
+            self.uncompressed_bytes = self
+                .uncompressed_bytes
+                .saturating_add(2)
+                .saturating_add(record_bytes);
         }
-        self.record_count = next_records;
-        self.uncompressed_bytes = next_bytes;
+        self.chunk.push(record);
+        self.record_count = self.record_count.saturating_add(1);
+        Ok(())
+    }
+
+    fn flush_chunk(&mut self, conn: &rusqlite::Connection) -> Result<()> {
+        if self.chunk.is_empty() {
+            return Ok(());
+        }
+        insert_record_chunk(conn, &self.chunk)?;
+        self.chunk.clear();
+        self.chunk_bytes = 0;
         Ok(())
     }
 
     pub(crate) fn seal_and_flush(&mut self, conn: &rusqlite::Connection) -> Result<(usize, usize)> {
-        if self.overflowed {
-            return Err(StoreError::NativePathGroupPoisoned);
-        }
         if !self.sealed {
-            for chunk in &self.chunks {
-                insert_record_chunk(conn, chunk)?;
-            }
+            self.flush_chunk(conn)?;
             self.sealed = true;
         }
         Ok((self.record_count, self.uncompressed_bytes))
-    }
-
-    pub(crate) fn is_overflowed(&self) -> bool {
-        self.overflowed
     }
 }
 
@@ -228,7 +219,7 @@ pub(super) fn append_entity(
         Some(collector) => {
             let mut collector = collector.borrow_mut();
             match collector.as_mut() {
-                Some(collector) => collector.push(record)?,
+                Some(collector) => collector.push(conn, record)?,
                 None => insert_record_chunk(conn, std::slice::from_ref(&record))?,
             }
         }
@@ -329,7 +320,7 @@ fn append_baseline_record(
         .saturating_add(record_bytes)
         .saturating_add(chunk.len());
     if !chunk.is_empty()
-        && (chunk.len() == super::pages::PROJECTION_JOURNAL_CHUNK_SIZE
+        && (chunk.len() == PROJECTION_JOURNAL_CHUNK_SIZE
             || next_chunk_bytes > PROJECTION_JOURNAL_MAX_PAGE_BYTES)
     {
         insert_record_chunk(conn, chunk)?;
@@ -569,37 +560,142 @@ mod group_collector_tests {
         }
     }
 
-    #[test]
-    fn group_journal_byte_limit_accepts_exact_and_refuses_one_over() {
-        let empty = vec![record(1, 0), record(2, 0), record(3, 0)];
-        let fixed_bytes = serde_json::to_vec(&empty).unwrap().len();
-        let payload_total = NATIVE_PATH_MAX_JOURNAL_BYTES - fixed_bytes;
-        let first = payload_total / 3;
-        let second = payload_total / 3;
-        let third = payload_total - first - second;
-        let records = vec![record(1, first), record(2, second), record(3, third)];
-        assert_eq!(
-            serde_json::to_vec(&records).unwrap().len(),
-            NATIVE_PATH_MAX_JOURNAL_BYTES
-        );
-        assert!(records.iter().all(|record| {
-            serde_json::to_vec(record).unwrap().len() < PROJECTION_JOURNAL_RECORD_MAX_BYTES
-        }));
+    fn chunk_table() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projection_journal_chunks (
+                 generation INTEGER NOT NULL CHECK (generation > 0),
+                 first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+                 last_sequence INTEGER NOT NULL CHECK (last_sequence >= first_sequence),
+                 record_count INTEGER NOT NULL CHECK (record_count > 0 AND record_count <= 64),
+                 uncompressed_bytes INTEGER NOT NULL CHECK (
+                     uncompressed_bytes > 0 AND uncompressed_bytes <= 8388608
+                 ),
+                 records_zstd BLOB NOT NULL CHECK (length(records_zstd) > 0),
+                 PRIMARY KEY (generation, first_sequence),
+                 UNIQUE (generation, last_sequence),
+                 CHECK (last_sequence - first_sequence + 1 = record_count)
+             );",
+        )
+        .unwrap();
+        conn
+    }
 
+    fn stored_chunks(conn: &rusqlite::Connection) -> Vec<(i64, i64)> {
+        conn.prepare(
+            "SELECT record_count, uncompressed_bytes FROM projection_journal_chunks
+             ORDER BY first_sequence",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    }
+
+    // A group's journal volume is derived from how many canonical observations
+    // its mutations changed, which no coordinator can size in advance. The
+    // collector must therefore accept an unbounded record stream while keeping
+    // its own retained memory inside one physical chunk.
+    #[test]
+    fn group_collector_streams_past_the_former_group_byte_ceiling() {
+        const FORMER_GROUP_BYTE_CEILING: usize = 8 * 1024 * 1024;
+        let conn = chunk_table();
         let mut collector = GroupJournalCollector::default();
-        for record in records {
-            collector.push(record).unwrap();
+        let mut pushed = 0_usize;
+        let mut sequence = 1_u64;
+        while collector.uncompressed_bytes <= 3 * FORMER_GROUP_BYTE_CEILING {
+            collector.push(&conn, record(sequence, 40_000)).unwrap();
+            assert!(collector.chunk.len() <= PROJECTION_JOURNAL_CHUNK_SIZE);
+            assert!(collector.chunk_bytes <= PROJECTION_JOURNAL_MAX_PAGE_BYTES);
+            sequence += 1;
+            pushed += 1;
         }
-        assert_eq!(collector.record_count, 3);
-        assert_eq!(collector.uncompressed_bytes, NATIVE_PATH_MAX_JOURNAL_BYTES);
+        assert!(collector.uncompressed_bytes > FORMER_GROUP_BYTE_CEILING);
+        assert!(
+            !stored_chunks(&conn).is_empty(),
+            "chunks flush while packing"
+        );
+
+        let (records, bytes) = collector.seal_and_flush(&conn).unwrap();
+        assert_eq!(records, pushed);
+        let chunks = stored_chunks(&conn);
+        assert_eq!(
+            chunks.iter().map(|(count, _)| *count).sum::<i64>(),
+            pushed as i64
+        );
+        assert_eq!(
+            chunks.iter().map(|(_, chunk)| *chunk).sum::<i64>(),
+            bytes as i64
+        );
+        assert!(chunks
+            .iter()
+            .all(|(count, _)| *count <= PROJECTION_JOURNAL_CHUNK_SIZE as i64));
+    }
+
+    // A record that would carry the retained chunk past the persisted page
+    // bound closes that chunk first instead of growing the buffer.
+    #[test]
+    fn group_collector_starts_a_new_chunk_before_exceeding_the_page_bound() {
+        let half_page = PROJECTION_JOURNAL_MAX_PAGE_BYTES / 2;
+        let half_record_bytes = serde_json::to_vec(&record(1, half_page)).unwrap().len();
+        assert!(
+            2 * half_record_bytes > PROJECTION_JOURNAL_MAX_PAGE_BYTES,
+            "two half-page records must not fit one chunk"
+        );
+
+        let conn = chunk_table();
+        let mut collector = GroupJournalCollector::default();
+        collector.push(&conn, record(1, half_page)).unwrap();
+        assert!(stored_chunks(&conn).is_empty());
+        collector.push(&conn, record(2, half_page)).unwrap();
+
+        assert_eq!(
+            stored_chunks(&conn),
+            vec![(1, (2 + half_record_bytes) as i64)]
+        );
+        assert_eq!(collector.chunk.len(), 1);
+        assert!(collector.chunk_bytes <= PROJECTION_JOURNAL_MAX_PAGE_BYTES);
+
+        collector.seal_and_flush(&conn).unwrap();
+        assert_eq!(stored_chunks(&conn).len(), 2);
+    }
+
+    // The persisted chunk shape also caps a chunk at 64 records.
+    #[test]
+    fn group_collector_closes_a_chunk_at_the_persisted_record_bound() {
+        let conn = chunk_table();
+        let mut collector = GroupJournalCollector::default();
+        for sequence in 1..=u64::try_from(PROJECTION_JOURNAL_CHUNK_SIZE).unwrap() {
+            collector.push(&conn, record(sequence, 8)).unwrap();
+        }
+        assert!(stored_chunks(&conn).is_empty());
+
+        collector
+            .push(
+                &conn,
+                record(u64::try_from(PROJECTION_JOURNAL_CHUNK_SIZE).unwrap() + 1, 8),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_chunks(&conn)
+                .iter()
+                .map(|(count, _)| *count)
+                .collect::<Vec<_>>(),
+            vec![PROJECTION_JOURNAL_CHUNK_SIZE as i64]
+        );
+        assert_eq!(collector.chunk.len(), 1);
+    }
+
+    #[test]
+    fn sealed_group_collector_refuses_further_records() {
+        let conn = chunk_table();
+        let mut collector = GroupJournalCollector::default();
+        collector.push(&conn, record(1, 8)).unwrap();
+        collector.seal_and_flush(&conn).unwrap();
         assert!(matches!(
-            collector.push(record(4, 0)),
-            Err(StoreError::NativePathGroupLimitExceeded {
-                limit: "uncompressed journal encoding bytes",
-                maximum: NATIVE_PATH_MAX_JOURNAL_BYTES,
-                ..
-            })
+            collector.push(&conn, record(2, 8)),
+            Err(StoreError::NativePathJournalSealed)
         ));
-        assert!(collector.is_overflowed());
     }
 }

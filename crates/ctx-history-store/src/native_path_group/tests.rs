@@ -48,6 +48,14 @@ fn begin_group_details<'a>(
     store: &'a Store,
     guard: &crate::EventSearchBulkGuard,
 ) -> (NativePathPublicationGroup<'a>, NativePathCursorKey, usize) {
+    begin_group_with_accounting(store, guard, accounting())
+}
+
+fn begin_group_with_accounting<'a>(
+    store: &'a Store,
+    guard: &crate::EventSearchBulkGuard,
+    coordinator: NativePathGroupAccounting,
+) -> (NativePathPublicationGroup<'a>, NativePathCursorKey, usize) {
     let serial = NEXT_TEST_PUBLICATION.fetch_add(1, Ordering::SeqCst);
     let publication_id = format!("test-publication-{serial:020}");
     let key = NativePathCursorKey::new(
@@ -66,7 +74,7 @@ fn begin_group_details<'a>(
     committed.cursor = encode_cursor_envelope(&envelope).unwrap();
     let inactive_cursor_bind_bytes = encoded_cursor_cas_bytes(None, &committed);
 
-    let mut group = begin_unclassified_group(store, guard, accounting());
+    let mut group = begin_unclassified_group(store, guard, coordinator);
     assert_eq!(
         group
             .classify_cursor_set(&publication_id, std::slice::from_ref(&transition))
@@ -359,8 +367,14 @@ fn coordinator_limits_accept_exact_and_refuse_one_over() {
     }
 }
 
+// Core bind-value bytes are the exact SQLite encoding of the canonical rows,
+// which only the Store can measure and which is larger than the
+// provider-serialized page bytes admission bounds. It is reported exactly and
+// never rejects: a group filled to the retained-page admission ceiling would
+// otherwise be admitted and then refused.
 #[test]
-fn typed_source_values_derive_exact_core_byte_limit_and_one_over_rolls_back() {
+fn typed_source_values_derive_exact_core_byte_accounting_without_rejecting() {
+    const FORMER_CORE_BYTE_CEILING: usize = 8 * 1024 * 1024;
     let (_temp, store) = open_store();
     let guard = store.begin_event_search_bulk_mode().unwrap();
 
@@ -369,18 +383,15 @@ fn typed_source_values_derive_exact_core_byte_limit_and_one_over_rolls_back() {
     exact_source.sync.metadata = Value::String(String::new());
     let fixed = capture_source_bind_bytes(&exact_source).unwrap();
     exact_source.sync.metadata =
-        Value::String("x".repeat(NATIVE_PATH_MAX_CORE_BOUND_BYTES - fixed - cursor_bind_bytes));
+        Value::String("x".repeat(FORMER_CORE_BYTE_CEILING - fixed - cursor_bind_bytes));
     assert_eq!(
         capture_source_bind_bytes(&exact_source).unwrap() + cursor_bind_bytes,
-        NATIVE_PATH_MAX_CORE_BOUND_BYTES
+        FORMER_CORE_BYTE_CEILING
     );
     exact.upsert_capture_source(&exact_source).unwrap();
     let receipt = publish_and_commit(exact).unwrap();
     assert_eq!(receipt.attempted_mutation_units(), 2);
-    assert_eq!(
-        receipt.core_bound_value_bytes(),
-        NATIVE_PATH_MAX_CORE_BOUND_BYTES
-    );
+    assert_eq!(receipt.core_bound_value_bytes(), FORMER_CORE_BYTE_CEILING);
 
     let mut one_over_source = exact_source.clone();
     one_over_source.id = Uuid::from_u128(2);
@@ -390,62 +401,46 @@ fn typed_source_values_derive_exact_core_byte_limit_and_one_over_rolls_back() {
         begin_group_details(&store, &guard);
     assert_eq!(one_over_cursor_bind_bytes, cursor_bind_bytes);
     one_over.upsert_capture_source(&one_over_source).unwrap();
-    one_over.prepare_journal_checkpoint().unwrap();
-    let error = one_over.publish_cursor_set().unwrap_err();
-    assert!(matches!(
-        error,
-        StoreError::NativePathGroupLimitExceeded {
-            limit: "Core bound-value encoding bytes",
-            actual,
-            maximum: NATIVE_PATH_MAX_CORE_BOUND_BYTES,
-        } if actual == NATIVE_PATH_MAX_CORE_BOUND_BYTES + 1
-    ));
-    assert!(matches!(
-        one_over.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-    assert!(matches!(
-        store.get_capture_source(one_over_source.id),
-        Err(StoreError::NotFound(_))
-    ));
+    let one_over_receipt = publish_and_commit(one_over).unwrap();
+    assert_eq!(
+        one_over_receipt.core_bound_value_bytes(),
+        FORMER_CORE_BYTE_CEILING + 1
+    );
+    assert_eq!(
+        store.get_capture_source(one_over_source.id).unwrap().id,
+        one_over_source.id
+    );
     store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
 #[test]
-fn event_accounting_includes_store_derived_fts_and_rolls_back_on_overflow() {
+fn event_accounting_includes_store_derived_fts_bytes() {
+    const BODY_BYTES: usize = 64 * 1024;
     let (_temp, store) = open_store();
     let guard = store.begin_event_search_bulk_mode().unwrap();
-    let mut oversized = event(Uuid::from_u128(3), 1, None, None);
-    oversized.event_type = EventType::Message;
-    oversized.role = Some(EventRole::User);
-    oversized.payload = Value::String(String::new());
-    let fixed = event_bind_bytes(&oversized).unwrap();
-    oversized.payload = Value::String("x".repeat(NATIVE_PATH_MAX_CORE_BOUND_BYTES - fixed));
-    assert_eq!(
-        event_bind_bytes(&oversized).unwrap(),
-        NATIVE_PATH_MAX_CORE_BOUND_BYTES
-    );
+    let mut large = event(Uuid::from_u128(3), 1, None, None);
+    large.event_type = EventType::Message;
+    large.role = Some(EventRole::User);
+    large.payload = Value::String("x".repeat(BODY_BYTES));
+    let typed_bytes = event_bind_bytes(&large).unwrap();
 
     let mut group = begin_group(&store, &guard);
-    assert!(matches!(
-        group.reconcile_provider_event(
-            &oversized,
+    group
+        .reconcile_provider_event(
+            &large,
             ProviderEventHashAuthority::NormalizedPayloadFallback,
-        ),
-        Err(StoreError::NativePathGroupLimitExceeded {
-            limit: "Core bound-value encoding bytes",
-            actual,
-            maximum: NATIVE_PATH_MAX_CORE_BOUND_BYTES,
-        }) if actual > NATIVE_PATH_MAX_CORE_BOUND_BYTES
-    ));
-    assert!(matches!(
-        group.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-    assert!(matches!(
-        store.get_event(oversized.id),
-        Err(StoreError::NotFound(_))
-    ));
+        )
+        .unwrap();
+    let receipt = publish_and_commit(group).unwrap();
+
+    // The charge is the typed bind encoding plus the Store-derived search
+    // projection the same mutation writes, so it always exceeds the typed row.
+    assert!(
+        receipt.core_bound_value_bytes() > typed_bytes,
+        "expected Store-derived projection bytes beyond {typed_bytes}: {}",
+        receipt.core_bound_value_bytes()
+    );
+    assert_eq!(store.get_event(large.id).unwrap().id, large.id);
     store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
@@ -1317,120 +1312,93 @@ fn journal_collector_batches_513_records_and_reports_exact_physical_bytes() {
     store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
+// A store upgraded from a released version holds rows the coordinator did not
+// write in this run. One typed mutation over such a source re-journals every
+// canonical observation it changes, which is far more journal volume than the
+// coordinator can see, size, or split. Admission cannot bound it, so commit
+// must not reject it.
 #[test]
-fn exact_journal_record_limit_commits_from_one_bounded_typed_mutation() {
+fn one_typed_mutation_commits_journal_fanout_past_the_former_group_ceilings() {
+    const FORMER_RECORD_CEILING: usize = 4_096;
+    const FORMER_BYTE_CEILING: usize = 8 * 1024 * 1024;
     let (_temp, store, mut source) =
-        projected_source_with_events(&vec![0; NATIVE_PATH_MAX_JOURNAL_RECORDS]);
+        projected_source_with_events(&vec![4_096; FORMER_RECORD_CEILING + 1]);
     let guard = store.begin_event_search_bulk_mode().unwrap();
-    source.sync.metadata = json!({"exact": true});
+    source.sync.metadata = json!({"upgraded": true});
     let mut group = begin_group(&store, &guard);
     group.upsert_capture_source(&source).unwrap();
     let receipt = publish_and_commit(group).unwrap();
-    assert_eq!(receipt.attempted_mutation_units(), 2);
-    assert_eq!(receipt.journal_records(), NATIVE_PATH_MAX_JOURNAL_RECORDS);
-    store.finish_event_search_bulk_mode(&guard).unwrap();
-}
 
-#[test]
-fn journal_record_overflow_error_poison_rolls_back_typed_mutation_when_ignored() {
-    let (_temp, store, mut source) =
-        projected_source_with_events(&vec![0; NATIVE_PATH_MAX_JOURNAL_RECORDS + 1]);
-    let original = source.clone();
-    source.sync.metadata = json!({"must_rollback": true});
-    let guard = store.begin_event_search_bulk_mode().unwrap();
-    let mut group = begin_group(&store, &guard);
-    assert!(matches!(
-        group.upsert_capture_source(&source),
-        Err(StoreError::NativePathGroupLimitExceeded {
-            limit: "actual journal records",
-            actual: 4_097,
-            maximum: NATIVE_PATH_MAX_JOURNAL_RECORDS,
-        })
-    ));
-    assert!(matches!(
-        group.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-    assert_eq!(store.get_capture_source(source.id).unwrap(), original);
+    assert_eq!(receipt.attempted_mutation_units(), 2);
+    assert_eq!(receipt.journal_records(), FORMER_RECORD_CEILING + 1);
+    assert!(
+        receipt.journal_uncompressed_bytes() > FORMER_BYTE_CEILING,
+        "fanout should exceed the former byte ceiling: {}",
+        receipt.journal_uncompressed_bytes()
+    );
     assert_eq!(
         store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM projection_journal_chunks",
+                "SELECT COALESCE(SUM(record_count), 0), COALESCE(SUM(uncompressed_bytes), 0)
+                 FROM projection_journal_chunks",
                 [],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .unwrap(),
-        0
+        (
+            i64::try_from(receipt.journal_records()).unwrap(),
+            i64::try_from(receipt.journal_uncompressed_bytes()).unwrap(),
+        )
     );
     store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
+// The released v0.26 candidate admitted a group by provider-serialized page
+// bytes and then enforced an equal ceiling on the journal encoding of the same
+// content, which is always larger. A group filled to the Core admission
+// ceiling must commit.
 #[test]
-fn journal_byte_limit_accepts_exact_and_one_over_poison_rolls_back() {
-    // Sixty-five records force a second physical chunk before the group byte
-    // boundary, so adding one payload byte also adds exactly one accounting
-    // byte instead of changing array framing at the page boundary.
-    let base_sizes = vec![125_000; 65];
-    let (_base_temp, base_store, mut base_source) = projected_source_with_events(&base_sizes);
-    let base_guard = base_store.begin_event_search_bulk_mode().unwrap();
-    base_source.sync.metadata = json!({"measure": true});
-    let mut base_group = begin_group(&base_store, &base_guard);
-    base_group.upsert_capture_source(&base_source).unwrap();
-    let measured = publish_and_commit(base_group)
-        .unwrap()
-        .journal_uncompressed_bytes();
-    base_store
-        .finish_event_search_bulk_mode(&base_guard)
-        .unwrap();
-    assert!(measured < NATIVE_PATH_MAX_JOURNAL_BYTES);
+fn group_at_the_core_admission_ceiling_commits_its_larger_journal_encoding() {
+    let (_temp, store, mut source) = projected_source_with_events(&vec![64_000; 160]);
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    source.sync.metadata = json!({"at_ceiling": true});
+    let coordinator =
+        NativePathGroupAccounting::new(160, 1, NATIVE_PATH_MAX_RETAINED_PAGE_BYTES).unwrap();
+    let (mut group, _key, _bytes) = begin_group_with_accounting(&store, &guard, coordinator);
+    group.upsert_capture_source(&source).unwrap();
+    let receipt = publish_and_commit(group).unwrap();
 
-    let mut exact_sizes = base_sizes;
-    exact_sizes[64] += NATIVE_PATH_MAX_JOURNAL_BYTES - measured;
-    let (_exact_temp, exact_store, mut exact_source) = projected_source_with_events(&exact_sizes);
-    let exact_guard = exact_store.begin_event_search_bulk_mode().unwrap();
-    exact_source.sync.metadata = json!({"exact": true});
-    let mut exact_group = begin_group(&exact_store, &exact_guard);
-    exact_group.upsert_capture_source(&exact_source).unwrap();
     assert_eq!(
-        publish_and_commit(exact_group)
-            .unwrap()
-            .journal_uncompressed_bytes(),
-        NATIVE_PATH_MAX_JOURNAL_BYTES
+        receipt.coordinator_accounting().retained_page_bytes(),
+        NATIVE_PATH_MAX_RETAINED_PAGE_BYTES
     );
-    exact_store
-        .finish_event_search_bulk_mode(&exact_guard)
-        .unwrap();
-
-    exact_sizes[64] += 1;
-    let (_over_temp, over_store, mut over_source) = projected_source_with_events(&exact_sizes);
-    let original = over_source.clone();
-    over_source.sync.metadata = json!({"must_rollback": true});
-    let over_guard = over_store.begin_event_search_bulk_mode().unwrap();
-    let mut over_group = begin_group(&over_store, &over_guard);
-    let over_error = over_group.upsert_capture_source(&over_source).unwrap_err();
     assert!(
-        matches!(
-            over_error,
-            StoreError::NativePathGroupLimitExceeded {
-                limit: "uncompressed journal encoding bytes",
-                actual,
-                maximum: NATIVE_PATH_MAX_JOURNAL_BYTES,
-            } if actual == NATIVE_PATH_MAX_JOURNAL_BYTES + 1
-        ),
-        "unexpected one-over error: {over_error:?}"
+        receipt.journal_uncompressed_bytes() > NATIVE_PATH_MAX_RETAINED_PAGE_BYTES,
+        "journal encoding should exceed the retained-page admission bound: {}",
+        receipt.journal_uncompressed_bytes()
     );
-    assert!(matches!(
-        over_group.commit(),
-        Err(StoreError::NativePathGroupPoisoned)
-    ));
-    assert_eq!(
-        over_store.get_capture_source(over_source.id).unwrap(),
-        original
-    );
-    over_store
-        .finish_event_search_bulk_mode(&over_guard)
-        .unwrap();
+    assert!(receipt.core_bound_value_bytes() > 0);
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+// Every limit the group enforces when it commits must already have been
+// charged before the mutation that could exceed it, so no admitted group is
+// ever rejected.
+#[test]
+fn committed_receipt_reports_only_admission_bounded_limits() {
+    let (_temp, store, mut source) = projected_source_with_events(&[256; 8]);
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    source.sync.metadata = json!({"receipt": true});
+    let mut group = begin_group(&store, &guard);
+    group.upsert_capture_source(&source).unwrap();
+    let receipt = publish_and_commit(group).unwrap();
+
+    assert!(receipt.attempted_mutation_units() <= NATIVE_PATH_MAX_MUTATION_UNITS);
+    assert!(receipt.core_bound_value_bytes() > 0);
+    assert_eq!(receipt.journal_records(), 8);
+    assert!(receipt.journal_uncompressed_bytes() > 0);
+    store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
 mod generation;

@@ -52,9 +52,8 @@ pub use identity::{LocalDeviceIdentity, LocalWorkspaceIdentity};
 pub use native_path_group::{
     decode_native_path_committed_cursor, NativePathCommittedCursor, NativePathCursorKey,
     NativePathCursorSetClassification, NativePathCursorTransition, NativePathGroupAccounting,
-    NativePathGroupReceipt, NativePathPublicationGroup, NATIVE_PATH_MAX_CORE_BOUND_BYTES,
-    NATIVE_PATH_MAX_GROUP_PAGES, NATIVE_PATH_MAX_GROUP_SOURCES, NATIVE_PATH_MAX_JOURNAL_BYTES,
-    NATIVE_PATH_MAX_JOURNAL_RECORDS, NATIVE_PATH_MAX_MUTATION_UNITS,
+    NativePathGroupReceipt, NativePathPublicationGroup, NATIVE_PATH_MAX_GROUP_PAGES,
+    NATIVE_PATH_MAX_GROUP_SOURCES, NATIVE_PATH_MAX_MUTATION_UNITS,
     NATIVE_PATH_MAX_RETAINED_PAGE_BYTES,
 };
 pub use projection_journal::{
