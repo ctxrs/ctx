@@ -12,8 +12,8 @@ use crate::common::time::parse_rfc3339_utc;
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::normalization::{
     native_event, native_provider_capture, provider_capped_json, provider_capped_json_value,
-    provider_local_preview, provider_role, provider_value_text, NativeEventDraft,
-    NativeSessionDraft,
+    provider_explicit_result_value_text, provider_local_preview, provider_role,
+    provider_value_text, NativeEventDraft, NativeSessionDraft,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderImportSummary, Result,
@@ -269,6 +269,27 @@ pub(super) fn mistral_vibe_event_text(role: &str, value: &Value, event_type: Eve
         EventType::ToolCall => format!("Mistral Vibe {role} tool call"),
         _ => format!("Mistral Vibe {role} message"),
     }
+}
+
+/// Returns only fields that explicitly carry a Mistral Vibe tool result.
+pub(crate) fn mistral_vibe_result_content(value: &Value) -> Option<String> {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if mistral_vibe_event_type(role, value) != EventType::ToolOutput {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for field in ["content", "reasoning_content", "images"] {
+        if let Some(text) = value
+            .get(field)
+            .and_then(provider_explicit_result_value_text)
+        {
+            parts.push(text);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 pub(super) fn mistral_vibe_tool_calls_text(value: &Value) -> Option<String> {

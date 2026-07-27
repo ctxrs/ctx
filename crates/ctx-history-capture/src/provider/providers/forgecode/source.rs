@@ -305,6 +305,38 @@ struct ForgeCodeHydratedRow {
     metrics: Option<Vec<u8>>,
 }
 
+pub(super) fn forgecode_values_at_rowid(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    let columns = forgecode_conversation_columns(conn)?;
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let context = optional_column_expr(&columns, "context", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let metrics = optional_column_expr(&columns, "metrics", "NULL");
+    let sql = format!(
+        "select rowid, CAST(conversation_id AS BLOB), CAST({title} AS BLOB), \
+                workspace_id, CAST({context} AS BLOB), CAST(created_at AS BLOB), \
+                CAST({updated_at} AS BLOB), CAST({metrics} AS BLOB) \
+         from conversations where rowid = ?1"
+    );
+    conn.query_row(&sql, [rowid], |row| {
+        Ok(ForgeCodeHydratedRow {
+            rowid: row.get(0)?,
+            conversation_id: row.get(1)?,
+            title: row.get(2)?,
+            workspace_id: row.get(3)?,
+            context: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            metrics: row.get(7)?,
+        })
+    })
+    .optional()?
+    .map(|row| row.captured_values().map_err(forgecode_captured_error))
+    .transpose()
+}
+
 impl ForgeCodeHydratedRow {
     fn captured_values(self) -> std::result::Result<Vec<CapturedSqliteValue>, String> {
         Ok(vec![
@@ -318,6 +350,41 @@ impl ForgeCodeHydratedRow {
             forgecode_captured_optional_bytes(self.metrics, "metrics")?,
         ])
     }
+}
+
+/// Reopens exactly one conversation row using the same storage coercions as
+/// capture. Complete-content resolution uses this instead of maintaining a
+/// second ForgeCode parser.
+pub(crate) fn load_forgecode_conversation_values(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Vec<CapturedSqliteValue>> {
+    let columns = forgecode_conversation_columns(conn)?;
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let context = optional_column_expr(&columns, "context", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let metrics = optional_column_expr(&columns, "metrics", "NULL");
+    let sql = format!(
+        "select rowid, CAST(conversation_id AS BLOB), CAST({title} AS BLOB), \
+                workspace_id, CAST({context} AS BLOB), CAST(created_at AS BLOB), \
+                CAST({updated_at} AS BLOB), CAST({metrics} AS BLOB) \
+         from conversations where rowid = ?1"
+    );
+    let hydrated = conn.query_row(&sql, [rowid], |row| {
+        Ok(ForgeCodeHydratedRow {
+            rowid: row.get(0)?,
+            conversation_id: row.get(1)?,
+            title: row.get(2)?,
+            workspace_id: row.get(3)?,
+            context: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            metrics: row.get(7)?,
+        })
+    })?;
+    hydrated
+        .captured_values()
+        .map_err(CaptureError::InvalidPayload)
 }
 
 fn forgecode_captured_text(

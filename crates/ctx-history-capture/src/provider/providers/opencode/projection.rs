@@ -36,15 +36,17 @@ use super::capture::{
     OPENCODE_END_RECORD_KIND, OPENCODE_MESSAGE_PART_RECORD_KIND, OPENCODE_RECORD_KIND,
     OPENCODE_SESSION_PARENT_RECORD_KIND,
 };
+use super::complete_content::{
+    opencode_integer_value, opencode_optional_text_value, opencode_text_value, OpenCodeCapturedRow,
+};
 use super::normalization::{
-    opencode_entry_type_from_data, opencode_event, opencode_event_cursor, opencode_event_time,
-    opencode_message_part_identity_index, opencode_message_part_role, opencode_part_type,
-    opencode_patch_file_touch_drafts, opencode_text_part_text, opencode_tool_part_event_data,
+    opencode_event, opencode_event_cursor, opencode_event_text, opencode_event_time,
+    opencode_event_type, opencode_patch_file_touch_drafts,
 };
 use super::schema::{
     opencode_session_hydration_sql, opencode_session_id_lookup_index,
     opencode_session_retained_text, parse_json_object_string, OpenCodeCapturedShape,
-    OpenCodeMessageRow, OpenCodeSessionRow, OpenCodeSessionSql, OpenCodeSqliteDialect,
+    OpenCodeSessionRow, OpenCodeSessionSql, OpenCodeSqliteDialect,
     OPENCODE_SESSION_PARENT_OVERHEAD_BYTES,
 };
 
@@ -76,6 +78,8 @@ struct OpenCodeProjectedRecord {
     occurred_at: DateTime<Utc>,
     provider_event_index: u64,
     existing_session_event: bool,
+    complete_result_content: Option<String>,
+    complete_text: Option<String>,
 }
 
 impl<'connection, 'dialect> OpenCodeCapturedBatchProjector<'connection, 'dialect> {
@@ -426,6 +430,7 @@ impl<'connection, 'dialect> OpenCodeCapturedBatchProjector<'connection, 'dialect
         projected.capture.source.cursor = None;
         projected.raw_value = Value::Null;
         projected.existing_session_event = false;
+        projected.complete_text = None;
         Ok(projected)
     }
 
@@ -467,6 +472,10 @@ impl<'connection, 'dialect> OpenCodeCapturedBatchProjector<'connection, 'dialect
                 provider_event_index,
                 self.dialect,
             )
+        });
+        let complete_text = row.row.event.as_ref().map(|message| {
+            let event_type = opencode_event_type(&message.entry_type, &row.data);
+            opencode_event_text(&message.entry_type, &row.data, event_type, self.dialect)
         });
         let is_subagent = captured.session.parent_id.is_some();
         let source_cursor = row.row.event.as_ref().map(|message| ProviderCursorRange {
@@ -563,6 +572,8 @@ impl<'connection, 'dialect> OpenCodeCapturedBatchProjector<'connection, 'dialect
             occurred_at,
             provider_event_index,
             existing_session_event: true,
+            complete_result_content: row.complete_result_content,
+            complete_text,
         })
     }
 }
@@ -640,13 +651,37 @@ impl CapturedBatchProjector for OpenCodeCapturedBatchProjector<'_, '_> {
             Ok(projected) => {
                 let OpenCodeProjectedRecord {
                     line_number,
-                    capture,
+                    mut capture,
                     raw_value,
                     part_file_touch_source,
                     occurred_at,
                     provider_event_index,
                     existing_session_event,
+                    complete_result_content,
+                    complete_text,
                 } = projected;
+                if let Some(event) = capture.event.as_mut() {
+                    crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                        event,
+                        self.dialect.provider,
+                        self.dialect.source_format,
+                        record.locator(),
+                        values,
+                        complete_result_content,
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                    if let Some(complete_text) = complete_text {
+                        crate::complete_content::sqlite::attach_sqlite_complete_content_locator_with_digest_values(
+                            event,
+                            self.dialect.provider,
+                            self.dialect.source_format,
+                            record.locator(),
+                            &values[1..],
+                            || complete_text,
+                        )
+                        .map_err(ProviderProjectionFatal::new)?;
+                    }
+                }
                 let provider_session_id = capture.session.provider_session_id.clone();
                 let event = capture.event.clone();
                 output.use_explicit_file_touches();
@@ -793,160 +828,5 @@ impl CapturedBatchProjector for OpenCodeCapturedBatchProjector<'_, '_> {
                 BoundedParserCheckpoint::from_serializable(&())?,
             )?,
         ))
-    }
-}
-
-struct OpenCodeCapturedRow {
-    session_found: bool,
-    session: OpenCodeSessionRow,
-    message_id: String,
-    source_session_id: String,
-    entry_type: String,
-    seq: Option<i64>,
-    time_created: i64,
-    time_updated: i64,
-    message_data: String,
-    part_data: String,
-    part_id: String,
-    part_type: String,
-    source_table: String,
-}
-
-struct OpenCodeProjectedMessage {
-    row: OpenCodeOptionalMessage,
-    data: Value,
-    part_file_touch_source: Option<Value>,
-}
-
-struct OpenCodeOptionalMessage {
-    event: Option<OpenCodeMessageRow>,
-}
-
-impl OpenCodeCapturedRow {
-    fn message_row(&self) -> Result<OpenCodeProjectedMessage> {
-        if self.source_table == OpenCodeCapturedShape::MessagePart.label() {
-            return self.message_part_row();
-        }
-        let data = serde_json::from_str::<Value>(&self.message_data).map_err(|error| {
-            CaptureError::InvalidPayload(format!(
-                "invalid JSON in {} message {}: {error}",
-                self.source_table, self.message_id
-            ))
-        })?;
-        let entry_type = opencode_entry_type_from_data(&self.entry_type, &self.message_data);
-        let seq = self.seq.unwrap_or_else(|| {
-            opencode_message_part_identity_index(&self.source_session_id, &self.message_id)
-        });
-        Ok(OpenCodeProjectedMessage {
-            row: OpenCodeOptionalMessage {
-                event: Some(OpenCodeMessageRow {
-                    id: self.message_id.clone(),
-                    session_id: self.source_session_id.clone(),
-                    entry_type,
-                    seq,
-                    time_created: self.time_created,
-                    time_updated: self.time_updated,
-                }),
-            },
-            data,
-            part_file_touch_source: None,
-        })
-    }
-
-    fn message_part_row(&self) -> Result<OpenCodeProjectedMessage> {
-        let part_data = serde_json::from_str::<Value>(&self.part_data).map_err(|error| {
-            CaptureError::InvalidPayload(format!(
-                "invalid JSON in message part {}: {error}",
-                self.part_id
-            ))
-        })?;
-        let role = opencode_message_part_role(&part_data);
-        let part_type = opencode_part_type(Some(&self.part_type), &part_data);
-        let part_seq = opencode_message_part_identity_index(&self.message_id, &self.part_id);
-        let is_patch = part_type == "patch";
-        let (event_data, emits_event) =
-            if let Some(text) = opencode_text_part_text(&part_type, &part_data) {
-                let emits_event = matches!(role.as_str(), "assistant" | "user" | "system")
-                    && !text.trim().is_empty();
-                (
-                    Some(json!({
-                    "role": role.clone(),
-                    "time": { "created": self.time_created },
-                    "text": text,
-                    "source_table": "message+part",
-                    "message_id": self.message_id.clone(),
-                    "part_id": self.part_id.clone(),
-                    "part_type": part_type.clone(),
-                    })),
-                    emits_event,
-                )
-            } else if let Some(tool) = opencode_tool_part_event_data(
-                &self.message_id,
-                &self.part_id,
-                &part_type,
-                self.time_created,
-                &part_data,
-            ) {
-                (Some(tool), true)
-            } else if is_patch {
-                (
-                    Some(json!({
-                        "role": role.clone(),
-                        "time": { "created": self.time_created },
-                        "source_table": "message+part",
-                        "message_id": self.message_id.clone(),
-                        "part_id": self.part_id.clone(),
-                        "part_type": part_type.clone(),
-                    })),
-                    false,
-                )
-            } else {
-                (None, false)
-            };
-        let event = emits_event.then(|| OpenCodeMessageRow {
-            id: format!("{}:{}", self.message_id, self.part_id),
-            session_id: self.source_session_id.clone(),
-            entry_type: if matches!(part_type.as_str(), "tool" | "tool_result" | "result") {
-                "tool".to_owned()
-            } else {
-                role
-            },
-            seq: part_seq,
-            time_created: self.time_created,
-            time_updated: self.time_updated,
-        });
-        Ok(OpenCodeProjectedMessage {
-            row: OpenCodeOptionalMessage { event },
-            data: event_data.unwrap_or(Value::Null),
-            part_file_touch_source: is_patch.then_some(part_data),
-        })
-    }
-}
-
-pub(super) fn opencode_text_value(values: &[CapturedSqliteValue], index: usize) -> Result<&str> {
-    match values.get(index) {
-        Some(CapturedSqliteValue::Text(value)) => Ok(value),
-        _ => Err(CaptureError::SystemInvariant(
-            "OpenCode logical row has an invalid text value",
-        )),
-    }
-}
-
-pub(super) fn opencode_optional_text_value(
-    values: &[CapturedSqliteValue],
-    index: usize,
-) -> Result<Option<String>> {
-    Ok(match opencode_text_value(values, index)? {
-        "" => None,
-        value => Some(value.to_owned()),
-    })
-}
-
-pub(super) fn opencode_integer_value(values: &[CapturedSqliteValue], index: usize) -> Result<i64> {
-    match values.get(index) {
-        Some(CapturedSqliteValue::Integer(value)) => Ok(*value),
-        _ => Err(CaptureError::SystemInvariant(
-            "OpenCode logical row has an invalid integer value",
-        )),
     }
 }

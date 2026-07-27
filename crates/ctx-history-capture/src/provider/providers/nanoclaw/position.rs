@@ -1,7 +1,10 @@
 use crate::captured_batch::{NativeLocator, NativePosition};
 use crate::{CaptureError, Result};
 
-use super::{nanoclaw_captured_error, NANOCLAW_LOCATOR_KIND, NANOCLAW_POSITION_KIND};
+use super::{
+    nanoclaw_captured_error, NANOCLAW_LOCATOR_KIND, NANOCLAW_MESSAGE_LOCATOR_KIND,
+    NANOCLAW_POSITION_KIND,
+};
 
 const NANOCLAW_POSITION_BYTES: usize = 1 + 8 + 1 + 8 + 1 + 8;
 
@@ -31,7 +34,7 @@ impl NanoClawPositionPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum NanoClawMessageSource {
+pub(crate) enum NanoClawMessageSource {
     Inbound,
     Outbound,
 }
@@ -55,26 +58,33 @@ impl NanoClawMessageSource {
         }
     }
 
-    pub(super) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Inbound => "inbound",
             Self::Outbound => "outbound",
         }
     }
 
-    pub(super) fn table(self) -> &'static str {
+    pub(crate) fn table(self) -> &'static str {
         match self {
             Self::Inbound => "messages_in",
             Self::Outbound => "messages_out",
         }
     }
 
-    pub(super) fn file_name(self) -> &'static str {
+    pub(crate) fn file_name(self) -> &'static str {
         match self {
             Self::Inbound => "inbound.db",
             Self::Outbound => "outbound.db",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NanoClawMessageLocator {
+    pub(crate) session_rowid: i64,
+    pub(crate) source: NanoClawMessageSource,
+    pub(crate) message_rowid: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +154,50 @@ pub(super) fn nanoclaw_locator(
     value.push(source.map_or(0, NanoClawMessageSource::tag));
     value.extend_from_slice(&nanoclaw_ordered_i64(rowid).to_be_bytes());
     NativeLocator::new(NANOCLAW_LOCATOR_KIND, value).map_err(nanoclaw_captured_error)
+}
+
+pub(super) fn nanoclaw_message_locator(
+    session_rowid: i64,
+    source: NanoClawMessageSource,
+    message_rowid: i64,
+) -> Result<NativeLocator> {
+    if session_rowid <= 0 || message_rowid <= 0 {
+        return Err(CaptureError::InvalidPayload(
+            "NanoClaw complete-content locator rowids must be positive".to_owned(),
+        ));
+    }
+    let mut value = Vec::with_capacity(17);
+    value.extend_from_slice(&nanoclaw_ordered_i64(session_rowid).to_be_bytes());
+    value.push(source.tag());
+    value.extend_from_slice(&nanoclaw_ordered_i64(message_rowid).to_be_bytes());
+    NativeLocator::new(NANOCLAW_MESSAGE_LOCATOR_KIND, value).map_err(nanoclaw_captured_error)
+}
+
+pub(crate) fn decode_nanoclaw_message_locator(
+    locator: &NativeLocator,
+) -> Result<NanoClawMessageLocator> {
+    if locator.kind() != NANOCLAW_MESSAGE_LOCATOR_KIND || locator.value().len() != 17 {
+        return Err(CaptureError::InvalidPayload(
+            "NanoClaw complete-content locator has an invalid shape".to_owned(),
+        ));
+    }
+    let session_rowid = nanoclaw_unordered_i64(nanoclaw_decode_u64(&locator.value()[..8])?);
+    let source = NanoClawMessageSource::from_tag(locator.value()[8])?.ok_or_else(|| {
+        CaptureError::InvalidPayload(
+            "NanoClaw complete-content locator must select a message database".to_owned(),
+        )
+    })?;
+    let message_rowid = nanoclaw_unordered_i64(nanoclaw_decode_u64(&locator.value()[9..17])?);
+    if session_rowid <= 0 || message_rowid <= 0 {
+        return Err(CaptureError::InvalidPayload(
+            "NanoClaw complete-content locator rowids must be positive".to_owned(),
+        ));
+    }
+    Ok(NanoClawMessageLocator {
+        session_rowid,
+        source,
+        message_rowid,
+    })
 }
 
 fn nanoclaw_decode_u64(bytes: &[u8]) -> Result<u64> {

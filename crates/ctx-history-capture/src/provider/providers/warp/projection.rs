@@ -1,11 +1,12 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, Fidelity, ProviderCaptureEnvelope, ProviderEventEnvelope,
-    ProviderSourceTrust,
+    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
+    ProviderEventEnvelope, ProviderSourceTrust,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::position::warp_content_locator;
 use super::proto::{warp_decode_task, WarpMessageProto};
 use super::sqlite::{
     WARP_CONVERSATION_OVERSIZE_RECORD_KIND, WARP_CONVERSATION_START_RECORD_KIND,
@@ -16,6 +17,9 @@ use crate::captured_batch::{
     SourceObservation,
 };
 use crate::common::time::parse_rfc3339_utc;
+use crate::complete_content::sqlite::{
+    attach_sqlite_complete_content_locator, attach_sqlite_result_content_locator,
+};
 use crate::provider::importer::{
     BoundedParserCheckpoint, CapturedBatchCursorFinish, CapturedBatchProjector,
     CertifiedProviderCursor, ExistingSessionEventOutcome, ProviderProjectionFatal,
@@ -141,6 +145,11 @@ impl WarpCapturedBatchProjector {
         }
         let task_row =
             decode_warp_task_record(record.payload()).map_err(ProviderProjectionFatal::new)?;
+        let CapturedRecordPayload::SqliteValues(task_values) = record.payload() else {
+            return Err(ProviderProjectionFatal::system_invariant(
+                "Warp task record requires SQLite logical values",
+            ));
+        };
         let task = match warp_decode_task(&task_row.task) {
             Ok(task) => task,
             Err(error) => {
@@ -171,7 +180,9 @@ impl WarpCapturedBatchProjector {
         };
         let line = provider_line_from_index(record.ordinal().saturating_add(1));
         for (message_index, message) in task.messages.iter().enumerate() {
-            if message.text.trim().is_empty() {
+            if message.text.trim().is_empty()
+                && message.complete_text.as_deref().is_none_or(str::is_empty)
+            {
                 continue;
             }
             let message_index = u64::try_from(message_index).map_err(|_| {
@@ -190,7 +201,14 @@ impl WarpCapturedBatchProjector {
                         "Warp global provider event index overflowed",
                     )
                 })?;
-            let event = warp_message_event(
+            let locator_index = u32::try_from(message_index).map_err(|_| {
+                ProviderProjectionFatal::system_invariant(
+                    "Warp task message index exceeds the locator range",
+                )
+            })?;
+            let content_locator = warp_content_locator(task_row.rowid, locator_index)
+                .map_err(ProviderProjectionFatal::new)?;
+            let mut event = warp_message_event(
                 &task_row.conversation_id,
                 &task_id,
                 message,
@@ -198,6 +216,28 @@ impl WarpCapturedBatchProjector {
                 provider_event_index,
                 message_time,
             );
+            if let Some(complete_text) = message.complete_text.as_deref() {
+                match event.event_type {
+                    EventType::Message => attach_sqlite_complete_content_locator(
+                        &mut event,
+                        CaptureProvider::Warp,
+                        WARP_SQLITE_SOURCE_FORMAT,
+                        &content_locator,
+                        task_values,
+                        || complete_text.to_owned(),
+                    ),
+                    EventType::ToolOutput => attach_sqlite_result_content_locator(
+                        &mut event,
+                        CaptureProvider::Warp,
+                        WARP_SQLITE_SOURCE_FORMAT,
+                        &content_locator,
+                        task_values,
+                        Some(complete_text.to_owned()),
+                    ),
+                    _ => Ok(()),
+                }
+                .map_err(ProviderProjectionFatal::new)?;
+            }
             let outcome = output.emit_existing_session_event(
                 line,
                 warp_capture(

@@ -2,8 +2,8 @@ use std::{num::NonZeroUsize, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderEventEnvelope, ProviderSourceTrust,
+    AgentType, CaptureProvider, ContentRef, EventRole, EventType, Fidelity,
+    ProviderCaptureEnvelope, ProviderEventEnvelope, ProviderSourceTrust,
 };
 use ctx_history_store::Store;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,9 @@ use crate::captured_batch::{
     CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, ProviderRecordKind,
     SourceObservation, CAPTURE_BATCH_MAX_BATCHES_PER_GROUP,
 };
-use crate::complete_content::structured::attach_structured_complete_content_locator;
+use crate::complete_content::structured::{
+    attach_continue_result_content_locator, attach_structured_complete_content_locator,
+};
 
 use crate::provider::file_touches::{
     visit_provider_file_touches_from_raw_value, ProviderFileTouchSourceContext,
@@ -51,8 +53,8 @@ use whole_json::{
     whole_json_position_ordinal,
 };
 
-const CONTINUE_CAPTURE_REVISION: u32 = 1;
-const CONTINUE_POLICY_REVISION: u32 = 5;
+const CONTINUE_CAPTURE_REVISION: u32 = 2;
+const CONTINUE_POLICY_REVISION: u32 = 6;
 const CONTINUE_RECORD_KIND: &str = "continue-session-json-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +236,7 @@ impl CapturedBatchProjector for ContinueCapturedBatchProjector<'_> {
                 .map_err(ProviderProjectionFatal::new)?;
             return Ok(());
         }
+        let mut next_source_subrecord_index = 0_u32;
         for (item_index, item) in history.iter().enumerate() {
             let provider_event_index = item_index.saturating_add(1) as u64;
             let line = item_index.saturating_add(1);
@@ -254,11 +257,7 @@ impl CapturedBatchProjector for ContinueCapturedBatchProjector<'_> {
                     CaptureProvider::Continue,
                     &mut event,
                     record.ordinal(),
-                    u32::try_from(item_index).map_err(|_| {
-                        ProviderProjectionFatal::system_invariant(
-                            "Continue subrecord index exceeds u32",
-                        )
-                    })?,
+                    next_source_subrecord_index,
                     &native_id,
                     bytes,
                     &complete_text,
@@ -283,6 +282,12 @@ impl CapturedBatchProjector for ContinueCapturedBatchProjector<'_> {
                     ..ProviderNormalizationResult::default()
                 },
             )?;
+            next_source_subrecord_index =
+                next_source_subrecord_index.checked_add(1).ok_or_else(|| {
+                    ProviderProjectionFatal::system_invariant(
+                        "Continue source subrecord index exceeds u32",
+                    )
+                })?;
             let file_touch_outcome = visit_provider_file_touches_from_raw_value(
                 ProviderFileTouchSourceContext::new(
                     CaptureProvider::Continue,
@@ -323,6 +328,84 @@ impl CapturedBatchProjector for ContinueCapturedBatchProjector<'_> {
                     "Continue projected file-touch count overflowed",
                 ))
                 .map_err(ProviderProjectionFatal::new)?;
+            let item_index_u32 = u32::try_from(item_index).map_err(|_| {
+                ProviderProjectionFatal::system_invariant("Continue history index exceeds u32")
+            })?;
+            let states = item
+                .get("toolCallStates")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for (tool_state_index, state) in states.iter().enumerate() {
+                let Some(result_body) = continue_tool_result_body(state) else {
+                    continue;
+                };
+                let tool_state_index = u32::try_from(tool_state_index).map_err(|_| {
+                    ProviderProjectionFatal::system_invariant(
+                        "Continue tool-state index exceeds u32",
+                    )
+                })?;
+                let result = ContinueResultProjection {
+                    history_item_index: item_index_u32,
+                    tool_state_index,
+                    occurred_at,
+                    native_record_id: continue_tool_result_native_id(
+                        item,
+                        item_index_u32,
+                        state,
+                        tool_state_index,
+                    ),
+                    body: result_body,
+                    state: state.clone(),
+                };
+                let provider_event_index = continue_result_provider_event_index(
+                    result.history_item_index,
+                    result.tool_state_index,
+                )
+                .map_err(ProviderProjectionFatal::new)?;
+                let mut event =
+                    continue_tool_result_event(&provider_session_id, &result, provider_event_index);
+                attach_continue_result_content_locator(
+                    &mut event,
+                    record.ordinal(),
+                    next_source_subrecord_index,
+                    result.history_item_index,
+                    result.tool_state_index,
+                    &result.native_record_id,
+                    bytes,
+                    &result.body,
+                )
+                .map_err(ProviderProjectionFatal::new)?;
+                let capture = continue_capture(
+                    &provider_session_id,
+                    &session,
+                    indexed_metadata.as_ref(),
+                    started_at,
+                    &self.raw_source_path,
+                    &self.context,
+                    Some(event),
+                );
+                emit_projected_normalization_units(
+                    output,
+                    ProviderNormalizationResult {
+                        captures: vec![(line, capture)],
+                        ..ProviderNormalizationResult::default()
+                    },
+                )?;
+                next_source_subrecord_index =
+                    next_source_subrecord_index.checked_add(1).ok_or_else(|| {
+                        ProviderProjectionFatal::system_invariant(
+                            "Continue source subrecord index exceeds u32",
+                        )
+                    })?;
+                self.accepted_events = self
+                    .accepted_events
+                    .checked_add(1)
+                    .ok_or(CaptureError::SystemInvariant(
+                        "Continue projected event count overflowed",
+                    ))
+                    .map_err(ProviderProjectionFatal::new)?;
+            }
         }
         self.accepted_sessions = self
             .accepted_sessions
@@ -686,6 +769,164 @@ pub(crate) fn continue_history_item_event(
             "has_tool_calls": has_tool_calls,
         }),
     })
+}
+
+#[derive(Debug)]
+struct ContinueResultProjection {
+    history_item_index: u32,
+    tool_state_index: u32,
+    occurred_at: DateTime<Utc>,
+    native_record_id: String,
+    body: String,
+    state: Value,
+}
+
+pub(crate) fn continue_tool_result_body(state: &Value) -> Option<String> {
+    match state.get("output")? {
+        Value::Null => None,
+        Value::String(output) => Some(output.clone()),
+        output => serde_json::to_string(output).ok(),
+    }
+}
+
+pub(crate) fn continue_tool_result_native_id(
+    item: &Value,
+    history_item_index: u32,
+    state: &Value,
+    tool_state_index: u32,
+) -> String {
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_continue_native_id_part(value));
+    let tool_call_id = state
+        .get("toolCallId")
+        .or_else(|| state.pointer("/toolCall/id"))
+        .and_then(Value::as_str)
+        .filter(|value| valid_continue_native_id_part(value));
+    match (item_id, tool_call_id) {
+        (Some(item_id), Some(tool_call_id)) => {
+            format!("{item_id}:tool:{tool_call_id}:result")
+        }
+        (Some(item_id), None) => format!("{item_id}:tool-state:{tool_state_index}:result"),
+        (None, Some(tool_call_id)) => {
+            format!("history:{history_item_index}:tool:{tool_call_id}:result")
+        }
+        (None, None) => {
+            format!("history:{history_item_index}:tool-state:{tool_state_index}:result")
+        }
+    }
+}
+
+fn valid_continue_native_id_part(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 384 && !value.chars().any(char::is_control)
+}
+
+fn continue_tool_result_event(
+    provider_session_id: &str,
+    result: &ContinueResultProjection,
+    provider_event_index: u64,
+) -> ProviderEventEnvelope {
+    let tool_name = result
+        .state
+        .pointer("/toolCall/function/name")
+        .or_else(|| result.state.pointer("/toolCall/name"))
+        .and_then(Value::as_str)
+        .filter(|value| valid_continue_result_token(value, 256))
+        .unwrap_or("tool");
+    let tool_call_id = result
+        .state
+        .get("toolCallId")
+        .or_else(|| result.state.pointer("/toolCall/id"))
+        .and_then(Value::as_str)
+        .filter(|value| valid_continue_result_token(value, 256));
+    let tool_status = result
+        .state
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|value| valid_continue_result_token(value, 64));
+    let event_type = continue_result_event_type(tool_name);
+    let content_ref = ContentRef::from_bytes(result.body.as_bytes());
+    let mut event = native_event(NativeEventDraft {
+        provider: CaptureProvider::Continue,
+        source_format: CONTINUE_CLI_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index,
+        provider_event_hash: None,
+        cursor: format!(
+            "history:{provider_session_id}:{}:tool-state:{}:result",
+            result.history_item_index, result.tool_state_index
+        ),
+        event_type,
+        role: Some(EventRole::Tool),
+        occurred_at: result.occurred_at,
+        text: result.body.clone(),
+        body: result.state.clone(),
+        metadata: json!({
+            "source": CONTINUE_CLI_SOURCE_FORMAT,
+            "source_format": CONTINUE_CLI_SOURCE_FORMAT,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "tool_status": tool_status,
+            "history_item_index": result.history_item_index,
+            "tool_state_index": result.tool_state_index,
+        }),
+    });
+    if let (Some(object), Some(content_ref)) = (event.payload.as_object_mut(), content_ref) {
+        object.insert("result_content_ref".to_owned(), json!(content_ref));
+        object.insert("tool".to_owned(), json!(tool_name));
+        if let Some(tool_call_id) = tool_call_id {
+            object.insert("call_id".to_owned(), json!(tool_call_id));
+        }
+    }
+    event
+}
+
+fn valid_continue_result_token(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+        })
+}
+
+fn continue_result_provider_event_index(
+    history_item_index: u32,
+    tool_state_index: u32,
+) -> Result<u64> {
+    const RESULT_EVENT_NAMESPACE: u64 = 1_u64 << 63;
+    const TOOL_STATE_BITS: u32 = 31;
+    const MAX_TOOL_STATE_INDEX: u32 = (1_u32 << TOOL_STATE_BITS) - 1;
+    if tool_state_index > MAX_TOOL_STATE_INDEX {
+        return Err(CaptureError::InvalidPayload(
+            "Continue tool-state index exceeds stable result identity bounds".to_owned(),
+        ));
+    }
+    Ok(RESULT_EVENT_NAMESPACE
+        | (u64::from(history_item_index) << TOOL_STATE_BITS)
+        | u64::from(tool_state_index))
+}
+
+fn continue_result_event_type(tool_name: &str) -> EventType {
+    let normalized = tool_name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if matches!(
+        normalized.as_str(),
+        "bash"
+            | "shell"
+            | "terminal"
+            | "command"
+            | "executecommand"
+            | "runcommand"
+            | "runterminalcommand"
+    ) {
+        EventType::CommandOutput
+    } else {
+        EventType::ToolOutput
+    }
 }
 
 pub(crate) fn continue_context_items_text(value: &Value) -> Option<String> {

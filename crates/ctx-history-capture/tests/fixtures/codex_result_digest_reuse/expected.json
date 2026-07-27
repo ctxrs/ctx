@@ -54,13 +54,17 @@
         "tool": "function_call_output"
       },
       "locator": {
-        "body_sha256": "c1d5214c473e236df0277de84b7bfbfbdf1f4aa5d9f9d9ea56a4aaca5ed9e4b8",
-        "family": "jsonl",
-        "kind": "jsonl-range-v1",
-        "native_record_id": "line-2",
-        "record_sha256": "9afa0e00ecbb7409d8a7683d52a273aa26f4df5735c67d7bb1d0626d61bbe7d8",
-        "value_hex": "00000000000000ca000000000000017c",
-        "version": 1
+        "version": 1,
+        "locators": [{
+          "content_role": "result_body",
+          "content_profile": "codex.result-body.v1",
+          "content_ref": {"byte_len": 33, "sha256": "c1d5214c473e236df0277de84b7bfbfbdf1f4aa5d9f9d9ea56a4aaca5ed9e4b8"},
+          "source_family": "jsonl",
+          "address_kind": "jsonl-range-v1",
+          "native_record_id": "line-2",
+          "record_sha256": "9afa0e00ecbb7409d8a7683d52a273aa26f4df5735c67d7bb1d0626d61bbe7d8",
+          "address_value": "00000000000000ca000000000000017c"
+        }]
       }
     },
     {
@@ -116,13 +120,17 @@
         "tool": "custom_tool_call_output"
       },
       "locator": {
-        "body_sha256": "682d0596624e4bd396359b6b7afd562db193657937b150ca21017ca42ebe0b66",
-        "family": "jsonl",
-        "kind": "jsonl-range-v1",
-        "native_record_id": "line-3",
-        "record_sha256": "62a5795fb969914554bdb2c4986897f002fa052c430424eb14447b06ef9bcff4",
-        "value_hex": "000000000000017c0000000000000280",
-        "version": 1
+        "version": 1,
+        "locators": [{
+          "content_role": "result_body",
+          "content_profile": "codex.result-body.v1",
+          "content_ref": {"byte_len": 46, "sha256": "682d0596624e4bd396359b6b7afd562db193657937b150ca21017ca42ebe0b66"},
+          "source_family": "jsonl",
+          "address_kind": "jsonl-range-v1",
+          "native_record_id": "line-3",
+          "record_sha256": "62a5795fb969914554bdb2c4986897f002fa052c430424eb14447b06ef9bcff4",
+          "address_value": "000000000000017c0000000000000280"
+        }]
       }
     },
     {
@@ -178,13 +186,17 @@
         "tool": "tool_search_output"
       },
       "locator": {
-        "body_sha256": "c46428a5265928f89b16d562e9cabed607a6aa5bab918530dc66c12a4c035df0",
-        "family": "jsonl",
-        "kind": "jsonl-range-v1",
-        "native_record_id": "line-4",
-        "record_sha256": "042e2cf25583fee3ec26ee432a1f998d0a98729dabe1ef48f2b55c172b89fbb6",
-        "value_hex": "0000000000000280000000000000033d",
-        "version": 1
+        "version": 1,
+        "locators": [{
+          "content_role": "result_body",
+          "content_profile": "codex.result-body.v1",
+          "content_ref": {"byte_len": 46, "sha256": "c46428a5265928f89b16d562e9cabed607a6aa5bab918530dc66c12a4c035df0"},
+          "source_family": "jsonl",
+          "address_kind": "jsonl-range-v1",
+          "native_record_id": "line-4",
+          "record_sha256": "042e2cf25583fee3ec26ee432a1f998d0a98729dabe1ef48f2b55c172b89fbb6",
+          "address_value": "0000000000000280000000000000033d"
+        }]
       }
     },
     {
@@ -240,13 +252,17 @@
         "tool": "function_call_output"
       },
       "locator": {
-        "body_sha256": "79d0e579ecc0ceaaf3d2c6aded2ae482bb3616d4a2f6bb0a88ea11bf08f5a839",
-        "family": "jsonl",
-        "kind": "jsonl-range-v1",
-        "native_record_id": "line-5",
-        "record_sha256": "095038f7e4691368a8848986eed26239af9e311f3d86aed096e8285ced847f5c",
-        "value_hex": "000000000000033d0000000000000408",
-        "version": 1
+        "version": 1,
+        "locators": [{
+          "content_role": "result_body",
+          "content_profile": "codex.result-body.v1",
+          "content_ref": {"byte_len": 58, "sha256": "79d0e579ecc0ceaaf3d2c6aded2ae482bb3616d4a2f6bb0a88ea11bf08f5a839"},
+          "source_family": "jsonl",
+          "address_kind": "jsonl-range-v1",
+          "native_record_id": "line-5",
+          "record_sha256": "095038f7e4691368a8848986eed26239af9e311f3d86aed096e8285ced847f5c",
+          "address_value": "000000000000033d0000000000000408"
+        }]
       }
     }
   ]

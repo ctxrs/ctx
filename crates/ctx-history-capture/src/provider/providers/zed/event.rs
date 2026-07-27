@@ -557,6 +557,51 @@ fn zed_tool_results_text(value: Option<&Value>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+/// Extracts exact result fields from one validated Zed Agent message.
+/// Display-only tool names, error labels, and image placeholders are excluded.
+pub(crate) fn zed_result_content(message: &Value) -> Option<String> {
+    if zed_message_kind(message) != Some("Agent") || !zed_has_tool_result(message) {
+        return None;
+    }
+    let results = zed_message_inner(message, "Agent")?
+        .get("tool_results")?
+        .as_object()?;
+    let mut parts = Vec::new();
+    for result in results.values() {
+        if let Some(content) = result.get("content").and_then(zed_result_value_text) {
+            parts.push(content);
+        }
+        if let Some(output) = result.get("output").and_then(zed_result_value_text) {
+            parts.push(output);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn zed_result_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        Value::Object(_) => {
+            if let Some((kind, body)) = zed_external_tag(value) {
+                if kind == "Image" {
+                    return None;
+                }
+                return zed_result_value_text(body);
+            }
+            serde_json::to_string(value).ok()
+        }
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(zed_result_value_text)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+    }
+}
+
 fn zed_tool_result_content_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     if let Some(text) = value.as_str() {

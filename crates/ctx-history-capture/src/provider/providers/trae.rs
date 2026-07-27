@@ -1,10 +1,13 @@
 use std::{fs, path::Path};
 
-use ctx_history_core::CaptureProvider;
+use chrono::{DateTime, Utc};
+use ctx_history_core::{CaptureProvider, ProviderEventEnvelope};
 use ctx_history_store::Store;
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
 
 use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
-use crate::captured_batch::{CapturedBatch, SourceObservation};
+use crate::captured_batch::{CapturedBatch, NativeLocator, SourceObservation};
 use crate::provider::importer::{
     captured_batch_cursor_stream, drain_captured_batches, provider_path_identity,
     provider_source_cursor_stream_for_path, CapturedBatchCursorMode, CapturedSourceAdmission,
@@ -44,7 +47,7 @@ pub(crate) const TRAE_CHAT_KEYS: &[&str] = &[
 ];
 
 const TRAE_CAPTURE_REVISION: u32 = 3;
-const TRAE_POLICY_REVISION: u32 = 4;
+const TRAE_POLICY_REVISION: u32 = 5;
 const TRAE_POSITION_KIND: &str = "trae-itemtable-row-keyset-v2";
 const TRAE_CHAT_ROW_LOCATOR_KIND: &str = "trae-itemtable-chat-row-v1";
 const TRAE_FRONTIER_LOCATOR_KIND: &str = "trae-itemtable-frontier-v1";
@@ -54,6 +57,121 @@ const TRAE_CHAT_VALUE_RECORD_KIND: &str = "trae-chat-value-v1";
 const TRAE_FRONTIER_RECORD_KIND: &str = "trae-frontier-v1";
 const TRAE_POSITION_BYTES: usize = 1 + 2 + 4 + 4 + 8;
 const TRAE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 16 * 64;
+const TRAE_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "trae-itemtable-message-v1";
+
+pub(crate) fn trae_complete_message_locator(
+    key_index: u16,
+    session_index: usize,
+    message_index: usize,
+) -> Result<NativeLocator> {
+    let session_index = u32::try_from(session_index)
+        .map_err(|_| CaptureError::InvalidPayload("Trae session index exceeds u32".to_owned()))?;
+    let message_index = u32::try_from(message_index)
+        .map_err(|_| CaptureError::InvalidPayload("Trae message index exceeds u32".to_owned()))?;
+    let mut bytes = Vec::with_capacity(10);
+    bytes.extend_from_slice(&key_index.to_be_bytes());
+    bytes.extend_from_slice(&session_index.to_be_bytes());
+    bytes.extend_from_slice(&message_index.to_be_bytes());
+    NativeLocator::new(TRAE_COMPLETE_MESSAGE_LOCATOR_KIND, bytes).map_err(trae_captured_error)
+}
+
+pub(crate) fn trae_complete_value(conn: &Connection, key_index: u16) -> Result<Option<Vec<u8>>> {
+    let Some(chat_key) = TRAE_CHAT_KEYS.get(usize::from(key_index)) else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "select cast(value as text) from ItemTable where [key] = ?1 and typeof(value) = 'text'",
+        [chat_key],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map(|value| value.map(String::into_bytes))
+    .map_err(CaptureError::from)
+}
+
+pub(crate) fn trae_complete_message(
+    bytes: &[u8],
+    key_index: u16,
+    session_index: u32,
+    message_index: u32,
+    provider_session_id: &str,
+) -> Result<Option<(ProviderEventEnvelope, String)>> {
+    let Some(chat_key) = TRAE_CHAT_KEYS.get(usize::from(key_index)) else {
+        return Ok(None);
+    };
+    let selection = json_stream::trae_session_selection(bytes, chat_key)?;
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let session_index_usize = usize::try_from(session_index)
+        .map_err(|_| CaptureError::InvalidPayload("Trae session index exceeds usize".to_owned()))?;
+    let session = match selection {
+        json_stream::TraeSessionSelection::CnMessages(messages) => {
+            if session_index != 0 {
+                return Ok(None);
+            }
+            json_stream::TraeStreamSession {
+                native_session_id: "trae-cn-input-history".to_owned(),
+                metadata_preview: json!({
+                    "id": "trae-cn-input-history",
+                    "title": "Trae CN input history",
+                }),
+                explicit_started_at: None,
+                explicit_ended_at: None,
+                explicit_title: Some("Trae CN input history".to_owned()),
+                messages,
+            }
+        }
+        json_stream::TraeSessionSelection::Sessions(container) => {
+            let mut sessions = json_stream::TraeJsonContainerValues::new(bytes, container)?;
+            let mut current = 0_usize;
+            let mut selected = None;
+            while let Some(range) = sessions.next_range()? {
+                if current == session_index_usize {
+                    selected = json_stream::trae_stream_session(bytes, range, current)?;
+                    break;
+                }
+                current = current.saturating_add(1);
+            }
+            let Some(session) = selected else {
+                return Ok(None);
+            };
+            session
+        }
+    };
+    let suffix = format!("/{}", session.native_session_id);
+    let Some(workspace_id) = provider_session_id.strip_suffix(&suffix) else {
+        return Ok(None);
+    };
+    if workspace_id.is_empty() {
+        return Ok(None);
+    }
+    let mut messages = json_stream::TraeJsonArrayValues::new(bytes, session.messages)?;
+    let mut current = 0_u32;
+    while let Some(range) = messages.next_range()? {
+        if current == message_index {
+            let message: Value = serde_json::from_slice(&bytes[range])?;
+            let Some(input) = event::trae_event_from_owned_message(
+                provider_session_id,
+                workspace_id,
+                chat_key,
+                message,
+                usize::try_from(message_index).unwrap_or(usize::MAX),
+                DateTime::<Utc>::UNIX_EPOCH,
+                0,
+            ) else {
+                return Ok(None);
+            };
+            let text = input.text.clone();
+            return Ok(Some((
+                event::trae_event(provider_session_id, workspace_id, chat_key, &input),
+                text,
+            )));
+        }
+        current = current.saturating_add(1);
+    }
+    Ok(None)
+}
 
 /// Admits either one `state.vscdb` or a workspace-storage directory and
 /// orchestrates each workspace as an independently revisioned source.

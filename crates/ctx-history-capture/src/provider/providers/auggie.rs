@@ -42,7 +42,7 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-const AUGGIE_CAPTURE_REVISION: u32 = 1;
+const AUGGIE_CAPTURE_REVISION: u32 = 2;
 const AUGGIE_POLICY_REVISION: u32 = 4;
 const AUGGIE_RECORD_KIND: &str = "auggie-session-json-v1";
 const WHOLE_JSON_POSITION_KIND: &str = "whole-json-item-v1";

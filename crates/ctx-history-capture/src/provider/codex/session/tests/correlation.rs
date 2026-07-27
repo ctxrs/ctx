@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::complete_content::{
-    PersistedCompleteContentLocatorV1, RESULT_CONTENT_LOCATOR_METADATA_KEY,
+    VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
 use crate::provider::codex::events::codex_tool_output_event;
 
@@ -173,11 +173,12 @@ fn codex_tool_correlation_is_partition_independent_and_content_free() {
     let content_ref =
         serde_json::from_value::<ContentRef>(output.payload["body"]["result_content_ref"].clone())
             .unwrap();
-    let locator = PersistedCompleteContentLocatorV1::from_metadata_value(
-        &output.sync.metadata[RESULT_CONTENT_LOCATOR_METADATA_KEY],
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &output.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
     )
     .unwrap();
-    assert_eq!(locator.body_sha256().as_str(), content_ref.sha256());
+    let locator = locators.locator(VerifiedContentRole::ResultBody).unwrap();
+    assert_eq!(locator.content_ref(), &content_ref);
     assert_eq!(
         output.payload["body"]["output_bytes"],
         content_ref.byte_len()

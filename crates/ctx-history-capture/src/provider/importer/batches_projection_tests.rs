@@ -133,6 +133,166 @@ fn repeated_session_captures_merge_out_of_order_temporal_bounds() {
         session.sync.metadata["metadata"]["temporal_marker"],
         "first-envelope"
     );
+    let events = store
+        .events_for_session(session.id)
+        .expect("read imported events");
+    assert!(!events.is_empty());
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(events[0].id)
+            .expect("resolve current provider route")
+            .path(),
+        std::path::Path::new("/tmp/captured-batch.jsonl")
+    );
+}
+
+#[test]
+fn route_binding_conflict_rolls_back_captured_batch_projection_and_cursor() {
+    let temp = tempdir().expect("tempdir");
+    let mut store = Store::open(temp.path().join("work.sqlite")).expect("open store");
+    let batch = test_batch("incoming-route-revision", 0, &[0]).into_source_exhausted();
+    let capture = projected_pi_capture();
+    let source_path = capture
+        .source
+        .raw_source_path
+        .as_deref()
+        .expect("fixture source path");
+    let canonical_source_identity = provider_source_identity(
+        capture.provider,
+        &capture.source.source_format,
+        None,
+        Some(source_path),
+        None,
+        &serde_json::Value::Null,
+    )
+    .expect("canonical source identity");
+    let source_id = provider_scoped_source_uuid(
+        capture.provider,
+        &capture.session.provider_session_id,
+        &capture.source.source_format,
+        Some(source_path),
+    );
+    let seed_sync = SyncMetadata {
+        metadata: json!({"fixture": "preexisting-source"}),
+        ..SyncMetadata::default()
+    };
+    let seed_source = CaptureSource {
+        id: source_id,
+        descriptor: CaptureSourceDescriptor {
+            kind: CaptureSourceKind::ProviderImport,
+            provider: capture.provider,
+            machine_id: TEST_MACHINE_ID.to_owned(),
+            process_id: None,
+            cwd: Some("/preexisting/workspace".to_owned()),
+            raw_source_path: Some(source_path.to_owned()),
+            source_format: Some(capture.source.source_format.clone()),
+            source_root: None,
+            source_identity: Some(canonical_source_identity.clone()),
+            external_session_id: Some(capture.session.provider_session_id.clone()),
+        },
+        started_at: "2026-07-16T00:00:00Z".parse().unwrap(),
+        ended_at: None,
+        sync: seed_sync,
+    };
+    store
+        .upsert_capture_source(&seed_source)
+        .expect("seed capture source");
+    let seed_resolution = store
+        .reconcile_provider_source_locator(&ProviderSourceLocatorObservation {
+            provider: capture.provider,
+            source_format: capture.source.source_format.clone(),
+            machine_id: TEST_MACHINE_ID.to_owned(),
+            locator_identity: "preexisting-conflicting-locator".to_owned(),
+            cursor_stream: "preexisting-conflicting-stream".to_owned(),
+            proposed_source_identity: canonical_source_identity.clone(),
+            raw_source_path: Some(source_path.to_owned()),
+            source_revision: "preexisting-route-revision".to_owned(),
+            observed_at_ms: observed_at().timestamp_millis(),
+        })
+        .expect("seed provider locator");
+    let seed_binding = seed_resolution.route_binding();
+    store
+        .bind_capture_source_provider_route(source_id, &seed_binding)
+        .expect("seed conflicting route binding");
+    let archive_before = store.export_archive().expect("export baseline archive");
+
+    // Model a prior admission attempt that reconciled its current physical
+    // locator but did not project canonical rows. The actual CapturedBatch
+    // importer below must reject its conflicting binding atomically.
+    let admission =
+        CapturedSourceAdmission::conversation_without_cross_record_relationships(batch.source());
+    admission
+        .reconcile_provider_locator(&store, observed_at())
+        .expect("reconcile incoming provider route");
+    let incoming_before_projection = admission
+        .canonical_source_override()
+        .expect("incoming route override");
+    let (incoming_source_id, _) = super::super::source_relocation::provider_import_source_id(
+        &store,
+        capture.provider,
+        &capture.session.provider_session_id,
+        &capture.source,
+        Some(&incoming_before_projection),
+    )
+    .expect("resolve incoming capture source");
+    assert_eq!(incoming_source_id, source_id);
+    assert_ne!(incoming_before_projection.route_binding, seed_binding);
+    let mut projector = CaptureProjector {
+        capture,
+        cursor_position: batch.range_end().clone(),
+    };
+    let error = import_captured_batch(
+        &mut store,
+        &admission,
+        &batch,
+        NormalizedProviderImportOptions::default(),
+        TEST_MACHINE_ID,
+        observed_at(),
+        None,
+        &test_position(0),
+        CapturedBatchCursorMode::Resume,
+        &mut projector,
+        || Ok(true),
+    )
+    .expect_err("conflicting route binding must fail the captured batch");
+
+    assert!(matches!(
+        error,
+        CaptureError::Store(StoreError::CaptureSourceProviderRouteConflict {
+            capture_source_id
+        }) if capture_source_id == source_id
+    ));
+    assert_eq!(
+        store
+            .export_archive()
+            .expect("export archive after failure"),
+        archive_before,
+        "the capture source, sessions, and events must roll back together"
+    );
+    assert_eq!(
+        store
+            .get_capture_source(source_id)
+            .expect("read preexisting source"),
+        seed_source
+    );
+    assert!(store
+        .get_sync_cursor(
+            None,
+            TEST_MACHINE_ID,
+            &captured_batch_cursor_stream(batch.source()),
+        )
+        .expect("read unpublished cursor")
+        .is_none());
+    store
+        .bind_capture_source_provider_route(source_id, &seed_binding)
+        .expect("the preexisting binding remains authoritative");
+    let incoming = admission
+        .canonical_source_override()
+        .expect("incoming route was reconciled before projection");
+    assert!(matches!(
+        store.bind_capture_source_provider_route(source_id, &incoming.route_binding),
+        Err(StoreError::CaptureSourceProviderRouteConflict { .. })
+    ));
 }
 
 #[test]
@@ -289,7 +449,7 @@ fn accepted_events_persist_exact_source_record_coordinates() {
         assert!(event
             .sync
             .metadata
-            .get(crate::complete_content::COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
+            .get(crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
             .is_none());
         assert_eq!(event.sync.metadata["source_record_ordinal"], 7);
         assert_eq!(

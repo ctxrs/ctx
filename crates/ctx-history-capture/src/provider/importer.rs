@@ -16,10 +16,7 @@ use ctx_history_store::{ProviderEventHashAuthority, Store, StoreError};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::complete_content::{
-    PersistedCompleteContentLocatorV1, COMPLETE_CONTENT_LOCATOR_METADATA_KEY,
-    RESULT_CONTENT_LOCATOR_METADATA_KEY,
-};
+use crate::complete_content::{VerifiedContentLocatorsV1, VERIFIED_CONTENT_LOCATORS_METADATA_KEY};
 use crate::compute_payload_hash;
 use crate::{
     CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext,
@@ -438,6 +435,9 @@ pub(crate) fn import_provider_capture_line_with_canonical_source(
     };
     if caches.processed_sources.insert(source_id) {
         store.upsert_capture_source(&source_record)?;
+        if let Some(canonical_source) = canonical_source {
+            store.bind_capture_source_provider_route(source_id, &canonical_source.route_binding)?;
+        }
     }
 
     let session_id = provider_import_session_uuid(
@@ -645,9 +645,7 @@ fn import_provider_event_for_session(
     let payload = event.payload.clone();
     let mut event_metadata = event.metadata.clone();
     let source_record_coordinates = take_source_record_coordinates(&mut event_metadata)?;
-    let complete_content_locator = take_complete_content_locator(&mut event_metadata)?;
-    let result_content_locator =
-        take_content_locator(&mut event_metadata, RESULT_CONTENT_LOCATOR_METADATA_KEY)?;
+    let verified_content_locators = take_verified_content_locators(&mut event_metadata)?;
     let (event_hash, event_hash_authority) = match &event.provider_event_hash {
         Some(hash) => (hash.clone(), ProviderEventHashAuthority::ProviderSupplied),
         None => (
@@ -722,16 +720,11 @@ fn import_provider_event_for_session(
             .map(|coordinates| coordinates.1),
         "metadata": event_metadata,
     });
-    if let Some(locator) = complete_content_locator {
+    if let Some(locators) = verified_content_locators {
         normalized_metadata
             .as_object_mut()
             .expect("normalized provider metadata is an object")
-            .insert(COMPLETE_CONTENT_LOCATOR_METADATA_KEY.to_owned(), locator);
-    }
-    if let Some(locator) = result_content_locator {
-        if let Some(object) = normalized_metadata.as_object_mut() {
-            object.insert(RESULT_CONTENT_LOCATOR_METADATA_KEY.to_owned(), locator);
-        }
+            .insert(VERIFIED_CONTENT_LOCATORS_METADATA_KEY.to_owned(), locators);
     }
     let persisted_payload = compact_provider_result_payload(event.event_type, &payload);
     let normalized_event = Event {
@@ -787,24 +780,17 @@ fn import_provider_event_for_session(
     Ok(())
 }
 
-fn take_complete_content_locator(metadata: &mut Value) -> Result<Option<Value>> {
-    take_content_locator(metadata, COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
-}
-
-fn take_content_locator(metadata: &mut Value, key: &str) -> Result<Option<Value>> {
+fn take_verified_content_locators(metadata: &mut Value) -> Result<Option<Value>> {
     let Some(object) = metadata.as_object_mut() else {
         return Ok(None);
     };
-    let Some(value) = object.remove(key) else {
+    let Some(value) = object.remove(VERIFIED_CONTENT_LOCATORS_METADATA_KEY) else {
         return Ok(None);
     };
-    let locator =
-        PersistedCompleteContentLocatorV1::from_metadata_value(&value).ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "complete content locator annotation is malformed".to_owned(),
-            )
-        })?;
-    Ok(Some(locator.to_metadata_value()))
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(&value).ok_or_else(|| {
+        CaptureError::InvalidPayload("verified content locator annotation is malformed".to_owned())
+    })?;
+    Ok(Some(locators.to_metadata_value()))
 }
 
 fn take_source_record_coordinates(metadata: &mut Value) -> Result<Option<(u64, u32)>> {

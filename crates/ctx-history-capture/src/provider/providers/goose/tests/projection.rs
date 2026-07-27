@@ -142,13 +142,12 @@ fn goose_production_import_rejects_bad_message_rows_and_persists_valid_siblings(
         NormalizedProviderImportOptions::default(),
     )
     .unwrap();
-    assert_eq!(
-        replay,
-        ProviderImportSummary {
-            failed: 4,
-            ..ProviderImportSummary::default()
-        }
-    );
+    let mut expected = ProviderImportSummary {
+        failed: 4,
+        ..ProviderImportSummary::default()
+    };
+    expected.set_work_result(crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(replay, expected);
     assert_eq!(store.list_sessions().unwrap().len(), 2);
     assert_eq!(store.events_for_session(valid.id).unwrap().len(), 1);
 }
@@ -248,6 +247,8 @@ fn goose_streams_exact_ordered_touches_after_capture_with_distinct_source_root()
         NormalizedProviderImportOptions::default(),
     )
     .unwrap();
-    assert_eq!(replay, ProviderImportSummary::default());
+    let mut expected = ProviderImportSummary::default();
+    expected.set_work_result(crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(replay, expected);
     assert_eq!(store.export_archive().unwrap().files_touched.len(), 3);
 }

@@ -5,10 +5,11 @@ use ctx_history_capture::complete_content::jsonl::{
     JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
 };
 use ctx_history_capture::complete_content::{
-    CompleteContentBodyDigest, CompleteContentErrorKind, CompleteContentHashAuthority,
-    CompleteContentResolver, CompleteContentSourceFamily, CompleteContentSourceLocator,
-    CompleteMessageRequest, PersistedCompleteContentLocatorV1, SourceSnapshot,
-    COMPLETE_CONTENT_LOCATOR_METADATA_KEY,
+    verified_content_profile, AuthorizedSourceRoute, CompleteContentBodyDigest,
+    CompleteContentErrorKind, CompleteContentHashAuthority, CompleteContentResolver,
+    CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessageRequest,
+    SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorsV1, VerifiedContentRole,
+    VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
 use ctx_history_capture::{
     import_antigravity_cli_history, import_codebuddy_history, import_kimi_code_cli_history,
@@ -16,7 +17,7 @@ use ctx_history_capture::{
     CodeBuddyImportOptions, KimiCodeCliImportOptions, MistralVibeImportOptions,
     OpenClawImportOptions,
 };
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ContentRef};
 use ctx_history_store::{RawSqlOptions, RawSqlValue, Store};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -26,6 +27,16 @@ use uuid::Uuid;
 const INDEXED_LIMIT: usize = 16_000;
 const CAPABILITY_MATRIX: &str =
     include_str!("../../../docs/complete-content-provider-capabilities.json");
+
+fn message_locator(
+    value: &serde_json::Value,
+) -> ctx_history_capture::complete_content::VerifiedContentLocatorV1 {
+    VerifiedContentLocatorsV1::from_metadata_value(value)
+        .unwrap()
+        .locator(VerifiedContentRole::MessageBody)
+        .unwrap()
+        .clone()
+}
 
 fn provider_cursor_count(store: &Store) -> i64 {
     let result = store
@@ -75,6 +86,49 @@ struct Fixture {
     request: CompleteMessageRequest,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn admit_jsonl(
+    event_id: Uuid,
+    provider: CaptureProvider,
+    source_format: &str,
+    path: PathBuf,
+    root: Option<PathBuf>,
+    source_identity: Option<String>,
+    source_snapshot: SourceSnapshot,
+) -> ctx_history_capture::complete_content::BrokeredSourceAccess {
+    SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider,
+                source_format: source_format.to_owned(),
+                family: CompleteContentSourceFamily::Jsonl,
+                raw_source_path: path,
+                source_root: root,
+                source_identity,
+                source_snapshot,
+            },
+            event_id,
+        )
+        .unwrap()
+}
+
+fn refresh_antigravity_access(fixture: &mut Fixture, snapshot_size: u64) {
+    fixture.request.source_access = admit_jsonl(
+        fixture.request.event_id,
+        CaptureProvider::Antigravity,
+        "antigravity_cli_transcript_jsonl_tree",
+        fixture.path.clone(),
+        Some(fixture.temp.path().to_path_buf()),
+        Some("stable-source-identity".to_owned()),
+        SourceSnapshot {
+            size_bytes: Some(snapshot_size),
+            modified_at_ms: None,
+            sha256: None,
+        },
+    );
+}
+
 fn antigravity_fixture() -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("session.jsonl");
@@ -92,20 +146,35 @@ fn antigravity_fixture() -> Fixture {
     record.push(b'\n');
     fs::write(&path, &record).unwrap();
     let range = range_locator(0, record.len() as u64);
-    let request = CompleteMessageRequest {
-        event_id: Uuid::from_u128(1),
-        provider: CaptureProvider::Antigravity,
-        source_format: "antigravity_cli_transcript_jsonl_tree".to_owned(),
-        raw_source_path: path.clone(),
-        source_root: Some(temp.path().to_path_buf()),
-        source_identity: Some("stable-source-identity".to_owned()),
-        source_family: Some(CompleteContentSourceFamily::Jsonl),
-        source_locator: Some(range),
-        source_snapshot: SourceSnapshot {
+    let event_id = Uuid::from_u128(1);
+    let source_access = admit_jsonl(
+        event_id,
+        CaptureProvider::Antigravity,
+        "antigravity_cli_transcript_jsonl_tree",
+        path.clone(),
+        Some(temp.path().to_path_buf()),
+        Some("stable-source-identity".to_owned()),
+        SourceSnapshot {
             size_bytes: Some(record.len() as u64),
             modified_at_ms: None,
             sha256: None,
         },
+    );
+    let request = CompleteMessageRequest {
+        event_id,
+        provider: CaptureProvider::Antigravity,
+        source_format: "antigravity_cli_transcript_jsonl_tree".to_owned(),
+        source_access,
+        source_family: Some(CompleteContentSourceFamily::Jsonl),
+        content_profile: verified_content_profile(
+            CaptureProvider::Antigravity,
+            "antigravity_cli_transcript_jsonl_tree",
+            CompleteContentSourceFamily::Jsonl,
+            VerifiedContentRole::MessageBody,
+        )
+        .unwrap()
+        .to_owned(),
+        source_locator: Some(range),
         provider_session_id: Some("complete-antigravity".to_owned()),
         source_record_ordinal: 0,
         source_record_subrecord_index: 0,
@@ -113,7 +182,7 @@ fn antigravity_fixture() -> Fixture {
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
         expected_native_record_id: Some("step-0".to_owned()),
         expected_record_digest: Some(digest_bytes(record_payload_bytes(&record))),
-        expected_body_digest: Some(CompleteContentBodyDigest::from_text(&body)),
+        expected_content_ref: ContentRef::from_bytes(body.as_bytes()),
         indexed_text: body.chars().take(INDEXED_LIMIT).collect(),
         indexed_limit_chars: INDEXED_LIMIT,
     };
@@ -155,12 +224,15 @@ fn resolves_exact_unicode_body_after_append_and_move() {
     let mut appended = fixture.record.clone();
     appended.extend_from_slice(b"{\"step_index\":1,\"type\":\"SYSTEM_MESSAGE\"}\n");
     fs::write(&fixture.path, appended).unwrap();
+    let original_size = fixture.record.len() as u64;
+    refresh_antigravity_access(&mut fixture, original_size);
     let result = resolver.resolve(&[fixture.request.clone()]).unwrap();
     assert_eq!(result[0].text, fixture.body);
 
     let moved = fixture.temp.path().join("moved.jsonl");
     fs::rename(&fixture.path, &moved).unwrap();
-    fixture.request.raw_source_path = moved;
+    fixture.path = moved;
+    refresh_antigravity_access(&mut fixture, original_size);
     let result = resolver.resolve(&[fixture.request]).unwrap();
     assert_eq!(result[0].text, fixture.body);
 }
@@ -171,7 +243,8 @@ fn resolves_crlf_record_ranges_without_changing_the_record_digest() {
     fixture.record.insert(fixture.record.len() - 1, b'\r');
     fs::write(&fixture.path, &fixture.record).unwrap();
     fixture.request.source_locator = Some(range_locator(0, fixture.record.len() as u64));
-    fixture.request.source_snapshot.size_bytes = Some(fixture.record.len() as u64);
+    let snapshot_size = fixture.record.len() as u64;
+    refresh_antigravity_access(&mut fixture, snapshot_size);
 
     let result = JsonlCompleteContentResolver::new()
         .resolve(&[fixture.request])
@@ -194,12 +267,12 @@ fn rewrite_truncate_and_delete_fail_closed() {
     let fixture = antigravity_fixture();
     fs::write(&fixture.path, b"{}\n").unwrap();
     let error = resolver.resolve(&[fixture.request]).unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceRecordMissing);
 
     let fixture = antigravity_fixture();
     fs::remove_file(&fixture.path).unwrap();
     let error = resolver.resolve(&[fixture.request]).unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceMissing);
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
 }
 
 #[test]
@@ -246,7 +319,7 @@ fn locator_digest_and_indexed_prefix_mismatches_fail_atomically() {
     let mut source = fixture.record.clone();
     source.extend_from_slice(&second_record);
     fs::write(&fixture.path, source).unwrap();
-    fixture.request.source_snapshot.size_bytes = Some(total_length);
+    refresh_antigravity_access(&mut fixture, total_length);
     let mut second_request = fixture.request.clone();
     second_request.event_id = Uuid::from_u128(2);
     second_request.source_locator = Some(range_locator(second_start, total_length));
@@ -255,7 +328,7 @@ fn locator_digest_and_indexed_prefix_mismatches_fail_atomically() {
     second_request.expected_native_record_id = Some("step-1".to_owned());
     second_request.expected_record_digest =
         Some(digest_bytes(record_payload_bytes(&second_record)));
-    second_request.expected_body_digest = Some(CompleteContentBodyDigest::from_text("wrong"));
+    second_request.expected_content_ref = ContentRef::from_bytes(b"wrong");
     let error = resolver
         .resolve(&[fixture.request, second_request])
         .unwrap_err();
@@ -268,9 +341,22 @@ fn locator_digest_and_indexed_prefix_mismatches_fail_atomically() {
 #[test]
 fn traversal_and_missing_locator_are_rejected_without_scanning() {
     let resolver = JsonlCompleteContentResolver::new();
-    let mut fixture = antigravity_fixture();
-    fixture.request.raw_source_path = PathBuf::from("../outside.jsonl");
-    let error = resolver.resolve(&[fixture.request]).unwrap_err();
+    let fixture = antigravity_fixture();
+    let error = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::Antigravity,
+                source_format: fixture.request.source_format.clone(),
+                family: CompleteContentSourceFamily::Jsonl,
+                raw_source_path: PathBuf::from("../outside.jsonl"),
+                source_root: Some(fixture.temp.path().to_path_buf()),
+                source_identity: Some("stable-source-identity".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            fixture.request.event_id,
+        )
+        .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
 
     let mut fixture = antigravity_fixture();
@@ -284,12 +370,47 @@ fn traversal_and_missing_locator_are_rejected_without_scanning() {
 fn symlinked_sources_are_rejected() {
     use std::os::unix::fs::symlink;
 
-    let resolver = JsonlCompleteContentResolver::new();
-    let mut fixture = antigravity_fixture();
+    let fixture = antigravity_fixture();
     let link = fixture.temp.path().join("linked.jsonl");
     symlink(&fixture.path, &link).unwrap();
-    fixture.request.raw_source_path = link;
-    let error = resolver.resolve(&[fixture.request]).unwrap_err();
+    let error = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::Antigravity,
+                source_format: fixture.request.source_format.clone(),
+                family: CompleteContentSourceFamily::Jsonl,
+                raw_source_path: link,
+                source_root: Some(fixture.temp.path().to_path_buf()),
+                source_identity: Some("stable-source-identity".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            fixture.request.event_id,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
+
+    let linked_parent = fixture.temp.path().join("linked-parent");
+    let real_parent = fixture.temp.path().join("real-parent");
+    fs::create_dir(&real_parent).unwrap();
+    let nested = real_parent.join("nested.jsonl");
+    fs::copy(&fixture.path, &nested).unwrap();
+    symlink(&real_parent, &linked_parent).unwrap();
+    let error = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::Antigravity,
+                source_format: fixture.request.source_format,
+                family: CompleteContentSourceFamily::Jsonl,
+                raw_source_path: linked_parent.join("nested.jsonl"),
+                source_root: Some(fixture.temp.path().to_path_buf()),
+                source_identity: Some("stable-source-identity".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            fixture.request.event_id,
+        )
+        .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
 }
 
@@ -340,29 +461,33 @@ fn import_persists_only_truncated_message_locators_and_the_resolver_consumes_the
     let session = store.list_sessions().unwrap().pop().unwrap();
     let events = store.events_for_session(session.id).unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events[0].sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY].is_null());
+    assert!(events[0].sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].is_null());
 
     let event = &events[1];
-    let persisted = PersistedCompleteContentLocatorV1::from_metadata_value(
-        &event.sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY],
-    )
-    .unwrap();
+    let persisted = message_locator(&event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY]);
     assert_eq!(persisted.family(), CompleteContentSourceFamily::Jsonl);
     assert_eq!(persisted.kind(), JSONL_COMPLETE_CONTENT_LOCATOR_KIND);
-    let request = CompleteMessageRequest {
-        event_id: event.id,
-        provider: CaptureProvider::Antigravity,
-        source_format: "antigravity_cli_transcript_jsonl_tree".to_owned(),
-        raw_source_path: path,
-        source_root: Some(root),
-        source_identity: Some("stable-import-source".to_owned()),
-        source_family: Some(CompleteContentSourceFamily::Jsonl),
-        source_locator: persisted.source_locator(),
-        source_snapshot: SourceSnapshot {
+    let source_access = admit_jsonl(
+        event.id,
+        CaptureProvider::Antigravity,
+        "antigravity_cli_transcript_jsonl_tree",
+        path,
+        Some(root),
+        Some("stable-import-source".to_owned()),
+        SourceSnapshot {
             size_bytes: Some(source.len() as u64),
             modified_at_ms: None,
             sha256: None,
         },
+    );
+    let request = CompleteMessageRequest {
+        event_id: event.id,
+        provider: CaptureProvider::Antigravity,
+        source_format: "antigravity_cli_transcript_jsonl_tree".to_owned(),
+        source_access,
+        source_family: Some(CompleteContentSourceFamily::Jsonl),
+        content_profile: persisted.content_profile().to_owned(),
+        source_locator: persisted.source_locator(),
         provider_session_id: Some("complete-import".to_owned()),
         source_record_ordinal: event.sync.metadata["source_record_ordinal"]
             .as_u64()
@@ -377,7 +502,7 @@ fn import_persists_only_truncated_message_locators_and_the_resolver_consumes_the
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
         expected_native_record_id: Some(persisted.native_record_id().to_owned()),
         expected_record_digest: Some(persisted.record_sha256().clone()),
-        expected_body_digest: Some(persisted.body_sha256().clone()),
+        expected_content_ref: Some(persisted.content_ref().clone()),
         indexed_text: event.payload["body"]["text"].as_str().unwrap().to_owned(),
         indexed_limit_chars: INDEXED_LIMIT,
     };
@@ -439,7 +564,7 @@ fn provider_root_move_preserves_import_identity_restart_and_complete_content() {
         .unwrap();
     let original_source_identity = original_source.descriptor.source_identity.clone();
     let original_locator =
-        original_events[1].sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY].clone();
+        original_events[1].sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].clone();
     assert_eq!(provider_cursor_count(&store), 1);
 
     let new_root = temp.path().join("new-brain");
@@ -481,27 +606,33 @@ fn provider_root_move_preserves_import_identity_restart_and_complete_content() {
         Some(new_path.to_string_lossy().as_ref())
     );
     assert_eq!(
-        moved_events[1].sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY],
+        moved_events[1].sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
         original_locator
     );
     assert_eq!(provider_cursor_count(&store), 2);
 
-    let persisted =
-        PersistedCompleteContentLocatorV1::from_metadata_value(&original_locator).unwrap();
-    let request = CompleteMessageRequest {
-        event_id: moved_events[1].id,
-        provider: CaptureProvider::Antigravity,
-        source_format: "antigravity_cli_transcript_jsonl_tree".to_owned(),
-        raw_source_path: new_path.clone(),
-        source_root: Some(new_root.clone()),
-        source_identity: moved_source.descriptor.source_identity,
-        source_family: Some(CompleteContentSourceFamily::Jsonl),
-        source_locator: persisted.source_locator(),
-        source_snapshot: SourceSnapshot {
+    let persisted = message_locator(&original_locator);
+    let source_access = admit_jsonl(
+        moved_events[1].id,
+        CaptureProvider::Antigravity,
+        "antigravity_cli_transcript_jsonl_tree",
+        new_path.clone(),
+        Some(new_root.clone()),
+        moved_source.descriptor.source_identity.clone(),
+        SourceSnapshot {
             size_bytes: Some(original.len() as u64),
             modified_at_ms: None,
             sha256: None,
         },
+    );
+    let request = CompleteMessageRequest {
+        event_id: moved_events[1].id,
+        provider: CaptureProvider::Antigravity,
+        source_format: "antigravity_cli_transcript_jsonl_tree".to_owned(),
+        source_access,
+        source_family: Some(CompleteContentSourceFamily::Jsonl),
+        content_profile: persisted.content_profile().to_owned(),
+        source_locator: persisted.source_locator(),
         provider_session_id: Some("moved-session".to_owned()),
         source_record_ordinal: moved_events[1].sync.metadata["source_record_ordinal"]
             .as_u64()
@@ -517,7 +648,7 @@ fn provider_root_move_preserves_import_identity_restart_and_complete_content() {
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
         expected_native_record_id: Some(persisted.native_record_id().to_owned()),
         expected_record_digest: Some(persisted.record_sha256().clone()),
-        expected_body_digest: Some(persisted.body_sha256().clone()),
+        expected_content_ref: Some(persisted.content_ref().clone()),
         indexed_text: moved_events[1].payload["body"]["text"]
             .as_str()
             .unwrap()
@@ -588,7 +719,7 @@ fn persisted_request_for_provider(
         let events = store.events_for_session(session.id).unwrap();
         let Some(event) = events
             .iter()
-            .find(|event| event.sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY].is_object())
+            .find(|event| event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].is_object())
         else {
             continue;
         };
@@ -601,22 +732,20 @@ fn persisted_request_for_provider(
             events
                 .iter()
                 .filter(|event| {
-                    event.sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY].is_object()
+                    event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].is_object()
                 })
                 .count(),
         ));
         if source.descriptor.provider != provider {
             continue;
         }
-        let persisted = PersistedCompleteContentLocatorV1::from_metadata_value(
-            &event.sync.metadata[COMPLETE_CONTENT_LOCATOR_METADATA_KEY],
-        )
-        .unwrap();
+        let persisted =
+            message_locator(&event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY]);
         assert_eq!(persisted.kind(), EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND);
         assert!(!event
             .payload
             .to_string()
-            .contains(COMPLETE_CONTENT_LOCATOR_METADATA_KEY));
+            .contains(VERIFIED_CONTENT_LOCATORS_METADATA_KEY));
         let authority = match event.sync.metadata["provider_event_hash_authority"].as_str() {
             Some("provider_supplied") => CompleteContentHashAuthority::ProviderSupplied,
             Some("normalized_payload_fallback") => {
@@ -624,22 +753,31 @@ fn persisted_request_for_provider(
             }
             value => panic!("unexpected hash authority: {value:?}"),
         };
+        let source_format = source.descriptor.source_format.clone().unwrap();
+        let snapshot = SourceSnapshot {
+            size_bytes: source.sync.metadata["last_imported_size_bytes"].as_u64(),
+            modified_at_ms: source.sync.metadata["last_imported_modified_at_ms"].as_i64(),
+            sha256: source.sync.metadata["last_imported_sha256"]
+                .as_str()
+                .map(str::to_owned),
+        };
+        let source_access = admit_jsonl(
+            event.id,
+            provider,
+            &source_format,
+            PathBuf::from(source.descriptor.raw_source_path.clone().unwrap()),
+            source.descriptor.source_root.clone().map(PathBuf::from),
+            source.descriptor.source_identity.clone(),
+            snapshot,
+        );
         return CompleteMessageRequest {
             event_id: event.id,
             provider,
-            source_format: source.descriptor.source_format.unwrap(),
-            raw_source_path: PathBuf::from(source.descriptor.raw_source_path.unwrap()),
-            source_root: source.descriptor.source_root.map(PathBuf::from),
-            source_identity: source.descriptor.source_identity,
+            source_format,
+            source_access,
             source_family: Some(CompleteContentSourceFamily::Jsonl),
+            content_profile: persisted.content_profile().to_owned(),
             source_locator: persisted.source_locator(),
-            source_snapshot: SourceSnapshot {
-                size_bytes: source.sync.metadata["last_imported_size_bytes"].as_u64(),
-                modified_at_ms: source.sync.metadata["last_imported_modified_at_ms"].as_i64(),
-                sha256: source.sync.metadata["last_imported_sha256"]
-                    .as_str()
-                    .map(str::to_owned),
-            },
             provider_session_id: session.external_session_id,
             source_record_ordinal: event.sync.metadata["source_record_ordinal"]
                 .as_u64()
@@ -654,7 +792,7 @@ fn persisted_request_for_provider(
             expected_hash_authority: authority,
             expected_native_record_id: Some(persisted.native_record_id().to_owned()),
             expected_record_digest: Some(persisted.record_sha256().clone()),
-            expected_body_digest: Some(persisted.body_sha256().clone()),
+            expected_content_ref: Some(persisted.content_ref().clone()),
             indexed_text: event.payload["body"]["text"].as_str().unwrap().to_owned(),
             indexed_limit_chars: INDEXED_LIMIT,
         };
@@ -896,9 +1034,16 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
         },
     )
     .unwrap();
-    assert!(provider_cursor_rows(&store).iter().all(|(_, _, cursor)| {
-        serde_json::from_str::<serde_json::Value>(cursor).unwrap()["o"] == 5
-    }));
+    let mut policy_revisions = provider_cursor_rows(&store)
+        .iter()
+        .map(|(_, _, cursor)| {
+            serde_json::from_str::<serde_json::Value>(cursor).unwrap()["o"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    policy_revisions.sort_unstable();
+    assert_eq!(policy_revisions, vec![5, 6, 6, 6]);
     for (provider, event_id, locator_value) in stable_events {
         let rebuilt = persisted_request_for_provider(&store, provider);
         assert_eq!(rebuilt.event_id, event_id);
@@ -948,7 +1093,15 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
     let mut substituted = persisted_request_for_provider(&store, CaptureProvider::CodeBuddy);
     let copied_codebuddy = codebuddy_path.with_file_name("copied-session.jsonl");
     fs::copy(&codebuddy_path, &copied_codebuddy).unwrap();
-    substituted.raw_source_path = copied_codebuddy;
+    substituted.source_access = admit_jsonl(
+        substituted.event_id,
+        CaptureProvider::CodeBuddy,
+        &substituted.source_format,
+        copied_codebuddy,
+        Some(codebuddy_root.clone()),
+        Some("codebuddy-substitution".to_owned()),
+        SourceSnapshot::default(),
+    );
     let error = JsonlCompleteContentResolver::new()
         .resolve(&[substituted])
         .unwrap_err();
@@ -971,18 +1124,18 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
     let error = JsonlCompleteContentResolver::new()
         .resolve(std::slice::from_ref(&codebuddy_request))
         .unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceMissing);
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
     fs::rename(&moved_codebuddy, &codebuddy_path).unwrap();
     fs::write(&codebuddy_path, b"{}\n").unwrap();
     let error = JsonlCompleteContentResolver::new()
         .resolve(std::slice::from_ref(&codebuddy_request))
         .unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceRecordMissing);
     fs::remove_file(&codebuddy_path).unwrap();
     let error = JsonlCompleteContentResolver::new()
         .resolve(&[codebuddy_request])
         .unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceMissing);
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceRecordMissing);
 
     for (provider, path) in [
         (

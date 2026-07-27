@@ -53,7 +53,10 @@ pub use raw_sql::{
     RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
-pub use source_locators::{ProviderSourceLocatorObservation, ProviderSourceLocatorResolution};
+pub use source_locators::{
+    AuthorizedSourceRoute, ProviderSourceLocatorObservation, ProviderSourceLocatorResolution,
+    ProviderSourceRouteBinding,
+};
 
 use std::{
     cell::Cell,
@@ -65,7 +68,11 @@ use std::{
 use rusqlite::Connection;
 
 pub const SCHEMA_VERSION: i64 = 47;
-pub const FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v3";
+pub const FINAL_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v5";
+/// Projection input did not change with the local-only verified locator schema.
+/// Neither the verified locator cleanup nor local provider-route binding changes
+/// the canonical helper input. Keep the frozen helper contract on v3.
+pub const CANONICAL_PROJECTION_SCHEMA_IDENTITY: &str = "ctx-store-schema-47-final-v3";
 
 pub struct Store {
     path: PathBuf,

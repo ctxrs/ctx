@@ -12,7 +12,9 @@ use crate::captured_batch::{
     CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, SourceObservation,
     StructuralRejectionKind,
 };
-use crate::complete_content::structured::attach_structured_complete_content_locator;
+use crate::complete_content::structured::{
+    attach_structured_complete_content_locator, attach_structured_result_content_locator,
+};
 use crate::provider::file_touches::{
     visit_provider_file_touches_from_raw_value, ProviderFileTouchSourceContext,
     PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
@@ -277,6 +279,18 @@ impl CapturedBatchProjector for OpenHandsCapturedBatchProjector {
             decoded.text(),
         )
         .map_err(ProviderProjectionFatal::new)?;
+        if let Some(content) = super::openhands_result_content(&decoded) {
+            attach_structured_result_content_locator(
+                CaptureProvider::OpenHands,
+                &mut event,
+                record.ordinal(),
+                0,
+                decoded.event_id(),
+                bytes,
+                &content,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
         let raw_source_path = path.display().to_string();
         let conversation_dir = self.conversation_dir.display().to_string();
         let extract_file_touches = !matches!(

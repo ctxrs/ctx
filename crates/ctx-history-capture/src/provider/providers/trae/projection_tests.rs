@@ -30,6 +30,7 @@ struct CollectingOutput {
     rejections: usize,
     event_hashes: Vec<String>,
     event_texts: Vec<String>,
+    verified_message_locators: usize,
 }
 
 impl ProviderProjectionOutput for CollectingOutput {
@@ -39,6 +40,14 @@ impl ProviderProjectionOutput for CollectingOutput {
     ) -> ProviderProjectionResult<()> {
         for (_, capture) in normalization.captures {
             if let Some(event) = capture.event {
+                if event
+                    .metadata
+                    .get(crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
+                    .is_some()
+                {
+                    self.verified_message_locators =
+                        self.verified_message_locators.saturating_add(1);
+                }
                 self.event_captures = self.event_captures.saturating_add(1);
                 self.event_hashes
                     .push(event.provider_event_hash.unwrap_or_default());
@@ -58,6 +67,46 @@ impl ProviderProjectionOutput for CollectingOutput {
     fn reject_record(&mut self, _line_number: usize, _reason: String) {
         self.rejections = self.rejections.saturating_add(1);
     }
+}
+
+#[test]
+fn long_message_gets_one_path_free_itemtable_locator() {
+    let conn = Connection::open_in_memory().unwrap();
+    create_item_table(&conn);
+    let body = format!(
+        "Trae complete message {}",
+        "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 64)
+    );
+    let value = json!({
+        "list": [{
+            "id": "session-1",
+            "messages": [{"id": "message-1", "role": "user", "content": body}]
+        }],
+    })
+    .to_string();
+    conn.execute(
+        "insert into ItemTable (key, value) values (?1, ?2)",
+        rusqlite::params![TRAE_CHAT_KEYS[0], value],
+    )
+    .unwrap();
+    let mut fetcher = TraeRowFetcher::new(&conn, 1).unwrap();
+    let logical = fetcher
+        .fetch(initial_trae_position().unwrap())
+        .unwrap()
+        .unwrap();
+    let mut projector = TraeCapturedBatchProjector {
+        context: context(),
+        workspace_id: "workspace".to_owned(),
+        workspace_folder: None,
+        workspace_ordinal: 1,
+        projected_chat_values: 0,
+    };
+    let mut output = CollectingOutput::default();
+    projector
+        .project_record(logical.record(), &mut output)
+        .unwrap();
+    assert_eq!(output.event_captures, 1);
+    assert_eq!(output.verified_message_locators, 1);
 }
 
 fn create_item_table(conn: &Connection) {

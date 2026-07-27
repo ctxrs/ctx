@@ -63,3 +63,83 @@ fn wire_failures_remain_bounded_and_fail_closed() {
         );
     }
 }
+
+#[test]
+fn shell_result_recovers_exact_output_and_ignores_unknown_fields() {
+    let mut finished = field(1, b"exact shell output\nUnicode: \xf0\x9f\xa6\x80");
+    finished.extend(field(99, b"future nested field"));
+    let mut run_shell = field(5, &finished);
+    run_shell.extend(field(98, b"future result field"));
+    let mut tool_result = field(1, b"call-1");
+    tool_result.extend(field(2, &run_shell));
+    tool_result.extend(field(97, b"future envelope field"));
+    let mut message = field(1, b"message-result-1");
+    message.extend(field(5, &tool_result));
+
+    let decoded = warp_decode_message(&message).unwrap();
+    assert_eq!(decoded.event_type, EventType::ToolOutput);
+    assert_eq!(decoded.kind, "tool_call_result");
+    assert_eq!(
+        decoded.complete_text.as_deref(),
+        Some("exact shell output\nUnicode: 🦀")
+    );
+    assert_eq!(decoded.text, decoded.complete_text.unwrap());
+}
+
+#[test]
+fn binary_only_and_status_only_results_never_become_text() {
+    // CallMCPToolResult.Success.Results.Image(data = arbitrary binary).
+    let image = field(1, &[0x00, 0xff, 0x80, 0x01]);
+    let item = field(2, &image);
+    let success = field(1, &item);
+    let call_mcp = field(1, &success);
+    let mut tool_result = field(1, b"call-binary");
+    tool_result.extend(field(16, &call_mcp));
+    let mut message = field(1, b"message-binary");
+    message.extend(field(5, &tool_result));
+
+    let decoded = warp_decode_message(&message).unwrap();
+    assert_eq!(decoded.event_type, EventType::ToolOutput);
+    assert_eq!(decoded.complete_text, None);
+    assert_eq!(decoded.text, "tool result: call_mcp_tool");
+
+    // PermissionDenied is a status, not a result body.
+    let denied = field(6, &field(1, &[]));
+    let result = field(2, &denied);
+    assert_eq!(warp_decode_tool_result_text(&result).unwrap(), None);
+
+    // Future result variants remain typed-but-unhydrated until their schema is
+    // reviewed; arbitrary length-delimited bytes are never promoted to text.
+    assert_eq!(
+        warp_decode_tool_result_text(&field(99, b"plausible but unknown text")).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn nonstandard_error_and_terminal_text_arms_are_exact() {
+    let request_computer_error = field(3, &field(1, b"computer access unavailable"));
+    let request_computer_result = field(31, &request_computer_error);
+    assert_eq!(
+        warp_decode_tool_result_text(&request_computer_result)
+            .unwrap()
+            .as_deref(),
+        Some("computer access unavailable")
+    );
+
+    let denied = field(2, &field(1, b"remote agents disabled"));
+    let run_agents_result = field(39, &denied);
+    assert_eq!(
+        warp_decode_tool_result_text(&run_agents_result)
+            .unwrap()
+            .as_deref(),
+        Some("remote agents disabled")
+    );
+
+    // A successful RunAgents result is structured and must not be flattened.
+    let launched = field(1, &field(1, b"model-id"));
+    assert_eq!(
+        warp_decode_tool_result_text(&field(39, &launched)).unwrap(),
+        None
+    );
+}

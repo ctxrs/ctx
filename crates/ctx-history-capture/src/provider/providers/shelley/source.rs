@@ -31,7 +31,7 @@ pub(super) fn shelley_source_revision(
     )
 }
 
-pub(super) fn shelley_conversation_columns(conn: &Connection) -> Result<BTreeSet<String>> {
+pub(crate) fn shelley_conversation_columns(conn: &Connection) -> Result<BTreeSet<String>> {
     if !sqlite_table_exists(conn, "conversations")? {
         return Err(CaptureError::InvalidPayload(
             "Shelley shelley.db is missing required conversations table".into(),
@@ -55,7 +55,7 @@ pub(super) fn shelley_has_conversations(conn: &Connection) -> Result<bool> {
     .map_err(CaptureError::from)
 }
 
-pub(super) fn shelley_message_columns(conn: &Connection) -> Result<BTreeSet<String>> {
+pub(crate) fn shelley_message_columns(conn: &Connection) -> Result<BTreeSet<String>> {
     if !sqlite_table_exists(conn, "messages")? {
         return Err(CaptureError::InvalidPayload(
             "Shelley shelley.db is missing required messages table".into(),
@@ -133,11 +133,12 @@ pub(super) fn shelley_qualified_optional_column(
     }
 }
 
-pub(super) fn shelley_conversation_select_expressions(
+pub(crate) fn shelley_conversation_select_expressions(
     columns: &BTreeSet<String>,
     alias: &str,
 ) -> Vec<String> {
     [
+        format!("{alias}.rowid"),
         format!("{alias}.conversation_id"),
         shelley_qualified_optional_column(columns, alias, "slug", "NULL"),
         shelley_qualified_optional_column(columns, alias, "user_initiated", "1"),
@@ -159,7 +160,7 @@ pub(super) fn shelley_conversation_select_expressions(
     .collect()
 }
 
-pub(super) fn shelley_message_select_expressions(
+pub(crate) fn shelley_message_select_expressions(
     columns: &BTreeSet<String>,
     alias: &str,
 ) -> Vec<String> {

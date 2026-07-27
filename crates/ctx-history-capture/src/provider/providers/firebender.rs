@@ -45,10 +45,10 @@ use crate::{
 };
 
 mod message_text;
-pub(crate) use message_text::firebender_message_text;
+pub(crate) use message_text::{firebender_message_text, firebender_result_content};
 
-const FIREBENDER_CAPTURE_REVISION: u32 = 1;
-const FIREBENDER_POLICY_REVISION: u32 = 5;
+const FIREBENDER_CAPTURE_REVISION: u32 = 2;
+const FIREBENDER_POLICY_REVISION: u32 = 6;
 const FIREBENDER_POSITION_KIND: &str = "firebender-chat-session-keyset-v1";
 const FIREBENDER_LOCATOR_KIND: &str = "firebender-chat-session-row-v1";
 const FIREBENDER_RECORD_KIND: &str = "firebender-chat-session-v1";
@@ -208,6 +208,8 @@ impl CapturedBatchProjector for FirebenderCapturedBatchProjector {
             let mut event = firebender_event(&row.id, provider_event_index, &message, occurred_at);
             crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
                 &mut event,
+                CaptureProvider::Firebender,
+                FIREBENDER_SQLITE_SOURCE_FORMAT,
                 record.locator(),
                 values,
                 || {
@@ -221,6 +223,15 @@ impl CapturedBatchProjector for FirebenderCapturedBatchProjector {
                         )
                     })
                 },
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+            crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                &mut event,
+                CaptureProvider::Firebender,
+                FIREBENDER_SQLITE_SOURCE_FORMAT,
+                record.locator(),
+                values,
+                firebender_result_content(&message),
             )
             .map_err(ProviderProjectionFatal::new)?;
             self.emit_capture(

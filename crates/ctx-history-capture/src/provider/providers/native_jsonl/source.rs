@@ -38,8 +38,8 @@ use super::projector::{
     NativeJsonlParserCheckpoint,
 };
 
-pub(super) const NATIVE_JSONL_CAPTURE_REVISION: u32 = 3;
-pub(super) const NATIVE_JSONL_POLICY_REVISION: u32 = 5;
+pub(super) const NATIVE_JSONL_CAPTURE_REVISION: u32 = 4;
+pub(super) const NATIVE_JSONL_POLICY_REVISION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeJsonlFrozenFileMetadata {

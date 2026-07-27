@@ -18,6 +18,10 @@ Every batch event has a UUIDv4 `event_id`, a minute-rounded `occurred_at`, a
 closed `surface`, a closed `outcome`, and a coarse `duration_bucket`.
 Identity-bearing batch events do not carry exact duration milliseconds.
 `surface` is one of `cli`, `mcp`, `pro_host`, or `daemon`.
+Official hosted installs may attach the install-attempt identifier to these
+batch events only for the first seven days after installation. The producer
+omits the bridge when the marker timestamp is missing, malformed, future-dated,
+or at least seven days old; managed upgrades preserve the original timestamp.
 
 `operation_completed@1` records one terminal event for an eligible operation.
 `provider_refresh_completed@1` records a completed refresh summary.

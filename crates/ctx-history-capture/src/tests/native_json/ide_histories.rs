@@ -429,6 +429,26 @@ fn native_cursor_policy_upgrade_repairs_once_then_is_terminal_noop() {
     assert_eq!(repaired.imported_events, 1);
     assert_eq!(store.events_for_session(session_id).unwrap().len(), 5);
     assert_provider_policy_cursor_restored(&store, machine_id, &stream, policy_revision);
+    let repaired_output = store
+        .events_for_session(session_id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == EventType::ToolOutput)
+        .expect("Cursor result was restored by the policy rebuild");
+    let repaired_ref = serde_json::from_value::<ctx_history_core::ContentRef>(
+        repaired_output.payload["body"]["result_content_ref"].clone(),
+    )
+    .expect("policy rebuild restores compact result identity");
+    let repaired_locators =
+        crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
+            &repaired_output.sync.metadata
+                [crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+        )
+        .expect("policy rebuild restores verified content locators");
+    let repaired_locator = repaired_locators
+        .locator(crate::complete_content::VerifiedContentRole::ResultBody)
+        .expect("policy rebuild restores the result-body locator");
+    assert_eq!(repaired_locator.content_ref(), &repaired_ref);
 
     let terminal = import_cursor_native_history(&transcript, &mut store, options).unwrap();
     assert_eq!(terminal.failed, 0, "{terminal:?}");

@@ -444,8 +444,9 @@ fn codex_result_digest_reuse_matches_source_backed_base_for_all_output_shapes() 
     use sha2::Digest as _;
 
     use crate::complete_content::{
-        jsonl::JsonlCompleteContentResolver, PersistedCompleteContentLocatorV1,
-        ResultContentRequest, SourceSnapshot, RESULT_CONTENT_LOCATOR_METADATA_KEY,
+        jsonl::JsonlCompleteContentResolver, AuthorizedSourceRoute, ResultContentRequest,
+        SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorsV1, VerifiedContentRole,
+        VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
     };
 
     let fixture_root =
@@ -536,6 +537,22 @@ fn codex_result_digest_reuse_matches_source_backed_base_for_all_output_shapes() 
         provider_source_session_uuid(&source_identity, "codex-result-digest-reuse")
     );
 
+    let source_format = source.descriptor.source_format.clone().unwrap();
+    let source_access = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id,
+                provider: source.descriptor.provider,
+                source_format: source_format.clone(),
+                family: crate::complete_content::CompleteContentSourceFamily::Jsonl,
+                raw_source_path: source.descriptor.raw_source_path.clone().unwrap().into(),
+                source_root: source.descriptor.source_root.clone().map(Into::into),
+                source_identity: Some(source_identity.clone()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            events[0].id,
+        )
+        .unwrap();
     let source_records = source_bytes
         .split(|byte| *byte == b'\n')
         .filter(|record| !record.is_empty())
@@ -605,14 +622,15 @@ fn codex_result_digest_reuse_matches_source_backed_base_for_all_output_shapes() 
         );
         assert_eq!(event.sync.metadata["source_record_subrecord_index"], 0);
         assert_eq!(
-            event.sync.metadata[RESULT_CONTENT_LOCATOR_METADATA_KEY], case["locator"],
+            event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY], case["locator"],
             "{name} exact locator"
         );
 
-        let locator = PersistedCompleteContentLocatorV1::from_metadata_value(
-            &event.sync.metadata[RESULT_CONTENT_LOCATOR_METADATA_KEY],
+        let locators = VerifiedContentLocatorsV1::from_metadata_value(
+            &event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
         )
         .unwrap();
+        let locator = locators.locator(VerifiedContentRole::ResultBody).unwrap();
         let independently_computed_record_digest = format!(
             "{:x}",
             sha2::Sha256::digest(source_records[line_number - 1])
@@ -623,8 +641,8 @@ fn codex_result_digest_reuse_matches_source_backed_base_for_all_output_shapes() 
             "{name} record digest"
         );
         assert_eq!(
-            locator.body_sha256().as_str(),
-            expected_content_ref.sha256(),
+            locator.content_ref(),
+            &expected_content_ref,
             "{name} locator/ContentRef digest"
         );
         assert_eq!(
@@ -635,14 +653,14 @@ fn codex_result_digest_reuse_matches_source_backed_base_for_all_output_shapes() 
         replay_requests.push(ResultContentRequest {
             event_id: event.id,
             provider: source.descriptor.provider,
-            source_format: source.descriptor.source_format.clone().unwrap(),
-            raw_source_path: source.descriptor.raw_source_path.clone().unwrap().into(),
-            source_root: source.descriptor.source_root.clone().map(Into::into),
-            source_identity: Some(source_identity.clone()),
+            source_format: source_format.clone(),
+            source_access: source_access.clone(),
+            source_family: locator.family(),
+            content_profile: locator.content_profile().to_owned(),
             source_locator: locator.source_locator().unwrap(),
-            source_snapshot: SourceSnapshot::default(),
             source_record_ordinal: provider_event_index,
             source_record_subrecord_index: 0,
+            expected_native_record_id: locator.native_record_id().to_owned(),
             expected_record_digest: locator.record_sha256().clone(),
             expected_content_ref,
         });

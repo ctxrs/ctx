@@ -31,8 +31,12 @@ mod source;
 #[cfg(test)]
 mod tests;
 
+// Narrow provider API consumed by the source resolver after locator attachment.
+#[allow(unused_imports)]
+pub(crate) use event::forgecode_normalized_result_content;
+
 const FORGECODE_CAPTURE_REVISION: u32 = 1;
-const FORGECODE_POLICY_REVISION: u32 = 4;
+const FORGECODE_POLICY_REVISION: u32 = 5;
 const FORGECODE_POSITION_KIND: &str = "forgecode-conversation-rowid-v1";
 const FORGECODE_LOCATOR_KIND: &str = "forgecode-conversation-row-v1";
 const FORGECODE_RECORD_KIND: &str = "forgecode-conversation-v1";
@@ -47,6 +51,77 @@ pub(crate) fn forgecode_text_message_text(
 ) -> String {
     event::forgecode_text_message_text(body, event_type)
 }
+
+pub(crate) fn forgecode_result_record(
+    conn: &rusqlite::Connection,
+    rowid: i64,
+    subrecord: u32,
+) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
+    let Some(values) = source::forgecode_values_at_rowid(conn, rowid)? else {
+        return Ok(None);
+    };
+    let row = source::decode_forgecode_conversation(&values)?;
+    let context = row
+        .context
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "ForgeCode result conversation context is no longer valid JSON".to_owned(),
+            )
+        })?;
+    let entry = context
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|messages| messages.get(subrecord as usize))
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "ForgeCode result message coordinate is no longer present".to_owned(),
+            )
+        })?;
+    let parts = event::forgecode_message_parts(entry);
+    let content = event::forgecode_normalized_result_content(parts.body).ok_or_else(|| {
+        CaptureError::InvalidPayload("ForgeCode row is no longer a supported result".to_owned())
+    })?;
+    let native_record_id = crate::compute_payload_hash(entry)?;
+    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
+        values,
+        native_record_id,
+        content,
+    }))
+}
+
+pub(crate) fn forgecode_complete_message(
+    values: &[crate::captured_batch::CapturedSqliteValue],
+    subrecord_index: u32,
+) -> Result<(String, String, String)> {
+    let row = source::decode_forgecode_conversation(values)?;
+    let context = row
+        .context
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("ForgeCode conversation has no context".into())
+        })?;
+    let value: serde_json::Value = serde_json::from_str(context)?;
+    let entry = value
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|messages| messages.get(subrecord_index as usize))
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("ForgeCode message subrecord is missing".into())
+        })?;
+    let parts = event::forgecode_message_parts(entry);
+    let text = event::forgecode_message_text(parts, event::forgecode_event_type(parts));
+    Ok((
+        row.conversation_id,
+        crate::compute_payload_hash(entry)?,
+        text,
+    ))
+}
+
+pub(crate) use source::load_forgecode_conversation_values;
 
 pub(crate) fn import_forgecode_sqlite_batched(
     path: &Path,

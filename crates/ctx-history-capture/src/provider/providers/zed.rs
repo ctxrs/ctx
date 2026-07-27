@@ -23,6 +23,7 @@ mod source;
 mod thread;
 
 pub(crate) use event::decode_zed_thread_events;
+pub(crate) use event::zed_result_content;
 use projection::ZedCapturedBatchProjector;
 use source::{
     initial_zed_position, zed_captured_error, zed_source_revision, zed_source_snapshot,
@@ -30,17 +31,18 @@ use source::{
 };
 pub(crate) use thread::decode_zed_thread_for_complete;
 
-// Revision 3 makes the provider-local event decoder authoritative for both capture and
+// Revision 4 makes the provider-local event decoder authoritative for both capture and
 // complete-content recovery, and rejects payloads outside its explicit structural bounds.
-// The accepted-event text/body/metadata policy is unchanged, so the policy revision stays 4.
-const ZED_CAPTURE_REVISION: u32 = 3;
-const ZED_POLICY_REVISION: u32 = 4;
+// Policy 5 adds compact result references and verified result-body locators.
+const ZED_CAPTURE_REVISION: u32 = 4;
+const ZED_POLICY_REVISION: u32 = 5;
 const ZED_POSITION_KIND: &str = "zed-thread-native-keyset-v2";
 const ZED_LOCATOR_KIND: &str = "zed-thread-row-v1";
 const ZED_RECORD_KIND: &str = "zed-thread-v1";
 const ZED_MALFORMED_RECORD_KIND: &str = "zed-thread-malformed-v1";
 const ZED_POSITION_BYTES: usize = 1 + 1 + 8 + 8;
 const ZED_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 10;
+pub(crate) const ZED_RESULT_CONTENT_PROFILE: &str = "zed.result-body.v1";
 
 pub(crate) fn import_zed_threads_sqlite_batched(
     path: &Path,

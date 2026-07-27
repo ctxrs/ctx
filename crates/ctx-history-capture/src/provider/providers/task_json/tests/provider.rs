@@ -35,6 +35,36 @@ fn real_task_result_retains_only_bounded_result_evidence_and_outcome() {
 }
 
 #[test]
+fn result_profile_is_shared_and_has_no_whole_record_fallback() {
+    let result = json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "not a result"},
+            {"type": "tool_result", "content": [
+                {"text": "first"},
+                {"output": "second"}
+            ]}
+        ]
+    });
+    assert_eq!(
+        task_json_result_content(&result, "api_conversation_history").as_deref(),
+        Some("first\nsecond")
+    );
+
+    let command = json!({"type": "command", "text": "command output"});
+    assert_eq!(
+        task_json_result_content(&command, "ui_messages").as_deref(),
+        Some("command output")
+    );
+
+    let label_only = json!({"type": "tool_result", "tool_name": "shell"});
+    assert_eq!(
+        task_json_result_content(&label_only, "api_conversation_history"),
+        None
+    );
+}
+
+#[test]
 fn task_directory_traversal_does_not_collect_the_tree() {
     let temp = tempdir().unwrap();
     let tasks = temp.path().join("tasks");

@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::projector::{MistralVibeCapturedBatchProjector, MistralVibeParserCheckpoint};
-use super::schema::mistral_vibe_bounded_metadata;
+use super::schema::{mistral_vibe_bounded_metadata, mistral_vibe_result_content};
 use super::source::{
     visit_mistral_vibe_session_sources, MistralVibeSessionObservation, MistralVibeSessionSource,
     MISTRAL_VIBE_MAX_DIRECTORY_DEPTH, MISTRAL_VIBE_MAX_TRAVERSAL_ENTRIES,
@@ -209,6 +209,37 @@ fn bounded_metadata_checkpoint_stays_small() {
     };
     BoundedParserCheckpoint::from_serializable(&checkpoint).unwrap();
     drop(temp);
+}
+
+#[test]
+fn result_profile_keeps_explicit_output_and_rejects_display_fallback() {
+    let result = json!({
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": [
+            {"text": "first"},
+            {"output": "second"}
+        ],
+        "reasoning_content": "third"
+    });
+    assert_eq!(
+        mistral_vibe_result_content(&result).as_deref(),
+        Some("first\nsecond\nthird")
+    );
+    assert_eq!(
+        mistral_vibe_result_content(&json!({
+            "role": "tool",
+            "tool_call_id": "call-1"
+        })),
+        None
+    );
+    assert_eq!(
+        mistral_vibe_result_content(&json!({
+            "role": "assistant",
+            "content": "not a result"
+        })),
+        None
+    );
 }
 
 #[test]

@@ -12,7 +12,7 @@ use super::{
     ProjectionJournalRecord, ProjectionJournalSnapshot, EMPTY_SHA256, PROJECTION_CONTRACT_VERSION,
     PROJECTION_JOURNAL_MAX_PAGE_BYTES, PROJECTION_JOURNAL_PAGE_SIZE,
 };
-use crate::{Result, Store, StoreError, FINAL_SCHEMA_IDENTITY, SCHEMA_VERSION};
+use crate::{Result, Store, StoreError, CANONICAL_PROJECTION_SCHEMA_IDENTITY, SCHEMA_VERSION};
 
 pub(super) const PROJECTION_JOURNAL_CHUNK_SIZE: usize = 64;
 
@@ -70,7 +70,7 @@ fn snapshot(
         canonical_schema_version: u32::try_from(SCHEMA_VERSION).map_err(|_| {
             StoreError::InvalidProjectionJournalData("negative canonical schema version".to_owned())
         })?,
-        canonical_schema_identity: FINAL_SCHEMA_IDENTITY.to_owned(),
+        canonical_schema_identity: CANONICAL_PROJECTION_SCHEMA_IDENTITY.to_owned(),
         projection_contract_version: PROJECTION_CONTRACT_VERSION,
         frozen_through: checkpoint(&state),
         authorized_repository_roots: authorized_repository_roots(conn)?,

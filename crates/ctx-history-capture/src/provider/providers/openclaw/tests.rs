@@ -1,5 +1,7 @@
 use std::{fs::FileTimes, fs::OpenOptions, io::Write};
 
+use serde_json::json;
+
 use crate::test_support_paths::tempdir;
 
 use super::*;
@@ -60,6 +62,39 @@ fn openclaw_fixture_with_messages(
 
 fn openclaw_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     openclaw_fixture_with_messages(65)
+}
+
+#[test]
+fn result_profile_returns_only_explicit_legacy_tool_message_content() {
+    let row = json!({
+        "type": "message",
+        "message": {
+            "role": "tool",
+            "name": "shell",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"output": "second"}
+            ]
+        }
+    });
+    assert_eq!(
+        openclaw_result_content(&row).as_deref(),
+        Some("first\nsecond")
+    );
+    assert_eq!(
+        openclaw_result_content(&json!({
+            "type": "message",
+            "message": {"role": "tool", "name": "shell"}
+        })),
+        None
+    );
+    assert_eq!(
+        openclaw_result_content(&json!({
+            "type": "message",
+            "message": {"role": "assistant", "content": "not a result"}
+        })),
+        None
+    );
 }
 
 fn import_options() -> NormalizedProviderImportOptions {

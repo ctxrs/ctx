@@ -187,11 +187,24 @@ fn project_zed_thread_row(
         let line = zed_line_number(row.rowid, event.provider_event_index);
         crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
             &mut event,
+            CaptureProvider::Zed,
+            ZED_THREADS_SQLITE_SOURCE_FORMAT,
             locator,
             values,
             || complete_text,
         )
         .map_err(ProviderProjectionFatal::new)?;
+        if let Some(content) = super::zed_result_content(message) {
+            crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                &mut event,
+                CaptureProvider::Zed,
+                ZED_THREADS_SQLITE_SOURCE_FORMAT,
+                locator,
+                values,
+                Some(content),
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
         output.emit_normalization(ProviderNormalizationResult {
             captures: vec![(
                 line,

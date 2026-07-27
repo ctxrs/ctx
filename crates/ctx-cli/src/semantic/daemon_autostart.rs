@@ -157,6 +157,27 @@ fn daemon_autostart_command(
     command
 }
 
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
+use anyhow::{Context, Result};
+use ctx_history_core::{database_path, utc_now};
+use serde_json::{json, Value};
+
+use crate::{compact_json, config::AppConfig, DaemonStartModeArg, DaemonTriggerCommandArg};
+
+use super::{
+    health_search::semantic_env_flag,
+    paths_status::{daemon_lock_is_stale, daemon_lock_path, write_daemon_status},
+    runtime_limits::{
+        DAEMON_AUTOSTART_IDLE_EXIT_SECONDS_DEFAULT, DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS_DEFAULT,
+        DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_CAP,
+    },
+};
+
 #[cfg(test)]
 mod telemetry_tests {
     use super::*;
@@ -183,23 +204,3 @@ mod telemetry_tests {
             .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
     }
 }
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
-
-use anyhow::{Context, Result};
-use ctx_history_core::{database_path, utc_now};
-use serde_json::{json, Value};
-
-use crate::{compact_json, config::AppConfig, DaemonStartModeArg, DaemonTriggerCommandArg};
-
-use super::{
-    health_search::semantic_env_flag,
-    paths_status::{daemon_lock_is_stale, daemon_lock_path, write_daemon_status},
-    runtime_limits::{
-        DAEMON_AUTOSTART_IDLE_EXIT_SECONDS_DEFAULT, DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS_DEFAULT,
-        DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_CAP,
-    },
-};

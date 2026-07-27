@@ -166,6 +166,67 @@ fn mcp_initialize_negotiates_client_supported_protocol_version() {
 }
 
 #[test]
+fn mcp_stdio_preserves_json_rpc_ids_and_notification_semantics() {
+    let temp = tempdir();
+    let stdin = concat!(
+        "{not-json\n",
+        "[]\n",
+        "{\"jsonrpc\":\"2.0\"}\n",
+        "{\"jsonrpc\":\"1.0\",\"id\":\"string-id\",\"method\":\"ping\"}\n",
+        "{\"jsonrpc\":\"1.0\",\"id\":42,\"method\":\"ping\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/unknown\"}\n",
+    );
+    let output = ctx(&temp)
+        .args(["mcp", "serve"])
+        .write_stdin(stdin)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    assert!(
+        output.stderr.is_empty(),
+        "MCP stderr must stay clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let responses = stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .unwrap_or_else(|error| panic!("MCP stdout was not JSON-RPC: {error}: {line:?}"))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        responses.len(),
+        6,
+        "notifications must not emit responses: {stdout}"
+    );
+    assert!(responses
+        .iter()
+        .all(|response| response["jsonrpc"] == "2.0"));
+
+    for response in [&responses[0], &responses[1], &responses[2], &responses[5]] {
+        assert!(
+            response.as_object().unwrap().contains_key("id"),
+            "JSON-RPC error response omitted id: {response}"
+        );
+        assert!(response["id"].is_null(), "{response}");
+    }
+    assert_eq!(responses[0]["error"]["code"], -32700);
+    assert_eq!(responses[1]["error"]["code"], -32600);
+    assert_eq!(responses[2]["error"]["code"], -32600);
+    assert_eq!(responses[3]["id"], "string-id");
+    assert_eq!(responses[3]["error"]["code"], -32600);
+    assert_eq!(responses[4]["id"], 42);
+    assert_eq!(responses[4]["error"]["code"], -32600);
+    assert_eq!(responses[5]["error"]["code"], -32600);
+}
+
+#[test]
 fn mcp_rejects_oversized_input_line_and_continues() {
     let temp = tempdir();
     let initialize = json!({
@@ -186,6 +247,8 @@ fn mcp_rejects_oversized_input_line_and_continues() {
     let responses = mcp_raw_roundtrip(&temp, stdin);
     assert_eq!(responses.len(), 2);
     assert_eq!(responses[0]["error"]["code"], -32700);
+    assert!(responses[0].as_object().unwrap().contains_key("id"));
+    assert!(responses[0]["id"].is_null());
     assert!(
         responses[0]["error"]["data"]["error"]
             .as_str()
@@ -217,6 +280,8 @@ fn mcp_rejects_invalid_utf8_input_line_and_continues() {
     let responses = mcp_raw_roundtrip_bytes(&temp, stdin);
     assert_eq!(responses.len(), 2);
     assert_eq!(responses[0]["error"]["code"], -32700);
+    assert!(responses[0].as_object().unwrap().contains_key("id"));
+    assert!(responses[0]["id"].is_null());
     assert_eq!(
         responses[0]["error"]["data"]["error"],
         "MCP message is not valid UTF-8"

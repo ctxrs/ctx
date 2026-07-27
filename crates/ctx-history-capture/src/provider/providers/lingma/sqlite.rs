@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use rusqlite::{Connection, Statement};
+use rusqlite::{Connection, OptionalExtension, Statement};
 
 use crate::captured_batch::{
     CapturedBatch, CapturedBatchBuilder, CapturedRecord, CapturedSqliteValue, NativeLocator,
@@ -31,6 +31,37 @@ fn lingma_sqlite_encoding(conn: &Connection) -> Result<LingmaSqliteEncoding> {
             "Lingma SQLite source uses unsupported text encoding {encoding}"
         ))),
     }
+}
+
+pub(super) fn lingma_complete_values(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    let encoding = lingma_sqlite_encoding(conn)?;
+    let encoded = conn
+        .query_row(
+            "select c.rowid, cast(cast(c.session_id as text) as blob), \
+                    cast(cast(c.request_id as text) as blob), \
+                    cast(cast(c.chat_prompt as text) as blob), \
+                    cast(cast(c.summary as text) as blob), \
+                    cast(cast(c.error_result as text) as blob), \
+                    cast(c.gmt_create as integer), cast(cast(c.extra as text) as blob) \
+             from chat_record c where c.rowid = ?1",
+            [rowid],
+            lingma_encoded_row,
+        )
+        .optional()?;
+    encoded
+        .map(|encoded| {
+            decode_lingma_encoded_row(encoded, encoding)
+                .map(|(_, values)| values)
+                .map_err(|_| {
+                    CaptureError::InvalidPayload(
+                        "Lingma complete-content row contains malformed text encoding".to_owned(),
+                    )
+                })
+        })
+        .transpose()
 }
 
 #[derive(Clone, Copy)]

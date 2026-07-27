@@ -2,9 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderCursorCheckpoint, ProviderCursorRange, ProviderEventEnvelope, ProviderSessionEnvelope,
-    ProviderSourceEnvelope, ProviderSourceTrust, SessionStatus,
+    AgentType, CaptureProvider, ContentRef, EventRole, EventType, Fidelity,
+    ProviderCaptureEnvelope, ProviderCursorCheckpoint, ProviderCursorRange, ProviderEventEnvelope,
+    ProviderSessionEnvelope, ProviderSourceEnvelope, ProviderSourceTrust, SessionStatus,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
 use ctx_history_store::Store;
@@ -25,6 +25,7 @@ use crate::{
     DEEPAGENTS_SQLITE_SOURCE_FORMAT,
 };
 
+use super::complete_content::deepagents_write_record_digest;
 use super::cursor::deepagents_cursor_candidate;
 use super::ledger::deepagents_message_identity;
 use super::message::{deepagents_messages_from_blob, DeepAgentsMessage};
@@ -52,6 +53,7 @@ pub(super) struct DeepAgentsEventDraft {
     pub(super) message_offset: usize,
     pub(super) provider_event_identity_index: Option<u64>,
     pub(super) provider_event_hash: String,
+    pub(super) record_digest: Option<crate::complete_content::CompleteContentBodyDigest>,
 }
 
 pub(super) struct DeepAgentsCapturedBatchProjector {
@@ -149,6 +151,8 @@ impl DeepAgentsCapturedBatchProjector {
                 "Deep Agents accepted offsets and event indices have different lengths",
             ));
         }
+        let record_digest =
+            deepagents_write_record_digest(&write.key, write.value_type.as_deref(), &write.value);
         let mut prior_offset = None;
         let mut prior_event_index = None;
         for (offset, provider_event_index) in
@@ -197,6 +201,7 @@ impl DeepAgentsCapturedBatchProjector {
                 provider_event_hash: message_identity
                     .map(|identity| identity.payload_hash)
                     .unwrap_or_else(|| cursor.clone()),
+                record_digest: Some(record_digest.clone()),
                 cursor,
                 occurred_at,
                 message: message.clone(),
@@ -382,7 +387,7 @@ pub(super) fn deepagents_event(event: &DeepAgentsEventDraft) -> ProviderEventEnv
     } else {
         EventType::Message
     };
-    native_event(NativeEventDraft {
+    let mut envelope = native_event(NativeEventDraft {
         provider: CaptureProvider::DeepAgents,
         source_format: DEEPAGENTS_SQLITE_SOURCE_FORMAT,
         provider_session_id: event.thread_id.clone(),
@@ -415,5 +420,91 @@ pub(super) fn deepagents_event(event: &DeepAgentsEventDraft) -> ProviderEventEnv
             "provider_event_identity_index": event.provider_event_identity_index,
             "privacy": "decoded from writes.messages only",
         }),
-    })
+    });
+    attach_deepagents_verified_content(&mut envelope, event);
+    envelope
+}
+
+fn attach_deepagents_verified_content(
+    envelope: &mut ProviderEventEnvelope,
+    event: &DeepAgentsEventDraft,
+) {
+    use crate::complete_content::{
+        attach_verified_content_locator, verified_content_profile, CompleteContentSourceFamily,
+        VerifiedContentLocatorV1, VerifiedContentRole,
+    };
+
+    let role = match envelope.event_type {
+        EventType::Message
+            if envelope
+                .payload
+                .pointer("/text_retention/truncated")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true) =>
+        {
+            VerifiedContentRole::MessageBody
+        }
+        EventType::ToolOutput => VerifiedContentRole::ResultBody,
+        _ => return,
+    };
+    let Some(record_digest) = event.record_digest.clone() else {
+        return;
+    };
+    let Some(address) = super::DeepAgentsContentAddress::from_write(
+        &super::source::DeepAgentsWriteKey {
+            thread_id: event.thread_id.clone(),
+            checkpoint_id: event.checkpoint_id.clone(),
+            task_id: event.task_id.clone(),
+            idx: event.write_idx,
+        },
+        event.message_offset,
+    ) else {
+        return;
+    };
+    let Some(locator_value) = address.encode() else {
+        return;
+    };
+    let Some(content_ref) = ContentRef::from_bytes(event.message.text.as_bytes()) else {
+        return;
+    };
+    let result_content_ref = (role == VerifiedContentRole::ResultBody)
+        .then(|| serde_json::to_value(&content_ref).ok())
+        .flatten();
+    if role == VerifiedContentRole::ResultBody && result_content_ref.is_none() {
+        return;
+    }
+    let Some(profile) = verified_content_profile(
+        CaptureProvider::DeepAgents,
+        DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+        CompleteContentSourceFamily::Sqlite,
+        role,
+    ) else {
+        return;
+    };
+    let native_record_id = envelope
+        .provider_event_hash
+        .clone()
+        .or_else(|| envelope.cursor.clone())
+        .unwrap_or_else(|| format!("event-index:{}", envelope.provider_event_index));
+    let Some(locator) = VerifiedContentLocatorV1::new(
+        role,
+        profile,
+        content_ref,
+        CompleteContentSourceFamily::Sqlite,
+        super::DEEPAGENTS_CONTENT_LOCATOR_KIND,
+        &locator_value,
+        native_record_id,
+        record_digest,
+    ) else {
+        return;
+    };
+    if attach_verified_content_locator(&mut envelope.metadata, locator).is_none() {
+        return;
+    }
+    if let Some(content_ref) = result_content_ref {
+        let Some(payload) = envelope.payload.as_object_mut() else {
+            return;
+        };
+        payload.insert("result_content_ref".to_owned(), content_ref);
+    }
 }

@@ -28,28 +28,72 @@ use crate::{
     WAL_TRUNCATE_MIN_BYTES,
 };
 
+pub(crate) struct ExplicitFormatImportContext<'a> {
+    pub(super) args: &'a ImportArgs,
+    pub(super) format: ImportFormatArg,
+    pub(super) db_path: PathBuf,
+    pub(super) store: Store,
+    pub(super) telemetry: &'a mut ImportTelemetry,
+    pub(super) provider_refreshes: &'a mut ProviderRefreshCollector,
+    pub(super) refresh_trigger: ProviderRefreshTrigger,
+    pub(super) options: ImportRunOptions,
+}
+
+impl ExplicitFormatImportContext<'_> {
+    fn failure_report(
+        &mut self,
+        path: &Path,
+        stats: SourceStats,
+        error: &anyhow::Error,
+    ) -> ImportReport {
+        let mut totals = ImportTotals::default();
+        totals.add_source_failure(&stats);
+        self.provider_refreshes.record_failure(
+            CaptureProvider::Custom,
+            self.refresh_trigger,
+            ProviderRefreshSourceMode::ExplicitFormat,
+            &stats,
+            None,
+        );
+        insert_explicit_format_analytics(self.telemetry, &stats, &totals);
+        ImportReport {
+            resume: self.args.resume,
+            totals,
+            inventory: InventoryTotals {
+                sources: 1,
+                source_files: stats.files,
+                source_bytes: stats.bytes,
+                ..InventoryTotals::default()
+            },
+            catalog: CatalogTotals::default(),
+            catalog_sources: Vec::new(),
+            sources: vec![custom_format_failure_json(
+                self.format,
+                path,
+                &stats,
+                &error_summary(error),
+                import_failure_type(error),
+            )],
+        }
+    }
+}
+
 pub(crate) fn run_explicit_format_import(
-    args: &ImportArgs,
-    format: ImportFormatArg,
-    db_path: PathBuf,
-    mut store: Store,
-    telemetry: &mut ImportTelemetry,
-    provider_refreshes: &mut ProviderRefreshCollector,
-    refresh_trigger: ProviderRefreshTrigger,
-    options: ImportRunOptions,
+    mut context: ExplicitFormatImportContext<'_>,
 ) -> Result<ImportReport> {
-    let path = args
+    let path = context
+        .args
         .path
-        .as_ref()
+        .clone()
         .context("--format requires an explicit --path")?;
-    let stats = match source_stats(path)
+    let stats = match source_stats(&path)
         .with_context(|| format!("scan import source {}", path.display()))
     {
         Ok(stats) => stats,
         Err(error) if import_error_scope(&error) == ImportFailureScope::System => {
-            provider_refreshes.record_failure(
+            context.provider_refreshes.record_failure(
                 CaptureProvider::Custom,
-                refresh_trigger,
+                context.refresh_trigger,
                 ProviderRefreshSourceMode::ExplicitFormat,
                 &SourceStats::default(),
                 None,
@@ -57,36 +101,27 @@ pub(crate) fn run_explicit_format_import(
             return Err(error);
         }
         Err(error) => {
-            return Ok(explicit_format_failure_report(
-                args,
-                format,
-                path,
-                SourceStats::default(),
-                &error,
-                telemetry,
-                provider_refreshes,
-                refresh_trigger,
-            ));
+            return Ok(context.failure_report(&path, SourceStats::default(), &error));
         }
     };
-    telemetry.sources_seen = Some(count_bucket(1));
-    telemetry.source_bytes = Some(bytes_bucket(stats.bytes));
+    context.telemetry.sources_seen = Some(count_bucket(1));
+    context.telemetry.source_bytes = Some(bytes_bucket(stats.bytes));
 
     let progress = ProgressReporter::new(
-        options.progress,
-        options.json,
-        options.operation,
+        context.options.progress,
+        context.options.json,
+        context.options.operation,
         stats.bytes,
     );
     progress.message(
         "discovering",
         format!(
             "Found 1 {} source ({}).",
-            format.as_str(),
+            context.format.as_str(),
             format_bytes(stats.bytes)
         ),
     );
-    if let Some(warning) = low_disk_space_warning(&db_path, stats.bytes) {
+    if let Some(warning) = low_disk_space_warning(&context.db_path, stats.bytes) {
         progress.warning(warning);
     }
     if (stats.files >= LARGE_IMPORT_SOURCE_FILES_WARNING
@@ -102,15 +137,15 @@ pub(crate) fn run_explicit_format_import(
         progress.notice(notice);
     }
 
-    let record = import_record_for_custom_history(path, format);
+    let record = import_record_for_custom_history(&path, context.format);
     let record_id = record.id;
-    let record_existed = history_record_exists(&store, record_id)?;
-    store.upsert_record(&record)?;
-    progress.message("indexing", format!("importing {}", format.as_str()));
-    let import_result = match format {
+    let record_existed = history_record_exists(&context.store, record_id)?;
+    context.store.upsert_record(&record)?;
+    progress.message("indexing", format!("importing {}", context.format.as_str()));
+    let import_result = match context.format {
         ImportFormatArg::CtxHistoryJsonlV1 => import_custom_history_jsonl_v1(
-            path,
-            &mut store,
+            &path,
+            &mut context.store,
             CustomHistoryJsonlV1ImportOptions {
                 source_path: Some(path.clone()),
                 history_record_id: Some(record_id),
@@ -122,9 +157,9 @@ pub(crate) fn run_explicit_format_import(
     let summary = match import_result {
         Ok(summary) => summary,
         Err(error) if import_error_scope(&error) == ImportFailureScope::System => {
-            provider_refreshes.record_failure(
+            context.provider_refreshes.record_failure(
                 CaptureProvider::Custom,
-                refresh_trigger,
+                context.refresh_trigger,
                 ProviderRefreshSourceMode::ExplicitFormat,
                 &stats,
                 None,
@@ -132,35 +167,26 @@ pub(crate) fn run_explicit_format_import(
             return Err(error);
         }
         Err(error) => {
-            cleanup_rejected_history_record(&store, record_id, record_existed)?;
-            return Ok(explicit_format_failure_report(
-                args,
-                format,
-                path,
-                stats,
-                &error,
-                telemetry,
-                provider_refreshes,
-                refresh_trigger,
-            ));
+            cleanup_rejected_history_record(&context.store, record_id, record_existed)?;
+            return Ok(context.failure_report(&path, stats, &error));
         }
     };
     let mut totals = ImportTotals::default();
     if summary.failed > 0 && !provider_summary_has_imported_content(&summary) {
-        cleanup_rejected_history_record(&store, record_id, record_existed)?;
+        cleanup_rejected_history_record(&context.store, record_id, record_existed)?;
         totals.add_rejected_source(&summary, &stats);
-        provider_refreshes.record_failure(
+        context.provider_refreshes.record_failure(
             CaptureProvider::Custom,
-            refresh_trigger,
+            context.refresh_trigger,
             ProviderRefreshSourceMode::ExplicitFormat,
             &stats,
             Some(&summary),
         );
     } else {
         totals.add(&summary, &stats);
-        provider_refreshes.record_success(
+        context.provider_refreshes.record_success(
             CaptureProvider::Custom,
-            refresh_trigger,
+            context.refresh_trigger,
             ProviderRefreshSourceMode::ExplicitFormat,
             &summary,
             &stats,
@@ -168,21 +194,22 @@ pub(crate) fn run_explicit_format_import(
     }
     if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
         progress.message("finalizing", "optimizing search index");
-        Store::open(&db_path)?.optimize_search_index()?;
+        Store::open(&context.db_path)?.optimize_search_index()?;
     }
     progress.message("finalizing", "checkpointing search database");
-    Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
-    if options.print_human {
+    Store::open(&context.db_path)?
+        .checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
+    if context.options.print_human {
         progress.finish_line();
     }
     progress.done(
         "finalizing",
-        format!("processed 1 {} source file", format.as_str()),
+        format!("processed 1 {} source file", context.format.as_str()),
         stats.bytes,
     );
-    insert_explicit_format_analytics(telemetry, &stats, &totals);
+    insert_explicit_format_analytics(context.telemetry, &stats, &totals);
     Ok(ImportReport {
-        resume: args.resume,
+        resume: context.args.resume,
         totals,
         inventory: InventoryTotals {
             sources: 1,
@@ -192,49 +219,13 @@ pub(crate) fn run_explicit_format_import(
         },
         catalog: CatalogTotals::default(),
         catalog_sources: Vec::new(),
-        sources: vec![custom_format_import_json(format, path, &stats, &summary)],
-    })
-}
-
-fn explicit_format_failure_report(
-    args: &ImportArgs,
-    format: ImportFormatArg,
-    path: &Path,
-    stats: SourceStats,
-    error: &anyhow::Error,
-    telemetry: &mut ImportTelemetry,
-    provider_refreshes: &mut ProviderRefreshCollector,
-    refresh_trigger: ProviderRefreshTrigger,
-) -> ImportReport {
-    let mut totals = ImportTotals::default();
-    totals.add_source_failure(&stats);
-    provider_refreshes.record_failure(
-        CaptureProvider::Custom,
-        refresh_trigger,
-        ProviderRefreshSourceMode::ExplicitFormat,
-        &stats,
-        None,
-    );
-    insert_explicit_format_analytics(telemetry, &stats, &totals);
-    ImportReport {
-        resume: args.resume,
-        totals,
-        inventory: InventoryTotals {
-            sources: 1,
-            source_files: stats.files,
-            source_bytes: stats.bytes,
-            ..InventoryTotals::default()
-        },
-        catalog: CatalogTotals::default(),
-        catalog_sources: Vec::new(),
-        sources: vec![custom_format_failure_json(
-            format,
-            path,
+        sources: vec![custom_format_import_json(
+            context.format,
+            &path,
             &stats,
-            &error_summary(error),
-            import_failure_type(error),
+            &summary,
         )],
-    }
+    })
 }
 
 fn insert_explicit_format_analytics(

@@ -1,7 +1,14 @@
 use std::time::SystemTime;
 
 use super::super::project::{NanoClawProjectSnapshot, NanoClawSqliteSnapshot};
+use super::super::{
+    position::{nanoclaw_message_locator, NanoClawMessageSource},
+    NanoClawCompleteProject,
+};
 use super::*;
+use crate::complete_content::sqlite::{
+    CompleteContentSqliteBoundError, CompleteContentSqliteQueryBudget,
+};
 
 #[test]
 fn project_snapshot_freezes_constituent_identities_in_row_and_direction_order() {
@@ -25,7 +32,7 @@ fn project_snapshot_freezes_constituent_identities_in_row_and_direction_order() 
 
     let revision = snapshot.source_revision(7, "schema-oracle");
     assert!(revision.starts_with(
-        "nanoclaw-project-snapshot-v1:capture=1;policy=4;user_version=7;schema=schema-oracle;"
+        "nanoclaw-project-snapshot-v1:capture=2;policy=4;user_version=7;schema=schema-oracle;"
     ));
 }
 
@@ -123,6 +130,117 @@ fn rapid_same_page_mutations_invalidate_without_scheduler_assistance() {
 #[test]
 fn rapid_same_page_mutations_invalidate_with_scheduler_yields() {
     assert_rapid_component_mutations_detected(true);
+}
+
+#[test]
+fn complete_project_rejects_mutation_after_compound_snapshot_open() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "complete-mutation", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "in-1", 1, 1_000, "before");
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    let project = NanoClawCompleteProject::open(
+        &root,
+        std::slice::from_ref(&locator),
+        CompleteContentSqliteQueryBudget::new(),
+    )
+    .unwrap();
+
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'after!' where rowid = 1",
+            [],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        project.resolve(&locator),
+        Err(CompleteContentSqliteBoundError::Capture(
+            CaptureError::SourceChangedDuringCapture
+        ))
+    ));
+}
+
+fn add_schema_objects(path: &Path, prefix: &str, count: usize) {
+    let ddl = (0..count)
+        .map(|index| format!("create table {prefix}_{index:04} (value integer);"))
+        .collect::<String>();
+    Connection::open(path).unwrap().execute_batch(&ddl).unwrap();
+}
+
+fn assert_progress_interrupted(
+    result: std::result::Result<NanoClawCompleteProject, CompleteContentSqliteBoundError>,
+) {
+    match result {
+        Err(CompleteContentSqliteBoundError::Capture(CaptureError::Sqlite(
+            rusqlite::Error::SqliteFailure(failure, _),
+        ))) => assert_eq!(failure.code, rusqlite::ErrorCode::OperationInterrupted),
+        _ => panic!("expected deterministic SQLite progress interruption"),
+    }
+}
+
+#[test]
+fn complete_project_applies_schema_cap_to_central_and_selected_component() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+
+    let central_root = create_project(&temp, "oversized-central-schema", 1);
+    let (central_inbound, _) = create_message_stores(&central_root, "session-0000");
+    insert_inbound(&central_inbound, "in-1", 1, 1_000, "body");
+    add_schema_objects(&central_root.join("data/v2.db"), "extra", 1_025);
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    assert!(matches!(
+        NanoClawCompleteProject::open(
+            &central_root,
+            std::slice::from_ref(&locator),
+            CompleteContentSqliteQueryBudget::new(),
+        ),
+        Err(CompleteContentSqliteBoundError::ContentTooLarge)
+    ));
+
+    let component_root = create_project(&temp, "oversized-component-schema", 1);
+    let (component_inbound, _) = create_message_stores(&component_root, "session-0000");
+    insert_inbound(&component_inbound, "in-1", 1, 1_000, "body");
+    add_schema_objects(&component_inbound, "extra", 1_025);
+    let project = NanoClawCompleteProject::open(
+        &component_root,
+        std::slice::from_ref(&locator),
+        CompleteContentSqliteQueryBudget::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        project.resolve(&locator),
+        Err(CompleteContentSqliteBoundError::ContentTooLarge)
+    ));
+}
+
+#[test]
+fn complete_project_progress_budget_interrupts_central_and_component_without_sleeping() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "progress-budget", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "in-1", 1, 1_000, "body");
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+
+    assert_progress_interrupted(NanoClawCompleteProject::open(
+        &root,
+        std::slice::from_ref(&locator),
+        CompleteContentSqliteQueryBudget::interrupted_for_test(),
+    ));
+
+    let mut project = NanoClawCompleteProject::open(
+        &root,
+        std::slice::from_ref(&locator),
+        CompleteContentSqliteQueryBudget::new(),
+    )
+    .unwrap();
+    project.replace_query_budget_for_test(CompleteContentSqliteQueryBudget::interrupted_for_test());
+    match project.resolve(&locator) {
+        Err(CompleteContentSqliteBoundError::Capture(CaptureError::Sqlite(
+            rusqlite::Error::SqliteFailure(failure, _),
+        ))) => assert_eq!(failure.code, rusqlite::ErrorCode::OperationInterrupted),
+        _ => panic!("expected component SQLite progress interruption"),
+    }
 }
 
 #[test]

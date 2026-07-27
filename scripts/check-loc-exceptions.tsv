@@ -1,3 +1,2 @@
 path	kind	ceiling	disposition	owner	rationale	exit_or_review	review_by
 crates/ctx-cli/tests/native_providers.rs	test	1814	cohesive	component:cli-native-provider-contracts	Splitting the public native-provider end-to-end contract matrix would duplicate shared process fixtures and obscure cross-provider CLI parity.	Re-review when the shared process-fixture contract gains an independent owner.	2026-10-01
-crates/ctx-history-capture/src/provider/providers/openclaw.rs	source	1131	cohesive	component:capture-openclaw	Splitting the certified-resume and projection state machine would separate coupled cursor, source-observation, and publication contracts.	Re-review if a durable independent state owner emerges from the OpenClaw protocol.	2026-10-01

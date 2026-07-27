@@ -6,6 +6,10 @@ use crate::provider::normalization::{
     native_event, native_provider_capture, NativeEventDraft, NativeSessionDraft,
 };
 use crate::{
+    complete_content::{
+        jsonl::{attach_junie_record_set_locator, JunieRecordSetBinding, JunieRecordSetTarget},
+        VerifiedContentRole,
+    },
     ProviderAdapterContext, ProviderFileTouchedEnvelope, ProviderNormalizationResult,
     JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
 };
@@ -87,6 +91,7 @@ pub(super) fn junie_step_normalization(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn junie_step_output_normalization(
     base_draft: &NativeSessionDraft,
     context: &ProviderAdapterContext,
@@ -95,7 +100,8 @@ pub(super) fn junie_step_output_normalization(
     occurred_at: DateTime<Utc>,
     step: &JunieStepAgg,
     details: &str,
-) -> ProviderNormalizationResult {
+    source_binding: &JunieRecordSetBinding,
+) -> crate::Result<ProviderNormalizationResult> {
     let tool_name = if step.command.is_some() {
         "Bash"
     } else if step.files.is_some() {
@@ -103,7 +109,7 @@ pub(super) fn junie_step_output_normalization(
     } else {
         "tool"
     };
-    let event = native_event(NativeEventDraft {
+    let mut event = native_event(NativeEventDraft {
         provider: CaptureProvider::Junie,
         source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
         provider_session_id: base_draft.provider_session_id.clone(),
@@ -132,13 +138,22 @@ pub(super) fn junie_step_output_normalization(
             "tool_name": tool_name,
         }),
     });
-    ProviderNormalizationResult {
+    if let Ok(step_order) = u32::try_from(step.order) {
+        attach_junie_record_set_locator(
+            &mut event,
+            VerifiedContentRole::ResultBody,
+            details,
+            source_binding,
+            JunieRecordSetTarget::StepOutput(step_order),
+        )?;
+    }
+    Ok(ProviderNormalizationResult {
         captures: vec![(
             line_number,
             native_provider_capture(base_draft.clone(), context, Some(event)),
         )],
         ..ProviderNormalizationResult::default()
-    }
+    })
 }
 
 pub(super) fn junie_file_change_has_path(change: &Value) -> bool {

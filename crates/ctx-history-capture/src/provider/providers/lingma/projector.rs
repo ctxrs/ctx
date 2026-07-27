@@ -6,8 +6,8 @@ use ctx_history_core::{
 use serde_json::json;
 
 use crate::captured_batch::{
-    CapturedBatch, CapturedRecord, CapturedRecordPayload, CapturedSqliteValue, NativePosition,
-    SourceObservation,
+    CapturedBatch, CapturedRecord, CapturedRecordPayload, CapturedSqliteValue, NativeLocator,
+    NativePosition, SourceObservation,
 };
 use crate::provider::importer::{
     emit_projected_normalization_units, BoundedParserCheckpoint, CapturedBatchCursorFinish,
@@ -109,17 +109,18 @@ impl CapturedBatchProjector for LingmaCapturedBatchProjector {
         };
         let row = decode_lingma_values(values).map_err(ProviderProjectionFatal::new)?;
         let session = lingma_row_session_info(&row, self.context.imported_at);
-        emit_projected_normalization_units(
-            output,
-            lingma_row_normalization(
-                row,
-                &session,
-                &self.raw_source_path,
-                self.user_version,
-                &self.schema_fingerprint,
-                &self.context,
-            ),
+        let normalization = lingma_row_normalization(
+            row,
+            &session,
+            &self.raw_source_path,
+            self.user_version,
+            &self.schema_fingerprint,
+            &self.context,
+            record.locator(),
+            values,
         )
+        .map_err(ProviderProjectionFatal::new)?;
+        emit_projected_normalization_units(output, normalization)
     }
 
     fn initial_cursor_candidate(
@@ -269,6 +270,7 @@ fn lingma_optional_integer(
         ))),
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn lingma_row_normalization(
     row: LingmaChatRecordRow,
     session: &LingmaSessionInfo,
@@ -276,10 +278,12 @@ fn lingma_row_normalization(
     user_version: i64,
     schema_fingerprint: &str,
     context: &ProviderAdapterContext,
-) -> ProviderNormalizationResult {
+    locator: &NativeLocator,
+    values: &[CapturedSqliteValue],
+) -> Result<ProviderNormalizationResult> {
     let occurred_at = lingma_timestamp(row.gmt_create, context.imported_at);
     let base_index = lingma_event_base_index(&row);
-    let user_event = lingma_event(
+    let mut user_event = lingma_event(
         &row,
         LingmaEventDraft {
             provider_event_index: base_index,
@@ -291,6 +295,14 @@ fn lingma_row_normalization(
             fidelity: Fidelity::Imported,
         },
     );
+    crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+        &mut user_event,
+        CaptureProvider::Lingma,
+        LINGMA_SQLITE_SOURCE_FORMAT,
+        locator,
+        values,
+        || row.chat_prompt.clone(),
+    )?;
     let mut result = ProviderNormalizationResult {
         captures: vec![(
             provider_line_from_index(base_index),
@@ -338,7 +350,27 @@ fn lingma_row_normalization(
             ),
         ));
     }
-    result
+    Ok(result)
+}
+
+pub(super) fn lingma_complete_user_message(
+    values: &[CapturedSqliteValue],
+) -> Result<(ProviderEventEnvelope, String)> {
+    let row = decode_lingma_values(values)?;
+    let text = row.chat_prompt.clone();
+    let event = lingma_event(
+        &row,
+        LingmaEventDraft {
+            provider_event_index: lingma_event_base_index(&row),
+            role: EventRole::User,
+            event_type: EventType::Message,
+            occurred_at: lingma_timestamp(row.gmt_create, DateTime::<Utc>::UNIX_EPOCH),
+            text: text.clone(),
+            body_kind: "chat_prompt",
+            fidelity: Fidelity::Imported,
+        },
+    );
+    Ok((event, text))
 }
 
 struct LingmaCaptureContext<'a> {

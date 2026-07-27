@@ -365,6 +365,76 @@ fn tool_only_file_import_converges_from_the_certified_cursor() {
     let events = store.events_for_session(session.id).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, EventType::ToolOutput);
+    let output = "private tool output";
+    assert!(!events[0].payload.to_string().contains(output));
+    let source = store
+        .get_capture_source(events[0].capture_source_id.unwrap())
+        .unwrap();
+    let locators = crate::complete_content::VerifiedContentLocatorsV1::from_metadata_value(
+        &events[0].sync.metadata[crate::complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let locator = locators
+        .locator(crate::complete_content::VerifiedContentRole::ResultBody)
+        .unwrap();
+    assert_eq!(locator.content_profile(), PI_RESULT_CONTENT_PROFILE);
+    assert_eq!(locator.native_record_id(), "tool-only-1");
+    assert!(locator.content_ref().verifies(output.as_bytes()));
+    let route = store
+        .authorized_source_route_for_event(events[0].id)
+        .unwrap();
+    let source_access = crate::complete_content::SourceAccessBroker::new()
+        .admit(
+            crate::complete_content::AuthorizedSourceRoute {
+                source_id: route.capture_source_id(),
+                provider: route.provider(),
+                source_format: route.source_format().to_owned(),
+                family: locator.family(),
+                raw_source_path: route.path().to_path_buf(),
+                source_root: source
+                    .descriptor
+                    .source_root
+                    .as_deref()
+                    .map(std::path::PathBuf::from),
+                source_identity: Some(route.canonical_source_identity().to_owned()),
+                source_snapshot: crate::complete_content::SourceSnapshot::default(),
+            },
+            events[0].id,
+        )
+        .unwrap();
+    let request = crate::complete_content::ResultContentRequest {
+        event_id: events[0].id,
+        provider: CaptureProvider::Pi,
+        source_format: PI_SOURCE_FORMAT.to_owned(),
+        source_access,
+        source_family: locator.family(),
+        content_profile: locator.content_profile().to_owned(),
+        source_locator: locator.source_locator().unwrap(),
+        source_record_ordinal: events[0].sync.metadata["source_record_ordinal"]
+            .as_u64()
+            .unwrap(),
+        source_record_subrecord_index: events[0].sync.metadata["source_record_subrecord_index"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap(),
+        expected_native_record_id: locator.native_record_id().to_owned(),
+        expected_record_digest: locator.record_sha256().clone(),
+        expected_content_ref: locator.content_ref().clone(),
+    };
+    let resolved = crate::complete_content::jsonl::JsonlCompleteContentResolver::new()
+        .resolve_results(std::slice::from_ref(&request));
+    assert_eq!(resolved[0].as_ref().unwrap().content, output);
+
+    let mut mismatched = request;
+    mismatched.content_profile =
+        crate::provider::providers::claude::CLAUDE_RESULT_CONTENT_PROFILE.to_owned();
+    assert_eq!(
+        crate::complete_content::ResultContentResolverRegistry::new().resolve(&[mismatched])[0]
+            .as_ref()
+            .unwrap_err()
+            .kind,
+        crate::complete_content::CompleteContentErrorKind::HydrationUnsupported
+    );
 
     let (second, second_source_opens) = count_pi_source_file_opens(|| {
         import_pi_session_jsonl_file_batched(

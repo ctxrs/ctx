@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, Fidelity, ProviderCaptureEnvelope, ProviderCursorCheckpoint,
-    ProviderCursorRange, ProviderSessionEnvelope, ProviderSourceEnvelope, ProviderSourceTrust,
-    SessionStatus, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+    AgentType, CaptureProvider, ContentRef, Fidelity, ProviderCaptureEnvelope,
+    ProviderCursorCheckpoint, ProviderCursorRange, ProviderSessionEnvelope, ProviderSourceEnvelope,
+    ProviderSourceTrust, SessionStatus, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,8 +30,8 @@ use crate::{
 
 use super::dialect::{native_jsonl_record_kind, native_jsonl_record_starts_session};
 use super::normalization::{
-    antigravity_session_id_from_path, native_jsonl_event, native_jsonl_header_cwd,
-    native_jsonl_header_session_id, native_jsonl_header_start_time,
+    antigravity_session_id_from_path, native_jsonl_event_with_result_content_ref,
+    native_jsonl_header_cwd, native_jsonl_header_session_id, native_jsonl_header_start_time,
     native_jsonl_normalized_header_metadata, native_jsonl_path_session,
     native_jsonl_session_metadata_from_normalized_header, native_jsonl_session_status,
     native_jsonl_timestamp, windsurf_session_id_from_path,
@@ -121,9 +121,18 @@ impl NativeJsonlSessionCheckpoint {
         context: &ProviderAdapterContext,
         value: &Value,
         line_number: usize,
-    ) -> ProviderNormalizationResult {
+    ) -> (ProviderNormalizationResult, Option<ContentRef>) {
         let occurred_at = native_jsonl_timestamp(value).unwrap_or(self.started_at);
-        let event = native_jsonl_event(provider, source_format, value, line_number, occurred_at);
+        let (event, result_content_ref) = native_jsonl_event_with_result_content_ref(
+            provider,
+            source_format,
+            value,
+            line_number,
+            occurred_at,
+        )
+        .map_or((None, None), |(event, content_ref)| {
+            (Some(event), content_ref)
+        });
         let raw_source_path = path.display().to_string();
         let source_root = context
             .source_root_display()
@@ -188,10 +197,13 @@ impl NativeJsonlSessionCheckpoint {
             },
             event,
         };
-        ProviderNormalizationResult {
-            captures: vec![(line_number, capture)],
-            ..ProviderNormalizationResult::default()
-        }
+        (
+            ProviderNormalizationResult {
+                captures: vec![(line_number, capture)],
+                ..ProviderNormalizationResult::default()
+            },
+            result_content_ref,
+        )
     }
 }
 
@@ -433,7 +445,7 @@ impl CapturedBatchProjector for NativeJsonlCapturedBatchProjector {
             );
             self.session = Some(session);
         }
-        let mut normalization = self
+        let (mut normalization, result_content_ref) = self
             .session
             .as_ref()
             .ok_or_else(|| {
@@ -461,6 +473,16 @@ impl CapturedBatchProjector for NativeJsonlCapturedBatchProjector {
                 &value,
                 record,
                 line_number,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+            crate::complete_content::jsonl::attach_native_jsonl_result_content_locator(
+                event,
+                self.provider,
+                &self.source_format,
+                &value,
+                record,
+                line_number,
+                result_content_ref.as_ref(),
             )
             .map_err(ProviderProjectionFatal::new)?;
         }

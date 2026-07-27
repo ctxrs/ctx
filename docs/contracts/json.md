@@ -238,8 +238,13 @@ corruption, locks, unreadable source files, and malformed source data are
 source failures and do not stop independent sources. Failed sources can include
 up to five rejection details when every content record was rejected.
 
-`totals` and each source row include file, byte, session, event, edge, skipped,
-and `rejected_records` counts. Rejection details are exposed as `rejections`
+`totals` and each source row include `change`, whose value is `changed` or
+`no_op`, plus file, byte, session, event, edge, skipped, and
+`rejected_records` counts. `change` reports whether canonical source work
+changed; it is independent of insert counters. A deterministic source
+replacement can therefore report `change: "changed"`, zero newly imported
+events, and skipped existing events while reconciling those rows in place.
+Rejection details are exposed as `rejections`
 (bounded to five entries); `failed_sources` remains the count of source-level
 failures. `sources_completed_with_rejections` counts sources that committed
 accepted content while rejecting other records. `resume_mode` is currently `idempotent_rescan` when

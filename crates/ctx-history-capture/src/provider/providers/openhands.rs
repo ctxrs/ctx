@@ -36,6 +36,7 @@ mod source;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use event::openhands_result_content;
 pub(crate) use event::{decode_openhands_event, decode_openhands_event_value};
 #[cfg(test)]
 use projection::with_openhands_post_touch_failure;
@@ -51,8 +52,8 @@ use source::{
     visit_openhands_event_paths, OpenHandsEventSource,
 };
 
-const OPENHANDS_CAPTURE_REVISION: u32 = 2;
-const OPENHANDS_POLICY_REVISION: u32 = 5;
+const OPENHANDS_CAPTURE_REVISION: u32 = 3;
+const OPENHANDS_POLICY_REVISION: u32 = 6;
 const OPENHANDS_RECORD_KIND: &str = "openhands-event-json-v1";
 const OPENHANDS_POSITION_KIND: &str = "openhands-event-file-v1";
 const OPENHANDS_LOCATOR_KIND: &str = "openhands-event-path-v1";
@@ -62,6 +63,7 @@ const OPENHANDS_MAX_PATH_BYTES: usize = 7 * 1024;
 const OPENHANDS_MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024;
 const OPENHANDS_MAX_FAILURE_BYTES: usize = 4 * 1024;
 const OPENHANDS_CAPTURED_BATCH_PROJECTION_MARKER: &str = "openhands-captured-batch-v1";
+pub(crate) const OPENHANDS_RESULT_CONTENT_PROFILE: &str = "openhands.result-body.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OpenHandsEventIdentity {
