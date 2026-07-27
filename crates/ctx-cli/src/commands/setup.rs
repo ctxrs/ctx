@@ -9,24 +9,25 @@ use serde_json::{json, Value};
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
 
-use crate::analytics::AnalyticsProperties;
+use crate::analytics::{self, ProviderRefreshTrigger, SetupMode, SetupTelemetry, StoreTelemetry};
 use crate::commands::import::{
     import_report_analytics_outcome, import_report_failure_type, import_totals_json,
     insert_import_error_analytics, insert_import_report_analytics, inventory_available_sources,
     run_import_internal, CatalogTotals, ImportInventory, ImportReport, ImportRunOptions,
-    InventoryTotals,
+    InventoryTotals, ProviderRefreshCollector,
 };
 use crate::config::CONFIG_FILE;
 use crate::output::print_json;
 use crate::progress::{format_bytes, format_count, plural, ProgressArg, ProgressReporter};
 use crate::provider_sources::{discovered_sources, sources_json};
 use crate::semantic::semantic_query_service_supported;
-use crate::{analytics, config, ImportArgs, SetupArgs};
+use crate::{config, ImportArgs, SetupArgs};
 
 pub(crate) fn run_setup(
     args: SetupArgs,
     data_root: PathBuf,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut SetupTelemetry,
+    provider_refreshes: &mut ProviderRefreshCollector,
     quiet: bool,
     config: &config::AppConfig,
 ) -> Result<()> {
@@ -74,14 +75,19 @@ pub(crate) fn run_setup(
             format: None,
             all: true,
             resume: false,
+            partial: false,
             no_daemon: args.no_daemon,
             json: args.json,
             progress: progress_arg,
         };
+        provider_refreshes.start_timing();
         let report = run_import_internal(
             &import_args,
             data_root.clone(),
-            analytics_properties,
+            &mut telemetry.import,
+            provider_refreshes,
+            ProviderRefreshTrigger::Setup,
+            config,
             ImportRunOptions {
                 progress: progress_arg,
                 json: args.json,
@@ -91,16 +97,17 @@ pub(crate) fn run_setup(
                 operation: "setup",
             },
         );
+        provider_refreshes.stop_timing();
         match report {
             Ok(report) => Some(report),
             Err(error) => {
-                insert_import_error_analytics(analytics_properties, &error);
+                insert_import_error_analytics(&mut telemetry.import, &error);
                 return Err(error);
             }
         }
     };
     if let Some(report) = import_report.as_ref() {
-        insert_import_report_analytics(analytics_properties, report);
+        insert_import_report_analytics(&mut telemetry.import, report);
     }
     let all_import_sources_failed = import_report
         .as_ref()
@@ -117,52 +124,30 @@ pub(crate) fn run_setup(
     let pending_inventory_units = catalog_counts
         .pending
         .saturating_add(source_import_file_counts.pending);
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "providers_detected_bucket",
-        sources.len() as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "cataloged_sessions_bucket",
-        catalog.cataloged_sessions as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "inventory_sources_bucket",
-        inventory_totals.sources as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "inventory_source_files_bucket",
+    telemetry.providers_detected = Some(analytics::count_bucket(sources.len() as u64));
+    telemetry.cataloged_sessions = Some(analytics::count_bucket(catalog.cataloged_sessions as u64));
+    telemetry.inventory_sources = Some(analytics::count_bucket(inventory_totals.sources as u64));
+    telemetry.inventory_source_files = Some(analytics::count_bucket(
         inventory_totals.source_files as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "pending_sessions_bucket",
-        catalog_counts.pending as u64,
-    );
-    analytics::insert_bytes_bucket(
-        analytics_properties,
-        "catalog_source_bytes_bucket",
-        catalog.source_bytes,
-    );
-    analytics::insert_bytes_bucket(
-        analytics_properties,
-        "inventory_source_bytes_bucket",
-        inventory_totals.source_bytes,
-    );
+    ));
+    telemetry.pending_sessions = Some(analytics::count_bucket(catalog_counts.pending as u64));
+    telemetry.catalog_source_bytes = Some(analytics::bytes_bucket(catalog.source_bytes));
+    telemetry.inventory_source_bytes = Some(analytics::bytes_bucket(inventory_totals.source_bytes));
     let indexed_items = indexed_history_item_count(&setup_store)?;
-    insert_store_analytics_counts(analytics_properties, &setup_store)?;
-    analytics::insert_bool(
-        analytics_properties,
-        "has_indexed_content_after_setup",
-        setup_has_indexed_content(indexed_items),
-    );
+    let _ =
+        insert_store_analytics_counts(&mut telemetry.store, &setup_store, config.analytics.enabled);
+    telemetry.has_indexed_content = Some(setup_has_indexed_content(indexed_items));
     let background_indexing_enabled = daemon_backgrounding_enabled
         && !args.catalog_only
         && !foreground_import
         && (pending_inventory_units > 0 || (semantic_enabled && semantic_supported));
+    telemetry.mode = Some(if args.catalog_only {
+        SetupMode::CatalogOnly
+    } else if foreground_import || !background_indexing_enabled {
+        SetupMode::Ready
+    } else {
+        SetupMode::Background
+    });
 
     if args.json {
         print_json(json!({
@@ -172,7 +157,7 @@ pub(crate) fn run_setup(
             "config_path": config_path,
             "mode": if args.catalog_only {
                 "catalog_only"
-            } else if foreground_import {
+            } else if foreground_import || !background_indexing_enabled {
                 "ready"
             } else {
                 "background"
@@ -199,7 +184,11 @@ pub(crate) fn run_setup(
                 "stale_sessions": catalog_counts.stale,
             },
             "catalog_sources": catalog_sources,
-            "import": setup_import_json(import_report.as_ref(), args.catalog_only),
+            "import": setup_import_json(
+                import_report.as_ref(),
+                args.catalog_only,
+                background_indexing_enabled
+            ),
             "background_indexing": setup_background_indexing_json(
                 &inventory_totals,
                 inventory_units,
@@ -302,7 +291,11 @@ fn setup_progress_arg(progress: ProgressArg, quiet: bool) -> ProgressArg {
     }
 }
 
-pub(crate) fn setup_import_json(report: Option<&ImportReport>, catalog_only: bool) -> Value {
+pub(crate) fn setup_import_json(
+    report: Option<&ImportReport>,
+    catalog_only: bool,
+    background_indexing_enabled: bool,
+) -> Value {
     match report {
         Some(report) => json!({
             "ran": true,
@@ -316,7 +309,13 @@ pub(crate) fn setup_import_json(report: Option<&ImportReport>, catalog_only: boo
         }),
         None => json!({
             "ran": false,
-            "reason": if catalog_only { "catalog_only" } else { "background" },
+            "reason": if catalog_only {
+                "catalog_only"
+            } else if background_indexing_enabled {
+                "background"
+            } else {
+                "no_sources"
+            },
         }),
     }
 }
@@ -399,7 +398,7 @@ pub(crate) fn print_setup_status_line(
                 "ctx is initialized; local history indexing is queued for background processing"
             );
         } else {
-            println!("ctx is initialized; background indexing has no pending local history");
+            println!("ctx is initialized; no local history was indexed");
         }
         return;
     }
@@ -615,37 +614,30 @@ pub(crate) fn indexed_history_item_count(store: &Store) -> Result<usize> {
     Ok(store.indexed_history_item_count()?)
 }
 
-pub(crate) fn insert_store_analytics_counts(
-    analytics_properties: &mut AnalyticsProperties,
-    store: &Store,
-) -> Result<()> {
-    let counts = store.indexed_history_counts()?;
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "indexed_sessions_bucket",
-        counts.sessions as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "indexed_events_bucket",
-        counts.events as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "indexed_items_bucket",
-        counts.items() as u64,
-    );
-    Ok(())
+pub(crate) fn analytics_preflight<T>(
+    enabled: bool,
+    query: impl FnOnce() -> Result<T>,
+) -> Option<T> {
+    enabled.then(query)?.ok()
 }
 
-pub(crate) fn insert_db_size_bucket(
-    analytics_properties: &mut AnalyticsProperties,
-    db_path: &Path,
-) {
+pub(crate) fn insert_store_analytics_counts(
+    telemetry: &mut StoreTelemetry,
+    store: &Store,
+    enabled: bool,
+) -> Option<usize> {
+    let counts = analytics_preflight(enabled, || Ok(store.indexed_history_counts()?))?;
+    telemetry.indexed_sessions = Some(analytics::count_bucket(counts.sessions as u64));
+    telemetry.indexed_events = Some(analytics::count_bucket(counts.events as u64));
+    telemetry.indexed_items = Some(analytics::count_bucket(counts.items() as u64));
+    Some(counts.items())
+}
+
+pub(crate) fn insert_db_size_bucket(telemetry: &mut StoreTelemetry, db_path: &Path) {
     let bytes = fs::metadata(db_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    analytics::insert_bytes_bucket(analytics_properties, "db_size_bucket", bytes);
+    telemetry.db_size = Some(analytics::bytes_bucket(bytes));
 }
 
 pub(crate) fn setup_has_failed_sources(report: Option<&ImportReport>) -> bool {
@@ -654,7 +646,26 @@ pub(crate) fn setup_has_failed_sources(report: Option<&ImportReport>) -> bool {
 
 #[cfg(test)]
 mod setup_estimate_tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    #[test]
+    fn analytics_preflight_is_disabled_without_running_the_query() {
+        let called = Cell::new(false);
+        let value = analytics_preflight(false, || {
+            called.set(true);
+            Ok::<_, anyhow::Error>(42)
+        });
+        assert_eq!(value, None);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn analytics_preflight_errors_become_unknown() {
+        let value = analytics_preflight(true, || Err::<usize, _>(anyhow::anyhow!("preflight")));
+        assert_eq!(value, None);
+    }
 
     #[test]
     fn semantic_estimate_uses_quiet_backend_throughput() {

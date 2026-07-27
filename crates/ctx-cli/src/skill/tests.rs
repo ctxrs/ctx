@@ -13,9 +13,9 @@ use super::{
         install_agent_selection, parse_picker_selection, SkillSelectionSource,
     },
     target::resolve_targets,
-    SkillInstallArgs, BUNDLED_SKILL_NAME, METADATA_FILE,
+    SkillInstallArgs, METADATA_FILE,
 };
-use crate::analytics;
+use crate::analytics::{IntegrationScope, IntegrationTelemetry, TargetSelection};
 
 #[test]
 fn default_target_is_global_canonical_agents_dir() {
@@ -233,7 +233,7 @@ fn status_distinguishes_current_stale_modified_and_missing() {
 }
 
 #[test]
-fn analytics_properties_are_coarse_and_path_free() {
+fn analytics_values_are_closed_and_path_free() {
     let args = SkillInstallArgs {
         agent: vec![SkillAgentArg::Codex, SkillAgentArg::ClaudeCode],
         all_agents: false,
@@ -241,17 +241,10 @@ fn analytics_properties_are_coarse_and_path_free() {
         json: true,
         force: false,
     };
-    let mut properties = analytics::empty_properties();
-    args.add_initial_analytics(&mut properties);
+    let mut telemetry = IntegrationTelemetry::default();
+    args.add_initial_analytics(&mut telemetry);
 
-    assert_eq!(properties["skill_action"], "install");
-    assert_eq!(properties["skill_name"], BUNDLED_SKILL_NAME);
-    assert_eq!(properties["skill_scope"], "project");
-    assert_eq!(properties["target_agent_group"], "explicit");
-    for key in properties.keys() {
-        assert!(
-            !key.contains("path") && !key.contains("home") && !key.contains("dir"),
-            "unexpected path-like analytics key: {key}"
-        );
-    }
+    assert_eq!(telemetry.scope, Some(IntegrationScope::Project));
+    assert_eq!(telemetry.selection, Some(TargetSelection::Explicit));
+    assert_eq!(telemetry.force, Some(false));
 }

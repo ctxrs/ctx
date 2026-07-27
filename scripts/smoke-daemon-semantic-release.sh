@@ -268,6 +268,7 @@ release_metadata="${run_root}/release-metadata.env"
 mkdir -p "${release_artifact_dir}" "${install_bin_dir}"
 IFS=$'\t' read -r \
   host_system host_arch host_native_arch process_translated native_arch_probe \
+  hardware_identity emulation hypervisor evidence_complete \
   < <("${script_dir}/public-cli-host-runtime-evidence.sh")
 
 if [[ "${ctx_bin}" == */* ]]; then
@@ -298,7 +299,8 @@ fi
 runtime_authority="$(
   "${script_dir}/public-cli-runtime-authority.sh" \
     "${runtime_platform}" "${host_system}" "${host_arch}" passed \
-    "${host_native_arch}" "${process_translated}"
+    "${host_native_arch}" "${process_translated}" "${hardware_identity}" \
+    "${emulation}" "${hypervisor}" "${evidence_complete}"
 )"
 if [[ "${downgrade_runtime_authority}" == "1" ]]; then
   runtime_authority=non_authoritative
@@ -405,14 +407,13 @@ PY
 
 isolated_env=(
   -u CTX_DATA_ROOT
-  -u CTX_DAEMON_OFF
-  -u CTX_DISABLE_DAEMON
+  -u CTX_DAEMON_ENABLED
   -u CTX_DAEMON_AUTOSTART_OFF
   -u CTX_DAEMON_AUTOSTART_EXE
   -u CTX_DAEMON_BACKGROUND_CHILD
   -u CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS
   -u CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS
-  -u CTX_DISABLE_SEMANTIC_SEARCH
+  -u CTX_SEARCH_SEMANTIC
   -u CTX_SEMANTIC_WORKER_OFF
   -u CTX_SEMANTIC_WORKER_MAX_CHUNKS
   -u CTX_SEMANTIC_WORKER_MAX_SECONDS
@@ -426,8 +427,7 @@ isolated_env=(
   -u CTX_ANALYTICS_DEBUG
   -u CTX_UPGRADE_AUTO
   -u CTX_UPGRADE_CHANNEL
-  -u CTX_CHANNEL
-  -u CTX_FUNCTIONS_BASE
+  -u CTX_UPGRADE_FUNCTIONS_BASE
   -u CTX_UPGRADE_INTERVAL_SECONDS
   -u CTX_UPGRADE_TARGET
   -u CTX_UPGRADE_BACKGROUND_CHILD
@@ -459,13 +459,10 @@ ctx_env=(
   "HF_HUB_CACHE=${semantic_cache}"
   "FASTEMBED_CACHE_DIR=${semantic_cache}"
   "CTX_SEMANTIC_CACHE_DIR=${semantic_cache}"
-  CTX_ANALYTICS_OFF=1
-  CTX_DISABLE_ANALYTICS=1
-  CTX_UPGRADE_OFF=1
-  CTX_DISABLE_AUTO_UPGRADE=1
+  CTX_ANALYTICS_ENABLED=false
   CTX_UPGRADE_AUTO=off
-  CTX_DAEMON_ENABLED=1
-  CTX_SEARCH_SEMANTIC=1
+  CTX_DAEMON_ENABLED=true
+  CTX_SEARCH_SEMANTIC=true
   "CTX_RUNTIME_DIR=${runtime_root}"
 )
 if [[ "${coreml_mode}" == "1" ]]; then

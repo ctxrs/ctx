@@ -1,4 +1,23 @@
-use super::*;
+use std::path::Path;
+
+use anyhow::Result;
+use serde_json::{json, Value};
+
+use ctx_history_capture::{CaptureError, ProviderImportSummary, ProviderSourceStatus};
+use ctx_history_core::CaptureProvider;
+use ctx_history_store::StoreError;
+
+use crate::commands::import::totals::ImportTotals;
+use crate::commands::import::{
+    import_report_analytics_outcome, import_report_failure_type,
+    provider_summary_has_imported_content, rejected_source_summary, ImportReport,
+    ImportSourceFailure, SourceStats,
+};
+use crate::history_source_plugins::HistorySourcePluginSource;
+use crate::output::print_json;
+use crate::progress::format_bytes;
+use crate::provider_args::ImportFormatArg;
+use crate::provider_sources::{import_support_json, SourceInfo};
 
 fn source_import_status(summary: &ProviderImportSummary) -> &'static str {
     if summary.failed > 0 && !provider_summary_has_imported_content(summary) {
@@ -355,10 +374,10 @@ pub(crate) fn print_provider_failures(summary: &ProviderImportSummary) {
     for failure in summary.failures.iter().take(5) {
         println!("  rejected line {}: {}", failure.line, failure.error);
     }
-    if summary.failures.len() > 5 {
+    if summary.failed > 5 {
         println!(
             "  ... {} more rejected record(s)",
-            summary.failures.len().saturating_sub(5)
+            summary.failed.saturating_sub(5)
         );
     }
 }
@@ -607,6 +626,7 @@ pub(crate) fn available_space_bytes(_path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::import::rejected_source_error;
 
     #[test]
     fn provider_database_lock_is_source_scoped() {

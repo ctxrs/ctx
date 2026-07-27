@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "x64-loopback-only",
+      "accepted": true,
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]}
+        ],
+        "routes": [
+          {"family": "ipv4", "interface": "lo", "destination": "127.0.0.0/8"},
+          {"family": "ipv6", "interface": "lo", "destination": "::1/128"}
+        ],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "arm64-inert-kernel-fallbacks-and-bonding-control-file",
+      "accepted": true,
+      "state": {
+        "non_interface_entries": ["bonding_masters"],
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "tunl0", "type": 768, "operstate": "down", "carrier": null, "flags": 128, "ipv4": [], "ipv6": []},
+          {"name": "sit0", "type": 776, "operstate": "down", "carrier": null, "flags": 128, "ipv4": [], "ipv6": []},
+          {"name": "ip6tnl0", "type": 769, "operstate": "down", "carrier": null, "flags": 128, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [
+          {"family": "ipv4", "interface": "lo", "destination": "127.0.0.0/8"},
+          {"family": "ipv6", "interface": "lo", "destination": "::1/128"}
+        ],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "unknown-down-ethernet-still-fails-closed",
+      "accepted": false,
+      "error": "unsupported non-loopback interface is present: eth0",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "eth0", "type": 1, "operstate": "down", "carrier": 0, "flags": 4098, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "active-ethernet-rejected",
+      "accepted": false,
+      "error": "unsupported non-loopback interface is present: eth0",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "eth0", "type": 1, "operstate": "up", "carrier": 1, "flags": 69699, "ipv4": ["192.0.2.25"], "ipv6": ["fe80::25"]}
+        ],
+        "routes": [
+          {"family": "ipv4", "interface": "eth0", "destination": "default"}
+        ],
+        "route_probes": {"ipv4": "routable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "active-veth-rejected",
+      "accepted": false,
+      "error": "unsupported non-loopback interface is present: veth0",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "veth0", "type": 1, "operstate": "up", "carrier": 1, "flags": 69699, "ipv4": ["172.18.0.2"], "ipv6": ["fe80::1"]}
+        ],
+        "routes": [
+          {"family": "ipv4", "interface": "veth0", "destination": "default"}
+        ],
+        "route_probes": {"ipv4": "routable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "active-built-in-tunnel-rejected",
+      "accepted": false,
+      "error": "inert interface tunl0 is not down",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "tunl0", "type": 768, "operstate": "up", "carrier": 1, "flags": 65665, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "carrier-on-down-tunnel-rejected",
+      "accepted": false,
+      "error": "inert interface sit0 has carrier",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "sit0", "type": 776, "operstate": "down", "carrier": 1, "flags": 128, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "active-flags-on-down-tunnel-rejected",
+      "accepted": false,
+      "error": "inert interface ip6tnl0 has active flags",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "ip6tnl0", "type": 769, "operstate": "down", "carrier": null, "flags": 129, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "address-on-inert-tunnel-rejected",
+      "accepted": false,
+      "error": "inert interface tunl0 has a ipv4 address",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "tunl0", "type": 768, "operstate": "down", "carrier": null, "flags": 128, "ipv4": ["192.0.2.10"], "ipv6": []}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "route-on-inert-tunnel-rejected",
+      "accepted": false,
+      "error": "non-loopback route is present on sit0",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "sit0", "type": 776, "operstate": "down", "carrier": null, "flags": 128, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [
+          {"family": "ipv6", "interface": "sit0", "destination": "default"}
+        ],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "wrong-fallback-link-type-rejected",
+      "accepted": false,
+      "error": "inert interface tunl0 has the wrong link type",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]},
+          {"name": "tunl0", "type": 1, "operstate": "down", "carrier": null, "flags": 128, "ipv4": [], "ipv6": []}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "live-ipv4-route-probe-rejected",
+      "accepted": false,
+      "error": "ipv4 route probe is not conclusively unreachable",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "routable", "ipv6": "unreachable"}
+      }
+    },
+    {
+      "name": "indeterminate-ipv6-route-probe-fails-closed",
+      "accepted": false,
+      "error": "ipv6 route probe is not conclusively unreachable",
+      "state": {
+        "interfaces": [
+          {"name": "lo", "type": 772, "operstate": "unknown", "carrier": 1, "flags": 65609, "ipv4": ["127.0.0.1"], "ipv6": ["::1"]}
+        ],
+        "routes": [],
+        "route_probes": {"ipv4": "unreachable", "ipv6": "indeterminate_errno_1"}
+      }
+    }
+  ]
+}

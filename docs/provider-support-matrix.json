@@ -26,8 +26,7 @@
         }
       ],
       "history_locations": [
-        "~/.codex/sessions",
-        "~/.codex/history.jsonl"
+        "Winner: `$CODEX_HOME` or `~/.codex`, deriving `sessions`, `archived_sessions`, and `history.jsonl`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -45,6 +44,9 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
+      "limitations": [
+        "Exact supported JSONL is manual-importable. `.jsonl.zst` is detected unsupported; SQLite, past roots, and the default beside an override are excluded."
+      ],
       "public_docs": "docs/providers.md"
     },
     {
@@ -60,13 +62,12 @@
           "notes": [
             "Reads Pi session JSONL files under ~/.pi/agent/sessions, including per-cwd session directories produced by current Pi releases.",
             "An explicit Pi session JSONL file path remains supported with ctx import --provider pi --path.",
-            "Also reads ~/.omp/agent/sessions from Oh My Pi (OMP), a Pi fork, using the identical pi_session_jsonl format."
+            "Compatible Oh My Pi session JSONL remains importable by exact explicit path; its ~/.omp root is not an automatic Pi default."
           ]
         }
       ],
       "history_locations": [
-        "~/.pi/agent/sessions",
-        "~/.omp/agent/sessions"
+        "Winner by Pi precedence: session-dir env, agent-dir env plus `sessions`, global settings, trusted exact-CWD project settings, or `~/.pi/agent/sessions`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -84,6 +85,9 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
+      "limitations": [
+        "One-shot/API, untrusted or past project, moved, and OMP roots require exact `--path`. One root wins; no ancestor scan or default union."
+      ],
       "public_docs": "docs/providers.md"
     },
     {
@@ -101,6 +105,9 @@
           ]
         }
       ],
+      "history_locations": [
+        "Winner: safe `$CLAUDE_CONFIG_DIR/projects`, otherwise `~/.claude/projects` when no replacement is present."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
@@ -117,8 +124,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "An unsafe replacement suppresses the default and requires exact `--path`. Prompt-history and project-local guesses are excluded."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "open_code",
@@ -135,6 +144,9 @@
           ]
         }
       ],
+      "history_locations": [
+        "Winner: `$OPENCODE_DB` or `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db`."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
@@ -151,8 +163,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "`:memory:` means no disk history. Retained channels and nonselected defaults are manual-only."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "kilo",
@@ -167,16 +181,12 @@
           "notes": [
             "Reads Kilo Code SQLite history using the OpenCode-family SQLite normalizer against a read-only connection.",
             "KILO_DB overrides the database path; relative KILO_DB values resolve under the Kilo XDG data directory.",
-            "When KILO_DB is not set, ctx discovers the default Kilo DB plus channel DBs named kilo-<channel>.db."
+            "When KILO_DB is not set, ctx selects the single active Kilo database; legacy opencode.db is considered only when the current database is absent."
           ]
         }
       ],
       "history_locations": [
-        "KILO_DB",
-        "$XDG_DATA_HOME/kilo/kilo.db",
-        "~/.local/share/kilo/kilo.db",
-        "$XDG_DATA_HOME/kilo/kilo-*.db",
-        "~/.local/share/kilo/kilo-*.db"
+        "Winner: `$KILO_DB` or active DB under `${XDG_DATA_HOME:-~/.local/share}/kilo`; paired legacy `opencode.db` only when current is absent."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -194,10 +204,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Only OpenCode-derived SQLite session/session_message and legacy message-table projections are imported; todo and permission tables are recognized as schema neighbors but not converted into separate ctx events."
-      ]
+        "`:memory:` means no disk history. Channels/platform defaults are not unioned, nor are current and legacy."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "mimocode",
@@ -211,16 +221,12 @@
           "fidelity": "imported",
           "notes": [
             "Reads MiMo Code SQLite history using the OpenCode-family SQLite normalizer against a read-only connection.",
-            "Discovers the default database at $XDG_DATA_HOME/mimocode/mimocode.db or ~/.local/share/mimocode/mimocode.db, $MIMOCODE_HOME/data/mimocode.db, explicit $MIMOCODE_DB paths, and mimocode-*.db channel databases unless $MIMOCODE_DISABLE_CHANNEL_DB is set."
+            "Selects one database by $MIMOCODE_DB, $MIMOCODE_HOME/data/mimocode.db, or the XDG/default mimocode.db path, in that order."
           ]
         }
       ],
       "history_locations": [
-        "$MIMOCODE_DB",
-        "$MIMOCODE_HOME/data/mimocode.db",
-        "$XDG_DATA_HOME/mimocode/mimocode-*.db",
-        "$XDG_DATA_HOME/mimocode/mimocode.db",
-        "~/.local/share/mimocode/mimocode.db"
+        "Winner: `$MIMOCODE_DB`, `$MIMOCODE_HOME/data/mimocode.db`, or `${XDG_DATA_HOME:-~/.local/share}/mimocode/mimocode.db`, in order."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -238,10 +244,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "MiMo Code is based on OpenCode and uses a similar SQLite schema; the adapter reuses the OpenCode-family normalizer."
-      ]
+        "`:memory:` means no disk history. Inactive channels and defaults beside an override are manual-only."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "kiro_cli",
@@ -261,9 +267,7 @@
         }
       ],
       "history_locations": [
-        "$XDG_DATA_HOME/kiro-cli/data.sqlite3",
-        "~/.local/share/kiro-cli/data.sqlite3",
-        "~/Library/Application Support/kiro-cli/data.sqlite3"
+        "Detected unsupported: `${KIRO_HOME:-~/.kiro}/sessions`. Legacy platform `kiro-cli/data.sqlite3` is automatic only when current history is absent."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -281,11 +285,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Does not import the newer ~/.kiro/sessions/cli JSON/JSONL event-log format observed in recent Kiro CLI reports.",
-        "Windows Kiro CLI SQLite paths are not claimed by this row."
-      ]
+        "ACP/v3 and saved-chat JSON are unsupported. Exact legacy SQLite is manual-importable; current and legacy are never unioned."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "crush",
@@ -304,13 +307,7 @@
         }
       ],
       "history_locations": [
-        "CRUSH_GLOBAL_DATA/crush.db",
-        "$XDG_DATA_HOME/crush/crush.db",
-        "~/.local/share/crush/crush.db",
-        "CRUSH_GLOBAL_CONFIG options.data_directory/crush.db",
-        "~/.config/crush/crush.json options.data_directory/crush.db",
-        "<project-root>/.crush/crush.db",
-        "<project-root>/{crush.json,.crush.json} options.data_directory/crush.db"
+        "Winner: one `crush.db` from bounded config and nearest/default `.crush` inside the current Git/worktree boundary; finite registered projects may coexist."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -328,10 +325,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Crush SQLite schema changes may require adapter updates."
-      ]
+        "Global config/data directories are not DBs. Unregistered flags and past CWDs require exact `--path`; no broad ancestor scan."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "goose",
@@ -345,16 +342,12 @@
           "fidelity": "imported",
           "notes": [
             "Reads Goose sessions SQLite history from sessions/sessions.db using a read-only connection.",
-            "Discovery checks GOOSE_PATH_ROOT, XDG data homes, and the Block/goose data layout used by newer Goose builds."
+            "Discovery selects absolute GOOSE_PATH_ROOT or one current platform data-root strategy; retained alternate databases are not added."
           ]
         }
       ],
       "history_locations": [
-        "GOOSE_PATH_ROOT/data/sessions/sessions.db",
-        "$XDG_DATA_HOME/goose/sessions/sessions.db",
-        "$XDG_DATA_HOME/Block/goose/sessions/sessions.db",
-        "~/.local/share/goose/sessions/sessions.db",
-        "~/.local/share/Block/goose/sessions/sessions.db"
+        "Winner: absolute `$GOOSE_PATH_ROOT/data/sessions/sessions.db` or the selected platform root plus `data/sessions/sessions.db`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -372,10 +365,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Goose sessions.db schema changes may require adapter updates."
-      ]
+        "Current and retained platform roots are not unioned. Moved/retained DBs require exact `--path`."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "lingma",
@@ -388,15 +381,14 @@
           "source_format": "lingma_sqlite",
           "fidelity": "partial",
           "notes": [
-            "Reads Lingma chat_record rows from ~/.lingma/vscode/sharedClientCache/cache/db/local.db and the vscode-insiders variant.",
+            "Reads Lingma chat_record rows from the selected persistent VS Code or JetBrains client database; retired WayLog/Insiders stores are explicit-path-only.",
             "Qoder CN is the renamed Lingma product line in Alibaba public docs; its VSIX still uses the same ~/.lingma/vscode/sharedClientCache/cache/db/local.db path/schema.",
             "The qoder-cn and qoder_cn CLI aliases resolve to this Lingma importer; separate Qoder IDE homes such as ~/.qodercn or ~/.qoder-cn are not imported by this row."
           ]
         }
       ],
       "history_locations": [
-        "~/.lingma/vscode/sharedClientCache/cache/db/local.db",
-        "~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db"
+        "One automatic `local.db` per finitely identified installed VS Code or JetBrains client, profile, and version."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -414,16 +406,16 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
+      "limitations": [
+        "Distinct installed clients may coexist. Migration/old settings, Visual Studio, remote, and unknown profiles require exact `--path`."
+      ],
       "public_docs": "docs/providers.md",
       "metadata": {
         "aliases": [
           "qoder-cn",
           "qoder_cn"
         ]
-      },
-      "limitations": [
-        "Separate Qoder IDE paths such as ~/.qodercn or ~/.qoder-cn remain outside this row."
-      ]
+      }
     },
     {
       "id": "qoder",
@@ -443,7 +435,7 @@
         }
       ],
       "history_locations": [
-        "~/.qoder/projects/*/transcript/*.jsonl"
+        "Detected unsupported at fixed SDK default: `~/.qoder/projects/<project>/*.jsonl` direct session files."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -461,16 +453,16 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
+      "limitations": [
+        "`QODER_CONFIG_DIR` is SDK-scoped and manual-only. Direct SDK JSONL stays unsupported with `--path`; legacy `transcript/*.jsonl` can be selected exactly."
+      ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
         "canonical_provider_id": "qoder",
         "source_docs": [
           "https://docs.qoder.com/extensions/hooks"
         ]
-      },
-      "limitations": [
-        "Encrypted Qoder application logs and VS Code/Electron state databases are not imported."
-      ]
+      }
     },
     {
       "id": "warp",
@@ -490,10 +482,7 @@
         }
       ],
       "history_locations": [
-        "${XDG_STATE_HOME:-~/.local/state}/warp-terminal/warp.sqlite",
-        "~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable/warp.sqlite",
-        "%LOCALAPPDATA%/warp/Warp/data/warp.sqlite",
-        "Explicit warp.sqlite path, including the documented Windows %LOCALAPPDATA% path"
+        "Winner: Linux `${XDG_STATE_HOME:-~/.local/state}/warp-terminal/warp.sqlite`, or fixed macOS/Windows DB per installed first-party surface."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -511,10 +500,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Remote sync endpoints, hosted agent conversations, Markdown exports, browser IndexedDB, command history outside agent_tasks, and Warp Drive/team data are not parsed."
-      ]
+        "Only installed coexisting surfaces are emitted. Historical roots, arbitrary builds, cloud history, and FreeBSD are manual/excluded."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "codebuddy",
@@ -530,17 +519,12 @@
             "Reads CodeBuddy extension JSON history under recursive history/<md5(projectPath)> project directories.",
             "Reads CodeBuddy Code CLI JSONL transcripts under ~/.codebuddy/projects/<workspace>/*.jsonl.",
             "Session index.json lists messages; message bodies are read from messages/*.json and may contain stringified JSON.",
-            "Discovery checks ~/.codebuddy, ~/Library/Application Support/CodeBuddyExtension/Data, and LOCALAPPDATA/CodeBuddyExtension."
+            "Discovery selects $CODEBUDDY_CONFIG_DIR or ~/.codebuddy for CLI history and may add the current platform's CodeBuddyExtension IDE data store."
           ]
         }
       ],
       "history_locations": [
-        "~/.codebuddy",
-        "~/Library/Application Support/CodeBuddyExtension/Data",
-        "%LOCALAPPDATA%/CodeBuddyExtension",
-        "~/.codebuddy/projects/<workspace>/*.jsonl",
-        "*/history/<md5(projectPath)>/<session>/index.json",
-        "*/history/<md5(projectPath)>/<session>/messages/*.json"
+        "CLI winner: `$CODEBUDDY_CONFIG_DIR` or `~/.codebuddy`; an independently installed IDE may add its platform `CodeBuddyExtension` store."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -558,10 +542,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Official CodeBuddy docs describe CodeBuddy Code installation, models.json, and the configuration directory, but not the native transcript schema; future schema changes may require adapter updates."
-      ]
+        "The CLI override replaces default. One-shot and unregistered host/profile roots require exact `--path`."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "trae",
@@ -574,7 +558,7 @@
           "source_format": "trae_state_vscdb",
           "fidelity": "partial",
           "notes": [
-            "Automatic discovery is limited to Trae and Trae CN User/workspaceStorage roots at ~/Library/Application Support/Trae/User/workspaceStorage, ~/Library/Application Support/Trae CN/User/workspaceStorage, %APPDATA%/Trae/User/workspaceStorage, and %APPDATA%/Trae CN/User/workspaceStorage.",
+            "No official automatic Trae history root is established; workspaceStorage compatibility paths require an exact explicit path.",
             "Explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files remain supported.",
             "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, icube-ai-agent-storage-input-history, chat.ChatSessionStore.index, and ChatStore.",
             "Trae CN input-history rows are imported as user prompts when assistant replies are not present in local state.",
@@ -582,16 +566,7 @@
           ]
         }
       ],
-      "history_locations": [
-        "~/Library/Application Support/Trae/User/workspaceStorage",
-        "~/Library/Application Support/Trae CN/User/workspaceStorage",
-        "%APPDATA%/Trae/User/workspaceStorage",
-        "%APPDATA%/Trae CN/User/workspaceStorage",
-        "explicit Trae User/workspaceStorage directory",
-        "explicit Trae CN User/workspaceStorage directory",
-        "explicit Trae workspace directory containing state.vscdb",
-        "explicit Trae state.vscdb file"
-      ],
+      "history_locations": [],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -608,21 +583,20 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
+      "limitations": [
+        "No automatic official history leaf: `ModularData` does not identify current-importer input. Former `workspaceStorage` probes are removed; compatible `state.vscdb` remains available by exact `--path`."
+      ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
-        "default_auto_discovery": true,
-        "default_auto_discovery_scope": "Trae and Trae CN User/workspaceStorage roots with known ItemTable chat keys",
-        "import_support": "supported defaults plus explicit paths",
+        "default_auto_discovery": false,
+        "default_auto_discovery_scope": "none; no official automatic Trae history leaf is established",
+        "import_support": "exact explicit paths only",
         "aliases": [
           "trae-cn",
           "trae_cn"
         ],
         "canonical_provider_id": "trae"
-      },
-      "limitations": [
-        "Default discovery covers only the listed User/workspaceStorage roots and known ItemTable chat keys.",
-        "globalStorage, ModularData, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from Trae CN input-history-only databases remain unclaimed."
-      ]
+      }
     },
     {
       "id": "openclaw",
@@ -635,16 +609,13 @@
           "source_format": "openclaw_session_jsonl_tree",
           "fidelity": "partial",
           "notes": [
-            "Reads OpenClaw session JSONL transcripts under OPENCLAW_STATE_DIR, ~/.openclaw, and legacy ~/.clawdbot or ~/.moltbot homes.",
+            "Legacy OpenClaw session JSONL transcripts remain importable by exact explicit path; automatic discovery instead detects current per-agent SQLite as unsupported under one selected state/profile root.",
             "Upstream exposes newer session helpers and warns plugins not to depend on legacy sessions.json shape."
           ]
         }
       ],
       "history_locations": [
-        "OPENCLAW_STATE_DIR/agents/*/sessions/*.jsonl",
-        "~/.openclaw/agents/*/sessions/*.jsonl",
-        "~/.clawdbot/agents/*/sessions/*.jsonl",
-        "~/.moltbot/agents/*/sessions/*.jsonl"
+        "Detected unsupported: `agents/<agent-id>/agent/openclaw-agent.sqlite` beneath one selected state/profile root for each configured agent."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -662,10 +633,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Newer OpenClaw session APIs may change the local transcript contract; ctx currently reads the listed JSONL homes."
-      ]
+        "Current SQLite has no importer. Legacy JSONL, old profiles, `.moltbot`, mounts, and remotes are manual-only and not unioned."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "hermes",
@@ -684,8 +655,7 @@
         }
       ],
       "history_locations": [
-        "HERMES_HOME/state.db",
-        "~/.hermes/state.db"
+        "Winner: `$HERMES_HOME/state.db` or platform `state.db` for the active profile; persisted Gateway multiplex may add finite named profiles."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -703,8 +673,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/providers.md",
-      "limitations": []
+      "limitations": [
+        "Inactive profiles, API DBs, mounts, and unregistered installs require exact `--path`."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "nanoclaw",
@@ -718,14 +690,12 @@
           "fidelity": "partial",
           "notes": [
             "Explicit-path importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
-            "Project roots are discovered from the current working directory and ancestors, but explicit-only sources are not imported by ctx import --all or pre-search refresh."
+            "Automatic project discovery checks only the exact current working directory; ancestors are not searched, and alternate roots require an exact explicit path."
           ]
         }
       ],
       "history_locations": [
-        "<project-root>/data/v2.db",
-        "<project-root>/data/v2-sessions/*/*/inbound.db",
-        "<project-root>/data/v2-sessions/*/*/outbound.db"
+        "Project default: exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions`; alternate roots are explicit-only."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -743,10 +713,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Automatic refresh is intentionally disabled until more real-world NanoClaw project layout drift is validated."
-      ]
+        "`import_support: explicit` excludes NanoClaw from setup, `--all`, daemon, and search refresh. Other clones/mounts require exact `--path`; no home/ancestor scan."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "astrbot",
@@ -765,9 +735,7 @@
         }
       ],
       "history_locations": [
-        "ASTRBOT_ROOT/data/data_v4.db",
-        "~/.astrbot/data/data_v4.db",
-        "<project-root>/data/data_v4.db"
+        "Core winner: `$ASTRBOT_ROOT/data/data_v4.db`, exact-CWD `data/data_v4.db`, or Desktop `~/.astrbot/data/data_v4.db`; finite Launcher instances may coexist."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -785,8 +753,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
-      "limitations": []
+      "limitations": [
+        "Ancestors, containers, and unknown installs are not guessed. Old CWDs and mounts require exact `--path`."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "shelley",
@@ -799,15 +769,14 @@
           "source_format": "shelley_sqlite",
           "fidelity": "imported",
           "notes": [
-            "Reads Shelley SQLite history from SHELLEY_DB or ~/.config/shelley/shelley.db using a read-only SQLite connection.",
+            "Reads Shelley SQLite history from exact current-CWD shelley.db automatically or any supported database supplied by exact explicit path; SHELLEY_DB and helper defaults are not automatic selectors.",
             "Normalizes conversations as sessions and messages as events with stable conversation/sequence/message cursors.",
             "Indexes text from Shelley user/agent/tool JSON, including thinking, tool calls, and tool results when present."
           ]
         }
       ],
       "history_locations": [
-        "SHELLEY_DB",
-        "~/.config/shelley/shelley.db"
+        "Winner: `<current-working-directory>/shelley.db` on supported platforms."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -825,10 +794,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "Shelley SQLite schema changes may require adapter updates."
-      ]
+        "`SHELLEY_DB`, helper defaults, server flags, past CWDs, and Windows guesses are manual-only; `~/.config/shelley/shelley.db` is no longer automatic."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "continue",
@@ -848,8 +817,7 @@
         }
       ],
       "history_locations": [
-        "CONTINUE_GLOBAL_DIR/sessions",
-        "~/.continue/sessions"
+        "Winner: `$CONTINUE_GLOBAL_DIR/sessions` or `~/.continue/sessions`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -867,10 +835,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "This row covers Continue CLI sessions/*.json history, not editor webview-only state."
-      ]
+        "Override replaces default. Old process-relative roots are manual-only; editor webview state is not imported."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "openhands",
@@ -890,9 +858,7 @@
         }
       ],
       "history_locations": [
-        "OH_PERSISTENCE_DIR/<user_id>/v1_conversations/<conversation-id-hex>/*.json",
-        "FILE_STORE_PATH/<user_id>/v1_conversations/<conversation-id-hex>/*.json",
-        "~/.openhands/<user_id>/v1_conversations/<conversation-id-hex>/*.json"
+        "V1 winner: `$OH_PERSISTENCE_DIR`, `$FILE_STORE_PATH`, or `~/.openhands`, then optional user and `v1_conversations`. Current CLI `conversations/<id>/events` is detected unsupported."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -910,8 +876,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "Remote backend means no local root. Docker host paths are manual; current CLI events stay unsupported with explicit selection."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "antigravity_cli",
@@ -924,17 +892,14 @@
           "source_format": "antigravity_cli_transcript_jsonl_tree",
           "fidelity": "imported",
           "notes": [
-            "Reads Antigravity transcript JSONL mirrors under ~/.gemini/antigravity-cli/brain/*/.system_generated/logs and official IDE transcripts under ~/.gemini/antigravity-ide/brain/*/.system_generated/logs, preferring transcript_full.jsonl when present.",
-            "Native source discovery marks Antigravity available only when transcript_full.jsonl or transcript.jsonl exists.",
+            "Reads Antigravity transcript JSONL mirrors under ~/.gemini/antigravity-cli/brain/*/.system_generated/logs and official IDE transcripts under ~/.gemini/antigravity-ide/brain/*/.system_generated/logs.",
+            "Native source discovery marks Antigravity available only when transcript.jsonl exists; alternate transcript files require an exact explicit path.",
             "Preserves typed tool call arguments as bounded local JSON previews."
           ]
         }
       ],
       "history_locations": [
-        "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl",
-        "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl",
-        "~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl",
-        "~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript.jsonl"
+        "Fixed: `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl` and matching `antigravity-ide` root."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -952,10 +917,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "ctx reads the official IDE transcript path ~/.gemini/antigravity-ide/brain; it does not crawl other Antigravity homes."
-      ]
+        "No custom root is automatic. `transcript_full`, SQLite, installer/workspace guesses, and copies are manual or unsupported."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "gemini_cli",
@@ -973,6 +938,9 @@
           ]
         }
       ],
+      "history_locations": [
+        "Winner: `$GEMINI_CLI_HOME/.gemini/tmp/*/chats` or `~/.gemini/tmp/*/chats`."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
@@ -989,8 +957,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "Only bounded chat children are inspected; provider `.env` is never read. Past relative/BSD roots are manual."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "tabnine",
@@ -1010,8 +980,7 @@
         }
       ],
       "history_locations": [
-        "~/.tabnine/agent/tmp/*/chats/session-*.jsonl",
-        "~/.tabnine/agent/tmp/*/chats/<parent-session-id>/*.jsonl"
+        "Winner: `$GEMINI_CLI_HOME/.tabnine/agent/tmp/*/chats` or `~/.tabnine/agent/tmp/*/chats`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1029,10 +998,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Authenticated Tabnine chat data is required before local chat JSONL records exist under the listed chats path."
-      ]
+        "This package-defined location may vary by version. Old/unknown roots and FreeBSD require exact `--path`; no default union."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "cursor",
@@ -1051,6 +1020,9 @@
           ]
         }
       ],
+      "history_locations": [
+        "Winner: `$CURSOR_DATA_DIR/projects` or `~/.cursor/projects`."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -1067,8 +1039,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "Override replaces default. Hidden flags, worker/desktop/config roots, past roots, and unsupported platforms are manual."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "windsurf",
@@ -1088,8 +1062,7 @@
         }
       ],
       "history_locations": [
-        "~/.windsurf/transcripts",
-        "<transcript>.jsonl"
+        "Fixed: `~/.windsurf/transcripts/<trajectory-id>.jsonl`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1107,10 +1080,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Support is limited to official hook transcript JSONL; sessions that Windsurf did not write after hook setup are not backfilled from private caches."
-      ]
+        "No custom root is automatic. Hook copies/sinks, Devin, VS Code, cache, and workspace guesses require exact `--path`; unwritten sessions cannot be backfilled."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "zed",
@@ -1130,8 +1103,7 @@
         }
       ],
       "history_locations": [
-        "$XDG_DATA_HOME/zed/threads/threads.db",
-        "~/.local/share/zed/threads/threads.db"
+        "One `threads/threads.db` beneath safe Flatpak, absolute XDG, or supported OS default root, in Zed precedence order."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1149,11 +1121,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Future Zed DbThread schema changes may require adapter updates.",
-        "Per-message timestamps are not present in DbThread messages, so event timestamps are thread-level updated_at values."
-      ]
+        "Relative Flatpak suppresses fallback and requires exact `--path`; stateless has no disk history. One-shot/old/FreeBSD roots are manual."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "copilot_cli",
@@ -1171,6 +1142,9 @@
           ]
         }
       ],
+      "history_locations": [
+        "Winner: `$COPILOT_HOME/session-state` or `~/.copilot/session-state`."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -1187,8 +1161,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "Override replaces default. Deprecated config-dir, old XDG, and past roots require exact `--path`."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "factory_ai_droid",
@@ -1201,10 +1177,11 @@
           "source_format": "factory_ai_droid_sessions_jsonl",
           "fidelity": "imported",
           "notes": [
-            "Reads Factory AI Droid session JSONL files under ~/.factory/sessions, including worker session linkage when present."
+            "Reads Factory AI Droid session JSONL supplied by exact explicit path, including worker session linkage when present; no official automatic root is established."
           ]
         }
       ],
+      "history_locations": [],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
@@ -1221,8 +1198,10 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "No automatic official Factory root; former `~/.factory/sessions` probe is removed. User-owned supported JSONL remains available by exact `--path`."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "qwen_code",
@@ -1241,9 +1220,7 @@
         }
       ],
       "history_locations": [
-        "QWEN_RUNTIME_DIR/projects/*/chats/*.jsonl",
-        "QWEN_HOME/projects/*/chats/*.jsonl",
-        "~/.qwen/projects/*/chats/*.jsonl"
+        "Winner: `$QWEN_RUNTIME_DIR/projects`, configured `advanced.runtimeOutputDir/projects`, `$QWEN_HOME/projects`, or `~/.qwen/projects`; trusted project settings may replace it."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1261,8 +1238,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "Unsafe, ephemeral-trust, invalid, or unreconstructible selectors suppress fallback and require exact `--path`. One effective root wins."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "kimi_code_cli",
@@ -1281,10 +1260,7 @@
         }
       ],
       "history_locations": [
-        "KIMI_CODE_HOME/session_index.jsonl",
-        "KIMI_CODE_HOME/sessions/*/*/agents/*/wire.jsonl",
-        "~/.kimi-code/session_index.jsonl",
-        "~/.kimi-code/sessions/*/*/agents/*/wire.jsonl"
+        "Winner: `$KIMI_CODE_HOME` or `~/.kimi-code`, including `session_index.jsonl` and `agents/*/wire.jsonl`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1302,8 +1278,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
-      "limitations": []
+      "limitations": [
+        "Override replaces default. Retired predecessor and past process roots require exact `--path`."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "auggie",
@@ -1322,7 +1300,7 @@
         }
       ],
       "history_locations": [
-        "~/.augment/sessions/*.json"
+        "Fixed: `~/.augment/sessions/*.json`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1340,11 +1318,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Future Auggie session JSON schema changes may require adapter updates.",
-        "Without Augment login, ctx may only see cache/session directories until transcript JSON exists."
-      ]
+        "`--augment-cache-dir` is one-shot and requires exact `--path`; ctx does not scan processes, shell history, or filesystem."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "junie",
@@ -1357,16 +1334,14 @@
           "source_format": "junie_session_events_jsonl_tree",
           "fidelity": "imported",
           "notes": [
-            "Reads Junie sessions from ~/.junie/sessions/index.jsonl plus session-*/events.jsonl, JUNIE_SESSIONS_DIR, JUNIE_HOME/sessions, or an explicit sessions/session path.",
+            "Reads Junie sessions from the selected JUNIE_HOME/sessions or ~/.junie/sessions root, using index.jsonl plus session-*/events.jsonl, or from an explicit sessions/session path.",
             "Normalizes UserPromptEvent rows and SessionA2uxEvent agentEvent blocks into user, assistant, tool-call, command-output, and file-touch events.",
             "Discovery is index-driven and rejects sessionId values with path separators or traversal segments."
           ]
         }
       ],
       "history_locations": [
-        "JUNIE_SESSIONS_DIR/index.jsonl and session-*/events.jsonl",
-        "JUNIE_HOME/sessions/index.jsonl and session-*/events.jsonl",
-        "~/.junie/sessions/index.jsonl and session-*/events.jsonl"
+        "Winner: `$JUNIE_HOME/sessions` or `~/.junie/sessions` on supported platforms."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1384,16 +1359,15 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
+      "limitations": [
+        "`JUNIE_SESSIONS_DIR`, old roots, and unsupported Unix are manual. UI-event import is limited to supported text in `events.jsonl`."
+      ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
         "npx_skills_id": "junie",
         "canonical_provider_id": "junie",
         "schema_family": "Junie event-sourced UI stream"
-      },
-      "limitations": [
-        "Junie's events.jsonl schema is not documented first-party and may drift.",
-        "Junie stores a UI event stream rather than a conversational assistant transcript; ctx imports block/result text that is present in events.jsonl."
-      ]
+      }
     },
     {
       "id": "firebender",
@@ -1411,9 +1385,7 @@
           ]
         }
       ],
-      "history_locations": [
-        "<project>/.idea/firebender/chat_history.db"
-      ],
+      "history_locations": [],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -1430,6 +1402,9 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
+      "limitations": [
+        "No automatic official Firebender leaf; ancestor discovery of `<project>/.idea/firebender/chat_history.db` is removed. Compatible DB remains available by exact `--path`."
+      ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
         "aliases": [
@@ -1438,11 +1413,7 @@
         ],
         "npx_skills_id": "firebender",
         "canonical_provider_id": "firebender"
-      },
-      "limitations": [
-        "Future Firebender chat_history.db schema changes may require adapter updates.",
-        "ctx reads project-local .idea/firebender/chat_history.db; it does not claim a global Firebender transcript home."
-      ]
+      }
     },
     {
       "id": "forgecode",
@@ -1461,9 +1432,7 @@
         }
       ],
       "history_locations": [
-        "FORGE_CONFIG/.forge.db",
-        "~/forge/.forge.db",
-        "~/.forge/.forge.db"
+        "Winner: `$FORGE_CONFIG/.forge.db`, else `~/forge/.forge.db` when `~/forge` exists, else `~/.forge/.forge.db`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1481,11 +1450,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "ForgeCode stores the conversation as a mutable context JSON snapshot, so message cursors use the message array index rather than upstream stable message ids.",
-        "The importer recognizes the DTO fields present in Forge repository migrations and conversation records, but future unrecognized DTO fields are retained as capped raw metadata until explicitly mapped."
-      ]
+        "Only one DB is selected. Nonselected DB, `.forge_history`, and `custom_history_path` are manual/excluded."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "deepagents",
@@ -1504,7 +1472,7 @@
         }
       ],
       "history_locations": [
-        "~/.deepagents/.state/sessions.db"
+        "Winner: `~/.deepagents/.state/sessions.db`; legacy `~/.deepagents/sessions.db` only when current is absent."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1522,11 +1490,10 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Future Deep Agents or LangGraph checkpoint schema changes may require adapter updates.",
-        "The importer intentionally skips arbitrary checkpoint state blobs because they may contain private agent state beyond chat messages."
-      ]
+        "When both exist only current is automatic. Inspector variables/flags and arbitrary DBs require exact `--path`; opaque state is not chat."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "mistral_vibe",
@@ -1545,8 +1512,7 @@
         }
       ],
       "history_locations": [
-        "VIBE_HOME/logs/session/*/{meta.json,messages.jsonl}",
-        "~/.vibe/logs/session/*/{meta.json,messages.jsonl}"
+        "One `logs/session` root selected through Vibe home, session env, bounded user config, and persisted-trusted nearest-project config."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1564,11 +1530,10 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Future Mistral Vibe session JSONL schema changes may require adapter updates.",
-        "The public Vibe session log carries message timestamps inconsistently, so ctx falls back to deterministic import/session timestamps when a row does not expose one."
-      ]
+        "Defaults/selectors are not unioned. Ephemeral-trust, past relative, invalid, and unreconstructible roots require exact `--path`."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "mux",
@@ -1587,11 +1552,7 @@
         }
       ],
       "history_locations": [
-        "MUX_ROOT/sessions/*/chat.jsonl",
-        "MUX_ROOT/sessions/*/partial.json",
-        "~/.mux/sessions/*/chat.jsonl",
-        "~/.mux/sessions/*/partial.json",
-        "~/.mux/sessions/*/subagent-transcripts/*/chat.jsonl"
+        "Winner: `$MUX_ROOT/sessions`, development `~/.mux-dev/sessions`, or `~/.mux/sessions`; `.cmux/sessions` only when `.mux` is absent. `chat-archive.jsonl` is detected unsupported."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1609,11 +1570,10 @@
         "token_usage": true,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Future Mux chat, partial, or subagent transcript schema changes may require adapter updates.",
-        "Producing a local Mux transcript requires model/auth setup."
-      ]
+        "Roots are not unioned. Constructor/benchmark roots are manual; supported chat/partial/subagent files remain, archives stay unsupported."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "rovodev",
@@ -1632,8 +1592,7 @@
         }
       ],
       "history_locations": [
-        "~/.rovodev/sessions/*/session_context.json",
-        "~/.rovodev/sessions/*/metadata.json"
+        "Winner: safe `sessions.persistenceDir` from `~/.rovodev/config.yml`, otherwise `~/.rovodev/sessions` when absent."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1651,10 +1610,10 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
-      "public_docs": "docs/provider-support.md",
       "limitations": [
-        "Future Rovo Dev message part variants may require adapter updates."
-      ]
+        "Relative/invalid/unsafe replacement suppresses fallback and requires exact `--path`; alternate config-file roots are manual. Import sessions, not config."
+      ],
+      "public_docs": "docs/provider-support.md"
     },
     {
       "id": "cline",
@@ -1667,16 +1626,13 @@
           "source_format": "cline_task_directory_json",
           "fidelity": "imported",
           "notes": [
-            "Reads Cline task directories containing api_conversation_history.json, ui_messages.json, context_history.json, or task_metadata.json.",
-            "Discovery covers CLINE_DATA_DIR, CLINE_DIR/data, CLINE_SESSION_DATA_DIR sibling data roots, CLINE_DB_DATA_DIR sibling data roots, ~/.cline/data, and common VS Code globalStorage folders."
+            "Reads legacy Cline task directories containing api_conversation_history.json, ui_messages.json, or task_metadata.json.",
+            "Discovery selects one Cline-owned root by CLINE_DATA_DIR, enabled CLINE_SANDBOX_DATA_DIR, CLINE_DIR/data, or ~/.cline/data, plus finite Microsoft VS Code globalStorage profile roots. Current SDK session and DB roots are detection-only unsupported."
           ]
         }
       ],
       "history_locations": [
-        "CLINE_DATA_DIR/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}",
-        "CLINE_DIR/data/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}",
-        "~/.cline/data/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}",
-        "~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}"
+        "One Cline-owned legacy `tasks` root plus finite Microsoft VS Code stable/Insiders/profile stores. Current SDK manifests/messages, `sessions.db`, and `sessions.index.json` are detected unsupported."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1694,10 +1650,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "VS Code private extension state databases are not parsed; file-backed task directories are required."
-      ]
+        "SDK selectors do not map to legacy tasks. One-shot/non-Microsoft/remote roots are manual; SDK shapes stay unsupported with explicit paths."
+      ],
+      "public_docs": "docs/providers.md"
     },
     {
       "id": "roo_code",
@@ -1711,14 +1667,12 @@
           "fidelity": "imported",
           "notes": [
             "Reads Roo Code task directories containing api_conversation_history.json, ui_messages.json, history_item.json, _index.json, or claude_messages.json.",
-            "Discovery covers roo-cline.customStoragePath from VS Code settings, common VS Code globalStorage folders for RooVeterinaryInc.roo-cline, ROO_CODE_DATA_DIR, ROO_DATA_DIR, ROO_CLINE_DATA_DIR, and explicit paths."
+            "Discovery covers absolute roo-cline.customStoragePath values from bounded VS Code settings/profile selection, finite official VS Code globalStorage roots, the CLI mock root, and explicit paths."
           ]
         }
       ],
       "history_locations": [
-        "roo-cline.customStoragePath/tasks/*/{api_conversation_history.json,ui_messages.json,history_item.json,_index.json,claude_messages.json}",
-        "~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/*/{api_conversation_history.json,ui_messages.json,history_item.json,_index.json,claude_messages.json}",
-        "ROO_CODE_DATA_DIR/tasks/*/{api_conversation_history.json,ui_messages.json,history_item.json,_index.json,claude_messages.json}"
+        "Absolute persistent `customStoragePath` by JSONC profile/window precedence, finite VS Code stable/Nightly/profile stores, and CLI `~/.vscode-mock/global-storage`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1736,10 +1690,10 @@
         "token_usage": true,
         "parent_child_session_edges": false
       },
-      "public_docs": "docs/providers.md",
       "limitations": [
-        "VS Code private extension state databases are not parsed; file-backed task directories are required."
-      ]
+        "ctx-only ROO env probes are removed. External workspace roots require consent; portable/launch/remote/fork roots require exact `--path`; ephemeral data is absent."
+      ],
+      "public_docs": "docs/providers.md"
     }
   ]
 }

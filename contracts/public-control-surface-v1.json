@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "principle": "One canonical control per behavior and justified channel.",
+  "controls": [
+    {
+      "behavior": "analytics delivery",
+      "config_key": "analytics.enabled",
+      "environment_variable": "CTX_ANALYTICS_ENABLED"
+    },
+    {
+      "behavior": "analytics endpoint",
+      "config_key": "analytics.endpoint",
+      "environment_variable": "CTX_ANALYTICS_ENDPOINT"
+    },
+    {
+      "behavior": "automatic upgrade mode",
+      "config_key": "upgrade.auto",
+      "environment_variable": "CTX_UPGRADE_AUTO"
+    },
+    {
+      "behavior": "upgrade channel",
+      "config_key": "upgrade.channel",
+      "environment_variable": "CTX_UPGRADE_CHANNEL"
+    },
+    {
+      "behavior": "upgrade check interval",
+      "config_key": "upgrade.interval_hours",
+      "environment_variable": "CTX_UPGRADE_INTERVAL_SECONDS"
+    },
+    {
+      "behavior": "upgrade metadata base",
+      "config_key": "upgrade.functions_base",
+      "environment_variable": "CTX_UPGRADE_FUNCTIONS_BASE"
+    },
+    {
+      "behavior": "daemon maintenance",
+      "config_key": "daemon.enabled",
+      "environment_variable": "CTX_DAEMON_ENABLED"
+    },
+    {
+      "behavior": "semantic search",
+      "config_key": "search.semantic",
+      "environment_variable": "CTX_SEARCH_SEMANTIC"
+    }
+  ],
+  "retired_controls": [
+    "CTX_CHANNEL",
+    "CTX_FUNCTIONS_BASE",
+    "CTX_DISABLE_SEMANTIC_SEARCH",
+    "upgrade.interval_seconds"
+  ],
+  "retired_control_reference": "docs/storage.md",
+  "deprecated_compatibility_handler": "crates/ctx-cli/src/deprecated_controls.rs",
+  "deprecated_compatibility_count": 7,
+  "deprecated_compatibility_removal_version": null,
+  "deprecated_control_references": [
+    "docs/storage.md"
+  ]
+}

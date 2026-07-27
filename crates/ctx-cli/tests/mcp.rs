@@ -65,6 +65,17 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
         "MCP research tool should not be exposed in {tools:#?}"
     );
     let search_tool = tools.iter().find(|tool| tool["name"] == "search").unwrap();
+    for name in ["show_session", "show_event"] {
+        let show_tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(
+            show_tool["inputSchema"]["properties"]["content"]["enum"],
+            json!(["indexed", "complete"])
+        );
+        assert_eq!(
+            show_tool["inputSchema"]["properties"]["content"]["default"],
+            "indexed"
+        );
+    }
     let providers = search_tool["inputSchema"]["properties"]["provider"]["enum"]
         .as_array()
         .unwrap();
@@ -108,7 +119,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert_eq!(status["indexed_events"], 0);
     assert_eq!(status["read_only"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
-    assert_eq!(status["daemon"]["enabled"], false);
+    assert_eq!(status["daemon"]["enabled"], true);
     assert_useful_mcp_text(
         &responses[2]["result"],
         &[
@@ -122,7 +133,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
             "local_only: true",
             "semantic: status=disabled",
             "semantic_coverage: searchable_items=0",
-            "daemon: enabled=false",
+            "daemon: enabled=true",
             "daemon_jobs:",
         ],
     );

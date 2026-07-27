@@ -5,17 +5,17 @@ use serde_json::json;
 
 use ctx_history_core::database_path;
 
-use crate::analytics::AnalyticsProperties;
+use crate::analytics::{count_bucket, DoctorTelemetry};
 use crate::output::print_json;
 use crate::progress::{progress_mode_name, ProgressReporter};
 use crate::semantic::{daemon_report, semantic_health_findings, semantic_worker_report};
 use crate::store_util::open_existing_store_read_only;
-use crate::{analytics, DoctorArgs};
+use crate::DoctorArgs;
 
 pub(crate) fn run_doctor(
     args: DoctorArgs,
     data_root: PathBuf,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut DoctorTelemetry,
 ) -> Result<()> {
     let progress = ProgressReporter::new(args.progress, args.json, "doctor", 0);
     progress.message("opening", "opening ctx store");
@@ -45,11 +45,29 @@ pub(crate) fn run_doctor(
         semantic_worker_report(&data_root, None)?
     };
     let daemon = daemon_report(&data_root, &semantic_report);
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "finding_count_bucket",
-        findings.len() as u64,
-    );
+    let pro = crate::pro::lifecycle_status_json(&data_root);
+    if pro["installed"].as_bool() == Some(true) {
+        if let Some(code @ ("helper_upgrade_required" | "protocol_mismatch")) =
+            pro["error_code"].as_str()
+        {
+            findings.push(format!(
+                "ctx Pro helper is incompatible ({code}); run `ctx pro`"
+            ));
+        } else if let Some(code @ ("key_store_unavailable" | "key_store_locked")) =
+            pro["error_code"].as_str()
+        {
+            findings.push(format!(
+                "ctx Pro key store is unavailable ({code}); configure and unlock a persistent platform key store (not an ephemeral session collection), then run `ctx pro`; plaintext key fallback is not supported"
+            ));
+        } else if pro["error_code"].as_str() == Some("corrupt_graph") {
+            findings.push(
+                "ctx Pro graph needs repair; run `ctx pro` or reinstall with `ctx pro uninstall --delete-data`"
+                    .to_owned(),
+            );
+        }
+    }
+    telemetry.finding_count = Some(count_bucket(findings.len() as u64));
+    telemetry.healthy = Some(findings.is_empty());
     progress.done(
         "done",
         if findings.is_empty() {
@@ -66,6 +84,7 @@ pub(crate) fn run_doctor(
             "progress": progress_mode_name(args.progress),
             "findings": findings,
             "daemon": daemon,
+            "pro": pro,
         }))?;
     } else if findings.is_empty() {
         println!("ok");

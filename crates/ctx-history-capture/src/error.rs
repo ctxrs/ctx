@@ -35,6 +35,10 @@ pub enum CaptureError {
     },
     #[error("system invariant failed: {0}")]
     SystemInvariant(&'static str),
+    #[error("provider source changed during bounded capture")]
+    SourceChangedDuringCapture,
+    #[error("provider cursor changed during bounded capture")]
+    ProviderCursorConflict,
     #[error("line {line} in {path:?} is not a valid capture envelope: {source}")]
     InvalidJsonLine {
         path: PathBuf,

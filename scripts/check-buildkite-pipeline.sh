@@ -53,8 +53,7 @@ if command -v ruby >/dev/null 2>&1; then
     abort "public-smoke should run one hosted Linux job at a time" unless smoke["concurrency"] == 1 && smoke["concurrency_group"].to_s.include?("default-hosted")
     command = smoke["command"].to_s
     abort "public-smoke must run the Buildkite public CI script" unless command.include?("scripts/buildkite-public-ci.sh")
-    abort "public-smoke must pass an explicit hosted-safe target list" unless command.include?("scripts/buildkite-public-ci.sh -- test") && command.include?("//:cargo_check")
-    abort "public-smoke must run ctx CLI unit regressions" unless command.include?("//crates/ctx-cli:unit_tests")
+    abort "public-smoke must run the authoritative native CI mode" unless command.include?("scripts/buildkite-public-ci.sh --mode=ci")
     required_keys = %w[
       public-cli-linux-x64
       public-cli-linux-aarch64
@@ -168,6 +167,8 @@ if command -v ruby >/dev/null 2>&1; then
     abort "macos-x64 native lane must upload default smoke evidence" unless native_paths.include?("target/public-cli-native-smoke/macos-x64-native/candidate-smoke.json")
     windows_native = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-windows-x64-native-smoke" }
     windows_native_command = windows_native["command"].to_s
+    rust_toolchain = data.dig("env", "CTX_RUST_TOOLCHAIN").to_s
+    abort "windows-x64 native lane must use the pinned Rust toolchain without POSIX expansion" unless !rust_toolchain.empty? && windows_native_command.include?("rustup toolchain install #{rust_toolchain} ") && windows_native_command.include?("rustup run #{rust_toolchain} cargo check")
     abort "windows-x64 native lane must run the PowerShell 5 candidate contract" unless windows_native_command.include?("scripts/tests/run-native-candidate-smoke-test.ps1")
     runtime_builds = {
       "public-cli-linux-x64" => "linux-x64",
@@ -208,22 +209,15 @@ fi
 for required in \
   'key: "public-smoke"' \
   'queue: "default"' \
-  'bash scripts/buildkite-public-ci.sh -- test' \
-  '//crates/ctx-cli:unit_tests' \
-  '//:cargo_check' \
-  '//:linux_release_construction_tests' \
-  '//:macos_release_signing_tests' \
-  '//:native_candidate_smoke_tests' \
-  '//:release_binary_compat_tests' \
+  'bash scripts/buildkite-public-ci.sh --mode=ci' \
   'target/ctx-artifacts/check/**' \
   'concurrency_group: "ctx/public-smoke/default-hosted"' \
-  'CTX_RUST_TOOLCHAIN: "1.88.0"' \
+  'CTX_RUST_TOOLCHAIN: "1.97.1"' \
   'CTX_BAZELISK_VERSION: "v1.29.0"' \
   'CTX_GO_VERSION: "1.22.12"' \
   'BUILDKITE_JOB_ID' \
   'CTX_PUBLIC_CI_TOOL_ROOT' \
   'DPkg::Lock::Timeout=300' \
-  'rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy' \
   'apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends' \
   'default-jdk-headless' \
   'install_go' \
@@ -345,11 +339,11 @@ require_order(
 require_order(
     "macOS runtime signing/archive/checksum evidence",
     runtime,
-    'scripts/run-macos-release-signing.sh',
-    'create_archive "${stage_dir}" "${package_path}"',
+    '"${script_dir}/run-macos-release-signing.sh"',
+    'python3 "${sidecar_tools}/archive_tool.py" create',
     'sha256_file "${output_dir%/}/${asset_name}"',
-    'python3 scripts/macos-release-signing-evidence.py bind-archive',
-    'scripts/check-macos-release-signing.sh',
+    'python3 "${script_dir}/macos-release-signing-evidence.py" bind-archive',
+    '"${script_dir}/check-macos-release-signing.sh"',
 )
 require_order(
     "macOS release transport checksum evidence",

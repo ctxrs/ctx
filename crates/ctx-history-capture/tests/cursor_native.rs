@@ -81,7 +81,7 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 4, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 2, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 6);
     drop(store);
@@ -163,7 +163,7 @@ fn reports_all_malformed_cursor_agent_transcript() {
 }
 
 #[test]
-fn reports_empty_cursor_agent_transcript() {
+fn accepts_empty_cursor_agent_transcript_without_scaffolding() {
     let temp = tempdir();
     let fixture = temp
         .path()
@@ -176,15 +176,15 @@ fn reports_empty_cursor_agent_transcript() {
         import_cursor_native_history(&fixture, &mut store, CursorNativeImportOptions::default())
             .unwrap();
 
-    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    assert!(summary.failures[0]
-        .error
-        .contains("no Cursor agent transcript JSONL files found"));
+    assert!(summary.failures.is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
-fn reports_aborted_stub_cursor_agent_transcript() {
+fn accepts_aborted_stub_cursor_agent_transcript_without_scaffolding() {
     let temp = tempdir();
     let fixture = temp
         .path()
@@ -200,10 +200,9 @@ fn reports_aborted_stub_cursor_agent_transcript() {
     let options = CursorNativeImportOptions::default();
     let summary = import_cursor_native_history(&fixture, &mut store, options).unwrap();
 
-    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    assert_eq!(
-        summary.failures[0].error,
-        "no importable native JSONL session header"
-    );
+    assert!(summary.failures.is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
 }

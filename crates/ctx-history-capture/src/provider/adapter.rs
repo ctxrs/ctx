@@ -99,6 +99,15 @@ pub struct NormalizedProviderImportOptions {
     pub persist_cursors: bool,
     pub wrap_transaction: bool,
     pub fast_event_inserts: bool,
+    pub capture_work_limit: CaptureWorkLimit,
+    pub inventory_observation_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptureWorkLimit {
+    #[default]
+    Drain,
+    OneSafeGroup,
 }
 
 impl Default for NormalizedProviderImportOptions {
@@ -108,6 +117,8 @@ impl Default for NormalizedProviderImportOptions {
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: false,
+            capture_work_limit: CaptureWorkLimit::Drain,
+            inventory_observation_token: None,
         }
     }
 }
@@ -161,123 +172,3 @@ pub struct ProviderFixtureJsonlAdapter {
     pub source_format: String,
     pub fidelity: Fidelity,
 }
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CodexHistoryJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CodexSessionJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PiSessionJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ClaudeProjectsJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ClineTaskJsonAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RooTaskJsonAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CodeBuddyHistoryJsonAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AuggieSessionJsonAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct JunieSessionEventsAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FirebenderSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OpenCodeSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct KiloSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MiMoCodeSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct KiroSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CrushSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GooseSessionsSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OpenClawJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct HermesSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NanoClawProjectAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AstrBotSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ShelleySqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ContinueCliSessionsAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OpenHandsFileEventsAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LingmaSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AntigravityCliJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GeminiCliJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TabnineCliJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CursorAgentTranscriptJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WindsurfCascadeHookTranscriptJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct QoderJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ZedThreadsSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FactoryAiDroidJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CopilotCliSessionEventsAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct QwenCodeJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct KimiCodeCliWireJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RovoDevSessionJsonAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ForgeCodeSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DeepAgentsSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MistralVibeJsonlAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MuxJsonlAdapter;

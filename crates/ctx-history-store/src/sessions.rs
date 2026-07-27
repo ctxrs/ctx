@@ -11,9 +11,69 @@ use crate::connection::{
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
+macro_rules! session_params {
+    ($session:expr) => {
+        params![
+            $session.id.to_string(),
+            optional_uuid_string($session.history_record_id),
+            optional_uuid_string($session.parent_session_id),
+            optional_uuid_string($session.root_session_id),
+            optional_uuid_string($session.capture_source_id),
+            $session.provider.as_str(),
+            $session.external_session_id.as_deref(),
+            $session.external_agent_id.as_deref(),
+            $session.agent_type.as_str(),
+            $session.role_hint.as_deref(),
+            $session.is_primary as i64,
+            $session.status.as_str(),
+            $session.sync.fidelity.as_str(),
+            optional_uuid_string($session.transcript_blob_id),
+            timestamp_ms($session.started_at),
+            optional_timestamp_ms($session.ended_at),
+            timestamp_ms($session.timestamps.created_at),
+            timestamp_ms($session.timestamps.updated_at),
+            $session.sync.visibility.as_str(),
+            $session.sync.sync_state.as_str(),
+            $session.sync.sync_version as i64,
+            optional_timestamp_ms($session.sync.deleted_at),
+            serde_json::to_string(&$session.sync.metadata)?,
+        ]
+    };
+}
+
 impl Store {
+    pub fn insert_session_if_absent(&self, session: &Session) -> Result<bool> {
+        self.with_atomic_write(|| {
+            let changed = self
+            .conn
+            .prepare_cached(
+                r#"
+                INSERT INTO sessions
+                (
+                    id, history_record_id, parent_session_id, root_session_id, capture_source_id,
+                    provider, external_session_id, external_agent_id, agent_type, role_hint,
+                    is_primary, status, fidelity, transcript_blob_id, started_at_ms, ended_at_ms,
+                    created_at_ms, updated_at_ms, visibility, sync_state, sync_version,
+                    deleted_at_ms, metadata_json
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                ON CONFLICT(id) DO NOTHING
+                "#,
+            )?
+            .execute(session_params!(session))?;
+            if changed != 0 {
+                self.journal_session_mutated(session.id)?;
+            }
+            Ok(changed != 0)
+        })
+    }
+
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
-        self.conn.execute(
+        self.with_atomic_write(|| {
+            let previous_dependencies =
+                self.capture_session_upsert_journal_dependencies(session)?;
+            self.conn
+            .prepare_cached(
                 r#"
                 INSERT INTO sessions
                 (
@@ -38,8 +98,23 @@ impl Store {
                     status = excluded.status,
                     fidelity = excluded.fidelity,
                     transcript_blob_id = excluded.transcript_blob_id,
-                    started_at_ms = excluded.started_at_ms,
-                    ended_at_ms = excluded.ended_at_ms,
+                    started_at_ms = CASE
+                        WHEN json_extract(sessions.metadata_json, '$.relationship_placeholder') = 1
+                        THEN excluded.started_at_ms
+                        ELSE MIN(sessions.started_at_ms, excluded.started_at_ms)
+                    END,
+                    ended_at_ms = CASE
+                        WHEN json_extract(sessions.metadata_json, '$.relationship_placeholder') = 1
+                        THEN excluded.ended_at_ms
+                        WHEN sessions.ended_at_ms IS NULL THEN excluded.ended_at_ms
+                        WHEN excluded.ended_at_ms IS NULL THEN sessions.ended_at_ms
+                        ELSE MAX(sessions.ended_at_ms, excluded.ended_at_ms)
+                    END,
+                    created_at_ms = CASE
+                        WHEN json_extract(sessions.metadata_json, '$.relationship_placeholder') = 1
+                        THEN excluded.created_at_ms
+                        ELSE sessions.created_at_ms
+                    END,
                     updated_at_ms = excluded.updated_at_ms,
                     visibility = excluded.visibility,
                     sync_state = excluded.sync_state,
@@ -47,33 +122,12 @@ impl Store {
                     deleted_at_ms = excluded.deleted_at_ms,
                     metadata_json = excluded.metadata_json
                 "#,
-                params![
-                    session.id.to_string(),
-                    optional_uuid_string(session.history_record_id),
-                    optional_uuid_string(session.parent_session_id),
-                    optional_uuid_string(session.root_session_id),
-                    optional_uuid_string(session.capture_source_id),
-                    session.provider.as_str(),
-                    session.external_session_id.as_deref(),
-                    session.external_agent_id.as_deref(),
-                    session.agent_type.as_str(),
-                    session.role_hint.as_deref(),
-                    session.is_primary as i64,
-                    session.status.as_str(),
-                    session.sync.fidelity.as_str(),
-                    optional_uuid_string(session.transcript_blob_id),
-                    timestamp_ms(session.started_at),
-                    optional_timestamp_ms(session.ended_at),
-                    timestamp_ms(session.timestamps.created_at),
-                    timestamp_ms(session.timestamps.updated_at),
-                    session.sync.visibility.as_str(),
-                    session.sync.sync_state.as_str(),
-                    session.sync.sync_version as i64,
-                    optional_timestamp_ms(session.sync.deleted_at),
-                    serde_json::to_string(&session.sync.metadata)?,
-                ],
-            )?;
-        Ok(())
+            )?
+            .execute(session_params!(session))?;
+            self.journal_session_mutated(session.id)?;
+            self.journal_captured_session_dependencies(previous_dependencies)?;
+            Ok(())
+        })
     }
 
     pub fn get_session(&self, id: Uuid) -> Result<Session> {
@@ -181,19 +235,25 @@ impl Store {
     }
 
     pub fn assign_session_to_record(&self, session_id: Uuid, record_id: Uuid) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET history_record_id = ?1 WHERE id = ?2",
-            params![record_id.to_string(), session_id.to_string()],
-        )?;
-        self.conn.execute(
-            "UPDATE events SET history_record_id = ?1 WHERE session_id = ?2",
-            params![record_id.to_string(), session_id.to_string()],
-        )?;
-        self.conn.execute(
-            "UPDATE runs SET history_record_id = ?1 WHERE session_id = ?2",
-            params![record_id.to_string(), session_id.to_string()],
-        )?;
-        Ok(())
+        self.with_atomic_write(|| {
+            let previous_dependencies =
+                self.capture_session_record_assignment_journal_dependencies(session_id, record_id)?;
+            self.conn.execute(
+                "UPDATE sessions SET history_record_id = ?1 WHERE id = ?2",
+                params![record_id.to_string(), session_id.to_string()],
+            )?;
+            self.conn.execute(
+                "UPDATE events SET history_record_id = ?1 WHERE session_id = ?2",
+                params![record_id.to_string(), session_id.to_string()],
+            )?;
+            self.conn.execute(
+                "UPDATE runs SET history_record_id = ?1 WHERE session_id = ?2",
+                params![record_id.to_string(), session_id.to_string()],
+            )?;
+            self.journal_session_mutated(session_id)?;
+            self.journal_captured_session_dependencies(previous_dependencies)?;
+            Ok(())
+        })
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {

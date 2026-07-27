@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode="${1:-cargo_test_default}"
+mode="${1:-docs_check}"
 
 fail() {
   printf 'bazel gate failed: %s\n' "$*" >&2
@@ -25,9 +25,6 @@ init_env() {
   source "${PWD}/scripts/ci-common.sh"
   ctx_init_bazel_test_env
   ctx_init_resource_env
-  export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
-  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-${CTX_RUST_TOOLCHAIN:-stable}}"
-  export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 }
 
 run() {
@@ -35,10 +32,6 @@ run() {
   printf ' %q' "$@"
   printf '\n'
   "$@"
-}
-
-run_cargo_test() {
-  run cargo test --locked "$@"
 }
 
 run_real_harness() {
@@ -79,29 +72,6 @@ run_source_diff_check() {
 init_env
 
 case "${mode}" in
-  cargo_fmt_check)
-    run cargo fmt --all -- --check
-    ;;
-  cargo_check)
-    run cargo check --workspace --locked
-    ;;
-  cargo_clippy)
-    run cargo clippy --workspace --all-targets --locked -- -D warnings
-    ;;
-  cargo_test_default)
-    run_cargo_test --workspace
-    ;;
-  cli_contract_tests)
-    run_cargo_test -p ctx --test cli_public_help_docs help_exposes_session_retrieval_commands
-    run_cargo_test -p ctx --test cli_public_help_docs public_subcommand_help_is_golden_enough_for_session_retrieval
-    run_cargo_test -p ctx --test cli_public_help_docs provider_help_and_errors_do_not_dump_full_provider_list
-    run_cargo_test -p ctx --test cli_public_help_docs docs_commands_expose_embedded_docs_and_man_pages
-    run_cargo_test -p ctx --test upgrade upgrade_status_check_and_apply_support_managed_installs
-    run_cargo_test -p ctx --test upgrade json_commands_do_not_spawn_background_upgrade
-    ;;
-  slash_command_e2e)
-    run_cargo_test -p ctx --test slash_command_e2e
-    ;;
   real_harness_codex_skill_e2e)
     run_real_harness scripts/real-harness-codex-skill-e2e.sh "${2:-}"
     ;;
@@ -113,9 +83,6 @@ case "${mode}" in
     ;;
   docs_check)
     run bash scripts/check-docs.sh
-    ;;
-  mcp_integration_e2e)
-    run_cargo_test -p ctx --test mcp_integration_e2e
     ;;
   real_harness_codex_mcp_e2e)
     run_real_harness scripts/real-harness-codex-mcp-e2e.sh "${2:-}"
@@ -155,38 +122,29 @@ case "${mode}" in
     run bash scripts/tests/macos-release-signing-test.sh
     ;;
   loc_check)
+    run bash scripts/tests/check_loc_test.sh
     run bash scripts/check-loc.sh
+    ;;
+  public_control_surface_check)
+    run python3 scripts/check-public-control-surface.py
     ;;
   source_diff_check)
     run_source_diff_check
     ;;
   package_audit_fast)
-    CTX_AUDIT_SKIP_RELEASE_BUILD=1 run bash scripts/audit-search-mvp-package.sh
+    CTX_AUDIT_SKIP_RELEASE_BUILD=1 CTX_AUDIT_CTX_BINARY="${2:-}" run bash scripts/audit-search-mvp-package.sh
     ;;
   sdk_contract_checks)
     run bash scripts/check-sdks.sh
     ;;
   sdk_package_dry_run)
-    run bash scripts/sdk-package-dry-run.sh
+    CTX_SDK_CARGO="${2:-}" \
+      CTX_SDK_RUSTC="${3:-}" \
+      CTX_SDK_CARGO_VENDOR_MANIFEST="${4:-}" \
+      run bash scripts/sdk-package-dry-run.sh
     ;;
   package_audit_release)
-    run bash scripts/audit-search-mvp-package.sh
-    ;;
-  fresh_home_e2e)
-    run_cargo_test -p ctx --test search_show_locate_sql fresh_home_search_mvp_flow
-    ;;
-  provider_fixture_e2e)
-    run_cargo_test -p ctx --test search_show_locate_sql codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity
-    run_cargo_test -p ctx --test search_show_locate_sql pi_cli_import_search_flow
-    run_cargo_test -p ctx --test native_providers native_provider_cli_flow_imports_supported_provider_paths
-    run_cargo_test -p ctx --test native_providers native_provider_cli_requires_existing_history_or_explicit_path
-    run_cargo_test -p ctx --test native_providers antigravity_cli_imports_native_transcript_tree
-    ;;
-  local_transcript_oracle)
-    run_cargo_test -p ctx --test search_show_locate_sql local_transcript_oracle_preserves_cli_json_and_sqlite
-    ;;
-  search_determinism_tests)
-    run_cargo_test -p ctx-history-search search_packet_is_deterministic_for_large_history_and_equal_ties_use_record_id
+    CTX_AUDIT_CTX_BINARY="${2:-}" run bash scripts/audit-search-mvp-package.sh
     ;;
   *)
     fail "unknown bazel test mode: ${mode}"

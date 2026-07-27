@@ -1,7 +1,12 @@
 use ctx_history_core::CaptureProvider;
 
-use super::super::{discover_provider_sources, ProviderImportSupport, ProviderSourceStatus};
-use super::support::{assert_source_status, tempdir};
+use super::super::{
+    discover_provider_sources, discover_provider_sources_for_provider,
+    discover_provider_sources_for_provider_report, discover_provider_sources_report,
+    provider_source_for_path, DiscoveryIssueKind, ProviderImportSupport, ProviderSourceKind,
+    ProviderSourceStatus,
+};
+use super::support::{assert_source_status, tempdir, EnvGuard, ENV_LOCK};
 
 #[test]
 fn gemini_default_source_is_empty_until_chat_transcripts_exist() {
@@ -193,16 +198,20 @@ fn junie_default_source_does_not_follow_symlinked_index() {
 }
 
 #[test]
-fn codex_default_source_is_empty_until_jsonl_sessions_exist() {
+fn codex_selected_source_is_empty_until_jsonl_sessions_exist() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
-    let sessions = temp.path().join(".codex/sessions");
+    let codex_home = temp.path().join(".codex");
+    let sessions = codex_home.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
+    let _codex_home = EnvGuard::set("CODEX_HOME", &codex_home);
 
     let source = discover_provider_sources(temp.path())
         .into_iter()
         .find(|source| {
             source.provider == CaptureProvider::Codex
                 && source.source_format == "codex_session_jsonl_tree"
+                && source.path == sessions
         })
         .unwrap();
     assert_eq!(source.status, ProviderSourceStatus::Empty);
@@ -213,6 +222,7 @@ fn codex_default_source_is_empty_until_jsonl_sessions_exist() {
         .find(|source| {
             source.provider == CaptureProvider::Codex
                 && source.source_format == "codex_session_jsonl_tree"
+                && source.path == sessions
         })
         .unwrap();
     assert_eq!(source.status, ProviderSourceStatus::Available);
@@ -220,7 +230,9 @@ fn codex_default_source_is_empty_until_jsonl_sessions_exist() {
 
 #[test]
 fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
+    let _xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", temp.path().join(".config"));
 
     let pi = temp.path().join(".pi/agent/sessions");
     std::fs::create_dir_all(pi.join("--workspace--")).unwrap();
@@ -239,18 +251,13 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
 
     let omp = temp.path().join(".omp/agent/sessions");
     std::fs::create_dir_all(omp.join("--workspace--")).unwrap();
-    let omp_source = discover_provider_sources(temp.path())
-        .into_iter()
-        .find(|source| source.provider == CaptureProvider::Pi && source.path == omp)
-        .unwrap();
-    assert_eq!(omp_source.status, ProviderSourceStatus::Empty);
-    assert_eq!(omp_source.source_format, "pi_session_jsonl");
+    assert!(!discover_provider_sources(temp.path())
+        .iter()
+        .any(|source| source.provider == CaptureProvider::Pi && source.path == omp));
     std::fs::write(omp.join("--workspace--/session.jsonl"), "{}\n").unwrap();
-    let omp_source = discover_provider_sources(temp.path())
-        .into_iter()
-        .find(|source| source.provider == CaptureProvider::Pi && source.path == omp)
-        .unwrap();
-    assert_eq!(omp_source.status, ProviderSourceStatus::Available);
+    assert!(!discover_provider_sources(temp.path())
+        .iter()
+        .any(|source| source.provider == CaptureProvider::Pi && source.path == omp));
 
     let antigravity = temp.path().join(".gemini/antigravity-cli/brain");
     std::fs::create_dir_all(antigravity.join("session/.system_generated/logs")).unwrap();
@@ -266,6 +273,16 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
     );
     std::fs::write(
         antigravity.join("session/.system_generated/logs/transcript_full.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    assert_source_status(
+        temp.path(),
+        CaptureProvider::Antigravity,
+        ProviderSourceStatus::Empty,
+    );
+    std::fs::write(
+        antigravity.join("session/.system_generated/logs/transcript.jsonl"),
         "{}\n",
     )
     .unwrap();
@@ -403,16 +420,9 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
 
     let openclaw = temp.path().join(".openclaw/agents/personal/sessions");
     std::fs::create_dir_all(&openclaw).unwrap();
-    assert_source_status(
-        temp.path(),
-        CaptureProvider::OpenClaw,
-        ProviderSourceStatus::Empty,
-    );
     std::fs::write(openclaw.join("session.jsonl"), "{}\n").unwrap();
-    assert_source_status(
-        temp.path(),
-        CaptureProvider::OpenClaw,
-        ProviderSourceStatus::Available,
+    assert!(
+        discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenClaw).is_empty()
     );
 
     let hermes = temp.path().join(".hermes");
@@ -444,7 +454,12 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
         .into_iter()
         .find(|source| source.provider == CaptureProvider::Shelley)
         .unwrap();
-    assert_eq!(shelley_source.status, ProviderSourceStatus::Available);
+    assert_eq!(
+        shelley_source.path,
+        std::env::current_dir().unwrap().join("shelley.db")
+    );
+    assert_ne!(shelley_source.path, shelley.join("shelley.db"));
+    assert_eq!(shelley_source.status, ProviderSourceStatus::Missing);
     assert_eq!(shelley_source.import_support, ProviderImportSupport::Native);
     assert!(shelley_source.import_support.is_auto_importable());
 
@@ -498,14 +513,209 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
         ProviderSourceStatus::Available,
     );
 
-    let roo = temp
-        .path()
-        .join(".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/roo-discovery");
+    let roo_root = temp.path().join(".vscode-mock/global-storage");
+    let roo = roo_root.join("tasks/roo-discovery");
     std::fs::create_dir_all(&roo).unwrap();
     std::fs::write(roo.join("history_item.json"), "{}").unwrap();
-    assert_source_status(
-        temp.path(),
-        CaptureProvider::RooCode,
-        ProviderSourceStatus::Available,
+    let roo_source = discover_provider_sources(temp.path())
+        .into_iter()
+        .find(|source| source.provider == CaptureProvider::RooCode && source.path == roo_root)
+        .unwrap();
+    assert_eq!(roo_source.status, ProviderSourceStatus::Available);
+}
+
+#[test]
+fn legacy_vector_apis_are_exact_report_source_projections() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = tempdir();
+    let _codex_home = EnvGuard::remove("CODEX_HOME");
+    let all_report = discover_provider_sources_report(temp.path());
+    assert_eq!(discover_provider_sources(temp.path()), all_report.sources);
+
+    let provider_report =
+        discover_provider_sources_for_provider_report(temp.path(), CaptureProvider::Codex);
+    assert_eq!(
+        discover_provider_sources_for_provider(temp.path(), CaptureProvider::Codex),
+        provider_report.sources
     );
+    for provider in [CaptureProvider::FactoryAiDroid, CaptureProvider::Firebender] {
+        assert!(all_report.issues.iter().any(|issue| {
+            issue.provider == provider
+                && issue.kind == DiscoveryIssueKind::InsufficientOfficialEvidence
+        }));
+    }
+    assert!(provider_report.issues.is_empty());
+}
+
+#[test]
+fn exact_current_incompatible_explicit_paths_are_detection_only_unsupported() {
+    let temp = tempdir();
+    let cases = [
+        (
+            CaptureProvider::Codex,
+            temp.path().join(".codex/sessions/session.jsonl.zst"),
+            "compressed .jsonl.zst",
+        ),
+        (
+            CaptureProvider::OpenClaw,
+            temp.path()
+                .join(".openclaw/agents/main/agent/openclaw-agent.sqlite"),
+            "openclaw-agent.sqlite",
+        ),
+        (
+            CaptureProvider::OpenHands,
+            temp.path()
+                .join(".openhands/conversations/conversation/events/event-1.json"),
+            "events/event-*.json",
+        ),
+        (
+            CaptureProvider::Mux,
+            temp.path().join(".mux/sessions/session/chat-archive.jsonl"),
+            "chat-archive.jsonl",
+        ),
+        (
+            CaptureProvider::Cline,
+            temp.path().join(".cline/data/db/sessions.db"),
+            "current Cline SDK",
+        ),
+    ];
+    for (_, path, _) in &cases {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"current format marker").unwrap();
+    }
+
+    let kiro = temp.path().join(".kiro/sessions");
+    std::fs::create_dir_all(kiro.join("cli")).unwrap();
+    std::fs::write(kiro.join("cli/session.json"), b"{}").unwrap();
+    std::fs::write(kiro.join("cli/session.jsonl"), b"{}\n").unwrap();
+    let qoder = temp.path().join(".qoder/projects/bucket/session.jsonl");
+    std::fs::create_dir_all(qoder.parent().unwrap()).unwrap();
+    std::fs::write(&qoder, b"{}\n").unwrap();
+
+    for (provider, path, reason_fragment) in cases.into_iter().chain([
+        (CaptureProvider::KiroCli, kiro, "ACP/v3"),
+        (CaptureProvider::Qoder, qoder, "direct SDK JSONL"),
+    ]) {
+        let source = provider_source_for_path(provider, path);
+        assert_eq!(source.status, ProviderSourceStatus::Unsupported);
+        assert_eq!(source.import_support, ProviderImportSupport::Unsupported);
+        assert_eq!(source.source_kind, ProviderSourceKind::DetectionOnly);
+        assert_eq!(source.source_format, "unsupported");
+        assert!(source
+            .unsupported_reason
+            .is_some_and(|reason| reason.contains(reason_fragment)));
+    }
+}
+
+#[test]
+fn explicit_unsupported_detection_preserves_supported_mixed_trees() {
+    let temp = tempdir();
+    let cases = [
+        (
+            CaptureProvider::Qoder,
+            temp.path().join("qoder/projects"),
+            "bucket/transcript/legacy.jsonl",
+            "bucket/current.jsonl",
+        ),
+        (
+            CaptureProvider::OpenClaw,
+            temp.path().join("openclaw"),
+            "agents/main/sessions/legacy.jsonl",
+            "agents/main/agent/openclaw-agent.sqlite",
+        ),
+        (
+            CaptureProvider::OpenHands,
+            temp.path().join("openhands"),
+            "v1_conversations/legacy/event.json",
+            "conversations/current/events/event-1.json",
+        ),
+        (
+            CaptureProvider::Mux,
+            temp.path().join("mux/sessions"),
+            "session/chat.jsonl",
+            "session/chat-archive.jsonl",
+        ),
+        (
+            CaptureProvider::Cline,
+            temp.path().join("cline/data"),
+            "tasks/legacy/api_conversation_history.json",
+            "db/sessions.db",
+        ),
+    ];
+    for (provider, root, supported, unsupported) in cases {
+        for relative in [supported, unsupported] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"{}\n").unwrap();
+        }
+        let source = provider_source_for_path(provider, root);
+        assert_eq!(
+            source.status,
+            ProviderSourceStatus::Available,
+            "{provider:?}"
+        );
+        assert!(source.import_support.is_importable(), "{provider:?}");
+    }
+}
+
+#[test]
+fn explicit_current_detection_requires_exact_kiro_and_qoder_shapes() {
+    let temp = tempdir();
+    let unrelated_sessions = temp.path().join("unrelated/sessions");
+    std::fs::create_dir_all(&unrelated_sessions).unwrap();
+    std::fs::write(unrelated_sessions.join("notes.jsonl"), b"{}\n").unwrap();
+    let kiro = provider_source_for_path(CaptureProvider::KiroCli, unrelated_sessions);
+    assert_eq!(kiro.status, ProviderSourceStatus::Available);
+
+    let deep_qoder = temp
+        .path()
+        .join("qoder/projects/bucket/deeper/current.jsonl");
+    std::fs::create_dir_all(deep_qoder.parent().unwrap()).unwrap();
+    std::fs::write(&deep_qoder, b"{}\n").unwrap();
+    let qoder = provider_source_for_path(CaptureProvider::Qoder, deep_qoder);
+    assert_eq!(qoder.status, ProviderSourceStatus::Available);
+}
+
+#[test]
+fn supported_explicit_shapes_and_missing_textual_paths_keep_pinned_mapping() {
+    let temp = tempdir();
+    let supported = [
+        (CaptureProvider::KiroCli, temp.path().join("data.sqlite3")),
+        (
+            CaptureProvider::Qoder,
+            temp.path().join("projects/bucket/transcript/session.jsonl"),
+        ),
+        (
+            CaptureProvider::OpenClaw,
+            temp.path().join("legacy-openclaw-sessions"),
+        ),
+        (
+            CaptureProvider::OpenHands,
+            temp.path().join("v1_conversations/conversation/event.json"),
+        ),
+        (CaptureProvider::Mux, temp.path().join("session/chat.jsonl")),
+        (
+            CaptureProvider::Cline,
+            temp.path().join("legacy-cline-root"),
+        ),
+    ];
+    for (_, path) in &supported {
+        if path.extension().is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"supported marker").unwrap();
+        } else {
+            std::fs::create_dir_all(path).unwrap();
+        }
+    }
+    for (provider, path) in supported {
+        let source = provider_source_for_path(provider, path);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert!(source.import_support.is_importable());
+    }
+
+    let missing_archive = temp.path().join("missing/chat-archive.jsonl");
+    let source = provider_source_for_path(CaptureProvider::Mux, missing_archive.clone());
+    assert_eq!(source.path, missing_archive);
+    assert_eq!(source.status, ProviderSourceStatus::Missing);
+    assert_eq!(source.source_format, "mux_session_jsonl");
 }

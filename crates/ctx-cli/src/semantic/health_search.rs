@@ -1,4 +1,4 @@
-fn semantic_env_flag(name: &str) -> bool {
+pub(super) fn semantic_env_flag(name: &str) -> bool {
     env::var(name)
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
@@ -54,39 +54,39 @@ pub(crate) fn semantic_health_findings(data_root: &Path) -> Vec<String> {
     findings
 }
 
-fn json_string(value: &Value, key: &str) -> Option<String> {
+pub(super) fn json_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(|value| value.as_str())
         .map(str::to_owned)
 }
 
-fn json_i64(value: &Value, key: &str) -> Option<i64> {
+pub(super) fn json_i64(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(|value| value.as_i64())
 }
 
-fn json_u32(value: &Value, key: &str) -> Option<u32> {
+pub(super) fn json_u32(value: &Value, key: &str) -> Option<u32> {
     value
         .get(key)
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok())
 }
 
-fn json_usize(value: &Value, key: &str) -> Option<usize> {
+pub(super) fn json_usize(value: &Value, key: &str) -> Option<usize> {
     value
         .get(key)
         .and_then(|value| value.as_u64())
         .and_then(|value| usize::try_from(value).ok())
 }
 
-fn create_private_dir_all(path: &Path) -> Result<()> {
+pub(super) fn create_private_dir_all(path: &Path) -> Result<()> {
     fs::create_dir_all(path)
         .with_context(|| format!("create private directory {}", path.display()))?;
     secure_private_dir_permissions(path)?;
     Ok(())
 }
 
-fn private_create_new_file(path: &Path) -> std::io::Result<fs::File> {
+pub(super) fn private_create_new_file(path: &Path) -> std::io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -95,7 +95,7 @@ fn private_create_new_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
+pub(super) fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -106,7 +106,7 @@ fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
+pub(super) fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -115,7 +115,7 @@ fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
+pub(super) fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -124,7 +124,7 @@ fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(windows)]
-fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
+pub(super) fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
@@ -143,36 +143,36 @@ fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
+pub(super) fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new().read(true).write(true).open(path)
 }
 
 #[cfg(unix)]
-fn secure_private_dir_permissions(path: &Path) -> Result<()> {
+pub(super) fn secure_private_dir_permissions(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("secure private directory {}", path.display()))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn secure_private_dir_permissions(_path: &Path) -> Result<()> {
+pub(super) fn secure_private_dir_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-fn secure_private_file_permissions(path: &Path) -> Result<()> {
+pub(super) fn secure_private_file_permissions(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("secure private file {}", path.display()))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn secure_private_file_permissions(_path: &Path) -> Result<()> {
+pub(super) fn secure_private_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
+pub(super) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
     for candidate in [
         path.to_path_buf(),
         PathBuf::from(format!("{}-wal", path.display())),
@@ -187,11 +187,11 @@ fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn secure_semantic_vector_permissions(_path: &Path) -> Result<()> {
+pub(super) fn secure_semantic_vector_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sqlite_column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+pub(super) fn sqlite_column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -203,7 +203,11 @@ fn sqlite_column_exists(conn: &Connection, table: &str, column: &str) -> Result<
     Ok(false)
 }
 
-fn sqlite_table_has_columns(conn: &Connection, table: &str, columns: &[&str]) -> Result<bool> {
+pub(super) fn sqlite_table_has_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[&str],
+) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
     let mut existing = std::collections::HashSet::new();
@@ -213,7 +217,7 @@ fn sqlite_table_has_columns(conn: &Connection, table: &str, columns: &[&str]) ->
     Ok(columns.iter().all(|column| existing.contains(*column)))
 }
 
-fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
+pub(super) fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
     let exists = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -225,7 +229,7 @@ fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(exists)
 }
 
-fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
+pub(super) fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
     let sql = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -237,7 +241,7 @@ fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
     Ok(sql)
 }
 
-fn semantic_query_text(query: &str, terms: &[String]) -> String {
+pub(super) fn semantic_query_text(query: &str, terms: &[String]) -> String {
     let mut parts = Vec::new();
     if !query.trim().is_empty() {
         parts.push(query.trim().to_owned());
@@ -252,13 +256,15 @@ fn semantic_query_text(query: &str, terms: &[String]) -> String {
     parts.join(" ")
 }
 
-fn semantic_filters_need_overfetch(filters: &ctx_history_search::SearchFilters) -> bool {
+pub(super) fn semantic_filters_need_overfetch(filters: &ctx_history_search::SearchFilters) -> bool {
     semantic_filters_require_lexical_fallback(filters)
         || !filters.include_subagents
         || filters.exclude_provider_session.is_some()
 }
 
-fn semantic_filters_require_lexical_fallback(filters: &ctx_history_search::SearchFilters) -> bool {
+pub(super) fn semantic_filters_require_lexical_fallback(
+    filters: &ctx_history_search::SearchFilters,
+) -> bool {
     filters.session.is_some()
         || filters.provider.is_some()
         || filters.history_source.is_some()
@@ -278,7 +284,7 @@ fn semantic_filters_require_lexical_fallback(filters: &ctx_history_search::Searc
             .is_some_and(|value| !value.trim().is_empty())
 }
 
-fn semantic_hybrid_coverage_ready(
+pub(super) fn semantic_hybrid_coverage_ready(
     embedded_items: usize,
     searchable_items: usize,
     dirty_items: usize,
@@ -289,7 +295,7 @@ fn semantic_hybrid_coverage_ready(
     embedded_items >= searchable_items && dirty_items == 0
 }
 
-fn semantic_status_needs_exact_sidecar_stats(
+pub(super) fn semantic_status_needs_exact_sidecar_stats(
     searchable_items: usize,
     dirty_items: usize,
     stats: SemanticSidecarStats,
@@ -300,7 +306,7 @@ fn semantic_status_needs_exact_sidecar_stats(
     stats.embedded_items >= searchable_items
 }
 
-fn semantic_hits_for_text_query(
+pub(super) fn semantic_hits_for_text_query(
     data_root: &Path,
     store: &Store,
     vector_store: &SemanticVectorStore,
@@ -320,7 +326,10 @@ fn semantic_hits_for_text_query(
     Ok((semantic_hit_search.hits, diagnostics))
 }
 
-fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Option<(Vec<f32>, u64)>> {
+pub(super) fn daemon_query_embedding(
+    data_root: &Path,
+    semantic_text: &str,
+) -> Result<Option<(Vec<f32>, u64)>> {
     let Some(response) = daemon_query_request(
         data_root,
         compact_json(json!({
@@ -331,7 +340,8 @@ fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Optio
         })),
         StdDuration::from_secs(30),
         1024 * 1024,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -341,7 +351,10 @@ fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Optio
             .unwrap_or("daemon query failed");
         return Err(anyhow!("{message}"));
     }
-    let model_key = response.get("model_key").and_then(Value::as_str).unwrap_or("");
+    let model_key = response
+        .get("model_key")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if model_key != semantic_model_key() {
         return Err(anyhow!("daemon query response model key mismatch"));
     }
@@ -373,20 +386,20 @@ fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Optio
 
 #[cfg(ctx_semantic_fastembed)]
 #[derive(Debug, Clone)]
-struct SemanticEmbedPolicy {
-    threads: usize,
-    batch_size: usize,
-    memory_budget_bytes: u64,
-    total_memory_bytes: Option<u64>,
-    available_memory_bytes: Option<u64>,
-    active_percent: u8,
-    compute_class: SemanticComputeClass,
-    source: &'static str,
+pub(super) struct SemanticEmbedPolicy {
+    pub(super) threads: usize,
+    pub(super) batch_size: usize,
+    pub(super) memory_budget_bytes: u64,
+    pub(super) total_memory_bytes: Option<u64>,
+    pub(super) available_memory_bytes: Option<u64>,
+    pub(super) active_percent: u8,
+    pub(super) compute_class: SemanticComputeClass,
+    pub(super) source: &'static str,
 }
 
 #[cfg(ctx_semantic_fastembed)]
 impl SemanticEmbedPolicy {
-    fn status_json(&self) -> Value {
+    pub(super) fn status_json(&self) -> Value {
         compact_json(json!({
             "source": self.source,
             "threads": self.threads,
@@ -404,32 +417,31 @@ impl SemanticEmbedPolicy {
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embed_policy() -> SemanticEmbedPolicy {
+pub(super) fn semantic_embed_policy() -> SemanticEmbedPolicy {
     semantic_embed_policy_for(SemanticComputeClass::Cpu)
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embed_policy_for(compute_class: SemanticComputeClass) -> SemanticEmbedPolicy {
-    semantic_embed_policy_from_env_and_resources(
-        compute_class,
-        SemanticSystemResources::current(),
-    )
+pub(super) fn semantic_embed_policy_for(
+    compute_class: SemanticComputeClass,
+) -> SemanticEmbedPolicy {
+    semantic_embed_policy_from_env_and_resources(compute_class, SemanticSystemResources::current())
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embed_policy_status_json() -> Value {
+pub(super) fn semantic_embed_policy_status_json() -> Value {
     semantic_embed_policy().status_json()
 }
 
 #[cfg(not(ctx_semantic_fastembed))]
-fn semantic_embed_policy_status_json() -> Value {
+pub(super) fn semantic_embed_policy_status_json() -> Value {
     compact_json(json!({
         "source": "unsupported",
     }))
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embedder_policy_status_json(embedder: &Option<SemanticEmbedder>) -> Value {
+pub(super) fn semantic_embedder_policy_status_json(embedder: &Option<SemanticEmbedder>) -> Value {
     embedder
         .as_ref()
         .map(|embedder| embedder.policy.status_json())
@@ -437,24 +449,28 @@ fn semantic_embedder_policy_status_json(embedder: &Option<SemanticEmbedder>) -> 
 }
 
 #[cfg(not(ctx_semantic_fastembed))]
-fn semantic_embedder_policy_status_json(_embedder: &Option<SemanticEmbedder>) -> Value {
+pub(super) fn semantic_embedder_policy_status_json(_embedder: &Option<SemanticEmbedder>) -> Value {
     semantic_embed_policy_status_json()
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embedder_runtime_status_json(embedder: &Option<SemanticEmbedder>) -> Option<Value> {
+pub(super) fn semantic_embedder_runtime_status_json(
+    embedder: &Option<SemanticEmbedder>,
+) -> Option<Value> {
     embedder
         .as_ref()
         .map(|embedder| embedder.runtime_info().to_json())
 }
 
 #[cfg(not(ctx_semantic_fastembed))]
-fn semantic_embedder_runtime_status_json(_embedder: &Option<SemanticEmbedder>) -> Option<Value> {
+pub(super) fn semantic_embedder_runtime_status_json(
+    _embedder: &Option<SemanticEmbedder>,
+) -> Option<Value> {
     None
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embed_policy_from_env_and_resources(
+pub(super) fn semantic_embed_policy_from_env_and_resources(
     compute_class: SemanticComputeClass,
     resources: SemanticSystemResources,
 ) -> SemanticEmbedPolicy {
@@ -482,24 +498,24 @@ fn semantic_embed_policy_from_env_and_resources(
     policy
 }
 
-fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
+pub(super) fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
     let env = SemanticCacheEnv::current();
     semantic_worker_cache_dir_from_env(data_root, &env)
 }
 
 #[derive(Debug, Clone, Default)]
-struct SemanticCacheEnv {
-    hf_home: Option<PathBuf>,
-    semantic_cache_dir: Option<PathBuf>,
-    fastembed_cache_dir: Option<PathBuf>,
-    hf_hub_cache: Option<PathBuf>,
-    xdg_cache_home: Option<PathBuf>,
-    home: Option<PathBuf>,
-    current_dir: Option<PathBuf>,
+pub(super) struct SemanticCacheEnv {
+    pub(super) hf_home: Option<PathBuf>,
+    pub(super) semantic_cache_dir: Option<PathBuf>,
+    pub(super) fastembed_cache_dir: Option<PathBuf>,
+    pub(super) hf_hub_cache: Option<PathBuf>,
+    pub(super) xdg_cache_home: Option<PathBuf>,
+    pub(super) home: Option<PathBuf>,
+    pub(super) current_dir: Option<PathBuf>,
 }
 
 impl SemanticCacheEnv {
-    fn current() -> Self {
+    pub(super) fn current() -> Self {
         Self {
             hf_home: env_path("HF_HOME"),
             semantic_cache_dir: env_path("CTX_SEMANTIC_CACHE_DIR"),
@@ -512,7 +528,7 @@ impl SemanticCacheEnv {
     }
 }
 
-fn env_path(name: &str) -> Option<PathBuf> {
+pub(super) fn env_path(name: &str) -> Option<PathBuf> {
     env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
@@ -520,7 +536,10 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn semantic_worker_cache_dir_from_env(data_root: &Path, env: &SemanticCacheEnv) -> PathBuf {
+pub(super) fn semantic_worker_cache_dir_from_env(
+    data_root: &Path,
+    env: &SemanticCacheEnv,
+) -> PathBuf {
     if let Some(path) = env.semantic_cache_dir.as_ref() {
         return path.clone();
     }
@@ -540,7 +559,7 @@ fn semantic_worker_cache_dir_from_env(data_root: &Path, env: &SemanticCacheEnv) 
         .unwrap_or_else(|| data_root.join("semantic-model-cache"))
 }
 
-fn semantic_worker_default_cache_candidates(
+pub(super) fn semantic_worker_default_cache_candidates(
     data_root: &Path,
     env: &SemanticCacheEnv,
 ) -> Vec<PathBuf> {
@@ -561,31 +580,28 @@ fn semantic_worker_default_cache_candidates(
         let cache = home.join(".cache");
         cache_paths::push_unique_path(&mut candidates, home.join(".fastembed_cache"));
         cache_paths::push_unique_path(&mut candidates, cache.join("fastembed"));
-        cache_paths::push_unique_path(
-            &mut candidates,
-            cache.join("huggingface").join("hub"),
-        );
+        cache_paths::push_unique_path(&mut candidates, cache.join("huggingface").join("hub"));
         cache_paths::push_unique_path(&mut candidates, cache.join("huggingface"));
     }
     candidates
 }
 
-fn semantic_model_cache_available(cache_dir: &Path) -> bool {
+pub(super) fn semantic_model_cache_available(cache_dir: &Path) -> bool {
     semantic_model_cache_snapshot_dir(cache_dir).is_some()
         || semantic_coreml_model_cache_available(cache_dir)
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn semantic_coreml_model_cache_available(cache_dir: &Path) -> bool {
+pub(super) fn semantic_coreml_model_cache_available(cache_dir: &Path) -> bool {
     coreml_bundle_cache_available(cache_dir)
 }
 
 #[cfg(not(any(target_os = "macos", test)))]
-fn semantic_coreml_model_cache_available(_cache_dir: &Path) -> bool {
+pub(super) fn semantic_coreml_model_cache_available(_cache_dir: &Path) -> bool {
     false
 }
 
-fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value {
+pub(super) fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value {
     let cpu_available = semantic_model_cache_snapshot_dir(cache_dir).is_some();
     #[cfg(any(target_os = "macos", test))]
     let coreml = coreml_acquisition_status_json(cache_dir);
@@ -606,7 +622,7 @@ fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value {
     }))
 }
 
-fn semantic_model_acquisition_integrity_error(error: &anyhow::Error) -> bool {
+pub(super) fn semantic_model_acquisition_integrity_error(error: &anyhow::Error) -> bool {
     if error
         .downcast_ref::<SemanticCpuModelIntegrityError>()
         .is_some()
@@ -621,7 +637,7 @@ fn semantic_model_acquisition_integrity_error(error: &anyhow::Error) -> bool {
     false
 }
 
-fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
+pub(super) fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
     if !semantic_embedding_supported() {
         return None;
     }
@@ -636,7 +652,7 @@ fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn semantic_model_snapshot_from_root(model_root: &Path) -> Option<PathBuf> {
+pub(super) fn semantic_model_snapshot_from_root(model_root: &Path) -> Option<PathBuf> {
     let snapshot = model_root.join("snapshots").join(SEMANTIC_MODEL_REVISION);
     if !snapshot.is_dir() {
         return None;
@@ -653,18 +669,59 @@ fn semantic_model_snapshot_from_root(model_root: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embedding_supported() -> bool {
+pub(super) fn semantic_embedding_supported() -> bool {
     true
 }
 
 #[cfg(not(ctx_semantic_fastembed))]
-fn semantic_embedding_supported() -> bool {
+pub(super) fn semantic_embedding_supported() -> bool {
     false
 }
 
-fn env_usize(name: &str) -> Option<usize> {
+pub(super) fn env_usize(name: &str) -> Option<usize> {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
 }
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    time::Duration as StdDuration,
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+use anyhow::{anyhow, Context, Result};
+use ctx_history_store::Store;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::compact_json;
+
+use super::{
+    cache_paths,
+    indexing::semantic_hits_for_query,
+    model_contract::{
+        semantic_model_key, SemanticCpuModelIntegrityError, SEMANTIC_DIMENSIONS,
+        SEMANTIC_MODEL_REVISION, SEMANTIC_REQUIRED_MODEL_FILES,
+    },
+    model_runtime::SemanticEmbedder,
+    paths_status::{
+        daemon_lock_path, pid_lock_file_is_orphaned, read_daemon_status,
+        read_semantic_worker_status, semantic_vector_path, semantic_worker_lock_path,
+    },
+    query_service::daemon_query_request,
+    reports::SemanticRetrievalDiagnostics,
+    resource_policy::{semantic_quiet_policy, SemanticComputeClass, SemanticSystemResources},
+    runtime_limits::{SEMANTIC_EMBED_BATCH_MAX, SEMANTIC_EMBED_THREADS_MAX},
+    vector_store::{SemanticSidecarStats, SemanticVectorStore},
+};
+
+#[cfg(any(target_os = "macos", test))]
+use super::model_acquisition::{
+    coreml_acquisition_status_json, coreml_bundle_cache_available,
+    model_acquisition_integrity_error,
+};

@@ -96,7 +96,7 @@ main() {
     CODEX_HOME="${codex_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${ctx_bin}" integrations install skills --agent codex --json > "${install_json}"
   require_contains "${install_json}" '"agent":"codex"'
   require_contains "${install_json}" '"status":"current"'
@@ -116,7 +116,7 @@ main() {
     CODEX_HOME="${codex_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     OPENAI_API_KEY="sk-ctx-real-harness-fixture" \
     run "${codex_bin}" exec \
       --skip-git-repo-check \
@@ -136,12 +136,12 @@ main() {
 
   require_contains "${stdout_file}" 'fixture-ctx-skill-ok'
   require_contains "${stderr_file}" "/bin/bash -lc 'ctx --version'"
-  require_contains "${stderr_file}" 'ctx 0.25.0'
+  require_contains "${stderr_file}" 'ctx 0.26.0'
   require_contains "${log_file}" '"has_ctx_skill":true'
   require_contains "${log_file}" '"has_ctx_skill_description":true'
   require_contains "${log_file}" '"has_ctx_skill_path":true'
   require_contains "${log_file}" '"call_id":"call_ctx_version"'
-  require_contains "${log_file}" 'ctx 0.25.0'
+  require_contains "${log_file}" 'ctx 0.26.0'
 
   printf 'real Codex skill harness E2E passed: %s\n' "${run_root}"
 }

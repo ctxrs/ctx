@@ -69,20 +69,22 @@ ctx daemon enable
   semantic is enabled. The daemon may acquire the local embedding model for
   semantic indexing. A looping daemon keeps the embedding model resident after
   cold start and performs recent-work freshness checks before settling into idle
-  loops; cloud sync remains disabled with `enabled: false` and
-  `network_allowed: false`.
+  loops.
 - `daemon disable` and `daemon enable` update `[daemon].enabled` in
-  `config.toml`. The prerelease default is disabled, so daemon maintenance is an
-  explicit opt-in; `daemon run --force` overrides a disabled config for explicit
-  manual troubleshooting.
+  `config.toml`. Daemon maintenance is enabled by default; an explicit disable
+  persists across upgrades. `daemon run --force` overrides a disabled config
+  for explicit manual troubleshooting.
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, or require API
 keys. Without semantic opt-in they do not download embedding models; with
 semantic enabled, daemon maintenance may acquire the local embedding model.
-Daemon maintenance is local-only and bounded; cloud sync remains disabled. Core
-storage checks use the configured data root, and JSON stdout remains structured.
-JSON-output commands do not autostart daemon maintenance. Installer-managed binaries can run a signed
+Daemon maintenance is bounded and local. Core storage checks use the configured
+data root, and JSON
+stdout remains structured.
+JSON setup and import do not autostart daemon maintenance. JSON search follows
+its refresh mode: default `background` may autostart, while `off` never does.
+Installer-managed binaries can run a signed
 background upgrade check after successful non-JSON commands other than
 `ctx status`; that check is
 separate from provider history indexing.
@@ -183,13 +185,20 @@ ctx sources
 ctx sources --json
 ```
 
-`sources` lists provider history locations that ctx knows how to check on this
-machine. Current rows include:
+`sources` lists bounded provider history locations selected for this machine.
+Provider precedence is winner-only: an environment or persistent-config
+replacement suppresses its lower-priority default. Current coexisting installed
+surfaces or persisted profiles may produce separate rows. One-shot, old, moved,
+or unreconstructible roots require an exact `--path` and are not remembered.
+Current rows include:
 
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL files under `~/.pi/agent/sessions`;
-- native rows for supported Claude Code, Codex, Cursor, Pi, GitHub Copilot CLI, OpenCode, MiMo Code, Gemini CLI/Antigravity, Kilo Code, Kiro CLI, Crush, Goose, Tabnine, Windsurf, Zed, Factory AI Droid, Qwen Code, Kimi Code CLI, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, Lingma, Qoder, Warp, CodeBuddy, Trae, OpenClaw, Hermes, NanoClaw, AstrBot, Shelley, Continue, and OpenHands local history locations;
+- automatic or unsupported-detection rows for supported providers whose matrix
+  entry has a bounded current location; providers with an empty
+  `history_locations` list remain available through exact compatible
+  `--path` imports;
 - AstrBot `data_v4.db` history when those files exist;
 - explicit-import rows for NanoClaw project roots when those paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
@@ -204,6 +213,11 @@ plugin manifests appear as non-importable plugin rows with `status: "invalid"`
 and an `error`. `sources` reads path metadata and plugin manifests, writes
 nothing to provider files or source repositories, and does not execute plugin
 commands.
+
+A detected current format that ctx cannot import has `status: "unsupported"`
+and `import_support: "unsupported"`. A supported source that requires user
+selection has `import_support: "explicit"`; it can be imported by exact path
+but does not participate in setup, `--all`, daemon refresh, or search refresh.
 
 ## Import
 
@@ -269,59 +283,186 @@ failure; a source with valid content and rejections completes with an explicit
 
 When `[daemon].enabled` is true, `import` may opportunistically start a short
 one-pass ctx-owned maintenance profile after the foreground import finishes.
-The daemon work is local-only: bounded native provider-history refresh plus
-semantic indexing when semantic is enabled. It may acquire the local embedding
-model for semantic indexing, but it does not enable cloud sync. Use
-`import --no-daemon` for a one-run opt-out. Custom
+The daemon work includes bounded native provider-history refresh plus semantic
+indexing when semantic is enabled. It may acquire the local embedding model for
+  semantic indexing. Use `import --no-daemon` for a one-run opt-out. Custom
 JSONL imports, explicit history-source-only imports, and `import --json` do not
 autostart daemon maintenance.
 
-Custom history can be imported from an explicit JSONL file with
-`--format ctx-history-jsonl-v1 --path <file>`. This path is not discovered or
-remembered as a provider home; see `docs/custom-history-import-format.md` for
-the schema and incremental semantics.
+## Local Pro
 
-History-source plugins are local commands that stream `ctx-history-jsonl-v1` to
-stdout. Use `--history-source <selector>` for an explicit plugin import, or
-`--history-source-manifest <path>` to test a manifest without installing it.
-Selectors are exact `plugin/source` or
-`provider_key/source_id` values. `--reset-cursor` withholds the previous plugin
-cursor for that run and asks the plugin to perform a full rescan. See
-`docs/history-source-plugins.md`.
+Local Pro is a separately installed native helper and encrypted derived graph:
 
-Import selection rules:
+```bash
+ctx pro [--json]
+ctx pro setup [--json]
+ctx pro manage [--no-open] [--json]
+ctx pro uninstall [--delete-data|--keep-data] [--json]
+```
 
-- with no arguments, import discovered native sources that exist;
-- with `--all`, import discovered native sources that exist and enabled
-  history-source plugin sources;
-- with `--provider`, import discovered sources for that provider;
-- with `--format ctx-history-jsonl-v1 --path <file>`, import that custom
-  history JSONL file;
-- with `--history-source`, import matching local plugin sources;
-- with `--history-source-manifest`, import sources from that manifest path;
-- with `--provider <provider> --path <path>`, import exactly that native
-  provider path.
+Bare `ctx pro` performs sign-in when needed, activates access, transactionally
+installs or repairs a signed target-specific helper, and catches the graph up.
+It is idempotent across first setup, resume, repair, and later catch-up.
+`ctx pro setup` is a supported explicit synonym with the same setup JSON and
+operation. Use `ctx status` (or the existing MCP `pro_status` tool) for
+Pro state without mutating canonical history or graph data. Entitlement
+authorization may advance nonsecret anti-clock-rollback metadata. `manage`
+opens hosted account and billing management.
+Interactive `uninstall` asks exactly `Delete
+all local Pro data? It can be rebuilt if you set up Pro again. [Y/n]`; Enter
+chooses deletion and `n` preserves local Pro data.
+Noninteractive and JSON callers must choose `--delete-data` or `--keep-data`.
+Canonical ctx history is always preserved.
 
-NanoClaw is explicit-import only and is not included in `--all` or pre-search
-refresh. Import it with `--provider` when discovery finds the desired source, or
-add `--path` to target a specific source, then search the existing index. AstrBot
-`data_v4.db` sources are supported for bounded default locations and remain
-available for explicit `--path` imports.
+Setup uses a browser-based device sign-in that also works from an SSH or
+headless terminal by displaying a URL and short code. When setup creates a new
+Stripe Checkout session, it validates and prints the URL, attempts to open it,
+and keeps the same invocation alive. It polls authenticated account state with
+adaptive 3-, 6-, 12-, then at most 15-second intervals, honoring bounded
+`Retry-After` delays and reporting progress about once a minute. Polling stops
+when access is granted, Checkout expires, or 30 minutes elapse, then continues
+entitlement retrieval, signed helper installation, and materialization
+automatically. Only transient, rate-limit, and unavailable responses are
+retried; authentication and invalid responses fail closed. If a browser cannot
+be opened, the printed URL remains usable and polling continues.
+If a completed Checkout is still waiting for Stripe subscription state to
+converge, setup resumes the same bounded polling without requiring another URL.
+On expiry or timeout, rerun `ctx pro` to safely resume.
 
-The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
-`resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native
-cursor resume is not a universal contract yet.
+New accounts receive a 14-day trial after adding a payment method; Day One
+billing is monthly and a licensed person may use their own installations
+without a device-management step. `manage --no-open` prints the hosted
+billing-portal URL instead of opening it. With `--json`, `manage` also reports
+`access_state` plus any applicable
+`refresh_after_unix`, `access_deadline_unix`, and `grace_deadline_unix` values.
+The access state is one of `trial`, `active`, `canceling_paid`, `offline_grace`,
+or `locked`; it is separate from helper and graph readiness.
+A locked commercial state may retain an applicable deadline for recovery
+diagnostics, but that deadline never grants access.
+
+WorkOS session material, the installation signing key, and the signed
+entitlement are kept only in the operating system key store. They have
+no plaintext-file or secret-environment-variable fallback. Entitlements renew
+quietly before their seven-day grant expires; a failed refresh does not block a
+still-valid offline grant and is retried with a bounded backoff.
+
+`--keep-data` is a local helper removal that preserves local Pro data so setup
+can restore access later. It does not require commercial configuration,
+network access, or an available native key store. `--delete-data` removes and
+verifies local Pro data through the public delete-only adapter. It works after
+an earlier plain uninstall and does not evaluate subscription or entitlement
+expiry. It reports `local_pro_data: "deleted"` only after the authoritative
+local inventory is absent and fails closed before removing the helper if that
+inventory cannot be verified. Both successful choices print or return
+`ctx pro` as the next action for restoring or rebuilding Pro.
+
+Subscription lock does not delete `ctx.db`, the encrypted graph, or its key.
+After renewal or resubscription, `ctx pro` refreshes authorization and restores
+access to the preserved graph. Only explicit
+`ctx pro uninstall --delete-data` removes Pro data and key material.
+
+Materialization is internal and idempotent. Setup, daemon freshness, and graph
+queries invoke it as needed. Repository and worktree roots come from canonical
+activity; there is no `setup --repo` option.
+
+Each absolute ctx data root and production/staging environment is an independent
+Local Pro installation and key-store namespace. Moving a data root is
+not currently automatic; relocate it only through a future explicit migration
+flow rather than copying `ctx-pro.db` alone.
+
+The current query surface is:
+
+```bash
+ctx show commit <sha> [--repository <logical-repository>] [--limit N] [--json]
+ctx show pr <number-or-url> [--repository <logical-repository>] [--json]
+ctx locate file <path> [--repository <logical-repository>] [--line N] [--json]
+ctx blame <file> [--repository <logical-repository>] [--line N] [--json]
+ctx timeline <kind> <value> [--repository <logical-repository>] [--line N] [--limit N] [--cursor <cursor>] [--json]
+ctx facts <kind> <value> [--repository <logical-repository>] [--line N] [--limit N] [--cursor <cursor>] [--json]
+```
+
+`kind` is `repository`, `worktree`, `branch`, `commit`, `file`, `pr`, `issue`,
+`command`, `check`, `session`, `agent`, or `run`. Advanced `show` and `locate`
+forms are available for commit, PR, issue, file, branch, and repository. The
+default limit is 100 and the hard maximum is 500.
+
+Query `--repository` is an optional logical repository identity, such as
+`forge:github.com/ctxrs/ctx`, recorded in the graph. It is never a local
+checkout path or a raw credential-bearing remote URL. Prefer an unscoped query
+when that identity is not already known:
+
+```bash
+ctx locate commit <sha> --json | jq '.results[].resource'
+ctx show commit '<chosen-resource-id>' --json
+```
+
+The first command may return more than one resource. Select the intended
+resource, then reuse its opaque `id` as the same kind's value. Do not parse it or
+assume the first result is correct. The current resource record does not expose
+a separate repository-ID field.
+
+`--line` is a positive 1-based source line and is valid only for `file`
+targets. Other resource kinds fail with the typed `invalid_request` error.
+`--limit` defaults to 100, is bounded from 1 through 500, and limits cited
+records rather than transcript events.
+
+Only `facts` and `timeline` accept `--cursor`. They return
+authenticated cursors bound to the query and current graph state; a changed
+graph makes an old cursor stale. `show`, `locate`, and `blame` are bounded,
+unpaged point views and do not accept a cursor. Agent clients can request typed
+relationship traversal through MCP. A graph query may update stale derived
+state but never canonical history.
+
+Successful query JSON includes `schema_version`, `payload_type`, `target`,
+`results`, flattened `citations`, `pagination.next_cursor`,
+`pagination.truncated`, `stale`, and `suggested_next_commands`. Facts expose
+confidence and state; ambiguity is returned explicitly. Stable Pro failure
+codes include `pro_not_installed`, `commercial_unavailable`,
+`entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
+`key_store_locked`, `not_materialized`, `protocol_mismatch`, `repository_unavailable`,
+`stale_fact`, `ambiguous`, `corrupt_graph`, `invalid_request`,
+`helper_crashed`, and `helper_timeout`.
+
+`key_store_locked` and `key_store_unavailable` are the only stable public names
+for native key-store failures. Pre-release `credential_vault_*` spellings were
+never shipped and have no compatibility alias.
+
+The helper materializes deterministic repository/worktree/branch/remote,
+commit, file, command/check, forge-reference/action, and agent relationship
+facts. It does not claim universal shell-wrapper, forge, or provider accuracy;
+unknown or contradictory evidence remains referenced, attempted, or ambiguous.
+Deployments and ask/brief generation are outside this local work-graph surface.
+Credential material is held by the native platform key store.
+
+Materialization uses a frozen canonical `(mutation_epoch,
+event_seq_high_water)` frontier. A pure tail append raises only the high-water
+mark, so the next completed run reads and commits only the new observations:
+work is O(delta), not a rescan of prior rows. A non-tail insertion, a relevant
+event/session/run/source update or deletion, or a parser/policy projection
+revision advances the mutation epoch. Repository authorization or observed
+HEAD/ref semantics also participate in derived-graph compatibility.
+
+The helper reports explicit graph states. `NotMaterialized` starts the first
+build; `Ready` is fully current; `Partial` continues an interrupted finite walk;
+`NeedsResume` consumes a newer canonical tail; and `NeedsRebuild` means the
+epoch, schema/detector contract, repository set, or repository semantics cannot
+safely continue. Rebuild uses a state-token-checked reset before replay. Legacy
+derived graphs that predate the required immutable digests and epochs are reset
+instead of being treated as a valid resume point. Canonical `ctx` history is
+never deleted by this process.
 
 ## Show And Locate
 
 ```bash
 ctx show session <ctx-session-id>
 ctx show session <ctx-session-id> --mode full --format text
+ctx show session <ctx-session-id> --content complete --format text
 ctx show session <ctx-session-id> --mode log --format jsonl
 ctx show session <ctx-session-id> --format markdown --out transcript.md
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
 ctx show event <ctx-event-id> --window 3 --format text
 ctx show event <ctx-event-id> --before 5 --after 10 --format json
+ctx show event <ctx-event-id> --content complete --format json
 ctx locate session <ctx-session-id>
 ctx locate event <ctx-event-id>
 ```
@@ -338,9 +479,23 @@ transcript artifact to that path and prints nothing on success.
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
 
+Both commands default to `--content indexed`, which renders only SQLite data
+and never opens a provider transcript. `--content complete` is an explicit
+local-data read: for eligible messages whose indexed text was truncated at the
+16,000-character import boundary, ctx opens the recorded provider source and
+returns the complete body only after its source, native record, indexed prefix,
+and body digest all verify. Untruncated messages continue to use the index.
+Complete mode is strict for the selected event or session: an unsupported,
+missing, changed, unverifiable, or oversized record fails the command without a
+partial transcript. It never expands omitted tool output, patches, diffs,
+binary data, or other provider-private payloads.
+
 `locate session` and `locate event` print provenance metadata: ctx IDs,
 provider, provider-owned session IDs, source path and cursor, source
 availability, import fidelity, and resume/cursor metadata when available.
+Event locations also report safe source-record coordinates and whether a
+complete-content locator is available; locator bytes and expected digests are
+not displayed.
 
 Provider-owned IDs are metadata, not positional IDs. Positional session and
 event arguments are ctx-owned IDs. To look up a provider-owned session, use an
@@ -365,16 +520,18 @@ ctx search "token budget" --session <ctx-session-id>
 ctx search "review findings" --include-subagents
 ctx search "this current task" --include-current-session
 ctx search "mail provider throttled bulk mailbox setup" --backend hybrid
-ctx search "pricing for ctx cloud team history" --backend semantic
+ctx search "pricing decisions from the launch review" --backend semantic
 ctx search "release notes" --history-source example-agent/default
 ctx search "release notes" --provider-key example-agent --source-id default
 ```
 
 `search` defaults to `--refresh background`, which serves the existing index and
 lets the ctx daemon refresh lexical and semantic indexes in the background when
-daemon maintenance is enabled. If daemon maintenance is disabled, `background`
-uses the bounded foreground text-refresh path for discovered native provider
-sources and enabled auto history-source plugins. Semantic retrieval reads
+daemon maintenance is enabled. If no local index exists yet, search performs a
+bounded foreground text bootstrap so direct first-search usage still works. If
+daemon maintenance is disabled, `background` uses the same bounded foreground
+text-refresh path for discovered native provider sources and enabled auto
+history-source plugins. Semantic retrieval reads
 existing local sidecar coverage when it is already available, and freshness is
 visible through `ctx status`, `ctx index status`, and the search JSON
 `retrieval.worker` report. ctx does not initialize or download embedding models
@@ -471,9 +628,10 @@ interactive use; run `--refresh wait` or `ctx import` for exhaustive foreground
 plugin catch-up. Foreground refresh may write newly discovered provider or
 plugin history into the local `work.sqlite` index before querying. Semantic retrieval reads the
 `vectors.sqlite` sidecar when it already exists; search itself does not start
-semantic indexing or download models. With semantic enabled and default
-background refresh, search may start the configured daemon so the daemon-owned
-query service can embed the query; `--refresh off` skips that autostart. Use
+semantic indexing or download models. Default background refresh may start the
+configured daemon for local history freshness. With semantic enabled, the
+daemon-owned query service can embed the query; `--refresh off` skips daemon
+autostart. Use
 `ctx daemon run` for explicit foreground local native history refresh and
 semantic catch-up. JSON status includes a top-level `semantic` object with worker
 `status`, `running`, `pid`, heartbeat/error timestamps, `indexed_chunks`, and a
@@ -481,9 +639,8 @@ semantic catch-up. JSON status includes a top-level `semantic` object with worke
 `dirty_items`, `queued_items_estimate`, and `coverage_ratio`, plus the private
 local sidecar and worker status paths. JSON status also includes a top-level
 `daemon` object
-with coordinator status and `history_refresh`/`semantic_index`/`cloud_sync` job
-state; cloud sync is disabled with `enabled: false` and
-`network_allowed: false`. `ctx doctor` is the diagnostic surface for semantic
+with coordinator status and `history_refresh`/`semantic_index` job state.
+`ctx doctor` is the diagnostic surface for semantic
 sidecar, worker, and daemon health.
 
 ## SQL
@@ -562,9 +719,13 @@ ctx mcp serve
 ctx integrations install mcp
 ```
 
-`mcp serve` starts a read-only MCP server over newline-delimited stdio JSON-RPC.
-It exposes tools for `status`, `sources`, `search`, `sql`, `show_session`, and
-`show_event`. The MCP search and SQL tools query the existing index only; they
+`mcp serve` starts a local MCP server over newline-delimited stdio JSON-RPC. It
+exposes 13 tools: six OSS tools (`status`, `sources`, `search`, `sql`,
+`show_session`, `show_event`) and seven Pro tools (`pro_status`,
+`show_resource`, `locate_resource`, `blame`, `timeline`, `related`, `facts`).
+Pro graph queries may idempotently catch up only the derived graph. The MCP
+search and SQL tools query
+the existing index only; they
 do not refresh or import provider history, and MCP search currently uses the
 lexical search path only. Tool results include MCP text content plus
 `structuredContent` JSON. Treat all MCP output as private local history: it may
@@ -604,12 +765,12 @@ and mismatched sidecars are treated as unmanaged and will not self-upgrade.
 binary found on `PATH`, with warnings when an older binary shadows the managed
 install or multiple `ctx` binaries are present.
 
-Official installer-managed installs default to background auto-upgrade after
-successful normal commands when signed release metadata explicitly allows
-auto-upgrade. Background checks never run for `ctx status`, `--json` commands,
+Official installer-managed installs can opt in to background auto-upgrade with
+`ctx upgrade enable`; signed release metadata must also explicitly allow it.
+Background checks never run for `ctx status`, `--json` commands,
 MCP, `ctx docs`, `ctx sql`, `ctx upgrade`, CI, or unmanaged installs. They write
 state and logs under the ctx data root and do not write to stdout or stderr. Use
-`CTX_UPGRADE_OFF=1` or `CTX_DISABLE_AUTO_UPGRADE=1` for process-level opt-out,
+`CTX_UPGRADE_AUTO=off` for a process-level opt-out,
 or `ctx upgrade disable` to write `upgrade.auto = "off"` in `config.toml`.
 
 Manual `ctx upgrade` can print progress and errors. It verifies signed release
@@ -648,6 +809,15 @@ ctx show session <ctx-session-id> --format json
 ctx show event <ctx-event-id> --format json
 ctx locate session <ctx-session-id> --format json
 ctx locate event <ctx-event-id> --format json
+ctx pro --json
+ctx pro setup --json
+ctx pro manage --no-open --json
+ctx pro uninstall (--delete-data|--keep-data) --json
+ctx show commit <sha> --json
+ctx locate commit <sha> --json
+ctx blame <file> --json
+ctx timeline <kind> <value> --json
+ctx facts <kind> <value> --json
 ctx search <query>|--term <term>|--file <path> --json
 ctx sql "SELECT COUNT(*) FROM ctx_sessions" --json
 ctx docs list --json

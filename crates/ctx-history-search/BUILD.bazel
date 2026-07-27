@@ -1,6 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -37,7 +38,7 @@ rust_library(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
-rust_test(
+ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
     crate_name = "ctx_history_search",
@@ -47,6 +48,28 @@ rust_test(
         normal_dev = True,
         proc_macro_dev = True,
     ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + CTX_HISTORY_SEARCH_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "determinism_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_history_search_determinism",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["search_packet_is_deterministic_for_large_history_and_equal_ties_use_record_id"],
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,

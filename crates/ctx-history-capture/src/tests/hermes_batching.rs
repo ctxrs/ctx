@@ -1,4 +1,14 @@
-use super::support::*;
+use crate::provider::providers::hermes::import_hermes_sqlite_batched;
+use crate::tests::support::paths::tempdir;
+use crate::{
+    import_hermes_sqlite, HermesSqliteImportOptions, NormalizedProviderImportOptions,
+    ProviderAdapterContext, ProviderImportSummary, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+};
+use chrono::{DateTime, Utc};
+use ctx_history_store::Store;
+use rusqlite::Connection;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -7,6 +17,132 @@ use std::{
     thread,
     time::Duration,
 };
+use tempfile::TempDir;
+
+fn test_imported_at() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+fn import_hermes_captured(path: &Path, store: &mut Store) -> ProviderImportSummary {
+    import_hermes_sqlite_batched(
+        path,
+        store,
+        ProviderAdapterContext {
+            machine_id: "hermes-captured-test-machine".to_owned(),
+            source_path: Some(path.to_path_buf()),
+            source_root: None,
+            imported_at: test_imported_at(),
+        },
+        NormalizedProviderImportOptions {
+            fast_event_inserts: true,
+            capture_work_limit: crate::CaptureWorkLimit::Drain,
+            inventory_observation_token: None,
+            ..NormalizedProviderImportOptions::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn captured_hermes_import_crosses_message_batches_and_replays_from_cursor() {
+    let temp = tempdir();
+    let fixture = write_hermes_batched_db(&temp, 130);
+    let db_path = temp.path().join("captured-work.sqlite");
+    let mut store = Store::open(&db_path).unwrap();
+
+    let first = import_hermes_captured(&fixture, &mut store);
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, 130);
+    assert_eq!(
+        store
+            .search_event_hits("hermes-batched-message-129", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let replay = import_hermes_captured(&fixture, &mut store);
+    assert_eq!(replay.failed, 0, "{:?}", replay.failures);
+    assert_eq!(replay.imported, 0);
+    assert_eq!(replay.skipped, 0);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+}
+
+#[test]
+fn captured_hermes_sessions_phase_preserves_eventless_sessions() {
+    let temp = tempdir();
+    let fixture = write_hermes_batched_db(&temp, 1);
+    Connection::open(&fixture)
+        .unwrap()
+        .execute(
+            "INSERT INTO sessions VALUES ('eventless', 'acp', 1782259300.0)",
+            [],
+        )
+        .unwrap();
+    let mut store = Store::open(temp.path().join("eventless-work.sqlite")).unwrap();
+
+    let summary = import_hermes_captured(&fixture, &mut store);
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 2);
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
+}
+
+#[test]
+fn captured_hermes_changed_source_resets_and_imports_new_tail() {
+    let temp = tempdir();
+    let fixture = write_hermes_batched_db(&temp, 2);
+    let mut store = Store::open(temp.path().join("changed-work.sqlite")).unwrap();
+    let first = import_hermes_captured(&fixture, &mut store);
+    assert_eq!(first.imported_events, 2);
+
+    Connection::open(&fixture)
+        .unwrap()
+        .execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) \
+             VALUES ('hermes-batched', 'assistant', 'hermes-changed-tail', 1782259300.0)",
+            [],
+        )
+        .unwrap();
+
+    let changed = import_hermes_captured(&fixture, &mut store);
+    assert_eq!(changed.failed, 0, "{:?}", changed.failures);
+    assert_eq!(changed.imported_events, 1);
+    assert_eq!(
+        store
+            .search_event_hits("hermes-changed-tail", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn captured_hermes_rejects_oversized_rows_before_hydration() {
+    let temp = tempdir();
+    let fixture = write_hermes_batched_db(&temp, 0);
+    let oversized_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .unwrap()
+        .saturating_add(1);
+    Connection::open(&fixture)
+        .unwrap()
+        .execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) \
+             VALUES ('hermes-batched', 'assistant', zeroblob(?1), 1782259300.0)",
+            [oversized_bytes],
+        )
+        .unwrap();
+    let mut store = Store::open(temp.path().join("oversized-work.sqlite")).unwrap();
+
+    let summary = import_hermes_captured(&fixture, &mut store);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 0);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0].error.contains("exceeds the"));
+}
 
 #[test]
 fn native_hermes_import_crosses_batches_and_replays_idempotently() {
@@ -35,7 +171,7 @@ fn native_hermes_import_crosses_batches_and_replays_idempotently() {
     let replay = import_hermes_sqlite(&fixture, &mut store, options).unwrap();
     assert_eq!(replay.failed, 0, "{:?}", replay.failures);
     assert_eq!(replay.imported_events, 0);
-    assert_eq!(replay.skipped_events, 130);
+    assert_eq!(replay.skipped_events, 0);
     assert_eq!(
         store
             .search_event_hits("hermes-batched-message-129", 10)
@@ -97,7 +233,10 @@ fn native_hermes_import_preserves_preexisting_search_segment_and_bounds_peak_wal
         historic_summary.failures
     );
     assert_eq!(historic_summary.imported_events, 256);
-    assert_eq!(event_search_segment_count(&db_path), 1);
+    assert!(
+        event_search_segment_count(&db_path) > 1,
+        "batched Hermes import must preserve its per-batch search segments"
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     let peak_wal_bytes = Arc::new(AtomicU64::new(0));
@@ -154,7 +293,7 @@ fn native_hermes_import_preserves_preexisting_search_segment_and_bounds_peak_wal
     let replay = import_hermes_sqlite(&current, &mut store, current_options).unwrap();
     assert_eq!(replay.failed, 0, "{:?}", replay.failures);
     assert_eq!(replay.imported_events, 0);
-    assert_eq!(replay.skipped_events, 130);
+    assert_eq!(replay.skipped_events, 0);
 }
 
 fn assert_bounded_wal(db_path: &Path) {

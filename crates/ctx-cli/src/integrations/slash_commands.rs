@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{analytics, AnalyticsProperties};
+use crate::analytics::{
+    count_bucket, IntegrationResult, IntegrationScope, IntegrationTelemetry, TargetSelection,
+};
 
 const COMMAND_NAME: &str = "ctx-history";
 const METADATA_FILE: &str = ".ctx-slash-commands.json";
@@ -254,31 +256,28 @@ fn scope(project: bool) -> SlashCommandScope {
 }
 
 pub(crate) fn insert_install_analytics(
-    properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
     args: &SlashCommandInstallArgs,
 ) {
-    analytics::insert_str(
-        properties,
-        "slash_command_scope",
-        if args.project { "project" } else { "global" },
-    );
-    analytics::insert_str(
-        properties,
-        "target_agent_group",
-        if args.all_agents {
-            "all"
-        } else if args.agent.is_empty() {
-            "detected"
-        } else {
-            "explicit"
-        },
-    );
+    telemetry.scope = Some(if args.project {
+        IntegrationScope::Project
+    } else {
+        IntegrationScope::Global
+    });
+    telemetry.selection = Some(if args.all_agents {
+        TargetSelection::All
+    } else if args.agent.is_empty() {
+        TargetSelection::Detected
+    } else {
+        TargetSelection::Explicit
+    });
+    telemetry.force = Some(args.force);
     let count = if args.all_agents {
         SlashCommandAgentArg::ALL.len()
     } else {
         args.agent.len()
     };
-    analytics::insert_count_bucket(properties, "target_agents_count_bucket", count as u64);
+    telemetry.target_agents = Some(count_bucket(count as u64));
 }
 
 #[derive(Debug, Clone)]
@@ -491,14 +490,10 @@ impl SlashCommandMetadata {
 pub(crate) fn run_install(
     args: SlashCommandInstallArgs,
     context: &PathContext,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut IntegrationTelemetry,
 ) -> Result<()> {
     let agents = selected_agents(&args, context);
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "slash_command_target_agents_count_bucket",
-        agents.len() as u64,
-    );
+    telemetry.resolved_agents = Some(count_bucket(agents.len() as u64));
     let mut results = Vec::with_capacity(agents.len());
     for agent in agents {
         let plan = agent.install_plan(args.project, context);
@@ -514,13 +509,16 @@ pub(crate) fn run_install(
                 )
         });
     let updated = results.iter().any(|result| result.updated);
-    analytics::insert_str(
-        analytics_properties,
-        "install_result",
-        if failed == 0 { "ok" } else { "partial_error" },
-    );
-    analytics::insert_bool(analytics_properties, "already_installed", already_installed);
-    analytics::insert_bool(analytics_properties, "updated", updated);
+    telemetry.result = Some(if failed == 0 {
+        IntegrationResult::Ok
+    } else {
+        IntegrationResult::PartialError
+    });
+    telemetry.already_installed = Some(already_installed);
+    telemetry.updated = Some(updated);
+    telemetry.modified_targets = Some(count_bucket(
+        results.iter().filter(|result| result.updated).count() as u64,
+    ));
     if args.json {
         println!(
             "{}",

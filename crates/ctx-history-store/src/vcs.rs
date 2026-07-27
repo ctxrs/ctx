@@ -71,7 +71,8 @@ impl Store {
     }
 
     pub fn upsert_vcs_change(&self, change: &VcsChange) -> Result<Uuid> {
-        self.conn.execute(
+        self.with_atomic_write(|| {
+            self.conn.execute(
                 r#"
                 INSERT INTO vcs_changes
                 (id, vcs_workspace_id, kind, change_id, parent_change_ids_json, branch_or_bookmark, tree_hash, author_time_ms, confidence, created_at_ms, updated_at_ms, source_id, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
@@ -112,13 +113,16 @@ impl Store {
                     serde_json::to_string(&change.sync.metadata)?,
                 ],
             )?;
-        self.conn
+            let id = self.conn
                 .query_row(
                     "SELECT id FROM vcs_changes WHERE vcs_workspace_id = ?1 AND kind = ?2 AND change_id = ?3",
                     params![change.vcs_workspace_id.to_string(), change.kind.as_str(), change.change_id.as_str()],
                     |row| parse_uuid(row.get::<_, String>(0)?),
                 )
-                .map_err(StoreError::from)
+                .map_err(StoreError::from)?;
+            self.journal_vcs_change_mutated(id)?;
+            Ok(id)
+        })
     }
 
     pub(crate) fn list_vcs_changes(&self) -> Result<Vec<VcsChange>> {

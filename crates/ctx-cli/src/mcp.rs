@@ -1,7 +1,7 @@
 use std::{
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -13,11 +13,24 @@ use ctx_history_store::{
     RAW_SQL_MAX_COLUMNS_CAP, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
     RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
+use ctx_pro_host_protocol::QueryKind;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+mod input;
+mod pro;
+mod response;
+mod response_bound;
+mod show;
+mod telemetry;
 mod text;
 
+use input::{read_mcp_input_line, McpInputLine};
+use pro::{pro_query_tool, tool_pro_blame, tool_pro_query, tool_pro_status};
+use response::{error_response, json_rpc_error, success_response, tool_error_result, tool_result};
+use response_bound::{bound_complete_content_mcp_response, is_complete_content_tool_call};
+use show::{tool_show_event, tool_show_session};
+use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
 
 use super::{
@@ -28,7 +41,9 @@ use super::{
     SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode,
     MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
+use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use crate::commands::search::resolve_search_backend;
+use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
 use crate::semantic::{
     daemon_report, search_packet_with_backend, semantic_worker_report_cached,
     semantic_worker_report_configured_json,
@@ -40,12 +55,6 @@ const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-0
 const MCP_MAX_LINE_BYTES: usize = 1024 * 1024;
 const MCP_MAX_SESSION_EVENTS: usize = 200;
 
-enum McpInputLine {
-    Line(String),
-    InvalidUtf8,
-    TooLarge,
-}
-
 #[derive(Debug, Args)]
 pub(crate) struct McpArgs {
     #[command(subcommand)]
@@ -55,8 +64,8 @@ pub(crate) struct McpArgs {
 #[derive(Debug, Subcommand)]
 enum McpCommand {
     #[command(
-        about = "Serve a read-only MCP server over stdio",
-        long_about = "Serve a read-only MCP server over newline-delimited stdio JSON-RPC.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
+        about = "Serve local ctx tools over stdio",
+        long_about = "Serve local ctx tools over newline-delimited stdio JSON-RPC. Materialize updates only the derived Pro graph; all other tools are read-only.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
     )]
     Serve(McpServeArgs),
 }
@@ -75,169 +84,214 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
     let stdout = io::stdout();
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
+    let mut telemetry = McpTelemetry::start(data_root.clone());
+    let started = Instant::now();
     let mut initialized = false;
 
-    while let Some(input) = read_mcp_input_line(&mut stdin)? {
-        let response = match input {
+    let result = serve_stdio_loop(
+        &data_root,
+        &mut stdin,
+        &mut stdout,
+        &mut initialized,
+        &mut telemetry,
+    );
+    let (reason, outcome) = match &result {
+        Ok(()) => (McpStopReasonV1::Eof, Outcome::Success),
+        Err(failure) => (failure.reason, Outcome::Failure),
+    };
+    telemetry.stop(reason, outcome, started.elapsed());
+    result.map_err(|failure| failure.error)
+}
+
+struct McpServeFailure {
+    reason: McpStopReasonV1,
+    error: anyhow::Error,
+}
+
+fn serve_stdio_loop(
+    data_root: &Path,
+    stdin: &mut impl BufRead,
+    stdout: &mut impl Write,
+    initialized: &mut bool,
+    telemetry: &mut McpTelemetry,
+) -> std::result::Result<(), McpServeFailure> {
+    loop {
+        let input = read_mcp_input_line(stdin).map_err(|error| McpServeFailure {
+            reason: McpStopReasonV1::StdinReadError,
+            error,
+        })?;
+        let Some(input) = input else {
+            return Ok(());
+        };
+        let request_started = Instant::now();
+        let (handled, descriptor) = match input {
             McpInputLine::Line(line) => {
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
                 }
-                handle_line(line, &data_root, &mut initialized)
+                match serde_json::from_str::<Value>(line) {
+                    Ok(message) => {
+                        let descriptor = RequestDescriptor::from_message(&message);
+                        (handle_message(message, data_root, initialized), descriptor)
+                    }
+                    Err(err) => (
+                        McpHandled::plain(Some(error_response(
+                            Value::Null,
+                            -32700,
+                            "Parse error",
+                            Some(json!({ "error": err.to_string() })),
+                        ))),
+                        RequestDescriptor::InvalidJson,
+                    ),
+                }
             }
-            McpInputLine::InvalidUtf8 => Some(error_response(
-                Value::Null,
-                -32700,
-                "Parse error",
-                Some(json!({ "error": "MCP message is not valid UTF-8" })),
-            )),
-            McpInputLine::TooLarge => Some(error_response(
-                Value::Null,
-                -32700,
-                "Parse error",
-                Some(json!({
-                    "error": format!("MCP message exceeds max line bytes ({MCP_MAX_LINE_BYTES})")
-                })),
-            )),
+            McpInputLine::InvalidUtf8 => (
+                McpHandled::plain(Some(error_response(
+                    Value::Null,
+                    -32700,
+                    "Parse error",
+                    Some(json!({ "error": "MCP message is not valid UTF-8" })),
+                ))),
+                RequestDescriptor::InvalidUtf8,
+            ),
+            McpInputLine::TooLarge => (
+                McpHandled::plain(Some(error_response(
+                    Value::Null,
+                    -32700,
+                    "Parse error",
+                    Some(json!({
+                        "error": format!("MCP message exceeds max line bytes ({MCP_MAX_LINE_BYTES})")
+                    })),
+                ))),
+                RequestDescriptor::LineTooLarge,
+            ),
         };
+        let McpHandled {
+            value: response,
+            pro_event,
+        } = handled;
         if let Some(response) = response {
-            writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
-            stdout.flush()?;
-        }
-    }
-    Ok(())
-}
-
-fn read_mcp_input_line(reader: &mut impl BufRead) -> Result<Option<McpInputLine>> {
-    let mut buffer = Vec::new();
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            if buffer.is_empty() {
-                return Ok(None);
+            let encoded = serde_json::to_string(&response).map_err(|error| {
+                telemetry.record_response_failure(
+                    descriptor,
+                    request_started.elapsed(),
+                    McpErrorClassV1::ResponseSerialize,
+                );
+                McpServeFailure {
+                    reason: McpStopReasonV1::ResponseSerializeError,
+                    error: error.into(),
+                }
+            })?;
+            writeln!(stdout, "{encoded}").map_err(|error| {
+                telemetry.record_response_failure(
+                    descriptor,
+                    request_started.elapsed(),
+                    McpErrorClassV1::ResponseWrite,
+                );
+                McpServeFailure {
+                    reason: McpStopReasonV1::StdoutWriteError,
+                    error: error.into(),
+                }
+            })?;
+            stdout.flush().map_err(|error| {
+                telemetry.record_response_failure(
+                    descriptor,
+                    request_started.elapsed(),
+                    McpErrorClassV1::ResponseFlush,
+                );
+                McpServeFailure {
+                    reason: McpStopReasonV1::StdoutFlushError,
+                    error: error.into(),
+                }
+            })?;
+            telemetry.record_delivered(descriptor, Some(&response), request_started.elapsed());
+            if let Some(event) = pro_event {
+                telemetry.submit_pro_event(event);
             }
-            break;
-        }
-        if let Some(newline_index) = available.iter().position(|byte| *byte == b'\n') {
-            let bytes_to_consume = newline_index + 1;
-            if buffer.len().saturating_add(bytes_to_consume) > MCP_MAX_LINE_BYTES {
-                reader.consume(bytes_to_consume);
-                return Ok(Some(McpInputLine::TooLarge));
-            }
-            buffer.extend_from_slice(&available[..bytes_to_consume]);
-            reader.consume(bytes_to_consume);
-            break;
-        }
-
-        let bytes_to_consume = available.len();
-        if buffer.len().saturating_add(bytes_to_consume) > MCP_MAX_LINE_BYTES {
-            reader.consume(bytes_to_consume);
-            discard_until_newline(reader)?;
-            return Ok(Some(McpInputLine::TooLarge));
-        }
-        buffer.extend_from_slice(available);
-        reader.consume(bytes_to_consume);
-    }
-
-    Ok(Some(match String::from_utf8(buffer) {
-        Ok(line) => McpInputLine::Line(line),
-        Err(_) => McpInputLine::InvalidUtf8,
-    }))
-}
-
-fn discard_until_newline(reader: &mut impl BufRead) -> Result<()> {
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            return Ok(());
-        }
-        let bytes_to_consume = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map(|index| index + 1)
-            .unwrap_or(available.len());
-        let found_newline = bytes_to_consume <= available.len()
-            && available
-                .get(bytes_to_consume.saturating_sub(1))
-                .is_some_and(|byte| *byte == b'\n');
-        reader.consume(bytes_to_consume);
-        if found_newline {
-            return Ok(());
+        } else {
+            debug_assert!(pro_event.is_none());
+            telemetry.record_delivered(descriptor, None, request_started.elapsed());
         }
     }
 }
 
-fn handle_line(line: &str, data_root: &Path, initialized: &mut bool) -> Option<Value> {
-    let message = match serde_json::from_str::<Value>(line) {
-        Ok(message) => message,
-        Err(err) => {
-            return Some(error_response(
-                Value::Null,
-                -32700,
-                "Parse error",
-                Some(json!({ "error": err.to_string() })),
-            ));
-        }
-    };
-    handle_message(message, data_root, initialized)
-}
-
-fn handle_message(message: Value, data_root: &Path, initialized: &mut bool) -> Option<Value> {
+fn handle_message(
+    message: Value,
+    data_root: &Path,
+    initialized: &mut bool,
+) -> McpHandled<Option<Value>> {
     let Some(object) = message.as_object() else {
-        return Some(error_response(Value::Null, -32600, "Invalid Request", None));
+        return McpHandled::plain(Some(error_response(
+            Value::Null,
+            -32600,
+            "Invalid Request",
+            None,
+        )));
     };
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         let id = object.get("id").cloned().unwrap_or(Value::Null);
-        return Some(error_response(id, -32600, "Invalid Request", None));
+        return McpHandled::plain(Some(error_response(id, -32600, "Invalid Request", None)));
     }
+    let bound_complete_content = is_complete_content_tool_call(&message);
     let id = message
         .as_object()
         .and_then(|object| object.get("id"))
         .cloned();
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return id.map(|id| error_response(id, -32600, "Invalid Request", None));
+        return McpHandled::plain(id.map(|id| error_response(id, -32600, "Invalid Request", None)));
     };
     if matches!(id, Some(Value::Null | Value::Array(_) | Value::Object(_))) {
-        return Some(error_response(Value::Null, -32600, "Invalid Request", None));
+        return McpHandled::plain(Some(error_response(
+            Value::Null,
+            -32600,
+            "Invalid Request",
+            None,
+        )));
     }
-    if id.is_none() {
+    let Some(id) = id else {
         if method == "notifications/initialized" {
             *initialized = true;
         }
-        return None;
-    }
-    let id = id?;
+        return McpHandled::plain(None);
+    };
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     if !params.is_object() {
-        return Some(error_response(
+        return McpHandled::plain(Some(error_response(
             id,
             -32602,
             "Invalid params",
             Some(json!({ "error": "params must be an object" })),
-        ));
+        )));
     }
     if method != "initialize" && !*initialized {
-        return Some(error_response(
+        return McpHandled::plain(Some(error_response(
             id,
             -32002,
             "Server not initialized",
             Some(json!({ "error": "send initialize before calling ctx MCP tools" })),
-        ));
+        )));
     }
     let result = match method {
         "initialize" => {
             *initialized = true;
-            Ok(initialize_result(&params))
+            Ok(McpHandled::plain(initialize_result(&params)))
         }
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+        "ping" => Ok(McpHandled::plain(json!({}))),
+        "tools/list" => Ok(McpHandled::plain(json!({ "tools": tool_definitions() }))),
         "tools/call" => handle_tools_call(params, data_root),
         _ => Err(json_rpc_error(-32601, "Method not found", None)),
     };
-    Some(match result {
-        Ok(result) => success_response(id, result),
-        Err(error) => {
+    let response_id = id.clone();
+    let McpHandled {
+        value: response,
+        pro_event,
+    } = match result {
+        Ok(handled) => McpHandled {
+            value: success_response(id, handled.value),
+            pro_event: handled.pro_event,
+        },
+        Err(error) => McpHandled::plain({
             if let Some(object) = error.as_object() {
                 let code = object.get("code").and_then(Value::as_i64).unwrap_or(-32603);
                 let message = object
@@ -249,8 +303,20 @@ fn handle_message(message: Value, data_root: &Path, initialized: &mut bool) -> O
             } else {
                 error_response(id, -32603, "Internal error", Some(error))
             }
-        }
-    })
+        }),
+    };
+    McpHandled {
+        value: Some(if bound_complete_content {
+            bound_complete_content_mcp_response(
+                response,
+                response_id,
+                MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+            )
+        } else {
+            response
+        }),
+        pro_event,
+    }
 }
 
 fn initialize_result(params: &Value) -> Value {
@@ -266,7 +332,7 @@ fn initialize_result(params: &Value) -> Value {
             "name": "ctx",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "instructions": "Read-only access to the local ctx index. Tool output may include absolute paths, source metadata, snippets, transcript text, and raw SQL query results; MCP hosts may log or forward it. This minimal server supports initialize, ping, tools/list, and tools/call over newline-delimited stdio. It does not expose MCP resources or prompts, and tools do not import provider history, write provider files, or write repositories."
+        "instructions": "Local access to the ctx index and optional Pro work graph. Tool output may include absolute paths, source metadata, snippets, transcript text, and raw SQL query results; MCP hosts may log or forward it. Materialize updates only the derived local Pro graph. Other tools are read-only. No tool writes provider history or repositories."
     })
 }
 
@@ -281,7 +347,7 @@ fn negotiate_protocol_version(params: &Value) -> &'static str {
         .unwrap_or(MCP_PROTOCOL_VERSION)
 }
 
-fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
+fn handle_tools_call(params: Value, data_root: &Path) -> Result<McpHandled<Value>, Value> {
     let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
         json_rpc_error(
             -32602,
@@ -301,14 +367,14 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
         ));
     }
 
-    let result = match name {
+    let handled = match name {
         "status" => {
             validate_argument_keys(&arguments, &[])?;
-            tool_status(data_root)
+            McpHandled::plain(tool_status(data_root))
         }
         "sources" => {
             validate_argument_keys(&arguments, &[])?;
-            tool_sources(data_root)
+            McpHandled::plain(tool_sources(data_root))
         }
         "search" => {
             validate_argument_keys(
@@ -334,7 +400,7 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
                     "semantic_weight",
                 ],
             )?;
-            tool_search(&arguments, data_root)
+            McpHandled::plain(tool_search(&arguments, data_root))
         }
         "sql" => {
             validate_argument_keys(
@@ -348,15 +414,46 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
                     "timeout_ms",
                 ],
             )?;
-            tool_sql(&arguments, data_root)
+            McpHandled::plain(tool_sql(&arguments, data_root))
         }
         "show_session" => {
-            validate_argument_keys(&arguments, &["ctx_session_id", "mode"])?;
-            tool_show_session(&arguments, data_root)
+            validate_argument_keys(&arguments, &["ctx_session_id", "mode", "content"])?;
+            McpHandled::plain(tool_show_session(&arguments, data_root))
         }
         "show_event" => {
-            validate_argument_keys(&arguments, &["ctx_event_id", "before", "after", "window"])?;
-            tool_show_event(&arguments, data_root)
+            validate_argument_keys(
+                &arguments,
+                &["ctx_event_id", "before", "after", "window", "content"],
+            )?;
+            McpHandled::plain(tool_show_event(&arguments, data_root))
+        }
+        "pro_status" => {
+            validate_argument_keys(&arguments, &[])?;
+            tool_pro_status(data_root)
+        }
+        "show_resource" => {
+            validate_argument_keys(&arguments, &["target", "limit"])?;
+            tool_pro_query(&arguments, data_root, QueryKind::Show, "pro_resource")
+        }
+        "locate_resource" => {
+            validate_argument_keys(&arguments, &["target", "limit"])?;
+            tool_pro_query(&arguments, data_root, QueryKind::Locate, "pro_location")
+        }
+        "blame" => {
+            validate_argument_keys(&arguments, &["target", "limit"])?;
+            tool_pro_blame(&arguments, data_root)
+        }
+        "timeline" => {
+            validate_argument_keys(&arguments, &["target", "limit", "cursor"])?;
+            tool_pro_query(&arguments, data_root, QueryKind::Timeline, "pro_timeline")
+        }
+        "related" => {
+            validate_argument_keys(&arguments, &["target", "limit", "cursor"])?;
+            tool_pro_query(&arguments, data_root, QueryKind::Related, "pro_related")
+        }
+        "facts" => {
+            validate_argument_keys(&arguments, &["target", "limit", "cursor"])?;
+            tool_pro_query(&arguments, data_root, QueryKind::Facts, "pro_facts")
         }
         _ => {
             return Err(json_rpc_error(
@@ -367,9 +464,12 @@ fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {
         }
     };
 
-    Ok(match result {
-        Ok(value) => tool_result(value),
-        Err(err) => tool_error_result(err),
+    Ok(McpHandled {
+        value: match handled.value {
+            Ok(value) => tool_result(value),
+            Err(err) => tool_error_result(err),
+        },
+        pro_event: handled.pro_event,
     })
 }
 
@@ -604,55 +704,6 @@ fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
     Ok(raw_sql_result_json(&result))
 }
 
-fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<Value> {
-    let store = open_existing_store(data_root)?;
-    let session_id = required_uuid(arguments, "ctx_session_id")?;
-    let mode = optional_transcript_mode(arguments, "mode")?.unwrap_or(TranscriptMode::Lite);
-    let session = store.get_session(session_id)?;
-    let mut events = store.events_for_session_limited(session.id, MCP_MAX_SESSION_EVENTS + 1)?;
-    let truncated = events.len() > MCP_MAX_SESSION_EVENTS;
-    if truncated {
-        events.truncate(MCP_MAX_SESSION_EVENTS);
-    }
-    let mut value = session_transcript_json(&store, &session, &events, mode, OutputFormat::Json);
-    if truncated {
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "truncated".to_owned(),
-                json!({
-                    "events": true,
-                    "max_events": MCP_MAX_SESSION_EVENTS,
-                }),
-            );
-        }
-    }
-    Ok(value)
-}
-
-fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Value> {
-    let store = open_existing_store(data_root)?;
-    let event_id = required_uuid(arguments, "ctx_event_id")?;
-    let before = optional_usize(arguments, "before")?.unwrap_or(0);
-    let after = optional_usize(arguments, "after")?.unwrap_or(0);
-    let window = optional_usize(arguments, "window")?;
-    if before > MAX_EVENT_WINDOW
-        || after > MAX_EVENT_WINDOW
-        || window.is_some_and(|window| window > MAX_EVENT_WINDOW)
-    {
-        return Err(anyhow!(
-            "show_event before/after/window must be {MAX_EVENT_WINDOW} or less"
-        ));
-    }
-    let event = store.get_event(event_id)?;
-    let events = event_window(&store, &event, before, after, window)?;
-    Ok(event_window_json(
-        &store,
-        &event,
-        &events,
-        OutputFormat::Json,
-    ))
-}
-
 fn open_existing_store(data_root: &Path) -> Result<Store> {
     let db_path = database_path(data_root.to_path_buf());
     if !db_path.exists() {
@@ -663,35 +714,6 @@ fn open_existing_store(data_root: &Path) -> Result<Store> {
     }
     Store::open_read_only(&db_path)
         .with_context(|| format!("open read-only ctx store {}", db_path.display()))
-}
-
-fn tool_result(structured: Value) -> Value {
-    let text = render_tool_text(&structured);
-    json!({
-        "content": [
-            {
-                "type": "text",
-                "text": text,
-            }
-        ],
-        "structuredContent": structured,
-    })
-}
-
-fn tool_error_result(err: anyhow::Error) -> Value {
-    let error = err.to_string();
-    json!({
-        "isError": true,
-        "content": [
-            {
-                "type": "text",
-                "text": error.clone(),
-            }
-        ],
-        "structuredContent": {
-            "error": error,
-        }
-    })
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -760,7 +782,8 @@ fn tool_definitions() -> Vec<Value> {
             "description": "Return an indexed session transcript by ctx session id.",
             "inputSchema": object_schema(json!({
                 "ctx_session_id": { "type": "string" },
-                "mode": { "type": "string", "enum": ["full", "lite", "log"], "default": "lite" }
+                "mode": { "type": "string", "enum": ["full", "lite", "log"], "default": "lite" },
+                "content": { "type": "string", "enum": ["indexed", "complete"], "default": "indexed", "description": "Complete explicitly reads verified local provider sources and caps the final serialized JSON-RPC response at 8 MiB. MCP hosts may log or forward returned transcript content." }
             }), vec!["ctx_session_id"]),
             "annotations": { "readOnlyHint": true },
         }),
@@ -772,10 +795,60 @@ fn tool_definitions() -> Vec<Value> {
                 "ctx_event_id": { "type": "string" },
                 "before": { "type": "integer", "minimum": 0, "default": 0 },
                 "after": { "type": "integer", "minimum": 0, "default": 0 },
-                "window": { "type": "integer", "minimum": 0 }
+                "window": { "type": "integer", "minimum": 0 },
+                "content": { "type": "string", "enum": ["indexed", "complete"], "default": "indexed", "description": "Complete explicitly reads verified local provider sources and caps the final serialized JSON-RPC response at 8 MiB. MCP hosts may log or forward returned transcript content." }
             }), vec!["ctx_event_id"]),
             "annotations": { "readOnlyHint": true },
         }),
+        json!({
+            "name": "pro_status",
+            "title": "Pro Status",
+            "description": "Inspect local ctx Pro readiness, protocol capabilities, and nonsecret access state/deadlines.",
+            "inputSchema": object_schema(json!({}), vec![]),
+            "annotations": { "readOnlyHint": true },
+        }),
+        pro_query_tool(
+            "show_resource",
+            "Show Resource",
+            "Resolve a resource to cited work-graph records.",
+            None,
+            false,
+        ),
+        pro_query_tool(
+            "locate_resource",
+            "Locate Resource",
+            "Locate the exact canonical evidence behind a work-graph resource.",
+            None,
+            false,
+        ),
+        pro_query_tool(
+            "blame",
+            "Agent Blame",
+            "Show Git and agent provenance for a file or line.",
+            Some("file"),
+            false,
+        ),
+        pro_query_tool(
+            "timeline",
+            "Timeline",
+            "Return ordered cited work history for a resource.",
+            None,
+            true,
+        ),
+        pro_query_tool(
+            "related",
+            "Related Resources",
+            "Return typed neighboring resources and sessions.",
+            None,
+            true,
+        ),
+        pro_query_tool(
+            "facts",
+            "Facts",
+            "Return stable machine-oriented cited facts for a resource.",
+            None,
+            true,
+        ),
     ]
 }
 
@@ -918,32 +991,4 @@ fn optional_transcript_mode(arguments: &Value, key: &str) -> Result<Option<Trans
         "log" => Ok(Some(TranscriptMode::Log)),
         _ => Err(anyhow!("mode must be one of full, lite, log")),
     }
-}
-
-fn success_response(id: Value, result: Value) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    })
-}
-
-fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
-    compact_json(json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message,
-            "data": data,
-        }
-    }))
-}
-
-fn json_rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
-    compact_json(json!({
-        "code": code,
-        "message": message,
-        "data": data,
-    }))
 }

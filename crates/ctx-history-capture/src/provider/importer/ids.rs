@@ -5,7 +5,9 @@ use ctx_history_core::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{fnv1a64, stable_capture_uuid};
+use crate::{
+    fnv1a64, provider::file_touches::MAX_PACKED_PROVIDER_EVENT_INDEX, stable_capture_uuid,
+};
 
 #[cfg(test)]
 pub(crate) fn provider_source_uuid(provider: CaptureProvider, provider_session_id: &str) -> Uuid {
@@ -280,11 +282,56 @@ pub(crate) fn provider_file_touch_uuid(
     )
 }
 
+// Low event indices keep the historical packed touch UUID exactly. Above that boundary the
+// producer exposes the per-event ordinal as `provider_touch_index`, so the full event index must
+// participate in the UUID key.
+pub(crate) fn provider_event_file_touch_uuid(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    provider_event_index: Option<u64>,
+    provider_touch_index: u64,
+) -> Uuid {
+    let Some(provider_event_index) =
+        provider_event_index.filter(|index| *index > MAX_PACKED_PROVIDER_EVENT_INDEX)
+    else {
+        return provider_file_touch_uuid(provider, provider_session_id, provider_touch_index);
+    };
+    let identity_key = serde_json::to_string(&(
+        "provider-event-file-touch-v2",
+        provider.as_str(),
+        provider_session_id,
+        provider_event_index,
+        provider_touch_index,
+    ))
+    .expect("provider event file-touch identity key should serialize");
+    stable_capture_uuid(&identity_key, "file-touch")
+}
+
 pub(crate) fn provider_source_file_touch_uuid(source_id: Uuid, provider_touch_index: u64) -> Uuid {
     stable_capture_uuid(
         &format!("provider-source:{source_id}:file-touch:{provider_touch_index}"),
         "file-touch",
     )
+}
+
+pub(crate) fn provider_source_event_file_touch_uuid(
+    source_id: Uuid,
+    provider_event_index: Option<u64>,
+    provider_touch_index: u64,
+) -> Uuid {
+    let Some(provider_event_index) =
+        provider_event_index.filter(|index| *index > MAX_PACKED_PROVIDER_EVENT_INDEX)
+    else {
+        return provider_source_file_touch_uuid(source_id, provider_touch_index);
+    };
+    let identity_key = serde_json::to_string(&(
+        "provider-source-event-file-touch-v2",
+        source_id,
+        provider_event_index,
+        provider_touch_index,
+    ))
+    .expect("provider source event file-touch identity key should serialize");
+    stable_capture_uuid(&identity_key, "file-touch")
 }
 
 pub(crate) fn provider_source_event_seq(source_id: Uuid, provider_event_index: u64) -> u64 {
@@ -322,5 +369,75 @@ pub(crate) fn provider_sync_metadata(fidelity: Fidelity, metadata: Value) -> Syn
         sync_version: 0,
         deleted_at: None,
         metadata,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn low_event_file_touch_uuids_retain_packed_identity_compatibility() {
+        let provider = CaptureProvider::OpenHands;
+        let provider_session_id = "legacy-packed-session";
+        let source_id = Uuid::parse_str("4ea89d63-c113-4fe8-93e5-12859eb2aac7").unwrap();
+        for provider_event_index in [17, MAX_PACKED_PROVIDER_EVENT_INDEX] {
+            let provider_touch_index = (provider_event_index << 16) | 3;
+
+            assert_eq!(
+                provider_event_file_touch_uuid(
+                    provider,
+                    provider_session_id,
+                    Some(provider_event_index),
+                    provider_touch_index,
+                ),
+                provider_file_touch_uuid(provider, provider_session_id, provider_touch_index)
+            );
+            assert_eq!(
+                provider_source_event_file_touch_uuid(
+                    source_id,
+                    Some(provider_event_index),
+                    provider_touch_index,
+                ),
+                provider_source_file_touch_uuid(source_id, provider_touch_index)
+            );
+        }
+    }
+
+    #[test]
+    fn full_width_event_file_touch_uuids_do_not_alias_packed_event_zero() {
+        let provider = CaptureProvider::OpenHands;
+        let provider_session_id = "hash-indexed-session";
+        let source_id = Uuid::parse_str("4ea89d63-c113-4fe8-93e5-12859eb2aac7").unwrap();
+        let event_zero_provider_id =
+            provider_event_file_touch_uuid(provider, provider_session_id, Some(0), 0);
+        let event_zero_source_id = provider_source_event_file_touch_uuid(source_id, Some(0), 0);
+
+        assert_ne!(
+            provider_event_file_touch_uuid(provider, provider_session_id, Some(1_u64 << 48), 0),
+            event_zero_provider_id
+        );
+        assert_ne!(
+            provider_source_event_file_touch_uuid(source_id, Some(1_u64 << 48), 0),
+            event_zero_source_id
+        );
+        assert_ne!(
+            provider_event_file_touch_uuid(provider, provider_session_id, Some(1_u64 << 48), 0,),
+            provider_event_file_touch_uuid(provider, provider_session_id, Some(1_u64 << 48), 1,)
+        );
+        assert_ne!(
+            provider_source_event_file_touch_uuid(source_id, Some(1_u64 << 48), 0),
+            provider_source_event_file_touch_uuid(source_id, Some(1_u64 << 48), 1)
+        );
+
+        let full_hash = 0xfedc_ba98_7654_3210;
+        assert_ne!(
+            provider_event_file_touch_uuid(provider, provider_session_id, Some(full_hash), 0),
+            event_zero_provider_id
+        );
+        assert_ne!(
+            provider_source_event_file_touch_uuid(source_id, Some(full_hash), 0),
+            event_zero_source_id
+        );
     }
 }

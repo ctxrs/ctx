@@ -1,6 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -36,7 +37,7 @@ rust_library(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
-rust_test(
+ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
     crate_name = "ctx_sdk",

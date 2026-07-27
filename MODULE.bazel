@@ -12,7 +12,50 @@ rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 # separate explicit lane rather than in this CI parity graph.
 rust.toolchain(
     edition = "2021",
-    versions = ["1.88.0"],
+    # Source: Rust 1.97.1 channel manifest dated 2026-07-16.
+    # https://static.rust-lang.org/dist/2026-07-16/channel-rust-1.97.1.toml
+    # Native Windows Bazel actions use MSVC; the public GNU binary remains a
+    # Cargo release-construction target.
+    sha256s = {
+        "cargo-1.97.1-aarch64-apple-darwin.tar.xz": "2d84a74e9558192a7de674aca6aa3ab7464bed2df97e0377156ddb7e09a0fd7a",
+        "cargo-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "8f70bcaccea5ba4db187c3fd4d64e24592b4e16af513497201f5909d61691dbe",
+        "cargo-1.97.1-x86_64-apple-darwin.tar.xz": "1bd1029b579d0563ca851ebd095914871535bfd1978a123eeaa03107e89b0e03",
+        "cargo-1.97.1-x86_64-pc-windows-msvc.tar.xz": "1180ac0cd30ee98af682528c10505f5cba118f122aec9b7ca18ae605b1db38a0",
+        "cargo-1.97.1-x86_64-unknown-freebsd.tar.xz": "aa79c6488e9443fb29e23cf5200d221408e9a7059d95127c5ce7f5123b8995b5",
+        "cargo-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "e1be5f5ff7f7f80ca506fb65770b759edbdc6d303781ed71c5de8ec8a8394779",
+        "clippy-1.97.1-aarch64-apple-darwin.tar.xz": "5e44c0ac5ca9b6f14a3c9031a61f583348b902f908f46e95717aef1dbd2807db",
+        "clippy-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "d8bac7b0ba5ca9bb868ccb9e367a1d52f4837f3ebf4892eaf64cda37ce362bb5",
+        "clippy-1.97.1-x86_64-apple-darwin.tar.xz": "6dad187a2210db93c63cdf21a376db8b7fe4f5e64d6ef4d404a74d166e59ad74",
+        "clippy-1.97.1-x86_64-pc-windows-msvc.tar.xz": "3be927ecfbbba535bee2f4d23cd08c639278c8746c04bd70fb21ea58667b054b",
+        "clippy-1.97.1-x86_64-unknown-freebsd.tar.xz": "c46ab554746a99f99ebd83bfca4546e35b13e0728f5ea0ad61022d3c4ba753d1",
+        "clippy-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "3441df8fb54db985f8c8a3e8356b8874a3f92cc8cca8565cfe36f1dc15935e72",
+        "llvm-tools-1.97.1-aarch64-apple-darwin.tar.xz": "2160fccee889a092a281bd6d90c09519ca75ab9ed34d9d86301f4fb9602382f8",
+        "llvm-tools-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "1c471f218346d37bdccadb1a9d37383d448cdaf00bf2a7cb1072c0970eb48b40",
+        "llvm-tools-1.97.1-x86_64-apple-darwin.tar.xz": "b8c7fd75bf79873177b51c008fdac5ef785950aa6d2c11d5250053176a16549a",
+        "llvm-tools-1.97.1-x86_64-pc-windows-msvc.tar.xz": "4f51224d60b67ed343079cbc1743143e97e7ec8a540ad3d056ac0a2a8eb532e8",
+        "llvm-tools-1.97.1-x86_64-unknown-freebsd.tar.xz": "67adad3ba4f9660714a19c24da99a883fa7f924bfca0d754571ebabf430bf63c",
+        "llvm-tools-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "3e7a1c596a42dea6bf625ec6f006ce2fbcf5d1ff892f082828eb182a5d483b95",
+        "rust-std-1.97.1-aarch64-apple-darwin.tar.xz": "a4895f5c6995e83cab8687e46b14324592398049def71ce75ca308c981cf200d",
+        "rust-std-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "46aed8e63186350004d8ec6afca798811e6530b514352e5a8a26f3dc4939b3be",
+        "rust-std-1.97.1-x86_64-apple-darwin.tar.xz": "0fa78653023be5bdfeb419edc82e3b1346ccaa23eaa036491cce084101c741dd",
+        "rust-std-1.97.1-x86_64-pc-windows-msvc.tar.xz": "05f356609926e663a81e9697077214236514b2f9ff7a36e63b0070f43f073f66",
+        "rust-std-1.97.1-x86_64-unknown-freebsd.tar.xz": "9decb923c4f2b1fc57d2dcb39a8c9c96f91b1de586abf37cfe2db9edf4530d43",
+        "rust-std-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "1c1e704ae80126b7de34f72ea2825f7fd01736dec20732faed47374b95282fba",
+        "rustc-1.97.1-aarch64-apple-darwin.tar.xz": "6076cad38ccabaa24325f26a74080a363a2633a9cd34c473a8977255d8a593cb",
+        "rustc-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "b344b81f0cd4c2246c7da8b197fe7a339d7dd02bb15cb69b2524115d9c75224c",
+        "rustc-1.97.1-x86_64-apple-darwin.tar.xz": "3c38289f319bf02fa1c8149ce3e00f261e4efd14813a99f7f7ae4f180c7d1173",
+        "rustc-1.97.1-x86_64-pc-windows-msvc.tar.xz": "0119e2788f3391a891b2e0fe611e82b433670eeae76c45995b081d0ac7715c6d",
+        "rustc-1.97.1-x86_64-unknown-freebsd.tar.xz": "bd0e697c35369eb2836b864cda764d3d9c878f2f3f3a99137983fcf581a82959",
+        "rustc-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "9819d0a32d56bd339585319c80260e332779f5541fd66838ab7e016d6c814819",
+        "rustfmt-1.97.1-aarch64-apple-darwin.tar.xz": "358bbba5d0c7c37116ec15f67cfd3ac4da5d3c319cddb49389c26d3a0c65747a",
+        "rustfmt-1.97.1-aarch64-unknown-linux-gnu.tar.xz": "3dbde15d30794924195ae446f3d2ceb542a131306d22ae7912c7634d414622a8",
+        "rustfmt-1.97.1-x86_64-apple-darwin.tar.xz": "457c35a619207d35da2a3804940e620ad7cdc8e0808b17f2f6c2202f9e3f3d91",
+        "rustfmt-1.97.1-x86_64-pc-windows-msvc.tar.xz": "1718eea97fc34543c71a5849bc72952f88bc6c789c9110626bc00b2791642e81",
+        "rustfmt-1.97.1-x86_64-unknown-freebsd.tar.xz": "1982a27f1d0d5bd6a4248d06cb13f63cdd95f9782742ad3a180b6314a4cfb889",
+        "rustfmt-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "907fe97d6afbde1eca1b34c992c76e1406d422e2e6f137813d382acec7eb4d14",
+    },
+    rustfmt_version = "1.97.1",
+    versions = ["1.97.1"],
 )
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
@@ -20,5 +63,38 @@ crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
     manifests = ["//:Cargo.toml"],
+    # Preserve rules_rust's reduced defaults and add the shipped macOS x64
+    # target, which the upstream default intentionally omits.
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "wasm32-unknown-unknown",
+        "wasm32-wasip1",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-nixos-gnu",
+    ],
 )
 use_repo(crate, "crates")
+
+# Development links use a content-pinned mold input. The public build macros
+# expose it only through the Linux development configuration; CI/debug/release
+# configurations retain their independently keyed linker behavior.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_jar = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_jar")
+http_jar(
+    name = "ctx_bazel_diff",
+    sha256 = "331fa4d5f220e99e727d3c9a4fd89a23fe27806f99c4788fa9fa233e350fef5f",
+    urls = ["https://github.com/Tinder/bazel-diff/releases/download/v36.0.0/bazel-diff_deploy.jar"],
+)
+http_archive(
+    name = "ctx_mold",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+exports_files(["bin/mold", "bin/ld.mold"])
+""",
+    sha256 = "a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d",
+    strip_prefix = "mold-2.41.0-x86_64-linux",
+    urls = ["https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz"],
+)

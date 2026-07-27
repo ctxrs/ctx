@@ -21,6 +21,22 @@ pub fn utc_now() -> DateTime<Utc> {
     DateTime::<Utc>::from(SystemTime::now())
 }
 
+pub fn compute_payload_hash(
+    payload: &serde_json::Value,
+) -> std::result::Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(payload)?;
+    Ok(format!("fnv1a64:{:016x}", fnv1a64(&bytes)))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 macro_rules! text_enum {
     (
         $(#[$meta:meta])*
@@ -95,14 +111,18 @@ macro_rules! text_enum {
 }
 
 pub mod archive;
+mod content_ref;
 pub mod dtos;
 pub mod history_jsonl;
 pub mod paths;
+pub mod platform_security;
 pub mod provider;
+mod result_compaction;
 pub mod source;
 pub mod sync;
 
 pub use archive::{CaptureEnvelope, SessionHistoryArchive};
+pub use content_ref::ContentRef;
 pub use dtos::{
     AgentType, Artifact, ArtifactKind, CitationReference, Confidence, ContextCitation,
     ContextCitationType, ContextLinks, ContextPagination, ContextTruncation, Event, EventRole,
@@ -130,6 +150,7 @@ pub use provider::{
     ProviderSupportStatus, PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
 };
+pub use result_compaction::compact_result_payload;
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
 pub use sync::{
     AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,

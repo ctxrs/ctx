@@ -1,5 +1,5 @@
 impl SemanticVectorStore {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let _ = register_sqlite_vec_auto_extension();
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
@@ -20,7 +20,7 @@ impl SemanticVectorStore {
         Ok(store)
     }
 
-    fn open_read_only(path: &Path) -> Result<Option<Self>> {
+    pub(super) fn open_read_only(path: &Path) -> Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
         }
@@ -33,7 +33,7 @@ impl SemanticVectorStore {
         Ok(Some(store))
     }
 
-    fn ensure_readable_schema(&self) -> Result<()> {
+    pub(super) fn ensure_readable_schema(&self) -> Result<()> {
         let user_version = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -68,7 +68,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn ensure_schema(&mut self) -> Result<()> {
+    pub(super) fn ensure_schema(&mut self) -> Result<()> {
         let user_version = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -229,7 +229,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn compact_after_plaintext_scrub(&self) -> Result<()> {
+    pub(super) fn compact_after_plaintext_scrub(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             PRAGMA wal_checkpoint(TRUNCATE);
@@ -239,7 +239,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn sqlite_vec0_runtime_available(&self) -> bool {
+    pub(super) fn sqlite_vec0_runtime_available(&self) -> bool {
         if !register_sqlite_vec_auto_extension() {
             return false;
         }
@@ -248,7 +248,7 @@ impl SemanticVectorStore {
             .is_ok()
     }
 
-    fn ensure_sqlite_vec0_schema(&mut self) -> Result<()> {
+    pub(super) fn ensure_sqlite_vec0_schema(&mut self) -> Result<()> {
         if !self.sqlite_vec0_runtime_available() {
             return Ok(());
         }
@@ -259,7 +259,7 @@ impl SemanticVectorStore {
         self.sync_sqlite_vec0_from_chunks_if_needed()
     }
 
-    fn sqlite_vec0_schema_compatible(&self) -> Result<bool> {
+    pub(super) fn sqlite_vec0_schema_compatible(&self) -> Result<bool> {
         let meta_exists = sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?;
         let vec_exists = sqlite_table_exists(&self.conn, "event_embedding_vec0")?;
         if !meta_exists && !vec_exists {
@@ -294,7 +294,7 @@ impl SemanticVectorStore {
             && sql.contains(&format!("embedding float[{SEMANTIC_DIMENSIONS}]")))
     }
 
-    fn create_sqlite_vec0_schema(&self) -> Result<()> {
+    pub(super) fn create_sqlite_vec0_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS event_embedding_vec0_meta (
@@ -324,7 +324,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn sqlite_vec0_mismatch_count(&self) -> Result<usize> {
+    pub(super) fn sqlite_vec0_mismatch_count(&self) -> Result<usize> {
         if !self.sqlite_vec0_runtime_available()
             || !sqlite_table_exists(&self.conn, "event_embedding_vec0")?
             || !sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
@@ -405,7 +405,7 @@ impl SemanticVectorStore {
             .saturating_add(missing_or_stale_vector))
     }
 
-    fn drop_sqlite_vec0_schema(&self) -> Result<()> {
+    pub(super) fn drop_sqlite_vec0_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             DROP TABLE IF EXISTS event_embedding_vec0;
@@ -415,7 +415,7 @@ impl SemanticVectorStore {
         Ok(())
     }
 
-    fn sqlite_vec0_counts(&self) -> Result<Option<(usize, usize, usize)>> {
+    pub(super) fn sqlite_vec0_counts(&self) -> Result<Option<(usize, usize, usize)>> {
         if !self.sqlite_vec0_runtime_available()
             || !sqlite_table_exists(&self.conn, "event_embedding_vec0")?
             || !sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
@@ -454,7 +454,7 @@ impl SemanticVectorStore {
     }
 
     #[cfg(all(test, ctx_sqlite_vec))]
-    fn sqlite_vec0_ready(&self) -> Result<bool> {
+    pub(super) fn sqlite_vec0_ready(&self) -> Result<bool> {
         let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
             return Ok(false);
         };
@@ -464,14 +464,14 @@ impl SemanticVectorStore {
         Ok(self.sqlite_vec0_mismatch_count()? == 0)
     }
 
-    fn sqlite_vec0_search_ready(&self) -> Result<bool> {
+    pub(super) fn sqlite_vec0_search_ready(&self) -> Result<bool> {
         let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
             return Ok(false);
         };
         Ok(canonical_chunks > 0 && meta_rows == canonical_chunks && vec_rows == canonical_chunks)
     }
 
-    fn sync_sqlite_vec0_from_chunks_if_needed(&mut self) -> Result<()> {
+    pub(super) fn sync_sqlite_vec0_from_chunks_if_needed(&mut self) -> Result<()> {
         let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
             return Ok(());
         };
@@ -484,7 +484,7 @@ impl SemanticVectorStore {
         self.rebuild_sqlite_vec0_from_chunks()
     }
 
-    fn rebuild_sqlite_vec0_from_chunks(&mut self) -> Result<()> {
+    pub(super) fn rebuild_sqlite_vec0_from_chunks(&mut self) -> Result<()> {
         if !self.sqlite_vec0_runtime_available() {
             return Ok(());
         }
@@ -542,5 +542,22 @@ impl SemanticVectorStore {
         tx.commit()?;
         Ok(())
     }
-
 }
+use std::{path::Path, time::Duration as StdDuration};
+
+use anyhow::{anyhow, Context, Result};
+use ctx_history_core::utc_now;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+
+use super::{
+    health_search::{
+        create_private_dir_all, private_create_new_file, secure_semantic_vector_permissions,
+        sqlite_column_exists, sqlite_table_exists, sqlite_table_has_columns, sqlite_table_sql,
+    },
+    model_contract::{
+        semantic_model_key, SEMANTIC_BACKEND, SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_ID,
+    },
+    query_service::register_sqlite_vec_auto_extension,
+    runtime_limits::SEMANTIC_VECTOR_BUSY_TIMEOUT_MS,
+    vector_store::SemanticVectorStore,
+};

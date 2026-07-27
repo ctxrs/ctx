@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     str::FromStr,
@@ -6,7 +7,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{functions::FunctionFlags, Connection, OpenFlags};
 use uuid::Uuid;
 
 use crate::object_store::{
@@ -24,47 +25,43 @@ impl Store {
 
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        Self::open_read_only_connection(path, false)
-    }
-
-    pub fn open_read_only_snapshot(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        Self::open_read_only_connection(path, true)
-    }
-
-    fn open_read_only_connection(path: PathBuf, immutable_snapshot: bool) -> Result<Self> {
+        verify_private_store_paths(&path)?;
         let object_dir = path
             .parent()
             .map(|parent| parent.join(OBJECTS_DIR))
             .unwrap_or_else(|| PathBuf::from(OBJECTS_DIR));
-        let conn = if immutable_snapshot {
-            Connection::open_with_flags(
-                sqlite_read_only_immutable_uri(&path),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            )?
-        } else {
-            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
-        };
+        // A live Store uses WAL. Every reader must participate in SQLite's
+        // normal read protocol; immutable=1 can silently omit committed WAL
+        // frames when a writer appears after a sidecar-presence check.
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         configure_read_only_connection(&conn, BUSY_TIMEOUT)?;
         let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if user_version != SCHEMA_VERSION {
             return Err(StoreError::UnsupportedSchemaVersion(user_version));
         }
-        Ok(Self {
+        crate::schema::verify_final_schema_identity(&conn)?;
+        let store = Self {
             path,
             object_dir,
             conn,
             busy_timeout: BUSY_TIMEOUT,
             event_search_bulk_depth: Default::default(),
-        })
+            batch_depth: Default::default(),
+            import_batch_depth: Default::default(),
+            event_search_projection_capabilities: Default::default(),
+            projection_journal_active_in_batch: Default::default(),
+        };
+        store.initialize_event_search_projection_capabilities()?;
+        Ok(store)
     }
 
     pub fn open_with_busy_timeout(path: impl AsRef<Path>, busy_timeout: Duration) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut migrated_legacy_layout = false;
         if let Some(parent) = path.parent() {
-            migrated_legacy_layout = migrate_legacy_history_layout(parent)?;
             fs::create_dir_all(parent)?;
+            restrict_private_dir(parent)?;
+            migrated_legacy_layout = migrate_legacy_history_layout(parent)?;
             restrict_private_dir(parent)?;
         }
         let object_dir = path
@@ -79,20 +76,25 @@ impl Store {
         }
         let conn = Connection::open(&path)?;
         restrict_private_file(&path)?;
-        configure_connection(&conn, busy_timeout)?;
         let store = Self {
             path,
             object_dir,
             conn,
             busy_timeout,
             event_search_bulk_depth: Default::default(),
+            batch_depth: Default::default(),
+            import_batch_depth: Default::default(),
+            event_search_projection_capabilities: Default::default(),
+            projection_journal_active_in_batch: Default::default(),
         };
         store.migrate()?;
+        restrict_existing_sqlite_auxiliary_files(&store.path)?;
         store.recover_event_search_bulk_mode()?;
         if migrated_legacy_layout {
             store.normalize_legacy_blob_paths()?;
         }
         store.ensure_search_projection_initialized()?;
+        store.initialize_event_search_projection_capabilities()?;
         Ok(store)
     }
 
@@ -101,18 +103,140 @@ impl Store {
     }
 
     pub fn begin_immediate_batch(&self) -> Result<()> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let depth = self.batch_depth.get();
+        if depth == 0 {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            self.projection_journal_active_in_batch.set(None);
+        } else {
+            self.conn
+                .execute_batch(&format!("SAVEPOINT ctx_store_batch_{}", depth + 1))?;
+        }
+        self.batch_depth.set(depth + 1);
         Ok(())
     }
 
     pub fn commit_batch(&self) -> Result<()> {
-        self.conn.execute_batch("COMMIT")?;
+        let depth = self.batch_depth.get();
+        if depth == 0 {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        if depth == 1 {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            self.conn
+                .execute_batch(&format!("RELEASE SAVEPOINT ctx_store_batch_{depth}"))?;
+        }
+        self.batch_depth.set(depth - 1);
+        if depth == 1 {
+            self.projection_journal_active_in_batch.set(None);
+        }
         Ok(())
     }
 
     pub fn rollback_batch(&self) -> Result<()> {
-        self.conn.execute_batch("ROLLBACK")?;
+        let depth = self.batch_depth.get();
+        if depth == 0 {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        if depth == 1 {
+            self.conn.execute_batch("ROLLBACK")?;
+        } else {
+            self.conn.execute_batch(&format!(
+                "ROLLBACK TO SAVEPOINT ctx_store_batch_{depth};\n\
+                 RELEASE SAVEPOINT ctx_store_batch_{depth};"
+            ))?;
+        }
+        self.batch_depth.set(depth - 1);
+        // A savepoint may have activated or disabled the journal. Its cached
+        // activity must be re-read after any rollback restores the prior state.
+        self.projection_journal_active_in_batch.set(None);
         Ok(())
+    }
+
+    /// Begins an importer-owned atomic batch. Event and run mutations can rely on this owner to
+    /// roll back the complete batch instead of adding a savepoint around every row.
+    #[doc(hidden)]
+    pub fn begin_import_batch(&self) -> Result<()> {
+        self.begin_immediate_batch()?;
+        self.import_batch_depth
+            .set(self.import_batch_depth.get().saturating_add(1));
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn commit_import_batch(&self) -> Result<()> {
+        let depth = self.import_batch_depth.get();
+        if depth == 0 {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        self.commit_batch()?;
+        self.import_batch_depth.set(depth - 1);
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn rollback_import_batch(&self) -> Result<()> {
+        let depth = self.import_batch_depth.get();
+        if depth == 0 {
+            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
+        }
+        self.rollback_batch()?;
+        self.import_batch_depth.set(depth - 1);
+        Ok(())
+    }
+
+    pub(crate) fn with_import_batch_write<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        if self.import_batch_depth.get() > 0 {
+            debug_assert!(self.batch_depth.get() > 0);
+            operation()
+        } else {
+            self.with_atomic_write(operation)
+        }
+    }
+
+    pub(crate) fn with_atomic_write<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let owns_transaction = self.conn.is_autocommit();
+        if owns_transaction {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        } else {
+            self.conn
+                .execute_batch("SAVEPOINT ctx_atomic_canonical_mutation")?;
+        }
+        let result = operation();
+        if !owns_transaction {
+            return match result {
+                Ok(value) => {
+                    self.conn
+                        .execute_batch("RELEASE SAVEPOINT ctx_atomic_canonical_mutation")?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    self.conn.execute_batch(
+                        "ROLLBACK TO SAVEPOINT ctx_atomic_canonical_mutation;
+                         RELEASE SAVEPOINT ctx_atomic_canonical_mutation;",
+                    )?;
+                    Err(error)
+                }
+            };
+        }
+        match result {
+            Ok(value) => {
+                if let Err(error) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(StoreError::Sql(error));
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK") {
+                    return Err(StoreError::Sql(rollback_error));
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn checkpoint_wal_passive(&self) -> Result<()> {
@@ -208,6 +332,43 @@ impl Store {
     }
 }
 
+fn restrict_existing_sqlite_auxiliary_files(path: &Path) -> Result<()> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut value = OsString::from(path.as_os_str());
+        value.push(suffix);
+        let auxiliary = PathBuf::from(value);
+        match fs::symlink_metadata(&auxiliary) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                restrict_private_file(&auxiliary)?;
+            }
+            Ok(_) => {
+                return Err(StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "SQLite auxiliary path has an unsafe file type",
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn verify_private_store_paths(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use ctx_history_core::platform_security::{verify_private_directory, verify_private_file};
+
+        if let Some(parent) = path.parent() {
+            verify_private_directory(parent)?;
+        }
+        verify_private_file(path)?;
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalCheckpointOutcome {
     busy: bool,
@@ -217,6 +378,14 @@ struct WalCheckpointOutcome {
 
 pub(crate) fn configure_connection(conn: &Connection, busy_timeout: Duration) -> Result<()> {
     conn.busy_timeout(busy_timeout)?;
+    conn.create_scalar_function(
+        "ctx_projection_writer_authorized_v1",
+        0,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )?;
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
@@ -224,27 +393,12 @@ pub(crate) fn configure_connection(conn: &Connection, busy_timeout: Duration) ->
         PRAGMA synchronous = NORMAL;
         PRAGMA temp_store = MEMORY;
         PRAGMA cache_size = -32768;
-        PRAGMA wal_autocheckpoint = 10000;
+        -- Keep automatic checkpoints below the Store's 64 MiB hard WAL bound,
+        -- while avoiding repeated full-database writeback during large imports.
+        PRAGMA wal_autocheckpoint = 14000;
         "#,
     )?;
     Ok(())
-}
-
-pub(crate) fn sqlite_read_only_immutable_uri(path: &Path) -> String {
-    let mut uri = String::from("file:");
-    for byte in path.to_string_lossy().as_bytes() {
-        match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'_' | b'-' => {
-                uri.push(*byte as char)
-            }
-            byte => {
-                uri.push('%');
-                uri.push_str(&format!("{byte:02X}"));
-            }
-        }
-    }
-    uri.push_str("?mode=ro&immutable=1");
-    uri
 }
 
 pub(crate) fn configure_read_only_connection(

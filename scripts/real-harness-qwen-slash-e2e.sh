@@ -139,7 +139,7 @@ main() {
       XDG_CONFIG_HOME="${xdg}" \
       QWEN_HOME="${qwen_home}" \
       CTX_DATA_ROOT="${data_root}" \
-      CTX_ANALYTICS_OFF=1 \
+      CTX_ANALYTICS_ENABLED=false \
       run "${ctx_bin}" integrations install slash-commands --agent qwen-code --project --json
   ) > "${install_json}"
   require_contains "${install_json}" '"agent": "qwen-code"'
@@ -158,7 +158,7 @@ main() {
       XDG_CONFIG_HOME="${xdg}" \
       QWEN_HOME="${qwen_home}" \
       CTX_DATA_ROOT="${data_root}" \
-      CTX_ANALYTICS_OFF=1 \
+      CTX_ANALYTICS_ENABLED=false \
       PATH="$(dirname "${ctx_bin}"):${PATH}" \
       OPENAI_API_KEY="sk-ctx-real-harness-fixture" \
       OPENAI_BASE_URL="http://127.0.0.1:${port}/v1" \

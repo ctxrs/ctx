@@ -19,6 +19,31 @@ pub enum StoreError {
     NotFound(Uuid),
     #[error("unsupported history store schema version: {0}")]
     UnsupportedSchemaVersion(i64),
+    #[error("history store schema 47 is not the released final shape (identity: {0})")]
+    UnsupportedSchemaIdentity(String),
+    #[error("local Pro projection journal is not active")]
+    ProjectionJournalInactive,
+    #[error("local Pro projection journal contract fingerprint is invalid")]
+    InvalidProjectionContractFingerprint,
+    #[error(
+        "local Pro projection journal position {generation}/{sequence} is stale; active generation is {active_generation}"
+    )]
+    StaleProjectionJournalPosition {
+        generation: u64,
+        sequence: u64,
+        active_generation: u64,
+    },
+    #[error(
+        "local Pro projection journal payload for {entity_kind}/{entity_id} is {encoded_bytes} bytes; maximum is {max_bytes}"
+    )]
+    ProjectionJournalPayloadTooLarge {
+        entity_kind: &'static str,
+        entity_id: Uuid,
+        encoded_bytes: usize,
+        max_bytes: usize,
+    },
+    #[error("local Pro projection journal contains invalid persisted data: {0}")]
+    InvalidProjectionJournalData(String),
     #[error("unsupported session history archive version: {0}")]
     UnsupportedArchiveVersion(u32),
     #[error(
@@ -30,6 +55,40 @@ pub enum StoreError {
     },
     #[error("ctx index is busy: another bulk search import is active")]
     BulkSearchImportBusy,
+    #[error(
+        "ctx event-search FTS5 segment guard stopped bulk import: {table} has {segments} segments (safe guard {guard}, SQLite hard limit {hard_limit}); bounded maintenance could not create headroom; this is an FTS segment-limit condition, not evidence that the disk is full"
+    )]
+    EventSearchSegmentLimit {
+        table: &'static str,
+        segments: i64,
+        guard: i64,
+        hard_limit: i64,
+    },
+    #[error("ctx index is busy: another source inventory is active")]
+    SourceInventoryBusy,
+    #[error(
+        "source import observation changed before it could be marked {operation}; retry the import: {provider}/{source_path}"
+    )]
+    SourceImportObservationConflict {
+        operation: &'static str,
+        provider: String,
+        source_path: String,
+    },
+    #[error(
+        "provider history source relocation is ambiguous for {provider}/{source_format}; the prior and incoming exact locators cannot be proven to be one source"
+    )]
+    ProviderSourceRelocationAmbiguous {
+        provider: String,
+        source_format: String,
+    },
+    #[error(
+        "multiple canonical capture sources match {provider}/{source_format}/{external_session_id}"
+    )]
+    AmbiguousCaptureSourceIdentity {
+        provider: String,
+        source_format: String,
+        external_session_id: String,
+    },
     #[error("bulk search guard belongs to a different ctx index")]
     InvalidBulkSearchGuard,
     #[error("archive conflicts with existing {kind}: {id}")]
@@ -46,6 +105,8 @@ pub enum StoreError {
     ArchiveArtifactNonRegularFile { id: Uuid, path: PathBuf },
     #[error("archive artifact {id} is missing matching blob content")]
     ArchiveArtifactMissingContent { id: Uuid },
+    #[error("result event {id} cannot reference a durable payload blob")]
+    ResultPayloadBlobUnsupported { id: Uuid },
     #[error("provider event conflict for {provider}/{external_session_id} at index {provider_index}: existing hash {existing_hash}, new hash {new_hash}")]
     ProviderEventConflict {
         provider: String,

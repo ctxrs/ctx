@@ -1,7 +1,10 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::{analytics, skill, AnalyticsProperties};
+use crate::{
+    analytics::{IntegrationAction, IntegrationTarget, IntegrationTelemetry},
+    skill,
+};
 
 mod mcp;
 mod slash_commands;
@@ -69,62 +72,45 @@ impl IntegrationsArgs {
             },
         }
     }
-
-    pub(crate) fn add_initial_analytics(&self, properties: &mut AnalyticsProperties) {
-        match &self.command {
-            IntegrationCommand::Install(args) => {
-                analytics::insert_str(properties, "integration_action", "install");
-                match &args.target {
-                    IntegrationInstallTarget::Mcp(args) => args.add_initial_analytics(properties),
-                    IntegrationInstallTarget::Skills(args) => {
-                        analytics::insert_str(properties, "integration_target", "skills");
-                        args.add_initial_analytics(properties);
-                    }
-                    IntegrationInstallTarget::SlashCommands(args) => {
-                        analytics::insert_str(properties, "integration_target", "slash_commands");
-                        slash_commands::insert_install_analytics(properties, args);
-                    }
-                }
-            }
-            IntegrationCommand::Status(args) => {
-                analytics::insert_str(properties, "integration_action", "status");
-                match &args.target {
-                    IntegrationStatusTarget::Mcp(args) => args.add_initial_analytics(properties),
-                    IntegrationStatusTarget::Skills(args) => {
-                        analytics::insert_str(properties, "integration_target", "skills");
-                        args.add_initial_analytics(properties);
-                    }
-                }
-            }
-        }
-    }
 }
 
-pub(crate) fn run(
-    args: IntegrationsArgs,
-    analytics_properties: &mut AnalyticsProperties,
-) -> Result<()> {
+pub(crate) fn run(args: IntegrationsArgs, telemetry: &mut IntegrationTelemetry) -> Result<()> {
     match args.command {
         IntegrationCommand::Install(args) => match args.target {
             IntegrationInstallTarget::Mcp(args) => {
+                telemetry.action = Some(IntegrationAction::Install);
+                telemetry.target = Some(IntegrationTarget::Mcp);
+                args.add_initial_analytics(telemetry);
                 let context = mcp::McpPathContext::from_env()?;
-                run_mcp_install(args, &context, analytics_properties)
+                run_mcp_install(args, &context, telemetry)
             }
             IntegrationInstallTarget::Skills(args) => {
-                skill::run_install_command(args, analytics_properties)
+                telemetry.action = Some(IntegrationAction::Install);
+                telemetry.target = Some(IntegrationTarget::Skills);
+                args.add_initial_analytics(telemetry);
+                skill::run_install_command(args, telemetry)
             }
             IntegrationInstallTarget::SlashCommands(args) => {
+                telemetry.action = Some(IntegrationAction::Install);
+                telemetry.target = Some(IntegrationTarget::SlashCommands);
+                slash_commands::insert_install_analytics(telemetry, &args);
                 let context = slash_commands::PathContext::from_env()?;
-                slash_commands::run_install(args, &context, analytics_properties)
+                slash_commands::run_install(args, &context, telemetry)
             }
         },
         IntegrationCommand::Status(args) => match args.target {
             IntegrationStatusTarget::Mcp(args) => {
+                telemetry.action = Some(IntegrationAction::Status);
+                telemetry.target = Some(IntegrationTarget::Mcp);
+                args.add_initial_analytics(telemetry);
                 let context = mcp::McpPathContext::from_env()?;
-                run_mcp_status(args, &context)
+                run_mcp_status(args, &context, telemetry)
             }
             IntegrationStatusTarget::Skills(args) => {
-                skill::run_status_command(args, analytics_properties)
+                telemetry.action = Some(IntegrationAction::Status);
+                telemetry.target = Some(IntegrationTarget::Skills);
+                args.add_initial_analytics(telemetry);
+                skill::run_status_command(args, telemetry)
             }
         },
     }

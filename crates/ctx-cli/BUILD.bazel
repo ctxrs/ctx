@@ -1,11 +1,17 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
+load(":test_targets.bzl", "CTX_CLI_RUSTC_FLAGS", "ctx_cli_integration_test", "ctx_cli_test_data")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["Cargo.toml"])
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+    "build.rs",
+    "test_targets.bzl",
+])
 
 filegroup(
     name = "cargo_package_data",
@@ -26,6 +32,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-search:lib",
     "//crates/ctx-history-store:lib",
+    "//crates/ctx-pro-host-protocol:lib",
 ]
 
 CTX_CLI_COMPILE_DATA = [
@@ -33,36 +40,11 @@ CTX_CLI_COMPILE_DATA = [
     "//:ctx_embedded_docs",
 ]
 
-# Cargo build.rs enables these cfgs on platforms supported by the public
-# semantic runtime. Mirror that decision for platforms represented by the
-# native Bazel graph while preserving the fallback on unsupported targets.
-CTX_CLI_RUSTC_FLAGS = [
-    "--check-cfg=cfg(ctx_semantic_fastembed)",
-    "--check-cfg=cfg(ctx_sqlite_vec)",
-    "--check-cfg=cfg(test)",
-] + select({
-    "@rules_rust//rust/platform:aarch64-apple-darwin": [
-        "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
-    ],
-    "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
-    ],
-    "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
-        "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
-    ],
-    "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
-    ],
-    "@rules_rust//rust/platform:x86_64-unknown-nixos-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
-    ],
-    "//conditions:default": [],
-})
+CTX_CLI_TEST_COMPILE_DATA = CTX_CLI_COMPILE_DATA + glob(["testdata/**"]) + [
+    "//:release_contracts",
+    "//:telemetry_contract_fixtures",
+    "//crates/ctx-pro-host-protocol:testdata/v1/public-journal-page.json",
+]
 
 RUST_SRCS = glob(["src/**/*.rs"])
 
@@ -71,7 +53,7 @@ PROD_SRCS = glob(
     exclude = RUST_PROD_SRC_EXCLUDES,
 )
 
-rust_binary(
+ctx_rust_binary(
     name = "ctx",
     srcs = PROD_SRCS,
     crate_name = "ctx",
@@ -86,7 +68,7 @@ rust_binary(
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
 )
 
-rust_test(
+ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
     crate_name = "ctx",
@@ -96,7 +78,8 @@ rust_test(
         normal_dev = True,
         proc_macro_dev = True,
     ),
-    compile_data = CTX_CLI_COMPILE_DATA,
+    compile_data = CTX_CLI_TEST_COMPILE_DATA,
+    data = ctx_cli_test_data(),
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -108,4 +91,172 @@ rust_test(
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
+)
+
+ctx_cli_integration_test(
+    name = "analytics_tests",
+    src = "tests/analytics.rs",
+)
+
+ctx_cli_integration_test(
+    name = "analytics_identity_tests",
+    src = "tests/analytics_identity.rs",
+)
+
+ctx_cli_integration_test(
+    name = "analytics_policy_tests",
+    src = "tests/analytics_policy.rs",
+)
+
+ctx_cli_integration_test(
+    name = "cli_public_help_docs_tests",
+    src = "tests/cli_public_help_docs.rs",
+    tags = ["cli-contract"],
+)
+
+ctx_cli_integration_test(
+    name = "cloud_removed_tests",
+    src = "tests/cloud_removed.rs",
+    extra_data = ["//:cloud_removed_build_inputs"],
+    tags = ["privacy", "security"],
+)
+
+ctx_cli_integration_test(
+    name = "custom_root_discovery_tests",
+    src = "tests/custom_root_discovery.rs",
+)
+
+ctx_cli_integration_test(
+    name = "explicit_path_revision_upgrade_tests",
+    src = "tests/explicit_path_revision_upgrade.rs",
+)
+
+ctx_cli_integration_test(
+    name = "history_source_plugins_tests",
+    src = "tests/history_source_plugins.rs",
+)
+
+ctx_cli_integration_test(
+    name = "index_tests",
+    src = "tests/index.rs",
+)
+
+ctx_cli_integration_test(
+    name = "integrations_tests",
+    src = "tests/integrations.rs",
+)
+
+ctx_cli_integration_test(
+    name = "integrations_mcp_tests",
+    src = "tests/integrations_mcp.rs",
+)
+
+ctx_cli_integration_test(
+    name = "mcp_tests",
+    src = "tests/mcp.rs",
+)
+
+ctx_cli_integration_test(
+    name = "mcp_telemetry_tests",
+    src = "tests/mcp_telemetry.rs",
+)
+
+ctx_cli_integration_test(
+    name = "mcp_integration_e2e_tests",
+    src = "tests/mcp_integration_e2e.rs",
+    tags = ["integration"],
+)
+
+ctx_cli_integration_test(
+    name = "native_provider_real_shapes_tests",
+    src = "tests/native_provider_real_shapes.rs",
+)
+
+ctx_cli_integration_test(
+    name = "native_provider_rejections_tests",
+    src = "tests/native_provider_rejections.rs",
+)
+
+ctx_cli_integration_test(
+    name = "native_providers_tests",
+    src = "tests/native_providers.rs",
+)
+
+ctx_cli_integration_test(
+    name = "offline_default_tests",
+    src = "tests/offline_default.rs",
+    tags = ["privacy", "security"],
+)
+
+ctx_cli_integration_test(
+    name = "pro_host_tests",
+    src = "tests/pro_host.rs",
+    tags = ["protocol"],
+)
+
+ctx_cli_integration_test(
+    name = "pro_lifecycle_tests",
+    src = "tests/pro_lifecycle.rs",
+)
+
+ctx_cli_integration_test(
+    name = "pro_mcp_tests",
+    src = "tests/pro_mcp.rs",
+    tags = ["protocol"],
+)
+
+ctx_cli_integration_test(
+    name = "pro_release_helper_tests",
+    src = "tests/pro_release_helper.rs",
+    tags = ["release-gate"],
+)
+
+ctx_cli_integration_test(
+    name = "pro_test_support_tests",
+    src = "tests/pro_test_support.rs",
+)
+
+ctx_cli_integration_test(
+    name = "search_refresh_tests",
+    src = "tests/search_refresh.rs",
+)
+
+ctx_cli_integration_test(
+    name = "search_show_locate_sql_tests",
+    src = "tests/search_show_locate_sql.rs",
+)
+
+ctx_cli_integration_test(
+    name = "setup_sources_import_tests",
+    src = "tests/setup_sources_import.rs",
+    extra_srcs = [
+        "tests/setup_sources_import/import_orchestration.rs",
+        "tests/setup_sources_import/lifecycle.rs",
+        "tests/setup_sources_import/source_inventory.rs",
+    ],
+)
+
+ctx_cli_integration_test(
+    name = "skill_tests",
+    src = "tests/skill.rs",
+)
+
+ctx_cli_integration_test(
+    name = "slash_command_e2e_tests",
+    src = "tests/slash_command_e2e.rs",
+    tags = ["integration"],
+)
+
+ctx_cli_integration_test(
+    name = "upgrade_tests",
+    src = "tests/upgrade.rs",
+    extra_compile_data = [
+        "src/upgrade/install.rs",
+        "//:upgrade_extractor_contract",
+    ],
+)
+
+test_suite(
+    name = "complete_content_tests",
+    tests = [":unit_tests"],
 )

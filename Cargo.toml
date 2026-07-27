@@ -5,6 +5,7 @@ members = [
     "crates/ctx-history-core",
     "crates/ctx-history-search",
     "crates/ctx-history-store",
+    "crates/ctx-pro-host-protocol",
     "crates/ctx-protocol",
     "crates/ctx-sdk",
 ]
@@ -26,22 +27,29 @@ clap = { version = "4.5", features = ["derive", "env"] }
 clap_mangen = "0.2"
 directories = "5.0"
 ed25519-dalek = "2.1"
+json5 = { version = "0.4", default-features = false }
+jsonc-parser = { version = "0.33", default-features = false, features = ["serde", "serde_json"] }
 libc = "0.2"
 predicates = "3.1"
 proptest = "1"
 regex = "1.10"
 ring = "0.17"
 rmpv = "1.3"
-rusqlite = { version = "0.32", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions", "hooks", "limits"] }
+quick-xml = { version = "0.38", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = { version = "0.9", default-features = false }
 sha2 = "0.10"
 tempfile = "3.10"
 thiserror = "1.0"
+toml_edit = { version = "0.22", default-features = false, features = ["parse", "serde"] }
 tar = "0.4"
 url = "2.5"
 uuid = { version = "1.10", features = ["serde", "v4", "v7"] }
+ureq = { version = "2.10", default-features = true }
 xz2 = "0.1"
+zeroize = "1.8"
 zstd = "0.13"
 
 [patch.crates-io]

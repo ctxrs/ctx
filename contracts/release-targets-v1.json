@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "id": "freebsd-x64",
+      "os": "freebsd",
+      "arch": "x86_64",
+      "public_rust_target": "x86_64-unknown-freebsd",
+      "helper_rust_target": "x86_64-unknown-freebsd",
+      "public_artifact": "ctx-freebsd-x64",
+      "helper_artifact": "ctx-pro-freebsd-x64",
+      "archive": "tar.gz",
+      "vault": "secret-service",
+      "runtime_authority": "native-freebsd-x86_64",
+      "diagnostic_authorities": [],
+      "platform_signature": "release-manifest"
+    },
+    {
+      "id": "linux-arm64",
+      "os": "linux",
+      "arch": "aarch64",
+      "public_rust_target": "aarch64-unknown-linux-gnu",
+      "helper_rust_target": "aarch64-unknown-linux-gnu",
+      "public_artifact": "ctx-linux-aarch64",
+      "helper_artifact": "ctx-pro-linux-arm64",
+      "archive": "tar.gz",
+      "vault": "secret-service",
+      "runtime_authority": "native-linux-aarch64",
+      "diagnostic_authorities": ["qemu-user"],
+      "platform_signature": "release-manifest"
+    },
+    {
+      "id": "linux-x64",
+      "os": "linux",
+      "arch": "x86_64",
+      "public_rust_target": "x86_64-unknown-linux-gnu",
+      "helper_rust_target": "x86_64-unknown-linux-gnu",
+      "public_artifact": "ctx-linux-x64",
+      "helper_artifact": "ctx-pro-linux-x64",
+      "archive": "tar.gz",
+      "vault": "secret-service",
+      "runtime_authority": "native-linux-x86_64",
+      "diagnostic_authorities": [],
+      "platform_signature": "release-manifest"
+    },
+    {
+      "id": "macos-arm64",
+      "os": "macos",
+      "arch": "aarch64",
+      "public_rust_target": "aarch64-apple-darwin",
+      "helper_rust_target": "aarch64-apple-darwin",
+      "public_artifact": "ctx-macos-arm64",
+      "helper_artifact": "ctx-pro-macos-arm64",
+      "archive": "tar.gz",
+      "vault": "keychain",
+      "runtime_authority": "native-apple-arm64",
+      "diagnostic_authorities": [],
+      "platform_signature": "developer-id-notarized"
+    },
+    {
+      "id": "macos-x64",
+      "os": "macos",
+      "arch": "x86_64",
+      "public_rust_target": "x86_64-apple-darwin",
+      "helper_rust_target": "x86_64-apple-darwin",
+      "public_artifact": "ctx-macos-x64",
+      "helper_artifact": "ctx-pro-macos-x64",
+      "archive": "tar.gz",
+      "vault": "keychain",
+      "runtime_authority": "native-apple-x86_64",
+      "diagnostic_authorities": ["rosetta-2", "non-apple-qemu"],
+      "platform_signature": "developer-id-notarized"
+    },
+    {
+      "id": "windows-x64",
+      "os": "windows",
+      "arch": "x86_64",
+      "public_rust_target": "x86_64-pc-windows-gnu",
+      "helper_rust_target": "x86_64-pc-windows-msvc",
+      "public_artifact": "ctx-windows-x64.exe",
+      "helper_artifact": "ctx-pro-windows-x64.exe",
+      "archive": "zip",
+      "vault": "credential-manager",
+      "runtime_authority": "native-windows-x86_64",
+      "diagnostic_authorities": [],
+      "platform_signature": "unsigned"
+    }
+  ]
+}

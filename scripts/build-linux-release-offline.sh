@@ -29,16 +29,10 @@ case "${platform}:${target}:$(uname -m)" in
     ;;
 esac
 
-mapfile -t non_loopback_interfaces < <(find /sys/class/net -mindepth 1 -maxdepth 1 \
-  ! -name lo -printf '%f\n' 2>/dev/null || true)
-if [[ "${#non_loopback_interfaces[@]}" != "0" ]]; then
-  printf 'offline release build has network interfaces: %s\n' \
-    "${non_loopback_interfaces[*]}" >&2
-  exit 1
-fi
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
+
+python3 scripts/check-linux-release-network-isolation.py
 
 if [[ ! -d "${prepared_dir}/cargo-home" ]]; then
   printf 'prepared Cargo inputs are missing: %s\n' "${prepared_dir}/cargo-home" >&2

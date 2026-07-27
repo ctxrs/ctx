@@ -1,9 +1,13 @@
 impl SemanticVectorStore {
-    fn search(&self, query_embedding: &[f32], limit: usize) -> Result<SemanticVectorSearch> {
+    pub(super) fn search(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<SemanticVectorSearch> {
         self.search_with_event_filter(query_embedding, limit, None)
     }
 
-    fn search_event_ids(
+    pub(super) fn search_event_ids(
         &self,
         query_embedding: &[f32],
         event_ids: &[Uuid],
@@ -15,7 +19,7 @@ impl SemanticVectorStore {
         self.search_with_event_filter(query_embedding, limit, Some(event_ids))
     }
 
-    fn search_with_event_filter(
+    pub(super) fn search_with_event_filter(
         &self,
         query_embedding: &[f32],
         limit: usize,
@@ -131,7 +135,7 @@ impl SemanticVectorStore {
         })
     }
 
-    fn search_sqlite_vec0(
+    pub(super) fn search_sqlite_vec0(
         &self,
         query_embedding: &[f32],
         limit: usize,
@@ -231,3 +235,22 @@ impl SemanticVectorStore {
         })
     }
 }
+use std::{collections::HashMap, time::Instant};
+
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue};
+use uuid::Uuid;
+
+use super::{
+    health_search::sqlite_table_exists,
+    indexing::{compare_semantic_hits_desc, dot_product_f32_blob, serialize_f32_blob},
+    model_contract::{semantic_model_key, SEMANTIC_DIMENSIONS},
+    runtime_limits::{
+        SEMANTIC_FULL_SCAN_MAX_CHUNKS, SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES,
+        SEMANTIC_SQLITE_VEC0_MAX_K, SEMANTIC_VECTOR_BACKEND_RUST,
+        SEMANTIC_VECTOR_BACKEND_SQLITE_VEC,
+    },
+    vector_store::{
+        SemanticVectorHit, SemanticVectorSearch, SemanticVectorSearchStats, SemanticVectorStore,
+    },
+};

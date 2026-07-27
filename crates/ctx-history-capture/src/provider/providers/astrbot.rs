@@ -1,555 +1,180 @@
-use std::{collections::BTreeMap, path::Path};
+mod codec;
+mod preferences;
+mod producer;
+mod projector;
+mod relationships;
+mod source;
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, EventRole, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderEventEnvelope, ProviderSourceTrust,
-};
-use rusqlite::{Connection, OptionalExtension};
-use serde_json::{json, Value};
+#[cfg(test)]
+mod tests;
 
-use crate::provider::custom_history_jsonl::push_provider_import_failure;
-use crate::provider::native::{
-    native_event, native_provider_capture, open_provider_sqlite_readonly, provider_json_text,
-    provider_line_from_index, provider_nonnegative_i64_to_u64, provider_role,
-    provider_timestamp_millis, provider_value_text, NativeEventDraft, NativeSessionDraft,
+use std::{cell::Cell, fs, path::Path};
+
+use ctx_history_core::CaptureProvider;
+use ctx_history_store::Store;
+
+use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
+use crate::captured_batch::SourceObservation;
+use crate::provider::importer::{
+    captured_batch_cursor_stream, drain_captured_batches, provider_path_identity,
+    provider_source_cursor_stream_for_path, BoundedParserCheckpoint, CapturedBatchCursorMode,
+    CapturedSourceAdmission, CertifiedProviderCursor,
 };
-use crate::provider::sqlite::{
-    ensure_sqlite_table_columns, opencode_schema_fingerprint, optional_text_column_expr,
-    optional_timestamp_millis_expr, sqlite_table_columns, sqlite_table_exists,
-};
+use crate::provider::sqlite::open_provider_sqlite_readonly;
+use crate::provider::sqlite::{sqlite_schema_fingerprint, with_sqlite_read_snapshot};
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    ASTRBOT_SQLITE_SOURCE_FORMAT,
+    CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
+    Result, ASTRBOT_SQLITE_SOURCE_FORMAT,
 };
 
-pub(crate) struct AstrBotConversationRow {
-    pub(crate) row_id: i64,
-    pub(crate) inner_conversation_id: Option<String>,
-    pub(crate) conversation_id: String,
-    pub(crate) platform_id: Option<String>,
-    pub(crate) user_id: Option<String>,
-    pub(crate) content: String,
-    pub(crate) title: Option<String>,
-    pub(crate) persona_id: Option<String>,
-    pub(crate) token_usage: Option<String>,
-    pub(crate) created_at: Option<i64>,
-    pub(crate) updated_at: Option<i64>,
-}
+use self::codec::{
+    astrbot_captured_error, astrbot_sqlite_batch_error, decode_astrbot_position,
+    initial_astrbot_position, AstrBotParserCheckpoint,
+};
+use self::preferences::astrbot_selected_conversation_bounded;
+use self::producer::AstrBotRowFetcher;
+use self::projector::AstrBotCapturedBatchProjector;
+use self::relationships::{
+    astrbot_prepare_relationship_projection, astrbot_relationship_projection_needed,
+};
+use self::source::{
+    astrbot_conversation_columns, astrbot_source_revision, astrbot_source_snapshot, AstrBotSql,
+};
 
-#[derive(Debug, Clone)]
-pub(crate) struct AstrBotPlatformMessageRow {
-    pub(crate) id: i64,
-    pub(crate) platform_id: Option<String>,
-    pub(crate) user_id: Option<String>,
-    pub(crate) sender_id: Option<String>,
-    pub(crate) sender_name: Option<String>,
-    pub(crate) content: Option<String>,
-    pub(crate) llm_checkpoint_id: Option<String>,
-    pub(crate) created_at: Option<i64>,
-}
+const ASTRBOT_CAPTURE_REVISION: u32 = 2;
+const ASTRBOT_POLICY_REVISION: u32 = 4;
 
-pub(crate) fn normalize_astrbot_sqlite(
+pub(crate) fn import_astrbot_sqlite_batched(
     path: &Path,
-    context: &ProviderAdapterContext,
-) -> Result<ProviderNormalizationResult> {
+    store: &mut Store,
+    mut context: ProviderAdapterContext,
+    import_options: NormalizedProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    if context.source_path.is_none() {
+        context.source_path = Some(path.to_path_buf());
+    }
+    let canonical_path = fs::canonicalize(path)?;
+    let snapshot = astrbot_source_snapshot(path)?;
+    let cursor_path = provider_path_identity(&canonical_path)?;
+    let cursor_stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::AstrBot,
+        ASTRBOT_SQLITE_SOURCE_FORMAT,
+        &cursor_path,
+    );
     let conn = open_provider_sqlite_readonly(path)?;
+    if !snapshot.revalidate(path)? {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    let _ = astrbot_conversation_columns(&conn)?;
     let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
-    let conversations = astrbot_conversations(&conn)?;
-    let platform_messages = astrbot_platform_messages(&conn)?;
-    let selected_conversation = astrbot_selected_conversation(&conn).ok().flatten();
-    let mut result = ProviderNormalizationResult::default();
-    let mut checkpoint_sessions = BTreeMap::<String, String>::new();
-
-    for conversation in &conversations {
-        let conversation_line = match provider_nonnegative_i64_to_u64(
-            conversation.row_id,
-            "AstrBot conversation row id",
-        ) {
-            Ok(value) => provider_line_from_index(value),
-            Err(err) => {
-                push_provider_import_failure(&mut result.summary, 0, err.to_string());
-                continue;
+    let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
+    let selected_conversation = astrbot_selected_conversation_bounded(&conn)?;
+    let source = SourceObservation::new(
+        CaptureProvider::AstrBot,
+        ASTRBOT_SQLITE_SOURCE_FORMAT,
+        format!("astrbot-sqlite:{cursor_path}"),
+        astrbot_source_revision(&snapshot, user_version, &schema_fingerprint),
+        cursor_stream,
+        ASTRBOT_CAPTURE_REVISION,
+        ASTRBOT_POLICY_REVISION,
+        import_options.inventory_observation_token.as_deref(),
+    )
+    .map_err(astrbot_captured_error)?;
+    let stream = captured_batch_cursor_stream(&source);
+    let expected_store_cursor = store.get_sync_cursor(None, &context.machine_id, &stream)?;
+    let initial_position = initial_astrbot_position()?;
+    let mut start_position = initial_position.clone();
+    let mut parser_checkpoint = AstrBotParserCheckpoint::empty();
+    let mut cursor_mode = CapturedBatchCursorMode::Resume;
+    if let Some(stored_cursor) = expected_store_cursor.as_ref() {
+        match CertifiedProviderCursor::decode_if_certified(&stored_cursor.cursor)? {
+            Some(certified)
+                if certified.matches_revisions(
+                    source.source_revision(),
+                    source.capture_revision(),
+                    source.policy_revision(),
+                ) =>
+            {
+                parser_checkpoint = certified.parser_checkpoint().deserialize()?;
+                parser_checkpoint.validate()?;
+                decode_astrbot_position(certified.native_position())?;
+                start_position = certified.native_position().clone();
             }
-        };
-        let provider_session_id = astrbot_provider_session_id(conversation);
-        let started_at = provider_timestamp_millis(conversation.created_at, context.imported_at);
-        let ended_at = conversation
-            .updated_at
-            .map(|timestamp| provider_timestamp_millis(Some(timestamp), context.imported_at));
-        let content = provider_json_text(&conversation.content);
-        if let Value::Array(items) = &content {
-            for (index, item) in items.iter().enumerate() {
-                if let Some(checkpoint) = astrbot_checkpoint_id(item) {
-                    checkpoint_sessions.insert(checkpoint, provider_session_id.clone());
-                    continue;
-                }
-                let role = astrbot_role(item);
-                let Some(text) = astrbot_item_text(item).filter(|text| !text.trim().is_empty())
-                else {
-                    continue;
-                };
-                let event = native_event(NativeEventDraft {
-                    provider: CaptureProvider::AstrBot,
-                    source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
-                    provider_session_id: provider_session_id.clone(),
-                    provider_event_index: index as u64,
-                    provider_event_hash: astrbot_item_id(item)
-                        .map(|id| format!("conversation:{id}")),
-                    cursor: format!("conversation:{}:item:{index}", conversation.conversation_id),
-                    event_type: EventType::Message,
-                    role,
-                    occurred_at: started_at,
-                    text,
-                    body: item.clone(),
-                    metadata: json!({
-                        "source": "astrbot_conversations",
-                        "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                        "conversation_id": conversation.conversation_id,
-                        "inner_conversation_id": conversation.inner_conversation_id,
-                        "item_index": index,
-                    }),
-                });
-                result.captures.push((
-                    index + 1,
-                    astrbot_capture(
-                        AstrBotCaptureDraft {
-                            conversation,
-                            provider_session_id: &provider_session_id,
-                            started_at,
-                            ended_at,
-                            path,
-                            user_version,
-                            schema_fingerprint: &schema_fingerprint,
-                            selected_conversation: selected_conversation.as_deref(),
-                            event: Some(event),
-                        },
-                        context,
-                    ),
-                ));
-            }
-        } else {
-            let Some(text) = provider_value_text(&content).filter(|text| !text.trim().is_empty())
-            else {
-                continue;
-            };
-            let event = native_event(NativeEventDraft {
-                provider: CaptureProvider::AstrBot,
-                source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
-                provider_session_id: provider_session_id.clone(),
-                provider_event_index: 0,
-                provider_event_hash: Some(format!("conversation-row:{}", conversation.row_id)),
-                cursor: format!("conversation:{}:content", conversation.conversation_id),
-                event_type: EventType::Message,
-                role: None,
-                occurred_at: started_at,
-                text,
-                body: content.clone(),
-                metadata: json!({
-                    "source": "astrbot_conversations",
-                    "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                    "conversation_id": conversation.conversation_id,
-                }),
-            });
-            result.captures.push((
-                conversation_line,
-                astrbot_capture(
-                    AstrBotCaptureDraft {
-                        conversation,
-                        provider_session_id: &provider_session_id,
-                        started_at,
-                        ended_at,
-                        path,
-                        user_version,
-                        schema_fingerprint: &schema_fingerprint,
-                        selected_conversation: selected_conversation.as_deref(),
-                        event: Some(event),
-                    },
-                    context,
-                ),
-            ));
+            Some(_) => cursor_mode = CapturedBatchCursorMode::ResetChangedSource,
+            None => cursor_mode = CapturedBatchCursorMode::ReplaceLegacyCursor,
         }
     }
-
-    let conversations_by_id = conversations
-        .iter()
-        .map(|conversation| (astrbot_provider_session_id(conversation), conversation))
-        .collect::<BTreeMap<_, _>>();
-    for message in platform_messages {
-        let message_id =
-            match provider_nonnegative_i64_to_u64(message.id, "AstrBot platform message id") {
-                Ok(value) => value,
-                Err(err) => {
-                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
-                    continue;
-                }
-            };
-        let provider_session_id = message
-            .llm_checkpoint_id
-            .as_ref()
-            .and_then(|checkpoint| checkpoint_sessions.get(checkpoint))
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "platform/{}/{}",
-                    message.platform_id.as_deref().unwrap_or("unknown"),
-                    message.user_id.as_deref().unwrap_or("unknown")
-                )
-            });
-        let conversation = conversations_by_id.get(&provider_session_id).copied();
-        let started_at = conversation
-            .and_then(|conversation| conversation.created_at)
-            .map(|timestamp| provider_timestamp_millis(Some(timestamp), context.imported_at))
-            .unwrap_or_else(|| provider_timestamp_millis(message.created_at, context.imported_at));
-        let content = message
-            .content
-            .as_deref()
-            .map(provider_json_text)
-            .unwrap_or(Value::Null);
-        let Some(text) = provider_value_text(&content).filter(|text| !text.trim().is_empty())
-        else {
-            continue;
-        };
-        let role = if message.sender_id.as_deref() == message.user_id.as_deref() {
-            Some(EventRole::User)
-        } else {
-            Some(EventRole::Assistant)
-        };
-        let event_index = 1_000_000u64.saturating_add(message_id);
-        let event = native_event(NativeEventDraft {
-            provider: CaptureProvider::AstrBot,
-            source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
-            provider_session_id: provider_session_id.clone(),
-            provider_event_index: event_index,
-            provider_event_hash: Some(format!("platform-message:{}", message.id)),
-            cursor: format!("platform_message_history:id:{}", message.id),
-            event_type: EventType::Message,
-            role,
-            occurred_at: provider_timestamp_millis(message.created_at, started_at),
-            text,
-            body: json!({
-                "message_id": message.id,
-                "platform_id": message.platform_id,
-                "user_id": message.user_id,
-                "sender_id": message.sender_id,
-                "sender_name": message.sender_name,
-                "content": content,
-                "llm_checkpoint_id": message.llm_checkpoint_id,
-            }),
-            metadata: json!({
-                "source": "astrbot_platform_message_history",
-                "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                "message_id": message.id,
-            }),
-        });
-        if let Some(conversation) = conversation {
-            result.captures.push((
-                event_index.min(usize::MAX as u64) as usize,
-                astrbot_capture(
-                    AstrBotCaptureDraft {
-                        conversation,
-                        provider_session_id: &provider_session_id,
-                        started_at,
-                        ended_at: conversation.updated_at.map(|timestamp| {
-                            provider_timestamp_millis(Some(timestamp), context.imported_at)
-                        }),
-                        path,
-                        user_version,
-                        schema_fingerprint: &schema_fingerprint,
-                        selected_conversation: selected_conversation.as_deref(),
-                        event: Some(event),
-                    },
-                    context,
-                ),
-            ));
-        } else {
-            result.captures.push((
-                event_index.min(usize::MAX as u64) as usize,
-                native_provider_capture(
-                    NativeSessionDraft {
-                        provider: CaptureProvider::AstrBot,
-                        source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
-                        provider_session_id: provider_session_id.clone(),
-                        parent_provider_session_id: None,
-                        root_provider_session_id: None,
-                        external_agent_id: message.platform_id.clone(),
-                        agent_type: AgentType::Primary,
-                        role_hint: Some("platform-history".to_owned()),
-                        is_primary: true,
-                        started_at,
-                        ended_at: None,
-                        cwd: None,
-                        fidelity: Fidelity::Partial,
-                        raw_source_path: path.display().to_string(),
-                        trust: ProviderSourceTrust::ProviderNative,
-                        source_metadata: json!({
-                            "adapter": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                            "sqlite_user_version": user_version,
-                            "schema_fingerprint": schema_fingerprint,
-                            "support_level": "supported",
-                        }),
-                        session_metadata: json!({
-                            "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                            "platform_id": message.platform_id,
-                            "user_id": message.user_id,
-                            "fidelity_gap": "platform history row was not linked to a conversations checkpoint",
-                        }),
-                    },
-                    context,
-                    Some(event),
-                ),
-            ));
+    let sql = AstrBotSql::new(&conn)?;
+    if !parser_checkpoint.source_shape_validated {
+        // AstrBotSql::new validated the bounded schema shape. Legacy ordering is
+        // checked one row at a time at the producer frontier so a distant bad row
+        // cannot force an eager source scan before the first batch.
+        parser_checkpoint.source_shape_validated = true;
+        BoundedParserCheckpoint::from_serializable(&parser_checkpoint)?;
+    }
+    if astrbot_relationship_projection_needed(&conn, &sql, &start_position)? {
+        if !snapshot.revalidate(path)? {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        astrbot_prepare_relationship_projection(&conn, &sql)?;
+        if !snapshot.revalidate(path)? {
+            return Err(CaptureError::SourceChangedDuringCapture);
         }
     }
-
-    Ok(result)
-}
-
-pub(crate) fn astrbot_provider_session_id(conversation: &AstrBotConversationRow) -> String {
-    conversation
-        .inner_conversation_id
-        .as_ref()
-        .or(Some(&conversation.conversation_id))
-        .cloned()
-        .unwrap_or_else(|| format!("conversation-row-{}", conversation.row_id))
-}
-
-pub(crate) struct AstrBotCaptureDraft<'a> {
-    pub(crate) conversation: &'a AstrBotConversationRow,
-    pub(crate) provider_session_id: &'a str,
-    pub(crate) started_at: DateTime<Utc>,
-    pub(crate) ended_at: Option<DateTime<Utc>>,
-    pub(crate) path: &'a Path,
-    pub(crate) user_version: i64,
-    pub(crate) schema_fingerprint: &'a str,
-    pub(crate) selected_conversation: Option<&'a str>,
-    pub(crate) event: Option<ProviderEventEnvelope>,
-}
-
-pub(crate) fn astrbot_capture(
-    draft: AstrBotCaptureDraft<'_>,
-    context: &ProviderAdapterContext,
-) -> ProviderCaptureEnvelope {
-    let AstrBotCaptureDraft {
-        conversation,
-        provider_session_id,
-        started_at,
-        ended_at,
-        path,
+    let admission = CapturedSourceAdmission::conversation_for_context(&source, &context)?;
+    let source_exhausted = Cell::new(false);
+    let producer_source_exhausted = &source_exhausted;
+    let mut fetcher = AstrBotRowFetcher::new(&conn, sql, parser_checkpoint)?;
+    let mut producer = Some(SqliteLogicalRowBatchProducer::new(
+        source,
+        start_position,
+        move |position| {
+            let row = fetcher.fetch(position)?;
+            if row.is_none() {
+                producer_source_exhausted.set(true);
+            }
+            Ok(row)
+        },
+    ));
+    let mut projector = AstrBotCapturedBatchProjector {
+        context: context.clone(),
+        raw_source_path: path.display().to_string(),
         user_version,
         schema_fingerprint,
         selected_conversation,
-        event,
-    } = draft;
-    native_provider_capture(
-        NativeSessionDraft {
-            provider: CaptureProvider::AstrBot,
-            source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
-            provider_session_id: provider_session_id.to_owned(),
-            parent_provider_session_id: None,
-            root_provider_session_id: None,
-            external_agent_id: conversation.platform_id.clone(),
-            agent_type: AgentType::Primary,
-            role_hint: Some("llm-context".to_owned()),
-            is_primary: true,
-            started_at,
-            ended_at,
-            cwd: None,
-            fidelity: Fidelity::Partial,
-            raw_source_path: path.display().to_string(),
-            trust: ProviderSourceTrust::ProviderNative,
-            source_metadata: json!({
-                "adapter": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                "sqlite_user_version": user_version,
-                "schema_fingerprint": schema_fingerprint,
-                "support_level": "supported",
-            }),
-            session_metadata: json!({
-                "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                "conversation_id": conversation.conversation_id,
-                "inner_conversation_id": conversation.inner_conversation_id,
-                "platform_id": conversation.platform_id,
-                "user_id": conversation.user_id,
-                "title": conversation.title,
-                "persona_id": conversation.persona_id,
-                "token_usage": conversation.token_usage.as_deref().map(provider_json_text),
-                "selected_conversation": selected_conversation,
-                "fidelity_gap": "The AstrBot importer reads local LLM context plus available platform history from data_v4.db; platform-native chats may still be partial when upstream stores non-LLM replies on the IM platform",
-            }),
+        parser_checkpoint,
+    };
+    drain_captured_batches(
+        store,
+        &admission,
+        import_options,
+        &context.machine_id,
+        context.imported_at,
+        expected_store_cursor,
+        &initial_position,
+        cursor_mode,
+        &stream,
+        &mut projector,
+        || {
+            let Some(active_producer) = producer.as_mut() else {
+                return Ok(None);
+            };
+            if !snapshot.revalidate(path)? {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            let batch = with_sqlite_read_snapshot(&conn, || {
+                active_producer
+                    .next_batch()
+                    .map_err(astrbot_sqlite_batch_error)
+            })?;
+            if !snapshot.revalidate(path)? {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            if source_exhausted.get() {
+                producer.take();
+            }
+            Ok(batch)
         },
-        context,
-        event,
+        || snapshot.revalidate(path),
     )
-}
-
-pub(crate) fn astrbot_item_id(item: &Value) -> Option<&str> {
-    item.get("id")
-        .or_else(|| item.get("message_id"))
-        .or_else(|| item.get("checkpoint_id"))
-        .and_then(Value::as_str)
-}
-
-pub(crate) fn astrbot_checkpoint_id(item: &Value) -> Option<String> {
-    let item_type = item
-        .get("type")
-        .or_else(|| item.get("role"))
-        .and_then(Value::as_str)?;
-    if item_type != "_checkpoint" && item_type != "checkpoint" {
-        return None;
-    }
-    astrbot_item_id(item).map(str::to_owned)
-}
-
-pub(crate) fn astrbot_role(item: &Value) -> Option<EventRole> {
-    item.get("role")
-        .or_else(|| item.get("type"))
-        .and_then(Value::as_str)
-        .map(|role| provider_role(Some(role)))
-}
-
-pub(crate) fn astrbot_item_text(item: &Value) -> Option<String> {
-    item.get("content")
-        .or_else(|| item.get("text"))
-        .or_else(|| item.get("message"))
-        .and_then(provider_value_text)
-}
-
-pub(crate) fn astrbot_conversations(conn: &Connection) -> Result<Vec<AstrBotConversationRow>> {
-    if !sqlite_table_exists(conn, "conversations")? {
-        return Err(CaptureError::InvalidPayload(
-            "AstrBot data_v4.db is missing required conversations table".into(),
-        ));
-    }
-    let columns = sqlite_table_columns(conn, "conversations")?;
-    ensure_sqlite_table_columns(&columns, "AstrBot conversations table", &["content"])?;
-    let row_id = if columns.contains("id") {
-        "id"
-    } else {
-        "rowid"
-    };
-    let inner_conversation_id =
-        optional_text_column_expr(&columns, "inner_conversation_id", "NULL");
-    let conversation_id = if columns.contains("conversation_id") {
-        "CAST(conversation_id AS TEXT)".to_owned()
-    } else if columns.contains("inner_conversation_id") {
-        "CAST(inner_conversation_id AS TEXT)".to_owned()
-    } else {
-        "CAST(rowid AS TEXT)".to_owned()
-    };
-    let platform_id = optional_text_column_expr(&columns, "platform_id", "NULL");
-    let user_id = optional_text_column_expr(&columns, "user_id", "NULL");
-    let title = optional_text_column_expr(&columns, "title", "NULL");
-    let persona_id = optional_text_column_expr(&columns, "persona_id", "NULL");
-    let token_usage = optional_text_column_expr(&columns, "token_usage", "NULL");
-    let created_at = optional_timestamp_millis_expr(&columns, "created_at", "NULL");
-    let updated_at = optional_timestamp_millis_expr(&columns, "updated_at", "NULL");
-    let sql = format!(
-        "select {row_id}, {inner_conversation_id}, {conversation_id}, {platform_id}, \
-         {user_id}, content, {title}, {persona_id}, {token_usage}, {created_at}, \
-         {updated_at} from conversations order by {created_at}, {row_id}"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
-        Ok(AstrBotConversationRow {
-            row_id: row.get(0)?,
-            inner_conversation_id: row.get(1)?,
-            conversation_id: row.get::<_, String>(2)?,
-            platform_id: row.get(3)?,
-            user_id: row.get(4)?,
-            content: row.get(5)?,
-            title: row.get(6)?,
-            persona_id: row.get(7)?,
-            token_usage: row.get(8)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(CaptureError::from)
-}
-
-pub(crate) fn astrbot_platform_messages(
-    conn: &Connection,
-) -> Result<Vec<AstrBotPlatformMessageRow>> {
-    if !sqlite_table_exists(conn, "platform_message_history")? {
-        return Ok(Vec::new());
-    }
-    let columns = sqlite_table_columns(conn, "platform_message_history")?;
-    let id = if columns.contains("id") {
-        "id"
-    } else {
-        "rowid"
-    };
-    let platform_id = optional_text_column_expr(&columns, "platform_id", "NULL");
-    let user_id = optional_text_column_expr(&columns, "user_id", "NULL");
-    let sender_id = optional_text_column_expr(&columns, "sender_id", "NULL");
-    let sender_name = optional_text_column_expr(&columns, "sender_name", "NULL");
-    let content = optional_text_column_expr(&columns, "content", "NULL");
-    let llm_checkpoint_id = optional_text_column_expr(&columns, "llm_checkpoint_id", "NULL");
-    let created_at = optional_timestamp_millis_expr(&columns, "created_at", "NULL");
-    let sql = format!(
-        "select {id}, {platform_id}, {user_id}, {sender_id}, {sender_name}, \
-         {content}, {llm_checkpoint_id}, {created_at} from platform_message_history \
-         order by {created_at}, {id}"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
-        Ok(AstrBotPlatformMessageRow {
-            id: row.get(0)?,
-            platform_id: row.get(1)?,
-            user_id: row.get(2)?,
-            sender_id: row.get(3)?,
-            sender_name: row.get(4)?,
-            content: row.get(5)?,
-            llm_checkpoint_id: row.get(6)?,
-            created_at: row.get(7)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(CaptureError::from)
-}
-
-pub(crate) fn astrbot_selected_conversation(conn: &Connection) -> Result<Option<String>> {
-    if !sqlite_table_exists(conn, "preferences")? {
-        return Ok(None);
-    }
-    let columns = sqlite_table_columns(conn, "preferences")?;
-    if !columns.contains("key") || !columns.contains("value") {
-        return Ok(None);
-    }
-    let scope_filter = if columns.contains("scope") {
-        "AND scope = 'umo'"
-    } else {
-        ""
-    };
-    let value = optional_text_column_expr(&columns, "value", "NULL");
-    let sql =
-        format!("select {value} from preferences where key = 'sel_conv_id' {scope_filter} limit 1");
-    let value = conn
-        .query_row(&sql, [], |row| row.get::<_, Option<String>>(0))
-        .optional()?
-        .flatten();
-    Ok(value.and_then(astrbot_selected_conversation_value))
-}
-
-fn astrbot_selected_conversation_value(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-        let selected = match &parsed {
-            Value::Object(object) => object.get("val").and_then(provider_value_text),
-            Value::String(_) | Value::Number(_) | Value::Bool(_) => provider_value_text(&parsed),
-            Value::Array(_) | Value::Null => None,
-        };
-        if let Some(selected) = selected
-            .map(|selected| selected.trim().to_owned())
-            .filter(|selected| !selected.is_empty())
-        {
-            return Some(selected);
-        }
-    }
-    Some(trimmed.to_owned())
 }

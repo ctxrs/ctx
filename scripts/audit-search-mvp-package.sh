@@ -3,14 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-# shellcheck source=scripts/ci-common.sh
-source "${script_dir}/ci-common.sh"
 cd "${repo_root}"
-
-ctx_init_resource_env
-ctx_ensure_rust_build_toolchain
-
-cargo_bin="${CARGO:-cargo}"
 failures=0
 
 fail() {
@@ -35,11 +28,15 @@ grep_files() {
   shift
 
   if command -v rg >/dev/null 2>&1; then
-    rg -n --glob '!target/**' --glob '!Cargo.lock' --glob '!scripts/audit-search-mvp-package.sh' --glob '!scripts/check-docs.sh' --glob '!scripts/check-buildkite-pipeline.sh' -e "${pattern}" "$@"
+    rg -n --glob '!target/**' --glob '!**/__pycache__/**' --glob '!*.pyc' --glob '!Cargo.lock' --glob '!scripts/audit-search-mvp-package.sh' --glob '!scripts/check-release-source-surface.sh' --glob '!scripts/tests/fixtures/release-source-surface/**' --glob '!scripts/check-docs.sh' --glob '!scripts/check-buildkite-pipeline.sh' -e "${pattern}" "$@"
   else
     grep -R -n -E \
+      --exclude='*.pyc' \
+      --exclude-dir=__pycache__ \
       --exclude=Cargo.lock \
       --exclude="$(basename "$0")" \
+      --exclude=check-release-source-surface.sh \
+      --exclude-dir=release-source-surface \
       --exclude=check-docs.sh \
       --exclude=check-buildkite-pipeline.sh \
       -e "${pattern}" "$@"
@@ -108,80 +105,23 @@ if grep_files 'work-[r]ecord-(publish|report|vcs)[[:space:]]*=' \
   fail 'default crate manifests depend on publish/report/vcs crates'
 fi
 
-cargo_tree_output="$("${cargo_bin}" tree -p ctx --edges normal 2>&1)" || {
-  fail "cargo tree failed for default ctx dependency graph: ${cargo_tree_output}"
-  cargo_tree_output=""
-}
-if printf '%s\n' "${cargo_tree_output}" | grep -E 'work-[r]ecord-(publish|report|vcs)' >/dev/null; then
-  fail 'default ctx dependency graph includes publish/report/vcs crates'
-fi
-
-cargo_metadata_output="$("${cargo_bin}" metadata --no-deps --format-version 1 2>&1)" || {
-  fail "cargo metadata failed for default ctx package graph: ${cargo_metadata_output}"
-  cargo_metadata_output=""
-}
-if [[ -n "${cargo_metadata_output}" ]]; then
-  if command -v jq >/dev/null 2>&1; then
-    ctx_bin_targets="$(
-      printf '%s\n' "${cargo_metadata_output}" \
-        | jq -r '.packages[] | select(.name == "ctx") | .targets[] | select(.kind | index("bin")) | .name'
-    )"
-  elif command -v python3 >/dev/null 2>&1; then
-    ctx_bin_targets="$(
-      printf '%s\n' "${cargo_metadata_output}" \
-        | python3 -c 'import json, sys
-metadata = json.load(sys.stdin)
-for package in metadata.get("packages", []):
-    if package.get("name") != "ctx":
-        continue
-    for target in package.get("targets", []):
-        if "bin" in target.get("kind", []):
-            print(target.get("name", ""))
-'
-    )"
-  else
-    ctx_bin_targets="$(
-      printf '%s\n' "${cargo_metadata_output}" \
-        | grep -o '"kind":\["bin"\][^}]*"name":"[^"]*"' \
-        | sed -E 's/.*"name":"([^"]*)".*/\1/'
-    )"
-  fi
-
-  normalized_ctx_bins="$(printf '%s\n' "${ctx_bin_targets}" | sed '/^$/d' | sort | paste -sd ' ' -)"
-  if [[ "${normalized_ctx_bins}" != "ctx" ]]; then
-    fail "ctx package exposes unexpected binary targets: ${normalized_ctx_bins:-<none>}"
-  fi
-fi
-
-if grep_files 'ctx (dashboard|shim|publish|evidence|link-pr|context|update|uninstall|watch)([^[:alnum:]_-]|$)|ctx pr([^[:alnum:]_-]|$)|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|(^|[^[:alnum:]_])ShimCommandOptions([^[:alnum:]_]|$)|CommandRoot::Context([^[:alnum:]_]|$)|CommandRoot::Update([^[:alnum:]_]|$)|CommandRoot::Uninstall([^[:alnum:]_]|$)|CommandRoot::Watch([^[:alnum:]_]|$)|(^|[^[:alnum:]_])ContextArgs([^[:alnum:]_]|$)|(^|[^[:alnum:]_])UpdateArgs([^[:alnum:]_]|$)|(^|[^[:alnum:]_])UninstallArgs([^[:alnum:]_]|$)|(^|[^[:alnum:]_])WatchArgs([^[:alnum:]_]|$)|(^|[^[:alnum:]_])run_context([^[:alnum:]_]|$)|(^|[^[:alnum:]_])run_update([^[:alnum:]_]|$)|(^|[^[:alnum:]_])run_uninstall([^[:alnum:]_]|$)|(^|[^[:alnum:]_])run_watch([^[:alnum:]_]|$)|maybe_auto_update|check_or_apply_update|watch_strategy|polling_catch_up' \
-  .bazelignore .bazelrc .bazelversion .buildkite .gitignore Cargo.toml BUILD.bazel MODULE.bazel scripts crates/ctx-cli/src crates/ctx-history-capture/src crates/ctx-history-search/src >/dev/null 2>&1; then
+if ! bash scripts/check-release-source-surface.sh "${repo_root}"; then
   fail 'default binary/release path contains dashboard, shim, PR publish, watch, or gh integration text'
 fi
 
 if [[ "${CTX_AUDIT_SKIP_RELEASE_BUILD:-0}" != "1" ]]; then
-  cargo_locked_args=()
-  if [[ "${CTX_CARGO_LOCKED:-1}" != "0" && -f Cargo.lock ]]; then
-    cargo_locked_args+=(--locked)
-  fi
-  "${cargo_bin}" build -p ctx --bin ctx --release "${cargo_locked_args[@]}"
-
-  suffix=""
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*) suffix=".exe" ;;
-  esac
-  target_dir="${CARGO_TARGET_DIR:-target}"
-  binary="${target_dir%/}/release/ctx${suffix}"
-  if [[ ! -f "${binary}" ]]; then
-    fail "release binary missing: ${binary}"
+  binary="${CTX_AUDIT_CTX_BINARY:-}"
+  if [[ -z "${binary}" || ! -f "${binary}" ]]; then
+    fail "native Bazel ctx binary missing: ${binary:-<unset>}"
   elif command -v strings >/dev/null 2>&1; then
     binary_strings="$(strings "${binary}")"
     if printf '%s\n' "${binary_strings}" \
       | grep -E 'ctx (dashboard|shim|publish|evidence|link-pr|context|update|uninstall|watch)([^[:alnum:]_-]|$)|ctx pr([^[:alnum:]_-]|$)|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|dashboard export|maybe_auto_update|check_or_apply_update|(^|[^[:alnum:]_])run_update([^[:alnum:]_]|$)|(^|[^[:alnum:]_])run_uninstall([^[:alnum:]_]|$)|watch_strategy|polling_catch_up' >/dev/null; then
       fail 'release ctx binary contains removed dashboard/shim/PR-publish/watch command strings'
     fi
-    if printf '%s\n' "${binary_strings}" \
-      | grep -E -i 'dashboard|pull_request|published_to' >/dev/null; then
-      fail 'release ctx binary contains removed dashboard/PR publication strings'
+    if ! printf '%s\n' "${binary_strings}" \
+      | bash scripts/check-release-binary-strings.sh; then
+      fail 'release ctx binary contains removed hosted-history runtime strings'
     fi
   fi
 fi

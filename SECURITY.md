@@ -46,8 +46,8 @@ Useful reports include:
 ## Local Data Handling
 
 Treat the ctx data root and command output as sensitive. They may contain source
-code, prompts, local paths, command output previews, private repository names,
-and secrets that appeared in provider transcripts.
+code, prompts, local paths, tool-call arguments, private repository names, and
+typed identifiers extracted from provider transcripts.
 
 Raw provider transcript files remain in provider-owned locations. ctx imports
 the searchable text and metadata it needs into SQLite, so deleting or moving the

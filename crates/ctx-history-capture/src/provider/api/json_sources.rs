@@ -1,17 +1,19 @@
 use std::path::Path;
 
+use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 
-use crate::provider::adapter::{
-    AuggieSessionJsonAdapter, ClaudeProjectsJsonlAdapter, ClineTaskJsonAdapter,
-    CodeBuddyHistoryJsonAdapter, CrushSqliteAdapter, GooseSessionsSqliteAdapter,
-    HermesSqliteAdapter, JunieSessionEventsAdapter, OpenClawJsonlAdapter, PiSessionJsonlAdapter,
-    ProviderCaptureAdapter, RooTaskJsonAdapter,
-};
-use crate::provider::importer::{
-    import_native_jsonl_tree, import_normalized_provider_captures, NativeJsonlTreeImport,
-};
-use crate::provider::providers::trae::normalize_trae_history;
+use crate::provider::providers::auggie::import_auggie_sessions_batched;
+use crate::provider::providers::claude::import_claude_projects_jsonl_tree_batched;
+use crate::provider::providers::codebuddy::import_codebuddy_history_batched;
+use crate::provider::providers::crush::import_crush_sqlite_batched;
+use crate::provider::providers::goose::import_goose_sessions_sqlite_batched;
+use crate::provider::providers::hermes::import_hermes_sqlite_batched;
+use crate::provider::providers::junie::import_junie_session_events_batched;
+use crate::provider::providers::openclaw::import_openclaw_session_jsonl_tree_batched;
+use crate::provider::providers::pi::import_pi_session_jsonl_batched;
+use crate::provider::providers::task_json::{import_task_json_history_batched, task_json_provider};
+use crate::provider::providers::trae::import_trae_history_batched;
 use crate::{
     AuggieImportOptions, ClaudeProjectsImportOptions, ClineTaskJsonImportOptions,
     CodeBuddyImportOptions, CrushSqliteImportOptions, GooseSessionsSqliteImportOptions,
@@ -25,31 +27,7 @@ pub fn import_pi_session_jsonl(
     store: &mut Store,
     options: PiSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let normalization = PiSessionJsonlAdapter.normalize_path(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-        },
-    )
+    import_pi_session_jsonl_batched(path.as_ref(), store, options)
 }
 
 pub fn import_claude_projects_jsonl_tree(
@@ -57,31 +35,7 @@ pub fn import_claude_projects_jsonl_tree(
     store: &mut Store,
     options: ClaudeProjectsImportOptions,
 ) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ClaudeProjectsJsonlAdapter.normalize_path(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-        },
-    )
+    import_claude_projects_jsonl_tree_batched(path.as_ref(), store, options)
 }
 
 pub fn import_cline_task_json_history(
@@ -94,25 +48,24 @@ pub fn import_cline_task_json_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ClineTaskJsonAdapter.normalize_path(
+    import_task_json_history_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
+        task_json_provider(CaptureProvider::Cline),
     )
 }
 
@@ -126,25 +79,24 @@ pub fn import_roo_task_json_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = RooTaskJsonAdapter.normalize_path(
+    import_task_json_history_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
+        task_json_provider(CaptureProvider::RooCode),
     )
 }
 
@@ -158,24 +110,22 @@ pub fn import_codebuddy_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = CodeBuddyHistoryJsonAdapter.normalize_path(
+    import_codebuddy_history_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -190,24 +140,22 @@ pub fn import_trae_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = normalize_trae_history(
+    import_trae_history_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -222,24 +170,22 @@ pub fn import_crush_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = CrushSqliteAdapter.normalize_path(
+    import_crush_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -254,24 +200,22 @@ pub fn import_goose_sessions_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = GooseSessionsSqliteAdapter.normalize_path(
+    import_goose_sessions_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -281,17 +225,28 @@ pub fn import_openclaw_history(
     store: &mut Store,
     options: OpenClawImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    import_openclaw_session_jsonl_tree_batched(
+        path,
         store,
-        NativeJsonlTreeImport {
-            path: path.as_ref(),
+        ProviderAdapterContext {
             machine_id: options.machine_id,
-            source_path: options.source_path,
+            source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            history_record_id: options.history_record_id,
         },
-        OpenClawJsonlAdapter,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
+        },
     )
 }
 
@@ -305,22 +260,24 @@ pub fn import_hermes_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = HermesSqliteAdapter.normalize_path(
+    import_hermes_sqlite_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    let import_options = NormalizedProviderImportOptions {
-        history_record_id: options.history_record_id,
-        persist_cursors: true,
-        wrap_transaction: true,
-        fast_event_inserts: true,
-    };
-    import_normalized_provider_captures(store, normalization, import_options)
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
+        },
+    )
 }
 
 pub fn import_auggie_history(
@@ -333,24 +290,22 @@ pub fn import_auggie_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = AuggieSessionJsonAdapter.normalize_path(
+    import_auggie_sessions_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }
@@ -365,23 +320,22 @@ pub fn import_junie_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = JunieSessionEventsAdapter.normalize_path(
+    import_junie_session_events_batched(
         path,
-        &ProviderAdapterContext {
+        store,
+        ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
         },
-    )?;
-    import_normalized_provider_captures(
-        store,
-        normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
+            capture_work_limit: options.capture_work_limit,
+            inventory_observation_token: options.inventory_observation_token.clone(),
         },
     )
 }

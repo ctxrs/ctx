@@ -1,54 +1,50 @@
-fn semantic_vector_path(data_root: &Path) -> PathBuf {
+pub(super) fn semantic_vector_path(data_root: &Path) -> PathBuf {
     data_root.join("vectors.sqlite")
 }
 
-fn semantic_worker_lock_path(data_root: &Path) -> PathBuf {
+pub(super) fn semantic_worker_lock_path(data_root: &Path) -> PathBuf {
     data_root.join(SEMANTIC_WORKER_LOCK_FILE)
 }
 
-fn semantic_worker_status_path(data_root: &Path) -> PathBuf {
+pub(super) fn semantic_worker_status_path(data_root: &Path) -> PathBuf {
     data_root.join(SEMANTIC_WORKER_STATUS_FILE)
 }
 
-fn daemon_root_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_root_path(data_root: &Path) -> PathBuf {
     data_root.join(DAEMON_DIR)
 }
 
-fn daemon_jobs_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_jobs_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_JOBS_DIR)
 }
 
-fn daemon_lock_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_lock_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_LOCK_FILE)
 }
 
-fn daemon_status_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_status_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_STATUS_FILE)
 }
 
 #[cfg(unix)]
-fn daemon_query_socket_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_query_socket_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_QUERY_SOCKET_FILE)
 }
 
-fn daemon_history_refresh_job_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_history_refresh_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(DAEMON_HISTORY_REFRESH_JOB_FILE)
 }
 
-fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(DAEMON_SEMANTIC_JOB_FILE)
 }
 
-fn daemon_cloud_sync_job_path(data_root: &Path) -> PathBuf {
-    daemon_jobs_path(data_root).join(DAEMON_CLOUD_SYNC_JOB_FILE)
-}
-
-struct DaemonLock {
+pub(super) struct DaemonLock {
     _inner: PidFileLock,
 }
 
 impl DaemonLock {
-    fn acquire(data_root: &Path) -> Result<Option<Self>> {
+    pub(super) fn acquire(data_root: &Path) -> Result<Option<Self>> {
         create_private_dir_all(data_root)?;
         let root = daemon_root_path(data_root);
         create_private_dir_all(&root)?;
@@ -61,12 +57,12 @@ impl DaemonLock {
     }
 }
 
-struct SemanticWorkerLock {
+pub(super) struct SemanticWorkerLock {
     _inner: PidFileLock,
 }
 
 impl SemanticWorkerLock {
-    fn acquire(data_root: &Path) -> Result<Option<Self>> {
+    pub(super) fn acquire(data_root: &Path) -> Result<Option<Self>> {
         create_private_dir_all(data_root)?;
         Ok(PidFileLock::acquire(
             &semantic_worker_lock_path(data_root),
@@ -76,14 +72,14 @@ impl SemanticWorkerLock {
     }
 }
 
-struct PidFileLock {
+pub(super) struct PidFileLock {
     guard: fs::File,
     path: PathBuf,
     payload: Value,
 }
 
 impl PidFileLock {
-    fn acquire(path: &Path, payload: Value) -> Result<Option<Self>> {
+    pub(super) fn acquire(path: &Path, payload: Value) -> Result<Option<Self>> {
         let guard_path = pid_lock_guard_path(path);
         let (guard, _) = open_or_create_pid_lock_file(&guard_path)
             .with_context(|| format!("open ctx process guard {}", guard_path.display()))?;
@@ -99,7 +95,9 @@ impl PidFileLock {
         // cannot see the guard file. A live or incomplete legacy owner wins;
         // stale legacy metadata is reclaimable for supported upgrade handoff.
         if path.exists()
-            && !previous.as_ref().is_some_and(pid_lock_uses_advisory_protocol)
+            && !previous
+                .as_ref()
+                .is_some_and(pid_lock_uses_advisory_protocol)
             && !legacy_pid_lock_value_is_stale(path, previous.as_ref())
         {
             let _ = fs2::FileExt::unlock(&guard);
@@ -129,11 +127,11 @@ impl Drop for PidFileLock {
     }
 }
 
-fn pid_lock_guard_path(path: &Path) -> PathBuf {
+pub(super) fn pid_lock_guard_path(path: &Path) -> PathBuf {
     path.with_extension("guard")
 }
 
-fn open_or_create_pid_lock_file(path: &Path) -> std::io::Result<(fs::File, bool)> {
+pub(super) fn open_or_create_pid_lock_file(path: &Path) -> std::io::Result<(fs::File, bool)> {
     match private_create_new_lock_file(path) {
         Ok(file) => Ok((file, true)),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -143,14 +141,16 @@ fn open_or_create_pid_lock_file(path: &Path) -> std::io::Result<(fs::File, bool)
     }
 }
 
-fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
+pub(super) fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
     for attempt in 0..3 {
         let (mut file, created) = open_or_create_pid_lock_file(path)
             .with_context(|| format!("open ctx process lock metadata {}", path.display()))?;
         secure_private_file_permissions(path)?;
         let previous = (!created).then(|| read_pid_lock_json(path)).flatten();
         if !created
-            && !previous.as_ref().is_some_and(pid_lock_uses_advisory_protocol)
+            && !previous
+                .as_ref()
+                .is_some_and(pid_lock_uses_advisory_protocol)
             && !legacy_pid_lock_value_is_stale(path, previous.as_ref())
         {
             return Ok(false);
@@ -167,7 +167,7 @@ fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
     Ok(false)
 }
 
-fn pid_lock_payload(extra: Value) -> Value {
+pub(super) fn pid_lock_payload(extra: Value) -> Value {
     let mut payload = json!({
         "lock_protocol": PID_LOCK_PROTOCOL,
         "owner_id": Uuid::now_v7().to_string(),
@@ -181,11 +181,11 @@ fn pid_lock_payload(extra: Value) -> Value {
     payload
 }
 
-fn daemon_lock_is_stale(path: &Path) -> bool {
+pub(super) fn daemon_lock_is_stale(path: &Path) -> bool {
     pid_lock_file_is_stale(path)
 }
 
-fn pid_lock_file_is_stale(path: &Path) -> bool {
+pub(super) fn pid_lock_file_is_stale(path: &Path) -> bool {
     if let Some(observation) = observe_pid_advisory_lock(path) {
         return !observation.held;
     }
@@ -193,7 +193,7 @@ fn pid_lock_file_is_stale(path: &Path) -> bool {
     legacy_pid_lock_value_is_stale(path, value.as_ref())
 }
 
-fn pid_lock_file_is_orphaned(path: &Path) -> bool {
+pub(super) fn pid_lock_file_is_orphaned(path: &Path) -> bool {
     if let Some(observation) = observe_pid_advisory_lock(path) {
         return !observation.held && !observation.released;
     }
@@ -201,7 +201,7 @@ fn pid_lock_file_is_orphaned(path: &Path) -> bool {
     legacy_pid_lock_value_is_stale(path, value.as_ref())
 }
 
-fn legacy_pid_lock_value_is_stale(path: &Path, value: Option<&Value>) -> bool {
+pub(super) fn legacy_pid_lock_value_is_stale(path: &Path, value: Option<&Value>) -> bool {
     let Some(value) = value else {
         return incomplete_pid_lock_is_stale(path);
     };
@@ -215,7 +215,7 @@ fn legacy_pid_lock_value_is_stale(path: &Path, value: Option<&Value>) -> bool {
     }
 }
 
-fn incomplete_pid_lock_is_stale(path: &Path) -> bool {
+pub(super) fn incomplete_pid_lock_is_stale(path: &Path) -> bool {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
@@ -224,12 +224,12 @@ fn incomplete_pid_lock_is_stale(path: &Path) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PidAdvisoryLockObservation {
-    held: bool,
-    released: bool,
+pub(super) struct PidAdvisoryLockObservation {
+    pub(super) held: bool,
+    pub(super) released: bool,
 }
 
-fn observe_pid_advisory_lock(path: &Path) -> Option<PidAdvisoryLockObservation> {
+pub(super) fn observe_pid_advisory_lock(path: &Path) -> Option<PidAdvisoryLockObservation> {
     let guard = private_open_existing_lock_file(&pid_lock_guard_path(path)).ok()?;
     match fs2::FileExt::try_lock_shared(&guard) {
         Ok(()) => {
@@ -255,7 +255,7 @@ fn observe_pid_advisory_lock(path: &Path) -> Option<PidAdvisoryLockObservation> 
     }
 }
 
-fn try_lock_pid_file(file: &fs::File) -> std::io::Result<bool> {
+pub(super) fn try_lock_pid_file(file: &fs::File) -> std::io::Result<bool> {
     for attempt in 0..PID_LOCK_ACQUIRE_ATTEMPTS {
         match fs2::FileExt::try_lock_exclusive(file) {
             Ok(()) => return Ok(true),
@@ -270,7 +270,7 @@ fn try_lock_pid_file(file: &fs::File) -> std::io::Result<bool> {
     Ok(false)
 }
 
-fn pid_lock_path_has_owner(path: &Path, payload: &Value) -> bool {
+pub(super) fn pid_lock_path_has_owner(path: &Path, payload: &Value) -> bool {
     let owner_id = payload.get("owner_id").and_then(Value::as_str);
     owner_id.is_some()
         && read_pid_lock_json(path)
@@ -280,11 +280,11 @@ fn pid_lock_path_has_owner(path: &Path, payload: &Value) -> bool {
             == owner_id
 }
 
-fn pid_lock_uses_advisory_protocol(value: &Value) -> bool {
+pub(super) fn pid_lock_uses_advisory_protocol(value: &Value) -> bool {
     value.get("lock_protocol").and_then(Value::as_str) == Some(PID_LOCK_PROTOCOL)
 }
 
-fn pid_lock_file_reports_running(
+pub(super) fn pid_lock_file_reports_running(
     path: &Path,
     lock_state: Option<ProcessState>,
     status: &str,
@@ -296,16 +296,16 @@ fn pid_lock_file_reports_running(
         || unknown_process_lock_reports_running(path, lock_state, status)
 }
 
-fn read_pid_lock_file(path: &Path) -> Option<u32> {
+pub(super) fn read_pid_lock_file(path: &Path) -> Option<u32> {
     read_pid_lock_json(path).and_then(|value| pid_from_lock_json(&value))
 }
 
-fn read_pid_lock_json(path: &Path) -> Option<Value> {
+pub(super) fn read_pid_lock_json(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_pid_lock_json(file: &mut fs::File, value: &Value) -> Result<()> {
+pub(super) fn write_pid_lock_json(file: &mut fs::File, value: &Value) -> Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     serde_json::to_writer(&mut *file, value)?;
@@ -314,14 +314,14 @@ fn write_pid_lock_json(file: &mut fs::File, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn pid_from_lock_json(value: &Value) -> Option<u32> {
+pub(super) fn pid_from_lock_json(value: &Value) -> Option<u32> {
     value
         .get("pid")
         .and_then(|value| value.as_u64())
         .and_then(|pid| u32::try_from(pid).ok())
 }
 
-fn lock_started_at_is_stale(value: &Value) -> bool {
+pub(super) fn lock_started_at_is_stale(value: &Value) -> bool {
     let Some(started_at_ms) = json_i64(value, "started_at_ms") else {
         return false;
     };
@@ -329,14 +329,14 @@ fn lock_started_at_is_stale(value: &Value) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProcessState {
+pub(super) enum ProcessState {
     Running,
     NotRunning,
     Unknown,
 }
 
 #[cfg(unix)]
-fn process_state(pid: u32) -> ProcessState {
+pub(super) fn process_state(pid: u32) -> ProcessState {
     if pid == 0 {
         return ProcessState::NotRunning;
     }
@@ -355,11 +355,9 @@ fn process_state(pid: u32) -> ProcessState {
 }
 
 #[cfg(windows)]
-fn process_state(pid: u32) -> ProcessState {
+pub(super) fn process_state(pid: u32) -> ProcessState {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     if pid == 0 {
         return ProcessState::NotRunning;
@@ -379,11 +377,11 @@ fn process_state(pid: u32) -> ProcessState {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_state(_pid: u32) -> ProcessState {
+pub(super) fn process_state(_pid: u32) -> ProcessState {
     ProcessState::Unknown
 }
 
-fn unknown_process_lock_reports_running(
+pub(super) fn unknown_process_lock_reports_running(
     lock_path: &Path,
     state: Option<ProcessState>,
     status: &str,
@@ -395,16 +393,16 @@ fn unknown_process_lock_reports_running(
 }
 
 #[cfg(unix)]
-fn lower_semantic_worker_priority() {
+pub(super) fn lower_semantic_worker_priority() {
     unsafe {
         let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
     }
 }
 
 #[cfg(not(unix))]
-fn lower_semantic_worker_priority() {}
+pub(super) fn lower_semantic_worker_priority() {}
 
-fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
+pub(super) fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
@@ -426,47 +424,47 @@ fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn write_semantic_worker_status(data_root: &Path, value: &Value) -> Result<()> {
+pub(super) fn write_semantic_worker_status(data_root: &Path, value: &Value) -> Result<()> {
     write_private_json_file(&semantic_worker_status_path(data_root), value)
 }
 
-fn read_semantic_worker_status(data_root: &Path) -> Option<Value> {
+pub(super) fn read_semantic_worker_status(data_root: &Path) -> Option<Value> {
     let text = fs::read_to_string(semantic_worker_status_path(data_root)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_daemon_status(data_root: &Path, value: &Value) -> Result<()> {
+pub(super) fn write_daemon_status(data_root: &Path, value: &Value) -> Result<()> {
     write_private_json_file(&daemon_status_path(data_root), value)
 }
 
-fn read_daemon_status(data_root: &Path) -> Option<Value> {
+pub(super) fn read_daemon_status(data_root: &Path) -> Option<Value> {
     let text = fs::read_to_string(daemon_status_path(data_root)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_daemon_job_status(path: &Path, value: &Value) -> Result<()> {
+pub(super) fn write_daemon_job_status(path: &Path, value: &Value) -> Result<()> {
     write_private_json_file(path, value)
 }
 
-fn read_daemon_job_status(path: &Path) -> Option<Value> {
+pub(super) fn read_daemon_job_status(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn semantic_status_file_model_matches(status_value: Option<&Value>) -> bool {
+pub(super) fn semantic_status_file_model_matches(status_value: Option<&Value>) -> bool {
     status_value
         .and_then(|value| json_string(value, "model_key"))
         .is_some_and(|model_key| model_key == semantic_model_key())
 }
 
-fn semantic_status_file_searchable_items(status_value: Option<&Value>) -> Option<usize> {
+pub(super) fn semantic_status_file_searchable_items(status_value: Option<&Value>) -> Option<usize> {
     if !semantic_status_file_model_matches(status_value) {
         return None;
     }
     status_value.and_then(|value| json_usize(value, "searchable_items"))
 }
 
-fn semantic_status_file_stats(status_value: Option<&Value>) -> SemanticSidecarStats {
+pub(super) fn semantic_status_file_stats(status_value: Option<&Value>) -> SemanticSidecarStats {
     if !semantic_status_file_model_matches(status_value) {
         return SemanticSidecarStats::default();
     }
@@ -484,17 +482,25 @@ pub(crate) fn semantic_worker_report(
     data_root: &Path,
     store: Option<&Store>,
 ) -> Result<SemanticWorkerReport> {
-    semantic_worker_report_with_count_mode(data_root, store, SemanticReportCountMode::ExactOnCacheMiss)
+    semantic_worker_report_with_count_mode(
+        data_root,
+        store,
+        SemanticReportCountMode::ExactOnCacheMiss,
+    )
 }
 
 pub(crate) fn semantic_worker_report_cached(
     data_root: &Path,
     store: Option<&Store>,
 ) -> Result<SemanticWorkerReport> {
-    semantic_worker_report_with_count_mode(data_root, store, SemanticReportCountMode::CachedOrStatusFile)
+    semantic_worker_report_with_count_mode(
+        data_root,
+        store,
+        SemanticReportCountMode::CachedOrStatusFile,
+    )
 }
 
-fn semantic_worker_report_with_count_mode(
+pub(super) fn semantic_worker_report_with_count_mode(
     data_root: &Path,
     store: Option<&Store>,
     count_mode: SemanticReportCountMode,
@@ -503,9 +509,10 @@ fn semantic_worker_report_with_count_mode(
     let status_file_model_matches = semantic_status_file_model_matches(status_value.as_ref());
     let current_status_value = status_value.as_ref().filter(|_| status_file_model_matches);
     let (searchable_items, searchable_items_known) = match store {
-        Some(store) if count_mode == SemanticReportCountMode::ExactOnCacheMiss => {
-            (store.event_embedding_document_count_cached_or_exact()?, true)
-        }
+        Some(store) if count_mode == SemanticReportCountMode::ExactOnCacheMiss => (
+            store.event_embedding_document_count_cached_or_exact()?,
+            true,
+        ),
         Some(store) => match store
             .cached_event_embedding_document_count()?
             .or_else(|| semantic_status_file_searchable_items(status_value.as_ref()))
@@ -525,7 +532,9 @@ fn semantic_worker_report_with_count_mode(
         if let Some(vector_store) = SemanticVectorStore::open_read_only(&vector_path)? {
             let dirty_items = vector_store.dirty_event_count()?;
             let mut stats = match count_mode {
-                SemanticReportCountMode::ExactOnCacheMiss => vector_store.cached_or_exact_stats()?,
+                SemanticReportCountMode::ExactOnCacheMiss => {
+                    vector_store.cached_or_exact_stats()?
+                }
                 SemanticReportCountMode::CachedOrStatusFile => vector_store
                     .cached_stats()?
                     .unwrap_or_else(|| semantic_status_file_stats(current_status_value)),
@@ -574,16 +583,16 @@ fn semantic_worker_report_with_count_mode(
         .saturating_sub(embedded_items)
         .max(dirty_items);
     let mut status = status_file_status.unwrap_or_else(|| {
-            if !searchable_items_known || store.is_none() {
-                "unknown".to_owned()
-            } else if searchable_items == 0 {
-                "empty".to_owned()
-            } else if queued_items_estimate == 0 {
-                "ready".to_owned()
-            } else {
-                "pending".to_owned()
-            }
-        });
+        if !searchable_items_known || store.is_none() {
+            "unknown".to_owned()
+        } else if searchable_items == 0 {
+            "empty".to_owned()
+        } else if queued_items_estimate == 0 {
+            "ready".to_owned()
+        } else {
+            "pending".to_owned()
+        }
+    });
     if store.is_some() {
         let live_status = if !searchable_items_known {
             "unknown".to_owned()
@@ -624,9 +633,8 @@ fn semantic_worker_report_with_count_mode(
         finished_at_ms: current_status_value.and_then(|value| json_i64(value, "finished_at_ms")),
         indexed_chunks: current_status_value.and_then(|value| json_usize(value, "indexed_chunks")),
         model_init_ms: current_status_value.and_then(|value| json_usize(value, "model_init_ms")),
-        last_error: sidecar_error.or_else(|| {
-            current_status_value.and_then(|value| json_string(value, "last_error"))
-        }),
+        last_error: sidecar_error
+            .or_else(|| current_status_value.and_then(|value| json_string(value, "last_error"))),
         searchable_items,
         searchable_items_known,
         embedded_items,
@@ -659,7 +667,7 @@ pub(crate) fn daemon_report(data_root: &Path, semantic_report: &SemanticWorkerRe
     daemon_report_with_disabled_status(data_root, semantic_report, true)
 }
 
-fn daemon_report_with_disabled_status(
+pub(super) fn daemon_report_with_disabled_status(
     data_root: &Path,
     semantic_report: &SemanticWorkerReport,
     disabled_overrides_lifecycle: bool,
@@ -691,6 +699,17 @@ fn daemon_report_with_disabled_status(
             .as_ref()
             .and_then(|value| json_u32(value, "pid"))
     };
+    let jobs = json!({
+        "history_refresh": daemon_history_refresh_job_report(
+            data_root,
+            disabled_overrides_lifecycle
+        ),
+        "semantic_index": daemon_semantic_job_report(
+            data_root,
+            semantic_report,
+            disabled_overrides_lifecycle
+        ),
+    });
     compact_json(json!({
         "status": status,
         "enabled": enabled,
@@ -718,22 +737,11 @@ fn daemon_report_with_disabled_status(
         "last_error": status_value.as_ref().and_then(|value| json_string(value, "last_error")),
         "lock_path": lock_path,
         "status_path": status_path,
-        "jobs": {
-            "history_refresh": daemon_history_refresh_job_report(
-                data_root,
-                disabled_overrides_lifecycle
-            ),
-            "semantic_index": daemon_semantic_job_report(
-                data_root,
-                semantic_report,
-                disabled_overrides_lifecycle
-            ),
-            "cloud_sync": daemon_cloud_sync_job_report(data_root),
-        },
+        "jobs": jobs,
     }))
 }
 
-fn daemon_history_refresh_job_report(
+pub(super) fn daemon_history_refresh_job_report(
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
 ) -> Value {
@@ -779,19 +787,19 @@ fn daemon_history_refresh_job_report(
     }))
 }
 
-fn daemon_enabled_for_status(data_root: &Path) -> bool {
+pub(super) fn daemon_enabled_for_status(data_root: &Path) -> bool {
     AppConfig::load(data_root)
         .map(|config| config.daemon.enabled)
         .unwrap_or_else(|_| AppConfig::default().daemon.enabled)
 }
 
-fn semantic_enabled_for_status(data_root: &Path) -> bool {
+pub(super) fn semantic_enabled_for_status(data_root: &Path) -> bool {
     AppConfig::load(data_root)
         .map(|config| config.semantic_search_enabled())
         .unwrap_or_else(|_| AppConfig::default().semantic_search_enabled())
 }
 
-fn daemon_semantic_job_report(
+pub(super) fn daemon_semantic_job_report(
     data_root: &Path,
     semantic_report: &SemanticWorkerReport,
     disabled_overrides_lifecycle: bool,
@@ -916,17 +924,41 @@ fn daemon_semantic_job_report(
         },
     }))
 }
+use std::{
+    env, fs,
+    io::{Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    process,
+    time::SystemTime,
+};
 
-fn daemon_cloud_sync_job_report(data_root: &Path) -> Value {
-    let status_value = read_daemon_job_status(&daemon_cloud_sync_job_path(data_root));
-    compact_json(json!({
-        "status": "disabled",
-        "enabled": false,
-        "reason": "not_configured",
-        "network_allowed": false,
-        "last_run_at_ms": status_value.as_ref().and_then(|value| json_i64(value, "last_run_at_ms")),
-        "last_upload_at_ms": Value::Null,
-        "queued_items_estimate": 0,
-        "last_error": Value::Null,
-    }))
-}
+use anyhow::{Context, Result};
+use ctx_history_core::utc_now;
+use ctx_history_store::Store;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::{commands::search::RefreshArg, compact_json, config::AppConfig};
+
+use super::{
+    health_search::{
+        create_private_dir_all, json_i64, json_string, json_u32, json_usize,
+        private_create_new_file, private_create_new_lock_file, private_open_existing_lock_file,
+        secure_private_file_permissions, semantic_embed_policy_status_json,
+        semantic_model_acquisition_status_json, semantic_model_cache_available,
+        semantic_status_needs_exact_sidecar_stats, semantic_worker_cache_dir,
+    },
+    model_contract::semantic_model_key,
+    query_service::semantic_query_service_supported,
+    reports::{SemanticReportCountMode, SemanticWorkerReport},
+    runtime_limits::{
+        DAEMON_DIR, DAEMON_HISTORY_REFRESH_JOB_FILE, DAEMON_JOBS_DIR, DAEMON_LOCK_FILE,
+        DAEMON_LOCK_STALE_AFTER_MS, DAEMON_SEMANTIC_JOB_FILE, DAEMON_STATUS_FILE,
+        PID_LOCK_ACQUIRE_ATTEMPTS, PID_LOCK_ACQUIRE_RETRY, PID_LOCK_INCOMPLETE_GRACE,
+        PID_LOCK_PROTOCOL, SEMANTIC_WORKER_LOCK_FILE, SEMANTIC_WORKER_STATUS_FILE,
+    },
+    vector_store::{SemanticSidecarStats, SemanticVectorStore},
+};
+
+#[cfg(unix)]
+use super::runtime_limits::DAEMON_QUERY_SOCKET_FILE;
