@@ -58,6 +58,12 @@ fn noninteractive_watch_appends_plain_frames() {
         )
     );
     assert!(!rendered.contains('\u{1b}'));
+    assert!(rendered.contains("0/12 history files complete"));
+    assert!(rendered.contains("indexing · 4 sessions · 40 items"));
+    assert!(rendered.contains("semantic disabled"));
+    assert!(rendered.contains("daemon   running"));
+    assert!(!rendered.contains("(partial)"));
+    assert!(!rendered.contains("running=true"));
 }
 
 #[test]

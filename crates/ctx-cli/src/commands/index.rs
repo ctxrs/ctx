@@ -448,37 +448,47 @@ fn index_watch_human(status: &Value) -> String {
     let lexical_items = usize_at(status, &["lexical", "indexed_items"]);
     let semantic_done = usize_at(status, &["semantic", "coverage", "embedded_items"]);
     let semantic_total = usize_at(status, &["semantic", "coverage", "searchable_items"]);
+    let lexical_activity = if lexical_pending == 0 {
+        "ready"
+    } else if bool_at(status, &["daemon", "running"]) {
+        "indexing"
+    } else {
+        "waiting for daemon"
+    };
     let mut lines = vec![format!(
-        "lexical  [{}] {}/{} units finalized ({})",
+        "lexical  [{}] {}/{} history files complete",
         progress_bar(lexical_done, lexical_total),
         format_count(lexical_done),
         format_count(lexical_total),
-        string_at(status, &["lexical", "status"], "unknown")
     )];
     lines.push(format!(
-        "         {} sessions, {} items indexed",
+        "         {lexical_activity} · {} sessions · {} items",
         format_count(lexical_sessions),
         format_count(lexical_items),
     ));
+    let semantic_status = semantic_job_status(status);
+    if semantic_status == "disabled" {
+        lines.push("semantic disabled".to_owned());
+    } else {
+        lines.push(format!(
+            "semantic [{}] {}/{} items · {} chunks · {}",
+            progress_bar(semantic_done, semantic_total),
+            format_count(semantic_done),
+            format_count(semantic_total),
+            format_count(usize_at(
+                status,
+                &["semantic", "coverage", "embedded_chunks"]
+            )),
+            semantic_status.replace('_', " ")
+        ));
+    }
     lines.push(format!(
-        "semantic [{}] {}/{} events, {} chunks ({})",
-        progress_bar(semantic_done, semantic_total),
-        format_count(semantic_done),
-        format_count(semantic_total),
-        format_count(usize_at(
-            status,
-            &["semantic", "coverage", "embedded_chunks"]
-        )),
-        semantic_job_status(status)
-    ));
-    lines.push(format!(
-        "daemon   {} running={}",
-        string_at(status, &["daemon", "status"], "unknown"),
-        bool_at(status, &["daemon", "running"])
+        "daemon   {}",
+        string_at(status, &["daemon", "status"], "unknown").replace('_', " ")
     ));
     let daemon_reason = string_at(status, &["daemon", "reason"], "");
     if !daemon_reason.is_empty() {
-        lines.push(format!("         reason={daemon_reason}"));
+        lines.push(format!("         {}", daemon_reason.replace('_', " ")));
     }
     lines.join("\n")
 }
