@@ -254,10 +254,18 @@ impl Store {
         if self.native_cold_write_scope_active() {
             return operation();
         }
-        // Cold NativePath groups retain only statements prepared while their
-        // typed write scope is active. An out-of-route Store mutation must
-        // discard those statements before SQLite re-runs the authorizer.
-        if self.native_cold_load_active.get() && self.native_path_group_token.get().is_some() {
+        // A NativePath group installs an authorizer whose write decision SQLite
+        // evaluates once, during `sqlite3_prepare_v2`, and then bakes into the
+        // statement. Statements prepared inside the group's typed write scope
+        // therefore carry an "allow" decision. NativePath groups retain those
+        // statements across write scopes, so an out-of-route Store mutation
+        // must discard them here and let SQLite re-run the authorizer, which
+        // denies the unowned write and poisons the group.
+        if self.native_path_group_token.get().is_some()
+            && !self
+                .native_path_mutation_scope
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             self.conn.flush_prepared_statement_cache();
         }
         let owns_transaction = self.conn.is_autocommit();
