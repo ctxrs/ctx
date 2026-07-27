@@ -142,9 +142,17 @@ def ensure_mock_store(data_root):
         connection.executescript(
             '''
             CREATE TABLE IF NOT EXISTS sync_cursors (id TEXT PRIMARY KEY, cursor TEXT);
+            CREATE TABLE IF NOT EXISTS capture_source_provider_routes (id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS event_aliases (alias_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS native_path_source_generation_entities (
+                id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS native_path_source_generations (id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS provider_source_locators (id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS session_aliases (alias_id TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS capture_sources (
                 id TEXT PRIMARY KEY, source_identity TEXT);
-            CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, role_hint TEXT);
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY, role_hint TEXT, is_primary INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS projection_journal_entities (
                 stable_entity_id TEXT PRIMARY KEY);

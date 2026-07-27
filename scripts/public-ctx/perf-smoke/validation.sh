@@ -177,6 +177,24 @@ def reshape_data_root_to_released_store(data_root: Path) -> dict[str, object]:
         before = {}
         for table in ("events", "sessions", "capture_sources"):
             before[table] = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        # Tables the current schema has that a released v0.25 store does not,
+        # taken by diffing schema/ddl.rs against a real v0.25 database. v47
+        # creates them empty, so the first 0.26 import has nothing to resolve
+        # against and cannot reuse rows it did not write.
+        for table in (
+            "capture_source_provider_routes",
+            "event_aliases",
+            "native_path_source_generation_entities",
+            "native_path_source_generations",
+            "provider_source_locators",
+            "session_aliases",
+        ):
+            try:
+                connection.execute(f"DELETE FROM {table}")
+            except sqlite3.OperationalError as error:
+                raise HarnessError(
+                    f"released-store reshape could not clear {table}: {error}"
+                ) from error
         connection.execute("DELETE FROM sync_cursors")
         connection.execute("DELETE FROM projection_journal_entities")
         connection.execute("DELETE FROM projection_journal_chunks")
@@ -189,7 +207,10 @@ def reshape_data_root_to_released_store(data_root: Path) -> dict[str, object]:
             "UPDATE capture_sources "
             "SET source_identity = '46b1b4bc-66b2-773d-89ef-30b895fef4a2'"
         )
-        connection.execute("UPDATE sessions SET role_hint = NULL")
+        connection.execute(
+            "UPDATE sessions SET role_hint = "
+            "CASE WHEN is_primary = 1 THEN 'primary' ELSE 'subagent' END"
+        )
         connection.commit()
     finally:
         connection.close()
