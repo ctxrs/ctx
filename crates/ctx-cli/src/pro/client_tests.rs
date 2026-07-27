@@ -1326,7 +1326,7 @@ fn dual_namespace_graph_key_deletion_uses_each_exact_vault_authorization() {
         CredentialVaultNamespace::Staging,
         32,
         staging_issuer,
-        "staging-2026-07-v2",
+        "staging-2026-07-v3",
     );
 
     let mismatch = StoredAuthorizationProvider::load_for_graph_key_deletion(

@@ -18,7 +18,7 @@ const CHANNEL_ENV: &str = "CTX_PRO_CHANNEL";
 const STAGING_ACCESS_CLIENT_ID_ENV: &str = "CTX_PRO_STAGING_ACCESS_CLIENT_ID";
 const STAGING_ACCESS_CLIENT_SECRET_ENV: &str = "CTX_PRO_STAGING_ACCESS_CLIENT_SECRET";
 const STAGING_ENTITLEMENT_ISSUER: &str = "https://pro-staging.ctx.rs";
-const STAGING_ENTITLEMENT_KEY_IDS: &[&str] = &["staging-2026-07-v1", "staging-2026-07-v2"];
+const STAGING_ENTITLEMENT_KEY_IDS: &[&str] = &["staging-2026-07-v3"];
 const PRODUCTION_ENTITLEMENT_ISSUER: &str = "https://pro.ctx.rs";
 
 #[derive(Debug, Clone, Copy)]
@@ -213,7 +213,7 @@ mod tests {
             .unwrap();
         assert!(config
             .entitlement_trust
-            .validate_identity(STAGING_ENTITLEMENT_ISSUER, "staging-2026-07-v2")
+            .validate_identity(STAGING_ENTITLEMENT_ISSUER, "staging-2026-07-v3")
             .is_err());
     }
 
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(config.release_trust.channel, ReleaseChannel::Staging);
         config
             .entitlement_trust
-            .validate_identity(STAGING_ENTITLEMENT_ISSUER, "staging-2026-07-v2")
+            .validate_identity(STAGING_ENTITLEMENT_ISSUER, "staging-2026-07-v3")
             .unwrap();
         assert!(config
             .entitlement_trust

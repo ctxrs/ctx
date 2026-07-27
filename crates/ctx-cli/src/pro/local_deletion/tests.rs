@@ -143,7 +143,7 @@ impl CredentialRecordReader for MismatchedKeyAndEntitlementReader {
                     grant: EntitlementGrant {
                         schema_version: ENTITLEMENT_SCHEMA_VERSION,
                         issuer: "https://pro-staging.ctx.rs".to_owned(),
-                        key_id: "staging-2026-07-v2".to_owned(),
+                        key_id: "staging-2026-07-v3".to_owned(),
                         grant_id: "grant-mismatch".to_owned(),
                         subject: "subject".to_owned(),
                         account_id: "account".to_owned(),

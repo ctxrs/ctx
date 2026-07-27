@@ -1,12 +1,18 @@
 use std::{
     ffi::OsString,
-    fs::{self, File},
-    io::Read as _,
+    fs::{self, File, OpenOptions},
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
+#[cfg(windows)]
+use ctx_history_core::platform_security::restrict_private_executable;
+use ctx_history_core::platform_security::{
+    restrict_private_directory, verify_private_directory as verify_platform_private_directory,
+};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use super::lifecycle::lifecycle_manifest::{ReleaseChannel, MAX_ARTIFACT_BYTES};
 
@@ -19,8 +25,26 @@ const HELPER_CHANNEL_ENV: &str = "CTX_PRO_QUALIFICATION_HELPER_CHANNEL";
 
 #[derive(Debug)]
 pub(crate) struct QualificationHelperBundle {
+    stage: QualificationStage,
+    #[cfg(ctx_pro_qualification)]
+    source_path: PathBuf,
     path: PathBuf,
     sha256: String,
+}
+
+#[derive(Debug)]
+struct QualificationStage {
+    directory: PathBuf,
+    helper: PathBuf,
+    helper_handle: Option<File>,
+}
+
+impl Drop for QualificationStage {
+    fn drop(&mut self) {
+        drop(self.helper_handle.take());
+        let _ = fs::remove_file(&self.helper);
+        let _ = fs::remove_dir(&self.directory);
+    }
 }
 
 impl QualificationHelperBundle {
@@ -74,10 +98,16 @@ impl QualificationHelperBundle {
                 "invalid_request: qualification helper channel does not match the selected commercial channel"
             );
         }
-        let path = path
-            .canonicalize()
-            .context("invalid_request: resolve qualification helper path")?;
-        let bundle = Self { path, sha256 };
+        let source = open_verified_source(&path)?;
+        let stage = stage_verified_helper(source, &sha256)?;
+        let staged_path = stage.helper.clone();
+        let bundle = Self {
+            stage,
+            #[cfg(ctx_pro_qualification)]
+            source_path: path,
+            path: staged_path,
+            sha256,
+        };
         bundle.verify()?;
         Ok(Some(bundle))
     }
@@ -87,36 +117,239 @@ impl QualificationHelperBundle {
         Ok(&self.path)
     }
 
+    #[cfg(ctx_pro_qualification)]
+    pub(crate) fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
     fn verify(&self) -> Result<()> {
-        let metadata = fs::symlink_metadata(&self.path)
-            .context("invalid_request: inspect qualification helper")?;
-        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-            bail!("invalid_request: qualification helper must be a regular non-symlink file");
-        }
-        verify_private_executable(&self.path, &metadata)?;
-        if metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES {
-            bail!("invalid_request: qualification helper size is outside allowed bounds");
-        }
-        let file = open_without_following_symlinks(&self.path)
-            .context("invalid_request: open qualification helper")?;
-        let opened = file
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: qualification stage is invalid"))?;
+        verify_platform_private_directory(parent)
+            .context("invalid_request: qualification stage permissions are unsafe")?;
+        let retained = self
+            .stage
+            .helper_handle
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: qualification stage is unavailable"))?
             .metadata()
-            .context("invalid_request: inspect opened qualification helper")?;
-        if !same_file_identity(&metadata, &opened) {
+            .context("invalid_request: inspect retained qualification helper")?;
+        let mut named = open_verified_helper(&self.path)?;
+        let opened = named
+            .metadata()
+            .context("invalid_request: inspect staged qualification helper")?;
+        if !same_file_identity(&retained, &opened) {
             bail!("invalid_request: qualification helper changed during validation");
         }
-        let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
-        file.take(MAX_ARTIFACT_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .context("invalid_request: hash qualification helper")?;
-        if bytes.len() as u64 != opened.len() || bytes.len() as u64 > MAX_ARTIFACT_BYTES {
-            bail!("invalid_request: qualification helper changed during validation");
-        }
-        if format!("{:x}", Sha256::digest(&bytes)) != self.sha256 {
-            bail!("invalid_request: qualification helper SHA-256 does not match");
-        }
+        verify_reader_digest(&mut named, opened.len(), &self.sha256)?;
         Ok(())
     }
+}
+
+struct VerifiedSource {
+    file: File,
+    size: u64,
+}
+
+fn open_verified_source(path: &Path) -> Result<VerifiedSource> {
+    let metadata =
+        fs::symlink_metadata(path).context("invalid_request: inspect qualification helper")?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("invalid_request: qualification helper must be a regular non-symlink file");
+    }
+    verify_private_executable(path, &metadata)?;
+    if metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES {
+        bail!("invalid_request: qualification helper size is outside allowed bounds");
+    }
+    let file = open_without_following_symlinks(path)
+        .context("invalid_request: open qualification helper")?;
+    let opened = file
+        .metadata()
+        .context("invalid_request: inspect opened qualification helper")?;
+    if !same_file_identity(&metadata, &opened) {
+        bail!("invalid_request: qualification helper changed during validation");
+    }
+    Ok(VerifiedSource {
+        file,
+        size: opened.len(),
+    })
+}
+
+fn stage_verified_helper(mut source: VerifiedSource, sha256: &str) -> Result<QualificationStage> {
+    let directory = create_stage_directory()?;
+    let path = directory.join(if cfg!(windows) {
+        "ctx-pro-qualification.exe"
+    } else {
+        "ctx-pro-qualification"
+    });
+    let mut stage = QualificationStage {
+        directory,
+        helper: path.clone(),
+        helper_handle: None,
+    };
+    restrict_private_directory(&stage.directory)
+        .context("invalid_request: secure qualification helper stage")?;
+    verify_platform_private_directory(&stage.directory)
+        .context("invalid_request: qualification stage permissions are unsafe")?;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .context("invalid_request: create staged qualification helper")?;
+    let mut digest = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source
+            .file
+            .read(&mut buffer)
+            .context("invalid_request: read qualification helper")?;
+        if read == 0 {
+            break;
+        }
+        copied = copied
+            .checked_add(read as u64)
+            .filter(|copied| *copied <= MAX_ARTIFACT_BYTES)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid_request: qualification helper size is outside allowed bounds"
+                )
+            })?;
+        digest.update(&buffer[..read]);
+        file.write_all(&buffer[..read])
+            .context("invalid_request: write staged qualification helper")?;
+    }
+    if copied != source.size {
+        bail!("invalid_request: qualification helper changed during validation");
+    }
+    if format!("{:x}", digest.finalize()) != sha256 {
+        bail!("invalid_request: qualification helper SHA-256 does not match");
+    }
+    file.flush()
+        .context("invalid_request: flush staged qualification helper")?;
+    file.sync_all()
+        .context("invalid_request: sync staged qualification helper")?;
+    drop(file);
+
+    make_staged_helper_read_only(&path)?;
+    let mut helper_handle = open_verified_helper(&path)?;
+    let staged_metadata = helper_handle
+        .metadata()
+        .context("invalid_request: inspect staged qualification helper")?;
+    verify_reader_digest(&mut helper_handle, staged_metadata.len(), sha256)?;
+    sync_directory(&stage.directory)?;
+    stage.helper_handle = Some(helper_handle);
+    Ok(stage)
+}
+
+#[cfg(unix)]
+fn make_staged_helper_read_only(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))
+        .context("invalid_request: make staged qualification helper read-only")
+}
+
+#[cfg(windows)]
+fn make_staged_helper_read_only(path: &Path) -> Result<()> {
+    restrict_private_executable(path).context("invalid_request: secure staged qualification helper")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn make_staged_helper_read_only(_path: &Path) -> Result<()> {
+    bail!("invalid_request: qualification helpers are unsupported on this platform")
+}
+
+fn open_verified_helper(path: &Path) -> Result<File> {
+    let metadata =
+        fs::symlink_metadata(path).context("invalid_request: inspect qualification helper")?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("invalid_request: qualification helper must be a regular non-symlink file");
+    }
+    verify_private_executable(path, &metadata)?;
+    if metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES {
+        bail!("invalid_request: qualification helper size is outside allowed bounds");
+    }
+    let file = open_without_following_symlinks(path)
+        .context("invalid_request: open qualification helper")?;
+    let opened = file
+        .metadata()
+        .context("invalid_request: inspect opened qualification helper")?;
+    if !same_file_identity(&metadata, &opened) {
+        bail!("invalid_request: qualification helper changed during validation");
+    }
+    Ok(file)
+}
+
+fn verify_reader_digest(reader: &mut File, expected_size: u64, sha256: &str) -> Result<()> {
+    let mut digest = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .context("invalid_request: hash qualification helper")?;
+        if read == 0 {
+            break;
+        }
+        size = size
+            .checked_add(read as u64)
+            .filter(|size| *size <= MAX_ARTIFACT_BYTES)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid_request: qualification helper size is outside allowed bounds"
+                )
+            })?;
+        digest.update(&buffer[..read]);
+    }
+    if size != expected_size {
+        bail!("invalid_request: qualification helper changed during validation");
+    }
+    if format!("{:x}", digest.finalize()) != sha256 {
+        bail!("invalid_request: qualification helper SHA-256 does not match");
+    }
+    Ok(())
+}
+
+fn create_stage_directory() -> Result<PathBuf> {
+    for _ in 0..16 {
+        let path =
+            std::env::temp_dir().join(format!("ctx-pro-qualification-{}", Uuid::new_v4().simple()));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match builder.create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).context("invalid_request: create qualification helper stage")
+            }
+        }
+    }
+    bail!("invalid_request: create unique qualification helper stage")
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .context("invalid_request: sync qualification helper stage")
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn open_without_following_symlinks(path: &Path) -> std::io::Result<File> {
@@ -126,6 +359,17 @@ fn open_without_following_symlinks(path: &Path) -> std::io::Result<File> {
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     options.open(path)
 }
@@ -189,7 +433,7 @@ mod tests {
     fn helper() -> (tempfile::TempDir, PathBuf, String) {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("ctx-pro");
-        fs::write(&path, b"qualification helper").unwrap();
+        fs::write(&path, b"#!/bin/sh\nprintf 'verified helper\\n'\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let digest = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
         (root, path, digest)
@@ -218,7 +462,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn exact_private_helper_is_accepted_but_tampering_is_rejected() {
+    fn source_path_replacement_cannot_change_the_staged_helper() {
+        let (_root, path, digest) = helper();
+        let bundle = QualificationHelperBundle::from_values(
+            Some(path.clone().into_os_string()),
+            value(&digest),
+            value("stable"),
+            ReleaseChannel::Stable,
+        )
+        .unwrap()
+        .unwrap();
+        let staged = bundle.verified_path().unwrap().to_path_buf();
+        assert_ne!(staged, path);
+        assert_eq!(
+            fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o500
+        );
+
+        let original = path.with_extension("original");
+        fs::rename(&path, &original).unwrap();
+        fs::write(&path, b"#!/bin/sh\nprintf 'attacker replacement\\n'\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output = std::process::Command::new(bundle.verified_path().unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"verified helper\n");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("attacker"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_helper_tampering_is_rejected() {
         let (_root, path, digest) = helper();
         let bundle = QualificationHelperBundle::from_values(
             Some(path.into_os_string()),
@@ -228,13 +504,76 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        bundle.verified_path().unwrap();
-        fs::write(bundle.verified_path().unwrap(), b"tampered helper").unwrap();
+        let staged = bundle.verified_path().unwrap().to_path_buf();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&staged, b"tampered helper").unwrap();
         assert!(bundle
             .verified_path()
             .unwrap_err()
             .to_string()
             .contains("SHA-256 does not match"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_path_replacement_is_rejected_against_the_retained_inode() {
+        let (root, path, digest) = helper();
+        let bundle = QualificationHelperBundle::from_values(
+            Some(path.into_os_string()),
+            value(&digest),
+            value("stable"),
+            ReleaseChannel::Stable,
+        )
+        .unwrap()
+        .unwrap();
+        let staged = bundle.verified_path().unwrap().to_path_buf();
+        let displaced = root.path().join("displaced-staged-helper");
+        fs::rename(&staged, &displaced).unwrap();
+        fs::write(&staged, b"#!/bin/sh\nprintf 'replacement\\n'\n").unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o500)).unwrap();
+
+        assert!(bundle
+            .verified_path()
+            .unwrap_err()
+            .to_string()
+            .contains("changed during validation"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_stage_is_removed_when_the_bundle_is_dropped() {
+        let (_root, path, digest) = helper();
+        let staged;
+        {
+            let bundle = QualificationHelperBundle::from_values(
+                Some(path.into_os_string()),
+                value(&digest),
+                value("stable"),
+                ReleaseChannel::Stable,
+            )
+            .unwrap()
+            .unwrap();
+            staged = bundle.verified_path().unwrap().to_path_buf();
+            assert!(staged.exists());
+        }
+        assert!(!staged.exists());
+        assert!(!staged.parent().unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_source_is_rejected() {
+        let (_root, path, digest) = helper();
+        let link = path.with_extension("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let error = QualificationHelperBundle::from_values(
+            Some(link.into_os_string()),
+            value(&digest),
+            value("stable"),
+            ReleaseChannel::Stable,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("regular non-symlink file"));
     }
 
     #[cfg(unix)]

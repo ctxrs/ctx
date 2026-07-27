@@ -37,7 +37,7 @@ fn qualification_command(
             "blame",
             "commit",
             "0123456789abcdef",
-            "--json",
+            "--format=json",
         ]);
     command
 }
@@ -82,7 +82,7 @@ fn qualification_configuration_is_atomic_and_channel_bound() {
             "blame",
             "commit",
             "0123456789abcdef",
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
