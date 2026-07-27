@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn large_source_splits_exact_journal_envelopes_and_replays_as_noop() {
+fn large_source_publishes_exact_journal_envelopes_and_replays_as_noop() {
     const EVENT_COUNT: usize = 512;
     const BODY_BYTES: usize = 32 * 1024;
 
@@ -321,4 +321,135 @@ fn rejection_source_label_is_path_free_escaped_and_bounded() {
     assert!(!label.contains('\n'));
     assert!(label.contains("\\n"));
     assert!(label.ends_with("..."));
+}
+
+/// Rewrites an already imported store into the shape a released v0.25 store
+/// has after it migrates to the current schema.
+///
+/// A released store has no projection journal at all, no NativePath
+/// publication cursors, and capture-source identities that predate the current
+/// canonical identity. Its session rows also predate the current canonical
+/// actor columns, so the upgrading import rewrites the actor that every event
+/// observation cites.
+fn released_store_shape(store: Store, database: &Path) {
+    // v0.25 had no projection journal, so it also had no writer fence.
+    store.disable_projection_journal().unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(database).unwrap();
+    conn.execute("DELETE FROM sync_cursors", []).unwrap();
+    conn.execute(
+        "UPDATE capture_sources SET source_identity = '46b1b4bc-66b2-773d-89ef-30b895fef4a2'",
+        [],
+    )
+    .unwrap();
+    conn.execute("UPDATE sessions SET role_hint = NULL", [])
+        .unwrap();
+}
+
+#[test]
+fn released_store_upgrade_import_publishes_and_then_replays_as_a_noop() {
+    const EVENT_COUNT: usize = 512;
+    const BODY_BYTES: usize = 32 * 1024;
+    const SESSION_ID: &str = "00000000-0000-0000-0000-000000000025";
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let source_root = temp.path().join("sessions");
+    std::fs::create_dir(&source_root).unwrap();
+    let source = source_root.join(format!("rollout-2026-01-01T00-00-00-{SESSION_ID}.jsonl"));
+    let mut contents = serde_json::to_string(&serde_json::json!({
+        "timestamp": "2026-01-01T00:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": SESSION_ID,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": "/workspace",
+            "source": "cli"
+        }
+    }))
+    .unwrap();
+    contents.push('\n');
+    for index in 0..EVENT_COUNT {
+        contents.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "timestamp": "2026-01-01T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": format!("upgrade-arm-{index}-{}", "x".repeat(BODY_BYTES))
+                    }]
+                }
+            }))
+            .unwrap(),
+        );
+        contents.push('\n');
+    }
+    std::fs::write(&source, contents).unwrap();
+
+    let database = temp.path().join("work.sqlite");
+    let options = CodexSessionImportOptions {
+        machine_id: "released-upgrade-machine".to_owned(),
+        source_path: Some(source_root.clone()),
+        imported_at: "2026-01-02T00:00:00Z".parse().unwrap(),
+        ..CodexSessionImportOptions::default()
+    };
+
+    let mut released = Store::open(&database).unwrap();
+    let first = import_codex_native_session_root(&source_root, &mut released, options.clone())
+        .expect("released import");
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, EVENT_COUNT);
+    released_store_shape(released, &database);
+
+    let mut store = Store::open(&database).unwrap();
+    let upgrade = import_codex_native_session_root(&source_root, &mut store, options.clone())
+        .expect("upgrade import must not fail on a released store");
+    assert_eq!(upgrade.failed, 0);
+    assert_eq!(
+        upgrade.imported_events + upgrade.skipped_events,
+        EVENT_COUNT
+    );
+
+    // A second run over the unchanged corpus is a no-op.
+    let replay = import_codex_native_session_root(&source_root, &mut store, options)
+        .expect("repeat import after upgrade");
+    assert_eq!(replay.imported_events, 0);
+    assert_eq!(replay.imported_sessions, 0);
+    assert_eq!(replay.failed, 0);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        conn.prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |_| Ok(()))
+            .unwrap()
+            .count(),
+        0
+    );
+    let (events, distinct_events) = conn
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT id) FROM events WHERE deleted_at_ms IS NULL",
+            [],
+            |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(events, distinct_events);
+    assert!(events >= EVENT_COUNT, "upgrade lost canonical events");
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM projection_journal_chunks",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    );
 }

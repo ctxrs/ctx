@@ -7,50 +7,18 @@ pub(in crate::provider::codex::nativepath) struct CodexNativeRootPublication {
     pub(in super::super) skipped_events: usize,
 }
 
-impl CodexNativeRootPublication {
-    fn merge(mut self, later: Self) -> Self {
-        for cursor in later.published_cursors {
-            self.published_cursors
-                .retain(|current| !cursor_key_matches(current, &cursor));
-            self.published_cursors.push(cursor);
-        }
-        self.imported_events = self.imported_events.saturating_add(later.imported_events);
-        self.skipped_events = self.skipped_events.saturating_add(later.skipped_events);
-        self
-    }
-}
-
+/// Publishes one already bounded Codex root group.
+///
+/// Group membership is decided entirely by the Store's admission bounds, which
+/// the producer respects when it merges windows. The Store no longer rejects an
+/// admitted group for derived projection-journal volume, so there is no
+/// retry-by-splitting ladder here: a group that is admitted commits.
 pub(super) fn publish_root_group_bounded(
     store: &Store,
     bulk_guard: &EventSearchBulkGuard,
-    mut chunks: Vec<CodexNativeRootChunk>,
+    chunks: Vec<CodexNativeRootChunk>,
 ) -> VerticalResult<CodexNativeRootPublication> {
-    let mut journal_overflow_at = None;
-    match publish_root_group_once(store, bulk_guard, &chunks, &mut journal_overflow_at) {
-        Ok(checkpoint) => Ok(checkpoint),
-        Err(error) => match journal_overflow_at {
-            Some(split_at) if split_at > 0 => {
-                let remainder = chunks.split_off(split_at);
-                // Store rolled the overflowing transaction back. Commit the
-                // accepted source prefix, then retry from the rejected source.
-                let prefix = publish_root_group_bounded(store, bulk_guard, chunks)?;
-                let remainder = publish_root_group_bounded(store, bulk_guard, remainder)?;
-                Ok(prefix.merge(remainder))
-            }
-            Some(0) => {
-                let chunk = chunks.remove(0);
-                let Some((left, mut right)) = chunk.split_at_page_boundary()? else {
-                    return Err(error);
-                };
-                let left = publish_root_group_bounded(store, bulk_guard, vec![left])?;
-                right.bind_exact_expected_cursor(&left)?;
-                chunks.insert(0, right);
-                let remainder = publish_root_group_bounded(store, bulk_guard, chunks)?;
-                Ok(left.merge(remainder))
-            }
-            _ => Err(error),
-        },
-    }
+    publish_root_group_once(store, bulk_guard, &chunks)
 }
 
 pub(super) fn cursor_key_matches(left: &SyncCursor, right: &SyncCursor) -> bool {
@@ -74,7 +42,6 @@ pub(super) fn publish_root_group_once(
     store: &Store,
     bulk_guard: &EventSearchBulkGuard,
     chunks: &[CodexNativeRootChunk],
-    journal_overflow_at: &mut Option<usize>,
 ) -> VerticalResult<CodexNativeRootPublication> {
     let pages = chunks.iter().map(|chunk| chunk.pages.len()).sum::<usize>();
     let serialized_bytes = chunks
@@ -101,29 +68,22 @@ pub(super) fn publish_root_group_once(
     let mut write = CodexNativeCoreWrite::default();
     match classification {
         NativePathCursorSetClassification::AllExpected => {
-            for (index, chunk) in chunks.iter().enumerate() {
-                match write_raw_core(store, &mut publication, &chunk.context, &chunk.pages) {
-                    Ok(chunk_write) => {
-                        if chunk.expected_store_cursor.is_none()
-                            && chunk.pages.iter().all(|page| page.core_rows.is_empty())
-                        {
-                            return Err(CodexNativeVerticalError::CorruptFrontier(
-                                "fresh Codex source cannot publish cursor-only authority",
-                            ));
-                        }
-                        write.imported_events = write
-                            .imported_events
-                            .saturating_add(chunk_write.imported_events);
-                        write.skipped_events = write
-                            .skipped_events
-                            .saturating_add(chunk_write.skipped_events);
-                    }
-                    Err(error) => {
-                        *journal_overflow_at =
-                            is_exact_journal_group_overflow(&error).then_some(index);
-                        return Err(error);
-                    }
+            for chunk in chunks {
+                let chunk_write =
+                    write_raw_core(store, &mut publication, &chunk.context, &chunk.pages)?;
+                if chunk.expected_store_cursor.is_none()
+                    && chunk.pages.iter().all(|page| page.core_rows.is_empty())
+                {
+                    return Err(CodexNativeVerticalError::CorruptFrontier(
+                        "fresh Codex source cannot publish cursor-only authority",
+                    ));
                 }
+                write.imported_events = write
+                    .imported_events
+                    .saturating_add(chunk_write.imported_events);
+                write.skipped_events = write
+                    .skipped_events
+                    .saturating_add(chunk_write.skipped_events);
             }
             publication.prepare_journal_checkpoint()?;
             for chunk in chunks {
@@ -174,16 +134,4 @@ pub(super) fn publish_root_group_once(
         imported_events: write.imported_events,
         skipped_events: write.skipped_events,
     })
-}
-
-pub(super) fn is_exact_journal_group_overflow(error: &CodexNativeVerticalError) -> bool {
-    matches!(
-        error,
-        CodexNativeVerticalError::Store(
-            ctx_history_store::StoreError::NativePathGroupLimitExceeded {
-                limit: "actual journal records" | "uncompressed journal encoding bytes",
-                ..
-            }
-        )
-    )
 }

@@ -264,37 +264,3 @@ pub(super) fn build_next_store_cursor(
         options.imported_at,
     )?)
 }
-
-pub(super) fn build_context_store_cursor(
-    context: &CodexPublicationContext,
-    frontier: &CodexNativeFrontier,
-    phase: CodexNativeCursorPhase,
-) -> VerticalResult<SyncCursor> {
-    let parser_checkpoint =
-        BoundedParserCheckpoint::from_serializable(&CodexNativeStoreCursorWire {
-            version: CODEX_NATIVE_CURSOR_VERSION,
-            canonical_source_key: context.canonical_source_key.clone(),
-            generation: context.generation,
-            checkpoint: context.checkpoint.clone(),
-            certified_observation: Some(context.certified_observation.clone()),
-            phase,
-            retained_events: context.retained_events,
-            skipped_events: context.skipped_events,
-        })?;
-    let certified = CertifiedProviderCursor::new(
-        context.source_revision.clone(),
-        capture_revision(),
-        policy_revision(),
-        NativePosition::new(CODEX_NATIVE_POSITION_KIND, encode_frontier(frontier)?)
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
-        parser_checkpoint,
-    )?
-    .with_rejected_records(context.rejected_records);
-    Ok(certified_provider_sync_cursor(
-        CaptureProvider::Codex,
-        &context.options.machine_id,
-        context.cursor_stream.clone(),
-        &certified,
-        context.options.imported_at,
-    )?)
-}
