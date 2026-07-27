@@ -671,13 +671,15 @@ fn anonymous_trial_credentials_and_challenges_are_strictly_bounded() {
     assert!(error.to_string().starts_with("invalid_response:"));
     assert!(!error.to_string().contains(&oversized));
 
-    let mut challenge = TrialChallenge {
-        challenge_id: "challenge-123".to_owned(),
-        challenge_base64url: "a".repeat(43),
-        expires_at_unix: unix_time().unwrap() + 60,
-        artifact_access_token: "a".repeat(32),
-    };
+    let mut challenge: TrialChallenge = serde_json::from_value(serde_json::json!({
+        "challenge_id": "challenge-123",
+        "challenge_base64url": "a".repeat(43),
+        "expires_at_unix": unix_time().unwrap() + 60,
+        "trial_activation_token": "a".repeat(32),
+    }))
+    .unwrap();
     challenge.validate().unwrap();
+    assert_eq!(challenge.trial_activation_token, "a".repeat(32));
 
     challenge.expires_at_unix = unix_time().unwrap() - 1;
     assert!(challenge.validate().is_err());
@@ -685,7 +687,7 @@ fn anonymous_trial_credentials_and_challenges_are_strictly_bounded() {
 
 #[test]
 fn anonymous_trial_response_debug_redacts_credentials() {
-    let challenge_token = "challenge-token-must-not-appear";
+    let trial_activation_token = "trial-activation-token-must-not-appear";
     let activation_token = "activation-token-must-not-appear";
     let refresh_token = "refresh-token-must-not-appear";
     let entitlement = trial_entitlement();
@@ -697,10 +699,10 @@ fn anonymous_trial_response_debug_redacts_credentials() {
                     challenge_id: "challenge-123".to_owned(),
                     challenge_base64url: "a".repeat(43),
                     expires_at_unix: unix_time().unwrap() + 60,
-                    artifact_access_token: challenge_token.to_owned(),
+                    trial_activation_token: trial_activation_token.to_owned(),
                 }
             ),
-            challenge_token,
+            trial_activation_token,
         ),
         (
             format!(
@@ -729,10 +731,13 @@ fn anonymous_trial_response_debug_redacts_credentials() {
         ),
     ];
 
-    for (debug, token) in responses {
+    for (index, (debug, token)) in responses.into_iter().enumerate() {
         assert!(debug.contains("[REDACTED]"), "{debug}");
         assert!(!debug.contains(token), "{debug}");
         assert!(!debug.contains("entitlement-signature-canary"), "{debug}");
+        if index == 0 {
+            assert!(debug.contains("trial_activation_token"), "{debug}");
+        }
     }
 }
 

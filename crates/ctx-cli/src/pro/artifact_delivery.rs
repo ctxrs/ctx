@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -12,29 +12,21 @@ use ctx_history_core::platform_security::{
 };
 use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde::Deserialize;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-use super::{
-    commercial_api::{commercial_http_error, COMMERCIAL_ACCEPT},
-    request_identity::new_idempotency_key,
-};
-
 use super::lifecycle::lifecycle_manifest::{
-    platform_target, verified_manifest_for_trust, ProManifest, ReleaseTrust, MAX_ARTIFACT_BYTES,
-    MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
+    parse_release_version, platform_target, verified_manifest_for_trust, ProManifest, ReleaseTrust,
+    MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
 };
 use super::lifecycle::ProInstallArgs;
 
-const MAX_API_RESPONSE_BYTES: u64 = 96 * 1024;
-const MAX_DOWNLOAD_AUTHORIZATION_BYTES: usize = 4096;
-const MAX_DOWNLOAD_LIFETIME_SECONDS: u64 = 5 * 60;
+const RELEASE_ACCEPT: &str = "application/json, application/problem+json";
+const MAX_RELEASE_RESPONSE_BYTES: u64 = 96 * 1024;
 
-pub(crate) struct CommercialArtifactAuth<'a> {
-    pub(crate) api_base_url: &'a str,
-    pub(crate) authorization: &'a str,
+pub(crate) struct ArtifactDeliveryConfig<'a> {
+    pub(crate) release_origin: &'a str,
     pub(crate) release_trust: ReleaseTrust,
 }
 
@@ -81,88 +73,55 @@ struct ApiSuccess<T> {
     data: T,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DownloadAuthorization {
-    schema_version: u32,
-    channel: String,
-    version: String,
-    target: String,
-    build_identity: String,
-    protocol_fingerprint: String,
-    artifact_object: String,
-    url: String,
-    authorization: String,
-    expires_at_unix: u64,
-    manifest_sha256: String,
-    artifact_size: u64,
-    artifact_sha256: String,
+#[derive(Debug, thiserror::Error)]
+enum ReleaseReadFailure {
+    #[error("service_unavailable: anonymous release {operation} failed")]
+    Transport { operation: &'static str },
+    #[error("rate_limited: anonymous release {operation} returned HTTP 429")]
+    RateLimited { operation: &'static str },
+    #[error("service_unavailable: anonymous release {operation} returned HTTP {status}")]
+    Transient {
+        operation: &'static str,
+        status: u16,
+    },
+    #[error("invalid_response: anonymous release {operation} returned HTTP {status}")]
+    Rejected {
+        operation: &'static str,
+        status: u16,
+    },
 }
 
 pub(crate) fn fetch_latest(
     data_root: &Path,
-    commercial_auth: CommercialArtifactAuth<'_>,
-    current_version: Option<&str>,
+    installed_version: Option<&str>,
+    config: ArtifactDeliveryConfig<'_>,
 ) -> Result<VerifiedArtifactBundle> {
-    validate_auth(&commercial_auth)?;
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(60))
         .timeout_write(Duration::from_secs(15))
         .build();
-    let manifest_url = api_url(commercial_auth.api_base_url, "/v1/artifacts/manifest")?;
-    let envelope_bytes = post_json_bounded(
-        &agent,
-        &manifest_url,
-        commercial_auth.authorization,
-        &json!({
-            "schema_version": 1,
-            "channel": commercial_auth.release_trust.channel.wire_name(),
-            "target": platform_target(),
-            "current_version": current_version,
-            "protocol_version": ctx_pro_host_protocol::PROTOCOL_VERSION,
-            "protocol_fingerprint": ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
-        }),
+    let target = platform_target();
+    let manifest_url = manifest_url(
+        config.release_origin,
+        config.release_trust.channel.wire_name(),
+        &target,
     )?;
+    let envelope_bytes = get_manifest_bounded(&agent, &manifest_url)?;
     let envelope: ApiSuccess<ManifestEnvelope> = serde_json::from_slice(&envelope_bytes)
         .context("invalid_response: parse artifact manifest response")?;
     validate_success_envelope(&envelope)?;
     let (manifest, manifest_bytes, signature_bytes) =
-        verify_envelope(envelope.data, commercial_auth.release_trust)?;
-    let manifest_digest = format!("{:x}", Sha256::digest(&manifest_bytes));
-
-    let authorization_url = api_url(commercial_auth.api_base_url, "/v1/artifacts/download")?;
-    let authorization_bytes = post_json_bounded(
-        &agent,
-        &authorization_url,
-        commercial_auth.authorization,
-        &json!({
-            "schema_version": 1,
-            "channel": commercial_auth.release_trust.channel.wire_name(),
-            "version": manifest.version,
-            "target": manifest.target,
-            "manifest_sha256": manifest_digest,
-            "protocol_version": ctx_pro_host_protocol::PROTOCOL_VERSION,
-            "protocol_fingerprint": ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
-        }),
-    )?;
-    let authorization: ApiSuccess<DownloadAuthorization> =
-        serde_json::from_slice(&authorization_bytes)
-            .context("invalid_response: parse artifact download authorization")?;
-    validate_success_envelope(&authorization)?;
-    validate_download_authorization(
-        &authorization.data,
-        commercial_auth.api_base_url,
-        &manifest,
-        &manifest_digest,
-    )?;
+        verify_envelope(envelope.data, config.release_trust)?;
+    reject_release_rollback(installed_version, &manifest.version)?;
+    let artifact_url = artifact_url(config.release_origin, &manifest.artifact_object)?;
 
     let stage_dir = create_stage_directory(data_root)?;
     match download_and_stage(
         &agent,
         &stage_dir,
-        &authorization.data,
+        &artifact_url,
         &manifest,
         &manifest_bytes,
         &signature_bytes,
@@ -175,6 +134,16 @@ pub(crate) fn fetch_latest(
     }
 }
 
+fn reject_release_rollback(installed_version: Option<&str>, release_version: &str) -> Result<()> {
+    let Some(installed_version) = installed_version else {
+        return Ok(());
+    };
+    if parse_release_version(release_version)? < parse_release_version(installed_version)? {
+        bail!("invalid_request: Pro update would roll back the installed version");
+    }
+    Ok(())
+}
+
 fn validate_success_envelope<T>(response: &ApiSuccess<T>) -> Result<()> {
     if response.api_version != "v1"
         || response.request_id.is_empty()
@@ -184,36 +153,13 @@ fn validate_success_envelope<T>(response: &ApiSuccess<T>) -> Result<()> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        bail!("invalid_response: commercial API response identity is invalid");
+        bail!("invalid_response: anonymous release response identity is invalid");
     }
     Ok(())
 }
 
-fn validate_auth(auth: &CommercialArtifactAuth<'_>) -> Result<()> {
-    let token = auth
-        .authorization
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty())
-        .or_else(|| {
-            auth.authorization
-                .strip_prefix("CtxTrial ")
-                .filter(|token| token.len() >= 16)
-        });
-    if token.is_none()
-        || auth.authorization.len() > 16 * 1024
-        || auth
-            .authorization
-            .bytes()
-            .any(|byte| byte.is_ascii_control())
-    {
-        bail!("authentication_required: commercial access token is unavailable");
-    }
-    let _ = api_url(auth.api_base_url, "/v1/artifacts/manifest")?;
-    Ok(())
-}
-
-fn api_url(base: &str, path: &str) -> Result<Url> {
-    let base = Url::parse(base).context("invalid_request: commercial API URL is invalid")?;
+fn release_url(base: &str, path: &str) -> Result<Url> {
+    let base = Url::parse(base).context("invalid_request: release service origin is invalid")?;
     if base.scheme() != "https"
         || base.host_str().is_none()
         || !base.username().is_empty()
@@ -222,37 +168,100 @@ fn api_url(base: &str, path: &str) -> Result<Url> {
         || base.query().is_some()
         || base.fragment().is_some()
     {
-        bail!("invalid_request: commercial API URL must be an HTTPS origin");
+        bail!("invalid_request: release service must be an HTTPS origin");
     }
     base.join(path)
-        .context("invalid_request: commercial API route is invalid")
+        .context("invalid_request: release service route is invalid")
 }
 
-fn post_json_bounded(
-    agent: &ureq::Agent,
-    url: &Url,
-    authorization: &str,
-    body: &serde_json::Value,
-) -> Result<Vec<u8>> {
-    let body = serde_json::to_vec(body).context("invalid_request: encode commercial request")?;
-    let response = agent
-        .post(url.as_str())
-        .set("accept", COMMERCIAL_ACCEPT)
-        .set("authorization", authorization)
-        .set("content-type", "application/json")
-        .set("idempotency-key", &new_idempotency_key("artifact")?)
-        .send_bytes(&body);
-    let response =
-        response.map_err(|error| commercial_http_error(error, "commercial API request"))?;
-    read_bounded_response(response, MAX_API_RESPONSE_BYTES, "commercial API response")
+fn manifest_url(base: &str, channel: &str, target: &str) -> Result<Url> {
+    let mut url = release_url(base, "/v1/artifacts/manifest")?;
+    url.query_pairs_mut()
+        .append_pair("channel", channel)
+        .append_pair("target", target);
+    Ok(url)
 }
 
-fn safe_artifact_download_error(error: ureq::Error) -> anyhow::Error {
-    match error {
-        ureq::Error::Status(status, _) => {
-            anyhow!("service_unavailable: artifact download returned status {status}")
+fn artifact_url(base: &str, artifact_object: &str) -> Result<Url> {
+    let mut url = release_url(base, "/v1/artifacts/object")?;
+    if artifact_object.is_empty() {
+        bail!("invalid_response: signed manifest contains invalid artifact object");
+    }
+    {
+        let mut path = url.path_segments_mut().map_err(|_| {
+            anyhow!("invalid_request: release service origin cannot contain path segments")
+        })?;
+        for segment in artifact_object.split('/') {
+            if segment.is_empty()
+                || matches!(segment, "." | "..")
+                || segment.contains('\\')
+                || segment.bytes().any(|byte| byte.is_ascii_control())
+            {
+                bail!("invalid_response: signed manifest contains invalid artifact object");
+            }
+            path.push(segment);
         }
-        ureq::Error::Transport(_) => anyhow!("service_unavailable: artifact download failed"),
+    }
+    Ok(url)
+}
+
+fn get_manifest_bounded(agent: &ureq::Agent, url: &Url) -> Result<Vec<u8>> {
+    let response = agent.get(url.as_str()).set("accept", RELEASE_ACCEPT).call();
+    let response =
+        response.map_err(|error| anonymous_release_read_error(error, "manifest read"))?;
+    let response = require_success_status(response, "manifest read")?;
+    read_bounded_response(
+        response,
+        MAX_RELEASE_RESPONSE_BYTES,
+        "release manifest response",
+    )
+}
+
+fn anonymous_release_read_error(error: ureq::Error, operation: &'static str) -> anyhow::Error {
+    match error {
+        ureq::Error::Status(status, response) => {
+            anonymous_release_status_error(status, response, operation)
+        }
+        ureq::Error::Transport(_) => ReleaseReadFailure::Transport { operation }.into(),
+    }
+}
+
+fn require_success_status(
+    response: ureq::Response,
+    operation: &'static str,
+) -> Result<ureq::Response> {
+    let status = response.status();
+    if status == 200 {
+        return Ok(response);
+    }
+    Err(anonymous_release_status_error(status, response, operation))
+}
+
+fn anonymous_release_status_error(
+    status: u16,
+    response: ureq::Response,
+    operation: &'static str,
+) -> anyhow::Error {
+    discard_bounded_error_response(response);
+    if status == 429 {
+        ReleaseReadFailure::RateLimited { operation }.into()
+    } else if (500..=599).contains(&status) {
+        ReleaseReadFailure::Transient { operation, status }.into()
+    } else {
+        ReleaseReadFailure::Rejected { operation, status }.into()
+    }
+}
+
+fn discard_bounded_error_response(response: ureq::Response) {
+    let mut reader = response.into_reader().take(MAX_RELEASE_RESPONSE_BYTES + 1);
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut remaining = MAX_RELEASE_RESPONSE_BYTES + 1;
+    while remaining > 0 {
+        let maximum = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        match reader.read(&mut buffer[..maximum]) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => remaining = remaining.saturating_sub(read as u64),
+        }
     }
 }
 
@@ -295,43 +304,6 @@ fn verify_envelope(
     Ok((manifest, manifest_bytes, signature_bytes))
 }
 
-fn validate_download_authorization(
-    authorization: &DownloadAuthorization,
-    api_base_url: &str,
-    manifest: &ProManifest,
-    manifest_digest: &str,
-) -> Result<()> {
-    let expected_url = api_url(api_base_url, "/v1/artifacts/object")?;
-    let observed_url = Url::parse(&authorization.url)
-        .context("invalid_response: artifact download URL is invalid")?;
-    if authorization.schema_version != 1
-        || authorization.channel != manifest.channel
-        || authorization.version != manifest.version
-        || authorization.target != manifest.target
-        || authorization.build_identity != manifest.build_identity
-        || authorization.protocol_fingerprint != manifest.protocol_fingerprint
-        || authorization.artifact_object != manifest.artifact_object
-        || observed_url != expected_url
-        || !authorization.authorization.starts_with("CtxArtifact ")
-        || authorization.authorization.len() > MAX_DOWNLOAD_AUTHORIZATION_BYTES
-        || authorization.manifest_sha256 != manifest_digest
-        || authorization.artifact_size != manifest.artifact_size
-        || authorization.artifact_sha256 != manifest.artifact_sha256
-    {
-        bail!("invalid_response: artifact download authorization does not match manifest");
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("invalid_response: system clock is before Unix epoch")?
-        .as_secs();
-    if authorization.expires_at_unix <= now
-        || authorization.expires_at_unix > now.saturating_add(MAX_DOWNLOAD_LIFETIME_SECONDS)
-    {
-        bail!("invalid_response: artifact download authorization has invalid expiry");
-    }
-    Ok(())
-}
-
 fn create_stage_directory(data_root: &Path) -> Result<PathBuf> {
     let layout = ProFilesystemLayout::new(data_root);
     let pro = layout.pro_root();
@@ -359,16 +331,16 @@ fn create_stage_directory(data_root: &Path) -> Result<PathBuf> {
 fn download_and_stage(
     agent: &ureq::Agent,
     stage_dir: &Path,
-    authorization: &DownloadAuthorization,
+    artifact_url: &Url,
     manifest: &ProManifest,
     manifest_bytes: &[u8],
     signature_bytes: &[u8],
 ) -> Result<VerifiedArtifactBundle> {
     let response = agent
-        .get(&authorization.url)
-        .set("authorization", &authorization.authorization)
+        .get(artifact_url.as_str())
         .call()
-        .map_err(safe_artifact_download_error)?;
+        .map_err(|error| anonymous_release_read_error(error, "artifact read"))?;
+    let response = require_success_status(response, "artifact read")?;
     if response.header("content-type") != Some("application/octet-stream") {
         bail!("invalid_response: artifact download content type is invalid");
     }
@@ -486,8 +458,166 @@ fn cleanup_stage_directory(stage: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        net::{TcpListener, TcpStream},
+        sync::Arc,
+        thread,
+        time::Instant,
+    };
+
     use super::*;
-    use crate::pro::commercial_api::{commercial_retry_after, is_retryable_commercial_failure};
+
+    #[derive(Debug)]
+    struct PlaintextTestTls;
+
+    impl ureq::TlsConnector for PlaintextTestTls {
+        fn connect(
+            &self,
+            _dns_name: &str,
+            io: Box<dyn ureq::ReadWrite>,
+        ) -> std::result::Result<Box<dyn ureq::ReadWrite>, ureq::Error> {
+            Ok(io)
+        }
+    }
+
+    struct RecordedRequest {
+        request_line: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for artifact request"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept artifact request: {error}"),
+            }
+        }
+    }
+
+    fn read_request(stream: &mut TcpStream) -> RecordedRequest {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut wire = Vec::new();
+        let header_end = loop {
+            let mut buffer = [0_u8; 1024];
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0, "artifact connection closed before a request");
+            wire.extend_from_slice(&buffer[..read]);
+            assert!(
+                wire.len() <= 32 * 1024,
+                "artifact request headers too large"
+            );
+            if let Some(offset) = wire.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut trailing = [0_u8; 1];
+        match stream.read(&mut trailing) {
+            Ok(0) => {}
+            Ok(read) => wire.extend_from_slice(&trailing[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => panic!("read artifact request body: {error}"),
+        }
+
+        let header = std::str::from_utf8(&wire[..header_end - 4]).unwrap();
+        let mut lines = header.split("\r\n");
+        let request_line = lines.next().unwrap().to_owned();
+        let headers = lines
+            .map(|line| {
+                let (name, value) = line.split_once(':').unwrap();
+                (name.trim().to_ascii_lowercase(), value.trim().to_owned())
+            })
+            .collect();
+        RecordedRequest {
+            request_line,
+            headers,
+            body: wire[header_end..].to_vec(),
+        }
+    }
+
+    fn write_response(
+        stream: &mut TcpStream,
+        status: &str,
+        content_type: &str,
+        extra_headers: &str,
+        body: &[u8],
+    ) {
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    }
+
+    fn assert_anonymous_bodyless_get(request: &RecordedRequest, expected_target: &str) {
+        assert_eq!(
+            request.request_line,
+            format!("GET {expected_target} HTTP/1.1")
+        );
+        for forbidden in [
+            "authorization",
+            "proxy-authorization",
+            "idempotency-key",
+            "cookie",
+            "content-length",
+            "transfer-encoding",
+        ] {
+            assert!(
+                request.headers.iter().all(|(name, _)| name != forbidden),
+                "anonymous artifact GET sent forbidden header {forbidden}"
+            );
+        }
+        assert!(
+            request.body.is_empty(),
+            "anonymous artifact GET sent a body"
+        );
+    }
+
+    fn transport_test_manifest(artifact_object: String, artifact: &[u8]) -> ProManifest {
+        ProManifest {
+            schema_version: 1,
+            product: "ctx-pro".to_owned(),
+            channel: "staging".to_owned(),
+            version: "1.2.3".to_owned(),
+            source_commit: "1".repeat(40),
+            public_source_commit: "2".repeat(40),
+            private_source_commit: "1".repeat(40),
+            build_identity: "3".repeat(64),
+            protocol_min: ctx_pro_host_protocol::PROTOCOL_VERSION,
+            protocol_max: ctx_pro_host_protocol::PROTOCOL_VERSION,
+            protocol_fingerprint: ctx_pro_host_protocol::PROTOCOL_FINGERPRINT.to_owned(),
+            target: platform_target(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            artifact_object,
+            artifact_size: artifact.len() as u64,
+            artifact_sha256: format!("{:x}", Sha256::digest(artifact)),
+            public_artifact_sha256: "4".repeat(64),
+            public_package_sha256: "5".repeat(64),
+            private_package_sha256: "6".repeat(64),
+            runtime_evidence_sha256: "7".repeat(64),
+            runtime_run_id: "12345678-1234-4234-8234-123456789abc".to_owned(),
+            release_key_id: "ctx-pro-release-staging-test".to_owned(),
+        }
+    }
 
     fn test_response(
         status: u16,
@@ -506,38 +636,174 @@ mod tests {
         .unwrap()
     }
 
-    fn artifact_api_error(
+    fn release_read_error(
         status: u16,
         content_type: &str,
         retry_after: Option<&str>,
         body: &str,
     ) -> anyhow::Error {
-        commercial_http_error(
+        anonymous_release_read_error(
             ureq::Error::Status(
                 status,
                 test_response(status, content_type, retry_after, body),
             ),
-            "commercial API request",
+            "manifest read",
         )
     }
 
-    fn worker_problem(code: &str, retryable: bool) -> String {
-        json!({
-            "api_version": "v1",
-            "request_id": "123e4567-e89b-12d3-a456-426614174000",
-            "error": {
-                "code": code,
-                "message": "Worker body detail must stay redacted",
-                "retryable": retryable,
-            },
-        })
-        .to_string()
+    fn is_retryable_release_read_failure(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<ReleaseReadFailure>()
+            .is_some_and(|failure| {
+                matches!(
+                    failure,
+                    ReleaseReadFailure::Transport { .. }
+                        | ReleaseReadFailure::RateLimited { .. }
+                        | ReleaseReadFailure::Transient { .. }
+                )
+            })
     }
 
     #[test]
-    fn api_and_download_urls_are_exact_and_never_redirectable() {
-        let url = api_url("https://pro.ctx.test", "/v1/artifacts/object").unwrap();
-        assert_eq!(url.as_str(), "https://pro.ctx.test/v1/artifacts/object");
+    fn anonymous_artifact_reads_are_exact_credentialless_bodyless_and_do_not_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let target = platform_target();
+        let artifact_object = format!("pro/artifacts/staging/1.2.3/{target}/ctx-pro");
+        let manifest_target = format!("/v1/artifacts/manifest?channel=staging&target={target}");
+        let artifact_target = format!("/v1/artifacts/object/{artifact_object}");
+        let artifact = b"anonymous pro artifact";
+        let server_artifact = artifact.to_vec();
+
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+
+            let mut stream = accept_with_timeout(&listener);
+            requests.push(read_request(&mut stream));
+            write_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"manifest":"transport-only"}"#,
+            );
+            drop(stream);
+
+            let mut stream = accept_with_timeout(&listener);
+            requests.push(read_request(&mut stream));
+            write_response(
+                &mut stream,
+                "200 OK",
+                "application/octet-stream",
+                "",
+                &server_artifact,
+            );
+            drop(stream);
+
+            let mut stream = accept_with_timeout(&listener);
+            requests.push(read_request(&mut stream));
+            write_response(
+                &mut stream,
+                "302 Found",
+                "application/octet-stream",
+                &format!("Location: https://{address}/redirect-target\r\n"),
+                b"",
+            );
+            drop(stream);
+
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok(_) => panic!("anonymous artifact client followed a redirect"),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("check for redirected request: {error}"),
+                }
+            }
+            requests
+        });
+
+        let origin = format!("https://{address}");
+        let manifest_url = manifest_url(&origin, "staging", &target).unwrap();
+        let artifact_url = artifact_url(&origin, &artifact_object).unwrap();
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .timeout_connect(Duration::from_secs(2))
+            .timeout_read(Duration::from_secs(2))
+            .timeout_write(Duration::from_secs(2))
+            .tls_connector(Arc::new(PlaintextTestTls))
+            .build();
+
+        assert_eq!(
+            get_manifest_bounded(&agent, &manifest_url).unwrap(),
+            br#"{"manifest":"transport-only"}"#
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let stage = create_stage_directory(root.path()).unwrap();
+        let manifest = transport_test_manifest(artifact_object, artifact);
+        let bundle = download_and_stage(
+            &agent,
+            &stage,
+            &artifact_url,
+            &manifest,
+            b"{}",
+            b"signature",
+        )
+        .unwrap();
+        assert_eq!(fs::read(&bundle.artifact).unwrap(), artifact);
+
+        let error = get_manifest_bounded(&agent, &manifest_url).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid_response: anonymous release manifest read returned HTTP 302"
+        );
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_anonymous_bodyless_get(&requests[0], &manifest_target);
+        assert_anonymous_bodyless_get(&requests[1], &artifact_target);
+        assert_anonymous_bodyless_get(&requests[2], &manifest_target);
+    }
+
+    #[test]
+    fn signed_release_version_is_checked_before_artifact_delivery() {
+        reject_release_rollback(None, "0.25.0").unwrap();
+        reject_release_rollback(Some("0.25.0"), "0.25.0").unwrap();
+        reject_release_rollback(Some("0.25.0"), "0.26.0").unwrap();
+        assert_eq!(
+            reject_release_rollback(Some("0.26.0"), "0.25.0")
+                .unwrap_err()
+                .to_string(),
+            "invalid_request: Pro update would roll back the installed version"
+        );
+    }
+
+    #[test]
+    fn anonymous_artifact_urls_are_exact_same_origin_routes() {
+        let manifest = manifest_url(
+            "https://pro.ctx.test",
+            "staging",
+            "x86_64-unknown-linux-gnu",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.as_str(),
+            "https://pro.ctx.test/v1/artifacts/manifest?channel=staging&target=x86_64-unknown-linux-gnu"
+        );
+        let artifact = artifact_url(
+            "https://pro.ctx.test",
+            "pro/artifacts/staging/1.2.3/x86_64-unknown-linux-gnu/ctx-pro",
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.as_str(),
+            "https://pro.ctx.test/v1/artifacts/object/pro/artifacts/staging/1.2.3/x86_64-unknown-linux-gnu/ctx-pro"
+        );
+        assert_eq!(manifest.origin(), artifact.origin());
+
         for invalid in [
             "http://pro.ctx.test",
             "https://user@pro.ctx.test",
@@ -545,127 +811,88 @@ mod tests {
             "https://pro.ctx.test?token=secret",
             "file:///tmp/helper",
         ] {
-            assert!(api_url(invalid, "/v1/artifacts/object").is_err());
+            assert!(manifest_url(invalid, "staging", "target").is_err());
         }
     }
 
     #[test]
-    fn artifact_problem_responses_preserve_safe_non_transient_failures() {
-        for (status, code, expected_message) in [
-            (
-                401,
-                "authentication_required",
-                "sign in again with `ctx pro`",
-            ),
-            (
-                403,
-                "commercial_access_locked",
-                "an active trial or subscription is required",
-            ),
-            (
-                404,
-                "not_found",
-                "the requested commercial resource was not found",
-            ),
-            (
-                409,
-                "billing_conflict",
-                "multiple active subscriptions need attention",
-            ),
-            (
-                409,
-                "commercial_identity_conflict",
-                "the billing customer belongs to a different signed-in account",
-            ),
+    fn artifact_object_is_appended_as_validated_path_segments() {
+        for invalid in [
+            "",
+            "/absolute",
+            "pro//artifact",
+            "pro/../artifact",
+            "pro/./artifact",
+            "pro\\artifact",
+            "pro/\nartifact",
         ] {
-            let error = artifact_api_error(
-                status,
-                "application/problem+json; charset=utf-8",
-                Some("60"),
-                &worker_problem(code, true),
-            );
-            let rendered = error.to_string();
-            assert!(rendered.starts_with(&format!("{code}:")), "{rendered}");
-            assert!(rendered.contains(expected_message), "{rendered}");
-            assert!(!rendered.contains("Worker body detail"), "{rendered}");
-            assert!(!is_retryable_commercial_failure(&error), "{rendered}");
-            assert_eq!(commercial_retry_after(&error), None);
+            assert!(artifact_url("https://pro.ctx.test", invalid).is_err());
         }
+
+        let encoded = artifact_url("https://pro.ctx.test", "pro/artifact?query#fragment").unwrap();
+        assert_eq!(
+            encoded.as_str(),
+            "https://pro.ctx.test/v1/artifacts/object/pro/artifact%3Fquery%23fragment"
+        );
     }
 
     #[test]
-    fn artifact_problem_responses_retain_bounded_transient_retry_semantics() {
-        let rate_limited = artifact_api_error(
+    fn anonymous_release_rejections_are_generic_sanitized_and_not_retryable() {
+        let error = release_read_error(
+            404,
+            "application/problem+json",
+            Some("60"),
+            "release-origin-detail-must-not-escape",
+        );
+        let rendered = error.to_string();
+        assert_eq!(
+            rendered,
+            "invalid_response: anonymous release manifest read returned HTTP 404"
+        );
+        assert!(!rendered.contains("release-origin-detail"), "{rendered}");
+        assert!(!is_retryable_release_read_failure(&error), "{rendered}");
+    }
+
+    #[test]
+    fn anonymous_release_reads_retain_bounded_transient_retry_semantics() {
+        let rate_limited = release_read_error(
             429,
             "application/problem+json",
             Some("999999"),
-            &worker_problem("rate_limited", true),
+            "rate-limit-detail-must-not-escape",
         );
-        assert!(is_retryable_commercial_failure(&rate_limited));
-        assert_eq!(
-            commercial_retry_after(&rate_limited),
-            Some(Duration::from_secs(30 * 60))
-        );
+        assert!(is_retryable_release_read_failure(&rate_limited));
         assert!(rate_limited.to_string().starts_with("rate_limited:"));
-        assert!(!rate_limited.to_string().contains("Worker body detail"));
+        assert!(!rate_limited.to_string().contains("rate-limit-detail"));
 
-        let unknown_code = artifact_api_error(
+        let server_error = release_read_error(
             500,
             "application/problem+json",
             Some("75"),
-            &worker_problem("internal_error", true),
+            "server-detail-must-not-escape",
         );
-        assert!(!is_retryable_commercial_failure(&unknown_code));
-        assert_eq!(commercial_retry_after(&unknown_code), None);
-        assert!(unknown_code.to_string().starts_with("invalid_response:"));
-        assert!(!unknown_code.to_string().contains("internal_error"));
-        assert!(!unknown_code.to_string().contains("Worker body detail"));
-
-        let invalid_dependency = artifact_api_error(
-            502,
-            "application/problem+json",
-            Some("60"),
-            &worker_problem("dependency_invalid_response", false),
-        );
-        assert!(!is_retryable_commercial_failure(&invalid_dependency));
-        assert_eq!(commercial_retry_after(&invalid_dependency), None);
+        assert!(is_retryable_release_read_failure(&server_error));
+        assert!(server_error.to_string().starts_with("service_unavailable:"));
+        assert!(!server_error.to_string().contains("server-detail"));
     }
 
     #[test]
-    fn artifact_malformed_error_bodies_are_bounded_and_never_rendered() {
-        let authentication = artifact_api_error(
-            401,
-            "application/problem+json",
-            None,
-            "malformed bearer-secret body",
-        );
-        assert!(!is_retryable_commercial_failure(&authentication));
-        assert!(authentication.to_string().starts_with("invalid_response:"));
-        assert!(!authentication.to_string().contains("bearer-secret"));
-
-        let proxy = artifact_api_error(
+    fn anonymous_release_error_bodies_are_bounded_and_never_rendered() {
+        let proxy = release_read_error(
             503,
             "text/html",
             Some("999999"),
             "<html>proxy-secret body</html>",
         );
-        assert!(is_retryable_commercial_failure(&proxy));
-        assert_eq!(
-            commercial_retry_after(&proxy),
-            Some(Duration::from_secs(30 * 60))
-        );
+        assert!(is_retryable_release_read_failure(&proxy));
         assert!(!proxy.to_string().contains("proxy-secret"));
 
         let oversized = format!(
             "bounded-secret{}",
-            "x".repeat(MAX_API_RESPONSE_BYTES as usize)
+            "x".repeat(MAX_RELEASE_RESPONSE_BYTES as usize)
         );
-        let oversized = artifact_api_error(503, "application/problem+json", Some("30"), &oversized);
-        assert!(is_retryable_commercial_failure(&oversized));
-        assert_eq!(
-            commercial_retry_after(&oversized),
-            Some(Duration::from_secs(30))
-        );
+        let oversized = release_read_error(503, "application/problem+json", Some("30"), &oversized);
+        assert!(is_retryable_release_read_failure(&oversized));
         assert!(!oversized.to_string().contains("bounded-secret"));
     }
 
@@ -687,80 +914,5 @@ mod tests {
         };
         drop(bundle);
         assert!(!stage.exists());
-    }
-
-    #[test]
-    fn download_authorization_is_bound_to_the_exact_signed_build() {
-        let target = platform_target();
-        let manifest = ProManifest {
-            schema_version: 1,
-            product: "ctx-pro".to_owned(),
-            channel: "staging".to_owned(),
-            version: "1.2.3".to_owned(),
-            source_commit: "1".repeat(40),
-            public_source_commit: "3".repeat(40),
-            private_source_commit: "1".repeat(40),
-            build_identity: "2".repeat(64),
-            protocol_min: ctx_pro_host_protocol::PROTOCOL_VERSION,
-            protocol_max: ctx_pro_host_protocol::PROTOCOL_VERSION,
-            protocol_fingerprint: ctx_pro_host_protocol::PROTOCOL_FINGERPRINT.to_owned(),
-            architecture: std::env::consts::ARCH.to_owned(),
-            artifact_object: format!(
-                "pro/artifacts/staging/1.2.3/{target}/{}",
-                if cfg!(windows) {
-                    "ctx-pro.exe"
-                } else {
-                    "ctx-pro"
-                }
-            ),
-            target,
-            artifact_size: 3,
-            artifact_sha256: "a".repeat(64),
-            public_artifact_sha256: "b".repeat(64),
-            public_package_sha256: "c".repeat(64),
-            private_package_sha256: "d".repeat(64),
-            runtime_evidence_sha256: "e".repeat(64),
-            runtime_run_id: "12345678-1234-4234-8234-123456789abc".to_owned(),
-            release_key_id: "ctx-pro-release-staging-2026-07-21".to_owned(),
-        };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let mut authorization = DownloadAuthorization {
-            schema_version: 1,
-            channel: manifest.channel.clone(),
-            version: manifest.version.clone(),
-            target: manifest.target.clone(),
-            build_identity: manifest.build_identity.clone(),
-            protocol_fingerprint: manifest.protocol_fingerprint.clone(),
-            artifact_object: manifest.artifact_object.clone(),
-            url: "https://commercial.example/v1/artifacts/object".to_owned(),
-            authorization: "CtxArtifact payload.signature".to_owned(),
-            expires_at_unix: now + 60,
-            manifest_sha256: "b".repeat(64),
-            artifact_size: manifest.artifact_size,
-            artifact_sha256: manifest.artifact_sha256.clone(),
-        };
-        validate_download_authorization(
-            &authorization,
-            "https://commercial.example/",
-            &manifest,
-            &"b".repeat(64),
-        )
-        .unwrap();
-
-        authorization.build_identity = "3".repeat(64);
-        assert_eq!(
-            validate_download_authorization(
-                &authorization,
-                "https://commercial.example/",
-                &manifest,
-                &"b".repeat(64),
-            )
-            .unwrap_err()
-            .to_string(),
-            "invalid_response: artifact download authorization does not match manifest"
-        );
     }
 }

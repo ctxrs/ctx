@@ -11,7 +11,7 @@ use ctx_pro_host_protocol::base64url;
 use zeroize::Zeroizing;
 
 use super::{
-    artifact_delivery::{fetch_latest, CommercialArtifactAuth},
+    artifact_delivery::{fetch_latest, ArtifactDeliveryConfig},
     authorization::InstallationChallengeSigner,
     commercial_api::TrialChallengeRequest,
     commercial_lifecycle::{vault_error, CommercialLifecycleService},
@@ -107,18 +107,14 @@ pub(super) fn setup(
             std::mem::take(&mut refresh.trial_access_token),
             std::mem::take(&mut refresh.referral_claim_token),
         )?;
-        let artifact = {
-            let authorization = trial_artifact_authorization(trial.access_token());
-            fetch_latest(
-                data_root,
-                CommercialArtifactAuth {
-                    api_base_url: service.api.origin(),
-                    authorization: authorization.as_str(),
-                    release_trust: service.config.release_trust,
-                },
-                installed_version,
-            )
-        }?;
+        let artifact = fetch_latest(
+            data_root,
+            installed_version,
+            ArtifactDeliveryConfig {
+                release_origin: service.api.origin(),
+                release_trust: service.config.release_trust,
+            },
+        )?;
         service.store_anonymous_state(
             refresh.entitlement.clone(),
             &public_key,
@@ -142,19 +138,15 @@ pub(super) fn setup(
         installation_public_key_base64url: &encoded_public_key,
         referral_codename,
     })?;
-    let bootstrap_token = Zeroizing::new(std::mem::take(&mut challenge.artifact_access_token));
-    let artifact = {
-        let authorization = trial_artifact_authorization(bootstrap_token.as_str());
-        fetch_latest(
-            data_root,
-            CommercialArtifactAuth {
-                api_base_url: service.api.origin(),
-                authorization: authorization.as_str(),
-                release_trust: service.config.release_trust,
-            },
-            installed_version,
-        )
-    }?;
+    let activation_token = Zeroizing::new(std::mem::take(&mut challenge.trial_activation_token));
+    let artifact = fetch_latest(
+        data_root,
+        installed_version,
+        ArtifactDeliveryConfig {
+            release_origin: service.api.origin(),
+            release_trust: service.config.release_trust,
+        },
+    )?;
     let evidence = collect_device_evidence(
         data_root,
         &artifact.artifact,
@@ -162,7 +154,7 @@ pub(super) fn setup(
         &encoded_public_key,
     )?;
     let mut activation = service.api.activate_trial(
-        bootstrap_token.as_str(),
+        activation_token.as_str(),
         &challenge.challenge_id,
         &encoded_public_key,
         &evidence,
@@ -188,10 +180,6 @@ pub(super) fn setup(
         artifact: Some(artifact),
         account_state: "trial".to_owned(),
     })
-}
-
-fn trial_artifact_authorization(token: &str) -> Zeroizing<String> {
-    Zeroizing::new(format!("CtxTrial {token}"))
 }
 
 fn apply_trial_refresh(
@@ -292,18 +280,6 @@ mod tests {
         );
         let oversized = vec![b'x'; MAX_DEVICE_EVIDENCE_BYTES as usize + 1];
         assert!(read_bounded_pipe(Cursor::new(oversized)).is_err());
-    }
-
-    #[test]
-    fn artifact_authorization_copy_is_drop_guarded() {
-        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
-
-        let authorization = trial_artifact_authorization("trial-token-contract-canary");
-        assert_zeroize_on_drop(&authorization);
-        assert_eq!(
-            authorization.as_str(),
-            "CtxTrial trial-token-contract-canary"
-        );
     }
 
     #[test]

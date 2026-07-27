@@ -178,7 +178,7 @@ blame citations.
 Hosted traffic is limited to anonymous-trial challenge/evidence tokens,
 optional first-challenge referral attribution and its opaque claim, explicit
 referrer commands, identity and billing after conversion, entitlements, signed
-release metadata, and authenticated artifact delivery. Trial evidence consists
+release metadata, and anonymous signed artifact delivery. Trial evidence consists
 only of challenge-bound application-specific digests; raw platform identifiers
 are discarded inside the signed helper, and the service stores independently
 keyed lookup tokens. The signal is best-effort abuse detection, not hardware
