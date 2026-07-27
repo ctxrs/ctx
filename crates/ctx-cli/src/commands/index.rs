@@ -1,4 +1,5 @@
 use std::{
+    io::{self, IsTerminal as _},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -120,15 +121,17 @@ fn run_index_watch(
     telemetry: &mut IndexTelemetry,
 ) -> Result<()> {
     let interval = Duration::from_secs(args.interval_seconds);
+    let stdout = io::stdout();
+    let interactive = !args.json && stdout.is_terminal();
+    let mut output = IndexWatchOutput::new(stdout.lock(), interactive);
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = IndexSelection::default_for(&status);
         record_index_telemetry(telemetry, &status);
         if args.json {
-            println!("{}", serde_json::to_string(&status)?);
+            output.print_json(&status)?;
         } else if !quiet {
-            print_index_watch_human(&status);
-            println!();
+            output.print_human(&status)?;
         }
         if index_ready(&status, selection) {
             break;
@@ -139,6 +142,63 @@ fn run_index_watch(
         thread::sleep(interval);
     }
     Ok(())
+}
+
+struct IndexWatchOutput<W> {
+    writer: W,
+    interactive: bool,
+    rendered_lines: usize,
+}
+
+impl<W: io::Write> IndexWatchOutput<W> {
+    fn new(writer: W, interactive: bool) -> Self {
+        Self {
+            writer,
+            interactive,
+            rendered_lines: 0,
+        }
+    }
+
+    fn print_json(&mut self, status: &Value) -> Result<()> {
+        writeln!(self.writer, "{}", serde_json::to_string(status)?)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn print_human(&mut self, status: &Value) -> io::Result<()> {
+        let frame = index_watch_human(status);
+        if !self.interactive {
+            writeln!(self.writer, "{frame}")?;
+            writeln!(self.writer)?;
+            return self.writer.flush();
+        }
+
+        let lines = frame.lines().collect::<Vec<_>>();
+        if self.rendered_lines == 0 {
+            writeln!(self.writer, "{frame}")?;
+            self.rendered_lines = lines.len();
+            return self.writer.flush();
+        }
+        write!(self.writer, "\u{1b}[{}A", self.rendered_lines)?;
+        let previous_lines = self.rendered_lines;
+        let height = self.rendered_lines.max(lines.len());
+        for row in 0..height {
+            write!(self.writer, "\r\u{1b}[2K")?;
+            if let Some(line) = lines.get(row) {
+                write!(self.writer, "{line}")?;
+            }
+            writeln!(self.writer)?;
+        }
+        if previous_lines > lines.len() {
+            write!(
+                self.writer,
+                "\u{1b}[{}A",
+                previous_lines.saturating_sub(lines.len())
+            )?;
+        }
+        self.rendered_lines = lines.len();
+        self.writer.flush()
+    }
 }
 
 fn run_index_wait(
@@ -377,19 +437,23 @@ fn print_index_status_human(status: &Value) {
 }
 
 fn print_index_watch_human(status: &Value) {
+    println!("{}", index_watch_human(status));
+}
+
+fn index_watch_human(status: &Value) -> String {
     let lexical_total = usize_at(status, &["lexical", "inventory_units"]);
     let lexical_pending = usize_at(status, &["lexical", "pending_inventory_units"]);
     let lexical_done = lexical_total.saturating_sub(lexical_pending);
     let semantic_done = usize_at(status, &["semantic", "coverage", "embedded_items"]);
     let semantic_total = usize_at(status, &["semantic", "coverage", "searchable_items"]);
-    println!(
+    let mut lines = vec![format!(
         "lexical  [{}] {}/{} units ({})",
         progress_bar(lexical_done, lexical_total),
         format_count(lexical_done),
         format_count(lexical_total),
         string_at(status, &["lexical", "status"], "unknown")
-    );
-    println!(
+    )];
+    lines.push(format!(
         "semantic [{}] {}/{} events, {} chunks ({})",
         progress_bar(semantic_done, semantic_total),
         format_count(semantic_done),
@@ -399,16 +463,17 @@ fn print_index_watch_human(status: &Value) {
             &["semantic", "coverage", "embedded_chunks"]
         )),
         semantic_job_status(status)
-    );
-    println!(
+    ));
+    lines.push(format!(
         "daemon   {} running={}",
         string_at(status, &["daemon", "status"], "unknown"),
         bool_at(status, &["daemon", "running"])
-    );
+    ));
     let daemon_reason = string_at(status, &["daemon", "reason"], "");
     if !daemon_reason.is_empty() {
-        println!("         reason={daemon_reason}");
+        lines.push(format!("         reason={daemon_reason}"));
     }
+    lines.join("\n")
 }
 
 fn progress_bar(done: usize, total: usize) -> String {
@@ -553,3 +618,7 @@ fn parse_positive_seconds(value: &str) -> std::result::Result<u64, String> {
     }
     Ok(parsed)
 }
+
+#[cfg(test)]
+#[path = "index_tests.rs"]
+mod tests;
