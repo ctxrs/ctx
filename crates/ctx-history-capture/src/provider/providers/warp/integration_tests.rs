@@ -151,6 +151,24 @@ fn warp_task_bytes(task_id: &str, text: &str) -> Vec<u8> {
     task
 }
 
+fn warp_task_with_shell_result(task_id: &str, message_text: &str, result_text: &str) -> Vec<u8> {
+    let user_query = proto_field(1, message_text.as_bytes());
+    let mut user_message = proto_field(1, b"warp-message-long");
+    user_message.extend(proto_field(2, &user_query));
+
+    let finished = proto_field(1, result_text.as_bytes());
+    let run_shell = proto_field(5, &finished);
+    let mut tool_result = proto_field(1, b"warp-call-1");
+    tool_result.extend(proto_field(2, &run_shell));
+    let mut result_message = proto_field(1, b"warp-message-result");
+    result_message.extend(proto_field(5, &tool_result));
+
+    let mut task = proto_field(1, task_id.as_bytes());
+    task.extend(proto_field(5, &user_message));
+    task.extend(proto_field(5, &result_message));
+    task
+}
+
 fn test_source(label: &str) -> SourceObservation {
     SourceObservation::new(
         CaptureProvider::Warp,
@@ -485,7 +503,9 @@ fn warp_terminal_reopen_does_only_bounded_native_keyset_setup() {
         NormalizedProviderImportOptions::default(),
     )
     .unwrap();
-    assert_eq!(summary, ProviderImportSummary::default());
+    let mut expected = ProviderImportSummary::default();
+    expected.set_work_result(crate::ProviderImportWorkResult::NoOp);
+    assert_eq!(summary, expected);
     assert_eq!(warp_fetch_test_counts(), (1, 0, 0));
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
@@ -1043,6 +1063,106 @@ fn warp_snapshot_detects_database_mutation() {
     file.write_all(b"-changed").unwrap();
     file.sync_all().unwrap();
     assert!(!snapshot.revalidate(&path).unwrap());
+}
+
+#[test]
+fn warp_projection_attaches_exact_message_and_result_locators_without_raw_result() {
+    use crate::complete_content::{
+        VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+    };
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("warp-content-locator.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    create_warp_schema(&conn);
+    insert_conversation(&conn, "conversation-content", "2026-07-18 12:00:00", None);
+    let message_text = "m".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 32);
+    let result_text = "exact Warp shell result\nUnicode: 🦀";
+    insert_task(
+        &conn,
+        "conversation-content",
+        "task-content",
+        &warp_task_with_shell_result("task-content", &message_text, result_text),
+    );
+    let mut projector = WarpCapturedBatchProjector {
+        context: test_context(&path),
+        raw_source_path: path.display().to_string(),
+        user_version: 0,
+        schema_fingerprint: "warp-schema-test".to_owned(),
+        checkpoint: WarpParserCheckpoint::default(),
+    };
+    let batches = collect_batches(
+        &conn,
+        test_source("content-locator"),
+        initial_warp_position().unwrap(),
+    );
+    let mut output = CollectingProjectionOutput::default();
+    for record in batches.iter().flat_map(|batch| batch.records()) {
+        projector.project_record(record, &mut output).unwrap();
+    }
+    let events = output
+        .normalizations
+        .iter()
+        .flat_map(|normalization| normalization.captures.iter())
+        .filter_map(|(_, capture)| capture.event.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+
+    let message_locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &events[0].metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let message_locator = message_locators
+        .locator(VerifiedContentRole::MessageBody)
+        .unwrap();
+    assert_eq!(message_locator.kind(), "warp-task-message-v1");
+    assert_eq!(message_locator.source_locator().unwrap().value().len(), 12);
+
+    let result_locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &events[1].metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let result_locator = result_locators
+        .locator(VerifiedContentRole::ResultBody)
+        .unwrap();
+    assert_eq!(result_locator.kind(), "warp-task-message-v1");
+    assert!(result_locator
+        .content_ref()
+        .verifies(result_text.as_bytes()));
+    assert!(events[1].payload.get("result_content_ref").is_some());
+    assert!(!serde_json::to_string(&events[1])
+        .unwrap()
+        .contains(result_text));
+
+    drop(conn);
+    let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
+    let summary = import_warp_sqlite_batched(
+        &path,
+        &mut store,
+        test_context(&path),
+        NormalizedProviderImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.imported_events, 2);
+    let session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.external_session_id.as_deref() == Some("conversation-content"))
+        .unwrap();
+    let stored = store.events_for_session(session.id).unwrap();
+    assert_eq!(stored.len(), 2);
+    let stored_result = stored
+        .iter()
+        .find(|event| event.event_type == EventType::ToolOutput)
+        .unwrap();
+    let serialized = serde_json::to_string(stored_result).unwrap();
+    assert!(!serialized.contains(result_text));
+    assert!(stored_result.payload["body"]
+        .get("result_content_ref")
+        .is_some());
+    assert!(stored_result.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].is_object());
 }
 
 #[test]

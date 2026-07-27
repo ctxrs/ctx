@@ -86,6 +86,52 @@ fn write_codex_session_tree(temp: &TempDir) -> PathBuf {
     root
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_explicit_codex_file_imports_from_the_local_temp_directory() {
+    let temp = tempdir();
+    let source = temp.path().join("windows-local-codex-session.jsonl");
+    let long_message = format!("{}END_SENTINEL", "x".repeat(20_000));
+    let lines = [
+        json!({
+            "timestamp": "2026-07-23T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "windows-local-codex-session",
+                "timestamp": "2026-07-23T12:00:00Z",
+                "cwd": r"C:\workspace\ctx"
+            }
+        }),
+        json!({
+            "timestamp": "2026-07-23T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": long_message
+                }]
+            }
+        }),
+    ];
+    fs::write(
+        &source,
+        lines
+            .into_iter()
+            .map(|line| serde_json::to_string(&line).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let imported = explicit_import(&temp, "codex", source.to_str().unwrap());
+
+    assert_eq!(imported["totals"]["failed_sources"], 0, "{imported:#}");
+    assert_eq!(imported["totals"]["imported_events"], 1, "{imported:#}");
+}
+
 fn codex_identity_snapshot(database: &Path) -> (Vec<String>, Vec<String>) {
     let connection = Connection::open(database).unwrap();
     let sessions = connection

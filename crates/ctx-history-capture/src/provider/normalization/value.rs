@@ -184,6 +184,31 @@ pub(crate) fn provider_value_text(value: &Value) -> Option<String> {
     }
 }
 
+/// Normalizes an explicitly selected provider result value without inventing
+/// labels for tool calls, results, images, or other structural blocks.
+pub(crate) fn provider_explicit_result_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Number(_) | Value::Bool(_) | Value::Object(_) => serde_json::to_string(value).ok(),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    let selected = item
+                        .get("text")
+                        .or_else(|| item.get("content"))
+                        .or_else(|| item.get("output"))
+                        .or_else(|| item.get("result"))
+                        .unwrap_or(item);
+                    provider_explicit_result_value_text(selected)
+                })
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+    }
+}
+
 pub(crate) fn provider_role(value: Option<&str>) -> EventRole {
     match value {
         Some("user") => EventRole::User,

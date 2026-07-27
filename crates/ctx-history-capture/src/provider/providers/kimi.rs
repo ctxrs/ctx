@@ -26,6 +26,8 @@ mod layout;
 mod projection;
 mod source;
 
+pub(crate) use event::kimi_result_content;
+
 #[cfg(test)]
 mod tests;
 
@@ -33,9 +35,10 @@ use layout::KimiFrozenFileMetadata;
 use projection::{KimiCapturedBatchProjector, KimiParserCheckpoint};
 use source::KimiWireObservation;
 
-const KIMI_CAPTURE_REVISION: u32 = 3;
-const KIMI_POLICY_REVISION: u32 = 5;
+const KIMI_CAPTURE_REVISION: u32 = 4;
+const KIMI_POLICY_REVISION: u32 = 6;
 const KIMI_WIRE_RECORD_KIND: &str = "kimi-wire-jsonl-v1";
+pub(crate) const KIMI_RESULT_CONTENT_PROFILE: &str = "kimi.result-body.v1";
 
 pub(crate) fn import_kimi_wire_jsonl_file_batched(
     path: &Path,
@@ -268,17 +271,29 @@ pub(crate) fn kimi_complete_content_record(
     })
 }
 
-pub(crate) fn kimi_complete_content_source(
+pub(crate) fn kimi_complete_content_auxiliary_paths(
+    path: &Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    layout::complete_content_auxiliary_paths(path)
+}
+
+pub(crate) fn kimi_complete_content_source_from_admitted(
     path: &Path,
     source_root: Option<&Path>,
+    canonical_path: std::path::PathBuf,
+    wire_metadata: &std::fs::Metadata,
+    state: Option<(&std::fs::Metadata, &[u8])>,
+    index: Option<(&std::fs::Metadata, &[u8])>,
+    path_identity: String,
 ) -> Result<(String, String)> {
-    let observation = KimiWireObservation::read(path)?;
+    let observation =
+        KimiWireObservation::read_from_admitted(path, canonical_path, wire_metadata, state, index)?;
     let admission_scope_revision = kimi_admission_scope_revision_for_display(Some(
         source_root.unwrap_or(path).display().to_string(),
     ));
     Ok((
         observation.source_revision(&admission_scope_revision),
-        provider_path_identity(observation.canonical_path())?,
+        path_identity,
     ))
 }
 

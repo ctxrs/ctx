@@ -24,6 +24,10 @@ mod schema;
 mod source;
 mod stream;
 
+// Narrow provider API consumed by the source resolver after locator attachment.
+#[allow(unused_imports)]
+pub(crate) use normalization::goose_normalized_result_content;
+
 use position::{decode_goose_position, initial_goose_position};
 use projection::GooseCapturedBatchProjector;
 use schema::goose_schema_version;
@@ -31,7 +35,82 @@ use source::{goose_source_observation, goose_source_snapshot};
 use stream::{goose_sqlite_batch_error, GooseRowFetcher};
 
 const GOOSE_CAPTURE_REVISION: u32 = 3;
-const GOOSE_POLICY_REVISION: u32 = 4;
+const GOOSE_POLICY_REVISION: u32 = 5;
+
+pub(crate) fn goose_result_record(
+    conn: &rusqlite::Connection,
+    rowid: i64,
+) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
+    let Some(values) = stream::goose_message_values_at_rowid(conn, rowid)? else {
+        return Ok(None);
+    };
+    let (_, message) = schema::decode_goose_message_record(&values)?;
+    let raw_content =
+        serde_json::from_str::<serde_json::Value>(&message.content_json).map_err(|error| {
+            CaptureError::InvalidPayload(format!(
+                "Goose result content is no longer valid JSON: {error}"
+            ))
+        })?;
+    let content =
+        normalization::goose_normalized_result_content(&raw_content).ok_or_else(|| {
+            CaptureError::InvalidPayload("Goose row is no longer a supported result".to_owned())
+        })?;
+    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
+        values,
+        native_record_id: normalization::goose_message_identity(&message),
+        content,
+    }))
+}
+
+pub(crate) fn load_goose_message_values_schema(conn: &rusqlite::Connection) -> Result<()> {
+    schema::goose_session_columns(conn)?;
+    schema::goose_message_columns(conn)?;
+    Ok(())
+}
+
+pub(crate) fn load_goose_message_values(
+    conn: &rusqlite::Connection,
+    rowid: i64,
+) -> Result<Vec<crate::captured_batch::CapturedSqliteValue>> {
+    let message_columns = schema::goose_message_columns(conn)?;
+    let expressions = schema::goose_message_expressions(&message_columns, "m");
+    let select = expressions.hydration.join(", ");
+    let parent_rowid = conn.query_row(
+        "select s.rowid from messages m left join sessions s on s.id = m.session_id \
+             where m.rowid = ?1",
+        [rowid],
+        |row| row.get::<_, Option<i64>>(0),
+    )?;
+    let mut values = vec![parent_rowid.map_or(
+        crate::captured_batch::CapturedSqliteValue::Null,
+        crate::captured_batch::CapturedSqliteValue::Integer,
+    )];
+    values.extend(conn.query_row(
+        &format!("select {select} from messages m where m.rowid = ?1"),
+        [rowid],
+        schema::goose_message_only_values,
+    )?);
+    Ok(values)
+}
+
+pub(crate) fn goose_complete_message(
+    values: &[crate::captured_batch::CapturedSqliteValue],
+) -> Result<(String, String, String)> {
+    let (parent_rowid, message) = schema::decode_goose_message_record(values)?;
+    if parent_rowid.is_none() {
+        return Err(CaptureError::InvalidPayload(
+            "Goose message parent is missing".into(),
+        ));
+    }
+    let content: serde_json::Value = serde_json::from_str(&message.content_json)?;
+    let text = normalization::goose_complete_content_text(&content)
+        .unwrap_or_else(|| format!("Goose {} message", message.role));
+    let identity = message
+        .message_id
+        .clone()
+        .unwrap_or_else(|| format!("row-{}", message.id));
+    Ok((message.session_id, identity, text))
+}
 
 pub(crate) fn import_goose_sessions_sqlite_batched(
     path: &Path,

@@ -1,15 +1,13 @@
 use std::{collections::BTreeSet, fs};
 
 use ctx_history_capture::complete_content::{
-    structured::{
-        StructuredCompleteContentCapabilityStatus, StructuredCompleteContentResolver,
-        STRUCTURED_COMPLETE_CONTENT_CAPABILITIES, STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
-    },
+    structured::{StructuredCompleteContentResolver, STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND},
+    verified_content_profile, verified_content_route_supported, AuthorizedSourceRoute,
     CompleteContentBodyDigest, CompleteContentHashAuthority, CompleteContentResolver,
     CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessageRequest,
-    SourceSnapshot,
+    SourceAccessBroker, SourceSnapshot, VerifiedContentRole, VERIFIED_CONTENT_ROUTES,
 };
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ContentRef};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -51,12 +49,17 @@ fn public_matrix_covers_every_public_provider_exactly_once() {
     };
     assert_eq!(ids(&capability), ids(&provider));
     assert_eq!(ids(&capability).len(), 41);
-    assert_eq!(STRUCTURED_COMPLETE_CONTENT_CAPABILITIES.len(), 41);
     assert_eq!(
-        STRUCTURED_COMPLETE_CONTENT_CAPABILITIES
+        VERIFIED_CONTENT_ROUTES
             .iter()
-            .filter(|entry| {
-                entry.status == StructuredCompleteContentCapabilityStatus::Supported
+            .filter(|route| {
+                route.role == VerifiedContentRole::MessageBody
+                    && verified_content_route_supported(
+                        route.provider,
+                        route.source_format,
+                        CompleteContentSourceFamily::Structured,
+                        route.role,
+                    )
             })
             .count(),
         7
@@ -85,19 +88,40 @@ fn public_resolver_recovers_verified_rovo_body() {
     .unwrap();
     fs::write(&path, &bytes).unwrap();
     let record_digest = format!("{:x}", Sha256::digest(&bytes));
+    let event_id = Uuid::new_v4();
+    let source_access = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::RovoDev,
+                source_format: "rovodev_session_json_tree".to_owned(),
+                family: CompleteContentSourceFamily::Structured,
+                raw_source_path: path,
+                source_root: None,
+                source_identity: Some("test:rovo".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            event_id,
+        )
+        .unwrap();
     let request = CompleteMessageRequest {
-        event_id: Uuid::new_v4(),
+        event_id,
         provider: CaptureProvider::RovoDev,
         source_format: "rovodev_session_json_tree".to_owned(),
-        raw_source_path: path,
-        source_root: None,
-        source_identity: Some("test:rovo".to_owned()),
+        source_access,
         source_family: Some(CompleteContentSourceFamily::Structured),
+        content_profile: verified_content_profile(
+            CaptureProvider::RovoDev,
+            "rovodev_session_json_tree",
+            CompleteContentSourceFamily::Structured,
+            VerifiedContentRole::MessageBody,
+        )
+        .unwrap()
+        .to_owned(),
         source_locator: CompleteContentSourceLocator::new(
             STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
             structured_locator(CaptureProvider::RovoDev, 0, 0, native),
         ),
-        source_snapshot: SourceSnapshot::default(),
         provider_session_id: Some("session".to_owned()),
         source_record_ordinal: 0,
         source_record_subrecord_index: 0,
@@ -105,7 +129,7 @@ fn public_resolver_recovers_verified_rovo_body() {
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
         expected_native_record_id: Some(native.to_owned()),
         expected_record_digest: CompleteContentBodyDigest::parse(record_digest),
-        expected_body_digest: Some(CompleteContentBodyDigest::from_text(text)),
+        expected_content_ref: ContentRef::from_bytes(text.as_bytes()),
         indexed_text: text.chars().take(8).collect(),
         indexed_limit_chars: 8,
     };

@@ -62,6 +62,33 @@ fn projector_preserves_sessions_events_order_and_message_dedupe() {
         .filter(|(_, capture)| capture.event.is_some())
         .collect::<Vec<_>>();
     assert_eq!(captures.len(), 3);
+    let result_event = captures[2].1.event.as_ref().unwrap();
+    let result_locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &result_event.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let result_locator = result_locators
+        .locator(VerifiedContentRole::ResultBody)
+        .unwrap();
+    assert!(result_locator.content_ref().verifies(b"tool output"));
+    assert_eq!(
+        serde_json::from_value::<ctx_history_core::ContentRef>(
+            result_event.payload["result_content_ref"].clone()
+        )
+        .unwrap(),
+        result_locator.content_ref().clone(),
+    );
+    let result_address =
+        decode_deepagents_content_address(result_locator.source_locator().unwrap().value())
+            .unwrap();
+    assert_eq!(result_address.thread_id, "thread-a");
+    assert_eq!(result_address.checkpoint_id, "checkpoint-a");
+    assert_eq!(result_address.task_id, "task-a");
+    assert_eq!(result_address.write_idx, 1);
+    assert_eq!(result_address.message_offset, 1);
+    assert!(!serde_json::to_string(&result_event.metadata)
+        .unwrap()
+        .contains("tool output"));
     assert_eq!(
         captures
             .iter()
@@ -112,6 +139,62 @@ fn projector_preserves_sessions_events_order_and_message_dedupe() {
             }),
         ]
     );
+}
+
+#[test]
+fn projector_attaches_a_compound_locator_only_to_truncated_message_bodies() {
+    let conn = Connection::open_in_memory().unwrap();
+    create_tables(&conn);
+    insert_checkpoint(&conn, "thread-a", "checkpoint-a");
+    let long = "message body ".repeat(crate::PROVIDER_MAX_TEXT_CHARS / 8 + 1);
+    insert_write(
+        &conn,
+        "thread-a",
+        "checkpoint-a",
+        "task-a",
+        9,
+        &message_blob(vec![message_value("human", &long, "message-long")]),
+    );
+    let context = context(Some("/tmp/deepagents/sessions.db".into()));
+    let batches = produce_all(
+        &conn,
+        test_source("complete-message"),
+        initial_deepagents_position().unwrap(),
+        context.clone(),
+    );
+    let mut projector = DeepAgentsCapturedBatchProjector {
+        context,
+        raw_source_path: Some("/tmp/deepagents/sessions.db".to_owned()),
+        user_version: 0,
+        schema_fingerprint: "schema:test".to_owned(),
+        source_revision: "deepagents-snapshot:complete-message".to_owned(),
+        committed_store: None,
+    };
+    let mut output = CollectingProjectionOutput::default();
+    for record in batches.iter().flat_map(|batch| batch.records()) {
+        projector.project_record(record, &mut output).unwrap();
+    }
+    let event = output
+        .normalizations
+        .iter()
+        .flat_map(|normalization| &normalization.captures)
+        .find_map(|(_, capture)| capture.event.as_ref())
+        .unwrap();
+    assert_eq!(event.payload["text_retention"]["truncated"], true);
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &event.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    let locator = locators.locator(VerifiedContentRole::MessageBody).unwrap();
+    assert!(locator.content_ref().verifies(long.as_bytes()));
+    assert!(locators.locator(VerifiedContentRole::ResultBody).is_none());
+    let address =
+        decode_deepagents_content_address(locator.source_locator().unwrap().value()).unwrap();
+    assert_eq!(address.write_idx, 9);
+    assert_eq!(address.message_offset, 0);
+    assert!(!serde_json::to_string(&event.metadata)
+        .unwrap()
+        .contains("message body"));
 }
 
 #[test]

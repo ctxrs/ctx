@@ -11,12 +11,20 @@ hardware_identity="${7:-unknown}"
 emulation="${8:-unknown}"
 hypervisor="${9:-unknown}"
 evidence_complete="${10:-0}"
+runner_id="${11:-}"
+pinned_macos_x64_kvm_runner="precision-7780-macos-x64-kvm-v1"
 
 case "${runtime_status}" in
   not_run) printf 'not_run\n' ;;
   passed)
     case "${hardware_identity}:${emulation}:${hypervisor}:${evidence_complete}" in
       apple:none:absent:1|generic:none:absent:1|generic:none:present:1|generic:none:unknown:1) ;;
+      generic:qemu-kvm:present:1)
+        if [[ "${platform}" != "macos-x64" || "${runner_id}" != "${pinned_macos_x64_kvm_runner}" ]]; then
+          printf 'non_authoritative\n'
+          exit 0
+        fi
+        ;;
       apple:rosetta-2:absent:1|apple:qemu-kvm:*:1|generic:qemu-user:*:1|*:unknown:*:*|*:*:unknown:0|*:*:*:0)
         printf 'non_authoritative\n'
         exit 0
@@ -41,8 +49,15 @@ case "${runtime_status}" in
         exit 2
         ;;
     esac
-    if [[ "${platform}" == macos-* ]] && \
+    if [[ "${platform}" == "macos-arm64" ]] && \
       [[ "${hardware_identity}:${emulation}:${hypervisor}" != "apple:none:absent" ]]; then
+      printf 'non_authoritative\n'
+      exit 0
+    fi
+    if [[ "${platform}" == "macos-x64" ]] && \
+      [[ "${hardware_identity}:${emulation}:${hypervisor}" != "apple:none:absent" ]] && \
+      [[ "${hardware_identity}:${emulation}:${hypervisor}:${runner_id}" != \
+        "generic:qemu-kvm:present:${pinned_macos_x64_kvm_runner}" ]]; then
       printf 'non_authoritative\n'
       exit 0
     fi

@@ -81,6 +81,12 @@ pub enum StoreError {
         provider: String,
         source_format: String,
     },
+    #[error("capture source {capture_source_id} has a conflicting local provider route binding")]
+    CaptureSourceProviderRouteConflict { capture_source_id: Uuid },
+    #[error("no authorized current provider source route is available for event {event_id}")]
+    AuthorizedSourceRouteUnavailable { event_id: Uuid },
+    #[error("multiple authorized current provider source routes match event {event_id}")]
+    AuthorizedSourceRouteAmbiguous { event_id: Uuid },
     #[error(
         "multiple canonical capture sources match {provider}/{source_format}/{external_session_id}"
     )]

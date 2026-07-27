@@ -16,14 +16,13 @@ use super::capture::{
     OpenCodeKeyset, OpenCodePositionPhase, OpenCodeRowFetcher, OPENCODE_END_RECORD_KIND,
     OPENCODE_MESSAGE_PART_RECORD_KIND, OPENCODE_RECORD_KIND, OPENCODE_SESSION_PARENT_RECORD_KIND,
 };
+use super::complete_content::{opencode_integer_value, opencode_text_value};
 use super::normalization::{
-    opencode_event, opencode_message_part_role, opencode_patch_file_touch_drafts,
-    opencode_tool_part_event_data, OPENCODE_MESSAGE_PART_DEFAULT_ROLE,
+    opencode_event, opencode_message_part_role, opencode_normalized_result_content,
+    opencode_patch_file_touch_drafts, opencode_tool_part_event_data,
+    OPENCODE_MESSAGE_PART_DEFAULT_ROLE,
 };
-use super::projection::{
-    opencode_integer_value, opencode_text_value, OpenCodeCapturedBatchProjector,
-    OpenCodeProjectionSource,
-};
+use super::projection::{OpenCodeCapturedBatchProjector, OpenCodeProjectionSource};
 use super::schema::{
     opencode_captured_shape, opencode_session_candidate_sql, opencode_session_id_lookup_index,
     OpenCodeCapturedShape, OpenCodeMessageRow, OpenCodeRowSql, OpenCodeRowidSeek,
@@ -133,6 +132,40 @@ fn real_tool_part_materializes_bounded_result_evidence_and_outcome() {
         ])
     );
     assert!(!event.payload.to_string().contains("bounded commit"));
+}
+
+#[test]
+fn shared_sqlite_result_content_is_exact_unbounded_and_non_recursive() {
+    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 29);
+    let modern = json!({
+        "output": "lower priority",
+        "state": {
+            "status": "completed",
+            "output": long.clone(),
+        },
+    });
+    assert_eq!(
+        opencode_normalized_result_content("tool", &modern),
+        Some(long)
+    );
+    assert_eq!(
+        opencode_normalized_result_content(
+            "shell",
+            &json!({"output": "direct", "state": {"output": "nested"}}),
+        ),
+        Some("direct".to_owned())
+    );
+    assert_eq!(
+        opencode_normalized_result_content(
+            "tool_result",
+            &json!({"wrapper": {"output": "must not be discovered"}}),
+        ),
+        None
+    );
+    assert_eq!(
+        opencode_normalized_result_content("assistant", &json!({"output": "not a result"})),
+        None
+    );
 }
 
 fn create_session_message_schema(conn: &Connection) {

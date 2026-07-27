@@ -145,6 +145,21 @@ impl MistralVibeSessionObservation {
     }
 }
 
+pub(crate) fn mistral_vibe_complete_content_revision_from_admitted(
+    metadata: &Metadata,
+    messages: &Metadata,
+) -> Result<String> {
+    let observation = MistralVibeSessionObservation {
+        // Exact-content admission supplies path identity separately. The
+        // revision itself is intentionally only the two admitted file
+        // snapshots plus the capture/policy revisions.
+        canonical_messages_path: PathBuf::new(),
+        metadata_file: MistralVibeFrozenFile::from_metadata(metadata)?,
+        messages_file: MistralVibeFrozenFile::from_metadata(messages)?,
+    };
+    Ok(observation.source_revision())
+}
+
 pub(super) fn visit_mistral_vibe_session_sources(
     root: &Path,
     visit: &mut dyn FnMut(MistralVibeSessionSource) -> Result<()>,

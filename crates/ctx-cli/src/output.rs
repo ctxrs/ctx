@@ -24,15 +24,6 @@ pub(crate) enum SqlFormat {
     Raw,
 }
 
-impl LocateFormat {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Text => "text",
-            Self::Json => "json",
-        }
-    }
-}
-
 impl OutputFormat {
     pub(crate) fn as_str(self) -> &'static str {
         match self {

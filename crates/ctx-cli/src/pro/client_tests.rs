@@ -1,11 +1,15 @@
 use chrono::{DateTime, Utc};
-use ctx_history_capture::{import_codex_session_jsonl, CodexSessionImportOptions};
+use ctx_history_capture::{
+    complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY, import_codex_session_jsonl,
+    import_shelley_sqlite, CodexSessionImportOptions, ShelleySqliteImportOptions,
+};
 use ctx_history_core::{
     AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
     EntityTimestamps, Event, EventRole, EventType, Fidelity, Session, SessionStatus, SyncMetadata,
 };
+use rusqlite::Connection;
 use serde_json::json;
-use std::{cell::Cell, fs, path::PathBuf};
+use std::{cell::Cell, collections::BTreeMap, fs};
 use tempfile::tempdir;
 
 use super::*;
@@ -344,7 +348,7 @@ fn codex_result_hydration_is_source_verified_transient_and_fail_open() {
         ResultHydrationCounts {
             hydrated: 0,
             omitted: 3,
-            resolver_batches: 1,
+            resolver_batches: 0,
         }
     );
     assert!(request.result_contents.is_empty());
@@ -354,11 +358,131 @@ fn codex_result_hydration_is_source_verified_transient_and_fail_open() {
 }
 
 #[test]
-fn result_hydration_reserves_the_aggregate_budget_before_multi_source_reads() {
+fn shelley_result_hydrates_from_canonical_journal_through_sqlite_locator() {
+    let temp = tempdir().expect("temp dir");
+    let source_path = temp.path().join("shelley.db");
+    let secret = "SHELLEY-EXACT-RESULT-6f3a82";
+    let conn = Connection::open(&source_path).expect("open Shelley fixture");
+    conn.execute_batch(
+        "create table conversations (
+             conversation_id text primary key, slug text, created_at text, updated_at text
+         );
+         create table messages (
+             message_id text primary key, conversation_id text not null,
+             sequence_id integer not null, type text not null, user_data text, created_at text
+         );
+         create index idx_messages_conversation_sequence
+             on messages(conversation_id, sequence_id);
+         insert into conversations values (
+             'shelley-sidecar-session', 'sidecar fixture',
+             '2026-07-22T00:00:00Z', '2026-07-22T00:01:00Z'
+         );",
+    )
+    .expect("create Shelley fixture");
+    conn.execute(
+        "insert into messages values (
+             'shelley-sidecar-result', 'shelley-sidecar-session', 1, 'tool', ?1,
+             '2026-07-22T00:00:01Z'
+         )",
+        [json!({"ToolResult": {"Text": secret}}).to_string()],
+    )
+    .expect("insert Shelley result");
+    drop(conn);
+
+    let database = temp.path().join("ctx.db");
+    let mut store = Store::open(&database).expect("open Store");
+    let imported = import_shelley_sqlite(
+        &source_path,
+        &mut store,
+        ShelleySqliteImportOptions {
+            machine_id: "shelley-sidecar-machine".to_owned(),
+            source_path: Some(source_path.clone()),
+            imported_at: now(),
+            ..ShelleySqliteImportOptions::default()
+        },
+    )
+    .expect("import Shelley source");
+    assert_eq!(imported.failed, 0, "{:?}", imported.failures);
+    let session = store
+        .session_by_external_session(CaptureProvider::Shelley, "shelley-sidecar-session")
+        .expect("session query")
+        .expect("imported Shelley session");
+    let result = store
+        .events_for_session(session.id)
+        .expect("Shelley events")
+        .into_iter()
+        .find(|event| event.event_type == EventType::ToolOutput)
+        .expect("Shelley result event");
+    assert!(result.payload.pointer("/body/result_content_ref").is_some());
+    assert!(!serde_json::to_string(&result.payload)
+        .expect("stored payload JSON")
+        .contains(secret));
+
+    let genesis = store
+        .activate_projection_journal(PROTOCOL_FINGERPRINT)
+        .expect("activate journal");
+    let snapshot = store
+        .projection_journal_snapshot(None)
+        .expect("journal snapshot");
+    let mut request = JournalSyncRequest {
+        mode: JournalSyncMode::FullBaseline,
+        canonical_schema_version: snapshot.canonical_schema_version,
+        canonical_schema_identity: snapshot.canonical_schema_identity,
+        projection_contract_version: snapshot.projection_contract_version,
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        prior_checkpoint: JournalCheckpoint {
+            position: JournalPosition {
+                generation: genesis.position.generation,
+                sequence: 0,
+            },
+            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+            cumulative_digest: initial_journal_digest(genesis.position.generation),
+        },
+        frozen_through: protocol_checkpoint(snapshot.frozen_through),
+        authorized_repository_roots: snapshot.authorized_repository_roots,
+        records: snapshot
+            .records
+            .into_iter()
+            .map(protocol_journal_record)
+            .collect(),
+        result_contents: Vec::new(),
+    };
+    let result_record = request
+        .records
+        .iter()
+        .find(|record| {
+            record
+                .canonical_payload
+                .as_ref()
+                .is_some_and(|payload| payload.pointer("/result/content_ref").is_some())
+        })
+        .expect("canonical Shelley result record");
+    assert_eq!(result_record.stable_entity_id, result.id);
+    assert!(!serde_json::to_string(&request.records)
+        .expect("durable journal JSON")
+        .contains(secret));
+
+    let counts = hydrate_result_contents(&store, &mut request);
+    assert_eq!(
+        counts,
+        ResultHydrationCounts {
+            hydrated: 1,
+            omitted: 0,
+            resolver_batches: 1,
+        }
+    );
+    assert_eq!(request.result_contents.len(), 1);
+    assert_eq!(request.result_contents[0].stable_entity_id, result.id);
+    assert_eq!(request.result_contents[0].content, secret);
+    request.validate().expect("hydrated Shelley request");
+}
+
+#[test]
+fn result_hydration_releases_failed_reservations_for_later_valid_results() {
     let temp = tempdir().expect("temp dir");
     let database = temp.path().join("ctx.db");
     let mut store = Store::open(&database).expect("open Store");
-    let mut source_paths = Vec::new();
+    let mut result_ids = Vec::new();
     for index in 0..5 {
         let source_path = temp.path().join(format!("rollout-{index}.jsonl"));
         let prefix = format!("source-{index}:");
@@ -408,8 +532,48 @@ fn result_hydration_reserves_the_aggregate_budget_before_multi_source_reads() {
         )
         .expect("import source");
         assert_eq!(imported.failed, 0, "{:?}", imported.failures);
-        source_paths.push(source_path);
+        let session = store
+            .session_by_external_session(
+                CaptureProvider::Codex,
+                &format!("aggregate-budget-session-{index}"),
+            )
+            .expect("session query")
+            .expect("imported session");
+        let result = store
+            .events_for_session(session.id)
+            .expect("events")
+            .into_iter()
+            .find(|event| event.event_type == EventType::CommandOutput)
+            .expect("result event");
+        result_ids.push((
+            result.id,
+            result.capture_source_id.expect("result capture source"),
+            index,
+        ));
     }
+
+    result_ids.sort_by_key(|(_, capture_source_id, _)| *capture_source_id);
+    let invalid_result_id = result_ids[0].0;
+    let later_valid_result_id = result_ids[4].0;
+    let later_valid_source_index = result_ids[4].2;
+    let mut invalid = store
+        .get_event(invalid_result_id)
+        .expect("first result for invalid digest");
+    assert!(
+        invalid
+            .payload
+            .pointer("/body/result_content_ref")
+            .is_some(),
+        "{:?}",
+        invalid.payload
+    );
+    invalid.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY]["locators"][0]["content_ref"]
+        ["sha256"] = json!("0".repeat(64));
+    invalid.payload["body"]["result_content_ref"]["sha256"] = json!("0".repeat(64));
+    invalid.dedupe_key = None;
+    store
+        .upsert_event(&invalid)
+        .expect("persist invalid locator digest");
 
     let genesis = store
         .activate_projection_journal(PROTOCOL_FINGERPRINT)
@@ -417,7 +581,7 @@ fn result_hydration_reserves_the_aggregate_budget_before_multi_source_reads() {
     let snapshot = store
         .projection_journal_snapshot(None)
         .expect("journal snapshot");
-    let missing_source_path = snapshot
+    let first_result_id = snapshot
         .records
         .iter()
         .find_map(|record| {
@@ -425,16 +589,16 @@ fn result_hydration_reserves_the_aggregate_budget_before_multi_source_reads() {
                 .canonical_payload
                 .as_ref()?
                 .pointer("/result/content_ref")?;
-            let event = store.get_event(record.stable_entity_id).ok()?;
-            let source = store.get_capture_source(event.capture_source_id?).ok()?;
-            source.descriptor.raw_source_path.map(PathBuf::from)
+            result_ids
+                .iter()
+                .any(|(result_id, _, _)| *result_id == record.stable_entity_id)
+                .then_some(record.stable_entity_id)
         })
-        .expect("first budget-reserved result source");
-    let missing_source_index = source_paths
-        .iter()
-        .position(|path| path == &missing_source_path)
-        .expect("reserved source belongs to the fixture");
-    let missing_prefix = format!("source-{missing_source_index}:");
+        .expect("first budget-reserved result");
+    assert_eq!(
+        first_result_id, invalid_result_id,
+        "the invalid large result must precede valid results"
+    );
     let mut request = JournalSyncRequest {
         mode: JournalSyncMode::FullBaseline,
         canonical_schema_version: snapshot.canonical_schema_version,
@@ -458,15 +622,34 @@ fn result_hydration_reserves_the_aggregate_budget_before_multi_source_reads() {
             .collect(),
         result_contents: Vec::new(),
     };
-    fs::remove_file(&missing_source_path).expect("remove budget-reserved source");
-
+    let invalid_record = request
+        .records
+        .iter()
+        .find(|record| record.stable_entity_id == invalid_result_id)
+        .expect("invalid result journal record");
+    let invalid_content_ref = invalid_record
+        .canonical_payload
+        .as_ref()
+        .and_then(|payload| payload.pointer("/result/content_ref"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .expect("invalid result content ref");
+    assert!(
+        result_content::result_content_request(
+            &store,
+            invalid_result_id,
+            invalid_content_ref,
+            &mut BTreeMap::new(),
+        )
+        .is_some(),
+        "the invalid resolver request must pass route and locator admission"
+    );
     let counts = hydrate_result_contents(&store, &mut request);
     assert_eq!(
         counts,
         ResultHydrationCounts {
-            hydrated: 3,
-            omitted: 2,
-            resolver_batches: 4,
+            hydrated: 4,
+            omitted: 1,
+            resolver_batches: 5,
         }
     );
     assert_eq!(
@@ -475,12 +658,19 @@ fn result_hydration_reserves_the_aggregate_budget_before_multi_source_reads() {
             .iter()
             .map(|content| content.content.len())
             .sum::<usize>(),
-        3 * MAX_RESULT_CONTENT_BYTES_PER_ITEM
+        4 * MAX_RESULT_CONTENT_BYTES_PER_ITEM
     );
     assert!(!request
         .result_contents
         .iter()
-        .any(|content| content.content.contains(&missing_prefix)));
+        .any(|content| content.stable_entity_id == invalid_result_id));
+    assert!(request
+        .result_contents
+        .iter()
+        .any(|content| content.stable_entity_id == later_valid_result_id));
+    assert!(request.result_contents.iter().any(|content| content
+        .content
+        .contains(&format!("source-{later_valid_source_index}:"))));
     request.validate().expect("bounded request");
 }
 
@@ -695,32 +885,6 @@ fn materialization_mode_uses_only_public_host_graph_state_and_checkpoint_shape()
         ProMaterializationModeV1::from_graph_state(GraphState::Ready, false, 9),
         ProMaterializationModeV1::Rebuild
     );
-}
-
-#[test]
-fn generic_protocol_failures_map_to_stable_public_codes() {
-    for (class, expected) in [
-        (
-            ctx_pro_host_protocol::ErrorClass::ProtocolMismatch,
-            "protocol_mismatch",
-        ),
-        (
-            ctx_pro_host_protocol::ErrorClass::MissingSource,
-            "source_unavailable",
-        ),
-        (
-            ctx_pro_host_protocol::ErrorClass::MissingRepository,
-            "repository_unavailable",
-        ),
-        (ctx_pro_host_protocol::ErrorClass::StaleFact, "stale_fact"),
-    ] {
-        let mapped = protocol_error(ctx_pro_host_protocol::ProtocolError::new(
-            class,
-            "untrusted helper detail",
-        ));
-        assert_eq!(mapped.to_string(), expected);
-        assert_eq!(stable_error_code(&mapped), Some(expected));
-    }
 }
 
 #[test]

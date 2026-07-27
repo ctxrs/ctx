@@ -137,6 +137,11 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "import_change_reporting_tests",
+    src = "tests/import_change_reporting.rs",
+)
+
+ctx_cli_integration_test(
     name = "index_tests",
     src = "tests/index.rs",
 )
@@ -224,6 +229,11 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "search_show_locate_sql_tests",
     src = "tests/search_show_locate_sql.rs",
+)
+
+ctx_cli_integration_test(
+    name = "source_backed_content_tests",
+    src = "tests/source_backed_content.rs",
 )
 
 ctx_cli_integration_test(

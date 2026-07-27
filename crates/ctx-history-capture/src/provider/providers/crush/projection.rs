@@ -19,9 +19,10 @@ use crate::provider::importer::{
     ProviderProjectionFatal, ProviderProjectionOutput, ProviderProjectionResult,
 };
 use crate::provider::normalization::{
-    native_event, native_provider_capture, provider_line_from_index, provider_role,
-    provider_timestamp_millis, provider_timestamp_seconds, provider_value_text, text_id_index,
-    NativeEventDraft, NativeSessionDraft,
+    native_event, native_provider_capture, provider_line_from_index,
+    provider_normalized_result_value, provider_role, provider_timestamp_millis,
+    provider_timestamp_seconds, provider_value_text, text_id_index, NativeEventDraft,
+    NativeSessionDraft,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderFileTouchedEnvelope, ProviderNormalizationResult,
@@ -53,7 +54,7 @@ pub(super) struct CrushMessageRow {
     pub(super) id: String,
     session_id: String,
     role: String,
-    parts: String,
+    pub(super) parts: String,
     created_at: Option<i64>,
     updated_at: Option<i64>,
     provider: Option<String>,
@@ -115,6 +116,7 @@ struct CrushMessageProjection {
     event: ProviderEventEnvelope,
     raw_parts: Value,
     existing_session: bool,
+    complete_text: String,
 }
 
 pub(super) struct CrushChildMessageRow {
@@ -214,11 +216,32 @@ impl CapturedBatchProjector for CrushCapturedBatchProjector {
                 let CrushMessageProjection {
                     line_number,
                     provider_session_id,
-                    capture,
+                    mut capture,
                     event,
                     raw_parts,
                     existing_session,
+                    complete_text,
                 } = *message;
+                if let Some(captured_event) = capture.event.as_mut() {
+                    crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                        captured_event,
+                        CaptureProvider::Crush,
+                        CRUSH_SQLITE_SOURCE_FORMAT,
+                        record.locator(),
+                        values,
+                        crush_normalized_result_content(&raw_parts),
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                    crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+                        captured_event,
+                        CaptureProvider::Crush,
+                        CRUSH_SQLITE_SOURCE_FORMAT,
+                        record.locator(),
+                        values,
+                        || complete_text,
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                }
                 output.use_explicit_file_touches();
                 if existing_session {
                     let event_outcome = output.emit_existing_session_event(
@@ -363,7 +386,7 @@ fn project_message(
         event_type,
         role: Some(provider_role(Some(&message.role))),
         occurred_at,
-        text,
+        text: text.clone(),
         body: json!({
             "message_id": message.id,
             "role": message.role,
@@ -403,6 +426,7 @@ fn project_message(
         event,
         raw_parts: parts,
         existing_session,
+        complete_text: text,
     }))
 }
 
@@ -744,11 +768,9 @@ fn parts_text(parts: &Value) -> Option<String> {
                 "tool_result" => {
                     let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
                     text.push(format!("tool result: {name}"));
-                    for key in ["content", "data", "output"] {
-                        if let Some(value) = data.get(key).and_then(provider_value_text) {
-                            text.push(value);
-                            break;
-                        }
+                    if let Some(value) = crush_tool_result_value(data).and_then(provider_value_text)
+                    {
+                        text.push(value);
                     }
                 }
                 "shell_command" => {
@@ -776,6 +798,53 @@ fn parts_text(parts: &Value) -> Option<String> {
         push_json_text(&mut text, parts);
     }
     (!text.is_empty()).then(|| text.join("\n"))
+}
+
+/// Returns complete normalized result bodies from Crush result parts in their
+/// native order. Only schema-owned part kinds and fields are considered; the
+/// function never searches arbitrary descendants. The caller owns any bound.
+#[allow(dead_code)] // Activated by SQLite result-locator attachment.
+pub(crate) fn crush_normalized_result_content(parts: &Value) -> Option<String> {
+    let items = parts.as_array()?;
+    let mut results = Vec::new();
+    for item in items {
+        let Some(kind) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let data = item.get("data").unwrap_or(item);
+        let value = match kind {
+            "tool_result" => crush_tool_result_value(data),
+            "shell_command" => ["output", "stdout", "stderr"]
+                .iter()
+                .find_map(|key| data.get(*key)),
+            _ => None,
+        };
+        if let Some(value) = value {
+            results.push(provider_normalized_result_value(value));
+        }
+    }
+    (!results.is_empty()).then(|| results.join("\n"))
+}
+
+fn crush_tool_result_value(data: &Value) -> Option<&Value> {
+    ["content", "data", "output"]
+        .iter()
+        .find_map(|key| data.get(*key))
+}
+
+pub(crate) fn crush_complete_message(
+    values: &[CapturedSqliteValue],
+) -> Result<(String, String, String)> {
+    let child = decode_message_child(values)?;
+    if child.parent_rowid.is_none() {
+        return Err(CaptureError::InvalidPayload(
+            "Crush message parent is missing".into(),
+        ));
+    }
+    let message = child.message;
+    let parts: Value = serde_json::from_str(&message.parts)?;
+    let text = parts_text(&parts).unwrap_or_else(|| format!("Crush {} message", message.role));
+    Ok((message.session_id, message.id, text))
 }
 
 fn push_json_text(parts: &mut Vec<String>, value: &Value) {

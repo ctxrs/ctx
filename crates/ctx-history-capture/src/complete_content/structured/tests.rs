@@ -1,13 +1,20 @@
 use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, Fidelity};
+use ctx_history_core::{ContentRef, EventRole, Fidelity};
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::*;
-use crate::complete_content::{CompleteContentSourceLocator, SourceSnapshot};
+#[cfg(unix)]
+use crate::complete_content::structured::source_access::{
+    set_structured_admission_test_hook, StructuredAdmissionTestStage,
+};
+use crate::complete_content::{
+    AuthorizedSourceRoute, CompleteContentSourceLocator, SourceAccessBroker, SourceSnapshot,
+    VerifiedContentLocatorsV1, VerifiedContentRouteStatus, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+};
 
 fn format_for(provider: CaptureProvider) -> &'static str {
     match provider {
@@ -34,15 +41,67 @@ fn request(
     record_bytes: &[u8],
     text: &str,
 ) -> CompleteMessageRequest {
+    try_request(
+        provider,
+        path,
+        source_root,
+        provider_session_id,
+        ordinal,
+        subrecord,
+        native_id,
+        record_bytes,
+        text,
+    )
+    .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_request(
+    provider: CaptureProvider,
+    path: &Path,
+    source_root: Option<&Path>,
+    provider_session_id: &str,
+    ordinal: u64,
+    subrecord: u32,
+    native_id: &str,
+    record_bytes: &[u8],
+    text: &str,
+) -> std::result::Result<CompleteMessageRequest, CompleteContentError> {
     let indexed_limit_chars = 4;
-    CompleteMessageRequest {
-        event_id: Uuid::new_v4(),
+    let event_id = Uuid::new_v4();
+    let path = broker_test_path(path);
+    let source_root = source_root.map(broker_test_path);
+    let source_access = SourceAccessBroker::new().admit(
+        AuthorizedSourceRoute {
+            source_id: Uuid::new_v4(),
+            provider,
+            source_format: format_for(provider).to_owned(),
+            family: CompleteContentSourceFamily::Structured,
+            raw_source_path: path,
+            source_root,
+            source_identity: Some(format!("test:{}", provider.as_str())),
+            source_snapshot: SourceSnapshot {
+                size_bytes: Some(record_bytes.len() as u64),
+                modified_at_ms: None,
+                sha256: Some(digest_bytes(record_bytes)),
+            },
+        },
+        event_id,
+    )?;
+    Ok(CompleteMessageRequest {
+        event_id,
         provider,
         source_format: format_for(provider).to_owned(),
-        raw_source_path: path.to_path_buf(),
-        source_root: source_root.map(Path::to_path_buf),
-        source_identity: Some(format!("test:{}", provider.as_str())),
+        source_access,
         source_family: Some(CompleteContentSourceFamily::Structured),
+        content_profile: verified_content_profile(
+            provider,
+            format_for(provider),
+            CompleteContentSourceFamily::Structured,
+            VerifiedContentRole::MessageBody,
+        )
+        .unwrap()
+        .to_owned(),
         source_locator: Some(
             CompleteContentSourceLocator::new(
                 STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
@@ -50,11 +109,6 @@ fn request(
             )
             .unwrap(),
         ),
-        source_snapshot: SourceSnapshot {
-            size_bytes: Some(record_bytes.len() as u64),
-            modified_at_ms: None,
-            sha256: Some(digest_bytes(record_bytes)),
-        },
         provider_session_id: Some(provider_session_id.to_owned()),
         source_record_ordinal: ordinal,
         source_record_subrecord_index: subrecord,
@@ -62,10 +116,75 @@ fn request(
         expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
         expected_native_record_id: Some(native_id.to_owned()),
         expected_record_digest: CompleteContentBodyDigest::parse(digest_bytes(record_bytes)),
-        expected_body_digest: Some(CompleteContentBodyDigest::from_text(text)),
+        expected_content_ref: ContentRef::from_bytes(text.as_bytes()),
         indexed_text: text.chars().take(indexed_limit_chars).collect(),
         indexed_limit_chars,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn result_request(
+    provider: CaptureProvider,
+    path: &Path,
+    ordinal: u64,
+    subrecord: u32,
+    native_id: &str,
+    record_bytes: &[u8],
+    content: &str,
+) -> ResultContentRequest {
+    let event_id = Uuid::new_v4();
+    let path = broker_test_path(path);
+    let source_access = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider,
+                source_format: format_for(provider).to_owned(),
+                family: CompleteContentSourceFamily::Structured,
+                raw_source_path: path.clone(),
+                source_root: path.parent().map(Path::to_path_buf),
+                source_identity: Some(format!("test:{}", provider.as_str())),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            event_id,
+        )
+        .unwrap();
+    ResultContentRequest {
+        event_id,
+        provider,
+        source_format: format_for(provider).to_owned(),
+        source_access,
+        source_family: CompleteContentSourceFamily::Structured,
+        content_profile: verified_content_profile(
+            provider,
+            format_for(provider),
+            CompleteContentSourceFamily::Structured,
+            VerifiedContentRole::ResultBody,
+        )
+        .unwrap()
+        .to_owned(),
+        source_locator: CompleteContentSourceLocator::new(
+            STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
+            encode_structured_locator(provider, ordinal, subrecord, native_id).unwrap(),
+        )
+        .unwrap(),
+        source_record_ordinal: ordinal,
+        source_record_subrecord_index: subrecord,
+        expected_native_record_id: native_id.to_owned(),
+        expected_record_digest: CompleteContentBodyDigest::parse(digest_bytes(record_bytes))
+            .unwrap(),
+        expected_content_ref: ContentRef::from_bytes(content.as_bytes()).unwrap(),
     }
+}
+
+fn broker_test_path(path: &Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    match path.strip_prefix("/var") {
+        Ok(suffix) => Path::new("/private/var").join(suffix),
+        Err(_) => path.to_path_buf(),
+    }
+    #[cfg(not(target_os = "macos"))]
+    path.to_path_buf()
 }
 
 fn resolve_one_message(request: CompleteMessageRequest) -> CompleteMessage {
@@ -85,18 +204,24 @@ fn write(path: &Path, bytes: &[u8]) {
 
 #[test]
 fn capability_table_is_exhaustive_and_routes_exactly_seven_providers() {
-    assert_eq!(STRUCTURED_COMPLETE_CONTENT_CAPABILITIES.len(), 41);
-    let providers = STRUCTURED_COMPLETE_CONTENT_CAPABILITIES
+    let providers = VERIFIED_CONTENT_ROUTES
         .iter()
-        .map(|capability| capability.provider.as_str())
+        .filter(|route| route.role == VerifiedContentRole::MessageBody)
+        .map(|route| route.provider.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(providers.len(), 41);
-    let supported = STRUCTURED_COMPLETE_CONTENT_CAPABILITIES
+    let supported = VERIFIED_CONTENT_ROUTES
         .iter()
-        .filter(|capability| {
-            capability.status == StructuredCompleteContentCapabilityStatus::Supported
+        .filter(|route| {
+            route.role == VerifiedContentRole::MessageBody
+                && verified_content_route_supported(
+                    route.provider,
+                    route.source_format,
+                    CompleteContentSourceFamily::Structured,
+                    route.role,
+                )
         })
-        .map(|capability| capability.provider.as_str())
+        .map(|route| route.provider.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(
         supported,
@@ -110,12 +235,12 @@ fn capability_table_is_exhaustive_and_routes_exactly_seven_providers() {
             "roo_code",
         ])
     );
-    assert!(STRUCTURED_COMPLETE_CONTENT_CAPABILITIES
-        .iter()
-        .all(|entry| {
-            entry.status != StructuredCompleteContentCapabilityStatus::Unsupported
-                && !entry.reason.is_empty()
-        }));
+    assert!(VERIFIED_CONTENT_ROUTES.iter().all(|entry| {
+        entry.platform_dispositions.iter().all(|disposition| {
+            disposition.status == VerifiedContentRouteStatus::Supported
+                || !disposition.reason.is_empty()
+        })
+    }));
 }
 
 #[test]
@@ -147,12 +272,13 @@ fn persisted_locator_is_bounded_path_free_and_only_attached_to_truncated_message
     .unwrap();
     let value = event
         .metadata
-        .get(COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
+        .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
         .unwrap();
     let encoded = serde_json::to_vec(value).unwrap();
     assert!(encoded.len() <= 4 * 1024);
     assert!(!String::from_utf8_lossy(&encoded).contains("/home/"));
-    let persisted = PersistedCompleteContentLocatorV1::from_metadata_value(value).unwrap();
+    let persisted = VerifiedContentLocatorsV1::from_metadata_value(value).unwrap();
+    let persisted = persisted.locator(VerifiedContentRole::MessageBody).unwrap();
     assert_eq!(persisted.family(), CompleteContentSourceFamily::Structured);
     assert_eq!(persisted.native_record_id(), "native-12");
     let decoded = decode_structured_locator(persisted.source_locator().unwrap().value()).unwrap();
@@ -175,8 +301,171 @@ fn persisted_locator_is_bounded_path_free_and_only_attached_to_truncated_message
     .unwrap();
     assert!(short
         .metadata
-        .get(COMPLETE_CONTENT_LOCATOR_METADATA_KEY)
+        .get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY)
         .is_none());
+}
+
+#[test]
+fn result_locator_persists_only_a_reference_and_resolves_exact_structured_subrecords() {
+    let directory = TempDir::new().unwrap();
+    let content = "structured result λ\nsecond line";
+    let rovo_bytes = serde_json::to_vec(&json!({
+        "message_history": [{
+            "id": "rovo-result-1",
+            "role": "user",
+            "content": [{"type": "tool_result", "content": content}]
+        }]
+    }))
+    .unwrap();
+    let rovo_path = directory.path().join("session_context.json");
+    write(&rovo_path, &rovo_bytes);
+
+    let mut event = ProviderEventEnvelope {
+        provider_event_index: 0,
+        provider_event_hash: Some("rovo-result-1".to_owned()),
+        cursor: None,
+        event_type: EventType::ToolOutput,
+        role: Some(EventRole::Tool),
+        occurred_at: DateTime::<Utc>::UNIX_EPOCH,
+        fidelity: Fidelity::Imported,
+        idempotency_key: None,
+        artifacts: Vec::new(),
+        payload: json!({"result_outcome": "success"}),
+        metadata: json!({}),
+    };
+    attach_structured_result_content_locator(
+        CaptureProvider::RovoDev,
+        &mut event,
+        0,
+        0,
+        "rovo-result-1",
+        &rovo_bytes,
+        content,
+    )
+    .unwrap();
+    assert!(!event.payload.to_string().contains(content));
+    assert!(event.payload["result_content_ref"].get("sha256").is_some());
+
+    let mut request = result_request(
+        CaptureProvider::RovoDev,
+        &rovo_path,
+        0,
+        0,
+        "rovo-result-1",
+        &rovo_bytes,
+        content,
+    );
+    let resolved = ResultContentResolver::resolve_results(
+        &StructuredCompleteContentResolver::new(),
+        std::slice::from_ref(&request),
+    );
+    assert_eq!(resolved[0].as_ref().unwrap().content, content);
+
+    let mut wrong_subrecord = request.clone();
+    wrong_subrecord.source_record_subrecord_index = 1;
+    assert_eq!(
+        ResultContentResolver::resolve_results(
+            &StructuredCompleteContentResolver::new(),
+            &[wrong_subrecord]
+        )[0]
+        .as_ref()
+        .unwrap_err()
+        .kind,
+        CompleteContentErrorKind::ContentVerificationFailed
+    );
+
+    fs::write(&rovo_path, b"{\"message_history\":[]}").unwrap();
+    request.source_access = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: request.provider,
+                source_format: request.source_format.clone(),
+                family: CompleteContentSourceFamily::Structured,
+                raw_source_path: rovo_path.clone(),
+                source_root: rovo_path.parent().map(Path::to_path_buf),
+                source_identity: Some("test:rovo-dev".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            request.event_id,
+        )
+        .unwrap();
+    assert_eq!(
+        ResultContentResolver::resolve_results(
+            &StructuredCompleteContentResolver::new(),
+            &[request]
+        )[0]
+        .as_ref()
+        .unwrap_err()
+        .kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+}
+
+#[test]
+fn resolves_openhands_and_task_json_results_by_native_record_identity() {
+    let directory = TempDir::new().unwrap();
+    let openhands_content = "OpenHands stdout\n";
+    let openhands_bytes = serde_json::to_vec(&json!({
+        "id": "openhands-result-1",
+        "timestamp": "2026-07-22T12:00:00Z",
+        "kind": "ObservationEvent",
+        "source": "environment",
+        "observation": {
+            "kind": "ExecuteBashObservation",
+            "content": openhands_content
+        }
+    }))
+    .unwrap();
+    let openhands_path = directory
+        .path()
+        .join("profile/v1_conversations/session/events/result.json");
+    write(&openhands_path, &openhands_bytes);
+    let openhands = result_request(
+        CaptureProvider::OpenHands,
+        &openhands_path,
+        17,
+        0,
+        "openhands-result-1",
+        &openhands_bytes,
+        openhands_content,
+    );
+    assert_eq!(
+        ResultContentResolver::resolve_results(
+            &StructuredCompleteContentResolver::new(),
+            &[openhands]
+        )[0]
+        .as_ref()
+        .unwrap()
+        .content,
+        openhands_content
+    );
+
+    let task_content = "task command output";
+    let raw_record = format!(
+        r#"{{"id":"task-result-1","type":"command","text":{}}}"#,
+        serde_json::to_string(task_content).unwrap()
+    );
+    let task_file = format!("[\n {raw_record}\n]").into_bytes();
+    let task_path = directory.path().join("tasks/cline/ui_messages.json");
+    write(&task_path, &task_file);
+    let task = result_request(
+        CaptureProvider::Cline,
+        &task_path,
+        4,
+        0,
+        "cline-task:ui_messages:task-result-1",
+        raw_record.as_bytes(),
+        task_content,
+    );
+    assert_eq!(
+        ResultContentResolver::resolve_results(&StructuredCompleteContentResolver::new(), &[task])
+            [0]
+        .as_ref()
+        .unwrap()
+        .content,
+        task_content
+    );
 }
 
 #[test]
@@ -251,6 +540,46 @@ fn resolves_whole_json_provider_families_byte_exactly() {
         ))
         .text,
         rovo_text
+    );
+}
+
+#[test]
+fn continue_message_locator_uses_interleaved_citation_and_native_identity() {
+    let directory = TempDir::new().unwrap();
+    let text = "message after separately normalized result";
+    let bytes = serde_json::to_vec(&json!({
+        "history": [
+            {
+                "id": "call-item",
+                "message": {"role": "assistant", "content": ""},
+                "toolCallStates": [{
+                    "toolCallId": "call-1",
+                    "toolCall": {"function": {"name": "readFile"}},
+                    "output": "result"
+                }]
+            },
+            {"id": "message-item", "message": {"role": "user", "content": text}}
+        ]
+    }))
+    .unwrap();
+    let path = directory.path().join("continue-session.json");
+    write(&path, &bytes);
+    // Canonical subrecord 0 is the call, 1 its result, and 2 this message;
+    // native history index remains 1 and is recovered by message identity.
+    assert_eq!(
+        resolve_one_message(request(
+            CaptureProvider::Continue,
+            &path,
+            None,
+            "continue-session",
+            0,
+            2,
+            "message-item",
+            &bytes,
+            text,
+        ))
+        .text,
+        text
     );
 }
 
@@ -580,9 +909,10 @@ fn follows_verified_custom_root_moves_and_real_json5_profile_roots() {
     );
 
     let profile = directory.path().join("profiles.json5");
+    let configured_root = broker_test_path(&moved_root);
     let profile_text = format!(
         "// stable + insiders profiles\n{{ profiles: [{{ storagePath: {}, }},], }}",
-        serde_json::to_string(moved_root.to_str().unwrap()).unwrap()
+        serde_json::to_string(configured_root.to_str().unwrap()).unwrap()
     );
     write(&profile, profile_text.as_bytes());
     assert_eq!(
@@ -613,7 +943,10 @@ fn parses_xml_profile_roots_and_rejects_doctype_entities() {
     }))
     .unwrap();
     write(&source, &bytes);
-    let escaped_root = profile_root.to_str().unwrap().replace('&', "&amp;");
+    let escaped_root = broker_test_path(&profile_root)
+        .to_str()
+        .unwrap()
+        .replace('&', "&amp;");
     let profile = directory.path().join("profiles.xml");
     write(
         &profile,
@@ -639,19 +972,18 @@ fn parses_xml_profile_roots_and_rejects_doctype_entities() {
         &profile,
         br#"<!DOCTYPE x [<!ENTITY root "/tmp">]><profiles><path>&root;</path></profiles>"#,
     );
-    let failure = StructuredCompleteContentResolver::new()
-        .resolve(&[request(
-            CaptureProvider::RovoDev,
-            &profile,
-            None,
-            "xml-session",
-            0,
-            0,
-            "xml-1",
-            &bytes,
-            text,
-        )])
-        .unwrap_err();
+    let failure = try_request(
+        CaptureProvider::RovoDev,
+        &profile,
+        None,
+        "xml-session",
+        0,
+        0,
+        "xml-1",
+        &bytes,
+        text,
+    )
+    .unwrap_err();
     assert_eq!(failure.kind, CompleteContentErrorKind::SourceChanged);
 }
 
@@ -697,7 +1029,7 @@ fn detects_mutation_wrong_identity_and_wrong_body_digest() {
         &bytes,
         text,
     );
-    wrong_body.expected_body_digest = Some(CompleteContentBodyDigest::from_text("different"));
+    wrong_body.expected_content_ref = ContentRef::from_bytes(b"different");
     assert_eq!(
         StructuredCompleteContentResolver::new()
             .resolve(&[wrong_body])
@@ -721,9 +1053,25 @@ fn detects_mutation_wrong_identity_and_wrong_body_digest() {
         &path,
         br#"{"message_history":[{"id":"stable-1","content":"mutated"}]}"#,
     );
+    let stable = StructuredCompleteContentResolver::new()
+        .resolve(&[mutation_request])
+        .unwrap();
+    assert_eq!(stable[0].text, text);
+    let changed = try_request(
+        CaptureProvider::RovoDev,
+        &path,
+        None,
+        "session",
+        0,
+        0,
+        "stable-1",
+        &bytes,
+        text,
+    )
+    .unwrap();
     assert_eq!(
         StructuredCompleteContentResolver::new()
-            .resolve(&[mutation_request])
+            .resolve(&[changed])
             .unwrap_err()
             .kind,
         CompleteContentErrorKind::SourceChanged
@@ -766,7 +1114,8 @@ fn multi_message_resolution_is_all_or_nothing() {
         &bytes,
         second,
     );
-    second_request.expected_body_digest = Some(CompleteContentBodyDigest::from_text("wrong"));
+    second_request.source_access = first_request.source_access.clone();
+    second_request.expected_content_ref = ContentRef::from_bytes(b"wrong");
     let second_event = second_request.event_id;
     let failure = StructuredCompleteContentResolver::new()
         .resolve(&[first_request, second_request])
@@ -872,7 +1221,7 @@ fn rejects_symlinks_and_parent_traversal() {
     write(&path, &bytes);
     let link = directory.path().join("linked");
     symlink(&real, &link).unwrap();
-    let linked_request = request(
+    let linked_error = try_request(
         CaptureProvider::RovoDev,
         &link,
         None,
@@ -882,17 +1231,12 @@ fn rejects_symlinks_and_parent_traversal() {
         "link-1",
         &bytes,
         text,
-    );
-    assert_eq!(
-        StructuredCompleteContentResolver::new()
-            .resolve(&[linked_request])
-            .unwrap_err()
-            .kind,
-        CompleteContentErrorKind::SourceChanged
-    );
+    )
+    .unwrap_err();
+    assert_eq!(linked_error.kind, CompleteContentErrorKind::SourceChanged);
 
     let traversal = real.join("subdir/../session_context.json");
-    let traversal_request = request(
+    let traversal_error = try_request(
         CaptureProvider::RovoDev,
         &traversal,
         None,
@@ -902,12 +1246,157 @@ fn rejects_symlinks_and_parent_traversal() {
         "link-1",
         &bytes,
         text,
-    );
+    )
+    .unwrap_err();
     assert_eq!(
-        StructuredCompleteContentResolver::new()
-            .resolve(&[traversal_request])
-            .unwrap_err()
-            .kind,
+        traversal_error.kind,
         CompleteContentErrorKind::ContentVerificationFailed
     );
+}
+
+#[cfg(unix)]
+struct StructuredAdmissionHookReset;
+
+#[cfg(unix)]
+impl Drop for StructuredAdmissionHookReset {
+    fn drop(&mut self) {
+        set_structured_admission_test_hook(None);
+    }
+}
+
+#[cfg(unix)]
+fn install_structured_admission_hook(
+    hook: impl FnMut(&Path, StructuredAdmissionTestStage) + 'static,
+) -> StructuredAdmissionHookReset {
+    set_structured_admission_test_hook(Some(Box::new(hook)));
+    StructuredAdmissionHookReset
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_root_replacement_after_capability_admission() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("root");
+    let moved = directory.path().join("moved-root");
+    let replacement = directory.path().join("replacement-root");
+    let text = "original root content";
+    let bytes = serde_json::to_vec(&json!({
+        "message_history": [{"id": "root-race", "content": text}]
+    }))
+    .unwrap();
+    write(&root.join("session_context.json"), &bytes);
+    write(
+        &replacement.join("session_context.json"),
+        br#"{"message_history":[{"id":"root-race","content":"replacement"}]}"#,
+    );
+    let root_for_hook = broker_test_path(&root);
+    let moved_for_hook = broker_test_path(&moved);
+    let replacement_for_hook = broker_test_path(&replacement);
+    let mut fired = false;
+    let _reset = install_structured_admission_hook(move |path, stage| {
+        if !fired && stage == StructuredAdmissionTestStage::RootOpened && path == root_for_hook {
+            fs::rename(&root_for_hook, &moved_for_hook).unwrap();
+            fs::rename(&replacement_for_hook, &root_for_hook).unwrap();
+            fired = true;
+        }
+    });
+    let failure = try_request(
+        CaptureProvider::RovoDev,
+        &root,
+        None,
+        "root-race-session",
+        0,
+        0,
+        "root-race",
+        &bytes,
+        text,
+    )
+    .unwrap_err();
+    assert_eq!(failure.kind, CompleteContentErrorKind::SourceChanged);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_ancestor_replacement_after_root_capability_admission() {
+    let directory = TempDir::new().unwrap();
+    let parent = directory.path().join("parent");
+    let moved_parent = directory.path().join("moved-parent");
+    let root = parent.join("root");
+    let text = "original ancestor content";
+    let bytes = serde_json::to_vec(&json!({
+        "message_history": [{"id": "ancestor-race", "content": text}]
+    }))
+    .unwrap();
+    write(&root.join("session_context.json"), &bytes);
+    let root_for_hook = broker_test_path(&root);
+    let parent_for_hook = broker_test_path(&parent);
+    let moved_for_hook = broker_test_path(&moved_parent);
+    let mut fired = false;
+    let _reset = install_structured_admission_hook(move |path, stage| {
+        if !fired && stage == StructuredAdmissionTestStage::RootOpened && path == root_for_hook {
+            fs::rename(&parent_for_hook, &moved_for_hook).unwrap();
+            write(
+                &parent_for_hook.join("root/session_context.json"),
+                br#"{"message_history":[{"id":"ancestor-race","content":"replacement"}]}"#,
+            );
+            fired = true;
+        }
+    });
+    let failure = try_request(
+        CaptureProvider::RovoDev,
+        &root,
+        None,
+        "ancestor-race-session",
+        0,
+        0,
+        "ancestor-race",
+        &bytes,
+        text,
+    )
+    .unwrap_err();
+    assert_eq!(failure.kind, CompleteContentErrorKind::SourceChanged);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_child_replacement_after_descriptor_relative_open() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("root");
+    let target = root.join("session_context.json");
+    let moved = root.join("moved-original.json");
+    let replacement = directory.path().join("replacement.json");
+    let text = "original child content";
+    let bytes = serde_json::to_vec(&json!({
+        "message_history": [{"id": "child-race", "content": text}]
+    }))
+    .unwrap();
+    write(&target, &bytes);
+    write(
+        &replacement,
+        br#"{"message_history":[{"id":"child-race","content":"replacement"}]}"#,
+    );
+    let target_for_hook = broker_test_path(&target);
+    let moved_for_hook = broker_test_path(&moved);
+    let replacement_for_hook = broker_test_path(&replacement);
+    let mut fired = false;
+    let _reset = install_structured_admission_hook(move |path, stage| {
+        if !fired && stage == StructuredAdmissionTestStage::ChildOpened && path == target_for_hook {
+            fs::rename(&target_for_hook, &moved_for_hook).unwrap();
+            fs::rename(&replacement_for_hook, &target_for_hook).unwrap();
+            fired = true;
+        }
+    });
+    let failure = try_request(
+        CaptureProvider::RovoDev,
+        &root,
+        None,
+        "child-race-session",
+        0,
+        0,
+        "child-race",
+        &bytes,
+        text,
+    )
+    .unwrap_err();
+    assert_eq!(failure.kind, CompleteContentErrorKind::SourceChanged);
 }

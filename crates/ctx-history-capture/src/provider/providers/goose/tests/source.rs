@@ -38,7 +38,7 @@ fn goose_source_revision_keeps_exact_snapshot_envelope() {
     let snapshot = goose_source_snapshot(&path).unwrap();
     let snapshot_component = snapshot.revision_component();
     let expected_revision = format!(
-        "goose-sqlite-snapshot-v1:capture=3;policy=4;user_version=23;schema_version=14;schema=schema-v1;{snapshot_component}"
+        "goose-sqlite-snapshot-v1:capture=3;policy=5;user_version=23;schema_version=14;schema=schema-v1;{snapshot_component}"
     );
     assert_eq!(
         goose_source_revision(&snapshot, 23, Some(14), "schema-v1"),
@@ -63,7 +63,7 @@ fn goose_source_revision_keeps_exact_snapshot_envelope() {
     assert_eq!(source.source_revision(), expected_revision);
     assert_eq!(source.cursor_stream(), "provider:goose:cursor");
     assert_eq!(source.capture_revision(), 3);
-    assert_eq!(source.policy_revision(), 4);
+    assert_eq!(source.policy_revision(), 5);
     assert!(snapshot.revalidate(&path).unwrap());
 }
 

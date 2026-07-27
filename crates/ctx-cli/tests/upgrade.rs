@@ -72,6 +72,28 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
     assert_eq!(marker["version"], "9.9.9");
     assert_eq!(marker["sha256"], release.artifact_sha);
     assert_eq!(marker["install_attempt_id"], "ia_test_upgrade_attempt");
+    assert_eq!(marker["installed_at"], release.installed_at);
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_drops_expired_install_attribution_instead_of_reopening_it() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let marker_path = install_marker_path(&release.target);
+    let mut marker: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    marker["installed_at"] = json!("2020-01-01T00:00:00Z");
+    fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
+
+    let applied = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+    assert_eq!(applied["status"], "applied");
+
+    let upgraded: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    assert!(upgraded.get("install_attempt_id").is_none());
+    assert_ne!(upgraded["installed_at"], "2020-01-01T00:00:00Z");
 }
 
 #[cfg(unix)]

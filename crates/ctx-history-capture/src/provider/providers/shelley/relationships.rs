@@ -9,23 +9,24 @@ use crate::{CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_
 
 use super::{SHELLEY_CONVERSATION_VALUE_COUNT, SHELLEY_MESSAGE_VALUE_COUNT};
 
-pub(super) struct ShelleyConversationRow {
-    pub(super) conversation_id: String,
-    pub(super) slug: Option<String>,
-    pub(super) user_initiated: bool,
-    pub(super) created_at: Option<String>,
-    pub(super) updated_at: Option<String>,
-    pub(super) cwd: Option<String>,
-    pub(super) archived: bool,
-    pub(super) parent_conversation_id: Option<String>,
-    pub(super) model: Option<String>,
-    pub(super) conversation_options: Option<String>,
-    pub(super) current_generation: Option<i64>,
-    pub(super) agent_working: bool,
-    pub(super) tags: Option<String>,
-    pub(super) is_draft: bool,
-    pub(super) draft: Option<String>,
-    pub(super) queued_messages: Option<String>,
+pub(crate) struct ShelleyConversationRow {
+    pub(crate) rowid: i64,
+    pub(crate) conversation_id: String,
+    pub(crate) slug: Option<String>,
+    pub(crate) user_initiated: bool,
+    pub(crate) created_at: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) archived: bool,
+    pub(crate) parent_conversation_id: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) conversation_options: Option<String>,
+    pub(crate) current_generation: Option<i64>,
+    pub(crate) agent_working: bool,
+    pub(crate) tags: Option<String>,
+    pub(crate) is_draft: bool,
+    pub(crate) draft: Option<String>,
+    pub(crate) queued_messages: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +95,7 @@ pub(super) fn decode_shelley_message_child_record(
     Ok((message, has_conversation))
 }
 
-pub(super) fn decode_shelley_message(values: &[CapturedSqliteValue]) -> Result<ShelleyMessageRow> {
+pub(crate) fn decode_shelley_message(values: &[CapturedSqliteValue]) -> Result<ShelleyMessageRow> {
     if values.len() < SHELLEY_MESSAGE_VALUE_COUNT {
         return Err(CaptureError::InvalidPayload(
             "Shelley message logical row has too few values".to_owned(),
@@ -128,7 +129,7 @@ pub(super) fn decode_shelley_message(values: &[CapturedSqliteValue]) -> Result<S
     })
 }
 
-pub(super) fn decode_shelley_conversation(
+pub(crate) fn decode_shelley_conversation(
     values: &[CapturedSqliteValue],
 ) -> Result<ShelleyConversationRow> {
     if values.len() != SHELLEY_CONVERSATION_VALUE_COUNT {
@@ -137,33 +138,34 @@ pub(super) fn decode_shelley_conversation(
         ));
     }
     Ok(ShelleyConversationRow {
-        conversation_id: shelley_required_text(values, 0, "conversation_id")?,
-        slug: shelley_optional_text(values, 1, "conversation slug")?,
-        user_initiated: shelley_optional_integer(values, 2, "conversation user_initiated")?
+        rowid: shelley_required_integer(values, 0, "conversation rowid")?,
+        conversation_id: shelley_required_text(values, 1, "conversation_id")?,
+        slug: shelley_optional_text(values, 2, "conversation slug")?,
+        user_initiated: shelley_optional_integer(values, 3, "conversation user_initiated")?
             .is_some_and(|value| value != 0),
-        created_at: shelley_optional_text(values, 3, "conversation created_at")?,
-        updated_at: shelley_optional_text(values, 4, "conversation updated_at")?,
-        cwd: shelley_optional_text(values, 5, "conversation cwd")?,
-        archived: shelley_optional_integer(values, 6, "conversation archived")?.unwrap_or(0) != 0,
+        created_at: shelley_optional_text(values, 4, "conversation created_at")?,
+        updated_at: shelley_optional_text(values, 5, "conversation updated_at")?,
+        cwd: shelley_optional_text(values, 6, "conversation cwd")?,
+        archived: shelley_optional_integer(values, 7, "conversation archived")?.unwrap_or(0) != 0,
         parent_conversation_id: shelley_optional_text(
             values,
-            7,
+            8,
             "conversation parent_conversation_id",
         )?,
-        model: shelley_optional_text(values, 8, "conversation model")?,
-        conversation_options: shelley_optional_text(values, 9, "conversation options")?,
+        model: shelley_optional_text(values, 9, "conversation model")?,
+        conversation_options: shelley_optional_text(values, 10, "conversation options")?,
         current_generation: shelley_optional_integer(
             values,
-            10,
+            11,
             "conversation current_generation",
         )?,
-        agent_working: shelley_optional_integer(values, 11, "conversation agent_working")?
+        agent_working: shelley_optional_integer(values, 12, "conversation agent_working")?
             .unwrap_or(0)
             != 0,
-        tags: shelley_optional_text(values, 12, "conversation tags")?,
-        is_draft: shelley_optional_integer(values, 13, "conversation is_draft")?.unwrap_or(0) != 0,
-        draft: shelley_optional_text(values, 14, "conversation draft")?,
-        queued_messages: shelley_optional_text(values, 15, "conversation queued_messages")?,
+        tags: shelley_optional_text(values, 13, "conversation tags")?,
+        is_draft: shelley_optional_integer(values, 14, "conversation is_draft")?.unwrap_or(0) != 0,
+        draft: shelley_optional_text(values, 15, "conversation draft")?,
+        queued_messages: shelley_optional_text(values, 16, "conversation queued_messages")?,
     })
 }
 
@@ -258,6 +260,175 @@ pub(super) fn shelley_message_text(message: &ShelleyMessageRow, body: &Value) ->
     } else {
         Some(parts.join("\n"))
     }
+}
+
+/// Renders the exact source-backed text for message and result hydration.
+///
+/// The ordinary importer deliberately bounds its indexed preview; this path
+/// preserves every selected source string and is never persisted in SQLite.
+pub(crate) fn shelley_message_complete_text(message: &ShelleyMessageRow) -> Option<String> {
+    let body = shelley_message_body(message);
+    let mut parts = Vec::new();
+    for pointer in ["/user_data", "/llm_data", "/display_data"] {
+        if let Some(value) = body.pointer(pointer) {
+            shelley_collect_complete_text(value, &mut parts);
+        }
+    }
+    if parts.is_empty() && message.entry_type == "system" {
+        Some("Shelley system message".to_owned())
+    } else if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn shelley_collect_complete_text(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => shelley_push_complete_text(parts, text),
+        Value::Array(items) => {
+            for item in items {
+                shelley_collect_complete_text(item, parts);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(kind) = shelley_content_type(value) {
+                let handled = match kind.as_str() {
+                    "text" => {
+                        if let Some(text) = object.get("Text").and_then(Value::as_str) {
+                            shelley_push_complete_text(parts, text);
+                        }
+                        true
+                    }
+                    "thinking" | "redacted_thinking" => {
+                        if let Some(text) = object.get("Thinking").and_then(Value::as_str) {
+                            shelley_push_complete_text(parts, text);
+                        }
+                        true
+                    }
+                    "tool_use" | "server_tool_use" => {
+                        let name = object
+                            .get("ToolName")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool");
+                        shelley_push_complete_text(parts, &format!("tool call: {name}"));
+                        if let Some(input) =
+                            object.get("ToolInput").filter(|input| !input.is_null())
+                        {
+                            let input =
+                                serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
+                            shelley_push_complete_text(parts, &format!("tool input: {input}"));
+                        }
+                        true
+                    }
+                    "tool_result" | "web_search_tool_result" => {
+                        shelley_push_complete_text(parts, "tool result");
+                        if let Some(results) = object.get("ToolResult") {
+                            shelley_collect_complete_text(results, parts);
+                        }
+                        if let Some(display) = object.get("Display") {
+                            shelley_collect_complete_text(display, parts);
+                        }
+                        true
+                    }
+                    "web_search_result" => {
+                        for key in ["Title", "URL", "PageAge"] {
+                            if let Some(text) = object.get(key).and_then(Value::as_str) {
+                                shelley_push_complete_text(parts, text);
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    return;
+                }
+            }
+            for key in [
+                "Text",
+                "text",
+                "Thinking",
+                "thinking",
+                "content",
+                "Content",
+                "output",
+                "Output",
+                "summary",
+                "Summary",
+                "message",
+                "Message",
+                "error",
+                "Error",
+                "LLMContent",
+                "ToolResult",
+                "Display",
+            ] {
+                if let Some(child) = object.get(key) {
+                    shelley_collect_complete_text(child, parts);
+                }
+            }
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+fn shelley_push_complete_text(parts: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if !text.is_empty() {
+        parts.push(text.to_owned());
+    }
+}
+
+/// Canonical compound row used only for source-record verification. It binds
+/// the logical shape and every message/parent field that can affect extraction.
+pub(crate) fn shelley_verified_record_values(
+    message: &ShelleyMessageRow,
+    conversation: &ShelleyConversationRow,
+    parent_bearing: bool,
+) -> Vec<CapturedSqliteValue> {
+    let optional_text = |value: &Option<String>| {
+        value
+            .clone()
+            .map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Text)
+    };
+    let optional_integer =
+        |value: Option<i64>| value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer);
+    vec![
+        CapturedSqliteValue::Integer(i64::from(parent_bearing)),
+        CapturedSqliteValue::Integer(message.rowid),
+        CapturedSqliteValue::Text(message.message_id.clone()),
+        CapturedSqliteValue::Text(message.conversation_id.clone()),
+        CapturedSqliteValue::Integer(message.sequence_id),
+        CapturedSqliteValue::Text(message.entry_type.clone()),
+        optional_text(&message.llm_data),
+        optional_text(&message.user_data),
+        optional_text(&message.usage_data),
+        optional_text(&message.created_at),
+        optional_text(&message.display_data),
+        CapturedSqliteValue::Integer(i64::from(message.excluded_from_context)),
+        optional_integer(message.generation),
+        optional_text(&message.llm_api_url),
+        optional_text(&message.model_name),
+        optional_text(&message.forked_from_message_id),
+        CapturedSqliteValue::Integer(conversation.rowid),
+        CapturedSqliteValue::Text(conversation.conversation_id.clone()),
+        optional_text(&conversation.slug),
+        CapturedSqliteValue::Integer(i64::from(conversation.user_initiated)),
+        optional_text(&conversation.created_at),
+        optional_text(&conversation.updated_at),
+        optional_text(&conversation.cwd),
+        CapturedSqliteValue::Integer(i64::from(conversation.archived)),
+        optional_text(&conversation.parent_conversation_id),
+        optional_text(&conversation.model),
+        optional_text(&conversation.conversation_options),
+        optional_integer(conversation.current_generation),
+        CapturedSqliteValue::Integer(i64::from(conversation.agent_working)),
+        optional_text(&conversation.tags),
+        CapturedSqliteValue::Integer(i64::from(conversation.is_draft)),
+        optional_text(&conversation.draft),
+        optional_text(&conversation.queued_messages),
+    ]
 }
 
 pub(super) fn shelley_event_role(entry_type: &str) -> Option<EventRole> {

@@ -2,6 +2,284 @@ mod support;
 
 use support::*;
 
+const COMPLETE_MESSAGE_PREFIX_CHARS: usize = 16_000;
+
+fn import_and_find_long_message(
+    temp: &TempDir,
+    provider: &str,
+    path: &Path,
+    query: &str,
+) -> (String, Value) {
+    let imported = json_output(ctx(temp).args([
+        "import",
+        "--provider",
+        provider,
+        "--path",
+        path.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
+    let search = json_output(ctx(temp).args([
+        "search",
+        query,
+        "--provider",
+        provider,
+        "--events",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    let result = search["results"]
+        .as_array()
+        .and_then(|results| results.first())
+        .unwrap_or_else(|| panic!("missing {provider} long-message result: {search:#}"));
+    (
+        result["ctx_event_id"].as_str().unwrap().to_owned(),
+        imported,
+    )
+}
+
+fn assert_complete_show(temp: &TempDir, event_id: &str, expected: &str) {
+    let shown = json_output(ctx(temp).args([
+        "show",
+        "event",
+        event_id,
+        "--content",
+        "complete",
+        "--format",
+        "json",
+    ]));
+    assert_eq!(shown["event"]["text"], expected);
+    assert_eq!(shown["event"]["content"]["complete"], true);
+    assert_eq!(shown["event"]["content"]["origin"], "provider_source");
+    assert_eq!(shown["event"]["content"]["source_verified"], true);
+}
+
+#[test]
+fn codex_canonical_truncation_hydrates_and_fails_closed() {
+    let temp = tempdir();
+    let query = "codex-complete-message-oracle";
+    let end = "CTX_HYDRATE_SENTINEL_END";
+    let complete = format!(
+        "{query}-{}-{end}",
+        "x".repeat(COMPLETE_MESSAGE_PREFIX_CHARS)
+    );
+    let transcript = temp.path().join("codex-long-session.jsonl");
+    let header = json!({
+        "timestamp": "2026-07-22T12:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "codex-complete-session",
+            "timestamp": "2026-07-22T12:00:00Z",
+            "cwd": "/workspace/codex",
+            "originator": "codex-cli",
+        },
+    });
+    let message = json!({
+        "timestamp": "2026-07-22T12:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": complete}],
+        },
+    });
+    let original = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&header).unwrap(),
+        serde_json::to_string(&message).unwrap()
+    );
+    fs::write(&transcript, &original).unwrap();
+    let (event_id, _) = import_and_find_long_message(&temp, "codex", &transcript, query);
+
+    let indexed = json_output(ctx(&temp).args([
+        "show",
+        "event",
+        &event_id,
+        "--content",
+        "indexed",
+        "--format",
+        "json",
+    ]));
+    assert_eq!(indexed["event"]["content"]["complete"], false);
+    assert_eq!(indexed["event"]["content"]["stored_truncated"], true);
+    assert_eq!(
+        indexed["event"]["text"].as_str().unwrap().chars().count(),
+        COMPLETE_MESSAGE_PREFIX_CHARS
+    );
+    assert!(!indexed["event"]["text"].as_str().unwrap().contains(end));
+
+    assert_complete_show(&temp, &event_id, &complete);
+    assert!(
+        json_output(ctx(&temp).args(["locate", "event", &event_id, "--format", "json"]))
+            ["complete_content"]["available"]
+            .as_bool()
+            .unwrap()
+    );
+    let text_output = ctx(&temp)
+        .args(["show", "event", &event_id, "--content", "complete"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(text_output).unwrap().contains(end));
+
+    let changed = original.replacen(query, "zodex-complete-message-oracle", 1);
+    assert_eq!(changed.len(), original.len());
+    fs::write(&transcript, changed).unwrap();
+    let output = ctx(&temp)
+        .args([
+            "show",
+            "event",
+            &event_id,
+            "--content",
+            "complete",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error_code"], "source_changed", "{error:#}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(transcript.to_str().unwrap()));
+
+    fs::remove_file(&transcript).unwrap();
+    let output = ctx(&temp)
+        .args([
+            "show",
+            "event",
+            &event_id,
+            "--content",
+            "complete",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error_code"], "source_missing", "{error:#}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(transcript.to_str().unwrap()));
+}
+
+#[test]
+fn pi_long_message_reopens_after_append_without_storing_the_tail() {
+    let temp = tempdir();
+    let query = "pi-complete-message-oracle";
+    let tail = "pi-private-unindexed-tail";
+    let complete = format!(
+        "{query} {}{tail}",
+        "x".repeat(COMPLETE_MESSAGE_PREFIX_CHARS)
+    );
+    let transcript = temp.path().join("pi-long-session.jsonl");
+    let header = json!({
+        "type": "session",
+        "id": "pi-complete-session",
+        "timestamp": "2026-07-22T12:00:00Z",
+        "cwd": "/workspace/pi",
+    });
+    let message = json!({
+        "type": "message",
+        "id": "pi-complete-message",
+        "parentId": null,
+        "timestamp": "2026-07-22T12:00:01Z",
+        "message": {"role": "user", "content": [{"type": "text", "text": complete}]},
+    });
+    fs::write(
+        &transcript,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&header).unwrap(),
+            serde_json::to_string(&message).unwrap()
+        ),
+    )
+    .unwrap();
+    let (event_id, _) = import_and_find_long_message(&temp, "pi", &transcript, query);
+
+    let database = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let (payload, metadata): (String, String) = database
+        .query_row(
+            "select payload_json, metadata_json from events where id = ?1",
+            [&event_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(!payload.contains(tail));
+    assert!(!metadata.contains(tail));
+    assert!(!metadata.contains(transcript.to_str().unwrap()));
+    assert!(metadata.contains("pi-jsonl.message-body.v1"));
+    assert!(metadata.contains("pi-complete-message"));
+    drop(database);
+
+    let appended = json!({
+        "type": "custom",
+        "id": "pi-later-notice",
+        "timestamp": "2026-07-22T12:00:02Z",
+        "customType": "appended-after-import",
+    });
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(file, "{}", serde_json::to_string(&appended).unwrap()).unwrap();
+    drop(file);
+
+    assert_complete_show(&temp, &event_id, &complete);
+}
+
+#[test]
+fn claude_long_message_reopens_and_rejects_historical_rewrite() {
+    let temp = tempdir();
+    let query = "claude-complete-message-oracle";
+    let tail = "claude-private-unindexed-tail";
+    let complete = format!(
+        "{query} {}{tail}",
+        "y".repeat(COMPLETE_MESSAGE_PREFIX_CHARS)
+    );
+    let root = temp.path().join("claude-projects");
+    fs::create_dir_all(&root).unwrap();
+    let transcript = root.join("claude-complete-session.jsonl");
+    let message = json!({
+        "type": "user",
+        "uuid": "claude-complete-message",
+        "sessionId": "claude-complete-session",
+        "timestamp": "2026-07-22T12:00:01Z",
+        "cwd": "/workspace/claude",
+        "message": {"role": "user", "content": [{"type": "text", "text": complete}]},
+    });
+    let original = format!("{}\n", serde_json::to_string(&message).unwrap());
+    fs::write(&transcript, &original).unwrap();
+    let (event_id, _) = import_and_find_long_message(&temp, "claude", &root, query);
+
+    assert_complete_show(&temp, &event_id, &complete);
+
+    let changed = original.replacen(query, "claudz-complete-message-oracle", 1);
+    assert_eq!(changed.len(), original.len());
+    fs::write(&transcript, changed).unwrap();
+    let output = ctx(&temp)
+        .args([
+            "show",
+            "event",
+            &event_id,
+            "--content",
+            "complete",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error_code"], "source_changed", "{error:#}");
+}
+
 #[test]
 fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
     let temp = tempdir();
@@ -114,4 +392,49 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "--json",
     ]));
     assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
+}
+
+#[test]
+fn nanoclaw_complete_content_reopens_the_brokered_compound_snapshot() {
+    let temp = tempdir();
+    let needle = "nanoclaw-complete-content-broker-oracle";
+    let complete_text = format!("{needle}-{}", "x".repeat(17_000));
+    let path = write_native_nanoclaw_fixture(&temp, &complete_text);
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "nanoclaw",
+        "--path",
+        &path,
+        "--json",
+    ]));
+    assert_eq!(imported["totals"]["rejected_records"], 0);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        needle,
+        "--provider",
+        "nanoclaw",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    let event_id = search["results"][0]["ctx_event_id"].as_str().unwrap();
+    let shown = json_output(ctx(&temp).args([
+        "show",
+        "event",
+        event_id,
+        "--content",
+        "complete",
+        "--json",
+    ]));
+
+    assert_eq!(
+        shown["event"]["text"],
+        json!({"text": complete_text}).to_string()
+    );
+    assert_eq!(shown["event"]["content"]["origin"], "provider_source");
+    assert_eq!(shown["event"]["content"]["source_verified"], true);
+    assert_eq!(shown["event"]["content"]["complete"], true);
 }

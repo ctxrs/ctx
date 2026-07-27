@@ -52,8 +52,15 @@ use crate::{
     CLAUDE_PROJECTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
+mod complete_content;
+
+pub(crate) use complete_content::{
+    claude_complete_content_message_record, claude_complete_content_normalized_payload,
+    claude_event_type, claude_result_content, CLAUDE_RESULT_CONTENT_PROFILE,
+};
+
 const CLAUDE_CAPTURE_REVISION: u32 = 1;
-const CLAUDE_POLICY_REVISION: u32 = 5;
+const CLAUDE_POLICY_REVISION: u32 = 6;
 const CLAUDE_RECORD_KIND: &str = "claude-project-jsonl-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,7 +404,13 @@ impl CapturedBatchProjector for ClaudeCapturedBatchProjector {
                 &value,
             ));
         }
-        let normalization = self
+        let result = crate::complete_content::jsonl::result_content_and_id(
+            CaptureProvider::Claude,
+            CLAUDE_PROJECTS_SOURCE_FORMAT,
+            &value,
+            line_number,
+        );
+        let mut normalization = self
             .session
             .as_mut()
             .ok_or_else(|| {
@@ -406,6 +419,38 @@ impl CapturedBatchProjector for ClaudeCapturedBatchProjector {
                 )
             })?
             .capture(&self.path, &self.context, &value, line_number);
+        if let Some(event) = normalization
+            .captures
+            .first_mut()
+            .and_then(|(_, capture)| capture.event.as_mut())
+        {
+            crate::complete_content::jsonl::attach_jsonl_complete_content_locator(
+                event,
+                CaptureProvider::Claude,
+                CLAUDE_PROJECTS_SOURCE_FORMAT,
+                &value,
+                record,
+                line_number,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
+        if let (Some(event), Some((content, native_record_id))) = (
+            normalization
+                .captures
+                .first_mut()
+                .and_then(|(_, capture)| capture.event.as_mut()),
+            result,
+        ) {
+            crate::complete_content::jsonl::attach_jsonl_result_content_locator(
+                event,
+                CaptureProvider::Claude,
+                CLAUDE_PROJECTS_SOURCE_FORMAT,
+                &content,
+                &native_record_id,
+                record,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
         let event = normalization
             .captures
             .first()
@@ -880,40 +925,6 @@ pub(crate) fn claude_event(
             "tool_use_result": value.get("toolUseResult").map(|value| provider_policy_body(EventType::ToolOutput, value)),
         }),
     })
-}
-
-pub(crate) fn claude_event_type(entry_type: &str, message: &Value) -> EventType {
-    if claude_content_has_type(message.get("content"), "tool_result")
-        || message.get("toolUseResult").is_some()
-    {
-        return EventType::ToolOutput;
-    }
-    if claude_content_has_type(message.get("content"), "tool_use") {
-        return EventType::ToolCall;
-    }
-    match entry_type {
-        "user" | "assistant" => EventType::Message,
-        "system"
-        | "progress"
-        | "permission-mode"
-        | "last-prompt"
-        | "queue-operation"
-        | "attachment"
-        | "file-history-snapshot"
-        | "ai-title" => EventType::Notice,
-        _ => EventType::Notice,
-    }
-}
-
-pub(crate) fn claude_content_has_type(content: Option<&Value>, expected: &str) -> bool {
-    content
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

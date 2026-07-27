@@ -7,13 +7,16 @@ use ctx_history_core::{
 };
 use serde_json::{json, Value};
 
+use crate::complete_content::CompleteContentBodyDigest;
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::normalization::{
     provider_capped_json, provider_policy_body, provider_policy_event_text,
     provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
 };
 use crate::provider::providers::task_json::{task_json_string_field, task_json_time_field};
-use crate::{ProviderAdapterContext, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::{
+    captured_batch::NativeLocator, ProviderAdapterContext, Result, PROVIDER_MAX_PREVIEW_CHARS,
+};
 
 use super::{TRAE_CN_INPUT_HISTORY_KEY, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 
@@ -131,16 +134,31 @@ pub(super) struct TraeCaptureInput<'a> {
     pub(super) ended_at: Option<DateTime<Utc>>,
     pub(super) title: Option<String>,
     pub(super) event: TraeEventInput,
+    pub(super) complete_content_locator: Option<NativeLocator>,
+    pub(super) complete_content_record_digest: Option<CompleteContentBodyDigest>,
 }
 
-pub(super) fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelope {
-    let event_envelope = trae_event(
+pub(super) fn trae_capture(input: TraeCaptureInput<'_>) -> Result<ProviderCaptureEnvelope> {
+    let mut event_envelope = trae_event(
         input.provider_session_id,
         input.workspace_id,
         input.chat_key,
         &input.event,
     );
-    ProviderCaptureEnvelope {
+    if let (Some(locator), Some(record_digest)) = (
+        input.complete_content_locator.as_ref(),
+        input.complete_content_record_digest.as_ref(),
+    ) {
+        crate::complete_content::sqlite::attach_sqlite_native_content_locator(
+            &mut event_envelope,
+            CaptureProvider::Trae,
+            TRAE_STATE_VSCDB_SOURCE_FORMAT,
+            locator,
+            record_digest,
+            &input.event.text,
+        )?;
+    }
+    Ok(ProviderCaptureEnvelope {
         schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
         provider: CaptureProvider::Trae,
         source: ProviderSourceEnvelope {
@@ -219,7 +237,7 @@ pub(super) fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelo
             }),
         },
         event: Some(event_envelope),
-    }
+    })
 }
 
 fn trae_session_metadata_preview(session: &Value) -> Value {

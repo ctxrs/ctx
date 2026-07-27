@@ -11,6 +11,9 @@ use crate::captured_batch::{
     StructuralRejectionKind, CAPTURE_BATCH_MAX_PAYLOAD_BYTES, CAPTURE_BATCH_MAX_RECORDS,
 };
 use crate::common::time::parse_rfc3339_utc;
+use crate::complete_content::{
+    VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+};
 use crate::provider::importer::{
     CapturedBatchCursorFinish, CapturedBatchProjector, ProviderProjectionOutput,
     ProviderProjectionResult,

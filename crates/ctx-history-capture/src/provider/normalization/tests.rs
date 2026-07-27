@@ -4,6 +4,47 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS};
 
+#[test]
+fn standalone_result_content_profile_tokens_are_stable_and_unique() {
+    use crate::provider::providers::{
+        claude::CLAUDE_RESULT_CONTENT_PROFILE, kimi::KIMI_RESULT_CONTENT_PROFILE,
+        mistral_vibe::MISTRAL_VIBE_RESULT_CONTENT_PROFILE,
+        openclaw::OPENCLAW_RESULT_CONTENT_PROFILE, openhands::OPENHANDS_RESULT_CONTENT_PROFILE,
+        pi::PI_RESULT_CONTENT_PROFILE, rovodev::ROVODEV_RESULT_CONTENT_PROFILE,
+        task_json::TASK_JSON_RESULT_CONTENT_PROFILE, zed::ZED_RESULT_CONTENT_PROFILE,
+    };
+
+    let profiles = [
+        CLAUDE_RESULT_CONTENT_PROFILE,
+        KIMI_RESULT_CONTENT_PROFILE,
+        MISTRAL_VIBE_RESULT_CONTENT_PROFILE,
+        OPENCLAW_RESULT_CONTENT_PROFILE,
+        OPENHANDS_RESULT_CONTENT_PROFILE,
+        PI_RESULT_CONTENT_PROFILE,
+        ROVODEV_RESULT_CONTENT_PROFILE,
+        TASK_JSON_RESULT_CONTENT_PROFILE,
+        ZED_RESULT_CONTENT_PROFILE,
+    ];
+    assert_eq!(
+        profiles,
+        [
+            "claude.result-body.v1",
+            "kimi.result-body.v1",
+            "mistral-vibe.result-body.v1",
+            "openclaw-legacy-jsonl.result-body.v1",
+            "openhands.result-body.v1",
+            "pi.result-body.v1",
+            "rovodev.result-body.v1",
+            "task-json.result-body.v1",
+            "zed.result-body.v1",
+        ]
+    );
+    let unique = profiles
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), profiles.len());
+}
+
 fn test_native_event(event_type: EventType, text: &str, body: Value) -> ProviderEventEnvelope {
     test_native_event_for_provider(CaptureProvider::Codex, event_type, text, body)
 }

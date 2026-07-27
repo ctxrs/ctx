@@ -320,6 +320,11 @@ pub(super) fn import_codex_session_file_batched(
             || frozen.revalidate(path),
         )?;
         if outcome.batches_imported == 0 {
+            let work_result = if imported_any {
+                merged.work_result().merge(outcome.summary.work_result())
+            } else {
+                outcome.summary.work_result()
+            };
             let mut summary = if imported_any {
                 merged
             } else if required_start_offset.is_some() {
@@ -329,6 +334,7 @@ pub(super) fn import_codex_session_file_batched(
             } else {
                 merged
             };
+            summary.set_work_result(work_result);
             record_incomplete_codex_tail(&mut summary, &projector, completed_offset, frozen.length);
             if report_progress {
                 report_codex_import_progress(

@@ -27,7 +27,10 @@ mod text;
 
 use input::{read_mcp_input_line, McpInputLine};
 use pro::{pro_query_tool, tool_pro_blame, tool_pro_query, tool_pro_status};
-use response::{error_response, json_rpc_error, success_response, tool_error_result, tool_result};
+use response::{
+    error_response, invalid_request_response, json_rpc_error, success_response, tool_error_result,
+    tool_result,
+};
 use response_bound::{bound_complete_content_mcp_response, is_complete_content_tool_call};
 use show::{tool_show_event, tool_show_session};
 use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
@@ -230,8 +233,7 @@ fn handle_message(
         )));
     };
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        let id = object.get("id").cloned().unwrap_or(Value::Null);
-        return McpHandled::plain(Some(error_response(id, -32600, "Invalid Request", None)));
+        return McpHandled::plain(Some(invalid_request_response(object.get("id"))));
     }
     let bound_complete_content = is_complete_content_tool_call(&message);
     let id = message
@@ -239,15 +241,13 @@ fn handle_message(
         .and_then(|object| object.get("id"))
         .cloned();
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return McpHandled::plain(id.map(|id| error_response(id, -32600, "Invalid Request", None)));
+        return McpHandled::plain(Some(invalid_request_response(id.as_ref())));
     };
-    if matches!(id, Some(Value::Null | Value::Array(_) | Value::Object(_))) {
-        return McpHandled::plain(Some(error_response(
-            Value::Null,
-            -32600,
-            "Invalid Request",
-            None,
-        )));
+    if matches!(
+        id,
+        Some(Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_))
+    ) {
+        return McpHandled::plain(Some(invalid_request_response(None)));
     }
     let Some(id) = id else {
         if method == "notifications/initialized" {

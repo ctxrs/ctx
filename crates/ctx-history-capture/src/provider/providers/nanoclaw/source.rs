@@ -13,8 +13,8 @@ use crate::provider::sqlite::{
 use crate::{CaptureError, Result};
 
 use super::position::{
-    decode_nanoclaw_position, encode_nanoclaw_position, nanoclaw_locator, nanoclaw_next_ordinal,
-    NanoClawKeyset, NanoClawMessageSource, NanoClawPositionPhase,
+    decode_nanoclaw_position, encode_nanoclaw_position, nanoclaw_locator, nanoclaw_message_locator,
+    nanoclaw_next_ordinal, NanoClawKeyset, NanoClawMessageSource, NanoClawPositionPhase,
 };
 use super::project::{NanoClawProjectDatabaseSnapshot, NanoClawProjectSnapshot};
 use super::rows::{
@@ -349,7 +349,7 @@ impl<'connection, 'snapshot> NanoClawRowFetcher<'connection, 'snapshot> {
             message_source: Some(candidate.source),
             message_rowid: candidate.rowid,
         })?;
-        let locator = nanoclaw_locator(Some(candidate.source), candidate.rowid)?;
+        let locator = nanoclaw_message_locator(active.rowid, candidate.source, candidate.rowid)?;
         if observed_bytes > nanoclaw_oversize_limit()? {
             return SqliteLogicalRow::oversize(
                 next_position,

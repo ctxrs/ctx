@@ -810,7 +810,8 @@ if [[ "${platform}" != linux-* ]]; then
   local_runtime_authority="$(scripts/public-cli-runtime-authority.sh \
     "${platform}" "${host_system}" "${host_arch}" "${local_runtime_status}" \
     "${host_native_arch}" "${process_translated}" "${hardware_identity}" \
-    "${emulation}" "${hypervisor}" "${evidence_complete}")"
+    "${emulation}" "${hypervisor}" "${evidence_complete}" \
+    "${CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID:-}")"
   python3 scripts/write-public-cli-build-info.py \
     --output "${staged}.build-info.json" \
     --artifact "${staged}" \

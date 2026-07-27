@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::normalization::{
-    native_event, provider_role, provider_timestamp_seconds_to_datetime, provider_value_text,
-    NativeEventDraft,
+    native_event, provider_explicit_result_value_text, provider_role,
+    provider_timestamp_seconds_to_datetime, provider_value_text, NativeEventDraft,
 };
 use crate::KIMI_CODE_CLI_SOURCE_FORMAT;
 
@@ -162,6 +162,22 @@ pub(crate) fn kimi_event_text(record_type: &str, value: &Value, event_type: Even
     }
 }
 
+/// Returns explicit Kimi loop-event result content without the tool-name
+/// fallback used for display text.
+pub(crate) fn kimi_result_content(value: &Value) -> Option<String> {
+    let record_type = value.get("type").and_then(Value::as_str)?;
+    if kimi_event_type(record_type, value) != EventType::ToolOutput {
+        return None;
+    }
+    value
+        .pointer("/event/content")
+        .or_else(|| value.pointer("/event/text"))
+        .or_else(|| value.pointer("/event/output"))
+        .or_else(|| value.pointer("/event/result"))
+        .or_else(|| value.pointer("/event/message"))
+        .and_then(provider_explicit_result_value_text)
+}
+
 pub(crate) fn kimi_record_timestamp(
     value: &Value,
     fallback: DateTime<Utc>,
@@ -188,4 +204,42 @@ pub(crate) fn kimi_record_timestamp(
                 .and_then(DateTime::<Utc>::from_timestamp_millis)
         })
         .or(Some(fallback))
+}
+
+#[cfg(test)]
+mod result_content_tests {
+    use serde_json::json;
+
+    use super::kimi_result_content;
+
+    #[test]
+    fn profile_omits_tool_name_fallback_and_keeps_explicit_result() {
+        let result = json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "tool.result",
+                "toolName": "shell",
+                "output": [
+                    {"text": "first"},
+                    {"result": "second"}
+                ]
+            }
+        });
+        assert_eq!(
+            kimi_result_content(&result).as_deref(),
+            Some("first\nsecond")
+        );
+
+        let label_only = json!({
+            "type": "context.append_loop_event",
+            "event": {"type": "tool.finish", "toolName": "shell"}
+        });
+        assert_eq!(kimi_result_content(&label_only), None);
+
+        let call = json!({
+            "type": "context.append_loop_event",
+            "event": {"type": "tool.call", "content": "arguments"}
+        });
+        assert_eq!(kimi_result_content(&call), None);
+    }
 }

@@ -124,7 +124,7 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 2);
+    assert_eq!(first.imported_events, 3);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Continue, "continue-tool-boundary");
     let events = store.events_for_session(session_id).unwrap();
@@ -147,6 +147,14 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
     assert!(!rendered_tool.contains(raw_output));
     assert!(!rendered_tool.contains(raw_old));
     assert!(!rendered_tool.contains(raw_new));
+    let result = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolOutput)
+        .expect("separate source-backed Continue result imported");
+    let rendered_result = serde_json::to_string(result).unwrap();
+    assert!(rendered_result.contains("continue.result-body.v1"));
+    assert!(!rendered_result.contains(raw_output));
+    assert!(result.payload["body"]["result_content_ref"].is_object());
     assert!(store
         .search_event_hits("continue tool policy oracle prompt", 10)
         .unwrap()
@@ -180,7 +188,7 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 2);
+    assert_eq!(second.skipped_events, 3);
 }
 
 #[test]

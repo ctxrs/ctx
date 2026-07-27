@@ -662,11 +662,20 @@ fn import_codex_history_jsonl_batched(
             || frozen.revalidate(path),
         )?;
         if outcome.batches_imported == 0 {
+            let work_result = if imported_any {
+                merged.work_result().merge(outcome.summary.work_result())
+            } else {
+                outcome.summary.work_result()
+            };
             return if imported_any {
+                merged.set_work_result(work_result);
                 Ok(merged)
             } else if expected_store_cursor.is_some() {
-                projector.replay_summary()
+                let mut summary = projector.replay_summary()?;
+                summary.set_work_result(work_result);
+                Ok(summary)
             } else {
+                merged.set_work_result(work_result);
                 Ok(merged)
             };
         }

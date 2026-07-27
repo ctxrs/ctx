@@ -86,7 +86,7 @@ pub(crate) const MIMOCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqlite
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OpenCodeCapturedShape {
+pub(crate) enum OpenCodeCapturedShape {
     SessionMessage,
     SessionEntry,
     MessagePart,
@@ -94,6 +94,18 @@ pub(super) enum OpenCodeCapturedShape {
 }
 
 impl OpenCodeCapturedShape {
+    pub(crate) fn from_tag(tag: u8) -> Result<Self> {
+        match tag {
+            1 => Ok(Self::SessionMessage),
+            2 => Ok(Self::SessionEntry),
+            3 => Ok(Self::MessagePart),
+            4 => Ok(Self::Message),
+            _ => Err(CaptureError::InvalidPayload(
+                "OpenCode locator has an unknown captured shape".to_owned(),
+            )),
+        }
+    }
+
     pub(super) fn tag(self) -> u8 {
         match self {
             Self::SessionMessage => 1,

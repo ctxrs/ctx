@@ -25,6 +25,10 @@ mod projection;
 mod rows;
 mod source;
 
+mod complete_content;
+pub(crate) use complete_content::{selected_component_addresses, NanoClawCompleteProject};
+pub(crate) use position::decode_nanoclaw_message_locator;
+
 #[cfg(test)]
 #[path = "nanoclaw/tests.rs"]
 mod tests;
@@ -34,13 +38,17 @@ use project::{nanoclaw_project_root, NanoClawProjectSnapshot};
 use projection::NanoClawCapturedBatchProjector;
 use source::NanoClawRowFetcher;
 
-const NANOCLAW_CAPTURE_REVISION: u32 = 1;
+// Revision 2 gives message records a compound project locator that binds the
+// central session row, selected message database, and message row. The
+// normalized event policy is unchanged.
+const NANOCLAW_CAPTURE_REVISION: u32 = 2;
 const NANOCLAW_POLICY_REVISION: u32 = 4;
 // Snapshot consolidation changes only source-stability ownership. Captured bytes, projection
 // policy, source identity, cursor encoding, and source-revision-v1 bytes remain unchanged, so
 // neither persisted revision advances.
 const NANOCLAW_POSITION_KIND: &str = "nanoclaw-project-keyset-v1";
 const NANOCLAW_LOCATOR_KIND: &str = "nanoclaw-project-row-v1";
+pub(crate) const NANOCLAW_MESSAGE_LOCATOR_KIND: &str = "nanoclaw-project-message-v1";
 const NANOCLAW_SESSION_RECORD_KIND: &str = "nanoclaw-session-v1";
 const NANOCLAW_MESSAGE_RECORD_KIND: &str = "nanoclaw-message-v1";
 

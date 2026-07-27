@@ -21,36 +21,47 @@ use crate::{
 mod normalization;
 mod projector;
 mod relationships;
+mod row_position;
 mod row_stream;
 mod source;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use relationships::{shelley_event_index, shelley_value_text, ShelleyMessageRow};
-
-use projector::ShelleyCapturedBatchProjector;
-use row_stream::{
-    decode_shelley_position, initial_shelley_position, shelley_captured_error,
-    shelley_sqlite_batch_error, ShelleyRowFetcher,
+pub(crate) use relationships::{
+    decode_shelley_conversation, decode_shelley_message, shelley_message_complete_text,
+    shelley_verified_record_values, ShelleyConversationRow, ShelleyMessageRow,
 };
+#[cfg(test)]
+pub(crate) use relationships::{shelley_event_index, shelley_value_text};
+pub(crate) use source::{
+    shelley_conversation_columns, shelley_conversation_select_expressions, shelley_message_columns,
+    shelley_message_select_expressions,
+};
+
+pub(crate) use normalization::shelley_complete_event;
+use projector::ShelleyCapturedBatchProjector;
+use row_position::{decode_shelley_position, initial_shelley_position};
+#[cfg(test)]
+use row_position::{encode_shelley_position, shelley_locator, ShelleyCapturePhase, ShelleyKeyset};
+use row_stream::{shelley_captured_error, shelley_sqlite_batch_error, ShelleyRowFetcher};
+pub(crate) use row_stream::{shelley_conversation_values, shelley_message_values};
 use source::{shelley_source_revision, shelley_source_snapshot};
 
-const SHELLEY_CAPTURE_REVISION: u32 = 8;
-const SHELLEY_POLICY_REVISION: u32 = 4;
-const SHELLEY_POSITION_KIND: &str = "shelley-native-message-keyset-v8";
+const SHELLEY_CAPTURE_REVISION: u32 = 9;
+const SHELLEY_POLICY_REVISION: u32 = 5;
+const SHELLEY_POSITION_KIND: &str = "shelley-native-message-keyset-v9";
 const SHELLEY_LOCATOR_KIND: &str = "shelley-logical-row-v1";
-const SHELLEY_MESSAGE_RECORD_KIND: &str = "shelley-message-with-conversation-v2";
+const SHELLEY_MESSAGE_RECORD_KIND: &str = "shelley-message-with-conversation-v3";
 const SHELLEY_MESSAGE_CHILD_RECORD_KIND: &str = "shelley-message-child-v1";
 const SHELLEY_MESSAGE_KEY_MARKER_KIND: &str = "shelley-message-key-marker-v1";
 const SHELLEY_MESSAGE_KEY_REJECTION_KIND: &str = "shelley-message-key-rejection-v1";
 const SHELLEY_TERMINAL_MARKER_KIND: &str = "shelley-terminal-marker-v1";
-const SHELLEY_CONVERSATION_RECORD_KIND: &str = "shelley-conversation-v2";
-const SHELLEY_OVERSIZE_SESSION_RECORD_KIND: &str = "shelley-oversize-session-v1";
+const SHELLEY_CONVERSATION_RECORD_KIND: &str = "shelley-conversation-v3";
+const SHELLEY_OVERSIZE_SESSION_RECORD_KIND: &str = "shelley-oversize-session-v2";
 const SHELLEY_NONEMPTY_CONVERSATION_RECORD_KIND: &str = "shelley-nonempty-conversation-marker-v1";
 const SHELLEY_POSITION_BYTES: usize = 1 + 8 + 8 + 4;
 const SHELLEY_MESSAGE_VALUE_COUNT: usize = 15;
-const SHELLEY_CONVERSATION_VALUE_COUNT: usize = 16;
+const SHELLEY_CONVERSATION_VALUE_COUNT: usize = 17;
 const SHELLEY_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
 
 pub(crate) fn import_shelley_sqlite_batched(

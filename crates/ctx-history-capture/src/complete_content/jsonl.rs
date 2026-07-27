@@ -1,39 +1,42 @@
 //! Byte-range complete-message recovery for newline-delimited JSON sources.
 
-use std::{
-    fs::{self, File, Metadata, OpenOptions},
-    io::{self, Read, Seek, SeekFrom},
-    path::{Component, Path, PathBuf},
-    time::SystemTime,
-};
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::{CaptureProvider, ContentRef, EventType, ProviderEventEnvelope};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
-    CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
-    CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
-    CompleteContentSourceLocator, CompleteMessage, CompleteMessageRequest,
-    PersistedCompleteContentLocatorV1, SourceVerification, COMPLETE_CONTENT_LOCATOR_METADATA_KEY,
-    COMPLETE_CONTENT_MAX_BODY_BYTES, RESULT_CONTENT_LOCATOR_METADATA_KEY,
+    attach_verified_content_locator, verified_content_address_supported, verified_content_profile,
+    verified_content_route_supported, CompleteContentBodyDigest, CompleteContentError,
+    CompleteContentErrorKind, CompleteContentHashAuthority, CompleteContentResolver,
+    CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessage,
+    CompleteMessageRequest, SourceVerification, VerifiedContentLocatorV1, VerifiedContentRole,
+    COMPLETE_CONTENT_MAX_BODY_BYTES,
 };
 use crate::captured_batch::jsonl::jsonl_locator_range;
 use crate::captured_batch::{CapturedRecord, CapturedRecordPayload};
 use crate::provider::codex::events::{
     codex_content_text, codex_message_event, codex_session_line_timestamp,
 };
+use crate::provider::providers::native_jsonl::result_content::native_jsonl_result_content_profile;
 use crate::provider::providers::native_jsonl::{
     native_jsonl_event, native_jsonl_event_id, native_jsonl_event_text, native_jsonl_event_type,
 };
 use crate::{
     compute_payload_hash, CaptureError, Result as CaptureResult, CODEBUDDY_SOURCE_FORMAT,
-    CODEX_SESSION_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT,
-    OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    CODEX_SESSION_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT,
+    MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
 };
 
+mod junie;
+mod mux;
 mod results;
+pub(crate) use results::result_content_and_id;
+
+pub(crate) use junie::valid_junie_record_set_locator;
+pub(crate) use junie::{
+    attach_junie_record_set_locator, JunieRecordSetBinding, JunieRecordSetTarget,
+};
 
 pub const JSONL_COMPLETE_CONTENT_LOCATOR_KIND: &str = "jsonl-range-v1";
 /// Exact routes use a distinct kind because the legacy range locator deliberately
@@ -44,45 +47,6 @@ const JSONL_RANGE_LOCATOR_BYTES: usize = 16;
 const EXACT_JSONL_LOCATOR_BYTES: usize = JSONL_RANGE_LOCATOR_BYTES + 64;
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-source-revision-v1\0";
 const PATH_IDENTITY_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-path-identity-v1\0";
-
-const SUPPORTED_JSONL_SOURCES: &[(CaptureProvider, &str)] = &[
-    (CaptureProvider::Codex, CODEX_SESSION_SOURCE_FORMAT),
-    (
-        CaptureProvider::Antigravity,
-        crate::ANTIGRAVITY_CLI_SOURCE_FORMAT,
-    ),
-    (CaptureProvider::Gemini, crate::GEMINI_CLI_SOURCE_FORMAT),
-    (CaptureProvider::Tabnine, crate::TABNINE_CLI_SOURCE_FORMAT),
-    (
-        CaptureProvider::FactoryAiDroid,
-        crate::FACTORY_DROID_SOURCE_FORMAT,
-    ),
-    (
-        CaptureProvider::Cursor,
-        crate::CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-    ),
-    (
-        CaptureProvider::Windsurf,
-        crate::WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
-    ),
-    (CaptureProvider::Qoder, crate::QODER_SOURCE_FORMAT),
-    (
-        CaptureProvider::CopilotCli,
-        crate::COPILOT_CLI_SOURCE_FORMAT,
-    ),
-    (CaptureProvider::QwenCode, crate::QWEN_CODE_SOURCE_FORMAT),
-    (CaptureProvider::CodeBuddy, CODEBUDDY_SOURCE_FORMAT),
-    (CaptureProvider::MistralVibe, MISTRAL_VIBE_SOURCE_FORMAT),
-    (CaptureProvider::OpenClaw, OPENCLAW_SOURCE_FORMAT),
-    (CaptureProvider::KimiCodeCli, KIMI_CODE_CLI_SOURCE_FORMAT),
-];
-
-const EXACT_JSONL_SOURCES: &[(CaptureProvider, &str)] = &[
-    (CaptureProvider::CodeBuddy, CODEBUDDY_SOURCE_FORMAT),
-    (CaptureProvider::MistralVibe, MISTRAL_VIBE_SOURCE_FORMAT),
-    (CaptureProvider::OpenClaw, OPENCLAW_SOURCE_FORMAT),
-    (CaptureProvider::KimiCodeCli, KIMI_CODE_CLI_SOURCE_FORMAT),
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactJsonlSourceBinding {
@@ -114,7 +78,12 @@ impl CompleteContentResolver for JsonlCompleteContentResolver {
     }
 
     fn supports(&self, provider: CaptureProvider, source_format: &str) -> bool {
-        SUPPORTED_JSONL_SOURCES.contains(&(provider, source_format))
+        verified_content_route_supported(
+            provider,
+            source_format,
+            CompleteContentSourceFamily::Jsonl,
+            VerifiedContentRole::MessageBody,
+        )
     }
 
     fn resolve(
@@ -124,46 +93,62 @@ impl CompleteContentResolver for JsonlCompleteContentResolver {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
+        if first.provider == CaptureProvider::Mux {
+            return mux::resolve_messages(requests);
+        }
+        if first.provider == CaptureProvider::Junie {
+            return junie::resolve_messages(requests);
+        }
         if !self.supports(first.provider, &first.source_format) {
             return Err(error(first, CompleteContentErrorKind::HydrationUnsupported));
         }
         validate_batch(requests)?;
-        let selected_path = selected_source_path(first)?;
-        ensure_no_links(&selected_path, first)?;
-        let exact_binding =
-            if EXACT_JSONL_SOURCES.contains(&(first.provider, first.source_format.as_str())) {
-                Some(observe_exact_source_binding(first, &selected_path)?)
-            } else {
-                None
-            };
-        let (mut file, frozen) = open_frozen_source(&selected_path, first)?;
+        let decoded_locators = requests
+            .iter()
+            .map(|request| {
+                request
+                    .source_locator
+                    .as_ref()
+                    .and_then(DecodedJsonlLocator::decode)
+                    .ok_or_else(|| error(request, CompleteContentErrorKind::HydrationUnsupported))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let exact_binding = if verified_content_address_supported(
+            first.provider,
+            &first.source_format,
+            CompleteContentSourceFamily::Jsonl,
+            VerifiedContentRole::MessageBody,
+            EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
+        ) {
+            first.source_access.exact_jsonl_binding().cloned()
+        } else {
+            None
+        };
 
         let mut messages = Vec::with_capacity(requests.len());
-        for request in requests {
-            let locator = request
-                .source_locator
-                .as_ref()
-                .ok_or_else(|| error(request, CompleteContentErrorKind::HydrationUnsupported))?;
-            let decoded = DecodedJsonlLocator::decode(locator)
-                .ok_or_else(|| error(request, CompleteContentErrorKind::HydrationUnsupported))?;
+        for (request, decoded) in requests.iter().zip(&decoded_locators) {
             if decoded.binding.as_ref() != exact_binding.as_ref() {
                 return Err(error(request, CompleteContentErrorKind::SourceChanged));
             }
-            let record = read_record(&mut file, &frozen, decoded.range, request)?;
+            let expected_record_digest = request
+                .expected_record_digest
+                .as_ref()
+                .ok_or_else(|| error(request, CompleteContentErrorKind::HydrationUnsupported))?;
+            let record = request.source_access.read_jsonl_record(
+                decoded.range.byte_start,
+                decoded.range.byte_end_exclusive,
+                expected_record_digest,
+                request.event_id,
+            )?;
             let resolved = resolve_record(request, &record)?;
             messages.push(resolved);
         }
-
-        if let Some(expected) = exact_binding.as_ref() {
-            let current = observe_exact_source_binding(first, &selected_path)?;
-            if &current != expected {
-                return Err(error(first, CompleteContentErrorKind::SourceChanged));
-            }
-        }
-        revalidate_open_source(&file, &selected_path, &frozen, first)?;
+        first.source_access.revalidate_jsonl(first.event_id)?;
         Ok(messages)
     }
 }
+
+pub(crate) use mux::{attach_mux_verified_content_locator, valid_mux_locator};
 
 /// Adds the local-only locator consumed by complete-message show.
 ///
@@ -179,7 +164,13 @@ pub(crate) fn attach_jsonl_complete_content_locator(
     line_number: usize,
 ) -> CaptureResult<()> {
     if event.event_type != EventType::Message
-        || !SUPPORTED_JSONL_SOURCES.contains(&(provider, source_format))
+        || !verified_content_address_supported(
+            provider,
+            source_format,
+            CompleteContentSourceFamily::Jsonl,
+            VerifiedContentRole::MessageBody,
+            JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
+        )
     {
         return Ok(());
     }
@@ -205,26 +196,34 @@ pub(crate) fn attach_jsonl_complete_content_locator(
         byte_end_exclusive,
     };
     let record_sha256 = digest_bytes(record_bytes);
-    let body_sha256 = CompleteContentBodyDigest::from_text(&text);
-    let Some(locator) = PersistedCompleteContentLocatorV1::new(
+    let Some(content_ref) = ContentRef::from_bytes(text.as_bytes()) else {
+        return Ok(());
+    };
+    let Some(profile) = verified_content_profile(
+        provider,
+        source_format,
+        CompleteContentSourceFamily::Jsonl,
+        VerifiedContentRole::MessageBody,
+    ) else {
+        return Err(CaptureError::SystemInvariant(
+            "supported JSONL message route must have a verified-content profile",
+        ));
+    };
+    let Some(locator) = VerifiedContentLocatorV1::new(
+        VerifiedContentRole::MessageBody,
+        profile,
+        content_ref,
         CompleteContentSourceFamily::Jsonl,
         JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
         &range.encode(),
         native_record_id,
         record_sha256,
-        body_sha256,
     ) else {
         return Ok(());
     };
-    let Some(metadata) = event.metadata.as_object_mut() else {
-        return Err(CaptureError::SystemInvariant(
-            "provider event metadata must be an object",
-        ));
-    };
-    metadata.insert(
-        COMPLETE_CONTENT_LOCATOR_METADATA_KEY.to_owned(),
-        locator.to_metadata_value(),
-    );
+    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
+        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
+    )?;
     Ok(())
 }
 
@@ -238,7 +237,13 @@ pub(crate) fn attach_exact_jsonl_complete_content_locator(
     binding: &ExactJsonlSourceBinding,
 ) -> CaptureResult<()> {
     if event.event_type != EventType::Message
-        || !EXACT_JSONL_SOURCES.contains(&(provider, source_format))
+        || !verified_content_address_supported(
+            provider,
+            source_format,
+            CompleteContentSourceFamily::Jsonl,
+            VerifiedContentRole::MessageBody,
+            EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
+        )
     {
         return Ok(());
     }
@@ -267,25 +272,34 @@ pub(crate) fn attach_exact_jsonl_complete_content_locator(
         binding: Some(binding.clone()),
     }
     .encode_exact();
-    let Some(locator) = PersistedCompleteContentLocatorV1::new(
+    let Some(content_ref) = ContentRef::from_bytes(text.as_bytes()) else {
+        return Ok(());
+    };
+    let Some(profile) = verified_content_profile(
+        provider,
+        source_format,
+        CompleteContentSourceFamily::Jsonl,
+        VerifiedContentRole::MessageBody,
+    ) else {
+        return Err(CaptureError::SystemInvariant(
+            "supported exact JSONL message route must have a verified-content profile",
+        ));
+    };
+    let Some(locator) = VerifiedContentLocatorV1::new(
+        VerifiedContentRole::MessageBody,
+        profile,
+        content_ref,
         CompleteContentSourceFamily::Jsonl,
         EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
         &encoded,
         native_record_id,
         digest_bytes(record_bytes),
-        CompleteContentBodyDigest::from_text(&text),
     ) else {
         return Ok(());
     };
-    let Some(metadata) = event.metadata.as_object_mut() else {
-        return Err(CaptureError::SystemInvariant(
-            "provider event metadata must be an object",
-        ));
-    };
-    metadata.insert(
-        COMPLETE_CONTENT_LOCATOR_METADATA_KEY.to_owned(),
-        locator.to_metadata_value(),
-    );
+    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
+        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
+    )?;
     Ok(())
 }
 
@@ -299,11 +313,96 @@ pub(crate) fn attach_codex_result_content_locator(
     record: &CapturedRecord,
     line_number: usize,
 ) -> CaptureResult<()> {
+    let attached = attach_jsonl_result_content_locator_with_ref(
+        event,
+        content_ref,
+        CaptureProvider::Codex,
+        CODEX_SESSION_SOURCE_FORMAT,
+        format!("line-{line_number}"),
+        record,
+        None,
+    )?;
+    if !attached {
+        clear_result_content_ref(event);
+    }
+    Ok(())
+}
+
+/// Adds a local-only result locator for a direct native JSONL provider. The
+/// normalizer has already extracted the exact result bytes and computed the
+/// sole `ContentRef`; this path reuses that reference and never re-extracts or
+/// re-hashes the result body.
+pub(crate) fn attach_native_jsonl_result_content_locator(
+    event: &mut ProviderEventEnvelope,
+    provider: CaptureProvider,
+    source_format: &str,
+    raw_value: &Value,
+    record: &CapturedRecord,
+    line_number: usize,
+    content_ref: Option<&ContentRef>,
+) -> CaptureResult<()> {
+    if event.event_type != EventType::ToolOutput {
+        return Ok(());
+    }
+    let Some(content_ref) = content_ref else {
+        return Ok(());
+    };
+    let Some(payload) = event.payload.as_object() else {
+        return Ok(());
+    };
+    if payload.contains_key("result_content_ref") {
+        return Err(CaptureError::SystemInvariant(
+            "native JSONL result ContentRef was published before locator validation",
+        ));
+    }
+    let content_ref_value = serde_json::to_value(content_ref).map_err(|_| {
+        CaptureError::SystemInvariant("native JSONL result ContentRef is malformed")
+    })?;
+    let Some(profile) = native_jsonl_result_content_profile(provider) else {
+        return Ok(());
+    };
+    if verified_content_profile(
+        provider,
+        source_format,
+        CompleteContentSourceFamily::Jsonl,
+        VerifiedContentRole::ResultBody,
+    ) != Some(profile)
+    {
+        return Ok(());
+    }
+    let attached = attach_jsonl_result_content_locator_with_ref(
+        event,
+        content_ref,
+        provider,
+        source_format,
+        native_jsonl_event_id(provider, raw_value, line_number),
+        record,
+        None,
+    )?;
+    if attached {
+        event
+            .payload
+            .as_object_mut()
+            .expect("native JSONL result payload was validated as an object")
+            .insert("result_content_ref".to_owned(), content_ref_value);
+    }
+    Ok(())
+}
+
+fn attach_jsonl_result_content_locator_with_ref(
+    event: &mut ProviderEventEnvelope,
+    content_ref: &ContentRef,
+    provider: CaptureProvider,
+    source_format: &str,
+    native_record_id: String,
+    record: &CapturedRecord,
+    binding: Option<&ExactJsonlSourceBinding>,
+) -> CaptureResult<bool> {
     if !matches!(
         event.event_type,
         EventType::ToolOutput | EventType::CommandOutput
     ) {
-        return Ok(());
+        return Ok(false);
     }
     let CapturedRecordPayload::NativeBytes(record_bytes) = record.payload() else {
         return Err(CaptureError::SystemInvariant(
@@ -316,29 +415,135 @@ pub(crate) fn attach_codex_result_content_locator(
         byte_start,
         byte_end_exclusive,
     };
-    let body_sha256 = CompleteContentBodyDigest::parse(content_ref.sha256().to_owned()).ok_or(
-        CaptureError::SystemInvariant("Codex result ContentRef digest must be valid SHA-256"),
-    )?;
-    let Some(locator) = PersistedCompleteContentLocatorV1::new(
+    let Some(profile) = verified_content_profile(
+        provider,
+        source_format,
         CompleteContentSourceFamily::Jsonl,
-        JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        &range.encode(),
-        format!("line-{line_number}"),
-        digest_bytes(record_bytes),
-        body_sha256,
+        VerifiedContentRole::ResultBody,
     ) else {
+        return Ok(false);
+    };
+    let (kind, encoded) = match binding {
+        Some(binding) => (
+            EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
+            DecodedJsonlLocator {
+                range,
+                binding: Some(binding.clone()),
+            }
+            .encode_exact()
+            .to_vec(),
+        ),
+        None => (JSONL_COMPLETE_CONTENT_LOCATOR_KIND, range.encode().to_vec()),
+    };
+    let Some(locator) = VerifiedContentLocatorV1::new(
+        VerifiedContentRole::ResultBody,
+        profile,
+        content_ref.clone(),
+        CompleteContentSourceFamily::Jsonl,
+        kind,
+        &encoded,
+        native_record_id,
+        digest_bytes(record_bytes),
+    ) else {
+        return Ok(false);
+    };
+    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
+        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
+    )?;
+    Ok(true)
+}
+
+/// Adds a verified result-body locator and publishes its content reference only
+/// after every locator field has validated.
+pub(crate) fn attach_jsonl_result_content_locator(
+    event: &mut ProviderEventEnvelope,
+    provider: CaptureProvider,
+    source_format: &str,
+    content: &str,
+    native_record_id: &str,
+    record: &CapturedRecord,
+) -> CaptureResult<()> {
+    attach_standalone_jsonl_result_content_locator(
+        event,
+        provider,
+        source_format,
+        content,
+        native_record_id,
+        record,
+        None,
+    )
+}
+
+/// Exact-source variant used by providers whose result meaning depends on
+/// provider-owned auxiliary state in addition to the addressed JSONL record.
+pub(crate) fn attach_exact_jsonl_result_content_locator(
+    event: &mut ProviderEventEnvelope,
+    provider: CaptureProvider,
+    source_format: &str,
+    content: &str,
+    native_record_id: &str,
+    record: &CapturedRecord,
+    binding: &ExactJsonlSourceBinding,
+) -> CaptureResult<()> {
+    attach_standalone_jsonl_result_content_locator(
+        event,
+        provider,
+        source_format,
+        content,
+        native_record_id,
+        record,
+        Some(binding),
+    )
+}
+
+fn attach_standalone_jsonl_result_content_locator(
+    event: &mut ProviderEventEnvelope,
+    provider: CaptureProvider,
+    source_format: &str,
+    content: &str,
+    native_record_id: &str,
+    record: &CapturedRecord,
+    binding: Option<&ExactJsonlSourceBinding>,
+) -> CaptureResult<()> {
+    let Some(content_ref) = ContentRef::from_bytes(content.as_bytes()) else {
         return Ok(());
     };
-    let Some(metadata) = event.metadata.as_object_mut() else {
+    let content_ref_value = serde_json::to_value(&content_ref)
+        .map_err(|_| CaptureError::SystemInvariant("result ContentRef is malformed"))?;
+    let payload = event
+        .payload
+        .as_object()
+        .ok_or(CaptureError::SystemInvariant(
+            "provider result event payload must be an object",
+        ))?;
+    if payload.contains_key("result_content_ref") {
         return Err(CaptureError::SystemInvariant(
-            "provider event metadata must be an object",
+            "result ContentRef was published before locator validation",
         ));
-    };
-    metadata.insert(
-        RESULT_CONTENT_LOCATOR_METADATA_KEY.to_owned(),
-        locator.to_metadata_value(),
-    );
+    }
+    let attached = attach_jsonl_result_content_locator_with_ref(
+        event,
+        &content_ref,
+        provider,
+        source_format,
+        native_record_id.to_owned(),
+        record,
+        binding,
+    )?;
+    if attached {
+        event
+            .payload
+            .as_object_mut()
+            .expect("result payload was validated as an object")
+            .insert("result_content_ref".to_owned(), content_ref_value);
+    }
     Ok(())
+}
+
+fn clear_result_content_ref(event: &mut ProviderEventEnvelope) {
+    if let Some(payload) = event.payload.as_object_mut() {
+        payload.insert("result_content_ref".to_owned(), Value::Null);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +592,12 @@ struct JsonlRange {
 }
 
 impl JsonlRange {
+    fn length(self) -> Option<usize> {
+        self.byte_end_exclusive
+            .checked_sub(self.byte_start)
+            .and_then(|length| usize::try_from(length).ok())
+    }
+
     fn encode(self) -> [u8; JSONL_RANGE_LOCATOR_BYTES] {
         let mut value = [0_u8; JSONL_RANGE_LOCATOR_BYTES];
         value[..8].copy_from_slice(&self.byte_start.to_be_bytes());
@@ -411,26 +622,16 @@ impl JsonlRange {
             byte_end_exclusive,
         })
     }
-
-    fn length(self) -> Option<usize> {
-        usize::try_from(self.byte_end_exclusive.checked_sub(self.byte_start)?).ok()
-    }
 }
 
 fn validate_batch(requests: &[CompleteMessageRequest]) -> Result<(), CompleteContentError> {
     let first = &requests[0];
-    let first_identity = first
-        .source_identity
-        .as_deref()
-        .filter(|identity| !identity.is_empty())
-        .ok_or_else(|| error(first, CompleteContentErrorKind::HydrationUnsupported))?;
     let mut prior = None;
     for request in requests {
         if request.provider != first.provider
             || request.source_format != first.source_format
-            || request.raw_source_path != first.raw_source_path
-            || request.source_root != first.source_root
-            || request.source_identity.as_deref() != Some(first_identity)
+            || request.source_access != first.source_access
+            || request.source_access.family() != CompleteContentSourceFamily::Jsonl
             || request.source_record_subrecord_index != 0
         {
             return Err(error(
@@ -451,7 +652,7 @@ fn validate_batch(requests: &[CompleteMessageRequest]) -> Result<(), CompleteCon
         prior = Some(position);
         if request.expected_native_record_id.is_none()
             || request.expected_record_digest.is_none()
-            || request.expected_body_digest.is_none()
+            || request.expected_content_ref.is_none()
         {
             return Err(error(
                 request,
@@ -460,162 +661,6 @@ fn validate_batch(requests: &[CompleteMessageRequest]) -> Result<(), CompleteCon
         }
     }
     Ok(())
-}
-
-fn selected_source_path(request: &CompleteMessageRequest) -> Result<PathBuf, CompleteContentError> {
-    let raw = normalize_lexical(&request.raw_source_path)
-        .ok_or_else(|| error(request, CompleteContentErrorKind::SourceUnreadable))?;
-    let selected = if raw.is_absolute() {
-        raw
-    } else {
-        let root = request
-            .source_root
-            .as_deref()
-            .and_then(normalize_lexical)
-            .ok_or_else(|| error(request, CompleteContentErrorKind::SourceUnreadable))?;
-        normalize_lexical(&root.join(raw))
-            .ok_or_else(|| error(request, CompleteContentErrorKind::SourceUnreadable))?
-    };
-    if let Some(root) = request.source_root.as_deref().and_then(normalize_lexical) {
-        if selected != root && !selected.starts_with(&root) {
-            return Err(error(request, CompleteContentErrorKind::SourceUnreadable));
-        }
-    }
-    Ok(selected)
-}
-
-fn normalize_lexical(path: &Path) -> Option<PathBuf> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => return None,
-            Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    (!normalized.as_os_str().is_empty()).then_some(normalized)
-}
-
-fn ensure_no_links(
-    path: &Path,
-    request: &CompleteMessageRequest,
-) -> Result<(), CompleteContentError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        if current.as_os_str().is_empty() {
-            continue;
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(error(request, CompleteContentErrorKind::SourceUnreadable));
-            }
-            Ok(_) => {}
-            Err(io_error) if io_error.kind() == io::ErrorKind::NotFound => {
-                return Err(error(request, CompleteContentErrorKind::SourceMissing));
-            }
-            Err(_) => {
-                return Err(error(request, CompleteContentErrorKind::SourceUnreadable));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn open_frozen_source(
-    path: &Path,
-    request: &CompleteMessageRequest,
-) -> Result<(File, FrozenFile), CompleteContentError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options
-        .open(path)
-        .map_err(|io_error| match io_error.kind() {
-            io::ErrorKind::NotFound => error(request, CompleteContentErrorKind::SourceMissing),
-            _ => error(request, CompleteContentErrorKind::SourceUnreadable),
-        })?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| error(request, CompleteContentErrorKind::SourceUnreadable))?;
-    if !metadata.file_type().is_file() {
-        return Err(error(request, CompleteContentErrorKind::SourceUnreadable));
-    }
-    let frozen = FrozenFile::from_metadata(&metadata)
-        .map_err(|_| error(request, CompleteContentErrorKind::SourceUnreadable))?;
-    if request
-        .source_snapshot
-        .size_bytes
-        .is_some_and(|observed| frozen.length < observed)
-    {
-        return Err(error(request, CompleteContentErrorKind::SourceChanged));
-    }
-    Ok((file, frozen))
-}
-
-fn read_record(
-    file: &mut File,
-    frozen: &FrozenFile,
-    range: JsonlRange,
-    request: &CompleteMessageRequest,
-) -> Result<Vec<u8>, CompleteContentError> {
-    let length = range
-        .length()
-        .filter(|length| *length <= COMPLETE_CONTENT_MAX_BODY_BYTES)
-        .ok_or_else(|| error(request, CompleteContentErrorKind::ContentTooLarge))?;
-    if range.byte_end_exclusive > frozen.length {
-        return Err(error(
-            request,
-            CompleteContentErrorKind::SourceRecordMissing,
-        ));
-    }
-    if request
-        .source_snapshot
-        .size_bytes
-        .is_some_and(|observed| range.byte_end_exclusive > observed)
-    {
-        return Err(error(request, CompleteContentErrorKind::SourceChanged));
-    }
-    if range.byte_start > 0 {
-        file.seek(SeekFrom::Start(range.byte_start - 1))
-            .map_err(|_| error(request, CompleteContentErrorKind::SourceUnreadable))?;
-        let mut boundary = [0_u8; 1];
-        file.read_exact(&mut boundary)
-            .map_err(|_| error(request, CompleteContentErrorKind::SourceChanged))?;
-        if boundary[0] != b'\n' {
-            return Err(error(request, CompleteContentErrorKind::SourceChanged));
-        }
-    }
-    file.seek(SeekFrom::Start(range.byte_start))
-        .map_err(|_| error(request, CompleteContentErrorKind::SourceUnreadable))?;
-    let mut record = vec![0_u8; length];
-    file.read_exact(&mut record).map_err(|io_error| {
-        if io_error.kind() == io::ErrorKind::UnexpectedEof {
-            error(request, CompleteContentErrorKind::SourceRecordMissing)
-        } else {
-            error(request, CompleteContentErrorKind::SourceUnreadable)
-        }
-    })?;
-    let first_newline = record.iter().position(|byte| *byte == b'\n');
-    if first_newline.is_some_and(|position| position + 1 != record.len())
-        || (first_newline.is_none() && range.byte_end_exclusive != frozen.length)
-    {
-        return Err(error(request, CompleteContentErrorKind::SourceChanged));
-    }
-    let expected_record_digest = request
-        .expected_record_digest
-        .as_ref()
-        .ok_or_else(|| error(request, CompleteContentErrorKind::HydrationUnsupported))?;
-    if &digest_bytes(jsonl_payload_bytes(&record)) != expected_record_digest {
-        return Err(error(request, CompleteContentErrorKind::SourceChanged));
-    }
-    Ok(record)
 }
 
 fn resolve_record(
@@ -665,6 +710,21 @@ fn complete_message_text_and_id(
         let text = payload.get("content").and_then(codex_content_text)?;
         return Some((text, format!("line-{line_number}")));
     }
+    if provider == CaptureProvider::Claude && source_format == crate::CLAUDE_PROJECTS_SOURCE_FORMAT
+    {
+        return crate::provider::providers::claude::claude_complete_content_message_record(
+            value,
+            line_number,
+        );
+    }
+    if provider == CaptureProvider::Pi
+        && source_format == crate::provider::providers::pi::PI_SOURCE_FORMAT
+    {
+        return crate::provider::providers::pi::pi_complete_content_message_record(
+            value,
+            line_number,
+        );
+    }
     if provider == CaptureProvider::CodeBuddy && source_format == CODEBUDDY_SOURCE_FORMAT {
         return crate::provider::providers::codebuddy::codebuddy_cli_complete_content_record(
             value,
@@ -686,8 +746,21 @@ fn complete_message_text_and_id(
     if provider == CaptureProvider::KimiCodeCli && source_format == KIMI_CODE_CLI_SOURCE_FORMAT {
         return crate::provider::providers::kimi::kimi_complete_content_record(value, line_number);
     }
-    if !SUPPORTED_JSONL_SOURCES.contains(&(provider, source_format))
-        || native_jsonl_event_type(provider, value) != EventType::Message
+    if provider == CaptureProvider::Junie && source_format == JUNIE_SESSION_EVENTS_SOURCE_FORMAT {
+        if value.get("kind").and_then(Value::as_str) != Some("UserPromptEvent") {
+            return None;
+        }
+        return value
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(|text| (text.to_owned(), format!("line-{line_number}")));
+    }
+    if !verified_content_route_supported(
+        provider,
+        source_format,
+        CompleteContentSourceFamily::Jsonl,
+        VerifiedContentRole::MessageBody,
+    ) || native_jsonl_event_type(provider, value) != EventType::Message
     {
         return None;
     }
@@ -715,6 +788,10 @@ fn verify_provider_event_hash(
                     .provider_session_id
                     .as_deref()
                     .map(|session| format!("{session}:{native_record_id}"))
+            } else if request.provider == CaptureProvider::Junie
+                && request.source_format == JUNIE_SESSION_EVENTS_SOURCE_FORMAT
+            {
+                Some(format!("line:{line_number}:user"))
             } else {
                 Some(native_record_id.to_owned())
             };
@@ -755,6 +832,18 @@ fn normalized_message_payload(
         return codex_message_event(value.get("payload")?, line_number, timestamp)
             .map(|event| event.payload);
     }
+    if provider == CaptureProvider::Claude && source_format == crate::CLAUDE_PROJECTS_SOURCE_FORMAT
+    {
+        return crate::provider::providers::claude::claude_complete_content_normalized_payload(
+            value,
+            line_number,
+        );
+    }
+    if provider == CaptureProvider::Pi
+        && source_format == crate::provider::providers::pi::PI_SOURCE_FORMAT
+    {
+        return crate::provider::providers::pi::pi_complete_content_normalized_payload(value);
+    }
     if provider == CaptureProvider::OpenClaw && source_format == OPENCLAW_SOURCE_FORMAT {
         let session = "complete-content-verification";
         return Some(
@@ -768,59 +857,16 @@ fn normalized_message_payload(
             .payload,
         );
     }
+    if provider == CaptureProvider::Junie && source_format == JUNIE_SESSION_EVENTS_SOURCE_FORMAT {
+        let prompt = value.get("prompt").and_then(Value::as_str)?;
+        return Some(serde_json::json!({
+            "text": prompt,
+            "body": {"kind": "UserPromptEvent", "prompt": prompt},
+        }));
+    }
     let occurred_at = DateTime::<Utc>::from_timestamp(0, 0)?;
     native_jsonl_event(provider, source_format, value, line_number, occurred_at)
         .map(|event| event.payload)
-}
-
-fn observe_exact_source_binding(
-    request: &CompleteMessageRequest,
-    path: &Path,
-) -> Result<ExactJsonlSourceBinding, CompleteContentError> {
-    let observed = match request.provider {
-        CaptureProvider::CodeBuddy if request.source_format == CODEBUDDY_SOURCE_FORMAT => {
-            crate::provider::providers::codebuddy::codebuddy_cli_complete_content_source(path)
-        }
-        CaptureProvider::MistralVibe if request.source_format == MISTRAL_VIBE_SOURCE_FORMAT => {
-            crate::provider::providers::mistral_vibe::mistral_vibe_complete_content_source(path)
-        }
-        CaptureProvider::OpenClaw if request.source_format == OPENCLAW_SOURCE_FORMAT => {
-            crate::provider::providers::openclaw::openclaw_complete_content_source(path)
-        }
-        CaptureProvider::KimiCodeCli if request.source_format == KIMI_CODE_CLI_SOURCE_FORMAT => {
-            crate::provider::providers::kimi::kimi_complete_content_source(
-                path,
-                request.source_root.as_deref(),
-            )
-        }
-        _ => {
-            return Err(error(
-                request,
-                CompleteContentErrorKind::HydrationUnsupported,
-            ))
-        }
-    }
-    .map_err(|capture_error| map_source_error(request, capture_error))?;
-    Ok(ExactJsonlSourceBinding::new(&observed.0, &observed.1))
-}
-
-fn map_source_error(
-    request: &CompleteMessageRequest,
-    source: CaptureError,
-) -> CompleteContentError {
-    let kind = match source {
-        CaptureError::Io(ref io_error) if io_error.kind() == io::ErrorKind::NotFound => {
-            CompleteContentErrorKind::SourceMissing
-        }
-        CaptureError::InvalidPayload(ref message) if message.contains("exceeds") => {
-            CompleteContentErrorKind::ContentTooLarge
-        }
-        CaptureError::InvalidProviderTranscriptPath { .. }
-        | CaptureError::SourceChangedDuringCapture
-        | CaptureError::InvalidPayload(_) => CompleteContentErrorKind::SourceChanged,
-        _ => CompleteContentErrorKind::SourceUnreadable,
-    };
-    error(request, kind)
 }
 
 fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {
@@ -834,62 +880,6 @@ fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {
 fn digest_bytes(bytes: &[u8]) -> CompleteContentBodyDigest {
     CompleteContentBodyDigest::parse(format!("{:x}", Sha256::digest(bytes)))
         .expect("SHA-256 formatting is valid")
-}
-
-fn jsonl_payload_bytes(record: &[u8]) -> &[u8] {
-    let without_newline = record.strip_suffix(b"\n").unwrap_or(record);
-    without_newline
-        .strip_suffix(b"\r")
-        .unwrap_or(without_newline)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FrozenFile {
-    length: u64,
-    modified: SystemTime,
-    readonly: bool,
-    device: Option<u64>,
-    inode: Option<u64>,
-}
-
-impl FrozenFile {
-    fn from_metadata(metadata: &Metadata) -> io::Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-
-        #[cfg(unix)]
-        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
-        #[cfg(not(unix))]
-        let (device, inode) = (None, None);
-
-        Ok(Self {
-            length: metadata.len(),
-            modified: metadata.modified()?,
-            readonly: metadata.permissions().readonly(),
-            device,
-            inode,
-        })
-    }
-}
-
-fn revalidate_open_source(
-    file: &File,
-    path: &Path,
-    frozen: &FrozenFile,
-    request: &CompleteMessageRequest,
-) -> Result<(), CompleteContentError> {
-    let current = file
-        .metadata()
-        .ok()
-        .and_then(|metadata| FrozenFile::from_metadata(&metadata).ok());
-    let selected = fs::symlink_metadata(path)
-        .ok()
-        .filter(|metadata| !metadata.file_type().is_symlink())
-        .and_then(|metadata| FrozenFile::from_metadata(&metadata).ok());
-    if current.as_ref() != Some(frozen) || selected.as_ref() != Some(frozen) {
-        return Err(error(request, CompleteContentErrorKind::SourceChanged));
-    }
-    Ok(())
 }
 
 fn error(request: &CompleteMessageRequest, kind: CompleteContentErrorKind) -> CompleteContentError {

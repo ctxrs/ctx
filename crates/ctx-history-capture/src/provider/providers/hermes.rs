@@ -6,6 +6,7 @@ use std::{
 
 use ctx_history_core::{AgentType, CaptureProvider, EventType, Fidelity, ProviderSourceTrust};
 use ctx_history_store::Store;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
@@ -46,7 +47,48 @@ use self::sqlite::{
 };
 
 const HERMES_CAPTURE_REVISION: u32 = 1;
-const HERMES_POLICY_REVISION: u32 = 4;
+const HERMES_POLICY_REVISION: u32 = 5;
+
+pub(crate) fn load_hermes_message_values_schema(conn: &rusqlite::Connection) -> Result<()> {
+    HermesSchema::detect(conn).map(|_| ())
+}
+
+pub(crate) fn load_hermes_message_values(
+    conn: &rusqlite::Connection,
+    rowid: i64,
+) -> Result<Vec<crate::captured_batch::CapturedSqliteValue>> {
+    let schema = HermesSchema::detect(conn)?;
+    let visibility = schema.message_visibility();
+    let predicate = if visibility.is_empty() {
+        String::new()
+    } else {
+        format!(" and {visibility}")
+    };
+    let sql = format!(
+        "select {} from messages m where m.rowid = ?1{predicate}",
+        schema.messages().projection()
+    );
+    conn.query_row(&sql, [rowid], |row| {
+        schema.messages().capture_values(row, 0)
+    })
+    .map_err(Into::into)
+}
+
+pub(crate) fn hermes_complete_message(
+    conn: &rusqlite::Connection,
+    values: &[crate::captured_batch::CapturedSqliteValue],
+) -> Result<(String, String, String)> {
+    let schema = HermesSchema::detect(conn)?;
+    let row = decode_hermes_message(&schema, values)?;
+    let content = hermes_decode_content(row.content.as_deref());
+    let text = provider_value_text(&content).unwrap_or_else(|| {
+        row.tool_name
+            .as_ref()
+            .map(|name| format!("tool: {name}"))
+            .unwrap_or_else(|| format!("Hermes {}", row.role))
+    });
+    Ok((row.session_id, format!("message:{}", row.id), text))
+}
 
 pub(crate) fn hermes_decode_content(raw: Option<&str>) -> Value {
     let Some(raw) = raw else {
@@ -131,7 +173,36 @@ impl CapturedBatchProjector for HermesCapturedBatchProjector {
                     &self.schema_fingerprint,
                     &message,
                 ) {
-                    Ok(capture) => {
+                    Ok(mut capture) => {
+                        if let Some(event) = capture.event.as_mut() {
+                            let content = hermes_decode_content(message.content.as_deref());
+                            crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                                event,
+                                CaptureProvider::Hermes,
+                                HERMES_SQLITE_SOURCE_FORMAT,
+                                record.locator(),
+                                values,
+                                hermes_normalized_result_content(&message.role, &content),
+                            )
+                            .map_err(ProviderProjectionFatal::new)?;
+                            crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+                                event,
+                                CaptureProvider::Hermes,
+                                HERMES_SQLITE_SOURCE_FORMAT,
+                                record.locator(),
+                                values,
+                                || {
+                                    provider_value_text(&content).unwrap_or_else(|| {
+                                        message
+                                            .tool_name
+                                            .as_ref()
+                                            .map(|name| format!("tool: {name}"))
+                                            .unwrap_or_else(|| format!("Hermes {}", message.role))
+                                    })
+                                },
+                            )
+                            .map_err(ProviderProjectionFatal::new)?;
+                        }
                         // The session phase is authoritative. Persist only the
                         // event against that exact source-scoped Store session,
                         // leaving its complete metadata untouched.
@@ -309,12 +380,14 @@ fn hermes_existing_session_message_capture(
     let occurred_at =
         provider_required_timestamp_seconds(row.timestamp, "Hermes message timestamp")?;
     let content = hermes_decode_content(row.content.as_deref());
-    let text = provider_value_text(&content).unwrap_or_else(|| {
-        row.tool_name
-            .as_ref()
-            .map(|name| format!("tool: {name}"))
-            .unwrap_or_else(|| format!("Hermes {}", row.role))
-    });
+    let text = hermes_normalized_result_content(&row.role, &content)
+        .or_else(|| provider_value_text(&content))
+        .unwrap_or_else(|| {
+            row.tool_name
+                .as_ref()
+                .map(|name| format!("tool: {name}"))
+                .unwrap_or_else(|| format!("Hermes {}", row.role))
+        });
     let event = native_event(NativeEventDraft {
         provider: CaptureProvider::Hermes,
         source_format: HERMES_SQLITE_SOURCE_FORMAT,
@@ -382,6 +455,52 @@ fn hermes_existing_session_message_capture(
         context,
         Some(event),
     ))
+}
+
+/// Returns the complete normalized result body for one Hermes tool-role row.
+///
+/// Hermes owns the `content` column as the result body, so no nested field-name
+/// search is needed. The caller owns any byte bound.
+pub(crate) fn hermes_normalized_result_content(role: &str, content: &Value) -> Option<String> {
+    (role == "tool")
+        .then(|| provider_value_text(content))
+        .flatten()
+}
+
+pub(crate) fn hermes_result_record(
+    conn: &Connection,
+    rowid: i64,
+) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
+    let schema = HermesSchema::detect(conn)?;
+    let layout = schema.messages();
+    let visibility = schema.message_visibility();
+    let visibility = if visibility.is_empty() {
+        String::new()
+    } else {
+        format!(" and {visibility}")
+    };
+    let sql = format!(
+        "select {} from messages m join sessions s on s.id = m.session_id \
+         where m.rowid = ?1{visibility}",
+        layout.projection(),
+    );
+    let values = conn
+        .query_row(&sql, [rowid], |row| layout.capture_values(row, 0))
+        .optional()?;
+    let Some(values) = values else {
+        return Ok(None);
+    };
+    let message = decode_hermes_message(&schema, &values)?;
+    let content_value = hermes_decode_content(message.content.as_deref());
+    let content =
+        hermes_normalized_result_content(&message.role, &content_value).ok_or_else(|| {
+            CaptureError::InvalidPayload("Hermes row is no longer a supported result".to_owned())
+        })?;
+    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
+        values,
+        native_record_id: format!("message:{}", message.id),
+        content,
+    }))
 }
 
 fn hermes_capture(

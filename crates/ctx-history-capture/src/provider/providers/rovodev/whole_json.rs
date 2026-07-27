@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use crate::captured_batch::{
     CapturedBatch, CapturedRecord, CapturedRecordPayload, NativePosition, SourceObservation,
 };
-use crate::complete_content::structured::attach_structured_complete_content_locator;
+use crate::complete_content::structured::{
+    attach_structured_complete_content_locator, attach_structured_result_content_locator,
+};
 use crate::provider::file_touches::{
     visit_provider_file_touches_from_raw_value, ProviderFileTouchSourceContext,
     PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
@@ -174,6 +176,23 @@ fn visit_rovodev_session_normalizations(
                 &native_id,
                 record_bytes,
                 &complete_text,
+            )
+            .map_err(ProviderProjectionFatal::new)?;
+        }
+        if let Some(content) = super::rovodev_result_content(message) {
+            let native_id = event.provider_event_hash.clone().unwrap_or_default();
+            attach_structured_result_content_locator(
+                CaptureProvider::RovoDev,
+                &mut event,
+                0,
+                u32::try_from(index).map_err(|_| {
+                    ProviderProjectionFatal::system_invariant(
+                        "Rovo Dev subrecord index exceeds u32",
+                    )
+                })?,
+                &native_id,
+                record_bytes,
+                &content,
             )
             .map_err(ProviderProjectionFatal::new)?;
         }

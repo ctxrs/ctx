@@ -1,3 +1,6 @@
+use crate::complete_content::{
+    VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+};
 use crate::provider::providers::shelley::{
     shelley_event_index, shelley_value_text, ShelleyMessageRow,
 };
@@ -86,6 +89,18 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
         .expect("Shelley tool-result event imported");
     assert_eq!(agent_event.event_type, EventType::ToolCall);
     assert_eq!(tool_result_event.event_type, EventType::ToolOutput);
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &tool_result_event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .expect("Shelley tool result has a bounded verified-content locator");
+    let result_locator = locators
+        .locator(VerifiedContentRole::ResultBody)
+        .expect("Shelley tool result has a result-body route");
+    assert_eq!(result_locator.native_record_id(), "msg-tool-result");
+    assert_eq!(result_locator.source_locator().unwrap().value()[0], 2);
+    let locator_json = serde_json::to_string(result_locator).unwrap();
+    assert!(!locator_json.contains(fixture.to_string_lossy().as_ref()));
+    assert!(!locator_json.contains("0123456789abcdef0123456789abcdef01234567"));
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("shelley search oracle"));
     assert!(rendered.contains("thinking through the search"));
@@ -260,6 +275,11 @@ fn native_shelley_handles_duplicate_sequences_and_nonchat_rows() {
             .count()
             <= PROVIDER_MAX_TEXT_CHARS
     );
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &large.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .expect("truncated Shelley message has a verified-content locator");
+    assert!(locators.locator(VerifiedContentRole::MessageBody).is_some());
 }
 
 #[test]

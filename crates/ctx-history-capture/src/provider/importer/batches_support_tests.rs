@@ -11,10 +11,10 @@ use std::{
 use crate::test_support_paths::tempdir;
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope, SessionStatus,
-    SyncCursor,
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
+    EventType, Fidelity, ProviderCaptureEnvelope, SessionStatus, SyncCursor, SyncMetadata,
 };
-use ctx_history_store::{Store, StoreError};
+use ctx_history_store::{ProviderSourceLocatorObservation, Store, StoreError};
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -27,8 +27,9 @@ use crate::captured_batch::{
 };
 use crate::provider::file_touches::provider_file_touches_from_event;
 use crate::provider::importer::{
-    import_provider_capture_line, provider_import_edge_uuid, BoundedParserCheckpoint,
-    CertifiedProviderCursor, ProviderImportCaches,
+    import_provider_capture_line, provider_import_edge_uuid, provider_scoped_source_uuid,
+    provider_source_identity, BoundedParserCheckpoint, CertifiedProviderCursor,
+    ProviderImportCaches,
 };
 use crate::provider::providers::pi::{pi_session_capture, pi_session_header};
 use crate::{
@@ -812,7 +813,7 @@ fn projected_pi_capture() -> ProviderCaptureEnvelope {
     .expect("valid Pi header");
     pi_session_capture(
         &header,
-        Some(json!({
+        Some(&json!({
             "type": "message",
             "id": "captured-batch-message",
             "timestamp": "2026-07-17T12:00:01Z",

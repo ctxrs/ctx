@@ -841,15 +841,13 @@ fn result_evidence_rewrites_but_complete_content_only_changes_do_not() {
             "result_evidence": [{"kind": "call_id", "value": "call-1"}]
         }),
     );
-    value.sync.metadata["complete_content_locator_v1"] =
-        json!({"family": "jsonl_range", "path": "/secret/first"});
-    value.sync.metadata["complete_content_body_sha256"] = json!("a".repeat(64));
+    value.sync.metadata["verified_content_locators_v1"] =
+        json!({"version": 1, "locators": [{"path": "/secret/first"}]});
     store.upsert_event(&value).unwrap();
     store.activate_projection_journal(FINGERPRINT).unwrap();
 
-    value.sync.metadata["complete_content_locator_v1"] =
-        json!({"family": "jsonl_range", "path": "/secret/second"});
-    value.sync.metadata["complete_content_body_sha256"] = json!("b".repeat(64));
+    value.sync.metadata["verified_content_locators_v1"] =
+        json!({"version": 1, "locators": [{"path": "/secret/second"}]});
     store.upsert_event(&value).unwrap();
     assert_eq!(all_records(&store).len(), 1);
 

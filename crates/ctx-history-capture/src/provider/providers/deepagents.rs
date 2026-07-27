@@ -25,11 +25,11 @@ use crate::{
     Result, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
 };
 
-const DEEPAGENTS_CAPTURE_REVISION: u32 = 3;
-const DEEPAGENTS_POLICY_REVISION: u32 = 6;
+const DEEPAGENTS_CAPTURE_REVISION: u32 = 4;
+const DEEPAGENTS_POLICY_REVISION: u32 = 7;
 const DEEPAGENTS_POSITION_KIND: &str = "deepagents-logical-rowid-v2";
-const DEEPAGENTS_WRITE_LOCATOR_KIND: &str = "deepagents-write-v1";
-const DEEPAGENTS_THREAD_LOCATOR_KIND: &str = "deepagents-thread-v1";
+const DEEPAGENTS_WRITE_LOCATOR_KIND: &str = "deepagents-write-rowid-v2";
+const DEEPAGENTS_THREAD_LOCATOR_KIND: &str = "deepagents-thread-rowid-v2";
 const DEEPAGENTS_WRITE_RECORD_KIND: &str = "deepagents-message-write-v1";
 const DEEPAGENTS_REJECTED_WRITE_RECORD_KIND: &str = "deepagents-rejected-write-v1";
 const DEEPAGENTS_THREAD_RECORD_KIND: &str = "deepagents-thread-summary-v1";
@@ -37,6 +37,7 @@ const DEEPAGENTS_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 32 * 16;
 
 // Admission, certified resume, and safe-group publication stay visible here as the provider's
 // orchestration contract. The modules below own the bounded responsibilities it coordinates.
+mod complete_content;
 mod cursor;
 mod ledger;
 mod message;
@@ -45,6 +46,10 @@ mod projector;
 mod record;
 mod source;
 
+pub(crate) use complete_content::{
+    decode_deepagents_content_address, resolve_deepagents_content,
+    validate_deepagents_content_schema, DeepAgentsContentAddress, DEEPAGENTS_CONTENT_LOCATOR_KIND,
+};
 use cursor::{decode_deepagents_position, initial_deepagents_position};
 use producer::DeepAgentsRowFetcher;
 use projector::DeepAgentsCapturedBatchProjector;

@@ -11,9 +11,6 @@ impl CapturedSourceAdmission {
         store: &Store,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        if self.locator_resolution.borrow().is_some() {
-            return Ok(());
-        }
         let proposed_source_identity =
             self.scope
                 .stable_source_identity()
@@ -58,11 +55,14 @@ impl CapturedSourceAdmission {
     }
 
     pub(super) fn canonical_source_override(&self) -> Option<CanonicalProviderSourceOverride> {
+        let resolution = self.locator_resolution.borrow();
+        let resolution = resolution.as_ref()?;
         Some(CanonicalProviderSourceOverride {
             stable_source_identity: self.stable_source_identity()?,
             stable_session_identity: self.stable_session_identity()?,
             machine_id: self.scope.machine_id.clone(),
             uses_relocation_alias: self.source_was_relocated(),
+            route_binding: resolution.route_binding(),
         })
     }
 }

@@ -13,6 +13,7 @@ use crate::{
 mod dialect;
 mod normalization;
 mod projector;
+pub(crate) mod result_content;
 mod source;
 mod traversal;
 mod windsurf;
@@ -142,5 +143,7 @@ use source::{
     NATIVE_JSONL_CAPTURE_REVISION, NATIVE_JSONL_POLICY_REVISION,
 };
 
+#[cfg(test)]
+mod result_locator_tests;
 #[cfg(test)]
 mod tests;

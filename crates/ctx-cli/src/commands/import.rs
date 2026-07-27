@@ -40,7 +40,7 @@ mod totals;
 use catalog::source_uses_incremental_event_search;
 #[cfg(test)]
 pub(crate) use catalog::{catalog_import_checkpoint_matches, sha256_file_prefix_hex};
-use explicit::{large_import_notice, run_explicit_format_import};
+use explicit::{large_import_notice, run_explicit_format_import, ExplicitFormatImportContext};
 pub(crate) use inventory::{
     inventory_available_sources, inventory_import_sources, ImportInventory,
 };
@@ -408,7 +408,7 @@ pub(crate) fn run_import_internal(
     };
 
     if let Some(format) = args.format {
-        return run_explicit_format_import(
+        return run_explicit_format_import(ExplicitFormatImportContext {
             args,
             format,
             db_path,
@@ -417,7 +417,7 @@ pub(crate) fn run_import_internal(
             provider_refreshes,
             refresh_trigger,
             options,
-        );
+        });
     }
 
     let requests = import_requests(args)?;

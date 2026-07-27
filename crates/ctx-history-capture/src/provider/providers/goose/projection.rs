@@ -68,7 +68,7 @@ impl CapturedBatchProjector for GooseCapturedBatchProjector {
                     decode_goose_message_record(values).map_err(ProviderProjectionFatal::new)?;
                 let session =
                     parent_rowid.map(|_| GooseSessionRow::event_reference(&message.session_id));
-                let projection = match goose_message_normalization(
+                let mut projection = match goose_message_normalization(
                     message,
                     session.as_ref(),
                     &self.raw_source_path,
@@ -83,6 +83,28 @@ impl CapturedBatchProjector for GooseCapturedBatchProjector {
                         return Ok(());
                     }
                 };
+                if let Some(event) = projection.capture.event.as_mut() {
+                    crate::complete_content::sqlite::attach_sqlite_result_content_locator(
+                        event,
+                        CaptureProvider::Goose,
+                        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+                        record.locator(),
+                        values,
+                        super::normalization::goose_normalized_result_content(
+                            &projection.raw_content,
+                        ),
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                    crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+                        event,
+                        CaptureProvider::Goose,
+                        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+                        record.locator(),
+                        values,
+                        || projection.complete_text.clone(),
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                }
                 output.use_explicit_file_touches();
                 let event_outcome = output.emit_existing_session_event(
                     provider_line_from_index(record.ordinal().saturating_add(1)),

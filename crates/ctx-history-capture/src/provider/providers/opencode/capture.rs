@@ -14,7 +14,7 @@ use super::schema::{
 };
 
 pub(super) const OPENCODE_POSITION_KIND: &str = "opencode-sqlite-rowid-keyset-v6";
-pub(super) const OPENCODE_LOCATOR_KIND: &str = "opencode-sqlite-logical-row-v1";
+pub(crate) const OPENCODE_LOCATOR_KIND: &str = "opencode-sqlite-logical-row-v1";
 pub(super) const OPENCODE_RECORD_KIND: &str = "opencode-sqlite-message-v1";
 pub(super) const OPENCODE_SESSION_PARENT_RECORD_KIND: &str = "opencode-sqlite-session-parent-v1";
 pub(super) const OPENCODE_MESSAGE_PART_RECORD_KIND: &str = "opencode-sqlite-message-part-v1";
@@ -388,6 +388,80 @@ impl<'connection> OpenCodeRowFetcher<'connection> {
     }
 }
 
+pub(super) fn opencode_values_at_rowid(
+    conn: &Connection,
+    shape: OpenCodeCapturedShape,
+    rowid: i64,
+) -> Result<Option<Vec<CapturedSqliteValue>>> {
+    let row = OpenCodeRowSql::for_shape(conn, shape)?;
+    let structural = conn
+        .query_row(
+            &format!(
+                "select coalesce(cast({message_id} as text), ''), \
+                        coalesce(cast({session_id} as text), '') \
+                 from {from_clause} where {alias}.rowid = ?1",
+                message_id = row.message_id,
+                session_id = row.session_id,
+                from_clause = row.from_clause,
+                alias = row.source_alias,
+            ),
+            [rowid],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((message_id, source_session_id)) = structural else {
+        return Ok(None);
+    };
+    let (relationship_valid, resolved_session_id) = if shape == OpenCodeCapturedShape::MessagePart {
+        let message = conn
+            .query_row(
+                "select rowid, coalesce(cast(session_id as text), '') \
+                     from message where id = ?1 order by rowid limit 1",
+                [message_id.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match message {
+            Some((_, message_session_id)) if source_session_id.trim().is_empty() => {
+                (true, message_session_id)
+            }
+            Some((_, message_session_id)) => (
+                message_session_id == source_session_id,
+                source_session_id.clone(),
+            ),
+            None => (false, source_session_id.clone()),
+        }
+    } else {
+        (true, source_session_id.clone())
+    };
+    let parent_available = relationship_valid && !resolved_session_id.trim().is_empty();
+    let part_ordinal: i64 = conn.query_row(
+        &format!(
+            "select count(*) from {} where {}.rowid < ?1",
+            row.candidate_from_clause, row.source_alias,
+        ),
+        [rowid],
+        |row| row.get(0),
+    )?;
+    let mut values = Vec::with_capacity(14);
+    values.push(CapturedSqliteValue::Integer(part_ordinal));
+    values.push(CapturedSqliteValue::Integer(i64::from(parent_available)));
+    conn.query_row(&row.hydration_sql(shape), [rowid], |row| {
+        values.push(CapturedSqliteValue::Text(row.get(0)?));
+        values.push(CapturedSqliteValue::Text(resolved_session_id.clone()));
+        values.push(CapturedSqliteValue::Text(row.get(2)?));
+        values.push(CapturedSqliteValue::Integer(row.get(3)?));
+        values.push(CapturedSqliteValue::Integer(row.get(4)?));
+        values.push(CapturedSqliteValue::Integer(row.get(5)?));
+        values.push(CapturedSqliteValue::Integer(row.get(6)?));
+        for index in 7..=11 {
+            values.push(CapturedSqliteValue::Text(row.get(index)?));
+        }
+        Ok(())
+    })?;
+    Ok(Some(values))
+}
+
 pub(super) fn with_opencode_length_preflight<T>(
     conn: &Connection,
     query: impl FnOnce() -> rusqlite::Result<T>,
@@ -563,6 +637,22 @@ pub(super) fn opencode_locator(
     locator_value.extend_from_slice(&opencode_ordered_i64(rowid).to_be_bytes());
     locator_value.push(phase.tag());
     NativeLocator::new(OPENCODE_LOCATOR_KIND, locator_value).map_err(opencode_captured_error)
+}
+
+pub(crate) fn decode_opencode_message_locator(
+    locator: &NativeLocator,
+) -> Result<(OpenCodeCapturedShape, i64)> {
+    if locator.kind() != OPENCODE_LOCATOR_KIND
+        || locator.value().len() != 10
+        || locator.value()[9] != OpenCodePositionPhase::Child.tag()
+    {
+        return Err(CaptureError::InvalidPayload(
+            "OpenCode complete-content locator has an invalid shape".into(),
+        ));
+    }
+    let shape = OpenCodeCapturedShape::from_tag(locator.value()[0])?;
+    let encoded = opencode_decode_u64(&locator.value()[1..9])?;
+    Ok((shape, opencode_unordered_i64(encoded)))
 }
 
 pub(super) fn opencode_decode_u64(bytes: &[u8]) -> Result<u64> {

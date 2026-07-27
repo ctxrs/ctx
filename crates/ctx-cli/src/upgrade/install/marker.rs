@@ -7,6 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
+use crate::install_marker::{active_install_attribution_from_value, ActiveInstallAttribution};
+
 use super::super::state::{atomic_write_json, read_json_file};
 use super::super::{platform_key, sha256_hex, UpgradePlan};
 
@@ -120,8 +122,11 @@ fn verify_install_marker(marker: &InstallMarker, platform: &str) -> Result<()> {
 pub(super) fn write_install_marker_to(
     marker_path: &Path,
     plan: &UpgradePlan,
-    install_attempt_id: Option<&str>,
+    install_attribution: Option<&ActiveInstallAttribution>,
 ) -> Result<()> {
+    let installed_at = install_attribution
+        .map(|attribution| attribution.installed_at)
+        .unwrap_or_else(utc_now);
     let mut body = json!({
         "schema_version": 1,
         "manager": "ctx-hosted-installer",
@@ -135,26 +140,22 @@ pub(super) fn write_install_marker_to(
         "source_commit": plan.metadata.source_commit,
         "published_at": plan.metadata.published_at,
         "store_schema_version": plan.metadata.store_schema_version,
-        "installed_at": utc_now(),
+        "installed_at": installed_at,
     });
-    if let Some(install_attempt_id) = install_attempt_id {
+    if let Some(install_attribution) = install_attribution {
         if let Some(object) = body.as_object_mut() {
             object.insert(
                 "install_attempt_id".to_owned(),
-                Value::String(install_attempt_id.to_owned()),
+                Value::String(install_attribution.install_attempt_id.clone()),
             );
         }
     }
     atomic_write_json(marker_path, &body)
 }
 
-pub(super) fn existing_install_attempt_id(marker_path: &Path) -> Option<String> {
-    read_json_file(marker_path).and_then(|value| optional_install_attempt_id(&value))
-}
-
-fn optional_install_attempt_id(value: &Value) -> Option<String> {
-    let id = value.get("install_attempt_id")?.as_str()?;
-    is_valid_install_attempt_id(id).then(|| id.to_owned())
+pub(super) fn existing_install_attribution(marker_path: &Path) -> Option<ActiveInstallAttribution> {
+    read_json_file(marker_path)
+        .and_then(|value| active_install_attribution_from_value(&value, utc_now()))
 }
 
 pub(crate) fn is_valid_install_attempt_id(value: &str) -> bool {

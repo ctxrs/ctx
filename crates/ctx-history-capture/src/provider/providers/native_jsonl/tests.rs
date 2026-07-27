@@ -9,6 +9,37 @@ use crate::test_support_paths::tempdir;
 use super::*;
 
 #[test]
+fn antigravity_and_windsurf_formats_are_call_only_not_result_streams() {
+    const FIXTURES: &[(CaptureProvider, &str)] = &[
+        (
+            CaptureProvider::Antigravity,
+            include_str!(
+                "../../../../../../tests/fixtures/provider-history/antigravity/v1/brain/agy-success/.system_generated/logs/transcript_full.jsonl"
+            ),
+        ),
+        (
+            CaptureProvider::Windsurf,
+            include_str!(
+                "../../../../../../tests/fixtures/provider-history/windsurf/transcripts/windsurf-hook-trajectory-1.jsonl"
+            ),
+        ),
+    ];
+
+    for (provider, fixture) in FIXTURES {
+        let event_types = fixture
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .map(|value| native_jsonl_event_type(*provider, &value))
+            .collect::<Vec<_>>();
+        assert!(event_types.contains(&EventType::ToolCall));
+        assert!(!event_types.iter().any(|event_type| matches!(
+            event_type,
+            EventType::ToolOutput | EventType::CommandOutput
+        )));
+    }
+}
+
+#[test]
 fn cursor_tool_result_retains_only_artifact_identifiers() {
     let event = native_jsonl_event(
             CaptureProvider::Cursor,

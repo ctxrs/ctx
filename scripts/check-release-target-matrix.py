@@ -72,7 +72,7 @@ EXPECTED = {
         "helper_artifact": "ctx-pro-macos-x64",
         "archive": "tar.gz",
         "vault": "keychain",
-        "runtime_authority": "native-apple-x86_64",
+        "runtime_authority": "native-macos-x86_64",
         "diagnostic_authorities": ["rosetta-2", "non-apple-qemu"],
         "platform_signature": "developer-id-notarized",
     },

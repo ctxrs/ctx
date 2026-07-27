@@ -50,12 +50,16 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
+pub(crate) const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
+#[allow(dead_code)] // Registered by the universal locator integration branch.
+pub(crate) const PI_RESULT_CONTENT_PROFILE: &str = "pi.result-body.v1";
 const PI_CAPTURE_REVISION: u32 = 2;
-const PI_POLICY_REVISION: u32 = 5;
+const PI_POLICY_REVISION: u32 = 6;
 const PI_RECORD_KIND: &str = "pi-session-jsonl-v1";
 
 mod text;
+#[allow(unused_imports)] // Consumed by the universal locator integration branch.
+pub(crate) use text::pi_result_content;
 use text::{pi_entry_text, pi_event_role, pi_message_has_tool_call};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,14 +299,46 @@ impl CapturedBatchProjector for PiCapturedBatchProjector {
             );
             return Ok(());
         };
-        match pi_session_capture(header, Some(value), line_number, &self.context) {
-            Ok(capture) => self.accept_normalization(
-                ProviderNormalizationResult {
-                    captures: vec![(line_number, capture)],
-                    ..ProviderNormalizationResult::default()
-                },
-                output,
-            ),
+        let result = crate::complete_content::jsonl::result_content_and_id(
+            CaptureProvider::Pi,
+            PI_SOURCE_FORMAT,
+            &value,
+            line_number,
+        );
+        match pi_session_capture(header, Some(&value), line_number, &self.context) {
+            Ok(mut capture) => {
+                if let Some(event) = capture.event.as_mut() {
+                    crate::complete_content::jsonl::attach_jsonl_complete_content_locator(
+                        event,
+                        CaptureProvider::Pi,
+                        PI_SOURCE_FORMAT,
+                        &value,
+                        record,
+                        line_number,
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                }
+                if let (Some(event), Some((content, native_record_id))) =
+                    (capture.event.as_mut(), result)
+                {
+                    crate::complete_content::jsonl::attach_jsonl_result_content_locator(
+                        event,
+                        CaptureProvider::Pi,
+                        PI_SOURCE_FORMAT,
+                        &content,
+                        &native_record_id,
+                        record,
+                    )
+                    .map_err(ProviderProjectionFatal::new)?;
+                }
+                self.accept_normalization(
+                    ProviderNormalizationResult {
+                        captures: vec![(line_number, capture)],
+                        ..ProviderNormalizationResult::default()
+                    },
+                    output,
+                )
+            }
             Err(error) => {
                 output.reject_record(line_number, error.to_string());
                 Ok(())
@@ -695,12 +731,12 @@ pub(crate) fn pi_session_header(value: Value) -> Result<PiSessionHeader> {
 
 pub(crate) fn pi_session_capture(
     header: &PiSessionHeader,
-    entry: Option<Value>,
+    entry: Option<&Value>,
     line_number: usize,
     context: &ProviderAdapterContext,
 ) -> Result<ProviderCaptureEnvelope> {
     let event = entry
-        .map(|entry| pi_session_event(header, &entry, line_number))
+        .map(|entry| pi_session_event(header, entry, line_number))
         .transpose()?;
     let cursor = event.as_ref().and_then(|event| {
         event.cursor.as_ref().map(|cursor| ProviderCursorRange {
@@ -784,20 +820,11 @@ pub(crate) fn pi_session_event(
     })?;
     let event_type = pi_event_type(entry_type, message);
     let role = message_role.map(pi_event_role);
-    let text = pi_entry_text(entry, message).unwrap_or_default();
-    let retained_text = provider_policy_event_text(event_type, &text, entry);
-    let result_evidence = provider_result_identifier_evidence(event_type, &text, entry);
-    let result_outcome = provider_result_outcome_evidence(event_type, entry);
+    let payload = pi_normalized_event_payload(entry, event_type);
     let provider_event_index = (line_number - 1) as u64;
     let provider_event_identity_index =
         pi_provider_event_identity_index(header, entry).unwrap_or(provider_event_index);
     let legacy_provider_event_index = provider_event_index;
-    let command = message
-        .and_then(|value| value.get("command"))
-        .and_then(Value::as_str);
-    let exit_code = message
-        .and_then(|value| value.get("exitCode"))
-        .and_then(Value::as_i64);
 
     Ok(ProviderEventEnvelope {
         provider_event_index,
@@ -809,19 +836,7 @@ pub(crate) fn pi_session_event(
         fidelity: Fidelity::Imported,
         idempotency_key: Some(pi_event_idempotency_key(header, entry, line_number)),
         artifacts: Vec::new(),
-        payload: json!({
-            "entry_type": entry_type,
-            "entry_id": entry.get("id").and_then(Value::as_str),
-            "parent_id": entry.get("parentId").and_then(Value::as_str),
-            "message_role": message_role,
-            "command": command,
-            "exit_code": exit_code,
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "body": provider_capped_json(&provider_policy_body(event_type, entry), PROVIDER_MAX_PREVIEW_CHARS),
-        }),
+        payload,
         metadata: json!({
             "source": "pi_session",
             "source_format": "pi_session_jsonl",
@@ -840,6 +855,83 @@ pub(crate) fn pi_session_event(
                 .and_then(Value::as_str),
             "usage": message.and_then(|message| message.get("usage")).cloned(),
         }),
+    })
+}
+
+/// Pure message normalization shared by capture and verified source reopening.
+///
+/// The native entry ID is preferred; records without one remain addressable by
+/// their exact JSONL line and are still protected by record/content hashes.
+pub(crate) fn pi_complete_content_message_record(
+    entry: &Value,
+    line_number: usize,
+) -> Option<(String, String)> {
+    let entry_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message = entry.get("message");
+    (pi_event_type(entry_type, message) == EventType::Message).then(|| {
+        (
+            pi_entry_text(entry, message).unwrap_or_default(),
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("line-{line_number}")),
+        )
+    })
+}
+
+/// Rebuilds the exact normalized payload used by Store event hashing.
+pub(crate) fn pi_complete_content_normalized_payload(entry: &Value) -> Option<Value> {
+    let entry_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message = entry.get("message");
+    let event_type = pi_event_type(entry_type, message);
+    if event_type != EventType::Message {
+        return None;
+    }
+    Some(pi_normalized_event_payload(entry, event_type))
+}
+
+fn pi_normalized_event_payload(entry: &Value, event_type: EventType) -> Value {
+    let entry_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message = entry.get("message");
+    let message_role = message
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str);
+    let text = pi_entry_text(entry, message).unwrap_or_default();
+    let retained_text = provider_policy_event_text(event_type, &text, entry);
+    let result_evidence = provider_result_identifier_evidence(event_type, &text, entry);
+    let result_outcome = provider_result_outcome_evidence(event_type, entry);
+    let command = message
+        .and_then(|value| value.get("command"))
+        .and_then(Value::as_str);
+    let exit_code = message
+        .and_then(|value| value.get("exitCode"))
+        .and_then(Value::as_i64);
+    json!({
+        "entry_type": entry_type,
+        "entry_id": entry.get("id").and_then(Value::as_str),
+        "parent_id": entry.get("parentId").and_then(Value::as_str),
+        "message_role": message_role,
+        "command": command,
+        "exit_code": exit_code,
+        "text": retained_text.text,
+        "text_retention": retained_text.retention.as_json(),
+        "result_evidence": result_evidence,
+        "result_outcome": result_outcome,
+        "body": provider_capped_json(
+            &provider_policy_body(event_type, entry),
+            PROVIDER_MAX_PREVIEW_CHARS,
+        ),
     })
 }
 

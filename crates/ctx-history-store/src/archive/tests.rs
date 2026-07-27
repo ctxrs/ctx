@@ -285,6 +285,57 @@ fn every_event_write_boundary_keeps_result_bodies_source_backed() {
 }
 
 #[test]
+fn archive_export_and_import_strip_local_verified_content_locators() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let mut local = event(
+        1,
+        EventType::Message,
+        serde_json::json!({"text": "preview"}),
+    );
+    local.sync.metadata = serde_json::json!({
+        "verified_content_locators_v1": {"local_path_capability": "/private/source"},
+        "preserved": true
+    });
+    store.upsert_event(&local).unwrap();
+
+    let exported = store.export_archive().unwrap();
+    let exported_event = exported
+        .events
+        .iter()
+        .find(|event| event.id == local.id)
+        .unwrap();
+    assert_eq!(
+        exported_event.sync.metadata,
+        serde_json::json!({"preserved": true})
+    );
+    assert!(!serde_json::to_string(&exported)
+        .unwrap()
+        .contains("/private/source"));
+
+    let mut crafted = event(
+        2,
+        EventType::Message,
+        serde_json::json!({"text": "crafted"}),
+    );
+    crafted.sync.metadata = serde_json::json!({
+        "verified_content_locators_v1": {"local_path_capability": "/attacker/source"},
+        "preserved": true
+    });
+    let archive = SessionHistoryArchive {
+        schema_version: 2,
+        version: 2,
+        events: vec![crafted.clone()],
+        ..SessionHistoryArchive::default()
+    };
+    store.import_archive(&archive, false).unwrap();
+    assert_eq!(
+        store.get_event(crafted.id).unwrap().sync.metadata,
+        serde_json::json!({"preserved": true})
+    );
+}
+
+#[test]
 fn result_payload_blobs_are_rejected_at_direct_and_archive_boundaries() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("ctx.db")).unwrap();

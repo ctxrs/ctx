@@ -9,6 +9,20 @@ use super::sqlite::{
 use super::*;
 use crate::captured_batch::{CapturedRecordPayload, CAPTURE_BATCH_MAX_RECORDS};
 
+#[test]
+fn hermes_result_content_uses_only_the_tool_content_column_without_a_size_cap() {
+    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 19);
+    assert_eq!(
+        hermes_normalized_result_content("tool", &Value::String(long.clone())),
+        Some(long)
+    );
+    assert_eq!(
+        hermes_normalized_result_content("assistant", &Value::String("not a result".into())),
+        None
+    );
+    assert_eq!(hermes_normalized_result_content("tool", &Value::Null), None);
+}
+
 fn hermes_explain_resume_plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut statement = conn.prepare(&format!("explain query plan {sql}")).unwrap();
     statement

@@ -28,15 +28,17 @@ mod tests;
 
 use self::projector::MistralVibeCapturedBatchProjector;
 use self::schema::mistral_vibe_bounded_metadata;
+pub(crate) use self::schema::mistral_vibe_result_content;
 use self::source::{
     visit_mistral_vibe_session_sources, MistralVibeFrozenFile, MistralVibeSessionObservation,
     MistralVibeSessionSource,
 };
 
-const MISTRAL_VIBE_CAPTURE_REVISION: u32 = 2;
-const MISTRAL_VIBE_POLICY_REVISION: u32 = 5;
+const MISTRAL_VIBE_CAPTURE_REVISION: u32 = 3;
+const MISTRAL_VIBE_POLICY_REVISION: u32 = 6;
 const MISTRAL_VIBE_RECORD_KIND: &str = "mistral-vibe-message-jsonl-v1";
 const MISTRAL_VIBE_MAX_ID_BYTES: usize = 4 * 1024;
+pub(crate) const MISTRAL_VIBE_RESULT_CONTENT_PROFILE: &str = "mistral-vibe.result-body.v1";
 
 pub(crate) fn import_mistral_vibe_sessions_batched(
     path: &Path,
@@ -250,22 +252,14 @@ pub(crate) fn mistral_vibe_complete_content_record(
     })
 }
 
-pub(crate) fn mistral_vibe_complete_content_source(path: &Path) -> Result<(String, String)> {
-    let session_dir = path
-        .parent()
-        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Mistral Vibe messages.jsonl has no session directory",
-        })?;
-    let session_source = MistralVibeSessionSource {
-        session_dir: session_dir.to_path_buf(),
-        metadata_path: session_dir.join("meta.json"),
-        messages_path: path.to_path_buf(),
-    };
-    let observation = MistralVibeSessionObservation::read(&session_source)?;
+pub(crate) fn mistral_vibe_complete_content_source_from_admitted(
+    metadata: &std::fs::Metadata,
+    messages: &std::fs::Metadata,
+    path_identity: String,
+) -> Result<(String, String)> {
     Ok((
-        observation.source_revision(),
-        provider_path_identity(&observation.canonical_messages_path)?,
+        source::mistral_vibe_complete_content_revision_from_admitted(metadata, messages)?,
+        path_identity,
     ))
 }
 
