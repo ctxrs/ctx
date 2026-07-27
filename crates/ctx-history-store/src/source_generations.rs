@@ -20,6 +20,14 @@ pub enum NativePathSourceEntityKind {
 }
 
 impl NativePathSourceEntityKind {
+    const RETIREMENT_ORDER: [Self; 5] = [
+        Self::SessionEdge,
+        Self::Run,
+        Self::Event,
+        Self::FileTouch,
+        Self::Session,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Session => "session",
@@ -48,6 +56,32 @@ impl NativePathSourceEntityKind {
             "event" => Some(Self::Event),
             "file_touch" => Some(Self::FileTouch),
             _ => None,
+        }
+    }
+
+    const fn retirement_storage(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Session => (
+                "sessions",
+                "capture_source_id",
+                "idx_sessions_source_generation_retirement",
+            ),
+            Self::SessionEdge => (
+                "session_edges",
+                "source_id",
+                "idx_session_edges_source_generation_retirement",
+            ),
+            Self::Run => ("runs", "source_id", "idx_runs_source_generation_retirement"),
+            Self::Event => (
+                "events",
+                "capture_source_id",
+                "idx_events_source_generation_retirement",
+            ),
+            Self::FileTouch => (
+                "files_touched",
+                "source_id",
+                "idx_files_touched_source_generation_retirement",
+            ),
         }
     }
 }
@@ -448,131 +482,180 @@ impl Store {
             return Err(StoreError::NativePathSourceGenerationConflict);
         }
         let locator_identity = locator_storage_key(&key.locator_identity);
-        let after_order = after.map(|value| value.kind.order()).unwrap_or(-1);
-        let after_id = after.map(|value| value.id.to_string()).unwrap_or_default();
-        let mut statement = self.conn.prepare(
-            "WITH staged_sources AS (
-                 SELECT entity_id
-                 FROM native_path_source_generation_entities
-                 WHERE provider = ?1 AND source_format = ?2 AND machine_id = ?3
-                   AND locator_identity = ?4 AND generation_id = ?5
-                   AND entity_kind = 'capture_source'
-             ),
-             candidates(kind_order, entity_kind, entity_id, retained) AS (
-                 SELECT 4, 'session', entity.id,
-                        EXISTS(
-                            SELECT 1 FROM native_path_source_generation_entities kept
-                            WHERE kept.provider = ?1 AND kept.source_format = ?2
-                              AND kept.machine_id = ?3 AND kept.locator_identity = ?4
-                              AND kept.generation_id = ?5
-                              AND kept.entity_kind = 'session'
-                              AND kept.entity_id = entity.id
-                        )
-                 FROM sessions entity
-                 WHERE entity.capture_source_id IN staged_sources
-                   AND entity.deleted_at_ms IS NULL
-                 UNION ALL
-                 SELECT 0, 'session_edge', entity.id,
-                        EXISTS(
-                            SELECT 1 FROM native_path_source_generation_entities kept
-                            WHERE kept.provider = ?1 AND kept.source_format = ?2
-                              AND kept.machine_id = ?3 AND kept.locator_identity = ?4
-                              AND kept.generation_id = ?5
-                              AND kept.entity_kind = 'session_edge'
-                              AND kept.entity_id = entity.id
-                        )
-                 FROM session_edges entity
-                 WHERE entity.source_id IN staged_sources
-                   AND entity.deleted_at_ms IS NULL
-                 UNION ALL
-                 SELECT 1, 'run', entity.id,
-                        EXISTS(
-                            SELECT 1 FROM native_path_source_generation_entities kept
-                            WHERE kept.provider = ?1 AND kept.source_format = ?2
-                              AND kept.machine_id = ?3 AND kept.locator_identity = ?4
-                              AND kept.generation_id = ?5
-                              AND kept.entity_kind = 'run'
-                              AND kept.entity_id = entity.id
-                        )
-                 FROM runs entity
-                 WHERE entity.source_id IN staged_sources
-                   AND entity.deleted_at_ms IS NULL
-                 UNION ALL
-                 SELECT 2, 'event', entity.id,
-                        EXISTS(
-                            SELECT 1 FROM native_path_source_generation_entities kept
-                            WHERE kept.provider = ?1 AND kept.source_format = ?2
-                              AND kept.machine_id = ?3 AND kept.locator_identity = ?4
-                              AND kept.generation_id = ?5
-                              AND kept.entity_kind = 'event'
-                              AND kept.entity_id = entity.id
-                        )
-                 FROM events entity
-                 WHERE entity.capture_source_id IN staged_sources
-                   AND entity.deleted_at_ms IS NULL
-                 UNION ALL
-                 SELECT 3, 'file_touch', entity.id,
-                        EXISTS(
-                            SELECT 1 FROM native_path_source_generation_entities kept
-                            WHERE kept.provider = ?1 AND kept.source_format = ?2
-                              AND kept.machine_id = ?3 AND kept.locator_identity = ?4
-                              AND kept.generation_id = ?5
-                              AND kept.entity_kind = 'file_touch'
-                              AND kept.entity_id = entity.id
-                        )
-                 FROM files_touched entity
-                 WHERE entity.source_id IN staged_sources
-                   AND entity.deleted_at_ms IS NULL
-             )
-             SELECT entity_kind, entity_id, retained
-             FROM candidates
-             WHERE kind_order > ?6 OR (kind_order = ?6 AND entity_id > ?7)
-             ORDER BY kind_order, entity_id
-             LIMIT ?8",
-        )?;
-        let rows = statement.query_map(
-            params![
-                key.provider.as_str(),
-                &key.source_format,
-                &key.machine_id,
-                &locator_identity,
-                &key.generation_id,
-                after_order,
-                after_id,
-                i64::try_from(limit.saturating_add(1))
-                    .map_err(|_| StoreError::NativePathSourceGenerationConflict)?,
-            ],
-            |row| {
-                let kind = row.get::<_, String>(0)?;
-                let id = row.get::<_, String>(1)?;
-                Ok((kind, id, row.get::<_, i64>(2)? != 0))
-            },
-        )?;
+        let mut remaining = limit;
         let mut candidates = Vec::new();
-        for row in rows {
-            let (kind, id, retained) = row?;
-            candidates.push(NativePathSourceRetirementCandidate {
-                kind: NativePathSourceEntityKind::from_str(&kind)
-                    .ok_or(StoreError::NativePathSourceGenerationConflict)?,
-                id: Uuid::parse_str(&id)
-                    .map_err(|_| StoreError::NativePathSourceGenerationConflict)?,
-                retained,
-            });
+        let mut next_after = after.cloned();
+
+        for kind in NativePathSourceEntityKind::RETIREMENT_ORDER {
+            if after.is_some_and(|frontier| frontier.kind.order() > kind.order()) {
+                continue;
+            }
+            let (table, owner_column, keyset_index) = kind.retirement_storage();
+            let mut owner_after = String::new();
+            let mut entity_after = String::new();
+            let mut current_owner = None;
+
+            if let Some(frontier) = after.filter(|frontier| frontier.kind == kind) {
+                entity_after = frontier.id.to_string();
+                let recover_owner = format!(
+                    "SELECT entity.{owner_column}
+                     FROM {table} entity
+                     WHERE entity.id = ?6
+                       AND EXISTS(
+                           SELECT 1
+                           FROM native_path_source_generation_entities staged
+                           WHERE staged.provider = ?1
+                             AND staged.source_format = ?2
+                             AND staged.machine_id = ?3
+                             AND staged.locator_identity = ?4
+                             AND staged.generation_id = ?5
+                             AND staged.entity_kind = 'capture_source'
+                             AND staged.entity_id = entity.{owner_column}
+                       )"
+                );
+                current_owner = self
+                    .conn
+                    .prepare_cached(&recover_owner)?
+                    .query_row(
+                        params![
+                            key.provider.as_str(),
+                            &key.source_format,
+                            &key.machine_id,
+                            &locator_identity,
+                            &key.generation_id,
+                            &entity_after,
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if current_owner.is_none() {
+                    return Err(StoreError::NativePathSourceGenerationConflict);
+                }
+            }
+
+            loop {
+                if current_owner.is_none() {
+                    let next_owner = format!(
+                        "SELECT staged.entity_id
+                         FROM native_path_source_generation_entities staged
+                         WHERE staged.provider = ?1
+                           AND staged.source_format = ?2
+                           AND staged.machine_id = ?3
+                           AND staged.locator_identity = ?4
+                           AND staged.generation_id = ?5
+                           AND staged.entity_kind = 'capture_source'
+                           AND staged.entity_id > ?6
+                           AND EXISTS(
+                               SELECT 1
+                               FROM {table} entity
+                               WHERE entity.{owner_column} = staged.entity_id
+                                 AND entity.deleted_at_ms IS NULL
+                           )
+                         ORDER BY staged.entity_id
+                         LIMIT 1"
+                    );
+                    current_owner = self
+                        .conn
+                        .prepare_cached(&next_owner)?
+                        .query_row(
+                            params![
+                                key.provider.as_str(),
+                                &key.source_format,
+                                &key.machine_id,
+                                &locator_identity,
+                                &key.generation_id,
+                                &owner_after,
+                            ],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?;
+                    let Some(_) = current_owner else {
+                        break;
+                    };
+                    entity_after.clear();
+                }
+
+                let owner = current_owner
+                    .as_deref()
+                    .ok_or(StoreError::NativePathSourceGenerationConflict)?;
+                let query = format!(
+                    "SELECT entity.id,
+                            EXISTS(
+                                SELECT 1
+                                FROM native_path_source_generation_entities kept
+                                WHERE kept.provider = ?1
+                                  AND kept.source_format = ?2
+                                  AND kept.machine_id = ?3
+                                  AND kept.locator_identity = ?4
+                                  AND kept.generation_id = ?5
+                                  AND kept.entity_kind = ?6
+                                  AND kept.entity_id = entity.id
+                            )
+                     FROM {table} entity INDEXED BY {keyset_index}
+                     WHERE entity.{owner_column} = ?7
+                       AND entity.deleted_at_ms IS NULL
+                       AND entity.id > ?8
+                     ORDER BY entity.id
+                     LIMIT ?9"
+                );
+                let mut page = self
+                    .conn
+                    .prepare_cached(&query)?
+                    .query_map(
+                        params![
+                            key.provider.as_str(),
+                            &key.source_format,
+                            &key.machine_id,
+                            &locator_identity,
+                            &key.generation_id,
+                            kind.as_str(),
+                            owner,
+                            &entity_after,
+                            i64::try_from(remaining.saturating_add(1))
+                                .map_err(|_| StoreError::NativePathSourceGenerationConflict)?,
+                        ],
+                        |row| {
+                            let id = row.get::<_, String>(0)?;
+                            let id = Uuid::parse_str(&id).map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    0,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?;
+                            Ok(NativePathSourceRetirementCandidate {
+                                kind,
+                                id,
+                                retained: row.get::<_, i64>(1)? != 0,
+                            })
+                        },
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let has_more = page.len() > remaining;
+                if has_more {
+                    page.pop();
+                }
+                remaining = remaining.saturating_sub(page.len());
+                if let Some(last) = page.last() {
+                    next_after = Some(NativePathSourceEntityFrontier { kind, id: last.id });
+                }
+                candidates.extend(page);
+                if has_more {
+                    return Ok(NativePathSourceRetirementPreparation::Work {
+                        candidates,
+                        next_after,
+                        done: false,
+                    });
+                }
+                owner_after = owner.to_owned();
+                current_owner = None;
+            }
         }
-        let has_more = candidates.len() > limit;
-        if has_more {
-            candidates.pop();
-        }
-        let next_after = candidates
-            .last()
-            .map(|candidate| NativePathSourceEntityFrontier {
-                kind: candidate.kind,
-                id: candidate.id,
-            });
+
         Ok(NativePathSourceRetirementPreparation::Work {
             candidates,
             next_after,
-            done: !has_more,
+            done: true,
         })
     }
 

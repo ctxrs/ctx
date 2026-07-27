@@ -8,7 +8,10 @@ use crate::archive::ImportedArchiveCanonicalIds;
 use super::dependencies::{
     capture_replaced_session_dependencies, journal_session_dependencies, SessionJournalDependencies,
 };
-use super::impact::append_query_when_active;
+use super::impact::{
+    append_query_when_active, SESSION_EVENT_IMPACT_SQL, SESSION_FILE_TOUCH_IMPACT_SQL,
+    SESSION_VCS_CHANGE_IMPACT_SQL, SOURCE_EVENT_IMPACT_SQL,
+};
 use super::records::append_entity;
 use super::{active_state, JournalEntityKind, Result};
 
@@ -64,11 +67,7 @@ pub(crate) fn journal_archive_mutations(
         append_query_when_active(
             conn,
             JournalEntityKind::Event,
-            "SELECT DISTINCT e.id FROM events e
-             LEFT JOIN sessions s ON s.id = e.session_id
-             LEFT JOIN runs r ON r.id = e.run_id
-             WHERE e.capture_source_id = ?1 OR s.capture_source_id = ?1 OR r.source_id = ?1
-             ORDER BY e.id",
+            SOURCE_EVENT_IMPACT_SQL,
             id,
             None,
         )?;
@@ -97,35 +96,21 @@ pub(crate) fn journal_archive_mutations(
         append_query_when_active(
             conn,
             JournalEntityKind::Event,
-            "SELECT DISTINCT e.id FROM events e LEFT JOIN runs r ON r.id = e.run_id
-             WHERE e.session_id = ?1 OR r.session_id = ?1 ORDER BY e.id",
+            SESSION_EVENT_IMPACT_SQL,
             id,
             None,
         )?;
         append_query_when_active(
             conn,
             JournalEntityKind::FileTouch,
-            "SELECT DISTINCT f.id FROM files_touched f
-             LEFT JOIN events e ON e.id = f.event_id
-             LEFT JOIN runs fr ON fr.id = f.run_id
-             LEFT JOIN runs er ON er.id = e.run_id
-             LEFT JOIN sessions s ON s.id = ?1
-             WHERE e.session_id = ?1 OR er.session_id = ?1 OR fr.session_id = ?1
-                OR f.source_id = s.capture_source_id
-             ORDER BY f.id",
+            SESSION_FILE_TOUCH_IMPACT_SQL,
             id,
             None,
         )?;
         append_query_when_active(
             conn,
             JournalEntityKind::VcsChange,
-            "SELECT DISTINCT v.id FROM vcs_changes v
-             LEFT JOIN sessions s ON s.id = ?1
-             LEFT JOIN history_record_links l
-               ON l.target_type = 'vcs_change' AND l.target_id = v.id
-              AND l.deleted_at_ms IS NULL
-             WHERE v.source_id = s.capture_source_id OR l.history_record_id = s.history_record_id
-             ORDER BY v.id",
+            SESSION_VCS_CHANGE_IMPACT_SQL,
             id,
             None,
         )?;

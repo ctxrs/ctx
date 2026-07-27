@@ -23,12 +23,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_history_record_id ON sessions(history_re
 CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_root_session_id ON sessions(root_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_capture_source_id ON sessions(capture_source_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_source_generation_retirement
+ON sessions(capture_source_id, id)
+WHERE deleted_at_ms IS NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_transcript_blob_id ON sessions(transcript_blob_id);
 CREATE INDEX IF NOT EXISTS idx_session_aliases_session_id ON session_aliases(session_id);
 
 CREATE INDEX IF NOT EXISTS idx_session_edges_from_session_id ON session_edges(from_session_id);
 CREATE INDEX IF NOT EXISTS idx_session_edges_to_session_id ON session_edges(to_session_id);
 CREATE INDEX IF NOT EXISTS idx_session_edges_source_id ON session_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_session_edges_source_generation_retirement
+ON session_edges(source_id, id)
+WHERE deleted_at_ms IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_runs_history_record_started_at_ms ON runs(history_record_id, started_at_ms);
 CREATE INDEX IF NOT EXISTS idx_runs_history_record_id ON runs(history_record_id);
@@ -36,6 +42,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_session_id ON runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_runs_input_blob_id ON runs(input_blob_id);
 CREATE INDEX IF NOT EXISTS idx_runs_output_blob_id ON runs(output_blob_id);
 CREATE INDEX IF NOT EXISTS idx_runs_source_id ON runs(source_id);
+CREATE INDEX IF NOT EXISTS idx_runs_source_generation_retirement
+ON runs(source_id, id)
+WHERE deleted_at_ms IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_events_history_record_occurred_at_ms ON events(history_record_id, occurred_at_ms);
 CREATE INDEX IF NOT EXISTS idx_events_session_occurred_at_ms ON events(session_id, occurred_at_ms);
@@ -53,6 +62,9 @@ DROP INDEX IF EXISTS idx_events_role_occurred_seq;
 DROP INDEX IF EXISTS idx_events_run_role_occurred_seq;
 DROP INDEX IF EXISTS idx_events_session_run_role_occurred_seq;
 CREATE INDEX IF NOT EXISTS idx_events_capture_source_id ON events(capture_source_id);
+CREATE INDEX IF NOT EXISTS idx_events_source_generation_retirement
+ON events(capture_source_id, id)
+WHERE deleted_at_ms IS NULL;
 CREATE INDEX IF NOT EXISTS idx_events_payload_blob_id ON events(payload_blob_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe_key ON events(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_event_aliases_event_id ON event_aliases(event_id);
@@ -78,6 +90,9 @@ CREATE INDEX IF NOT EXISTS idx_files_touched_run_id ON files_touched(run_id);
 CREATE INDEX IF NOT EXISTS idx_files_touched_event_id ON files_touched(event_id);
 CREATE INDEX IF NOT EXISTS idx_files_touched_vcs_workspace_id ON files_touched(vcs_workspace_id);
 CREATE INDEX IF NOT EXISTS idx_files_touched_source_id ON files_touched(source_id);
+CREATE INDEX IF NOT EXISTS idx_files_touched_source_generation_retirement
+ON files_touched(source_id, id)
+WHERE deleted_at_ms IS NULL;
 CREATE INDEX IF NOT EXISTS idx_files_touched_path ON files_touched(path);
 CREATE INDEX IF NOT EXISTS idx_files_touched_old_path ON files_touched(old_path);
 

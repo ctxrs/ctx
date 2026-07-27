@@ -444,15 +444,22 @@ fn index_watch_human(status: &Value) -> String {
     let lexical_total = usize_at(status, &["lexical", "inventory_units"]);
     let lexical_pending = usize_at(status, &["lexical", "pending_inventory_units"]);
     let lexical_done = lexical_total.saturating_sub(lexical_pending);
+    let lexical_sessions = usize_at(status, &["lexical", "indexed_sessions"]);
+    let lexical_items = usize_at(status, &["lexical", "indexed_items"]);
     let semantic_done = usize_at(status, &["semantic", "coverage", "embedded_items"]);
     let semantic_total = usize_at(status, &["semantic", "coverage", "searchable_items"]);
     let mut lines = vec![format!(
-        "lexical  [{}] {}/{} units ({})",
+        "lexical  [{}] {}/{} units finalized ({})",
         progress_bar(lexical_done, lexical_total),
         format_count(lexical_done),
         format_count(lexical_total),
         string_at(status, &["lexical", "status"], "unknown")
     )];
+    lines.push(format!(
+        "         {} sessions, {} items indexed",
+        format_count(lexical_sessions),
+        format_count(lexical_items),
+    ));
     lines.push(format!(
         "semantic [{}] {}/{} events, {} chunks ({})",
         progress_bar(semantic_done, semantic_total),
