@@ -927,7 +927,7 @@ fn human_setup_without_sources_starts_daemon_without_claiming_background_indexin
 }
 
 #[test]
-fn daemon_once_rejections_return_nonzero_with_actionable_json() {
+fn daemon_once_rejections_complete_and_preserve_diagnostics() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let sessions = temp
@@ -956,13 +956,13 @@ fn daemon_once_rejections_return_nonzero_with_actionable_json() {
         .args(["daemon", "run", "--once", "--force", "--json"])
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
-        .failure()
+        .success()
         .get_output()
         .clone();
     let daemon: Value = serde_json::from_slice(&output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(daemon["status"], "failed", "{daemon:#}");
+    assert_eq!(daemon["status"], "completed", "{daemon:#}");
     assert_eq!(
         daemon["jobs"]["history_refresh"]["status"], "completed",
         "{daemon:#}"
@@ -972,19 +972,101 @@ fn daemon_once_rejections_return_nonzero_with_actionable_json() {
         "{daemon:#}"
     );
     assert_eq!(
-        daemon["last_error"],
-        "history refresh rejected 1 record; run `ctx import --all --no-daemon` for rejection details",
+        daemon["jobs"]["history_refresh"]["totals"]["failed_sources"], 0,
         "{daemon:#}"
     );
-    assert!(
-        stderr.contains("history refresh rejected 1 record"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("ctx import --all --no-daemon"), "{stderr}");
+    assert!(daemon["last_error"].is_null(), "{daemon:#}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    let index = json_output(ctx_from_binary(&temp, &binary).args(["index", "status", "--json"]));
+    assert_eq!(index["lexical"]["status"], "ready", "{index:#}");
+    assert_eq!(index["lexical"]["pending_inventory_units"], 0, "{index:#}");
+    ctx_from_binary(&temp, &binary)
+        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .timeout(Duration::from_secs(3))
+        .assert()
+        .success();
 
     let lock: Value =
         serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
     assert_eq!(lock["released"], true, "{lock:#}");
+}
+
+#[test]
+fn daemon_rejection_diagnostics_survive_a_later_healthy_source_cycle() {
+    let temp = tempdir();
+    let binary = copied_ctx_binary(&temp);
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::copy(
+        provider_history_fixture("codex-malformed-session.jsonl"),
+        sessions.join("rollout-malformed.jsonl"),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join(".codex/history.jsonl"),
+        concat!(
+            r#"{"session_id":"prompt-daemon-session","ts":1784371200,"text":"healthy prompt source"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    ctx_from_binary(&temp, &binary)
+        .args([
+            "setup",
+            "--catalog-only",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+
+    let mut saw_rejection = false;
+    let mut saw_later_healthy_cycle = false;
+    for _ in 0..4 {
+        let report = json_output(
+            ctx_from_binary(&temp, &binary)
+                .args(["daemon", "run", "--once", "--force", "--json"])
+                .env("CTX_UPGRADE_AUTO", "off"),
+        );
+        let rejected = report["jobs"]["history_refresh"]["totals"]["rejected_records"]
+            .as_u64()
+            .unwrap_or(0);
+        let preserved = report["jobs"]["history_refresh"]["rejection_diagnostics"]
+            ["rejected_records"]
+            .as_u64()
+            .unwrap_or(0);
+        if rejected > 0 {
+            assert_eq!(rejected, 1, "{report:#}");
+            assert_eq!(preserved, 1, "{report:#}");
+            saw_rejection = true;
+        } else if saw_rejection {
+            assert_eq!(preserved, 1, "{report:#}");
+            saw_later_healthy_cycle = true;
+            break;
+        }
+    }
+    assert!(saw_rejection, "malformed source was never selected");
+    assert!(
+        saw_later_healthy_cycle,
+        "healthy source was not selected after the malformed source"
+    );
+
+    let doctor = json_output(ctx_from_binary(&temp, &binary).args([
+        "doctor",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        doctor["daemon"]["jobs"]["history_refresh"]["rejection_diagnostics"]["rejected_records"], 1,
+        "{doctor:#}"
+    );
 }
 
 #[test]

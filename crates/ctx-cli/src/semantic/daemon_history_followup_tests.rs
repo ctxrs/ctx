@@ -1,4 +1,5 @@
 use super::*;
+use crate::semantic::daemon_status::daemon_jobs_failure_message;
 
 #[test]
 fn daemon_capture_only_progress_keeps_followup_frontier_alive() {
@@ -51,7 +52,7 @@ fn daemon_capture_only_progress_keeps_followup_frontier_alive() {
 }
 
 #[test]
-fn daemon_history_rejections_fail_the_pass_without_hiding_completed_work() {
+fn daemon_history_rejections_preserve_diagnostics_without_failing_the_pass() {
     let totals = ImportTotals {
         failed: 1,
         imported_events: 2,
@@ -69,7 +70,99 @@ fn daemon_history_rejections_fail_the_pass_without_hiding_completed_work() {
     assert_eq!(job["status"], "completed");
     assert_eq!(job["totals"]["imported_events"], 2);
     assert_eq!(job["totals"]["rejected_records"], 1);
+    assert!(!daemon_history_job_failed(&job));
+    assert!(daemon_jobs_failure_message(Some(&job), None).is_none());
+}
+
+#[test]
+fn daemon_history_source_failures_remain_fatal() {
+    let totals = ImportTotals {
+        failed_sources: 1,
+        ..ImportTotals::default()
+    };
+    let job = daemon_history_refresh_job_json(
+        "completed",
+        1,
+        totals,
+        utc_now().timestamp_millis(),
+        None,
+        None,
+    );
+
     assert!(daemon_history_job_failed(&job));
+    assert_eq!(
+        daemon_jobs_failure_message(Some(&job), None).as_deref(),
+        Some(
+            "history refresh failed for 1 source; run `ctx import --all --no-daemon` for source-level details"
+        )
+    );
+}
+
+#[test]
+fn daemon_history_rejection_diagnostics_survive_other_sources_and_restart() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut runtime = DaemonRuntime::default();
+    let mut malformed = daemon_history_refresh_job_json(
+        "completed",
+        1,
+        ImportTotals {
+            failed: 1,
+            ..ImportTotals::default()
+        },
+        utc_now().timestamp_millis(),
+        None,
+        None,
+    );
+    malformed["source_fingerprint"] = json!("source-a");
+    malformed["scheduler_discovered_source_fingerprints"] = json!(["source-a", "source-b"]);
+    finish_daemon_history_refresh_job(&mut runtime, &mut malformed);
+    assert_eq!(
+        malformed["rejection_diagnostics"]["rejected_records"], 1,
+        "{malformed:#}"
+    );
+    write_daemon_job_status(&daemon_history_refresh_job_path(temp.path()), &malformed)?;
+
+    let mut restarted = DaemonRuntime::default();
+    restore_daemon_history_runtime_state(&mut restarted, temp.path());
+    let mut healthy = daemon_history_refresh_job_json(
+        "completed",
+        1,
+        ImportTotals::default(),
+        utc_now().timestamp_millis(),
+        None,
+        None,
+    );
+    healthy["source_fingerprint"] = json!("source-b");
+    healthy["scheduler_discovered_source_fingerprints"] = json!(["source-a", "source-b"]);
+    finish_daemon_history_refresh_job(&mut restarted, &mut healthy);
+    assert_eq!(healthy["totals"]["rejected_records"], 0, "{healthy:#}");
+    assert_eq!(
+        healthy["rejection_diagnostics"]["rejected_records"], 1,
+        "{healthy:#}"
+    );
+    write_daemon_job_status(&daemon_history_refresh_job_path(temp.path()), &healthy)?;
+    let report = daemon_history_refresh_job_report(temp.path(), false);
+    assert_eq!(
+        report["rejection_diagnostics"]["rejected_records"], 1,
+        "{report:#}"
+    );
+
+    let mut corrected = daemon_history_refresh_job_json(
+        "completed",
+        1,
+        ImportTotals::default(),
+        utc_now().timestamp_millis(),
+        None,
+        None,
+    );
+    corrected["source_fingerprint"] = json!("source-a");
+    corrected["scheduler_discovered_source_fingerprints"] = json!(["source-a", "source-b"]);
+    finish_daemon_history_refresh_job(&mut restarted, &mut corrected);
+    assert_eq!(
+        corrected["rejection_diagnostics"]["rejected_records"], 0,
+        "{corrected:#}"
+    );
+    Ok(())
 }
 
 #[test]

@@ -25,6 +25,8 @@ use super::{
     paths_status::{daemon_history_refresh_job_path, read_daemon_job_status},
 };
 
+const DAEMON_REJECTION_DIAGNOSTIC_SOURCES_MAX: usize = 256;
+
 #[cfg(all(test, ctx_sqlite_vec))]
 use super::daemon::daemon_test_job;
 
@@ -47,12 +49,33 @@ pub(super) fn restore_daemon_history_runtime_state(runtime: &mut DaemonRuntime, 
         .and_then(Value::as_u64)
         .unwrap_or(0)
         .min(usize::MAX as u64) as usize;
+    runtime.history_rejected_records_by_source.clear();
+    if let Some(by_source) = status
+        .and_then(|value| value.get("scheduler_rejected_records_by_source"))
+        .and_then(Value::as_object)
+    {
+        for (fingerprint, rejected_records) in by_source
+            .iter()
+            .take(DAEMON_REJECTION_DIAGNOSTIC_SOURCES_MAX)
+        {
+            let Some(rejected_records) = rejected_records.as_u64().filter(|count| *count > 0)
+            else {
+                continue;
+            };
+            if !fingerprint.is_empty() && fingerprint.len() <= 128 {
+                runtime
+                    .history_rejected_records_by_source
+                    .insert(fingerprint.clone(), rejected_records);
+            }
+        }
+    }
 }
 
 pub(super) fn finish_daemon_history_refresh_job(
     runtime: &mut DaemonRuntime,
     job: &mut Value,
 ) -> bool {
+    update_daemon_history_rejection_diagnostics(runtime, job);
     update_daemon_history_followup_frontier(runtime, job);
     preserve_daemon_history_runtime_state(job, runtime);
     daemon_history_refresh_job_did_work(job)
@@ -65,7 +88,69 @@ pub(super) fn preserve_daemon_history_runtime_state(job: &mut Value, runtime: &D
     job["scheduler_followup_passes_remaining"] = json!(runtime.history_followup_passes_remaining);
     job["scheduler_retry_drain_passes_remaining"] =
         json!(runtime.history_retry_drain_passes_remaining);
+    job["scheduler_rejected_records_by_source"] = json!(runtime.history_rejected_records_by_source);
+    job["rejection_diagnostics"] = json!({
+        "rejected_records": runtime
+            .history_rejected_records_by_source
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add),
+        "sources_completed_with_rejections": runtime
+            .history_rejected_records_by_source
+            .len(),
+    });
     preserve_daemon_retry_state(job, &runtime.history_retry);
+}
+
+fn update_daemon_history_rejection_diagnostics(runtime: &mut DaemonRuntime, job: &Value) {
+    if let Some(discovered) = job
+        .get("scheduler_discovered_source_fingerprints")
+        .and_then(Value::as_array)
+    {
+        runtime
+            .history_rejected_records_by_source
+            .retain(|fingerprint, _| {
+                discovered
+                    .iter()
+                    .any(|value| value.as_str() == Some(fingerprint.as_str()))
+            });
+    }
+    if job.get("status").and_then(Value::as_str) != Some("completed")
+        || job
+            .get("totals")
+            .and_then(|totals| totals.get("failed_sources"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+    {
+        return;
+    }
+    let Some(fingerprint) = job
+        .get("source_fingerprint")
+        .and_then(Value::as_str)
+        .filter(|fingerprint| !fingerprint.is_empty() && fingerprint.len() <= 128)
+    else {
+        return;
+    };
+    let rejected_records = job
+        .get("totals")
+        .and_then(|totals| totals.get("rejected_records"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if rejected_records == 0 {
+        runtime
+            .history_rejected_records_by_source
+            .remove(fingerprint);
+    } else if runtime.history_rejected_records_by_source.len()
+        < DAEMON_REJECTION_DIAGNOSTIC_SOURCES_MAX
+        || runtime
+            .history_rejected_records_by_source
+            .contains_key(fingerprint)
+    {
+        runtime
+            .history_rejected_records_by_source
+            .insert(fingerprint.to_owned(), rejected_records);
+    }
 }
 
 pub(super) fn daemon_history_retry_blocks_scheduler(runtime: &DaemonRuntime) -> bool {
@@ -169,16 +254,27 @@ pub(super) fn run_daemon_history_refresh_job(
     });
     plugin_sources.sort_by_key(|source| source.label());
     let discovered_source_count = sources.len().saturating_add(plugin_sources.len());
+    let discovered_source_fingerprints = sources
+        .iter()
+        .map(|source| search_refresh_source_fingerprint(std::slice::from_ref(source)))
+        .chain(
+            plugin_sources
+                .iter()
+                .map(|source| semantic_text_hash(&source.label())),
+        )
+        .collect::<Vec<_>>();
     if discovered_source_count == 0 {
+        let mut job = daemon_history_refresh_job_json(
+            "skipped",
+            0,
+            ImportTotals::default(),
+            last_run_at_ms,
+            Some("no_sources"),
+            None,
+        );
+        job["scheduler_discovered_source_fingerprints"] = json!([]);
         return Ok(DaemonHistoryRefreshJob {
-            job: daemon_history_refresh_job_json(
-                "skipped",
-                0,
-                ImportTotals::default(),
-                last_run_at_ms,
-                Some("no_sources"),
-                None,
-            ),
+            job,
             provider_refresh_events: Vec::new(),
         });
     }
@@ -235,6 +331,10 @@ pub(super) fn run_daemon_history_refresh_job(
         map.insert(
             "scheduler_next_source_cursor".to_owned(),
             json!(*next_source_cursor),
+        );
+        map.insert(
+            "scheduler_discovered_source_fingerprints".to_owned(),
+            json!(discovered_source_fingerprints),
         );
     }
     Ok(DaemonHistoryRefreshJob {
