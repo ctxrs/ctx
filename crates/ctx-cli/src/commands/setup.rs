@@ -53,7 +53,8 @@ pub(crate) fn run_setup(
 
     fs::create_dir_all(&data_root)?;
     let db_path = database_path(data_root.clone());
-    let machine_readable_output = args.json || args.progress == ProgressArg::Json;
+    let json_output = args.format.is_json();
+    let machine_readable_output = json_output || args.progress == ProgressArg::Json;
     let daemon_suppression_reason = daemon_autostart_suppression_reason();
     let daemon_backgrounding_enabled = config.daemon.enabled
         && !args.no_daemon
@@ -64,7 +65,7 @@ pub(crate) fn run_setup(
     config::write_default_config(&data_root)?;
     let sources = discovered_sources();
     let progress_arg = setup_progress_arg(args.progress, quiet);
-    let progress = ProgressReporter::new(progress_arg, args.json, "setup", 0);
+    let progress = ProgressReporter::new(progress_arg, json_output, "setup", 0);
     let mut inventory_only = None;
     let import_report = if let Some(store) = inventory_store.as_ref() {
         progress.message("inventorying", "Preparing local history...");
@@ -88,12 +89,12 @@ pub(crate) fn run_setup(
             history_source: None,
             history_source_manifest: Vec::new(),
             reset_cursor: false,
-            format: None,
+            input_format: None,
             all: true,
             resume: false,
             partial: false,
             no_daemon: args.no_daemon,
-            json: args.json,
+            format: crate::output::JsonOutputFormat::Text,
             progress: progress_arg,
         };
         provider_refreshes.start_timing();
@@ -106,7 +107,7 @@ pub(crate) fn run_setup(
             config,
             ImportRunOptions {
                 progress: progress_arg,
-                json: args.json,
+                json: json_output,
                 print_human: false,
                 allow_empty_sources: true,
                 include_history_source_plugins: false,
@@ -189,7 +190,7 @@ pub(crate) fn run_setup(
         None
     };
 
-    if args.json {
+    if json_output {
         print_json(json!({
             "schema_version": 1,
             "data_root": data_root,

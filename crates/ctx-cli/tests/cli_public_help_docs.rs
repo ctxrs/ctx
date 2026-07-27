@@ -153,7 +153,7 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -166,7 +166,7 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
         "--events",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     let event_id = search["results"][0]["ctx_event_id"].as_str().unwrap();
     let changed = expanded.replacen("Fix the onboarding bug", "Mix the onboarding bug", 1);
@@ -174,7 +174,14 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
     fs::write(source, changed).unwrap();
 
     let output = ctx(&temp)
-        .args(["show", "event", event_id, "--content", "complete", "--json"])
+        .args([
+            "show",
+            "event",
+            event_id,
+            "--content",
+            "complete",
+            "--format=json",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -371,7 +378,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
             provider,
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(search["filters"]["provider"], expected);
     }
@@ -387,10 +394,10 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Usage: ctx setup",
                 "--semantic",
                 "Enable local semantic search in config",
-                "--json",
+                "--format <FORMAT>",
             ],
         ),
-        ("status", vec!["Usage: ctx status", "--json"]),
+        ("status", vec!["Usage: ctx status", "--format <FORMAT>"]),
         (
             "index",
             vec![
@@ -401,16 +408,16 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Show, watch, or wait for local indexing progress",
             ],
         ),
-        ("sources", vec!["Usage: ctx sources", "--json"]),
+        ("sources", vec!["Usage: ctx sources", "--format <FORMAT>"]),
         (
             "import",
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
                 "--path <PATH>",
-                "--format <FORMAT>",
+                "--input-format <INPUT_FORMAT>",
                 "--resume",
-                "--json",
+                "--format <FORMAT>",
             ],
         ),
         ("show", vec!["Usage: ctx show", "session", "event"]),
@@ -495,13 +502,15 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Index freshness behavior. background serves the existing index",
                 "--include-current-session",
                 "Include the active Codex session tree when CODEX_THREAD_ID is set",
-                "--json",
-                "Print machine-readable JSON",
+                "--format <FORMAT>",
                 "--verbose",
                 "Print expanded text details",
             ],
         ),
-        ("doctor", vec!["Usage: ctx doctor", "--json", "--progress"]),
+        (
+            "doctor",
+            vec!["Usage: ctx doctor", "--format <FORMAT>", "--progress"],
+        ),
     ] {
         let output = ctx(&temp)
             .args([command, "--help"])
@@ -527,6 +536,69 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
 }
 
 #[test]
+fn machine_readable_output_uses_format_without_a_json_alias() {
+    let temp = tempdir();
+    for args in [
+        &["setup", "--help"][..],
+        &["status", "--help"],
+        &["index", "status", "--help"],
+        &["index", "watch", "--help"],
+        &["index", "wait", "--help"],
+        &["sources", "--help"],
+        &["import", "--help"],
+        &["show", "session", "--help"],
+        &["show", "event", "--help"],
+        &["locate", "session", "--help"],
+        &["locate", "event", "--help"],
+        &["search", "--help"],
+        &["pro", "--help"],
+        &["pro", "setup", "--help"],
+        &["pro", "manage", "--help"],
+        &["pro", "uninstall", "--help"],
+        &["referral", "create", "--help"],
+        &["referral", "status", "--help"],
+        &["referral", "payout", "--help"],
+        &["blame", "file", "--help"],
+        &["blame", "commit", "--help"],
+        &["blame", "pr", "--help"],
+        &["sql", "--help"],
+        &["docs", "list", "--help"],
+        &["docs", "search", "--help"],
+        &["docs", "show", "--help"],
+        &["integrations", "install", "mcp", "--help"],
+        &["integrations", "install", "skills", "--help"],
+        &["integrations", "install", "slash-commands", "--help"],
+        &["integrations", "status", "mcp", "--help"],
+        &["integrations", "status", "skills", "--help"],
+        &["daemon", "run", "--help"],
+        &["daemon", "status", "--help"],
+        &["daemon", "enable", "--help"],
+        &["daemon", "disable", "--help"],
+        &["upgrade", "--help"],
+        &["upgrade", "check", "--help"],
+        &["upgrade", "status", "--help"],
+        &["doctor", "--help"],
+    ] {
+        let help = ctx(&temp)
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(help).unwrap();
+        assert!(help.contains("--format"), "{args:?} help:\n{help}");
+        assert!(!help.contains("--json"), "{args:?} help:\n{help}");
+    }
+
+    ctx(&temp)
+        .args(["status", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '--json'"));
+}
+
+#[test]
 fn daemon_help_exposes_readable_status_and_run_controls() {
     let temp = tempdir();
     for (args, required) in [
@@ -534,7 +606,7 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             vec!["daemon", "status", "--help"],
             vec![
                 "Usage: ctx daemon status",
-                "--json",
+                "--format <FORMAT>",
                 "Show ctx daemon status",
             ],
         ),
@@ -547,14 +619,14 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
                 "--loop-interval-seconds <LOOP_INTERVAL_SECONDS>",
                 "--max-chunks <MAX_CHUNKS>",
                 "--force",
-                "--json",
+                "--format <FORMAT>",
             ],
         ),
         (
             vec!["daemon", "enable", "--help"],
             vec![
                 "Usage: ctx daemon enable",
-                "--json",
+                "--format <FORMAT>",
                 "Enable ctx daemon maintenance",
             ],
         ),
@@ -562,7 +634,7 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             vec!["daemon", "disable", "--help"],
             vec![
                 "Usage: ctx daemon disable",
-                "--json",
+                "--format <FORMAT>",
                 "Disable ctx daemon maintenance",
             ],
         ),
@@ -617,7 +689,7 @@ fn daemon_run_rejects_internal_autostart_metadata_flags() {
 fn docs_commands_expose_embedded_docs_and_man_pages() {
     let temp = tempdir();
 
-    let list = json_output(ctx(&temp).args(["docs", "list", "--json"]));
+    let list = json_output(ctx(&temp).args(["docs", "list", "--format=json"]));
     assert_eq!(list["schema_version"], 1);
     assert!(list["topics"]
         .as_array()
@@ -632,15 +704,15 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
             .any(|topic| topic["id"] == topic_id));
     }
 
-    let search = json_output(ctx(&temp).args(["docs", "search", "upgrade", "--json"]));
+    let search = json_output(ctx(&temp).args(["docs", "search", "upgrade", "--format=json"]));
     assert_eq!(search["schema_version"], 1);
     assert_eq!(search["query"], "upgrade");
     assert!(!search["results"].as_array().unwrap().is_empty());
 
-    let sql_search = json_output(ctx(&temp).args(["docs", "search", "sql", "--json"]));
+    let sql_search = json_output(ctx(&temp).args(["docs", "search", "sql", "--format=json"]));
     assert_eq!(sql_search["results"][0]["id"], "sql");
 
-    let mcp_search = json_output(ctx(&temp).args(["docs", "search", "mcp", "--json"]));
+    let mcp_search = json_output(ctx(&temp).args(["docs", "search", "mcp", "--format=json"]));
     let mcp_result_ids = mcp_search["results"]
         .as_array()
         .unwrap()
@@ -650,10 +722,11 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert!(mcp_result_ids.contains(&"mcp"));
     assert!(mcp_result_ids.contains(&"mcp-integrations"));
 
-    let upgrade_search = json_output(ctx(&temp).args(["docs", "search", "upgrade", "--json"]));
+    let upgrade_search =
+        json_output(ctx(&temp).args(["docs", "search", "upgrade", "--format=json"]));
     assert_eq!(upgrade_search["results"][0]["id"], "upgrade");
 
-    let weak_search = json_output(ctx(&temp).args(["docs", "search", "a", "--json"]));
+    let weak_search = json_output(ctx(&temp).args(["docs", "search", "a", "--format=json"]));
     assert!(weak_search["results"].as_array().unwrap().is_empty());
     assert!(weak_search["suggested_next_commands"]
         .as_array()
@@ -709,7 +782,7 @@ fn status_and_doctor_report_effective_upgrade_auto_mode() {
     for command in ["status", "doctor"] {
         let default = json_output(
             ctx(&temp)
-                .args([command, "--json"])
+                .args([command, "--format=json"])
                 .env_remove("CTX_UPGRADE_AUTO"),
         );
         assert_eq!(default["upgrade"]["auto"], "apply");
@@ -717,7 +790,7 @@ fn status_and_doctor_report_effective_upgrade_auto_mode() {
 
         let process_opt_out = json_output(
             ctx(&temp)
-                .args([command, "--json"])
+                .args([command, "--format=json"])
                 .env("CTX_UPGRADE_AUTO", "off"),
         );
         assert_eq!(process_opt_out["upgrade"]["auto"], "off");
@@ -731,7 +804,7 @@ fn status_and_doctor_report_effective_upgrade_auto_mode() {
     .unwrap();
     let persistent_opt_out = json_output(
         ctx(&temp)
-            .args(["status", "--json"])
+            .args(["status", "--format=json"])
             .env("CTX_UPGRADE_AUTO", "apply"),
     );
     assert_eq!(persistent_opt_out["upgrade"]["auto"], "off");
@@ -881,11 +954,11 @@ fn removed_public_commands_are_rejected() {
     }
 
     for args in [
-        vec!["context", "onboarding", "--json"],
-        vec!["list", "--json"],
+        vec!["context", "onboarding", "--format=json"],
+        vec!["list", "--format=json"],
         vec!["export", "session", "00000000-0000-0000-0000-000000000000"],
-        vec!["validate", "--json"],
-        vec!["materialize", "--json"],
+        vec!["validate", "--format=json"],
+        vec!["materialize", "--format=json"],
         vec!["related", "commit", "abc"],
         vec!["timeline", "commit", "abc"],
         vec!["facts", "commit", "abc"],

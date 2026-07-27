@@ -10,7 +10,7 @@ fn history_source_plugins_are_listed_without_running() {
     let sources = json_output(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let plugin_source = sources["sources"]
         .as_array()
@@ -35,7 +35,7 @@ fn invalid_installed_history_source_plugin_is_listed_as_invalid() {
     let sources = json_output(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let invalid = sources["sources"]
         .as_array()
@@ -66,7 +66,7 @@ fn oversized_installed_history_source_plugin_is_listed_as_invalid() {
     let sources = json_output(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let invalid = sources["sources"]
         .as_array()
@@ -97,7 +97,7 @@ fn invalid_installed_history_source_plugin_does_not_block_valid_import() {
                 "import",
                 "--history-source",
                 "dorkos/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -130,7 +130,7 @@ fn removed_history_source_plugin_aliases_and_legacy_discovery_are_ignored() {
         ctx(&temp)
             .env_remove("CTX_HISTORY_PLUGIN_PATH")
             .env("CTX_PLUGIN_PATH", &plugin.manifest_dir)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     assert!(!sources["sources"]
         .as_array()
@@ -149,7 +149,7 @@ fn removed_history_source_plugin_aliases_and_legacy_discovery_are_ignored() {
         ctx(&temp)
             .env_remove("CTX_PLUGIN_PATH")
             .env("CTX_HISTORY_PLUGIN_PATH", &legacy_dir)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     assert!(!sources["sources"]
         .as_array()
@@ -166,7 +166,7 @@ fn setup_does_not_execute_enabled_history_source_plugins() {
     json_output(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
-            .args(["setup", "--json", "--progress", "none"]),
+            .args(["setup", "--format=json", "--progress", "none"]),
     );
 
     assert!(!plugin.run_marker.exists());
@@ -320,7 +320,7 @@ sys.stdout.write("x" * (17 * 1024 * 1024) + "\n")
                 "import",
                 "--history-source",
                 "bigline/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -394,7 +394,7 @@ for record in records:
             "import",
             "--history-source",
             "retryplugin/default",
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])
@@ -423,7 +423,7 @@ for record in records:
                 "import",
                 "--history-source",
                 "retryplugin/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -438,7 +438,7 @@ for record in records:
             "import",
             "--history-source",
             "retryplugin/default",
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])
@@ -507,7 +507,7 @@ for record in records:
                 "import",
                 "--history-source",
                 "largecursor/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -519,7 +519,7 @@ for record in records:
                 "import",
                 "--history-source",
                 "largecursor/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -544,7 +544,7 @@ fn import_history_source_plugin_is_searchable_and_receives_cursor() {
                 "--history-source",
                 "hermes/default",
                 "--resume",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -580,7 +580,7 @@ fn import_history_source_plugin_is_searchable_and_receives_cursor() {
         "custom",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         !initial["results"].as_array().unwrap().is_empty(),
@@ -593,7 +593,7 @@ fn import_history_source_plugin_is_searchable_and_receives_cursor() {
         "hermes/default",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     let source_filtered_result = &initial_by_history_source["results"][0];
     assert_eq!(source_filtered_result["provider"], "custom");
@@ -610,7 +610,7 @@ fn import_history_source_plugin_is_searchable_and_receives_cursor() {
                 "import",
                 "--history-source",
                 "hermes/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -627,7 +627,7 @@ fn import_history_source_plugin_is_searchable_and_receives_cursor() {
         "custom",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         !incremental["results"].as_array().unwrap().is_empty(),

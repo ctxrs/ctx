@@ -271,14 +271,14 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
     let _runtime = add_fake_release_runtime(&temp, &release);
 
     let status = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "status", "--json"]),
+        ctx(&temp).args(["upgrade", "status", "--format=json"]),
         &release,
     ));
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["install"]["managed"], true);
 
     let check = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "check", "--json"]),
+        ctx(&temp).args(["upgrade", "check", "--format=json"]),
         &release,
     ));
     assert_eq!(check["status"], "available");
@@ -295,14 +295,14 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
     );
 
     let dry_run = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--dry-run", "--json"]),
+        ctx(&temp).args(["upgrade", "--dry-run", "--format=json"]),
         &release,
     ));
     assert_eq!(dry_run["status"], "dry_run");
     assert_eq!(dry_run["applied"], false);
 
     let applied = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
     assert_eq!(applied["status"], "applied");
@@ -330,7 +330,7 @@ fn upgrade_drops_expired_install_attribution_instead_of_reopening_it() {
     fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
 
     let applied = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
     assert_eq!(applied["status"], "applied");
@@ -348,7 +348,7 @@ fn upgrade_installs_sidecar_from_signed_release_metadata() {
     let runtime = add_fake_release_runtime(&temp, &release);
 
     let applied = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
@@ -399,7 +399,7 @@ fn sidecar_hash_failure_leaves_cli_and_runtime_unmodified() {
     });
 
     let stderr = failure_stderr(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
@@ -418,7 +418,7 @@ fn upgrade_status_accepts_current_legacy_metadata_without_sidecar_fields() {
     let release = fake_legacy_release(&temp, env!("CARGO_PKG_VERSION"));
 
     let outcome = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
@@ -433,7 +433,7 @@ fn upgrade_refuses_newer_legacy_metadata_without_sidecar_fields() {
     let release = fake_legacy_release(&temp, "9.9.9");
 
     let stderr = failure_stderr(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
@@ -452,7 +452,7 @@ fn upgrade_installs_future_runtime_version_from_target_metadata() {
     let runtime = add_fake_release_runtime_version(&temp, &release, "1.28.0");
 
     let applied = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--json"]),
+        ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
@@ -563,7 +563,7 @@ fn runtime_installs_at_semantic_discovery_roots() {
     let _runtime = add_fake_release_runtime(&explicit, &release);
     let runtime_root = explicit.path().join("custom-runtime");
     let applied = json_output(
-        fake_release_env(ctx(&explicit).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&explicit).args(["upgrade", "--format=json"]), &release)
             .env("CTX_RUNTIME_DIR", &runtime_root),
     );
     assert_eq!(applied["status"], "applied");
@@ -581,8 +581,11 @@ fn runtime_installs_at_semantic_discovery_roots() {
     fs::create_dir(&data_root).unwrap();
     ctx_history_core::platform_security::restrict_private_directory(&data_root).unwrap();
     let applied = json_output(
-        fake_release_env(ctx(&custom_data).args(["upgrade", "--json"]), &release)
-            .env("CTX_DATA_ROOT", &data_root),
+        fake_release_env(
+            ctx(&custom_data).args(["upgrade", "--format=json"]),
+            &release,
+        )
+        .env("CTX_DATA_ROOT", &data_root),
     );
     assert_eq!(applied["status"], "applied");
     assert!(data_root
@@ -613,7 +616,7 @@ fn runtime_install_honors_cli_selected_data_root() {
             "--data-root",
             selected_root.to_str().unwrap(),
             "upgrade",
-            "--json",
+            "--format=json",
         ]);
 
     let applied = json_output(fake_release_env(&mut command, &release));
@@ -683,17 +686,23 @@ fn v025_legacy_runtime_recovery_requires_and_honors_the_original_custom_root() {
     )
     .unwrap();
 
-    let missing_root = fake_release_env(ctx(&temp).args(["upgrade", "check", "--json"]), &release)
-        .output()
-        .unwrap();
+    let missing_root = fake_release_env(
+        ctx(&temp).args(["upgrade", "check", "--format=json"]),
+        &release,
+    )
+    .output()
+    .unwrap();
     assert!(!missing_root.status.success(), "{missing_root:?}");
     assert!(String::from_utf8_lossy(&missing_root.stderr).contains("invalid runtime paths"));
     assert!(legacy_journal.exists());
 
-    let recovered = fake_release_env(ctx(&temp).args(["upgrade", "check", "--json"]), &release)
-        .env("CTX_RUNTIME_DIR", &custom_runtime)
-        .output()
-        .unwrap();
+    let recovered = fake_release_env(
+        ctx(&temp).args(["upgrade", "check", "--format=json"]),
+        &release,
+    )
+    .env("CTX_RUNTIME_DIR", &custom_runtime)
+    .output()
+    .unwrap();
     assert!(recovered.status.success(), "{recovered:?}");
     assert!(!legacy_journal.exists());
 }
@@ -707,10 +716,13 @@ fn cross_root_recovery_uses_one_installation_state_and_the_validated_origin_root
     let origin_root = tempdir();
     let discovering_root = tempdir();
 
-    let interrupted = fake_release_env(ctx(&origin_root).args(["upgrade", "--json"]), &release)
-        .env("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "binary")
-        .output()
-        .unwrap();
+    let interrupted = fake_release_env(
+        ctx(&origin_root).args(["upgrade", "--format=json"]),
+        &release,
+    )
+    .env("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "binary")
+    .output()
+    .unwrap();
     assert!(!interrupted.status.success(), "{interrupted:?}");
     assert!(release
         .target
@@ -720,7 +732,7 @@ fn cross_root_recovery_uses_one_installation_state_and_the_validated_origin_root
     assert!(state_path.exists());
 
     let discovered = fake_release_env(
-        ctx(&discovering_root).args(["upgrade", "check", "--json"]),
+        ctx(&discovering_root).args(["upgrade", "check", "--format=json"]),
         &release,
     )
     .output()
@@ -760,7 +772,7 @@ fn runtime_discovery_roots_reject_relative_and_whitespace_paths() {
         let cli_before = fs::read(&release.target).unwrap();
         let mut command = ctx(&temp);
         command
-            .args(["upgrade", "--json"])
+            .args(["upgrade", "--format=json"])
             .env(key, value)
             .current_dir(temp.path());
         let stderr = failure_stderr(fake_release_env(&mut command, &release));
@@ -787,7 +799,7 @@ fn runtime_archive_rejects_traversal_links_specials_and_unexpected_entries() {
         let cli_before = fs::read(&release.target).unwrap();
 
         let stderr = failure_stderr(fake_release_env(
-            ctx(&temp).args(["upgrade", "--json"]),
+            ctx(&temp).args(["upgrade", "--format=json"]),
             &release,
         ));
 
@@ -807,7 +819,7 @@ fn runtime_archive_rejects_expansion_over_limit_without_partial_install() {
     let cli_before = fs::read(&release.target).unwrap();
 
     let stderr = failure_stderr(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_UPGRADE_RUNTIME_MAX_EXPANDED_BYTES_FOR_TESTS", "16"),
     );
 
@@ -830,7 +842,8 @@ fn runtime_extraction_does_not_require_external_python() {
     fs::create_dir(&empty_path).unwrap();
 
     let applied = json_output(
-        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release).env("PATH", &empty_path),
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
+            .env("PATH", &empty_path),
     );
 
     assert_eq!(applied["status"], "applied");
@@ -900,7 +913,7 @@ fn upgrade_status_bridges_v025_data_root_state_read_only() {
     fs::write(&legacy_path, &legacy).unwrap();
 
     let status = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "status", "--json"]),
+        ctx(&temp).args(["upgrade", "status", "--format=json"]),
         &release,
     ));
 
@@ -950,7 +963,7 @@ fn upgrade_status_reconciles_completed_scheduled_replacement() {
     .unwrap();
 
     let status = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "status", "--json"]),
+        ctx(&temp).args(["upgrade", "status", "--format=json"]),
         &release,
     ));
 
@@ -974,7 +987,7 @@ fn upgrade_status_reports_path_shadowing() {
 
     let mut command = ctx(&temp);
     command
-        .args(["upgrade", "status", "--json"])
+        .args(["upgrade", "status", "--format=json"])
         .env("PATH", path);
     let status = json_output(fake_release_env(&mut command, &release));
 
@@ -995,9 +1008,9 @@ fn upgrade_status_reports_path_shadowing() {
 #[test]
 fn upgrade_commands_do_not_execute_hanging_shadow_path_ctx() {
     for args in [
-        ["upgrade", "status", "--json"].as_slice(),
-        ["upgrade", "check", "--json"].as_slice(),
-        ["upgrade", "--json"].as_slice(),
+        ["upgrade", "status", "--format=json"].as_slice(),
+        ["upgrade", "check", "--format=json"].as_slice(),
+        ["upgrade", "--format=json"].as_slice(),
     ] {
         let temp = tempdir();
         let release = fake_release(&temp, "9.9.9");
@@ -1041,7 +1054,7 @@ fn persistent_installation_lock_ignores_text_when_no_os_owner_exists() {
     fs::write(&lock_path, "stale pid-looking text\n").unwrap();
 
     let dry_run = json_output(fake_release_env(
-        ctx(&temp).args(["upgrade", "--dry-run", "--json"]),
+        ctx(&temp).args(["upgrade", "--dry-run", "--format=json"]),
         &release,
     ));
 
@@ -1151,7 +1164,7 @@ fn staging_dogfood_marker_survives_fresh_process_and_blocks_stable_metadata() {
 
     let mut status_command = ctx_from_binary(&temp, &binary);
     remove_installer_upgrade_env(&mut status_command);
-    let status = json_output(status_command.args(["upgrade", "status", "--json"]));
+    let status = json_output(status_command.args(["upgrade", "status", "--format=json"]));
     assert_eq!(status["install"]["managed"], true);
     assert_eq!(status["auto_upgrade"]["mode"], "off");
     assert_eq!(status["auto_upgrade"]["enabled"], false);
@@ -1184,7 +1197,7 @@ fn ordinary_hosted_install_marker_keeps_production_upgrade_behavior() {
 
     let mut status_command = ctx_from_binary(&temp, &binary);
     remove_installer_upgrade_env(&mut status_command);
-    let status = json_output(status_command.args(["upgrade", "status", "--json"]));
+    let status = json_output(status_command.args(["upgrade", "status", "--format=json"]));
     assert_eq!(status["install"]["managed"], true);
     assert_eq!(status["auto_upgrade"]["mode"], "apply");
     assert_eq!(status["auto_upgrade"]["enabled"], true);
@@ -1269,7 +1282,7 @@ fn upgrade_verifies_signed_metadata_and_fails_closed() {
     let release = fake_release(&default_signature_path, "9.9.9");
     let check = json_output(
         ctx(&default_signature_path)
-            .args(["upgrade", "check", "--json"])
+            .args(["upgrade", "check", "--format=json"])
             .env("CTX_UPGRADE_TEST_TARGET", &release.target)
             .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
             .env(
@@ -1376,7 +1389,7 @@ fn upgrade_rejects_unsafe_metadata_and_bad_artifacts() {
         )
     });
     let stderr = failure_stderr(fake_release_env(
-        ctx(&bad_checksum).args(["upgrade", "--json"]),
+        ctx(&bad_checksum).args(["upgrade", "--format=json"]),
         &release,
     ));
     assert!(stderr.contains("artifact checksum mismatch"), "{stderr}");

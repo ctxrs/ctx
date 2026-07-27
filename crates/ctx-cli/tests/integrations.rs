@@ -13,7 +13,7 @@ fn slash_commands_install_opencode_global_and_is_idempotent() {
         "slash-commands",
         "--agent",
         "opencode",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(first["integration"], "slash-commands");
     assert_eq!(first["command"], "ctx-history");
@@ -39,7 +39,7 @@ fn slash_commands_install_opencode_global_and_is_idempotent() {
         "slash-commands",
         "--agent",
         "opencode",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(second["results"][0]["previous_status"], "current");
     assert_eq!(second["results"][0]["already_installed"], true);
@@ -56,7 +56,7 @@ fn slash_commands_install_codex_is_skill_only_without_deprecated_prompts() {
         "slash-commands",
         "--agent",
         "codex",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(output["results"][0]["agent"], "codex");
     assert_eq!(output["results"][0]["status"], "skill_only");
@@ -81,7 +81,7 @@ fn slash_commands_install_gemini_project_writes_toml() {
         "--agent",
         "gemini-cli",
         "--project",
-        "--json",
+        "--format=json",
     ]);
     let output = json_output(&mut command);
     assert_eq!(output["scope"], "project");
@@ -115,7 +115,7 @@ fn slash_commands_install_qwen_project_writes_markdown() {
         "--agent",
         "qwen-code",
         "--project",
-        "--json",
+        "--format=json",
     ]);
     let output = json_output(&mut command);
     assert_eq!(output["scope"], "project");

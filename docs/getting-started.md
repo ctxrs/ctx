@@ -101,7 +101,7 @@ upgrade checks; that updater does not collect provider history.
 
 ```bash
 ctx sources
-ctx sources --json
+ctx sources --format json
 ```
 
 `sources` checks known provider locations on the current machine. Today it
@@ -121,7 +121,7 @@ ctx import --provider pi
 ctx import --provider cursor
 ctx import --provider zed
 ctx import --provider codex --path ~/.codex/sessions
-ctx import --resume --json
+ctx import --resume --format json
 ctx import --provider pi --path ./pi-session.jsonl
 ```
 
@@ -146,7 +146,7 @@ re-read previously indexed provider transcripts once. That rebuilds search
 content with touched-file metadata and local/private transcript text.
 
 Native provider `--path` imports require `--provider`. Custom JSONL imports use
-`--format ctx-history-jsonl-v1 --path <file>` instead.
+`--input-format ctx-history-jsonl-v1 --path <file>` instead.
 
 ## 5. Search
 
@@ -193,7 +193,7 @@ is actively indexing.
 ## 6. Use JSON For Scripts
 
 ```bash
-ctx search "failed migration" --json | jq '.results[0].ctx_event_id'
+ctx search "failed migration" --format json | jq '.results[0].ctx_event_id'
 ctx show event <ctx-event-id> --format json
 ctx show session <ctx-session-id> --format json
 ```
@@ -212,7 +212,7 @@ remain local.
 ```bash
 ctx pro
 ctx blame file src/lib.rs --lines 42
-ctx blame commit <sha> --json
+ctx blame commit <sha> --format json
 ctx blame pr 42 --repository forge:github.com/ctxrs/ctx
 ```
 

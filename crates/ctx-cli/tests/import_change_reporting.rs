@@ -76,7 +76,7 @@ fn import_codex(temp: &TempDir, source: &Path) -> Value {
             .arg("import")
             .args(["--provider", "codex", "--path"])
             .arg(source)
-            .args(["--no-daemon", "--json", "--progress", "none"])
+            .args(["--no-daemon", "--format=json", "--progress", "none"])
             .env("CTX_DATA_ROOT", &data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state)
@@ -187,7 +187,7 @@ fn import_reports_initial_noop_append_and_replacement_truthfully() {
                 "sql",
                 "SELECT SUM(payload_json LIKE '%replacement-before%') AS old_hits, \
          SUM(payload_json LIKE '%replacement-after!%') AS new_hits FROM ctx_events",
-                "--json",
+                "--format=json",
             ])
             .env("CTX_DATA_ROOT", temp.path().join("ctx-data")),
     );
@@ -348,7 +348,7 @@ fn explicit_codex_dispatch_rejects_ambiguous_first_record() {
         .arg("import")
         .args(["--provider", "codex", "--path"])
         .arg(&source)
-        .args(["--no-daemon", "--json", "--progress", "none"])
+        .args(["--no-daemon", "--format=json", "--progress", "none"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("schema is ambiguous"));

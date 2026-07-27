@@ -102,7 +102,7 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
             force: false,
             start_mode: Some(DaemonStartModeArg::Auto),
             trigger_command: Some(DaemonTriggerCommandArg::Search),
-            json: true,
+            format: crate::output::JsonOutputFormat::Json,
         },
         root.path(),
         &AppConfig::default(),

@@ -7,9 +7,9 @@ opening a website or reading repository files.
 ```bash
 ctx docs
 ctx docs list
-ctx docs list --json
+ctx docs list --format json
 ctx docs search "file path"
-ctx docs search "upgrade" --limit 5 --json
+ctx docs search "upgrade" --limit 5 --format json
 ctx docs show cli-reference
 ctx docs show search --format text
 ctx docs show json-contracts --format json

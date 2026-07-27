@@ -40,7 +40,7 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
             "codex",
             "--path",
             &fixture,
-            "--json",
+            "--format=json",
             "--progress",
             "json",
         ])
@@ -73,7 +73,7 @@ fn machine_readable_native_import_preserves_json_without_autostarting_daemon() {
                 "codex",
                 "--path",
                 &fixture,
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ])
@@ -165,7 +165,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -182,7 +182,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
         "custom",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
@@ -195,7 +195,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -234,7 +234,7 @@ fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
         "openhands",
         "--path",
         source_root.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -297,7 +297,7 @@ fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
         "ctx-history-jsonl-v1",
         "--path",
         fixture.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -341,7 +341,7 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -357,7 +357,7 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
         "custom",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
@@ -386,7 +386,7 @@ fn all_invalid_custom_import_cleans_up_and_retries_after_source_is_fixed() {
             "ctx-history-jsonl-v1",
             "--path",
             fixture.to_str().unwrap(),
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])
@@ -417,7 +417,7 @@ fn all_invalid_custom_import_cleans_up_and_retries_after_source_is_fixed() {
         "ctx-history-jsonl-v1",
         "--path",
         fixture.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -457,7 +457,7 @@ fn import_all_runs_enabled_history_source_plugins_for_external_shapes() {
     let imported = json_output(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
-            .args(["import", "--all", "--json", "--progress", "none"]),
+            .args(["import", "--all", "--format=json", "--progress", "none"]),
     );
     assert_eq!(imported["totals"]["imported_sources"], 4);
     assert_eq!(imported["totals"]["imported_sessions"], 4);
@@ -477,7 +477,7 @@ fn import_all_runs_enabled_history_source_plugins_for_external_shapes() {
             "custom",
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert!(
             !search["results"].as_array().unwrap().is_empty(),
@@ -505,7 +505,7 @@ fn import_all_discovers_and_imports_providers_together() {
     );
 
     let output = ctx(&temp)
-        .args(["import", "--all", "--json", "--progress", "json"])
+        .args(["import", "--all", "--format=json", "--progress", "json"])
         .assert()
         .success()
         .get_output()
@@ -527,7 +527,7 @@ fn import_all_discovers_and_imports_providers_together() {
 #[test]
 fn import_all_without_sources_does_not_report_missing_explicit_path() {
     let temp = tempdir();
-    let stderr = failure_stderr(ctx(&temp).args(["import", "--all", "--json"]));
+    let stderr = failure_stderr(ctx(&temp).args(["import", "--all", "--format=json"]));
 
     assert!(stderr.contains("no importable provider history sources found"));
     assert!(!stderr.contains("import path does not exist"), "{stderr}");
@@ -545,7 +545,7 @@ fn import_all_discovers_sources_when_home_unset_and_userprofile_set() {
         ctx(&temp)
             .env_remove("HOME")
             .env("USERPROFILE", temp.path())
-            .args(["import", "--all", "--json", "--progress", "none"]),
+            .args(["import", "--all", "--format=json", "--progress", "none"]),
     );
     assert_eq!(imported["totals"]["imported_sources"], 1);
     assert_eq!(imported["totals"]["failed_sources"], 0);
@@ -565,7 +565,7 @@ fn import_all_skips_empty_gemini_source() {
     );
     fs::create_dir_all(temp.path().join(".gemini")).unwrap();
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let gemini = sources["sources"]
         .as_array()
         .unwrap()
@@ -577,7 +577,7 @@ fn import_all_skips_empty_gemini_source() {
     assert_eq!(gemini["importable"], false);
 
     let imported =
-        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert_eq!(imported["totals"]["imported_sources"], 1);
     assert_eq!(imported["totals"]["failed_sources"], 0);
     assert!(imported["sources"]
@@ -599,7 +599,7 @@ fn import_all_reports_source_failure_without_losing_successes() {
     fs::write(opencode_dir.join("opencode.db"), b"not sqlite").unwrap();
 
     let output = ctx(&temp)
-        .args(["import", "--all", "--json", "--progress", "none"])
+        .args(["import", "--all", "--format=json", "--progress", "none"])
         .assert()
         .success()
         .get_output()
@@ -637,12 +637,12 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
     fs::write(opencode_dir.join("opencode.db"), b"not sqlite").unwrap();
 
     ctx(&temp)
-        .args(["import", "--all", "--json", "--progress", "none"])
+        .args(["import", "--all", "--format=json", "--progress", "none"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("all import sources failed"));
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["indexed_items"], 0);
     assert_eq!(status["indexed_sources"], 0);
 }
@@ -723,7 +723,7 @@ fn foreground_setup(temp: &TempDir) -> Value {
         "setup",
         "--wait",
         "--no-daemon",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]))
@@ -753,7 +753,7 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
         provider,
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, provider, query, 1, "message");
     let result = &search["results"][0];
@@ -877,7 +877,7 @@ fn cold_cutover_existing_store_setup_preserves_prior_provider_authority() {
         "import",
         "--all",
         "--no-daemon",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -931,7 +931,7 @@ fn cold_cutover_repeated_setup_and_import_are_authority_level_noops() {
         "import",
         "--all",
         "--no-daemon",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));

@@ -91,7 +91,7 @@ requires the Darwin `real`/`user`/`sys` header and the named long metrics.
     "platform": "macos",
     "tool": "/usr/bin/time"
   },
-  "command": ["/path/to/ctx", "status", "--json"],
+  "command": ["/path/to/ctx", "status", "--format=json"],
   "metrics": {
     "block_input_operations": 4,
     "block_output_operations": 9,

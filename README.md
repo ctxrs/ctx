@@ -93,7 +93,7 @@ For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works)
 
 ## Supported agent histories
 
-Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --json` on your machine to see which sources are currently `importable`.
+Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --format json` on your machine to see which sources are currently `importable`.
 
 | Agent harness | Support |
 | --- | --- |

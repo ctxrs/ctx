@@ -4,16 +4,16 @@ ctx JSON is for local agents and scripts. It can include prompts, command
 arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
-Command result JSON uses `schema_version: 1` except for `ctx import --json`.
-The Pro status object embedded by `ctx status --json` and exposed through MCP
+Command result JSON uses `schema_version: 1` except for `ctx import --format json`.
+The Pro status object embedded by `ctx status --format json` and exposed through MCP
 uses its own version 2 contract, described below. Progress-event JSON is stderr
 progress output and does not include `schema_version`.
 
 ## Setup
 
 ```bash
-ctx setup --json
-ctx setup --json --no-daemon
+ctx setup --format json
+ctx setup --format json --no-daemon
 ```
 
 Writes local storage and returns:
@@ -37,7 +37,7 @@ Writes local storage and returns:
 `ctx setup --wait` and daemon-disabled or `--no-daemon` runs. It is false when
 setup queues background indexing or uses `--catalog-only`. When it runs, `import.outcome`,
 `import.failure_scope`, `import.failure_type`, `import.totals`, and
-`import.sources` use the same semantics and shapes as `ctx import --json`.
+`import.sources` use the same semantics and shapes as `ctx import --format json`.
 Setup still uses top-level schema version 1; these nested fields are additive.
 An all-failed foreground setup import prints the complete JSON result and exits
 nonzero. Mixed success and source failures remain successful.
@@ -56,7 +56,7 @@ starts or nudges the daemon, so
 `background_indexing.daemon_autostart.status` is `not_needed` with reason
 `machine_readable_output`. The other `not_needed` reasons are
 `explicit_opt_out`, `daemon_disabled`, and `catalog_only`.
-Use `ctx daemon status --json` for process state. That status distinguishes the
+Use `ctx daemon status --format json` for process state. That status distinguishes the
 current config request from the last config the running daemon actually
 applied. A semantic opt-in is not live merely because
 `background_indexing.semantic_enabled` is true.
@@ -71,7 +71,7 @@ daemon maintenance. The daemon, when started, reports
 ## Status
 
 ```bash
-ctx status --json
+ctx status --format json
 ```
 
 Reads local storage state and returns:
@@ -137,7 +137,7 @@ Usage control modes return a separate action-focused JSON shape with
 
 The three result classes reconcile to `calls`; failures are currently
 `not_applicable`. `mcp_response_bytes` is transport volume, never tokens,
-savings, or model context. `ctx status --usage detail --json` also includes
+savings, or model context. `ctx status --usage detail --format json` also includes
 `details.by_operation[]`, grouped by `ctx_version`, `surface`, and closed
 `operation`, plus `details.duration_buckets[]`.
 
@@ -251,20 +251,20 @@ diagnostics survive later healthy source cycles and daemon restarts, clear when
 that source is observed without rejections, and do not make the daemon fail.
 Source-level failures remain terminal and are reported separately.
 
-`ctx daemon status --json` returns `schema_version`, `daemon`, `pro`, and
-`local_only`. `ctx daemon enable --json` and `ctx daemon disable --json` return
+`ctx daemon status --format json` returns `schema_version`, `daemon`, `pro`, and
+`local_only`. `ctx daemon enable --format json` and `ctx daemon disable --format json` return
 `schema_version`, `daemon_enabled`, `config_path`, and `local_only`.
-`ctx daemon run --json` returns the daemon object directly. The legacy hidden
+`ctx daemon run --format json` returns the daemon object directly. The legacy hidden
 `__ctx-daemon` entry point follows the same run output for compatibility.
 
-`ctx doctor --json` returns `schema_version`, `ok`, `progress`, `findings`, and
+`ctx doctor --format json` returns `schema_version`, `ok`, `progress`, `findings`, and
 the same top-level `daemon` object used by status so callers can inspect daemon
 lifecycle and job state without parsing human findings.
 
 ## Sources
 
 ```bash
-ctx sources --json
+ctx sources --format json
 ```
 
 Returns:
@@ -311,8 +311,8 @@ non-importable rows in `sources[]`; they are not provider discovery issues.
 ## Import
 
 ```bash
-ctx import --json
-ctx import --json --no-daemon
+ctx import --format json
+ctx import --format json --no-daemon
 ```
 
 Writes the local SQLite index and returns:
@@ -357,7 +357,7 @@ starts or nudges the daemon. `ctx import --no-daemon`, custom JSONL imports, and
 history-source-only imports do not autostart daemon maintenance. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "import"` through status surfaces.
 Import result schema version 2 does not embed daemon process state. Use
-`ctx daemon status --json` to inspect an already-running or explicitly started
+`ctx daemon status --format json` to inspect an already-running or explicitly started
 daemon.
 
 ## Progress
@@ -365,12 +365,12 @@ daemon.
 ```bash
 ctx setup --progress json
 ctx import --progress json
-ctx import --json --progress json
+ctx import --format json --progress json
 ```
 
 `--progress json` writes newline-delimited progress objects to stderr for
 `setup` and `import`. It does not change command result stdout. This means
-`ctx setup --json --progress json` and `ctx import --json --progress json`
+`ctx setup --format json --progress json` and `ctx import --format json --progress json`
 write the command result object to stdout and zero or more progress objects to
 stderr.
 
@@ -393,7 +393,7 @@ Each progress object includes:
 
 Progress events are operational status events, not durable result records.
 Consumers should key on `type` and `operation`, ignore unknown fields, and read
-the final command result from stdout when `--json` is present.
+the final command result from stdout when `--format json` is present.
 
 ## Show
 
@@ -470,7 +470,7 @@ the transcript row in `event`.
 ## Search
 
 ```bash
-ctx search <query>|--term <term>|--file <path> --json
+ctx search <query>|--term <term>|--file <path> --format json
 ```
 
 Returns:
@@ -536,7 +536,7 @@ Search JSON is local/private by default.
   `total_bytes`;
 - `source_count`;
 - `daemon_last_run_at_ms`, present when search relies on a recent daemon refresh;
-- `totals`, using the same import total fields as `ctx import --json`;
+- `totals`, using the same import total fields as `ctx import --format json`;
 - `error`, present when refresh failed but results were still served.
 
 `retrieval` describes the requested and effective search path:
@@ -600,7 +600,7 @@ that filter.
 ## SQL
 
 ```bash
-ctx sql "SELECT COUNT(*) AS sessions FROM ctx_sessions" --json
+ctx sql "SELECT COUNT(*) AS sessions FROM ctx_sessions" --format json
 ctx sql --file query.sql --format json
 ```
 
@@ -657,10 +657,10 @@ default when `CODEX_THREAD_ID` is set; pass `include_current_session: true` to
 opt back in.
 
 The MCP `sources` tool includes the same bounded `issues` and
-`issues_truncated` fields as `ctx sources --json`.
+`issues_truncated` fields as `ctx sources --format json`.
 
 The MCP `sql` tool uses the same `sql_result` JSON contract as `ctx sql
---json`, always read-only. Its `structuredContent` must include the same
+--format json`, always read-only. Its `structuredContent` must include the same
 required `read_only: true` and `share_safe: false` fields and preserve the CLI
 column, row, truncation, and limit semantics. CLI and MCP consumers must treat
 a missing or non-false `share_safe` value as incompatible SQL-result output,
@@ -674,8 +674,8 @@ protocol-level parse-error or invalid-params responses.
 ## Integrations
 
 ```bash
-ctx integrations install mcp --json
-ctx integrations status mcp --json
+ctx integrations install mcp --format json
+ctx integrations status mcp --format json
 ```
 
 MCP integration JSON returns:
@@ -707,12 +707,12 @@ and `unsupported`.
 ## Docs
 
 ```bash
-ctx docs list --json
-ctx docs search <query> --json
+ctx docs list --format json
+ctx docs search <query> --format json
 ctx docs show <topic> --format json
 ```
 
-`ctx docs list --json` returns:
+`ctx docs list --format json` returns:
 
 - `schema_version`;
 - `topics[]`.
@@ -720,7 +720,7 @@ ctx docs show <topic> --format json
 Each topic includes `id`, `title`, `audience`, `summary`, `tags`, and
 `source_path`.
 
-`ctx docs search <query> --json` returns:
+`ctx docs search <query> --format json` returns:
 
 - `schema_version`;
 - `query`;
@@ -739,10 +739,10 @@ history or SQLite.
 ## Upgrade
 
 ```bash
-ctx upgrade --json
-ctx upgrade --dry-run --json
-ctx upgrade check --json
-ctx upgrade status --json
+ctx upgrade --format json
+ctx upgrade --dry-run --format json
+ctx upgrade check --format json
+ctx upgrade status --format json
 ```
 
 `ctx upgrade` and `ctx upgrade check` return:
@@ -766,7 +766,7 @@ ctx upgrade status --json
 - `dry_run`;
 - `warnings[]`.
 
-`ctx upgrade status --json` returns:
+`ctx upgrade status --format json` returns:
 
 - `schema_version`;
 - `command: "upgrade_status"`;
@@ -806,7 +806,7 @@ was not present at the stored path when checked.
 
 ## Local Pro
 
-The `pro` object in `ctx status --json` has `schema_version: 2`,
+The `pro` object in `ctx status --format json` has `schema_version: 2`,
 `payload_type: "pro_status"`,
 `state`, `installed`, `ready`, `materialized`, `helper_version`,
 `protocol_version`, `capabilities`, `error_code`, `access_state`,
@@ -820,7 +820,7 @@ After an uninstall that deliberately preserves local Pro data, `state` is
 `restore_preserved_pro_data`; a first-use installation remains `not_setup` with
 `helper_missing`.
 The same base path-safe shape is returned by the MCP `pro_status` tool and
-embedded by `ctx doctor --json` under `pro`. MCP `pro_status` also adds
+embedded by `ctx doctor --format json` under `pro`. MCP `pro_status` also adds
 `conversion_action` and `local_usage`; doctor does not.
 
 `conversion_action` is `pro_monthly_conversion` at `"$20/month"` for `trial`
@@ -831,16 +831,16 @@ or an unpriced `pro_restore_access` for `locked`, both pointing to
 MCP `pro_status` also embeds the compact `local_usage` report; neither field is
 added to blame results or citations.
 
-`ctx pro --json` and its explicit synonym `ctx pro setup --json` both run the
+`ctx pro --format json` and its explicit synonym `ctx pro setup --format json` both run the
 idempotent setup path, report operation `setup`, and return the
 `schema_version: 1`, `payload_type: "pro_setup"` contract.
-`ctx pro --referral <codename> --json` uses that same setup payload. It accepts
+`ctx pro --referral <codename> --format json` uses that same setup payload. It accepts
 the codename only for the first anonymous-trial challenge and does not echo the
 raw codename or opaque claim in JSON. The resulting attribution is immutable.
 An accepted referral produces a 30-day trial; setup without one remains the
 ordinary 14-day trial.
-`ctx pro manage --no-open --json` and
-`ctx pro uninstall (--delete-data|--keep-data) --json` return the `pro_manage`
+`ctx pro manage --no-open --format json` and
+`ctx pro uninstall (--delete-data|--keep-data) --format json` return the `pro_manage`
 and `pro_uninstall` payload types respectively.
 Materialization is an internal,
 idempotent part of setup, daemon freshness, and blame catch-up.
@@ -866,7 +866,7 @@ deletion and emits no success payload. An interrupted deletion retains
 root-local retry metadata; setup and `--keep-data` fail until a later
 `--delete-data` verifies and completes the same installation-scoped cleanup.
 
-Successful `ctx blame file|commit|pr --json` and MCP `blame` return the protocol
+Successful `ctx blame file|commit|pr --format json` and MCP `blame` return the protocol
 `BlameResult` directly, with no payload wrapper, prose summary, or suggested
 claims:
 
@@ -924,9 +924,9 @@ Native key-store failures use only `key_store_unavailable` and
 ## Referrals
 
 ```bash
-ctx referral create <codename> --json
-ctx referral status --json
-ctx referral payout [--country <CC>] [--entity-type <individual|company>] --json
+ctx referral create <codename> --format json
+ctx referral status --format json
+ctx referral payout [--country <CC>] [--entity-type <individual|company>] --format json
 ```
 
 All three commands return schema version 1. JSON referral commands use cached
@@ -936,7 +936,7 @@ browser opener; a missing cached session fails with
 promotional message. Any verified person can create a codename; a Pro trial or
 subscription is not required.
 
-`ctx referral create <codename> --json` returns:
+`ctx referral create <codename> --format json` returns:
 
 - `schema_version`;
 - `payload_type: "referral_create"`;
@@ -944,7 +944,7 @@ subscription is not required.
 - `share_command`, exactly `ctx pro --referral <codename>`;
 - `disposition`, either `created` or `existing`.
 
-`ctx referral status --json` returns:
+`ctx referral status --format json` returns:
 
 - `schema_version`;
 - `payload_type: "referral_status"`;
@@ -990,7 +990,7 @@ voids an unpaid commission. Reversal of a paid commission becomes debt, a
 negative adjustment against future earnings subject to manual review, never an
 external clawback.
 
-`ctx referral payout --json` returns:
+`ctx referral payout --format json` returns:
 
 - `schema_version`;
 - `payload_type: "referral_payout"`;
@@ -1012,7 +1012,7 @@ out-of-bounds hosted results fail with `invalid_response`.
 ## Doctor
 
 ```bash
-ctx doctor --json
+ctx doctor --format json
 ```
 
 Reads local storage and returns findings:

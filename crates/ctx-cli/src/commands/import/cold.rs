@@ -53,7 +53,7 @@ pub(super) fn try_codex_cold_cli_import(
         || args
             .provider
             .is_some_and(|provider| provider.capture_provider() == CaptureProvider::Codex))
-        && args.format.is_none()
+        && args.input_format.is_none()
         && !args.resume
         && !args.reset_cursor
         && args.history_source.is_none();

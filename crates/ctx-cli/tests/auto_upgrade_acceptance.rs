@@ -56,7 +56,7 @@ mod unix {
                 "auto",
                 "--trigger-command",
                 "setup",
-                "--json",
+                "--format=json",
             ])
             .env(
                 "CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS",
@@ -338,7 +338,7 @@ mod unix {
                     RecoveryOwner::Explicit => {
                         let mut command = ctx_from_binary(&owner, &binary);
                         managed_release_env(&mut command, &release, &binary);
-                        command.args(["upgrade", "--json"]);
+                        command.args(["upgrade", "--format=json"]);
                         command
                     }
                 };
@@ -527,7 +527,7 @@ mod unix {
                     RecoveryOwner::Explicit => {
                         let mut command = ctx_from_binary(&owner, &binary);
                         managed_release_env(&mut command, &release, &binary);
-                        command.args(["upgrade", "--json"]);
+                        command.args(["upgrade", "--format=json"]);
                         command
                     }
                 };
@@ -578,7 +578,7 @@ mod unix {
             let mut contender = ctx_from_binary(&owner, &binary);
             managed_release_env(&mut contender, &release, &binary);
             let contended = contender
-                .args(["upgrade", "check", "--json"])
+                .args(["upgrade", "check", "--format=json"])
                 .output()
                 .unwrap();
             assert!(
@@ -696,7 +696,7 @@ mod unix {
         let release = fake_release(&temp, "9.9.9");
         let binary = managed_hook_candidate(&temp, "ia_disabled_recovery");
         let interrupted = managed_release_env(
-            ctx_from_binary(&temp, &binary).args(["upgrade", "--json"]),
+            ctx_from_binary(&temp, &binary).args(["upgrade", "--format=json"]),
             &release,
             &binary,
         )
@@ -948,7 +948,7 @@ mod unix {
         let binary = managed_candidate(&temp, "ia_manual_disabled");
 
         managed_release_env(
-            ctx_from_binary(&temp, &binary).args(["upgrade", "--json"]),
+            ctx_from_binary(&temp, &binary).args(["upgrade", "--format=json"]),
             &release,
             &binary,
         )

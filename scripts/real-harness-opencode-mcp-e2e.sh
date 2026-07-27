@@ -131,7 +131,7 @@ PY
     XDG_CONFIG_HOME="${xdg_config_home}" \
     CTX_DATA_ROOT="${data_root}" \
     CTX_ANALYTICS_ENABLED=false \
-    run "${ctx_bin}" integrations install mcp --agent opencode --json > "${install_json}"
+    run "${ctx_bin}" integrations install mcp --agent opencode --format json > "${install_json}"
   require_contains "${install_json}" '"agent":"opencode"'
   require_contains "${install_json}" '"status":"current"'
   require_contains "${config_json}" '"mcp"'

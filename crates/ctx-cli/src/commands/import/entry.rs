@@ -26,7 +26,7 @@ pub(crate) fn run_import(
             "warning: --partial is deprecated and no longer changes import behavior; tolerant import is now unconditional"
         );
     }
-    let json = args.json;
+    let json = args.format.is_json();
     let progress = args.progress;
     provider_refreshes.start_timing();
     let report = run_import_internal(

@@ -62,7 +62,7 @@ pub(crate) fn run_sources(
         .cloned()
         .collect::<Vec<_>>();
     let hidden_missing_sources = sources.len().saturating_sub(visible_sources.len());
-    if args.json {
+    if args.format.is_json() {
         let mut source_values = sources_json(&visible_sources);
         source_values.extend(plugin_sources_json(&plugin_sources));
         source_values.extend(plugin_manifest_failures_json(&plugin_failures));

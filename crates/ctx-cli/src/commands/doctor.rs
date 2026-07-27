@@ -18,7 +18,8 @@ pub(crate) fn run_doctor(
     data_root: PathBuf,
     telemetry: &mut DoctorTelemetry,
 ) -> Result<()> {
-    let progress = ProgressReporter::new(args.progress, args.json, "doctor", 0);
+    let json_output = args.format.is_json();
+    let progress = ProgressReporter::new(args.progress, json_output, "doctor", 0);
     progress.message("opening", "opening ctx store");
     let db_path = database_path(data_root.clone());
     let mut findings = Vec::new();
@@ -82,7 +83,7 @@ pub(crate) fn run_doctor(
         },
         0,
     );
-    if args.json {
+    if json_output {
         print_json(json!({
             "schema_version": 1,
             "ok": findings.is_empty(),

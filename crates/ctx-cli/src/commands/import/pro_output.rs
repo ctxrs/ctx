@@ -143,12 +143,12 @@ fn run_pro_materialization_import(
         history_source: None,
         history_source_manifest: Vec::new(),
         reset_cursor: false,
-        format: None,
+        input_format: None,
         all: true,
         resume: false,
         partial: false,
         no_daemon: true,
-        json: false,
+        format: crate::output::JsonOutputFormat::Text,
         progress: ProgressArg::None,
     };
     let config = crate::config::AppConfig::load(data_root)?;

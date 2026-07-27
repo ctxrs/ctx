@@ -9,7 +9,7 @@ use crate::analytics::{count_bucket, ShowTelemetry};
 use crate::complete_content::{
     resolve_event_contents, ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
 };
-use crate::output::{effective_format, OutputFormat};
+use crate::output::OutputFormat;
 use crate::provider_args::ProviderArg;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::{
@@ -38,8 +38,6 @@ pub(crate) struct ShowSessionArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) format: OutputFormat,
     #[arg(long)]
-    pub(crate) json: bool,
-    #[arg(long)]
     pub(crate) out: Option<PathBuf>,
 }
 
@@ -62,8 +60,6 @@ pub(crate) struct ShowEventArgs {
     pub(crate) content: ContentPolicy,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) format: OutputFormat,
-    #[arg(long)]
-    pub(crate) json: bool,
 }
 
 pub(crate) fn run_show(
@@ -82,7 +78,6 @@ pub(crate) fn run_show(
             )?;
             let events = store.events_for_session(session.id)?;
             telemetry.events_returned = Some(count_bucket(events.len() as u64));
-            let format = effective_format(args.format, args.json);
             let selected = selected_transcript_events(&events, args.mode);
             let content = resolve_event_contents(
                 &store,
@@ -91,7 +86,13 @@ pub(crate) fn run_show(
                 CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
             )?;
             write_rendered_session(
-                &store, &session, &events, args.mode, format, args.out, &content,
+                &store,
+                &session,
+                &events,
+                args.mode,
+                args.format,
+                args.out,
+                &content,
             )?;
         }
         ShowTarget::Event(args) => {
@@ -99,7 +100,6 @@ pub(crate) fn run_show(
             let event = resolve_event(&store, &args.id)?;
             let events = event_window(&store, &event, args.before, args.after, args.window)?;
             telemetry.events_returned = Some(count_bucket(events.len() as u64));
-            let format = effective_format(args.format, args.json);
             let selected = events.iter().collect::<Vec<_>>();
             let content = resolve_event_contents(
                 &store,
@@ -107,7 +107,7 @@ pub(crate) fn run_show(
                 args.content,
                 CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
             )?;
-            write_rendered_events(&store, &event, &events, format, None, &content)?;
+            write_rendered_events(&store, &event, &events, args.format, None, &content)?;
         }
     }
     Ok(())

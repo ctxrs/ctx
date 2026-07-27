@@ -177,7 +177,7 @@ def run_one(
     status_profile, status_last, _ = measure(
         "status",
         ctx_bin,
-        ["status", "--json"],
+        ["status", "--format=json"],
         repeats,
         env,
         data_root,
@@ -188,7 +188,7 @@ def run_one(
         ),
     )
 
-    search_args = ["search", QUERY, "--refresh", "off", "--json", "--limit", "20"]
+    search_args = ["search", QUERY, "--refresh", "off", "--format=json", "--limit", "20"]
     search_profile, search_last, _ = measure(
         "search_refresh_off",
         ctx_bin,
@@ -213,7 +213,7 @@ def run_one(
         QUERY,
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
         "--limit",
         "10",
         "--provider",

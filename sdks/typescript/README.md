@@ -16,13 +16,13 @@ const results = await client.search("sqlite storage", { refresh: "off" });
 
 ## API
 
-- `status()` wraps `ctx status --json`.
-- `init({ catalogOnly, progress })` wraps `ctx setup --json`.
-- `sources()` wraps `ctx sources --json`.
-- `import(options)` wraps `ctx import --json`.
+- `status()` wraps `ctx status --format json`.
+- `init({ catalogOnly, progress })` wraps `ctx setup --format json`.
+- `sources()` wraps `ctx sources --format json`.
+- `import(options)` wraps `ctx import --format json`.
 - `sync(options)` is an alias for `import(options)`.
 - `search(query, options)` and file/term-based `search(options)` wrap
-  `ctx search <query>|--term <term>|--file <path> --json`.
+  `ctx search <query>|--term <term>|--file <path> --format json`.
 - `showEvent(id, { before, after, window })` wraps `ctx show event --format json`.
 - `showSession(id, { mode })` wraps `ctx show session --format json`.
 - `showSession({ provider, providerSession, mode })` looks up by provider-owned session ID.

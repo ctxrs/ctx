@@ -20,7 +20,7 @@ fn removed_cloud_config_is_rejected_without_initializing_storage() {
     fs::write(&config_path, stale_config).unwrap();
 
     ctx(&temp)
-        .args(["status", "--json"])
+        .args(["status", "--format=json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cloud.mode"));

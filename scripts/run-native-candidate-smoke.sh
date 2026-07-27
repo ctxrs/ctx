@@ -246,10 +246,10 @@ run_bounded "${root}/setup.out" "${root}/setup.err" \
   exit 1
 }
 run_bounded "${root}/import.json" "${root}/import.err" ctx import \
-  --format ctx-history-jsonl-v1 \
+  --input-format ctx-history-jsonl-v1 \
   --path "${fixture}" \
   --no-daemon \
-  --json \
+  --format json \
   --progress none || {
   cat "${root}/import.err" >&2
   exit 1
@@ -262,7 +262,7 @@ grep -Eq '"imported_events"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import
 run_bounded "${root}/search.json" "${root}/search.err" ctx search "parser test" \
   --backend lexical \
   --refresh off \
-  --json || {
+  --format json || {
   cat "${root}/search.err" >&2
   exit 1
 }
@@ -291,7 +291,7 @@ fi
 analytics_default_events="${root}/analytics-default.jsonl"
 run_bounded "${root}/status.json" "${root}/status.err" clean_env \
   CTX_ANALYTICS_ENDPOINT="file://${analytics_default_events}" \
-  "${binary}" status --json || {
+  "${binary}" status --format json || {
   cat "${root}/status.err" >&2
   exit 1
 }
@@ -320,7 +320,7 @@ run_bounded "${root}/status-opt-out.json" "${root}/status-opt-out.err" clean_env
   CTX_ANALYTICS_ENDPOINT="file://${analytics_opt_out_events}" \
   CTX_UPGRADE_AUTO=off \
   CTX_DAEMON_ENABLED=false \
-  "${binary}" status --json || {
+  "${binary}" status --format json || {
   cat "${root}/status-opt-out.err" >&2
   exit 1
 }
@@ -354,7 +354,7 @@ run_bounded "${root}/pro-status.json" "${root}/pro-status.err" \
   clean_env CTX_ANALYTICS_ENABLED=false CTX_UPGRADE_AUTO=off \
   CTX_DAEMON_ENABLED=false \
   CTX_PRO_HELPER="${untrusted_helper}" \
-  "${binary}" status --json || {
+  "${binary}" status --format json || {
   cat "${root}/pro-status.err" >&2
   printf 'candidate Pro status query failed while testing helper selection\n' >&2
   exit 1
@@ -394,7 +394,7 @@ if run_bounded "${root}/semantic.out" "${root}/semantic.err" clean_env \
   CTX_UPGRADE_AUTO=off \
   CTX_DAEMON_ENABLED=1 \
   CTX_SEARCH_SEMANTIC=1 \
-  "${binary}" search "parser test" --backend semantic --refresh off --json; then
+  "${binary}" search "parser test" --backend semantic --refresh off --format json; then
   printf 'semantic-only search unexpectedly succeeded\n' >&2
   exit 1
 fi

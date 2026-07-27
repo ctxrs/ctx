@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::analytics::{
     count_bucket, IntegrationResult, IntegrationScope, IntegrationTelemetry, TargetSelection,
 };
+use crate::output::JsonOutputFormat;
 
 const COMMAND_NAME: &str = "ctx-history";
 const METADATA_FILE: &str = ".ctx-slash-commands.json";
@@ -26,7 +27,7 @@ User request: $ARGUMENTS
 
 Search local agent history with `ctx`, prefer default text output for agent
 reading, inspect cited events or sessions before making claims, and return a
-concise answer with ctx citations. Use `--json` only when piping to a script,
+concise answer with ctx citations. Use `--format json` only when piping to a script,
 `jq`, or extracting exact machine fields.
 "#;
 
@@ -38,7 +39,7 @@ Search local coding-agent history with ctx.
 2. Search with `ctx search "<query>"` using default text output.
 3. Inspect relevant citations with `ctx show event <id> --window 5` or `ctx show session <id>`.
 4. Answer concisely and include ctx citations for claims based on local history.
-5. Use `--json` only when piping to a script, `jq`, or extracting exact machine fields.
+5. Use `--format json` only when piping to a script, `jq`, or extracting exact machine fields.
 "#;
 
 #[derive(Debug, Args)]
@@ -52,8 +53,8 @@ pub(crate) struct SlashCommandInstallArgs {
         help = "Install into the current project instead of global agent dirs"
     )]
     project: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(long, help = "Overwrite locally modified ctx-managed command files")]
     force: bool,
 }
@@ -519,7 +520,7 @@ pub(crate) fn run_install(
     telemetry.modified_targets = Some(count_bucket(
         results.iter().filter(|result| result.updated).count() as u64,
     ));
-    if args.json {
+    if args.format.is_json() {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -836,7 +837,7 @@ mod tests {
             agent: Vec::new(),
             all_agents: false,
             project: false,
-            json: true,
+            format: JsonOutputFormat::Json,
             force: false,
         };
 

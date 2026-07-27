@@ -43,7 +43,7 @@ fn remove_semantic_cache_env(command: &mut Command) {
 fn index_status_and_watch_are_read_only_for_missing_store() {
     let temp = tempdir();
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
     assert_eq!(status["lexical"]["status"], "missing");
@@ -54,8 +54,13 @@ fn index_status_and_watch_are_read_only_for_missing_store() {
         "index status must not initialize the store"
     );
 
-    let stderr =
-        failure_stderr(ctx(&temp).args(["index", "watch", "--json", "--interval-seconds", "1"]));
+    let stderr = failure_stderr(ctx(&temp).args([
+        "index",
+        "watch",
+        "--format=jsonl",
+        "--interval-seconds",
+        "1",
+    ]));
     assert!(stderr.contains("ctx index does not exist yet"), "{stderr}");
     assert!(
         !temp.path().join("work.sqlite").exists(),
@@ -87,7 +92,7 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
         ])
         .assert()
         .success();
-    let pending = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    let pending = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert!(
         pending["lexical"]["pending_inventory_units"]
             .as_u64()
@@ -114,7 +119,13 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
 
     let output = ctx(&temp)
         .timeout(Duration::from_secs(3))
-        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .args([
+            "index",
+            "watch",
+            "--format=jsonl",
+            "--interval-seconds",
+            "1",
+        ])
         .assert()
         .failure()
         .get_output()
@@ -186,7 +197,7 @@ fn index_watch_and_wait_fail_when_inventory_has_terminal_failures() {
     )
     .unwrap();
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["lexical"]["status"], "failed", "{status:#}");
     assert_eq!(
         status["lexical"]["pending_inventory_units"], 1,
@@ -196,7 +207,13 @@ fn index_watch_and_wait_fail_when_inventory_has_terminal_failures() {
 
     let watch = ctx(&temp)
         .timeout(Duration::from_secs(3))
-        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .args([
+            "index",
+            "watch",
+            "--format=jsonl",
+            "--interval-seconds",
+            "1",
+        ])
         .assert()
         .failure()
         .get_output()
@@ -214,7 +231,7 @@ fn index_watch_and_wait_fail_when_inventory_has_terminal_failures() {
             "index",
             "wait",
             "--lexical",
-            "--json",
+            "--format=json",
             "--timeout-seconds",
             "1",
             "--interval-seconds",
@@ -254,7 +271,7 @@ fn index_status_reports_stale_daemon_lock_as_recoverable() {
     )
     .unwrap();
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["daemon"]["status"], "stale_lock");
     assert_eq!(status["daemon"]["recoverable"], true);
     assert_eq!(status["daemon"]["reason"], "daemon_lock_stale");
@@ -279,7 +296,7 @@ fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
     let mut current_dir_command = ctx(&temp);
     current_dir_command.current_dir(&workspace);
     remove_semantic_cache_env(&mut current_dir_command);
-    let status = json_output(current_dir_command.args(["index", "status", "--json"]));
+    let status = json_output(current_dir_command.args(["index", "status", "--format=json"]));
     assert_eq!(status["semantic"]["model_cache_available"], true);
     assert_eq!(
         status["semantic"]["embed_policy"]["source"],
@@ -292,7 +309,7 @@ fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
     let mut hf_home_command = ctx(&temp);
     remove_semantic_cache_env(&mut hf_home_command);
     hf_home_command.env("HF_HOME", &hf_home);
-    let status = json_output(hf_home_command.args(["index", "status", "--json"]));
+    let status = json_output(hf_home_command.args(["index", "status", "--format=json"]));
     assert_eq!(status["semantic"]["model_cache_available"], true);
     assert_eq!(
         status["semantic"]["embed_policy"]["source"],
@@ -310,10 +327,10 @@ fn index_wait_lexical_reports_ready_after_import() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["initialized"], true);
     assert_eq!(status["lexical"]["status"], "ready");
     assert!(status["lexical"]["indexed_items"].as_u64().unwrap() > 0);
@@ -322,7 +339,7 @@ fn index_wait_lexical_reports_ready_after_import() {
         "index",
         "wait",
         "--lexical",
-        "--json",
+        "--format=json",
         "--timeout-seconds",
         "1",
         "--interval-seconds",
@@ -347,13 +364,13 @@ fn index_wait_default_skips_semantic_when_disabled_after_import() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
     let wait = json_output(ctx(&temp).args([
         "index",
         "wait",
-        "--json",
+        "--format=json",
         "--timeout-seconds",
         "1",
         "--interval-seconds",
@@ -378,11 +395,17 @@ fn index_watch_default_skips_semantic_when_disabled_after_import() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
     let output = ctx(&temp)
-        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .args([
+            "index",
+            "watch",
+            "--format=jsonl",
+            "--interval-seconds",
+            "1",
+        ])
         .assert()
         .success()
         .get_output()
@@ -406,7 +429,7 @@ fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
     let output = ctx(&temp)
@@ -414,7 +437,7 @@ fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
             "index",
             "wait",
             "--semantic",
-            "--json",
+            "--format=json",
             "--timeout-seconds",
             "1",
             "--interval-seconds",
@@ -444,7 +467,7 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
 
     let output = ctx(&temp)
@@ -452,7 +475,7 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
             "index",
             "wait",
             "--all",
-            "--json",
+            "--format=json",
             "--timeout-seconds",
             "1",
             "--interval-seconds",

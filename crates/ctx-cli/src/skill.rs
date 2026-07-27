@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::analytics::{count_bucket, IntegrationScope, IntegrationTelemetry, TargetSelection};
+use crate::output::JsonOutputFormat;
 
 mod agents;
 mod install;
@@ -45,8 +46,8 @@ pub(crate) struct SkillInstallArgs {
         help = "Install into the current project instead of global agent dirs"
     )]
     project: bool,
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
     #[arg(long, help = "Overwrite locally modified bundled skill files")]
     force: bool,
 }
@@ -62,13 +63,13 @@ pub(crate) struct SkillStatusArgs {
         help = "Check the current project's skill dirs instead of global dirs"
     )]
     project: bool,
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 impl SkillInstallArgs {
     pub(crate) fn json_output(&self) -> bool {
-        self.json
+        self.format.is_json()
     }
 
     pub(crate) fn add_initial_analytics(&self, telemetry: &mut IntegrationTelemetry) {
@@ -84,7 +85,7 @@ impl SkillInstallArgs {
 
 impl SkillStatusArgs {
     pub(crate) fn json_output(&self) -> bool {
-        self.json
+        self.format.is_json()
     }
 
     pub(crate) fn add_initial_analytics(&self, telemetry: &mut IntegrationTelemetry) {

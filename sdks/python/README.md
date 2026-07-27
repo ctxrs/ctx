@@ -36,7 +36,7 @@ for hit in response["search"].get("results", []):
 The public methods mirror the agent-history-v1 client surface:
 
 - `status()`
-- `init()` for `ctx setup --json`
+- `init()` for `ctx setup --format json`
 - `sources()`
 - `import_()` and `sync()` (`import` is a reserved Python keyword)
 - `search()` with a query, term, or file option
