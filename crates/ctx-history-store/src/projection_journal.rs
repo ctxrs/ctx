@@ -24,8 +24,10 @@ use encoding::{generation_digest, validate_contract_fingerprint, validate_digest
 pub(crate) use fence::ensure_projection_writer_fence;
 use fence::{drop_projection_writer_fence, install_projection_writer_fence};
 #[cfg(test)]
-use pages::{decode_record_chunk, insert_record_chunk};
-use pages::{digest_at_position, prune_chunks_through};
+use pages::{decode_record_chunk, insert_record_chunk, json_array_encoded_bytes_after_push};
+use pages::{
+    digest_at_position, projection_context_available, prune_chunks_through, read_context_window,
+};
 #[cfg(test)]
 use protocol_validity::MAX_AUTHORIZED_REPOSITORY_ROOTS;
 use records::append_baseline;
@@ -52,6 +54,8 @@ pub(crate) fn reset_for_canonical_schema_rewrite(conn: &rusqlite::Connection) ->
 
 pub const PROJECTION_CONTRACT_VERSION: u32 = 1;
 pub const PROJECTION_JOURNAL_PAGE_SIZE: usize = 512;
+pub const PROJECTION_JOURNAL_CONTEXT_RECORDS: usize = 64;
+pub const PROJECTION_JOURNAL_CONTEXT_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub const PROJECTION_JOURNAL_RECORD_MAX_BYTES: usize = 3 * 1024 * 1024;
 pub const PROJECTION_JOURNAL_MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -152,12 +156,20 @@ pub struct ProjectionJournalSnapshot {
     pub canonical_schema_identity: String,
     pub projection_contract_version: u32,
     pub frozen_through: JournalCheckpoint,
+    pub context: ProjectionJournalContextWindow,
     /// Bounded, activity-observed repository candidates. The private helper
     /// must still revalidate each locator as a Git repository before reading.
     pub authorized_repository_roots: Vec<String>,
     pub records: Vec<ProjectionJournalRecord>,
     pub next_position: JournalPosition,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionJournalContextWindow {
+    pub base_checkpoint: JournalCheckpoint,
+    pub records: Vec<ProjectionJournalRecord>,
 }
 
 #[derive(Debug)]
@@ -221,15 +233,18 @@ impl Store {
             {
                 return start_generation(&self.conn, &state.contract_fingerprint);
             }
+            if !projection_context_available(&self.conn, &state, helper.position.sequence)? {
+                return start_generation(&self.conn, &state.contract_fingerprint);
+            }
             acknowledge_checkpoint(&self.conn, &state, helper)?;
             let current = active_state(&self.conn)?.ok_or(StoreError::ProjectionJournalInactive)?;
             Ok(checkpoint(&current))
         })
     }
 
-    /// Publishes a helper acknowledgement and prunes exactly that committed prefix.
-    /// The checkpoint update and deletion share one SQLite transaction, so a crash
-    /// leaves either the complete old prefix or the complete retained suffix.
+    /// Publishes a helper acknowledgement and prunes the committed prefix except
+    /// for the bounded look-behind needed by the next helper request. The
+    /// checkpoint update and deletion share one SQLite transaction.
     pub fn acknowledge_projection_journal(&self, acknowledged: &JournalCheckpoint) -> Result<()> {
         self.reject_projection_journal_lifecycle_in_native_path_group()?;
         self.with_atomic_write(|| {
@@ -293,6 +308,43 @@ impl Store {
         &self,
     ) -> Result<Option<JournalCheckpoint>> {
         active_state(&self.conn).map(|state| state.as_ref().map(checkpoint))
+    }
+
+    /// Returns the exact active high-water checkpoint without materializing
+    /// retained journal records.
+    pub fn projection_journal_checkpoint(&self) -> Result<JournalCheckpoint> {
+        self.reject_projection_journal_lifecycle_in_native_path_group()?;
+        active_state(&self.conn)?
+            .as_ref()
+            .map(checkpoint)
+            .ok_or(StoreError::ProjectionJournalInactive)
+    }
+
+    /// Verifies one checkpoint against the active retained journal without
+    /// materializing a journal page.
+    ///
+    /// High-water and acknowledged checkpoints are resolved from the exact
+    /// journal state row. Retained interior checkpoints decode only their one
+    /// containing bounded chunk.
+    pub fn verify_projection_journal_checkpoint(
+        &self,
+        candidate: &JournalCheckpoint,
+    ) -> Result<bool> {
+        self.reject_projection_journal_lifecycle_in_native_path_group()?;
+        let owns_transaction = self.conn.is_autocommit();
+        if owns_transaction {
+            self.conn.execute_batch("BEGIN")?;
+        }
+        let result = self.verify_projection_journal_checkpoint_in_transaction(Some(candidate));
+        if owns_transaction {
+            match &result {
+                Ok(_) => self.conn.execute_batch("COMMIT")?,
+                Err(_) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                }
+            }
+        }
+        result
     }
 
     pub(crate) fn verify_projection_journal_checkpoint_in_transaction(
@@ -391,6 +443,7 @@ fn acknowledge_checkpoint(
     if acknowledged.position.sequence == state.acknowledged_sequence {
         return Ok(());
     }
+    let retained_context = read_context_window(conn, state, acknowledged.position.sequence)?;
     conn.execute(
         "UPDATE projection_journal_state
          SET acknowledged_sequence = ?1, acknowledged_cumulative_digest = ?2
@@ -400,7 +453,16 @@ fn acknowledge_checkpoint(
             acknowledged.cumulative_digest,
         ],
     )?;
-    prune_chunks_through(conn, state.generation, acknowledged.position.sequence)?;
+    // The transmitted context is the largest suffix satisfying both its count
+    // and byte bounds. Retain exactly that suffix plus its immediate physical
+    // predecessor when nonzero so the next request can recover the base digest.
+    // All records after the acknowledgement are above this pruning threshold.
+    let prune_through = retained_context
+        .base_checkpoint
+        .position
+        .sequence
+        .saturating_sub(1);
+    prune_chunks_through(conn, state.generation, prune_through)?;
     Ok(())
 }
 

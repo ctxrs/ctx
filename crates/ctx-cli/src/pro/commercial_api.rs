@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     io::Read,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -7,11 +8,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_pro_host_protocol::SignedEntitlement;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use url::Url;
+use zeroize::{Zeroize as _, ZeroizeOnDrop, Zeroizing};
 
 use super::request_identity::new_idempotency_key;
 
+mod referral;
+mod urls;
+
+pub(super) use referral::{ReferralCreateResult, ReferralPayoutResult, ReferralStatusResult};
+
 const MAX_API_RESPONSE_BYTES: u64 = 96 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_TRIAL_ACCESS_TOKEN_BYTES: usize = 2 * 1024;
 const MAX_URL_BYTES: usize = 4096;
 const MAX_TIMESTAMP: i64 = 253_402_300_799;
 const MAX_CHECKOUT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -141,7 +149,7 @@ pub(super) struct PortalResult {
     pub(super) url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TrialChallenge {
     pub(super) challenge_id: String,
@@ -150,21 +158,62 @@ pub(super) struct TrialChallenge {
     pub(super) artifact_access_token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TrialActivation {
     pub(super) disposition: String,
+    #[zeroize(skip)]
     pub(super) entitlement: SignedEntitlement,
     pub(super) trial_access_token: String,
     pub(super) trial_deadline_unix: i64,
+    #[serde(default)]
+    pub(super) referral_claim_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TrialRefresh {
+    #[zeroize(skip)]
     pub(super) entitlement: SignedEntitlement,
     pub(super) trial_access_token: String,
     pub(super) trial_deadline_unix: i64,
+    #[serde(default)]
+    pub(super) referral_claim_token: Option<String>,
+}
+
+impl fmt::Debug for TrialChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrialChallenge")
+            .field("challenge_id", &self.challenge_id)
+            .field("challenge_base64url", &self.challenge_base64url)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("artifact_access_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Debug for TrialActivation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrialActivation")
+            .field("disposition", &self.disposition)
+            .field("entitlement", &"[REDACTED]")
+            .field("trial_access_token", &"[REDACTED]")
+            .field("trial_deadline_unix", &self.trial_deadline_unix)
+            .finish()
+    }
+}
+
+impl fmt::Debug for TrialRefresh {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrialRefresh")
+            .field("entitlement", &"[REDACTED]")
+            .field("trial_access_token", &"[REDACTED]")
+            .field("trial_deadline_unix", &self.trial_deadline_unix)
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -244,6 +293,7 @@ impl CommercialApiFailure {
                             | "request_body_too_large"
                             | "unsupported_media_type"
                     )
+                    || referral::is_never_retryable_error_code(code)
                 {
                     return false;
                 }
@@ -286,9 +336,19 @@ impl CommercialApiClient {
         Ok(state)
     }
 
-    pub(super) fn checkout(&self, access_token: &str) -> Result<CheckoutResult> {
-        let result: CheckoutResult =
-            self.post("/v1/billing/checkout", access_token, &EmptyRequest {})?;
+    pub(super) fn checkout(
+        &self,
+        access_token: &str,
+        referral_claim_token: Option<&str>,
+    ) -> Result<CheckoutResult> {
+        referral::validate_optional_claim_token(referral_claim_token)?;
+        let result: CheckoutResult = self.post(
+            "/v1/billing/checkout",
+            access_token,
+            &CheckoutRequest {
+                referral_claim_token,
+            },
+        )?;
         result.validate()?;
         Ok(result)
     }
@@ -299,7 +359,7 @@ impl CommercialApiClient {
         if result.kind != "portal_created" {
             bail!("invalid_response: commercial API returned an invalid portal result");
         }
-        validate_https_url(&result.url, "billing portal")?;
+        urls::validate_portal_url(&result.url)?;
         Ok(result)
     }
 
@@ -326,27 +386,15 @@ impl CommercialApiClient {
 
     pub(super) fn trial_challenge(
         &self,
-        channel: &str,
-        target: &str,
-        current_version: Option<&str>,
-        protocol_version: u16,
-        protocol_fingerprint: &str,
-        installation_public_key_base64url: &str,
+        request: TrialChallengeRequest<'_>,
     ) -> Result<TrialChallenge> {
-        validate_fixed_base64url(installation_public_key_base64url, "installation public key")?;
-        let challenge: TrialChallenge = self.post_authorized(
-            "/v1/trials/challenge",
-            None,
-            &TrialChallengeRequest {
-                schema_version: 1,
-                channel,
-                target,
-                current_version,
-                protocol_version,
-                protocol_fingerprint,
-                installation_public_key_base64url,
-            },
+        validate_fixed_base64url(
+            request.installation_public_key_base64url,
+            "installation public key",
         )?;
+        referral::validate_optional_codename(request.referral_codename)?;
+        let challenge: TrialChallenge =
+            self.post_authorized("/v1/trials/challenge", None, &request)?;
         challenge.validate()?;
         Ok(challenge)
     }
@@ -363,7 +411,7 @@ impl CommercialApiClient {
         let authorization = trial_authorization(access_token)?;
         let activation: TrialActivation = self.post_authorized(
             "/v1/trials/activate",
-            Some(&authorization),
+            Some(authorization),
             &TrialActivationRequest {
                 schema_version: 1,
                 challenge_id,
@@ -384,7 +432,7 @@ impl CommercialApiClient {
         let authorization = trial_authorization(access_token)?;
         let refresh: TrialRefresh = self.post_authorized(
             "/v1/trials/refresh",
-            Some(&authorization),
+            Some(authorization),
             &TrialRefreshRequest {
                 schema_version: 1,
                 installation_public_key_base64url,
@@ -399,14 +447,15 @@ impl CommercialApiClient {
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, access_token: &str) -> Result<T> {
-        validate_access_token(access_token)?;
         let url = self.endpoint(path)?;
-        let response = self
-            .agent
-            .get(url.as_str())
-            .set("accept", COMMERCIAL_ACCEPT)
-            .set("authorization", &format!("Bearer {access_token}"))
-            .call();
+        let response = {
+            let authorization = bearer_authorization(access_token)?;
+            self.agent
+                .get(url.as_str())
+                .set("accept", COMMERCIAL_ACCEPT)
+                .set("authorization", authorization.as_str())
+                .call()
+        };
         self.finish(response, "commercial API request")
     }
 
@@ -416,20 +465,21 @@ impl CommercialApiClient {
         access_token: &str,
         body: &B,
     ) -> Result<T> {
-        validate_access_token(access_token)?;
-        self.post_authorized(path, Some(&format!("Bearer {access_token}")), body)
+        let authorization = bearer_authorization(access_token)?;
+        self.post_authorized(path, Some(authorization), body)
     }
 
     fn post_authorized<T: DeserializeOwned, B: Serialize>(
         &self,
         path: &str,
-        authorization: Option<&str>,
+        authorization: Option<Zeroizing<String>>,
         body: &B,
     ) -> Result<T> {
         let url = self.endpoint(path)?;
-        let body =
+        let mut body =
             serde_json::to_vec(body).context("invalid_request: encode commercial request")?;
         if body.len() > 16 * 1024 {
+            body.zeroize();
             bail!("invalid_request: commercial request is too large");
         }
         let mut request = self
@@ -438,11 +488,13 @@ impl CommercialApiClient {
             .set("accept", COMMERCIAL_ACCEPT)
             .set("content-type", "application/json")
             .set("idempotency-key", &new_idempotency_key("cli")?);
-        if let Some(authorization) = authorization {
+        if let Some(authorization) = authorization.as_deref() {
             validate_authorization_header(authorization)?;
             request = request.set("authorization", authorization);
         }
         let response = request.send_bytes(&body);
+        body.zeroize();
+        drop(authorization);
         self.finish(response, "commercial API request")
     }
 
@@ -494,6 +546,7 @@ impl TrialActivation {
             bail!("invalid_response: trial activation disposition is invalid");
         }
         validate_trial_token(&self.trial_access_token)?;
+        referral::validate_optional_claim_token(self.referral_claim_token.as_deref())?;
         validate_timestamp(Some(self.trial_deadline_unix), "trial deadline")
     }
 }
@@ -501,6 +554,7 @@ impl TrialActivation {
 impl TrialRefresh {
     fn validate(&self) -> Result<()> {
         validate_trial_token(&self.trial_access_token)?;
+        referral::validate_optional_claim_token(self.referral_claim_token.as_deref())?;
         validate_timestamp(Some(self.trial_deadline_unix), "trial deadline")
     }
 }
@@ -513,7 +567,7 @@ impl CheckoutResult {
                     .url
                     .as_deref()
                     .ok_or_else(|| anyhow!("invalid_response: Checkout result has no URL"))?;
-                validate_https_url(url, "Checkout")?;
+                urls::validate_checkout_url(url)?;
                 self.validate_poll_expiry()?;
                 if self.state.is_some() {
                     bail!("invalid_response: Checkout result unexpectedly contains account state");
@@ -557,19 +611,27 @@ impl CheckoutResult {
 struct EmptyRequest {}
 
 #[derive(Serialize)]
+struct CheckoutRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referral_claim_token: Option<&'a str>,
+}
+
+#[derive(Serialize)]
 struct EntitlementRequest<'a> {
     installation_public_key_base64url: &'a str,
 }
 
 #[derive(Serialize)]
-struct TrialChallengeRequest<'a> {
-    schema_version: u16,
-    channel: &'a str,
-    target: &'a str,
-    current_version: Option<&'a str>,
-    protocol_version: u16,
-    protocol_fingerprint: &'a str,
-    installation_public_key_base64url: &'a str,
+pub(super) struct TrialChallengeRequest<'a> {
+    pub(super) schema_version: u16,
+    pub(super) channel: &'a str,
+    pub(super) target: &'a str,
+    pub(super) current_version: Option<&'a str>,
+    pub(super) protocol_version: u16,
+    pub(super) protocol_fingerprint: &'a str,
+    pub(super) installation_public_key_base64url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) referral_codename: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -620,21 +682,29 @@ fn validate_authorization_header(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn trial_authorization(token: &str) -> Result<String> {
+fn bearer_authorization(token: &str) -> Result<Zeroizing<String>> {
+    validate_access_token(token)?;
+    Ok(Zeroizing::new(format!("Bearer {token}")))
+}
+
+fn trial_authorization(token: &str) -> Result<Zeroizing<String>> {
     validate_trial_token(token)?;
-    Ok(format!("CtxTrial {token}"))
+    Ok(Zeroizing::new(format!("CtxTrial {token}")))
 }
 
 fn validate_trial_token(token: &str) -> Result<()> {
-    if token.len() < 16
-        || token.len() > MAX_ACCESS_TOKEN_BYTES
+    if invalid_trial_token(token) {
+        bail!("invalid_response: anonymous trial credential is invalid");
+    }
+    Ok(())
+}
+
+fn invalid_trial_token(token: &str) -> bool {
+    token.len() < 16
+        || token.len() > MAX_TRIAL_ACCESS_TOKEN_BYTES
         || token.bytes().any(|byte| {
             !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
         })
-    {
-        bail!("authentication_required: anonymous trial credential is unavailable");
-    }
-    Ok(())
 }
 
 fn validate_fixed_base64url(value: &str, label: &str) -> Result<()> {
@@ -667,7 +737,7 @@ fn validate_timestamp(value: Option<i64>, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn unix_time() -> Result<i64> {
+pub(super) fn unix_time() -> Result<i64> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -706,6 +776,9 @@ fn validate_error(error: &ApiError) -> Result<()> {
 }
 
 fn commercial_error_message(error: &ApiError) -> &'static str {
+    if let Some(message) = referral::commercial_error_message(&error.code) {
+        return message;
+    }
     match error.code.as_str() {
         "authentication_required" => "sign in again with `ctx pro`",
         "billing_conflict" => {
@@ -820,13 +893,47 @@ fn typed_api_failure(
     validate_envelope(&failure.api_version, &failure.request_id)?;
     validate_error(&failure.error)?;
     let message = commercial_error_message(&failure.error);
+    let Some(code) = public_commercial_error_code(&failure.error.code) else {
+        return Ok(CommercialApiFailure::InvalidResponse { status });
+    };
     Ok(CommercialApiFailure::Response {
-        code: failure.error.code,
+        code,
         message,
         status,
         retryable: failure.error.retryable,
         retry_after,
     })
+}
+
+fn public_commercial_error_code(code: &str) -> Option<String> {
+    if let Some(code) = referral::public_commercial_error_code(code) {
+        return Some(code.to_owned());
+    }
+    match code {
+        "authentication_required"
+        | "billing_conflict"
+        | "commercial_access_locked"
+        | "commercial_identity_conflict"
+        | "not_found"
+        | "rate_limited"
+        | "anonymous_trial_already_consumed"
+        | "anonymous_trial_identity_ambiguous"
+        | "anonymous_trial_installation_limit" => Some(code.to_owned()),
+        "dependency_timeout" | "dependency_unavailable" | "service_unavailable" => {
+            Some("service_unavailable".to_owned())
+        }
+        "dependency_invalid_response" | "invalid_response" => Some("invalid_response".to_owned()),
+        "idempotency_conflict"
+        | "idempotency_key_invalid"
+        | "idempotency_key_required"
+        | "invalid_json"
+        | "invalid_installation_public_key"
+        | "invalid_request"
+        | "method_not_allowed"
+        | "request_body_too_large"
+        | "unsupported_media_type" => Some("invalid_request".to_owned()),
+        _ => None,
+    }
 }
 
 fn malformed_error_failure(status: u16, retry_after: Option<Duration>) -> CommercialApiFailure {
@@ -851,16 +958,20 @@ fn read_success_json<T: DeserializeOwned>(response: ureq::Response) -> Result<T>
 }
 
 fn read_json<T: DeserializeOwned>(response: ureq::Response, label: &str) -> Result<T> {
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_API_RESPONSE_BYTES as usize + 1));
     response
         .into_reader()
         .take(MAX_API_RESPONSE_BYTES + 1)
         .read_to_end(&mut bytes)
         .with_context(|| format!("service_unavailable: read {label}"))?;
     if bytes.len() as u64 > MAX_API_RESPONSE_BYTES {
+        bytes.zeroize();
         bail!("invalid_response: {label} is too large");
     }
-    serde_json::from_slice(&bytes).with_context(|| format!("invalid_response: parse {label}"))
+    let parsed =
+        serde_json::from_slice(&bytes).with_context(|| format!("invalid_response: parse {label}"));
+    bytes.zeroize();
+    parsed
 }
 
 pub(super) fn validate_https_url(value: &str, label: &str) -> Result<Url> {

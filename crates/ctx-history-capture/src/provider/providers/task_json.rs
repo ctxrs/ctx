@@ -6,7 +6,6 @@ mod normalization;
 pub(crate) mod cline_nativepath;
 
 pub(crate) use dialect::task_json_provider;
-pub(crate) use normalization::task_json_result_content;
 pub(crate) use normalization::{
     task_json_event_text, task_json_event_type, task_json_string_field, task_json_time_field,
     TaskJsonEventInput,
@@ -38,6 +37,3 @@ pub(crate) fn task_json_event_hash(
     );
     event.provider_event_hash
 }
-
-#[cfg(test)]
-pub(crate) const TASK_JSON_RESULT_CONTENT_PROFILE: &str = "task-json.result-body.v1";

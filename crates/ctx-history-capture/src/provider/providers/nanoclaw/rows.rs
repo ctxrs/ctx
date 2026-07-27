@@ -54,11 +54,33 @@ pub(super) struct NanoClawMessageRow {
 pub(super) struct NanoClawSessionCandidate {
     pub(super) rowid: i64,
     retained_bytes: i64,
+    storage_classes: Vec<String>,
 }
 
 impl NanoClawSessionCandidate {
     pub(super) fn observed_bytes(&self) -> Result<u64> {
         nanoclaw_observed_bytes(self.retained_bytes)
+    }
+
+    pub(super) fn rejection_reason(&self) -> Option<&'static str> {
+        let storage = self.storage_classes.as_slice();
+        if storage.len() != 15 {
+            return Some("NanoClaw session row has an invalid preflight shape");
+        }
+        let required_text = |kind: &str| matches!(kind, "integer" | "real" | "text");
+        let optional_text = |kind: &str| matches!(kind, "null" | "text");
+        let optional_timestamp = |kind: &str| matches!(kind, "null" | "integer" | "real" | "text");
+        if !required_text(&storage[0]) || !required_text(&storage[1]) {
+            Some("NanoClaw session identifier has an unsupported SQLite storage class")
+        } else if storage[2..7].iter().any(|kind| !optional_text(kind))
+            || storage[9..].iter().any(|kind| !optional_text(kind))
+        {
+            Some("NanoClaw session text field has an unsupported SQLite storage class")
+        } else if storage[7..9].iter().any(|kind| !optional_timestamp(kind)) {
+            Some("NanoClaw session timestamp has an unsupported SQLite storage class")
+        } else {
+            None
+        }
     }
 }
 
@@ -69,6 +91,7 @@ pub(super) struct NanoClawMessageCandidate {
     pub(super) timestamp: i64,
     pub(super) seq: i64,
     retained_bytes: i64,
+    storage_classes: Vec<String>,
 }
 
 impl NanoClawMessageCandidate {
@@ -78,6 +101,36 @@ impl NanoClawMessageCandidate {
             .ok_or(CaptureError::SystemInvariant(
                 "NanoClaw joined logical-row byte count overflowed",
             ))
+    }
+
+    pub(super) fn rejection_reason(&self) -> Option<&'static str> {
+        let storage = self.storage_classes.as_slice();
+        if storage.len() != 13 {
+            return Some("NanoClaw message row has an invalid preflight shape");
+        }
+        let required_text = |kind: &str| matches!(kind, "integer" | "real" | "text");
+        let optional_text = |kind: &str| matches!(kind, "null" | "text");
+        let optional_timestamp = |kind: &str| matches!(kind, "null" | "integer" | "real" | "text");
+        let optional_castable_text =
+            |kind: &str| matches!(kind, "null" | "integer" | "real" | "text");
+        if !required_text(&storage[0]) {
+            Some("NanoClaw message identifier has an unsupported SQLite storage class")
+        } else if !matches!(storage[1].as_str(), "null" | "integer") {
+            Some("NanoClaw message seq has an unsupported SQLite storage class")
+        } else if !optional_text(&storage[2])
+            || storage[4..10].iter().any(|kind| !optional_text(kind))
+            || !optional_text(&storage[11])
+        {
+            Some("NanoClaw message text field has an unsupported SQLite storage class")
+        } else if !optional_timestamp(&storage[3]) {
+            Some("NanoClaw message timestamp has an unsupported SQLite storage class")
+        } else if !optional_castable_text(&storage[10]) {
+            Some("NanoClaw message trigger has an unsupported SQLite storage class")
+        } else if !matches!(storage[12].as_str(), "null" | "integer") {
+            Some("NanoClaw message on_wake has an unsupported SQLite storage class")
+        } else {
+            None
+        }
     }
 }
 
@@ -121,8 +174,8 @@ pub(super) fn nanoclaw_session_projection(
         BTreeSet::new()
     };
     Ok(vec![
-        "CAST(s.id AS TEXT)".to_owned(),
-        "CAST(s.agent_group_id AS TEXT)".to_owned(),
+        nanoclaw_required_text_projection("s.id"),
+        nanoclaw_required_text_projection("s.agent_group_id"),
         nanoclaw_qualified_optional(columns, "s", "messaging_group_id", "NULL"),
         nanoclaw_qualified_optional(columns, "s", "thread_id", "NULL"),
         nanoclaw_qualified_optional(columns, "s", "agent_provider", "NULL"),
@@ -145,6 +198,13 @@ pub(super) fn nanoclaw_session_projection(
         nanoclaw_messaging_projection(&messaging_columns, "instance"),
         nanoclaw_messaging_projection(&messaging_columns, "name"),
     ])
+}
+
+fn nanoclaw_required_text_projection(qualified: &str) -> String {
+    format!(
+        "CASE WHEN typeof({qualified}) IN ('integer', 'real', 'text') \
+         THEN CAST({qualified} AS TEXT) ELSE '' END"
+    )
 }
 
 fn nanoclaw_qualified_optional(
@@ -210,11 +270,13 @@ pub(super) fn nanoclaw_fetch_session_candidate(
     columns: &BTreeSet<String>,
     after_rowid: Option<i64>,
 ) -> Result<Option<NanoClawSessionCandidate>> {
-    let retained = nanoclaw_retained_length_expr(&nanoclaw_session_projection(conn, columns)?);
+    let projection = nanoclaw_session_projection(conn, columns)?;
+    let retained = nanoclaw_retained_length_expr(&projection);
+    let storage_classes = nanoclaw_session_storage_classes(columns, &projection).join(", ");
     let (has_after, after_rowid) = after_rowid.map_or((0_i64, 0_i64), |rowid| (1, rowid));
     conn.query_row(
         &format!(
-            "select s.rowid, {retained} from sessions s \
+            "select s.rowid, {retained}, {storage_classes} from sessions s \
              where (?1 = 0 or s.rowid > ?2) order by s.rowid limit 1"
         ),
         [has_after, after_rowid],
@@ -222,6 +284,9 @@ pub(super) fn nanoclaw_fetch_session_candidate(
             Ok(NanoClawSessionCandidate {
                 rowid: row.get(0)?,
                 retained_bytes: row.get(1)?,
+                storage_classes: (2..17)
+                    .map(|index| row.get(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
             })
         },
     )
@@ -234,19 +299,41 @@ pub(super) fn nanoclaw_session_candidate_by_rowid(
     columns: &BTreeSet<String>,
     rowid: i64,
 ) -> Result<Option<NanoClawSessionCandidate>> {
-    let retained = nanoclaw_retained_length_expr(&nanoclaw_session_projection(conn, columns)?);
+    let projection = nanoclaw_session_projection(conn, columns)?;
+    let retained = nanoclaw_retained_length_expr(&projection);
+    let storage_classes = nanoclaw_session_storage_classes(columns, &projection).join(", ");
     conn.query_row(
-        &format!("select rowid, {retained} from sessions s where rowid = ?1"),
+        &format!("select rowid, {retained}, {storage_classes} from sessions s where rowid = ?1"),
         [rowid],
         |row| {
             Ok(NanoClawSessionCandidate {
                 rowid: row.get(0)?,
                 retained_bytes: row.get(1)?,
+                storage_classes: (2..17)
+                    .map(|index| row.get(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
             })
         },
     )
     .optional()
     .map_err(CaptureError::from)
+}
+
+fn nanoclaw_session_storage_classes(
+    columns: &BTreeSet<String>,
+    projection: &[String],
+) -> Vec<String> {
+    projection
+        .iter()
+        .enumerate()
+        .map(|(index, expression)| match index {
+            0 => "typeof(s.id)".to_owned(),
+            1 => "typeof(s.agent_group_id)".to_owned(),
+            7 => nanoclaw_qualified_type(columns, "s", "last_active"),
+            8 => nanoclaw_qualified_type(columns, "s", "created_at"),
+            _ => format!("typeof({expression})"),
+        })
+        .collect()
 }
 
 pub(super) fn nanoclaw_hydrate_native_session(
@@ -288,7 +375,7 @@ pub(super) fn nanoclaw_message_after(
     keyset: NanoClawFrontier,
 ) -> Result<NanoClawMessageAfter> {
     let timestamp = nanoclaw_message_timestamp_expr(columns, "m");
-    let seq = nanoclaw_qualified_optional(columns, "m", "seq", "NULL");
+    let seq = nanoclaw_message_seq_sort_expr(columns, "m");
     conn.query_row(
         &format!(
             "select coalesce({timestamp}, 0), coalesce({seq}, 0) \
@@ -316,8 +403,10 @@ pub(super) fn nanoclaw_fetch_message_candidate(
     after: Option<NanoClawMessageAfter>,
 ) -> Result<Option<NanoClawMessageCandidate>> {
     let timestamp = nanoclaw_message_timestamp_expr(columns, "m");
-    let seq = nanoclaw_qualified_optional(columns, "m", "seq", "NULL");
-    let retained = nanoclaw_retained_length_expr(&nanoclaw_message_projection(source, columns));
+    let seq = nanoclaw_message_seq_sort_expr(columns, "m");
+    let projection = nanoclaw_message_projection(source, columns);
+    let retained = nanoclaw_retained_length_expr(&projection);
+    let storage_classes = nanoclaw_message_storage_classes(source, columns, &projection).join(", ");
     let (has_after, after_timestamp, after_seq, after_source, after_rowid) =
         after.map_or((0_i64, 0_i64, 0_i64, 0_i64, 0_i64), |after| {
             (
@@ -332,18 +421,18 @@ pub(super) fn nanoclaw_fetch_message_candidate(
     let table = source.table();
     conn.query_row(
         &format!(
-            "select m.rowid, coalesce({timestamp}, 0), coalesce({seq}, 0), {retained} \
+            "select m.rowid, coalesce({timestamp}, 0), {seq}, {retained}, {storage_classes} \
              from {table} m where ?1 = 0 \
                 or coalesce({timestamp}, 0) > ?2 \
-                or (coalesce({timestamp}, 0) = ?2 and coalesce({seq}, 0) > ?3) \
-                or (coalesce({timestamp}, 0) = ?2 and coalesce({seq}, 0) = ?3 and ( \
+                or (coalesce({timestamp}, 0) = ?2 and {seq} > ?3) \
+                or (coalesce({timestamp}, 0) = ?2 and {seq} = ?3 and ( \
                     ?4 < ?5 or (?4 = ?5 and ( \
                         CAST(m.id AS TEXT) > (select CAST(a.id AS TEXT) from {table} a where a.rowid = ?6) \
                         or (CAST(m.id AS TEXT) = (select CAST(a.id AS TEXT) from {table} a where a.rowid = ?6) \
                             and m.rowid > ?6) \
                     )) \
                 )) \
-             order by coalesce({timestamp}, 0), coalesce({seq}, 0), CAST(m.id AS TEXT), m.rowid \
+             order by coalesce({timestamp}, 0), {seq}, CAST(m.id AS TEXT), m.rowid \
              limit 1"
         ),
         rusqlite::params![
@@ -361,6 +450,9 @@ pub(super) fn nanoclaw_fetch_message_candidate(
                 timestamp: row.get(1)?,
                 seq: row.get(2)?,
                 retained_bytes: row.get(3)?,
+                storage_classes: (4..17)
+                    .map(|index| row.get(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
             })
         },
     )
@@ -420,6 +512,58 @@ fn nanoclaw_message_projection(
     ]
 }
 
+fn nanoclaw_message_storage_classes(
+    source: NanoClawMessageSource,
+    columns: &BTreeSet<String>,
+    projection: &[String],
+) -> Vec<String> {
+    let raw = [
+        nanoclaw_qualified_type(columns, "m", "id"),
+        nanoclaw_qualified_type(columns, "m", "seq"),
+        nanoclaw_qualified_type(columns, "m", "kind"),
+        nanoclaw_qualified_type(columns, "m", "timestamp"),
+        if source == NanoClawMessageSource::Inbound {
+            nanoclaw_qualified_type(columns, "m", "status")
+        } else {
+            "typeof(NULL)".to_owned()
+        },
+        if source == NanoClawMessageSource::Outbound {
+            nanoclaw_qualified_type(columns, "m", "in_reply_to")
+        } else {
+            "typeof(NULL)".to_owned()
+        },
+        nanoclaw_qualified_type(columns, "m", "platform_id"),
+        nanoclaw_qualified_type(columns, "m", "channel_type"),
+        nanoclaw_qualified_type(columns, "m", "thread_id"),
+        nanoclaw_qualified_type(columns, "m", "content"),
+        if source == NanoClawMessageSource::Inbound {
+            nanoclaw_qualified_type(columns, "m", "trigger")
+        } else {
+            "typeof(NULL)".to_owned()
+        },
+        if source == NanoClawMessageSource::Inbound {
+            nanoclaw_qualified_type(columns, "m", "source_session_id")
+        } else {
+            "typeof(NULL)".to_owned()
+        },
+        if source == NanoClawMessageSource::Inbound {
+            nanoclaw_qualified_type(columns, "m", "on_wake")
+        } else {
+            "typeof(NULL)".to_owned()
+        },
+    ];
+    debug_assert_eq!(projection.len(), raw.len());
+    raw.into_iter().collect()
+}
+
+fn nanoclaw_qualified_type(columns: &BTreeSet<String>, alias: &str, column: &str) -> String {
+    if columns.contains(column) {
+        format!("typeof({alias}.{column})")
+    } else {
+        "typeof(NULL)".to_owned()
+    }
+}
+
 fn nanoclaw_qualified_optional_text(
     columns: &BTreeSet<String>,
     alias: &str,
@@ -434,6 +578,14 @@ fn nanoclaw_qualified_optional_text(
 
 fn nanoclaw_message_timestamp_expr(columns: &BTreeSet<String>, alias: &str) -> String {
     nanoclaw_qualified_timestamp(columns, alias, "timestamp")
+}
+
+fn nanoclaw_message_seq_sort_expr(columns: &BTreeSet<String>, alias: &str) -> String {
+    if columns.contains("seq") {
+        format!("CASE WHEN typeof({alias}.seq) = 'integer' THEN {alias}.seq ELSE 0 END")
+    } else {
+        "0".to_owned()
+    }
 }
 
 pub(super) fn nanoclaw_hydrate_native_message(

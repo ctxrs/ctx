@@ -17,13 +17,6 @@ mod schema;
 mod source;
 mod stream;
 
-pub(crate) fn goose_result_record(
-    conn: &rusqlite::Connection,
-    rowid: i64,
-) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
-    content::result_record(conn, rowid)
-}
-
 pub(crate) fn load_goose_message_values_schema(conn: &rusqlite::Connection) -> Result<()> {
     content::load_schema(conn)
 }
@@ -35,10 +28,11 @@ pub(crate) fn load_goose_message_values(
     content::load_message_values(conn, rowid)
 }
 
-pub(crate) fn goose_complete_message(
+pub(crate) fn goose_complete_message_with_normalized_hash(
+    conn: &rusqlite::Connection,
     values: &[NativeSqliteValue],
-) -> Result<(String, String, String)> {
-    content::complete_message(values)
+) -> Result<(String, String, String, String)> {
+    content::complete_message_with_normalized_hash(conn, values)
 }
 
 pub(crate) fn import_goose_nativepath(
@@ -55,4 +49,4 @@ pub(crate) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> Dat
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

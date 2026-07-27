@@ -110,6 +110,7 @@ filegroup(
 filegroup(
     name = "telemetry_contract_fixtures",
     srcs = glob([
+        "contracts/telemetry-v1/*.json",
         "contracts/telemetry-v1/*.md",
         "contracts/telemetry-v1/fixtures/*.json",
     ]),
@@ -169,6 +170,13 @@ filegroup(
 )
 
 filegroup(
+    name = "perf_smoke_runfiles",
+    srcs = ["scripts/public-ctx/perf-smoke.sh"] + glob([
+        "scripts/public-ctx/perf-smoke/*.sh",
+    ]),
+)
+
+filegroup(
     name = "upgrade_extractor_contract",
     srcs = ["scripts/test-windows-runtime-upgrade-extractor.ps1"],
     visibility = ["//visibility:public"],
@@ -210,10 +218,13 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
+    "//crates/ctx-history-capture:codex_nativepath_qualification_tests",
     "//crates/ctx-history-capture:codex_tail_nativepath_tests",
     "//crates/ctx-history-capture:complete_content_jsonl_tests",
     "//crates/ctx-history-capture:complete_content_sqlite_tests",
+    "//crates/ctx-history-capture:crush_identity_storage_tests",
     "//crates/ctx-history-capture:cursor_native_tests",
+    "//crates/ctx-history-capture:opencode_nativepath_release_blockers_tests",
     "//crates/ctx-history-capture:structured_complete_content_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
@@ -317,6 +328,16 @@ py_test(
     ],
     imports = ["tools/bazel"],
     main = "//tools/bazel:select_affected_tests_test.py",
+)
+
+py_test(
+    name = "perf_smoke_tests",
+    srcs = ["scripts/public-ctx/perf-smoke_test.py"],
+    data = [
+        ":perf_smoke_runfiles",
+        "Cargo.toml",
+    ],
+    main = "scripts/public-ctx/perf-smoke_test.py",
 )
 
 sh_test(
@@ -750,10 +771,13 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
+    "//crates/ctx-history-capture:codex_nativepath_qualification_tests",
     "//crates/ctx-history-capture:codex_tail_nativepath_tests",
     "//crates/ctx-history-capture:complete_content_jsonl_tests",
     "//crates/ctx-history-capture:complete_content_sqlite_tests",
+    "//crates/ctx-history-capture:crush_identity_storage_tests",
     "//crates/ctx-history-capture:cursor_native_tests",
+    "//crates/ctx-history-capture:opencode_nativepath_release_blockers_tests",
     "//crates/ctx-history-capture:structured_complete_content_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
@@ -814,6 +838,7 @@ test_suite(
         ":native_candidate_smoke_tests",
         ":native_rust_smoke",
         ":package_audit_fast",
+        ":perf_smoke_tests",
         ":public_control_surface_check",
         ":public_cli_bazel_build_info_tests",
         ":public_cli_bazel_release_contract",

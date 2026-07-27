@@ -84,7 +84,7 @@ impl<'a> ForgeCodeOutputReplay<'a> {
         let observations = std::mem::take(&mut page.outputs);
         let logical_units = observations.len().max(1);
         let conservative_serialized_bytes = page
-            .retained_bytes
+            .retained_output_bytes
             .saturating_add(FORGECODE_OUTPUT_ACCOUNTING_RESERVE_BYTES);
         let output = NativeProOutputPage {
             inventory_generation: self.sink.inventory_generation(),

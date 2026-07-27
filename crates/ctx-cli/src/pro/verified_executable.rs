@@ -30,7 +30,7 @@ pub(super) struct VerifiedHelperExecutable {
 }
 
 impl VerifiedHelperExecutable {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     pub(super) fn open_developer(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
             .context("pro_not_installed: inspect developer Pro helper")?;

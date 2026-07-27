@@ -20,7 +20,9 @@ use crate::{
         show::run_show,
         sources::run_sources,
         sql::run_sql,
-        status::{malformed_config_failure, run_status, run_usage_action},
+        status::{
+            malformed_config_failure, removed_cloud_config_failure, run_status, run_usage_action,
+        },
     },
     complete_content,
     config::AppConfig,
@@ -58,6 +60,11 @@ pub(crate) fn run() -> ExitCode {
 pub(crate) fn run_cli() -> Result<()> {
     let started = Instant::now();
     let cli = Cli::parse();
+    match &cli.command {
+        CommandRoot::Pro(args) => args.validate_invocation()?,
+        CommandRoot::Referral(args) => args.validate_invocation()?,
+        _ => {}
+    }
     let deprecated_controls = DeprecatedControls::detect();
     if command_deprecation_warning_eligible(&cli.command) {
         if let Some(warning) = deprecated_controls.warning() {
@@ -89,6 +96,12 @@ pub(crate) fn run_cli() -> Result<()> {
     let mut config =
         match AppConfig::load_with_deprecated_controls(&data_root, &deprecated_controls) {
             Ok(config) => config,
+            Err(error)
+                if command_is_usage_status_report(&cli.command)
+                    && crate::config::is_removed_cloud_mode_error(&error) =>
+            {
+                return removed_cloud_config_failure(json_output);
+            }
             Err(_) if command_is_usage_status_report(&cli.command) => {
                 return malformed_config_failure(json_output);
             }
@@ -183,6 +196,7 @@ pub(crate) fn run_cli() -> Result<()> {
             &config,
         ),
         CommandRoot::Pro(args) => pro::run_lifecycle(args, data_root.clone()),
+        CommandRoot::Referral(args) => pro::run_referral(args, data_root.clone()),
         CommandRoot::Blame(args) => {
             crate::commands::blame::run(args, data_root.clone(), &mut local_usage_draft)
         }
@@ -286,6 +300,7 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Locate(args) => locate_json_output(args),
         CommandRoot::Search(args) => args.json,
         CommandRoot::Pro(args) => args.json_output(),
+        CommandRoot::Referral(args) => args.json_output(),
         CommandRoot::Blame(args) => args.json_output(),
         CommandRoot::Sql(args) => args.output_format() == SqlFormat::Json,
         CommandRoot::Docs(args) => args.json_output(),

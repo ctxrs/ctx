@@ -2,6 +2,13 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct KiroRejection {
+    pub(super) line: u64,
+    pub(super) reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct KiroFrontier {
     pub(super) version: u32,
     pub(super) phase: KiroPhase,
@@ -42,6 +49,10 @@ pub(super) struct KiroStoreCursor {
     pub(super) terminal: bool,
     pub(super) generation: u64,
     pub(super) rejected_records: u64,
+    #[serde(default)]
+    pub(super) accepted_content_records: u64,
+    #[serde(default)]
+    pub(super) rejections: Vec<KiroRejection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +107,8 @@ impl KiroStoreCursor {
             || cursor.locator_identity.is_empty()
             || cursor.canonical_source_identity.is_empty()
             || (cursor.terminal && cursor.retirement.is_some())
+            || cursor.rejections.len() > KIRO_MAX_REJECTION_DETAILS
+            || u64::try_from(cursor.rejections.len()).unwrap_or(u64::MAX) > cursor.rejected_records
         {
             return Err(CaptureError::InvalidPayload(
                 "Kiro NativePath cursor has an unsupported version or provider".to_owned(),
@@ -109,6 +122,32 @@ pub(super) struct KiroCoreStart {
     pub(super) frontier: KiroFrontier,
     pub(super) retirement: Option<KiroRetirementRequest>,
     pub(super) already_terminal: bool,
+    pub(super) rejected_records: u64,
+    pub(super) accepted_content_records: u64,
+    pub(super) rejections: Vec<KiroRejection>,
+}
+
+impl KiroCoreStart {
+    pub(super) fn summary(&self) -> ProviderImportSummary {
+        let mut summary = ProviderImportSummary {
+            failed: usize::try_from(self.rejected_records).unwrap_or(usize::MAX),
+            accepted_content_records: usize::try_from(self.accepted_content_records)
+                .unwrap_or(usize::MAX),
+            failures: self
+                .rejections
+                .iter()
+                .map(|rejection| ProviderImportFailure {
+                    line: usize::try_from(rejection.line)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                    error: rejection.reason.clone(),
+                })
+                .collect(),
+            ..ProviderImportSummary::default()
+        };
+        summary.set_work_result(ProviderImportWorkResult::NoOp);
+        summary
+    }
 }
 
 pub(super) fn core_start(
@@ -121,6 +160,9 @@ pub(super) fn core_start(
             frontier: initial,
             retirement: None,
             already_terminal: false,
+            rejected_records: 0,
+            accepted_content_records: 0,
+            rejections: Vec::new(),
         });
     };
     if let Ok(committed) = decode_native_path_committed_cursor(&stored.cursor) {
@@ -135,12 +177,18 @@ pub(super) fn core_start(
                 frontier: cursor.frontier,
                 retirement: cursor.retirement,
                 already_terminal: cursor.terminal,
+                rejected_records: cursor.rejected_records,
+                accepted_content_records: cursor.accepted_content_records,
+                rejections: cursor.rejections,
             });
         }
         return Ok(KiroCoreStart {
             frontier: initial,
             retirement: None,
             already_terminal: false,
+            rejected_records: 0,
+            accepted_content_records: 0,
+            rejections: Vec::new(),
         });
     }
     decode_released_kiro_cursor(&stored.cursor)?;
@@ -148,6 +196,9 @@ pub(super) fn core_start(
         frontier: initial,
         retirement: None,
         already_terminal: false,
+        rejected_records: 0,
+        accepted_content_records: 0,
+        rejections: Vec::new(),
     })
 }
 

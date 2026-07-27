@@ -193,6 +193,34 @@ fn index_wait_default_skips_semantic_when_disabled_after_import() {
 }
 
 #[test]
+fn index_watch_default_skips_semantic_when_disabled_after_import() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let output = ctx(&temp)
+        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let snapshots = String::from_utf8(output.stdout).unwrap();
+    let snapshots = snapshots.lines().collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1, "{snapshots:#?}");
+    let status: Value = serde_json::from_str(snapshots[0]).unwrap();
+    assert_eq!(status["lexical"]["status"], "ready");
+    assert_eq!(status["semantic"]["enabled"], false);
+    assert_eq!(status["semantic"]["config_source"], "default");
+}
+
+#[test]
 fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");

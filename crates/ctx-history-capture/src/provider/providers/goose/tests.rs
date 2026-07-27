@@ -56,7 +56,7 @@ fn goose_output_body_and_outcome_use_the_same_direct_tool_responses() {
     assert_eq!(output.outcome.duration_ms, Some(42));
 }
 
-pub(super) fn create_goose_tables(conn: &Connection) {
+pub(crate) fn create_goose_tables(conn: &Connection) {
     conn.execute_batch(
         "create table schema_version (version integer not null);
          insert into schema_version values (14);

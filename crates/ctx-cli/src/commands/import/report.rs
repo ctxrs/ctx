@@ -4,7 +4,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    CaptureError, ProviderImportSummary, ProviderImportWorkResult, ProviderSourceStatus,
+    CaptureError, ProviderImportSummary, ProviderImportWorkResult, ProviderSourceFailureKind,
+    ProviderSourceStatus,
 };
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::StoreError;
@@ -576,7 +577,25 @@ pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
     for cause in error.chain() {
         if let Some(capture) = cause.downcast_ref::<CaptureError>() {
             return match capture {
-                CaptureError::UnsupportedSchemaVersion(_) => ImportFailureType::UnsupportedSchema,
+                CaptureError::ProviderSource { kind, .. } => match kind {
+                    ProviderSourceFailureKind::NotFound => ImportFailureType::NotFound,
+                    ProviderSourceFailureKind::Permission => ImportFailureType::Permission,
+                    ProviderSourceFailureKind::Locked
+                    | ProviderSourceFailureKind::Corrupt
+                    | ProviderSourceFailureKind::SourceDatabase => {
+                        ImportFailureType::SourceDatabase
+                    }
+                    ProviderSourceFailureKind::SchemaIncompatible => {
+                        ImportFailureType::UnsupportedSchema
+                    }
+                    ProviderSourceFailureKind::InvalidSource => ImportFailureType::MalformedSource,
+                    ProviderSourceFailureKind::SourceChanged | ProviderSourceFailureKind::Io => {
+                        ImportFailureType::Other
+                    }
+                },
+                CaptureError::UnsupportedSchemaVersion(_) | CaptureError::UnsupportedSchema(_) => {
+                    ImportFailureType::UnsupportedSchema
+                }
                 CaptureError::Io(error) => match error.kind() {
                     std::io::ErrorKind::NotFound => ImportFailureType::NotFound,
                     std::io::ErrorKind::PermissionDenied => ImportFailureType::Permission,
@@ -691,6 +710,19 @@ mod tests {
     }
 
     #[test]
+    fn structural_provider_schema_errors_are_typed_as_unsupported_schema() {
+        let error = anyhow::Error::new(CaptureError::UnsupportedSchema(
+            "missing Kiro column".to_owned(),
+        ));
+
+        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+        assert_eq!(
+            import_failure_type(&error),
+            ImportFailureType::UnsupportedSchema
+        );
+    }
+
+    #[test]
     fn raw_source_io_and_sqlite_errors_have_stable_typed_classification() {
         let missing = anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -708,6 +740,68 @@ mod tests {
     }
 
     #[test]
+    fn provider_schema_errors_have_stable_typed_classification() {
+        let error = anyhow::Error::new(CaptureError::UnsupportedSchema(
+            "missing required writes table".to_owned(),
+        ));
+
+        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+        assert_eq!(
+            import_failure_type(&error),
+            ImportFailureType::UnsupportedSchema
+        );
+    }
+
+    #[test]
+    fn typed_native_source_failures_have_stable_cli_classification() {
+        let cases = [
+            (
+                ProviderSourceFailureKind::NotFound,
+                ImportFailureType::NotFound,
+            ),
+            (
+                ProviderSourceFailureKind::Permission,
+                ImportFailureType::Permission,
+            ),
+            (
+                ProviderSourceFailureKind::Locked,
+                ImportFailureType::SourceDatabase,
+            ),
+            (
+                ProviderSourceFailureKind::Corrupt,
+                ImportFailureType::SourceDatabase,
+            ),
+            (
+                ProviderSourceFailureKind::SchemaIncompatible,
+                ImportFailureType::UnsupportedSchema,
+            ),
+            (
+                ProviderSourceFailureKind::InvalidSource,
+                ImportFailureType::MalformedSource,
+            ),
+            (
+                ProviderSourceFailureKind::SourceDatabase,
+                ImportFailureType::SourceDatabase,
+            ),
+            (
+                ProviderSourceFailureKind::SourceChanged,
+                ImportFailureType::Other,
+            ),
+            (ProviderSourceFailureKind::Io, ImportFailureType::Other),
+        ];
+        for (kind, expected) in cases {
+            let error = anyhow::Error::new(CaptureError::ProviderSource {
+                provider: "test",
+                path: Path::new("provider.sqlite").to_path_buf(),
+                kind,
+                detail: "typed failure".to_owned(),
+            });
+            assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+            assert_eq!(import_failure_type(&error), expected, "kind={kind:?}");
+        }
+    }
+
+    #[test]
     fn ctx_owned_io_is_system_scoped() {
         let error = anyhow::Error::new(CaptureError::SystemIo {
             operation: "write cursor temp file",
@@ -716,6 +810,19 @@ mod tests {
 
         assert_eq!(import_error_scope(&error), ImportFailureScope::System);
         assert_eq!(import_failure_type(&error), ImportFailureType::SystemIo);
+    }
+
+    #[test]
+    fn provider_schema_is_source_scoped_and_typed() {
+        let error = anyhow::Error::new(CaptureError::UnsupportedSchema(
+            "required threads table is missing".to_owned(),
+        ));
+
+        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+        assert_eq!(
+            import_failure_type(&error),
+            ImportFailureType::UnsupportedSchema
+        );
     }
 
     #[test]

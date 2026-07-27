@@ -4,8 +4,7 @@ use ctx_history_core::EventType;
 use rusqlite::Connection;
 
 use crate::complete_content::{
-    CompleteContentError, CompleteContentErrorKind, CompleteMessageRequest, ResolvedResultContent,
-    ResultContentRequest, SourceVerification, COMPLETE_CONTENT_MAX_BODY_BYTES,
+    CompleteContentError, CompleteContentErrorKind, CompleteMessageRequest,
 };
 use crate::provider::providers::deepagents as provider;
 
@@ -60,46 +59,6 @@ pub(super) fn resolve_message(
     })
 }
 
-pub(super) fn resolve_result(
-    conn: &Connection,
-    request: &ResultContentRequest,
-    address: &provider::DeepAgentsContentAddress,
-) -> Result<ResolvedResultContent, CompleteContentError> {
-    let resolved = provider::resolve_deepagents_content(conn, address)
-        .map_err(|cause| map_result_capture_error(request, cause))?
-        .ok_or_else(|| {
-            CompleteContentError::new(
-                CompleteContentErrorKind::SourceRecordMissing,
-                request.event_id,
-            )
-        })?;
-    if !matches!(
-        resolved.event.event_type,
-        EventType::ToolOutput | EventType::CommandOutput
-    ) || native_record_id(
-        resolved.event.provider_event_index,
-        resolved.event.provider_event_hash.as_deref(),
-        Some(resolved.event.cursor.as_str()),
-    ) != request.expected_native_record_id
-        || resolved.record_digest != request.expected_record_digest
-        || !request
-            .expected_content_ref
-            .verifies(resolved.text.as_bytes())
-        || resolved.text.len() > COMPLETE_CONTENT_MAX_BODY_BYTES
-    {
-        return Err(CompleteContentError::new(
-            CompleteContentErrorKind::ContentVerificationFailed,
-            request.event_id,
-        ));
-    }
-    Ok(ResolvedResultContent {
-        event_id: request.event_id,
-        content: resolved.text,
-        content_ref: request.expected_content_ref.clone(),
-        verification: SourceVerification::VERIFIED,
-    })
-}
-
 fn decode_address(
     request: &CompleteMessageRequest,
 ) -> Result<provider::DeepAgentsContentAddress, CompleteContentError> {
@@ -115,29 +74,4 @@ fn decode_address(
     }
     provider::decode_deepagents_content_address(locator.value())
         .ok_or_else(|| error(request, CompleteContentErrorKind::ContentVerificationFailed))
-}
-
-fn map_result_capture_error(
-    request: &ResultContentRequest,
-    cause: crate::CaptureError,
-) -> CompleteContentError {
-    let kind = match cause {
-        crate::CaptureError::Io(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-            CompleteContentErrorKind::SourceMissing
-        }
-        crate::CaptureError::Io(_) | crate::CaptureError::InvalidProviderTranscriptPath { .. } => {
-            CompleteContentErrorKind::SourceUnreadable
-        }
-        crate::CaptureError::SourceChangedDuringCapture => CompleteContentErrorKind::SourceChanged,
-        crate::CaptureError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
-            if matches!(
-                failure.code,
-                rusqlite::ErrorCode::TooBig | rusqlite::ErrorCode::OperationInterrupted
-            ) =>
-        {
-            CompleteContentErrorKind::ContentTooLarge
-        }
-        _ => CompleteContentErrorKind::ContentVerificationFailed,
-    };
-    CompleteContentError::new(kind, request.event_id)
 }

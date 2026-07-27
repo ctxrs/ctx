@@ -15,9 +15,12 @@ use crate::common::io::{
 use crate::provider::importer::BoundedParserCheckpoint;
 use crate::provider::normalization::provider_local_preview;
 use crate::provider::provider_safe_path_segment;
-use crate::{CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::{CaptureError, ProviderImportFailure, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
-use super::{MAX_JUNIE_INDEX_BYTES, MAX_JUNIE_INDEX_ENTRIES, MAX_JUNIE_INDEX_METADATA_BYTES};
+use super::{
+    MAX_JUNIE_FAILURES, MAX_JUNIE_FAILURE_BYTES, MAX_JUNIE_INDEX_BYTES, MAX_JUNIE_INDEX_ENTRIES,
+    MAX_JUNIE_INDEX_METADATA_BYTES,
+};
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct JunieIndexMeta {
@@ -39,12 +42,21 @@ pub(super) struct JunieSessionPath {
 struct JunieIndex {
     ordered_metas: Vec<JunieIndexMeta>,
     session_ids: HashSet<String>,
+    rejection_count: u64,
+    rejections: Vec<ProviderImportFailure>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct JunieSessionTreeVisit {
+    pub(super) visited: usize,
+    pub(super) rejection_count: u64,
+    pub(super) rejections: Vec<ProviderImportFailure>,
 }
 
 pub(super) fn visit_junie_session_event_paths(
     path: &Path,
     visit: &mut dyn FnMut(JunieSessionPath, usize) -> Result<()>,
-) -> Result<usize> {
+) -> Result<JunieSessionTreeVisit> {
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
@@ -56,7 +68,7 @@ pub(super) fn visit_junie_session_event_paths(
     ensure_provider_path_parents_are_not_symlinks(path)?;
     if file_type.is_file() {
         if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
-            return Ok(0);
+            return Ok(JunieSessionTreeVisit::default());
         }
         let session_id = junie_session_id_from_events_path(path)?;
         let index_meta =
@@ -72,10 +84,13 @@ pub(super) fn visit_junie_session_event_paths(
             },
             0,
         )?;
-        return Ok(1);
+        return Ok(JunieSessionTreeVisit {
+            visited: 1,
+            ..JunieSessionTreeVisit::default()
+        });
     }
     if !file_type.is_dir() {
-        return Ok(0);
+        return Ok(JunieSessionTreeVisit::default());
     }
 
     let direct_events = path.join("events.jsonl");
@@ -95,16 +110,21 @@ pub(super) fn visit_junie_session_event_paths(
             },
             0,
         )?;
-        return Ok(1);
+        return Ok(JunieSessionTreeVisit {
+            visited: 1,
+            ..JunieSessionTreeVisit::default()
+        });
     }
 
     let index_path = path.join("index.jsonl");
     if !index_path.is_file() {
-        return Ok(0);
+        return Ok(JunieSessionTreeVisit::default());
     }
     let JunieIndex {
         ordered_metas,
         session_ids: indexed_session_ids,
+        rejection_count,
+        rejections,
     } = read_junie_index(&index_path)?;
     let mut visited = 0_usize;
     for meta in ordered_metas {
@@ -173,7 +193,11 @@ pub(super) fn visit_junie_session_event_paths(
         )?;
         visited = visited.saturating_add(1);
     }
-    Ok(visited)
+    Ok(JunieSessionTreeVisit {
+        visited,
+        rejection_count,
+        rejections,
+    })
 }
 
 pub(super) fn junie_provider_session_id(session_path: &JunieSessionPath) -> Result<String> {
@@ -250,17 +274,20 @@ fn read_junie_index(path: &Path) -> Result<JunieIndex> {
     let mut total_bytes = 0_usize;
     let mut ordered_metas = Vec::new();
     let mut session_ids = HashSet::new();
+    let mut rejection_count = 0_u64;
+    let mut rejections = Vec::new();
     loop {
         let remaining_bytes = MAX_JUNIE_INDEX_BYTES.saturating_sub(total_bytes);
         let read_limit = u64::try_from(remaining_bytes.saturating_add(1))
             .map_err(|_| CaptureError::SystemInvariant("Junie index byte limit exceeds u64"))?;
         let mut bounded_reader = (&mut reader).take(read_limit);
-        let bytes =
-            match read_provider_jsonl_line_or_skip_oversized(&mut bounded_reader, &mut line)? {
-                ProviderJsonlLineRead::Eof => break,
-                ProviderJsonlLineRead::Line { bytes }
-                | ProviderJsonlLineRead::Oversized { bytes } => bytes,
-            };
+        let read = read_provider_jsonl_line_or_skip_oversized(&mut bounded_reader, &mut line)?;
+        let bytes = match read {
+            ProviderJsonlLineRead::Eof => break,
+            ProviderJsonlLineRead::Line { bytes } | ProviderJsonlLineRead::Oversized { bytes } => {
+                bytes
+            }
+        };
         entry_count = entry_count
             .checked_add(1)
             .ok_or(CaptureError::SystemInvariant(
@@ -284,10 +311,34 @@ fn read_junie_index(path: &Path) -> Result<JunieIndex> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
+        if matches!(read, ProviderJsonlLineRead::Oversized { .. }) {
+            record_index_rejection(
+                &mut rejections,
+                &mut rejection_count,
+                entry_count,
+                format!(
+                    "Junie index row exceeds the {} byte provider record limit",
+                    crate::MAX_PROVIDER_JSONL_LINE_BYTES
+                ),
+            );
+            continue;
+        }
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            record_index_rejection(
+                &mut rejections,
+                &mut rejection_count,
+                entry_count,
+                "Junie index row is not valid JSON".to_owned(),
+            );
             continue;
         };
         let Some(meta) = junie_index_meta_from_value(value) else {
+            record_index_rejection(
+                &mut rejections,
+                &mut rejection_count,
+                entry_count,
+                "Junie index row has a missing or unsafe sessionId".to_owned(),
+            );
             continue;
         };
         if session_ids.insert(meta.session_id.clone()) {
@@ -297,7 +348,29 @@ fn read_junie_index(path: &Path) -> Result<JunieIndex> {
     Ok(JunieIndex {
         ordered_metas,
         session_ids,
+        rejection_count,
+        rejections,
     })
+}
+
+fn record_index_rejection(
+    failures: &mut Vec<ProviderImportFailure>,
+    rejection_count: &mut u64,
+    line: usize,
+    mut error: String,
+) {
+    *rejection_count = rejection_count.saturating_add(1);
+    if failures.len() >= MAX_JUNIE_FAILURES {
+        return;
+    }
+    if error.len() > MAX_JUNIE_FAILURE_BYTES {
+        let mut boundary = MAX_JUNIE_FAILURE_BYTES;
+        while !error.is_char_boundary(boundary) {
+            boundary = boundary.saturating_sub(1);
+        }
+        error.truncate(boundary);
+    }
+    failures.push(ProviderImportFailure { line, error });
 }
 
 fn junie_index_meta_from_value(value: Value) -> Option<JunieIndexMeta> {

@@ -16,7 +16,7 @@ fn row(thread: Value) -> ZedThreadRow {
     }
 }
 
-fn snapshot(decoded: ZedDecodedEvent<'_>) -> EventSnapshot {
+fn snapshot(decoded: ZedDecodedEvent) -> EventSnapshot {
     let event = decoded.event;
     (
         json!({

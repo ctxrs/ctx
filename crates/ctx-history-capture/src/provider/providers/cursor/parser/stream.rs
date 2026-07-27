@@ -162,7 +162,12 @@ pub(super) fn scan_cursor_reader_with_limit(
     }
     let proof = prefix.finish();
     let checkpoint = CursorCheckpoint::new(proof, session, !saw_incomplete, rejections.total > 0);
-    let page_stats = pages.finish(checkpoint.clone(), rejections.total, &rejections.samples)?;
+    let page_stats = pages.finish(
+        checkpoint.clone(),
+        retained_event_count(&stats),
+        rejections.total,
+        &rejections.samples,
+    )?;
     stats.publication_pages = page_stats.pages;
     stats.nativepath_publication_rows = page_stats.rows;
     stats.publication_serialized_bytes = page_stats.serialized_bytes;
@@ -230,7 +235,16 @@ fn process_complete_line(
         }
     };
     let semantic_ordinal = prefix.semantic_records();
-    let sanitized = match decode_sanitized_record(payload, semantic_ordinal, &classification) {
+    let byte_start = prefix.complete_bytes();
+    let byte_end_exclusive = byte_start.saturating_add(line.consumed_bytes);
+    let sanitized = match decode_sanitized_record(
+        payload,
+        semantic_ordinal,
+        physical_line,
+        byte_start,
+        byte_end_exclusive,
+        &classification,
+    ) {
         Ok(sanitized) => sanitized,
         Err(_) => {
             let rejection = CursorRecordRejection {
@@ -247,23 +261,42 @@ fn process_complete_line(
         stats.native_result_records = stats.native_result_records.saturating_add(1);
         stats.native_result_bytes = stats.native_result_bytes.saturating_add(line.payload_bytes);
     }
+    let pre_record_checkpoint =
+        CursorCheckpoint::new(prefix.proof(), session.clone(), false, rejections.total > 0);
+    let pre_record_retained_event_count = retained_event_count(stats);
     prefix.record_semantic(line.consumed_bytes, line.content_sha256, &sanitized)?;
     let projected = project_cursor_record(&sanitized)?;
     update_cursor_session_checkpoint(session, &projected);
     update_retained_stats(stats, &projected);
     if !verifying {
-        let next_checkpoint =
+        let post_record_checkpoint =
             CursorCheckpoint::new(prefix.proof(), session.clone(), false, rejections.total > 0);
-        for event in projected {
+        let post_record_retained_event_count = retained_event_count(stats);
+        let final_part = projected.len().saturating_sub(1);
+        for (part, event) in projected.into_iter().enumerate() {
+            let (checkpoint, retained_event_count) = if part == final_part {
+                (&post_record_checkpoint, post_record_retained_event_count)
+            } else {
+                (&pre_record_checkpoint, pre_record_retained_event_count)
+            };
             pages.push(
                 event,
-                &next_checkpoint,
+                checkpoint,
+                retained_event_count,
                 rejections.total,
                 &rejections.samples,
             )?;
         }
     }
     Ok(())
+}
+
+fn retained_event_count(stats: &CursorParserStats) -> u64 {
+    stats
+        .retained_messages
+        .saturating_add(stats.retained_summaries)
+        .saturating_add(stats.retained_notices)
+        .saturating_add(stats.retained_tool_calls)
 }
 
 fn update_retained_stats(stats: &mut CursorParserStats, events: &[CursorNativeEvent]) {

@@ -18,62 +18,6 @@ pub(crate) use schema::{
     OPENCODE_SQLITE_DIALECT,
 };
 
-pub(crate) fn opencode_result_record(
-    conn: &rusqlite::Connection,
-    shape_tag: u8,
-    rowid: i64,
-) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
-    let shape = OpenCodeCapturedShape::from_tag(shape_tag)?;
-    let Some(values) = content_locator::opencode_values_at_rowid(conn, shape, rowid)? else {
-        return Ok(None);
-    };
-    let text = |index: usize| match values.get(index) {
-        Some(NativeSqliteValue::Text(value)) => Ok(value.as_str()),
-        _ => Err(CaptureError::InvalidPayload(
-            "OpenCode result logical row has an invalid text value".to_owned(),
-        )),
-    };
-    let message_id = text(2)?;
-    let source_table = text(13)?;
-    let (native_record_id, entry_type, data) = if source_table == "message+part" {
-        let part_id = text(11)?;
-        let part_type = text(12)?;
-        (
-            format!("{message_id}:{part_id}"),
-            if matches!(part_type, "tool" | "tool_result" | "result") {
-                "tool".to_owned()
-            } else {
-                part_type.to_owned()
-            },
-            serde_json::from_str::<serde_json::Value>(text(10)?).map_err(|error| {
-                CaptureError::InvalidPayload(format!(
-                    "OpenCode result part is no longer valid JSON: {error}"
-                ))
-            })?,
-        )
-    } else {
-        let data = serde_json::from_str::<serde_json::Value>(text(9)?).map_err(|error| {
-            CaptureError::InvalidPayload(format!(
-                "OpenCode result message is no longer valid JSON: {error}"
-            ))
-        })?;
-        (
-            message_id.to_owned(),
-            normalization::opencode_entry_type_from_data(text(4)?, text(9)?),
-            data,
-        )
-    };
-    let content = normalization::opencode_normalized_result_content(&entry_type, &data)
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload("OpenCode row is no longer a supported result".to_owned())
-        })?;
-    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
-        values,
-        native_record_id,
-        content,
-    }))
-}
-
 pub(crate) fn load_opencode_message_values_schema(
     conn: &rusqlite::Connection,
     dialect: &OpenCodeSqliteDialect,
@@ -156,11 +100,19 @@ pub(crate) fn load_opencode_message_values(
     ])
 }
 
-pub(crate) fn opencode_complete_message(
+pub(crate) fn opencode_complete_message_with_normalized_hash(
     values: &[NativeSqliteValue],
     dialect: &OpenCodeSqliteDialect,
-) -> Result<(String, String, String)> {
-    complete_content::opencode_complete_message(values, dialect)
+) -> Result<(String, String, String, String)> {
+    complete_content::opencode_complete_message_with_normalized_hash(values, dialect)
+}
+
+pub(crate) fn opencode_normalized_message_payload(
+    message_identity: &str,
+    complete_text: &str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    complete_content::opencode_normalized_message_payload(message_identity, complete_text, body)
 }
 
 pub(crate) fn decode_opencode_message_locator(

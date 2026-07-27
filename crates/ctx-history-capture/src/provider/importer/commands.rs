@@ -11,47 +11,13 @@ use super::ids::{provider_run_uuid, provider_source_run_uuid, provider_sync_meta
 
 /// Removes provider result bodies before the canonical Store write.
 ///
-/// Typed correlation and outcome metadata survive. Sparse failures and
-/// timeouts may also retain one bounded preview; successful and unknown
-/// outputs never do.
+/// Typed correlation, outcome metadata, and content references survive.
+/// Result text and previews never cross the canonical Store boundary.
 pub(crate) fn compact_provider_result_payload(event_type: EventType, payload: &Value) -> Value {
     if !matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
         return payload.clone();
     }
-    let mut compact = compact_result_payload(payload);
-    let retained_failure = compact
-        .get("result_outcome")
-        .and_then(Value::as_str)
-        .is_some_and(|outcome| outcome == "failure")
-        || compact
-            .get("timed_out")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        || compact
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .is_some_and(|exit_code| exit_code != 0);
-    if retained_failure {
-        let preview = payload
-            .get("output_preview")
-            .or_else(|| {
-                payload
-                    .get("body")
-                    .and_then(|body| body.get("output_preview"))
-            })
-            .and_then(Value::as_str)
-            .filter(|preview| !preview.trim().is_empty())
-            .map(|preview| {
-                preview
-                    .chars()
-                    .take(crate::PROVIDER_MAX_PREVIEW_CHARS)
-                    .collect::<String>()
-            });
-        if let (Some(compact), Some(preview)) = (compact.as_object_mut(), preview) {
-            compact.insert("output_preview".to_owned(), Value::String(preview));
-        }
-    }
-    compact
+    compact_result_payload(payload)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -232,6 +198,35 @@ mod tests {
             compact_provider_result_payload(EventType::Message, &malformed),
             malformed
         );
+    }
+
+    #[test]
+    fn sqlite_boundary_never_preserves_failed_output_previews() {
+        let compact = compact_provider_result_payload(
+            EventType::ToolOutput,
+            &json!({
+                "call_id": "call-private",
+                "tool": "exec",
+                "result_outcome": "failure",
+                "timed_out": false,
+                "exit_code": 7,
+                "duration_ms": 42,
+                "result_content_ref": {
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "byte_len": 18
+                },
+                "output_preview": "private failure text",
+                "text": "private failure text",
+                "body": {"output_preview": "private nested failure text"}
+            }),
+        );
+        assert_eq!(compact["call_id"], "call-private");
+        assert_eq!(compact["result_outcome"], "failure");
+        assert_eq!(compact["exit_code"], 7);
+        assert!(compact.get("result_content_ref").is_none());
+        assert!(compact.get("output_preview").is_none());
+        assert!(compact.get("text").is_none());
+        assert!(compact.get("body").is_none());
     }
 
     #[test]

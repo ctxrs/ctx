@@ -1,173 +1,6 @@
 use super::*;
-
-#[test]
-fn sqlite_result_profiles_query_exact_native_rows_for_supported_providers() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-
-    let hermes_path = temp.path().join("hermes.db");
-    let conn = Connection::open(&hermes_path).unwrap();
-    conn.execute_batch(
-        "create table sessions (id text primary key, source text not null, started_at real not null);
-         create table messages (
-            id integer primary key, session_id text not null, role text not null,
-            content text, timestamp real not null
-         );
-         insert into sessions values ('h-session', 'acp', 1.0);
-         insert into messages values (7, 'h-session', 'tool', 'hermes exact', 2.0);",
-    )
-    .unwrap();
-    let hermes_record = hermes::hermes_result_record(&conn, 7).unwrap().unwrap();
-    drop(conn);
-    let mut hermes_locator = vec![2];
-    hermes_locator.extend_from_slice(&7_i64.to_be_bytes());
-    let request = result_request_for(
-        &hermes_path,
-        CaptureProvider::Hermes,
-        HERMES_SQLITE_SOURCE_FORMAT,
-        HERMES_LOCATOR_KIND,
-        hermes_locator,
-        0,
-        &hermes_record,
-    );
-    assert_eq!(resolve_result(&request).unwrap().content, "hermes exact");
-
-    let forge_path = temp.path().join("forge.db");
-    let conn = Connection::open(&forge_path).unwrap();
-    conn.execute_batch(
-        "create table conversations (
-            conversation_id text not null, workspace_id integer not null,
-            context text, created_at text not null
-         );",
-    )
-    .unwrap();
-    let forge_context = serde_json::to_string(&json!({
-        "messages": [{"message": {"tool": {"output": {"values": [{"text": "forge exact"}]}}}}]
-    }))
-    .unwrap();
-    conn.execute(
-        "insert into conversations values ('forge-session', 1, ?1, '2026-01-01T00:00:00Z')",
-        [forge_context],
-    )
-    .unwrap();
-    let forge_record = forgecode::forgecode_result_record(&conn, 1, 0)
-        .unwrap()
-        .unwrap();
-    drop(conn);
-    let request = result_request_for(
-        &forge_path,
-        CaptureProvider::ForgeCode,
-        FORGECODE_SQLITE_SOURCE_FORMAT,
-        FORGECODE_LOCATOR_KIND,
-        1_i64.to_be_bytes().to_vec(),
-        0,
-        &forge_record,
-    );
-    assert_eq!(resolve_result(&request).unwrap().content, "forge exact");
-
-    let opencode_path = temp.path().join("opencode.db");
-    let conn = Connection::open(&opencode_path).unwrap();
-    conn.execute_batch(
-        "create table session (id text primary key);
-         create table session_message (id text not null, session_id text not null, data text not null);",
-    )
-    .unwrap();
-    conn.execute("insert into session values ('open-session')", [])
-        .unwrap();
-    conn.execute(
-        "insert into session_message values ('result-1', 'open-session', ?1)",
-        [serde_json::to_string(&json!({"role": "tool", "output": "open exact"})).unwrap()],
-    )
-    .unwrap();
-    let open_record = opencode::opencode_result_record(&conn, 1, 1)
-        .unwrap()
-        .unwrap();
-    drop(conn);
-    let mut open_locator = vec![1];
-    open_locator.extend_from_slice(&ordered_rowid(1));
-    open_locator.push(2);
-    for (provider, source_format) in [
-        (CaptureProvider::OpenCode, OPENCODE_SQLITE_SOURCE_FORMAT),
-        (CaptureProvider::Kilo, KILO_SQLITE_SOURCE_FORMAT),
-        (CaptureProvider::MiMoCode, MIMOCODE_SQLITE_SOURCE_FORMAT),
-    ] {
-        let request = result_request_for(
-            &opencode_path,
-            provider,
-            source_format,
-            OPENCODE_LOCATOR_KIND,
-            open_locator.clone(),
-            0,
-            &open_record,
-        );
-        assert_eq!(resolve_result(&request).unwrap().content, "open exact");
-    }
-
-    let crush_path = temp.path().join("crush.db");
-    let conn = Connection::open(&crush_path).unwrap();
-    conn.execute_batch(
-        "create table sessions (id text primary key);
-         create table messages (
-            id text not null, session_id text not null, role text not null, parts text not null
-         );",
-    )
-    .unwrap();
-    conn.execute("insert into sessions values ('crush-session')", [])
-        .unwrap();
-    conn.execute(
-        "insert into messages values ('crush-result', 'crush-session', 'tool', ?1)",
-        [serde_json::to_string(&json!([{
-            "type": "tool_result", "data": {"content": "crush exact"}
-        }]))
-        .unwrap()],
-    )
-    .unwrap();
-    let crush_record = crush::crush_result_record(&conn, 1).unwrap().unwrap();
-    drop(conn);
-    let mut crush_locator = vec![2];
-    crush_locator.extend_from_slice(&ordered_rowid(1));
-    let request = result_request_for(
-        &crush_path,
-        CaptureProvider::Crush,
-        CRUSH_SQLITE_SOURCE_FORMAT,
-        CRUSH_LOCATOR_KIND,
-        crush_locator,
-        0,
-        &crush_record,
-    );
-    assert_eq!(resolve_result(&request).unwrap().content, "crush exact");
-
-    let goose_path = temp.path().join("goose.db");
-    let conn = Connection::open(&goose_path).unwrap();
-    conn.execute_batch(
-        "create table sessions (id text primary key);
-         create table messages (session_id text not null, role text not null, content_json text not null);",
-    )
-    .unwrap();
-    conn.execute("insert into sessions values ('goose-session')", [])
-        .unwrap();
-    conn.execute(
-        "insert into messages values ('goose-session', 'tool', ?1)",
-        [serde_json::to_string(&json!([{
-            "type": "toolResponse", "result": "goose exact"
-        }]))
-        .unwrap()],
-    )
-    .unwrap();
-    let goose_record = goose::goose_result_record(&conn, 1).unwrap().unwrap();
-    drop(conn);
-    let mut goose_locator = vec![2];
-    goose_locator.extend_from_slice(&ordered_rowid(1));
-    let request = result_request_for(
-        &goose_path,
-        CaptureProvider::Goose,
-        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-        GOOSE_LOCATOR_KIND,
-        goose_locator,
-        0,
-        &goose_record,
-    );
-    assert_eq!(resolve_result(&request).unwrap().content, "goose exact");
-}
+use crate::provider::providers::goose::tests::create_goose_tables as create_goose_native_schema;
+use crate::{GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT, OPENCODE_SQLITE_SOURCE_FORMAT};
 
 #[test]
 fn forgecode_success_result_is_absent_from_core_storage() {
@@ -274,6 +107,95 @@ fn ordered_rowid_locator(kind: &str, phase: u8, rowid: i64) -> (String, Vec<u8>)
     let mut value = vec![phase];
     value.extend_from_slice(&((rowid as u64) ^ (1_u64 << 63)).to_be_bytes());
     (kind.to_owned(), value)
+}
+
+#[test]
+fn goose_message_resolver_reconstructs_long_content_and_persisted_degraded_ids() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("goose-native-message-resolver.db");
+    let conn = Connection::open(&path).unwrap();
+    create_goose_native_schema(&conn);
+    conn.execute("insert into sessions(id) values ('goose-session')", [])
+        .unwrap();
+
+    let fixtures = [
+        (1_i64, "  stable-id  ".to_owned(), "stable-id"),
+        (2, "duplicate-id".to_owned(), "row-2"),
+        (3, "duplicate-id".to_owned(), "row-3"),
+        (4, "x".repeat(1_025), "row-4"),
+        (5, "   ".to_owned(), "row-5"),
+    ];
+    let bodies = fixtures
+        .iter()
+        .map(|(id, _, _)| long_body(&format!("Goose complete row {id}")))
+        .collect::<Vec<_>>();
+    for ((id, message_id, _), body) in fixtures.iter().zip(&bodies) {
+        conn.execute(
+            "insert into messages(
+                id, message_id, session_id, role, content_json, created_timestamp,
+                timestamp, tokens, metadata_json
+             ) values (
+                ?1, ?2, 'goose-session', 'user', ?3, ?4,
+                '2026-07-26T00:00:00Z', '{\"input\":1}', '{\"source\":\"test\"}'
+             )",
+            rusqlite::params![
+                id,
+                message_id,
+                json!([{"type": "text", "text": body}]).to_string(),
+                id
+            ],
+        )
+        .unwrap();
+    }
+
+    let mut requests = Vec::new();
+    for ((id, _, expected_native_record_id), body) in fixtures.iter().zip(&bodies) {
+        let values = goose::load_goose_message_values(&conn, *id).unwrap();
+        let (session_id, native_record_id, normalized_payload_hash, resolved_body) =
+            goose::goose_complete_message_with_normalized_hash(&conn, &values).unwrap();
+        assert_eq!(session_id, "goose-session");
+        assert_eq!(native_record_id, *expected_native_record_id);
+        assert_eq!(resolved_body, *body);
+        assert_eq!(normalized_payload_hash.len(), 64);
+
+        let (_, locator) = ordered_rowid_locator(GOOSE_LOCATOR_KIND, 2, *id);
+        let event = synthetic_event(&native_record_id, body);
+        let mut request = request_for(
+            &path,
+            CaptureProvider::Goose,
+            GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+            "goose-session",
+            0,
+            GOOSE_LOCATOR_KIND,
+            locator,
+            &values,
+            &event,
+            body,
+        );
+        request.expected_hash_authority = CompleteContentHashAuthority::NormalizedPayloadFallback;
+        request.expected_provider_event_hash = normalized_payload_hash;
+        requests.push(request);
+    }
+    drop(conn);
+
+    let resolved = requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            SqliteCompleteContentResolver::new()
+                .resolve(std::slice::from_ref(request))
+                .unwrap_or_else(|error| panic!("Goose fixture {index} failed: {error:?}"))
+                .pop()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        bodies.iter().map(String::as_str).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -386,6 +308,12 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
         1,
     )
     .unwrap();
+    let (_, native_record_id, _, normalized_payload_hash) =
+        opencode::opencode_complete_message_with_normalized_hash(
+            &values,
+            &opencode::OPENCODE_SQLITE_DIALECT,
+        )
+        .unwrap();
     drop(conn);
     let mut locator = vec![1];
     locator.extend_from_slice(&((1_u64) ^ (1_u64 << 63)).to_be_bytes());
@@ -414,6 +342,9 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
             &event,
             &body,
         );
+        request.expected_hash_authority = CompleteContentHashAuthority::NormalizedPayloadFallback;
+        request.expected_provider_event_hash = normalized_payload_hash.clone();
+        request.expected_native_record_id = Some(native_record_id.clone());
         request.expected_record_digest = Some(sqlite_logical_record_digest(&values[1..]));
         assert_eq!(
             SqliteCompleteContentResolver::new()
@@ -468,23 +399,24 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
     let body = long_body("Goose exact body");
     let path = temp.path().join("goose.db");
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "create table sessions (id text primary key); \
-         create table messages (session_id text, role text, content_json text); \
-         insert into sessions values ('goose-session');",
-    )
-    .unwrap();
+    create_goose_native_schema(&conn);
+    conn.execute("insert into sessions(id) values ('goose-session')", [])
+        .unwrap();
     let content = serde_json::to_string(&json!([{"type":"text", "text":body}])).unwrap();
     conn.execute(
-        "insert into messages values ('goose-session', 'user', ?1)",
+        "insert into messages(
+            id, message_id, session_id, role, content_json, created_timestamp
+         ) values (1, 'goose-message', 'goose-session', 'user', ?1, 1)",
         [content],
     )
     .unwrap();
     let values = goose::load_goose_message_values(&conn, 1).unwrap();
+    let (_, native_record_id, normalized_payload_hash, _) =
+        goose::goose_complete_message_with_normalized_hash(&conn, &values).unwrap();
     drop(conn);
     let (_, locator) = ordered_rowid_locator(GOOSE_LOCATOR_KIND, 2, 1);
-    let event = synthetic_event("row-1", &body);
-    let request = request_for(
+    let event = synthetic_event(&native_record_id, &body);
+    let mut request = request_for(
         &path,
         CaptureProvider::Goose,
         crate::GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
@@ -496,6 +428,8 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
         &event,
         &body,
     );
+    request.expected_hash_authority = CompleteContentHashAuthority::NormalizedPayloadFallback;
+    request.expected_provider_event_hash = normalized_payload_hash;
     assert_eq!(
         SqliteCompleteContentResolver::new()
             .resolve(&[request])
@@ -622,6 +556,205 @@ fn newly_supported_sqlite_cohorts_reopen_exact_message_rows() {
 }
 
 #[test]
+fn opencode_nativepath_long_messages_hydrate_both_sqlite_shapes_and_mutation_fails_closed() {
+    for shape in [
+        opencode::OpenCodeCapturedShape::SessionMessage,
+        opencode::OpenCodeCapturedShape::MessagePart,
+    ] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let shape_name = match shape {
+            opencode::OpenCodeCapturedShape::SessionMessage => "session-message",
+            opencode::OpenCodeCapturedShape::MessagePart => "message-part",
+            _ => unreachable!("test covers the two released hydration shapes"),
+        };
+        let source_path = temp.path().join(format!("opencode-{shape_name}.db"));
+        let conn = Connection::open(&source_path).unwrap();
+        conn.execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 title text,
+                 directory text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session values ('long-session', NULL, 'long', '/tmp', 1, 2)",
+            [],
+        )
+        .unwrap();
+        let body = format!(
+            "long imported body\n{}",
+            "x".repeat(PROVIDER_MAX_TEXT_CHARS + 1024)
+        );
+        assert!(body.len() > 16 * 1024);
+        match shape {
+            opencode::OpenCodeCapturedShape::SessionMessage => {
+                conn.execute_batch(
+                    "create table session_message (
+                         id text primary key,
+                         session_id text not null,
+                         type text not null,
+                         seq integer not null,
+                         time_created integer not null,
+                         time_updated integer not null,
+                         data text not null
+                     );",
+                )
+                .unwrap();
+                conn.execute(
+                    "insert into session_message values (
+                         'long-message', 'long-session', 'user', 1, 3, 4, ?1
+                     )",
+                    [json!({"role": "user", "text": body}).to_string()],
+                )
+                .unwrap();
+            }
+            opencode::OpenCodeCapturedShape::MessagePart => {
+                conn.execute_batch(
+                    "create table message (
+                         id text primary key,
+                         session_id text not null,
+                         time_created integer not null,
+                         time_updated integer not null,
+                         data text not null
+                     );
+                     create table part (
+                         id text primary key,
+                         message_id text not null,
+                         session_id text not null,
+                         type text,
+                         time_created integer not null,
+                         time_updated integer not null,
+                         data text not null
+                     );",
+                )
+                .unwrap();
+                conn.execute(
+                    "insert into message values (
+                         'long-message', 'long-session', 3, 4,
+                         '{\"role\":\"user\",\"time\":{\"created\":3}}'
+                     )",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "insert into part values (
+                         'long-part', 'long-message', 'long-session', 'text', 3, 4, ?1
+                     )",
+                    [json!({"type": "text", "text": body}).to_string()],
+                )
+                .unwrap();
+            }
+            _ => unreachable!("test covers the two released hydration shapes"),
+        }
+        drop(conn);
+
+        let mut store = Store::open(temp.path().join("store.db")).unwrap();
+        let summary = opencode::import_opencode_nativepath(
+            &source_path,
+            &mut store,
+            ProviderAdapterContext {
+                machine_id: "opencode-long-message-test".to_owned(),
+                source_path: Some(source_path.clone()),
+                source_root: Some(temp.path().to_path_buf()),
+                imported_at: DateTime::<Utc>::UNIX_EPOCH,
+            },
+            ProviderImportOptions::default(),
+            &opencode::OPENCODE_SQLITE_DIALECT,
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        let session = store.list_sessions().unwrap().pop().unwrap();
+        let event = store.events_for_session(session.id).unwrap().pop().unwrap();
+        let locators = VerifiedContentLocatorsV1::from_metadata_value(
+            &event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+        )
+        .unwrap();
+        let locator = locators.locator(VerifiedContentRole::MessageBody).unwrap();
+        let hash_authority = match event.sync.metadata["provider_event_hash_authority"].as_str() {
+            Some("normalized_payload_fallback") => {
+                CompleteContentHashAuthority::NormalizedPayloadFallback
+            }
+            other => panic!("unexpected OpenCode hash authority: {other:?}"),
+        };
+        let request = CompleteMessageRequest {
+            event_id: event.id,
+            provider: CaptureProvider::OpenCode,
+            source_format: OPENCODE_SQLITE_SOURCE_FORMAT.to_owned(),
+            source_access: sqlite_source_access(
+                &source_path,
+                CaptureProvider::OpenCode,
+                OPENCODE_SQLITE_SOURCE_FORMAT,
+                event.id,
+            ),
+            source_family: Some(CompleteContentSourceFamily::Sqlite),
+            content_profile: locator.content_profile().to_owned(),
+            source_locator: locator.source_locator(),
+            provider_session_id: Some("long-session".to_owned()),
+            source_record_ordinal: event.sync.metadata["source_record_ordinal"]
+                .as_u64()
+                .unwrap(),
+            source_record_subrecord_index: 0,
+            expected_provider_event_hash: event.sync.metadata["provider_event_hash"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            expected_hash_authority: hash_authority,
+            expected_native_record_id: Some(locator.native_record_id().to_owned()),
+            expected_record_digest: Some(locator.record_sha256().clone()),
+            expected_content_ref: Some(locator.content_ref().clone()),
+            indexed_text: event.payload["text"].as_str().unwrap().to_owned(),
+            indexed_limit_chars: PROVIDER_MAX_TEXT_CHARS,
+        };
+        let hydrated = SqliteCompleteContentResolver::new()
+            .resolve(std::slice::from_ref(&request))
+            .unwrap();
+        assert_eq!(hydrated[0].text, body);
+
+        let mutated = format!(
+            "mutated imported body\n{}",
+            "z".repeat(PROVIDER_MAX_TEXT_CHARS + 1024)
+        );
+        let conn = Connection::open(&source_path).unwrap();
+        match shape {
+            opencode::OpenCodeCapturedShape::SessionMessage => {
+                conn.execute(
+                    "update session_message set data = ?1 where id = 'long-message'",
+                    [json!({"role": "user", "text": mutated}).to_string()],
+                )
+                .unwrap();
+            }
+            opencode::OpenCodeCapturedShape::MessagePart => {
+                conn.execute(
+                    "update part set data = ?1 where id = 'long-part'",
+                    [json!({"type": "text", "text": mutated}).to_string()],
+                )
+                .unwrap();
+            }
+            _ => unreachable!("test covers the two released hydration shapes"),
+        }
+        drop(conn);
+        let mut mutated_request = request.clone();
+        mutated_request.source_access = sqlite_source_access(
+            &source_path,
+            CaptureProvider::OpenCode,
+            OPENCODE_SQLITE_SOURCE_FORMAT,
+            event.id,
+        );
+        let error = SqliteCompleteContentResolver::new()
+            .resolve(&[mutated_request])
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            CompleteContentErrorKind::ContentVerificationFailed
+        );
+    }
+}
+
+#[test]
 fn lingma_user_prompt_round_trips_and_changed_row_fails_closed() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("lingma.db");
@@ -648,6 +781,7 @@ fn lingma_user_prompt_round_trips_and_changed_row_fails_closed() {
     .unwrap();
     let values = lingma::lingma_complete_values(&conn, 1).unwrap().unwrap();
     let (event, complete_text) = lingma::lingma_complete_user_message(&values).unwrap();
+    let released_provider_event_hash = event.released_provider_event_hash.clone();
     let mut event = test_provider_event(
         event.provider_event_index,
         Some(event.provider_event_hash),
@@ -687,10 +821,20 @@ fn lingma_user_prompt_round_trips_and_changed_row_fails_closed() {
         &event,
         &complete_text,
     );
+    request.expected_hash_authority = CompleteContentHashAuthority::NormalizedPayloadFallback;
     let messages = SqliteCompleteContentResolver::new()
         .resolve(std::slice::from_ref(&request))
         .unwrap();
     assert_eq!(messages[0].text, body);
+
+    let mut released_request = request.clone();
+    released_request.expected_provider_event_hash = released_provider_event_hash.clone();
+    released_request.expected_hash_authority = CompleteContentHashAuthority::ProviderSupplied;
+    released_request.expected_native_record_id = Some(released_provider_event_hash);
+    let released_messages = SqliteCompleteContentResolver::new()
+        .resolve(std::slice::from_ref(&released_request))
+        .unwrap();
+    assert_eq!(released_messages[0].text, body);
 
     conn.execute(
         "update chat_record set chat_prompt = ?1 where rowid = 1",
@@ -700,6 +844,11 @@ fn lingma_user_prompt_round_trips_and_changed_row_fails_closed() {
     readmit_sqlite(&mut request, &path, SourceSnapshot::default()).unwrap();
     assert_error_kind(
         &request,
+        CompleteContentErrorKind::ContentVerificationFailed,
+    );
+    readmit_sqlite(&mut released_request, &path, SourceSnapshot::default()).unwrap();
+    assert_error_kind(
+        &released_request,
         CompleteContentErrorKind::ContentVerificationFailed,
     );
 }

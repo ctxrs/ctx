@@ -216,11 +216,20 @@ fn verify_open_identity(_path: &Path, _file: &fs::File) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn sync_identity_root(data_root: &Path) -> Result<()> {
     fs::File::open(data_root)?
         .sync_all()
         .context("sync installation identity root")
+}
+
+/// macOS rejects `fsync(2)` on directory descriptors with `EINVAL`.
+///
+/// The identity file itself is synchronized before this function is called,
+/// but macOS has no supported directory flush to perform afterward.
+#[cfg(target_os = "macos")]
+fn sync_identity_root(_data_root: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -508,6 +517,24 @@ mod installation_identity_tests {
         fs::rename(&original, &moved).unwrap();
         assert_eq!(installation_id(&moved).unwrap(), id);
         assert!(!original.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_identity_root_sync_is_a_documented_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+
+        sync_identity_root(&missing).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn durable_unix_identity_root_sync_errors_are_not_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+
+        assert!(sync_identity_root(&missing).is_err());
     }
 
     #[cfg(unix)]

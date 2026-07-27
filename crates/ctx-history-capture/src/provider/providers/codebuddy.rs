@@ -5,9 +5,9 @@ mod source;
 pub(crate) use normalization::{codebuddy_decoded_message, codebuddy_message_text};
 
 const CODEBUDDY_NATIVE_CURSOR_VERSION: u32 = 1;
-const CODEBUDDY_CAPTURE_REVISION: u32 = 4;
-const CODEBUDDY_POLICY_REVISION: u32 = 5;
-const CODEBUDDY_CLI_POLICY_REVISION: u32 = 6;
+const CODEBUDDY_CAPTURE_REVISION: u32 = 5;
+const CODEBUDDY_POLICY_REVISION: u32 = 6;
+const CODEBUDDY_CLI_POLICY_REVISION: u32 = 7;
 const CODEBUDDY_MAX_CHECKPOINT_TEXT_BYTES: usize = 8 * 1024;
 const CODEBUDDY_MAX_FAILURE_BYTES: usize = 2 * 1024;
 const CODEBUDDY_MAX_CHECKPOINT_FAILURES: usize = 64;

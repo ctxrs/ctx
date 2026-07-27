@@ -15,14 +15,15 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    import_pi_session_jsonl, ImportProfile, OutputSourceIdentity, PiSessionImportOptions,
-    ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress, ProOutputSink,
-    ProOutputSinkError, ProviderImportSummary, ProviderImportWorkResult,
+    import_pi_session_jsonl, CaptureError, CaptureWorkLimit, ImportProfile, OutputSourceIdentity,
+    PiSessionImportOptions, ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress,
+    ProOutputSink, ProOutputSinkError, ProviderImportSummary, ProviderImportWorkResult,
 };
 
 use super::{
     super::PI_SOURCE_FORMAT,
-    vertical::{released_cursor_for_test, source_cursor_stream},
+    source::PiNativePathError,
+    vertical::{map_native_error, released_cursor_for_test, source_cursor_stream},
 };
 
 const MACHINE: &str = "pi-nativepath-production-test";
@@ -276,6 +277,169 @@ fn pi_only_exact_released_cursor_resets_then_safe_group_resume_is_idempotent() {
     );
 }
 
+#[test]
+fn pi_append_then_delete_retires_the_latest_locator_revision() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("pi-sessions");
+    let source = root.join("session.jsonl");
+    write_session(&source, "pi-append-delete", &["initial"]);
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let event_id = first_event_id(&store);
+    let initial_revision = store
+        .authorized_source_route_for_event(event_id)
+        .expect("initial route")
+        .source_revision()
+        .to_owned();
+
+    append_message(&source, "append", "append before delete");
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let appended_revision = store
+        .authorized_source_route_for_event(event_id)
+        .expect("appended route")
+        .source_revision()
+        .to_owned();
+    assert_ne!(appended_revision, initial_revision);
+
+    fs::remove_file(&source).expect("delete appended source");
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert!(store.authorized_source_route_for_event(event_id).is_err());
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+}
+
+#[test]
+fn pi_empty_core_append_then_move_supersedes_the_old_alias() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("pi-sessions");
+    let source = root.join("session.jsonl");
+    let moved = root.join("renamed.jsonl");
+    write_session(&source, "pi-append-move", &["initial"]);
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let event_id = first_event_id(&store);
+    let initial_revision = store
+        .authorized_source_route_for_event(event_id)
+        .expect("initial route")
+        .source_revision()
+        .to_owned();
+
+    append_success_output(&source);
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let appended_revision = store
+        .authorized_source_route_for_event(event_id)
+        .expect("empty-Core append route")
+        .source_revision()
+        .to_owned();
+    assert_ne!(appended_revision, initial_revision);
+
+    fs::rename(&source, &moved).expect("move appended source");
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let moved_route = store
+        .authorized_source_route_for_event(event_id)
+        .expect("moved route");
+    assert_eq!(moved_route.path(), moved.as_path());
+    assert_eq!(moved_route.source_revision(), appended_revision);
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+}
+
+#[test]
+fn pi_unchanged_rename_recovers_a_deferred_root_manifest_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("pi-sessions");
+    let source = root.join("session.jsonl");
+    let moved = root.join("renamed.jsonl");
+    write_session(&source, "pi-root-retry", &["initial"]);
+    let mut store = Store::open(temp.path().join("core.sqlite")).expect("store");
+
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    let event_id = first_event_id(&store);
+    fs::rename(&source, &moved).expect("rename source");
+
+    let bounded = import_with_limit(&root, &mut store, CaptureWorkLimit::OneSafeGroup);
+    assert_eq!(bounded.work_result(), ProviderImportWorkResult::Changed);
+    assert!(bounded.work_remaining);
+    assert_eq!(
+        store
+            .authorized_source_route_for_event(event_id)
+            .expect("relocated route")
+            .path(),
+        moved.as_path()
+    );
+
+    let manifest_retry = import(&root, &mut store, ImportProfile::CoreOnly);
+    assert_eq!(
+        manifest_retry.work_result(),
+        ProviderImportWorkResult::Changed
+    );
+    assert_eq!(
+        import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+}
+
+#[test]
+fn pi_native_errors_preserve_typed_capture_classification() {
+    let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    assert!(matches!(
+        map_native_error(PiNativePathError::Io {
+            path: PathBuf::from("/pi/session.jsonl"),
+            source: io_error,
+        }),
+        CaptureError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert!(matches!(
+        map_native_error(PiNativePathError::SourceChanged),
+        CaptureError::SourceChangedDuringCapture
+    ));
+    assert!(matches!(
+        map_native_error(PiNativePathError::Normalization(
+            CaptureError::SystemInvariant("Pi inner invariant")
+        )),
+        CaptureError::SystemInvariant("Pi inner invariant")
+    ));
+    let json_error = serde_json::from_str::<serde_json::Value>("{").expect_err("invalid test JSON");
+    assert!(matches!(
+        map_native_error(PiNativePathError::Encoding(json_error)),
+        CaptureError::Json(_)
+    ));
+    assert!(matches!(
+        map_native_error(PiNativePathError::InvalidSource {
+            path: PathBuf::from("/pi/session.jsonl"),
+            reason: "not a session".to_owned(),
+        }),
+        CaptureError::InvalidPayload(_)
+    ));
+}
+
 struct RecordingSink {
     store_path: PathBuf,
     progress: Mutex<HashMap<OutputSourceIdentity, ProOutputProgress>>,
@@ -380,6 +544,32 @@ fn import(root: &Path, store: &mut Store, profile: ImportProfile) -> ProviderImp
     .expect("Pi NativePath import")
 }
 
+fn import_with_limit(
+    root: &Path,
+    store: &mut Store,
+    capture_work_limit: CaptureWorkLimit,
+) -> ProviderImportSummary {
+    import_pi_session_jsonl(
+        root,
+        store,
+        PiSessionImportOptions {
+            machine_id: MACHINE.to_owned(),
+            source_path: Some(root.to_path_buf()),
+            imported_at: "2026-07-25T12:00:00Z".parse().expect("timestamp"),
+            capture_work_limit,
+            ..PiSessionImportOptions::default()
+        },
+    )
+    .expect("bounded Pi NativePath import")
+}
+
+fn first_event_id(store: &Store) -> Uuid {
+    store
+        .events_for_session(store.list_sessions().expect("sessions")[0].id)
+        .expect("events")[0]
+        .id
+}
+
 fn write_session(path: &Path, session_id: &str, messages: &[&str]) {
     fs::create_dir_all(path.parent().expect("source parent")).expect("source directory");
     let mut lines = vec![json!({
@@ -419,6 +609,30 @@ fn append_message(path: &Path, id: &str, content: &str) {
         })
     )
     .expect("append message");
+}
+
+fn append_success_output(path: &Path) {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("append source");
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "type": "message",
+            "id": "successful-output",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "append-call",
+                "success": true,
+                "content": "successful output stays out of Core"
+            }
+        })
+    )
+    .expect("append successful output");
 }
 
 fn write_output_session(path: &Path) {

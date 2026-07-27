@@ -1,24 +1,32 @@
 use std::{
     ffi::OsString,
     fs::{self, File},
-    io::{self, Read, Seek, SeekFrom},
+    io,
     path::{Path, PathBuf},
-    ptr::NonNull,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime},
 };
 
 use chrono::{DateTime, Days, Utc};
 use ctx_history_core::platform_security::{
-    create_private_directory_all, restrict_private_file_handle, verify_private_directory,
-    verify_private_file, verify_private_file_handle,
+    create_private_directory_all, restrict_private_file_handle, verify_private_file,
 };
-use rusqlite::{
-    params, serialize::OwnedData, Connection, DatabaseName, OpenFlags, OptionalExtension,
-    TransactionBehavior,
-};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use super::{CompletedOperation, CTX_VERSION, DEFINITION_VERSION, RETENTION_DAYS};
+
+mod file_family;
+
+#[cfg(test)]
+pub(super) use file_family::capture_with_between_reads_for_test;
+#[cfg(all(test, windows))]
+pub(super) use file_family::{assert_single_link_for_test, verify_same_file_for_test};
+use file_family::{
+    capture_checkpointed_image, deserialize_read_only, open_nofollow, preflight_auxiliaries,
+    preflight_existing_family, protect_sqlite_files, reopen_same_file, verify_file_owner,
+    verify_metadata_owner, verify_private_directory_and_owner, verify_same_file,
+    verify_single_link, FamilyGuard,
+};
 
 pub(crate) const USAGE_FILE: &str = "usage.sqlite";
 const APPLICATION_ID: i64 = 0x4354_5855;
@@ -26,7 +34,6 @@ const SCHEMA_VERSION: i64 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 const PAGE_SIZE_BYTES: i64 = 4 * 1024;
 const MAX_DATABASE_BYTES: i64 = 6 * 1024 * 1024;
-const MAX_FAMILY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAGE_COUNT: i64 = MAX_DATABASE_BYTES / PAGE_SIZE_BYTES;
 const WAL_AUTOCHECKPOINT_PAGES: i64 = 64;
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 1024 * 1024;
@@ -574,8 +581,8 @@ fn open_writable(
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
     }
     let conn = Connection::open_with_flags(path, flags)?;
-    verify_same_file(path, &guard.main.file)?;
-    verify_single_link(&guard.main.file)?;
+    verify_same_file(path, guard.main_file())?;
+    verify_single_link(guard.main_file())?;
     verify_schema(&conn)?;
     super::report::validate_rows(&conn)?;
     configure_transient(&conn, busy_timeout)?;
@@ -706,9 +713,11 @@ fn initialize_slot(
     match fs::hard_link(&temporary, path) {
         Ok(()) => {
             fs::remove_file(&temporary)?;
-            verify_same_file(path, &file)?;
-            verify_single_link(&file)?;
-            Ok(PreparedFile::NewInitialized(FamilyGuard::main_only(file)?))
+            let published = reopen_same_file(path, &file)?;
+            verify_single_link(&published)?;
+            Ok(PreparedFile::NewInitialized(FamilyGuard::main_only(
+                published,
+            )?))
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             fs::remove_file(&temporary)?;
@@ -761,6 +770,10 @@ fn cleanup_stale_initializer_slots(path: &Path, now: SystemTime) -> Result<usize
             .is_some_and(|age| age >= STALE_INIT_AGE);
         if stale {
             verify_same_file(&candidate, &candidate_handle)?;
+            // Windows pathname deletion cannot proceed while the hardened
+            // no-delete-sharing handle is retained.
+            #[cfg(windows)]
+            drop(candidate_handle);
             fs::remove_file(candidate)?;
             removed += 1;
         }
@@ -903,364 +916,6 @@ fn database_is_empty(conn: &Connection) -> Result<bool, UsageStoreError> {
         )
         .optional()?
         .is_none())
-}
-
-fn protect_sqlite_files(path: &Path) -> Result<(), UsageStoreError> {
-    protect_sqlite_member(path)?;
-    for suffix in ["-wal", "-shm"] {
-        let auxiliary = auxiliary_path(path, suffix);
-        match auxiliary.symlink_metadata() {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                protect_sqlite_member(&auxiliary)?;
-            }
-            Ok(_) => return Err(UsageStoreError::SchemaIdentity),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn preflight_auxiliaries(path: &Path, database_exists: bool) -> Result<(), UsageStoreError> {
-    for suffix in ["-wal", "-shm"] {
-        let auxiliary = auxiliary_path(path, suffix);
-        match auxiliary.symlink_metadata() {
-            Ok(_) if !database_exists => return Err(UsageStoreError::SchemaIdentity),
-            Ok(_) => verify_private_file_and_owner(&auxiliary)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn auxiliary_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = OsString::from(path.as_os_str());
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-struct GuardedMember {
-    file: File,
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-impl GuardedMember {
-    fn from_file(file: File) -> Result<Self, UsageStoreError> {
-        verify_private_file_handle(&file)?;
-        verify_file_owner(&file)?;
-        verify_single_link(&file)?;
-        let metadata = file.metadata()?;
-        Ok(Self {
-            file,
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })
-    }
-
-    fn recheck(&self, path: &Path, unchanged: bool) -> Result<(), UsageStoreError> {
-        verify_same_file(path, &self.file)?;
-        verify_private_file_handle(&self.file)?;
-        verify_file_owner(&self.file)?;
-        verify_single_link(&self.file)?;
-        if unchanged {
-            let metadata = self.file.metadata()?;
-            if metadata.len() != self.len || metadata.modified().ok() != self.modified {
-                return Err(UsageStoreError::UnsafeReadState);
-            }
-        }
-        Ok(())
-    }
-}
-
-struct FamilyGuard {
-    main: GuardedMember,
-    wal: Option<GuardedMember>,
-    shm: Option<GuardedMember>,
-}
-
-impl FamilyGuard {
-    fn main_only(file: File) -> Result<Self, UsageStoreError> {
-        Ok(Self {
-            main: GuardedMember::from_file(file)?,
-            wal: None,
-            shm: None,
-        })
-    }
-
-    fn recheck(&self, path: &Path) -> Result<(), UsageStoreError> {
-        self.recheck_members(path, false)
-    }
-
-    fn recheck_unchanged(&self, path: &Path) -> Result<(), UsageStoreError> {
-        self.recheck_members(path, true)
-    }
-
-    fn recheck_members(&self, path: &Path, unchanged: bool) -> Result<(), UsageStoreError> {
-        self.main.recheck(path, unchanged)?;
-        recheck_optional_member(self.wal.as_ref(), &auxiliary_path(path, "-wal"), unchanged)?;
-        recheck_optional_member(self.shm.as_ref(), &auxiliary_path(path, "-shm"), unchanged)?;
-        verify_family_size(path)
-    }
-
-    fn has_nonempty_auxiliary(&self) -> Result<bool, UsageStoreError> {
-        Ok(self.wal.as_ref().is_some_and(|member| {
-            member
-                .file
-                .metadata()
-                .map_or(true, |metadata| metadata.len() > 0)
-        }) || self.shm.as_ref().is_some_and(|member| {
-            member
-                .file
-                .metadata()
-                .map_or(true, |metadata| metadata.len() > 0)
-        }))
-    }
-}
-
-fn recheck_optional_member(
-    guarded: Option<&GuardedMember>,
-    path: &Path,
-    unchanged: bool,
-) -> Result<(), UsageStoreError> {
-    match (guarded, path.symlink_metadata()) {
-        (Some(member), Ok(_)) => member.recheck(path, unchanged),
-        (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        (Some(_), Err(error)) if error.kind() == io::ErrorKind::NotFound => {
-            Err(UsageStoreError::UnsafeReadState)
-        }
-        (None, Ok(_)) => Err(UsageStoreError::UnsafeReadState),
-        (_, Err(error)) => Err(error.into()),
-    }
-}
-
-fn preflight_existing_family(path: &Path, read_only: bool) -> Result<FamilyGuard, UsageStoreError> {
-    verify_private_file_and_owner(path)?;
-    verify_family_size(path)?;
-    let main = GuardedMember::from_file(open_nofollow(path, read_only)?)?;
-    verify_same_file(path, &main.file)?;
-    let wal = preflight_optional_member(&auxiliary_path(path, "-wal"))?;
-    let shm = preflight_optional_member(&auxiliary_path(path, "-shm"))?;
-    let guard = FamilyGuard { main, wal, shm };
-    guard.recheck(path)?;
-    Ok(guard)
-}
-
-fn preflight_optional_member(path: &Path) -> Result<Option<GuardedMember>, UsageStoreError> {
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            verify_private_file_and_owner(path)?;
-            let member = GuardedMember::from_file(open_nofollow(path, true)?)?;
-            verify_same_file(path, &member.file)?;
-            Ok(Some(member))
-        }
-        Ok(_) => Err(UsageStoreError::SchemaIdentity),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn capture_checkpointed_image(
-    path: &Path,
-    guard: &FamilyGuard,
-    between_reads: impl FnOnce(),
-) -> Result<Vec<u8>, UsageStoreError> {
-    guard.recheck_unchanged(path)?;
-    let first = read_bounded_image(&guard.main.file)?;
-    guard.recheck_unchanged(path)?;
-    between_reads();
-    guard.recheck_unchanged(path)?;
-    let second = read_bounded_image(&guard.main.file)?;
-    guard.recheck_unchanged(path)?;
-    if first != second {
-        return Err(UsageStoreError::UnsafeReadState);
-    }
-    normalize_checkpointed_header(first)
-}
-
-fn read_bounded_image(file: &File) -> Result<Vec<u8>, UsageStoreError> {
-    let expected_size =
-        usize::try_from(file.metadata()?.len()).map_err(|_| UsageStoreError::GrowthLimit)?;
-    if expected_size > usize::try_from(MAX_DATABASE_BYTES).unwrap_or(usize::MAX) {
-        return Err(UsageStoreError::GrowthLimit);
-    }
-    let mut reader = file.try_clone()?;
-    reader.seek(SeekFrom::Start(0))?;
-    let limit = u64::try_from(MAX_DATABASE_BYTES)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let mut image = Vec::new();
-    reader.take(limit).read_to_end(&mut image)?;
-    if image.len() > usize::try_from(MAX_DATABASE_BYTES).unwrap_or(usize::MAX) {
-        return Err(UsageStoreError::GrowthLimit);
-    }
-    if image.len() != expected_size {
-        return Err(UsageStoreError::UnsafeReadState);
-    }
-    Ok(image)
-}
-
-fn normalize_checkpointed_header(mut image: Vec<u8>) -> Result<Vec<u8>, UsageStoreError> {
-    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
-    if image.len() < 100
-        || image.get(..SQLITE_HEADER.len()) != Some(SQLITE_HEADER.as_slice())
-        || image.len() % usize::try_from(PAGE_SIZE_BYTES).unwrap_or(usize::MAX) != 0
-    {
-        return Err(UsageStoreError::SchemaIdentity);
-    }
-    let header_page_size = u16::from_be_bytes([image[16], image[17]]);
-    if i64::from(header_page_size) != PAGE_SIZE_BYTES
-        || !matches!(image[18], 1 | 2)
-        || !matches!(image[19], 1 | 2)
-        || image[18] != image[19]
-    {
-        return Err(UsageStoreError::SchemaIdentity);
-    }
-    // The bytes are now detached from the source. WAL-mode databases use 2 in
-    // these header slots; an in-memory, read-only deserialize needs the
-    // rollback-journal marker and never observes source auxiliaries.
-    image[18] = 1;
-    image[19] = 1;
-    Ok(image)
-}
-
-fn deserialize_read_only(image: Vec<u8>) -> Result<Connection, UsageStoreError> {
-    let size = image.len();
-    let allocation = unsafe { rusqlite::ffi::sqlite3_malloc64(size as u64) }.cast::<u8>();
-    let allocation = NonNull::new(allocation).ok_or(rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOMEM),
-        None,
-    ))?;
-    unsafe {
-        std::ptr::copy_nonoverlapping(image.as_ptr(), allocation.as_ptr(), size);
-    }
-    let data = unsafe { OwnedData::from_raw_nonnull(allocation, size) };
-    let mut conn = Connection::open_in_memory_with_flags(
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
-    conn.deserialize(DatabaseName::Main, data, true)?;
-    verify_schema(&conn)?;
-    Ok(conn)
-}
-
-#[cfg(test)]
-pub(super) fn capture_with_between_reads_for_test(
-    data_root: &Path,
-    between_reads: impl FnOnce(),
-) -> Result<(), UsageStoreError> {
-    let path = usage_path(data_root);
-    let guard = preflight_existing_family(&path, true)?;
-    if guard.has_nonempty_auxiliary()? {
-        return Err(UsageStoreError::UnsafeReadState);
-    }
-    let image = capture_checkpointed_image(&path, &guard, between_reads)?;
-    drop(deserialize_read_only(image)?);
-    guard.recheck_unchanged(&path)
-}
-
-fn protect_sqlite_member(path: &Path) -> Result<(), UsageStoreError> {
-    let file = open_nofollow(path, false)?;
-    restrict_private_file_handle(&file)?;
-    verify_file_owner(&file)?;
-    verify_same_file(path, &file)
-}
-
-fn open_nofollow(path: &Path, read_only: bool) -> Result<File, UsageStoreError> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true).write(!read_only);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    }
-    Ok(options.open(path)?)
-}
-
-fn verify_private_directory_and_owner(path: &Path) -> Result<(), UsageStoreError> {
-    verify_private_directory(path)?;
-    verify_metadata_owner(&path.symlink_metadata()?)
-}
-
-fn verify_private_file_and_owner(path: &Path) -> Result<(), UsageStoreError> {
-    verify_private_file(path)?;
-    verify_metadata_owner(&path.symlink_metadata()?)
-}
-
-fn verify_file_owner(file: &File) -> Result<(), UsageStoreError> {
-    verify_metadata_owner(&file.metadata()?)
-}
-
-fn verify_metadata_owner(metadata: &fs::Metadata) -> Result<(), UsageStoreError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(UsageStoreError::SchemaIdentity);
-        }
-    }
-    let _ = metadata;
-    Ok(())
-}
-
-fn verify_same_file(path: &Path, file: &File) -> Result<(), UsageStoreError> {
-    let path_metadata = path.symlink_metadata()?;
-    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
-        return Err(UsageStoreError::SchemaIdentity);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let file_metadata = file.metadata()?;
-        if path_metadata.dev() != file_metadata.dev() || path_metadata.ino() != file_metadata.ino()
-        {
-            return Err(UsageStoreError::SchemaIdentity);
-        }
-    }
-    Ok(())
-}
-
-fn verify_single_link(file: &File) -> Result<(), UsageStoreError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if file.metadata()?.nlink() != 1 {
-            return Err(UsageStoreError::SchemaIdentity);
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        if file.metadata()?.number_of_links() != 1 {
-            return Err(UsageStoreError::SchemaIdentity);
-        }
-    }
-    Ok(())
-}
-
-fn verify_family_size(path: &Path) -> Result<(), UsageStoreError> {
-    let mut bytes = 0_u64;
-    for member in [
-        path.to_path_buf(),
-        auxiliary_path(path, "-wal"),
-        auxiliary_path(path, "-shm"),
-    ] {
-        match member.symlink_metadata() {
-            Ok(metadata) => {
-                bytes = bytes
-                    .checked_add(metadata.len())
-                    .ok_or(UsageStoreError::GrowthLimit)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    if bytes >= MAX_FAMILY_BYTES {
-        return Err(UsageStoreError::GrowthLimit);
-    }
-    Ok(())
 }
 
 fn reject_future_dates(conn: &Connection, day: &str) -> Result<(), UsageStoreError> {

@@ -334,6 +334,13 @@ pub(crate) fn provider_cursor_stream(provider: CaptureProvider, source_format: &
 }
 
 pub(crate) fn provider_path_identity(path: &Path) -> Result<String> {
+    if path.to_str().is_none() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason:
+                "provider transcript path is not Unicode and cannot share durable TEXT authority",
+        });
+    }
     #[cfg(unix)]
     let (platform, raw) = {
         use std::os::unix::ffi::OsStrExt;
@@ -470,6 +477,22 @@ mod tests {
     use super::*;
 
     const MAX_NATIVE_POSITION_KIND_BYTES: usize = 256;
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_path_fails_before_durable_text_authority_can_diverge() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let path = std::path::PathBuf::from(OsString::from_vec(b"/tmp/codex-\xff.jsonl".to_vec()));
+        assert!(matches!(
+            provider_path_identity(&path),
+            Err(CaptureError::InvalidProviderTranscriptPath {
+                reason:
+                    "provider transcript path is not Unicode and cannot share durable TEXT authority",
+                ..
+            })
+        ));
+    }
 
     fn test_cursor() -> CertifiedProviderCursor {
         CertifiedProviderCursor::new(

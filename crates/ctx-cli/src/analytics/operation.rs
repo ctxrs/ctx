@@ -283,6 +283,7 @@ impl ClientOperationDraft {
             }),
             CommandRoot::Doctor(_) => ClientOperationV1::Doctor(DoctorTelemetry::default()),
             CommandRoot::Pro(_)
+            | CommandRoot::Referral(_)
             | CommandRoot::Blame(_)
             | CommandRoot::Mcp(_)
             | CommandRoot::Daemon(_) => return None,

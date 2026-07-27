@@ -4,9 +4,9 @@ use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::normalization::{
-    provider_capped_json, provider_explicit_result_value_text, provider_policy_body,
-    provider_policy_event_text, provider_result_identifier_evidence,
-    provider_result_outcome_evidence, provider_role, provider_value_text,
+    provider_capped_json, provider_policy_body, provider_policy_event_text,
+    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
+    provider_value_text,
 };
 use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
@@ -179,57 +179,6 @@ pub(crate) fn task_json_event_text(value: &Value, source: &str, event_type: Even
             } else {
                 serde_json::to_string(value).unwrap_or_else(|_| source.to_owned())
             }
-        })
-}
-
-/// Extracts explicit result bytes shared by the Cline and Roo task-JSON
-/// dialects. The whole-record display fallback is intentionally excluded.
-pub(crate) fn task_json_result_content(value: &Value, source: &str) -> Option<String> {
-    if !matches!(
-        task_json_event_type(value, source),
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        return None;
-    }
-
-    let content = value
-        .get("content")
-        .or_else(|| value.pointer("/message/content"));
-    if let Some(blocks) = content.and_then(Value::as_array) {
-        let mut parts = Vec::new();
-        for block in blocks {
-            let kind = block
-                .get("type")
-                .or_else(|| block.get("kind"))
-                .and_then(Value::as_str);
-            if !matches!(
-                kind,
-                Some("tool_result" | "tool-result" | "tool_use_result" | "function_result")
-            ) {
-                continue;
-            }
-            if let Some(text) = block
-                .get("content")
-                .or_else(|| block.get("result"))
-                .or_else(|| block.get("output"))
-                .or_else(|| block.get("text"))
-                .and_then(provider_explicit_result_value_text)
-            {
-                parts.push(text);
-            }
-        }
-        if !parts.is_empty() {
-            return Some(parts.join("\n"));
-        }
-        return None;
-    }
-
-    ["output", "result", "text", "content", "message"]
-        .into_iter()
-        .find_map(|field| {
-            value
-                .get(field)
-                .and_then(provider_explicit_result_value_text)
         })
 }
 

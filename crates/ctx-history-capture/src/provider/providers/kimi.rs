@@ -9,15 +9,12 @@ mod layout;
 mod native_path;
 mod source;
 
-pub(crate) use event::kimi_result_content;
 pub(crate) use native_path::import_kimi_nativepath_tree;
 
 #[cfg(test)]
 mod tests;
 
 use source::KimiWireObservation;
-
-pub(crate) const KIMI_RESULT_CONTENT_PROFILE: &str = "kimi.result-body.v1";
 
 fn kimi_admission_scope_revision(context: &ProviderAdapterContext) -> String {
     kimi_admission_scope_revision_for_display(context.source_root_display())
@@ -46,20 +43,22 @@ pub(crate) fn kimi_complete_content_record(
         .unwrap_or("unknown");
     let event_type = event::kimi_event_type(record_type, value);
     (event_type == ctx_history_core::EventType::Message).then(|| {
-        let native_record_id = format!(
-            "{}:{}",
-            record_type,
-            value
-                .get("time")
-                .and_then(serde_json::Value::as_i64)
-                .map(|time| time.to_string())
-                .unwrap_or_else(|| line_number.to_string())
-        );
+        let native_record_id =
+            event::kimi_legacy_provider_event_hash(record_type, value, line_number);
         (
             event::kimi_event_text(record_type, value, event_type),
             native_record_id,
         )
     })
+}
+
+pub(crate) fn kimi_complete_content_normalized_payload(
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let record_type = value.get("type").and_then(serde_json::Value::as_str)?;
+    let event_type = event::kimi_event_type(record_type, value);
+    (event_type == ctx_history_core::EventType::Message)
+        .then(|| event::kimi_normalized_event_payload(record_type, value, event_type))
 }
 
 pub(crate) fn kimi_complete_content_auxiliary_paths(

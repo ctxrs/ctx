@@ -133,30 +133,37 @@ pub(crate) fn scan_cursor_output_pages(
                 }
             };
             let semantic_ordinal = prefix.semantic_records();
-            let sanitized =
-                match decode_sanitized_record(payload, semantic_ordinal, &classification) {
-                    Ok(sanitized) => sanitized,
-                    Err(_) => {
-                        rejection_count = rejection_count.saturating_add(1);
-                        prefix.record_rejection(
-                            CursorRejectionKind::UnsupportedShape,
-                            line.consumed_bytes,
-                            line.content_sha256,
-                        );
-                        pages.advance(checkpoint(&prefix, &session, rejection_count, false));
-                        if !verified_resume && byte_end_exclusive == resume_offset {
-                            if !resume_matches(
-                                resume.expect("unverified resume exists"),
-                                &prefix,
-                                &session,
-                            ) {
-                                return Ok(CursorOutputScanOutcome::PrefixMismatch);
-                            }
-                            verified_resume = true;
+            let physical_ordinal = prefix.physical_lines();
+            let sanitized = match decode_sanitized_record(
+                payload,
+                semantic_ordinal,
+                physical_ordinal,
+                byte_start,
+                byte_end_exclusive,
+                &classification,
+            ) {
+                Ok(sanitized) => sanitized,
+                Err(_) => {
+                    rejection_count = rejection_count.saturating_add(1);
+                    prefix.record_rejection(
+                        CursorRejectionKind::UnsupportedShape,
+                        line.consumed_bytes,
+                        line.content_sha256,
+                    );
+                    pages.advance(checkpoint(&prefix, &session, rejection_count, false));
+                    if !verified_resume && byte_end_exclusive == resume_offset {
+                        if !resume_matches(
+                            resume.expect("unverified resume exists"),
+                            &prefix,
+                            &session,
+                        ) {
+                            return Ok(CursorOutputScanOutcome::PrefixMismatch);
                         }
-                        continue;
+                        verified_resume = true;
                     }
-                };
+                    continue;
+                }
+            };
             prefix.record_semantic(line.consumed_bytes, line.content_sha256, &sanitized)?;
             let projected = project_cursor_record(&sanitized)?;
             update_cursor_session_checkpoint(&mut session, &projected);

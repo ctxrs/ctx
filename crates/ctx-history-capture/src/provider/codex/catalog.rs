@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
     io::BufReader,
     path::{Path, PathBuf},
     thread,
@@ -11,15 +10,21 @@ use ctx_history_store::{CatalogSession, Store};
 use serde_json::{json, Value};
 
 use crate::common::io::{
-    collect_jsonl_paths, read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
+    collect_jsonl_paths_bounded, read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
 };
 use crate::common::time::{parse_rfc3339_utc, system_time_ms};
+use crate::provider_sources::{
+    observe_ordinary_file_strong_metadata, open_ordinary_file_without_following,
+};
 use crate::{
     observe_ordinary_file, CaptureError, CatalogSummary, CodexSessionCatalogOptions,
     OrdinaryFileObservation, ProviderImportFailure, Result, CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::{CODEX_CAPTURE_REVISION, CODEX_POLICY_REVISION};
+use crate::provider::importer::provider_path_identity;
+
+pub(crate) const CODEX_CATALOG_MAX_SOURCES: usize = 131_072;
 
 fn apply_codex_session_import_bounds(
     paths: &mut Vec<PathBuf>,
@@ -66,15 +71,16 @@ pub fn catalog_codex_session_tree(
     options: CodexSessionCatalogOptions,
 ) -> Result<CatalogSummary> {
     let root = root.as_ref();
-    let source_root = options
-        .source_root
-        .as_deref()
-        .unwrap_or(root)
-        .display()
-        .to_string();
+    provider_path_identity(root)?;
+    let source_root_path = options.source_root.as_deref().unwrap_or(root);
+    provider_path_identity(source_root_path)?;
+    let source_root = source_root_path.display().to_string();
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let mut paths = Vec::new();
-    collect_jsonl_paths(root, &mut paths)?;
+    collect_jsonl_paths_bounded(root, &mut paths, CODEX_CATALOG_MAX_SOURCES)?;
+    for path in &paths {
+        provider_path_identity(path)?;
+    }
     let skipped_by_bounds = apply_codex_session_import_bounds(
         &mut paths,
         options.max_session_files,
@@ -86,15 +92,46 @@ pub fn catalog_codex_session_tree(
         ..CatalogSummary::default()
     };
     let existing = store
-        .list_catalog_sessions_for_source(CaptureProvider::Codex, &source_root)?
+        .list_catalog_sessions_for_source_bounded(
+            CaptureProvider::Codex,
+            &source_root,
+            CODEX_CATALOG_MAX_SOURCES,
+        )?
         .into_iter()
         .map(|session| (session.source_path.clone(), session))
         .collect::<BTreeMap<_, _>>();
     let mut current_paths = Vec::with_capacity(paths.len());
     let mut cached_sessions = Vec::new();
+    let mut paths_to_observe = Vec::new();
     let mut paths_to_parse = Vec::new();
     let mut metadata_failures = Vec::new();
-    for (path, observation) in observe_codex_session_paths(paths, options.parallelism)? {
+    for path in paths {
+        let source_path = path.display().to_string();
+        match observe_ordinary_file_strong_metadata(&path) {
+            Ok(Some(observation)) => {
+                if let Some(session) = cached_catalog_session_if_unchanged(
+                    existing.get(&source_path),
+                    &observation,
+                    cataloged_at_ms,
+                ) {
+                    summary.source_files += 1;
+                    summary.source_bytes = summary.source_bytes.saturating_add(observation.len());
+                    current_paths.push(source_path);
+                    summary.cached_sessions += 1;
+                    cached_sessions.push(session);
+                    continue;
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                summary.failed_sessions += 1;
+                metadata_failures.push(format!("{}: {err}", path.display()));
+                continue;
+            }
+        }
+        paths_to_observe.push(path);
+    }
+    for (path, observation) in observe_codex_session_paths(paths_to_observe, options.parallelism)? {
         let observation = match observation {
             Ok(observation) => observation,
             Err(err) => {
@@ -234,12 +271,16 @@ pub fn catalog_codex_session_files(
     store: &Store,
     options: CodexSessionCatalogOptions,
 ) -> Result<CatalogSummary> {
-    let source_root = options
+    ensure_catalog_source_bound(paths.len())?;
+    let source_root_path = options
         .source_root
         .as_deref()
-        .unwrap_or(source_root.as_ref())
-        .display()
-        .to_string();
+        .unwrap_or(source_root.as_ref());
+    provider_path_identity(source_root_path)?;
+    for path in &paths {
+        provider_path_identity(path)?;
+    }
+    let source_root = source_root_path.display().to_string();
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let (scan_summary, sessions) =
         catalog_codex_session_paths(paths, &source_root, cataloged_at_ms, options.parallelism)?;
@@ -249,6 +290,15 @@ pub fn catalog_codex_session_files(
         store.upsert_catalog_sessions(&sessions)?;
     }
     Ok(summary)
+}
+
+pub(crate) fn ensure_catalog_source_bound(source_count: usize) -> Result<()> {
+    if source_count > CODEX_CATALOG_MAX_SOURCES {
+        return Err(CaptureError::InvalidPayload(format!(
+            "Codex catalog contains {source_count} sources; maximum is {CODEX_CATALOG_MAX_SOURCES}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn cached_catalog_session_if_unchanged(
@@ -473,7 +523,7 @@ pub(crate) fn catalog_codex_session_file(
     })
 }
 pub(crate) fn read_codex_session_meta(path: &Path) -> Result<Option<Value>> {
-    let file = File::open(path)?;
+    let file = open_ordinary_file_without_following(path)?;
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     for _ in 0..32 {

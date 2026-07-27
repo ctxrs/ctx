@@ -151,6 +151,26 @@ fn nativepath_lifecycle_handles_restart_append_mutations_and_disappearance() {
         "summary={fresh:?} archive={:?}",
         store.export_archive().unwrap().events
     );
+    let session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.provider == CaptureProvider::KimiCodeCli)
+        .unwrap();
+    let original = store
+        .events_for_session(session.id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.sync.metadata["source_record_ordinal"].as_u64() == Some(1))
+        .unwrap();
+    assert_eq!(
+        original.sync.metadata["provider_event_hash_authority"].as_str(),
+        Some("normalized_payload_fallback")
+    );
+    assert_ne!(
+        original.sync.metadata["provider_event_hash"].as_str(),
+        Some("turn.prompt:1784289600001")
+    );
 
     let noop = import_kimi_nativepath_tree(
         &root,
@@ -194,16 +214,28 @@ fn nativepath_lifecycle_handles_restart_append_mutations_and_disappearance() {
             message("rewrite"),
         ],
     );
-    assert_eq!(
-        import_kimi_nativepath_tree(
-            &root,
-            &mut store,
-            context(&root),
-            options(ImportProfile::CoreOnly),
-        )
+    let rewritten = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreOnly),
+    )
+    .unwrap();
+    assert_eq!(rewritten.work_result(), ProviderImportWorkResult::Changed);
+    let rewritten_event = store
+        .events_for_session(session.id)
         .unwrap()
-        .work_result(),
-        ProviderImportWorkResult::Changed
+        .into_iter()
+        .find(|event| event.sync.metadata["source_record_ordinal"].as_u64() == Some(1))
+        .unwrap();
+    assert_eq!(rewritten_event.id, original.id);
+    assert_eq!(
+        rewritten_event.payload["body"]["text"].as_str(),
+        Some("rewrite")
+    );
+    assert_ne!(
+        rewritten_event.sync.metadata["provider_event_hash"],
+        original.sync.metadata["provider_event_hash"]
     );
 
     fs::write(&wire, "{\"type\":\"metadata\"}\n").unwrap();
@@ -346,7 +378,7 @@ fn core_commits_before_independent_pro_and_omits_success_bodies() {
 
     let core = serde_json::to_string(&store.export_archive().unwrap().events).unwrap();
     assert!(!core.contains(SUCCESS_BODY));
-    assert!(core.contains(FAILURE_BODY));
+    assert!(!core.contains(FAILURE_BODY));
     let events = store.list_sessions().unwrap();
     let session = events
         .iter()
@@ -355,7 +387,8 @@ fn core_commits_before_independent_pro_and_omits_success_bodies() {
     let canonical = store.events_for_session(session.id).unwrap();
     assert!(canonical.iter().all(|event| {
         event.event_type != EventType::ToolOutput
-            || !event.payload.to_string().contains(SUCCESS_BODY)
+            || (!event.payload.to_string().contains(SUCCESS_BODY)
+                && !event.payload.to_string().contains(FAILURE_BODY))
     }));
     let runs = store.runs_for_session(session.id).unwrap();
     assert_eq!(runs.len(), 1);
@@ -406,13 +439,70 @@ fn pro_failure_never_rolls_back_core_and_later_activation_replays() {
 }
 
 #[test]
-fn corrupt_records_and_incomplete_tail_resume_without_partial_publication() {
+fn oversized_pro_singleton_is_durably_rejected_without_a_behind_loop() {
     let (temp, root, wire) = kimi_wire_fixture();
-    fs::write(
+    write_records(
         &wire,
-        "{bad-json\n{\"type\":\"turn.prompt\",\"input\":\"tail",
+        &[
+            json!({"type": "metadata", "created_at": 1_784_289_600_000_i64}),
+            output("oversized", 0, &"x".repeat(8 * 1024 * 1024)),
+        ],
+    );
+    let store_path = temp.path().join("oversized-pro.sqlite");
+    let mut store = ctx_history_store::Store::open(&store_path).unwrap();
+    let sink = Arc::new(RecordingSink::new(store_path));
+
+    let first = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreAndPro(sink.clone())),
     )
     .unwrap();
+    assert_eq!(first.failed, 1);
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 0);
+    assert!(sink
+        .progress
+        .lock()
+        .unwrap()
+        .values()
+        .all(|progress| progress.terminal));
+
+    let retry = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreAndPro(sink.clone())),
+    )
+    .unwrap();
+    assert_eq!(retry.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(retry.failed, 1);
+    assert!(retry.failures.is_empty(), "{:?}", retry.failures);
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 0);
+
+    write_records(
+        &wire,
+        &[
+            json!({"type": "metadata", "created_at": 1_784_289_600_000_i64}),
+            output("oversized", 0, "corrected"),
+        ],
+    );
+    let corrected = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreAndPro(sink.clone())),
+    )
+    .unwrap();
+    assert_eq!(corrected.failed, 0);
+    assert_eq!(sink.outputs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn malformed_record_replay_and_correction_preserve_rejection_authority() {
+    let (temp, root, wire) = kimi_wire_fixture();
+    fs::write(&wire, "{bad-json\n").unwrap();
     let mut store = ctx_history_store::Store::open(temp.path().join("corrupt.sqlite")).unwrap();
     let first = import_kimi_nativepath_tree(
         &root,
@@ -424,21 +514,38 @@ fn corrupt_records_and_incomplete_tail_resume_without_partial_publication() {
     assert_eq!(first.failed, 1);
     assert_eq!(first.imported_events, 0);
 
-    let mut file = OpenOptions::new().append(true).open(&wire).unwrap();
-    writeln!(file, "\"}}").unwrap();
-    drop(file);
-    let resumed = import_kimi_nativepath_tree(
+    let replay = import_kimi_nativepath_tree(
         &root,
         &mut store,
         context(&root),
         options(ImportProfile::CoreOnly),
     )
     .unwrap();
-    assert_eq!(resumed.imported_events, 1);
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(replay.failed, 1);
+
+    write_records(&wire, &[message("corrected")]);
+    let corrected = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreOnly),
+    )
+    .unwrap();
+    assert_eq!(corrected.failed, 0);
+    assert_eq!(corrected.imported_events, 1);
+    let corrected_replay = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreOnly),
+    )
+    .unwrap();
+    assert_eq!(corrected_replay.failed, 0);
 }
 
 #[test]
-fn released_cursor_is_migration_only_and_upgrades_without_duplicates() {
+fn prior_policy_cursor_migrates_exact_legacy_hash_without_duplicates() {
     let (temp, root, wire) = kimi_wire_fixture();
     let mut store = ctx_history_store::Store::open(temp.path().join("migration.sqlite")).unwrap();
     import_kimi_nativepath_tree(
@@ -448,18 +555,53 @@ fn released_cursor_is_migration_only_and_upgrades_without_duplicates() {
         options(ImportProfile::CoreOnly),
     )
     .unwrap();
+    let session = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.provider == CaptureProvider::KimiCodeCli)
+        .unwrap();
+    let mut legacy_event = store
+        .events_for_session(session.id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == EventType::Message)
+        .unwrap();
+    let legacy_event_id = legacy_event.id;
+    let normalized_hash = legacy_event.sync.metadata["provider_event_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let legacy_hash = "turn.prompt:1784289600001";
+    let legacy_dedupe_key = ctx_history_store::Store::provider_event_dedupe_key_with_payload_hash(
+        legacy_event.dedupe_key.as_deref().unwrap(),
+        legacy_hash,
+    )
+    .unwrap();
+    legacy_event.sync.metadata["provider_event_hash"] = json!(legacy_hash);
+    legacy_event.sync.metadata["provider_event_hash_authority"] = json!("provider_supplied");
+    legacy_event.payload["provider_event_hash"] = json!(legacy_hash);
+    legacy_event.dedupe_key = None;
+    store.upsert_event(&legacy_event).unwrap();
+    legacy_event.dedupe_key = Some(legacy_dedupe_key);
+    store.upsert_event(&legacy_event).unwrap();
     let locator = crate::provider::importer::provider_path_identity(&wire).unwrap();
     let stream = crate::provider::importer::provider_source_cursor_stream_for_path(
         CaptureProvider::KimiCodeCli,
         KIMI_CODE_CLI_SOURCE_FORMAT,
         &locator,
     );
-    let mut released = store
+    let mut previous = store
         .get_sync_cursor(None, MACHINE, &stream)
         .unwrap()
         .unwrap();
-    released.cursor = r#"{"v":1,"released_kimi_cursor":true}"#.to_owned();
-    store.upsert_sync_cursor(&released).unwrap();
+    let mut envelope = serde_json::from_str::<Value>(&previous.cursor).unwrap();
+    let mut provider_cursor =
+        serde_json::from_str::<Value>(envelope["provider_cursor"].as_str().unwrap()).unwrap();
+    provider_cursor["o"] = json!(7);
+    envelope["provider_cursor"] = Value::String(serde_json::to_string(&provider_cursor).unwrap());
+    previous.cursor = serde_json::to_string(&envelope).unwrap();
+    store.upsert_sync_cursor(&previous).unwrap();
 
     let migrated = import_kimi_nativepath_tree(
         &root,
@@ -481,7 +623,22 @@ fn released_cursor_is_migration_only_and_upgrades_without_duplicates() {
         crate::provider::importer::CertifiedProviderCursor::decode(committed.provider_cursor())
             .unwrap();
     assert_eq!(certified.parser_revision(), 6);
+    assert_eq!(certified.policy_revision(), 8);
     assert_eq!(store.export_archive().unwrap().events.len(), 2);
+    let migrated_event = store
+        .events_for_session(session.id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.id == legacy_event_id)
+        .unwrap();
+    assert_eq!(
+        migrated_event.sync.metadata["provider_event_hash"].as_str(),
+        Some(normalized_hash.as_str())
+    );
+    assert_eq!(
+        migrated_event.sync.metadata["provider_event_hash_authority"].as_str(),
+        Some("normalized_payload_fallback")
+    );
 }
 
 #[derive(Default)]
@@ -643,6 +800,79 @@ fn kimi_layout_derives_one_exact_root_despite_malicious_nesting() {
         Err(CaptureError::InvalidProviderTranscriptPath { .. })
     ));
     assert!(root.join("session_index.jsonl").is_file());
+}
+
+#[test]
+fn discovery_ignores_unrelated_wire_files_but_exact_input_rejects_them() {
+    let (temp, root, _wire) = kimi_wire_fixture();
+    let unrelated = root.join("unrelated/wire.jsonl");
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    fs::write(&unrelated, "{}\n").unwrap();
+    let mut store =
+        ctx_history_store::Store::open(temp.path().join("unrelated-wire.sqlite")).unwrap();
+
+    let imported = import_kimi_nativepath_tree(
+        &root,
+        &mut store,
+        context(&root),
+        options(ImportProfile::CoreOnly),
+    )
+    .unwrap();
+    assert_eq!(imported.imported_sessions, 1);
+    assert_eq!(store.list_capture_sources().unwrap().len(), 1);
+
+    let exact = import_kimi_nativepath_tree(
+        &unrelated,
+        &mut store,
+        context(&unrelated),
+        options(ImportProfile::CoreOnly),
+    );
+    assert!(matches!(
+        exact,
+        Err(CaptureError::InvalidProviderTranscriptPath { .. })
+    ));
+}
+
+#[test]
+fn exact_wire_input_uses_canonical_root_and_migrates_legacy_file_root() {
+    let (temp, root, wire) = kimi_wire_fixture();
+    let mut store =
+        ctx_history_store::Store::open(temp.path().join("exact-wire-root.sqlite")).unwrap();
+
+    import_kimi_nativepath_tree(
+        &wire,
+        &mut store,
+        context(&wire),
+        options(ImportProfile::CoreOnly),
+    )
+    .unwrap();
+    let canonical_root = fs::canonicalize(&root).unwrap();
+    let mut source = store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.descriptor.provider == CaptureProvider::KimiCodeCli)
+        .unwrap();
+    assert_eq!(
+        source.descriptor.source_root.as_deref(),
+        Some(canonical_root.to_str().unwrap())
+    );
+
+    source.descriptor.source_root = Some(wire.display().to_string());
+    store.upsert_capture_source(&source).unwrap();
+
+    import_kimi_nativepath_tree(
+        &wire,
+        &mut store,
+        context(&wire),
+        options(ImportProfile::CoreOnly),
+    )
+    .unwrap();
+    let migrated = store.get_capture_source(source.id).unwrap();
+    assert_eq!(
+        migrated.descriptor.source_root.as_deref(),
+        Some(canonical_root.to_str().unwrap())
+    );
 }
 
 #[test]

@@ -3,13 +3,23 @@ using Ctx.AgentHistory;
 
 internal static class Program
 {
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
+        if (args.SequenceEqual(new[] { "status", "--json" }))
+        {
+            Console.WriteLine(new JsonObject
+            {
+                ["analyticsEnabled"] = Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED")
+            }.ToJsonString());
+            return 0;
+        }
+
         var tests = new (string Name, Func<Task> Body)[]
         {
             ("wraps status as agent-history-v1", WrapsStatus),
             ("preserves additive response fields", PreservesAdditiveFields),
             ("builds local CLI operation arguments", BuildsOperationArguments),
+            ("forces analytics off after ambient and user environment merging", ForcesAnalyticsOff),
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("builds search flags", BuildsSearchFlags),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
@@ -38,6 +48,39 @@ internal static class Program
         }
 
         return failures == 0 ? 0 : 1;
+    }
+
+    private static async Task ForcesAnalyticsOff()
+    {
+        const string analyticsEnabled = "CTX_ANALYTICS_ENABLED";
+        var original = Environment.GetEnvironmentVariable(analyticsEnabled);
+        try
+        {
+            Environment.SetEnvironmentVariable(analyticsEnabled, "true");
+            Equal("true", Environment.GetEnvironmentVariable(analyticsEnabled));
+
+            var executableName = OperatingSystem.IsWindows()
+                ? "Ctx.AgentHistory.Tests.exe"
+                : "Ctx.AgentHistory.Tests";
+            var executable = Path.Combine(AppContext.BaseDirectory, executableName);
+            True(File.Exists(executable), $"test helper executable not found: {executable}");
+
+            var adapter = new LocalCliAdapter(new LocalAgentHistoryConfig
+            {
+                CtxBinary = executable,
+                Environment = new Dictionary<string, string?>
+                {
+                    [analyticsEnabled] = "true"
+                }
+            });
+
+            var raw = await adapter.ExecuteJsonAsync("status", ["status", "--json"]);
+            Equal("false", raw["analyticsEnabled"]!.GetValue<string>());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(analyticsEnabled, original);
+        }
     }
 
     private static async Task NormalizesSetupInitStatus()

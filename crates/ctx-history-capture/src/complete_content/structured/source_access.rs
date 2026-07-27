@@ -15,8 +15,11 @@ use super::verification::{ResolutionBudget, StructuredBounds, STRUCTURED_MAX_COM
 use crate::complete_content::source_access;
 use crate::complete_content::AuthorizedSourceRoute;
 use crate::complete_content::{
-    CompleteContentError, CompleteContentErrorKind, CompleteMessageRequest,
+    CompleteContentError, CompleteContentErrorKind, CompleteContentSourceLocator,
+    CompleteMessageRequest,
 };
+use crate::provider::provider_safe_path_segment;
+use crate::{CODEBUDDY_SOURCE_FORMAT, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT, ROVODEV_SOURCE_FORMAT};
 use uuid::Uuid;
 
 mod manifest;
@@ -150,13 +153,14 @@ impl StructuredSnapshotFile {
 
 pub(crate) fn admit_structured_source(
     route: &AuthorizedSourceRoute,
+    locators: &[CompleteContentSourceLocator],
     event_id: Uuid,
 ) -> std::result::Result<StructuredSourceSnapshot, CompleteContentError> {
     let request = AdmissionContext { route, event_id };
     let bounds = StructuredBounds::default();
     let deadline = std::time::Instant::now() + bounds.deadline;
     let mut budget = ResolutionBudget::new(bounds, deadline);
-    let roots = selected_roots(&request, &mut budget)?;
+    let roots = selected_roots(&request, locators, &mut budget)?;
     let files = candidate_files(&request, &roots, &mut budget)?;
     if files.is_empty() {
         return Err(error(&request, CompleteContentErrorKind::SourceMissing));
@@ -171,8 +175,24 @@ pub(crate) fn admit_structured_source(
 
 fn selected_roots(
     request: &AdmissionContext<'_>,
+    locators: &[CompleteContentSourceLocator],
     budget: &mut ResolutionBudget,
 ) -> std::result::Result<Vec<PathBuf>, CompleteContentError> {
+    if exact_raw_source_route(request.route) {
+        if !exact_path_allowed_by_root(request, &request.route.raw_source_path) {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        }
+        return Ok(vec![request.route.raw_source_path.clone()]);
+    }
+    if request.route.provider == CaptureProvider::CodeBuddy
+        && request.route.source_format == CODEBUDDY_SOURCE_FORMAT
+    {
+        return exact_codebuddy_message_paths(request, locators);
+    }
+
     let mut roots = BTreeSet::new();
     if request
         .route
@@ -212,6 +232,117 @@ fn selected_roots(
         return Err(error(request, CompleteContentErrorKind::SourceMissing));
     }
     Ok(roots.into_iter().collect())
+}
+
+fn exact_raw_source_route(route: &AuthorizedSourceRoute) -> bool {
+    (route.provider == CaptureProvider::OpenHands
+        && route.source_format == OPENHANDS_FILE_EVENTS_SOURCE_FORMAT)
+        || (route.provider == CaptureProvider::RovoDev
+            && route.source_format == ROVODEV_SOURCE_FORMAT)
+}
+
+fn exact_file_route(route: &AuthorizedSourceRoute) -> bool {
+    exact_raw_source_route(route)
+        || (route.provider == CaptureProvider::CodeBuddy
+            && route.source_format == CODEBUDDY_SOURCE_FORMAT)
+}
+
+fn exact_codebuddy_message_paths(
+    request: &AdmissionContext<'_>,
+    locators: &[CompleteContentSourceLocator],
+) -> std::result::Result<Vec<PathBuf>, CompleteContentError> {
+    let mut paths = BTreeSet::new();
+    for locator in locators {
+        let Some((provider, _, subrecord, native_id)) =
+            super::contracts::decode_structured_locator(locator.value())
+        else {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        };
+        if provider != CaptureProvider::CodeBuddy || subrecord != 0 {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        }
+        let Some((_, message_id)) = native_id.rsplit_once(':') else {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        };
+        if !provider_safe_path_segment(message_id) {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        }
+        let raw = &request.route.raw_source_path;
+        let raw_is_exact_message = raw
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("messages")
+            && raw.file_stem().and_then(|value| value.to_str()) == Some(message_id);
+        let exact = if raw_is_exact_message {
+            raw.clone()
+        } else {
+            raw.join("messages").join(format!("{message_id}.json"))
+        };
+        if !exact_path_allowed_by_root(request, &exact)
+            || (raw_is_exact_message && exact != *raw)
+            || (!raw_is_exact_message && !exact.starts_with(raw))
+        {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        }
+        paths.insert(exact);
+    }
+    if paths.is_empty() {
+        return Err(error(
+            request,
+            CompleteContentErrorKind::HydrationUnsupported,
+        ));
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn exact_path_allowed_by_root(request: &AdmissionContext<'_>, path: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    return match request.route.source_root.as_ref() {
+        Some(root) => windows_path_within(path, root),
+        None => windows_local_qualified(path),
+    };
+    #[cfg(target_os = "macos")]
+    return match request.route.source_root.as_deref() {
+        Some(root) => {
+            let path = source_access::normalize_macos_fixed_root_alias(path);
+            let root = source_access::normalize_macos_fixed_root_alias(root);
+            path.starts_with(root)
+        }
+        None => true,
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return request
+        .route
+        .source_root
+        .as_ref()
+        .is_none_or(|root| path.starts_with(root));
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = (request, path);
+        false
+    }
 }
 
 fn candidate_files(
@@ -255,6 +386,12 @@ fn candidate_files(
                     );
                 }
                 source_access::unix::OpenedPath::Directory(directory) => {
+                    if exact_file_route(request.route) {
+                        return Err(error(
+                            request,
+                            CompleteContentErrorKind::ContentVerificationFailed,
+                        ));
+                    }
                     collect_unix_files(request, root, &directory, 0, &mut files, budget)?;
                 }
             }
@@ -302,6 +439,12 @@ fn candidate_files(
                     );
                 }
                 AdmittedWindowsPath::Directory(directory) => {
+                    if exact_file_route(request.route) {
+                        return Err(error(
+                            request,
+                            CompleteContentErrorKind::ContentVerificationFailed,
+                        ));
+                    }
                     collect_windows_files(
                         request,
                         root,

@@ -16,6 +16,19 @@ mod unix {
         binary.with_file_name(".ctx.upgrade-state.json")
     }
 
+    fn managed_hook_candidate(temp: &tempfile::TempDir, install_attempt_id: &str) -> PathBuf {
+        let configured = PathBuf::from(
+            std::env::var_os("CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE")
+                .expect("Bazel must provide the auto-upgrade hook fixture"),
+        );
+        let source = if configured.is_absolute() {
+            configured
+        } else {
+            std::env::current_dir().unwrap().join(configured)
+        };
+        managed_candidate_from_binary(temp, &source, install_attempt_id)
+    }
+
     fn managed_daemon(
         temp: &tempfile::TempDir,
         release: &FakeRelease,
@@ -268,7 +281,7 @@ mod unix {
     ) {
         let installation = tempdir();
         let release = fake_release(&installation, "9.9.9");
-        let binary = managed_candidate(
+        let binary = managed_hook_candidate(
             &installation,
             &format!("ia_stale_recovery_{journal_kind:?}_{recovery_owner:?}"),
         );
@@ -428,7 +441,7 @@ mod unix {
     fn prove_recovery_quiescence(journal_kind: RecoveryJournal, recovery_owner: RecoveryOwner) {
         let installation = tempdir();
         let release = fake_release(&installation, "9.9.9");
-        let binary = managed_candidate(
+        let binary = managed_hook_candidate(
             &installation,
             &format!("ia_recovery_{journal_kind:?}_{recovery_owner:?}"),
         );
@@ -681,7 +694,7 @@ mod unix {
     fn disabled_daemon_does_not_recover_an_interrupted_install() {
         let temp = tempdir();
         let release = fake_release(&temp, "9.9.9");
-        let binary = managed_candidate(&temp, "ia_disabled_recovery");
+        let binary = managed_hook_candidate(&temp, "ia_disabled_recovery");
         let interrupted = managed_release_env(
             ctx_from_binary(&temp, &binary).args(["upgrade", "--json"]),
             &release,
@@ -711,7 +724,7 @@ mod unix {
     fn applying_state_failure_leaves_a_prepublication_journal() {
         let temp = tempdir();
         let release = fake_release(&temp, "9.9.9");
-        let binary = managed_candidate(&temp, "ia_journal_before_applying");
+        let binary = managed_hook_candidate(&temp, "ia_journal_before_applying");
         let before = fs::read(&binary).unwrap();
 
         managed_daemon(&temp, &release, &binary)
@@ -803,7 +816,7 @@ mod unix {
     fn long_running_second_root_acknowledges_before_mutation_and_restarts() {
         let installation = tempdir();
         let mut release = fake_release(&installation, "9.9.9");
-        let binary = managed_candidate(&installation, "ia_cross_root");
+        let binary = managed_hook_candidate(&installation, "ia_cross_root");
         patch_release_artifact_with_next_ctx(&mut release, &binary, "9.99.9");
         let binary_before = fs::read(&binary).unwrap();
         let first = tempdir();

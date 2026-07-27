@@ -50,7 +50,8 @@ research agent.
   confirmation; unattended, CI, and machine-readable setup remain Core-only
   unless the installer receives an explicit Pro-trial option. Trial activation
   failure never changes Core setup success or daemon startup. WorkOS sign-in
-  and Stripe are used only for paid conversion and account management.
+  and Stripe are used only for paid conversion, account management, and
+  explicit referral commands.
   `ctx pro setup` is a supported explicit synonym.
   `ctx status` reports Pro state and the next useful action without mutating
   canonical history or graph data. Entitlement authorization may advance
@@ -69,6 +70,47 @@ research agent.
   corrupt credential inventory and persists an exact-root cleanup phase so
   retries remain verifiable after graph-key or credential records are already
   absent.
+- `ctx pro --referral <codename>` is the sole referral-attribution input. The
+  ordinary anonymous trial is 14 days; a code accepted with the first
+  activation produces a 30-day referred trial. Attribution is immutable after
+  that first accepted activation, the raw code is not retained after activation,
+  and an existing nonreferred trial cannot attach one later. There is no
+  website, cookie, creator-affiliate, annual-plan, or compatibility attribution
+  path.
+- Referral availability is a reviewed per-channel build decision and is
+  disabled for both shipped channel configurations. Unavailable referral
+  commands and `ctx pro --referral` fail before local identity creation,
+  authentication, or browser side effects. The human-only `ctx blame` CTA is
+  suppressed and does not consume its once-only marker while unavailable.
+- Any WorkOS-verified person can use `ctx referral create` to claim one stable
+  codename without a Pro trial or subscription.
+  `ctx referral create|status|payout` are explicit hosted-service commands and
+  form the complete referrer management surface. Human mode may start WorkOS
+  AuthKit, and payout may open Stripe-hosted onboarding. JSON mode uses cached
+  authentication only and never starts authentication or opens a browser.
+  Referrer status is authenticated, private, and aggregate; it exposes no
+  referred identity, invoice, or per-referral ledger. Its cash buckets are
+  earned, pending, manual review, payable, processing, paid, and debt.
+  Processing is sent but unsettled; paid remains historical cash actually
+  settled, and a post-paid reversal increases debt rather than reducing paid.
+  The aggregate identity is `earned + debt = pending + manual review + payable
+  + processing + paid`.
+- The referral commission is $10 cash for each distinct qualifying $20 monthly
+  Pro invoice, invoices 1 through 12, with a $120 maximum per direct referral.
+  Invoice 1 and invoice 2 commissions accrue pending and require invoice 2 to
+  settle, the required 14-day hold, authoritative reconciliation, and manual
+  review before payability. Invoices 3 through 12 each require their own 14-day
+  hold, reconciliation, and manual review. Refunds and disputes void unpaid
+  commissions. A paid commission reversal becomes debt, a negative adjustment
+  against future earnings subject to manual review; ctx does not attempt an
+  external clawback.
+- Referral copy leads with
+  `Refer a developer. Earn $10/month toward your agent bill.` and may follow
+  with `Up to $120 per friend.` Routine status, MCP, and Core flows do not
+  surface referral prompts. The only automatic mention is a
+  nonsecret-marker-backed, shown-once line after a successful, nonempty,
+  interactive human Pro blame result; machine-readable, noninteractive, empty,
+  failed, install, setup, Core, and subsequent blame paths suppress it.
 - Pro materialization is an internal idempotent capability invoked by setup,
   daemon freshness, and blame. Repository roots are inferred from
   canonical activity rather than accepted as setup flags.
@@ -123,21 +165,23 @@ research agent.
 | locked | no active access or valid grace remains | denied; encrypted graph is preserved for recovery |
 
 `ctx pro manage` handles cancellation, payment recovery, and resubscription.
+Pro is $20 USD per month.
 Core OSS setup, search, indexed show/locate, and SQL remain available in every
 state. Pro uninstall and explicit Pro data deletion also remain available.
 Explicit status, MCP `pro_status`, and Pro management may show the
-`$15/month` continuation action for trial access or a neutral
+`$20/month` continuation action for trial access or a neutral
 unpriced `pro_restore_access` action for locked access that confirms the local
 graph is preserved. They do not show a purchase action for paid active,
 `canceling_paid`, or `offline_grace` access, do not replace the existing next
 action, do not open a browser from status, and never add marketing text to
 blame citations.
 Hosted traffic is limited to anonymous-trial challenge/evidence tokens,
-identity and billing after conversion, entitlements, signed release metadata,
-and authenticated artifact delivery. Trial evidence consists only of
-challenge-bound application-specific digests; raw platform identifiers are
-discarded inside the signed helper, and the service stores independently keyed
-lookup tokens. The signal is best-effort abuse detection, not hardware
+optional first-challenge referral attribution and its opaque claim, explicit
+referrer commands, identity and billing after conversion, entitlements, signed
+release metadata, and authenticated artifact delivery. Trial evidence consists
+only of challenge-bound application-specific digests; raw platform identifiers
+are discarded inside the signed helper, and the service stores independently
+keyed lookup tokens. The signal is best-effort abuse detection, not hardware
 attestation. Hosted traffic excludes transcript text, source code, repository
 paths or URLs, Git objects, graph facts, citations, and queries.
 

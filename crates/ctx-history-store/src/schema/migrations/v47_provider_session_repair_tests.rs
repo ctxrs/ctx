@@ -250,37 +250,32 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
             .unwrap();
         }
         for (event_id, session_id, preview) in [
-            (old_event_id, old_session_id, "stale canonical projection"),
+            (
+                old_event_id,
+                old_session_id,
+                "canonical event searchable text",
+            ),
             (
                 duplicate_event_id,
                 duplicate_session_id,
-                "stale duplicate projection",
+                "duplicate event searchable text",
             ),
             (
                 appended_event_id,
                 duplicate_session_id,
-                "stale appended projection",
+                "appended event searchable text",
             ),
-            (moved_event_id, moved_session_id, "stale moved projection"),
             (
-                other_event_id,
-                other_session_id,
-                "unrelated projection must remain untouched",
+                moved_event_id,
+                moved_session_id,
+                "moved event searchable text",
             ),
+            (other_event_id, other_session_id, "unrelated stored payload"),
         ] {
             conn.execute(
                 r#"
                 INSERT INTO event_search
                 (event_id, session_id, role, preview_text, rank_bucket)
-                VALUES (?1, ?2, 'assistant', ?3, 'message')
-                "#,
-                params![event_id.to_string(), session_id.to_string(), preview],
-            )
-            .unwrap();
-            conn.execute(
-                r#"
-                INSERT INTO event_search_scriptgram
-                (event_id, session_id, role, token_text, rank_bucket)
                 VALUES (?1, ?2, 'assistant', ?3, 'message')
                 "#,
                 params![event_id.to_string(), session_id.to_string(), preview],
@@ -296,6 +291,16 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
             )
             .unwrap();
         }
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER ctx_test_reject_unrelated_projection_rebuild
+             BEFORE DELETE ON event_search_lookup
+             WHEN OLD.event_id = '{}'
+             BEGIN SELECT RAISE(
+                 ABORT, 'exact provider repair unexpectedly rebuilt all projections'
+             ); END;",
+            other_event_id
+        ))
+        .unwrap();
         conn.execute(
             r#"
             INSERT INTO files_touched
@@ -411,7 +416,7 @@ fn schema_v47_repairs_provider_sessions_and_preserves_newer_state_and_id_aliases
             )
             .unwrap(),
         0,
-        "Latin-only text must not retain a stale scriptgram row"
+        "Latin text must not acquire a scriptgram row during targeted repair"
     );
     assert_eq!(
         store

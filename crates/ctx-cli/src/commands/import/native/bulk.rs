@@ -19,7 +19,6 @@ pub(super) fn import_one_source_inner_at_path(
     source: &SourceInfo,
     input_path: &Path,
     progress: Option<CodexSessionImportProgressCallback>,
-    refresh_search_after_import: bool,
     full_rescan: bool,
     preinventory: &SourcePreinventory,
     capture_work_limit: CaptureWorkLimit,
@@ -35,7 +34,7 @@ pub(super) fn import_one_source_inner_at_path(
     // one live outer lock, so this applies uniformly to every provider.
     let codex_catalog_noop = !full_rescan
         && source.provider == CaptureProvider::Codex
-        && input_path.is_dir()
+        && source.source_format == "codex_session_jsonl_tree"
         && store
             .list_pending_catalog_sessions(
                 CaptureProvider::Codex,
@@ -65,8 +64,5 @@ pub(super) fn import_one_source_inner_at_path(
         (_, Err(error)) => return Err(error.into()),
         (Err(error), Ok(())) => return Err(error),
     };
-    if refresh_search_after_import {
-        store.refresh_search_index()?;
-    }
     Ok(summary)
 }

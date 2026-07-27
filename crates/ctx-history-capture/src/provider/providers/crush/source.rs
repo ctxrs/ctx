@@ -88,7 +88,7 @@ fn optional_qualified(
 pub(super) fn session_projection(columns: &BTreeSet<String>, alias: &str) -> String {
     let optional = |column, fallback| optional_qualified(columns, alias, column, fallback);
     format!(
-        "CAST({alias}.id AS TEXT), {}, {}, {}, {}, {}, {}, {}, {}",
+        "{alias}.id, {}, {}, {}, {}, {}, {}, {}, {}",
         optional("parent_session_id", "NULL"),
         optional("title", "NULL"),
         optional("created_at", "NULL"),
@@ -103,7 +103,7 @@ pub(super) fn session_projection(columns: &BTreeSet<String>, alias: &str) -> Str
 pub(super) fn message_projection(columns: &BTreeSet<String>, alias: &str) -> String {
     let optional = |column, fallback| optional_qualified(columns, alias, column, fallback);
     format!(
-        "{alias}.rowid, CAST({alias}.id AS TEXT), CAST({alias}.session_id AS TEXT), \
+        "{alias}.rowid, {alias}.id, {alias}.session_id, \
          {alias}.role, {alias}.parts, {}, {}, {}, {}, {}",
         optional("created_at", "NULL"),
         optional("updated_at", "NULL"),
@@ -116,7 +116,7 @@ pub(super) fn message_projection(columns: &BTreeSet<String>, alias: &str) -> Str
 pub(super) fn file_projection(columns: &BTreeSet<String>, alias: &str) -> String {
     let optional = |column, fallback| optional_qualified(columns, alias, column, fallback);
     format!(
-        "{alias}.rowid, CAST({} AS TEXT), {alias}.path, CAST({} AS TEXT), {}, {}",
+        "{alias}.rowid, {}, {alias}.path, {}, {}, {}",
         optional("session_id", "NULL"),
         optional("version", "NULL"),
         optional("created_at", "NULL"),
@@ -126,7 +126,14 @@ pub(super) fn file_projection(columns: &BTreeSet<String>, alias: &str) -> String
 
 pub(super) fn read_file_projection(columns: &BTreeSet<String>, alias: &str) -> String {
     let read_at = optional_qualified(columns, alias, "read_at", "NULL");
-    format!("{alias}.rowid, CAST({alias}.session_id AS TEXT), {alias}.path, {read_at}")
+    format!("{alias}.rowid, {alias}.session_id, {alias}.path, {read_at}")
+}
+
+pub(super) fn message_session_join() -> &'static str {
+    "messages m left join sessions s \
+     on typeof(m.session_id) = 'text' \
+     and typeof(s.id) = 'text' \
+     and s.id collate binary = m.session_id collate binary"
 }
 
 pub(super) fn retained_length_expr(

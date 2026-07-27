@@ -185,9 +185,18 @@ closed while that deletion phase remains. A separate nonsecret
 keep-data uninstall from first use, but it is created only when encrypted graph
 data actually exists. The canonical `work.sqlite` history remains separate and
 usable without Pro. The operating-system key store stores an anonymous-trial
-credential, an optional WorkOS session used only after paid conversion, an
-installation-scoped signing key, and a signed entitlement; ctx has no plaintext
-credential fallback.
+credential, an optional WorkOS session used for explicit hosted account and
+referral commands, an installation-scoped signing key, a signed entitlement,
+and, after accepted referral activation, an optional opaque referral claim;
+ctx has no plaintext credential fallback. The raw referral code is never
+retained after activation. The claim is the immutable result of the sole
+attribution input, `ctx pro --referral <codename>`. The claim uses the
+native-vault commercial credential boundary and is removed by Pro
+commercial-credential cleanup.
+A separate nonsecret marker under the selected data root records only that the
+one-time human Pro blame referral line has been shown. It contains no codename,
+claim, identity, payout data, or counts. JSON, JSONL, MCP, noninteractive,
+empty, failed, install, setup, and Core paths neither read nor create it.
 
 Key-store record identifiers are opaque hashes scoped to the root-local opaque
 installation UUID and commercial environment, never to an absolute path.
@@ -292,9 +301,11 @@ local upsert as described above.
 | `ctx locate` | SQLite index and raw source path metadata | none |
 | `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status files when eligible human-readable background refresh autostarts maintenance; semantic-enabled search may also create query endpoint files |
 | `ctx sql` | existing SQLite index only | none |
-| `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, canonical history | key store, signed helper installation, and encrypted derived graph; the explicit `setup` form is a synonym |
+| `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, canonical history, and an optional first-challenge codename only for `ctx pro --referral <codename>` | key store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
 | `ctx pro manage` | key store and commercial account state | may refresh the WorkOS session in the key store and open a hosted billing-portal URL |
 | `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots leave Pro state unchanged, while independent default-on Core usage reporting may create or increment `usage.sqlite` |
+| `ctx referral create` / `status` / `payout` | native-vault commercial session and explicit hosted referral state; status reads only the authenticated referrer's aggregate summary | may refresh the commercial session in the native vault; human mode may open WorkOS AuthKit, and payout may open a one-use Stripe-hosted onboarding URL; JSON mode never opens a browser |
+| first successful nonempty interactive `ctx blame` | normal Pro blame inputs and whether the local shown-once marker already exists | may atomically create the private nonsecret shown-once marker after delivering the result; no referral network request or telemetry |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | SQLite index, data root metadata, semantic sidecar/status metadata, and ctx-owned daemon lock/status/job metadata | none |
@@ -573,14 +584,41 @@ behavior.
 
 Local Pro trial setup and renewal contact the ctx commercial API and signed
 artifact service without an account. WorkOS and Stripe are contacted only for
-paid conversion and account management. Trial setup sends challenge-bound,
+paid conversion, account management, and explicit referral commands. Trial
+setup sends challenge-bound,
 application-specific device-anchor digests produced by the signed helper; raw
 platform identifiers never leave it, and the service stores separately keyed
-anti-repeat tokens rather than the submitted evidence. `ctx pro manage` creates
-a hosted Stripe portal session after sign-in. These requests do not include transcript text, source content,
+anti-repeat tokens rather than the submitted evidence. An optional referral
+codename is sent only with the first anonymous-trial challenge. After accepted
+activation, attribution is immutable; only the returned opaque claim may remain
+in the native vault and survive credential refresh. Paid Checkout sends only
+that opaque claim, never the raw codename. No website or cookie is an
+attribution input. `ctx pro manage` creates a hosted Stripe portal session
+after sign-in. `ctx referral create`, `status`, and `payout` are explicit
+hosted-service operations; human mode may start WorkOS AuthKit, and eligible
+payout can open Stripe-hosted onboarding. Referral JSON uses cached
+authentication only and never starts AuthKit or opens a browser. These
+requests do not include transcript text, source content,
 repository paths, facts, graph rows, queries, or query results. Valid offline
 grants keep local graph operations usable when renewal is temporarily
 unavailable.
+
+The referral feature writes no state to `ctx.db`, `work.sqlite`,
+`usage.sqlite`, the encrypted Pro graph, provider transcripts, Git data, local
+analytics, routine `ctx status`, MCP, or ordinary Core flows. It emits no
+referral telemetry. The hosted service is authoritative for distinct qualifying
+$20 monthly invoice reconciliation, 14-day holds, the invoice 2 gate for
+invoices 1 and 2, invoices 3 through 12, refunds, disputes, manual payability,
+paid-reversal debt and negative adjustments, and the $120-per-referral cap. The
+client stores no invoice-level or per-referral ledger and receives only the
+authenticated referrer's private aggregate status. That summary distinguishes
+earned, pending, manual-review, payable, sent-but-unsettled processing, settled
+historical paid, and debt amounts. Paid cash is not decremented after a
+reversal; debt records the negative adjustment, and the service never requests
+an external clawback. Pro commercial-credential cleanup deletes the optional
+opaque referral claim along with the other root-scoped commercial credentials.
+The separate shown-once marker is content-free local output state, not
+attribution, identity, or payout state.
 
 An expired trial or subscription locks graph operations without deleting
 canonical history, encrypted graph data, or key material. Resubscription plus
@@ -611,9 +649,18 @@ surface; private Pro graph, entitlement, and query internals are not telemetry
 inputs.
 
 `provider_refresh_completed@1` carries only closed provider-refresh summaries
-that a producer already has safely available. `runtime_observation@1` is for
-low-frequency daemon or MCP lifecycle and liveness observations, not per-loop
-or per-request tracing. These three batch families are delivered to
+that a producer already has safely available. Source sizes use coarse buckets
+with large-store boundaries at 1, 2, 5, 10, 25, 50, and 100 GiB. When the CLI
+can read process resource counters around the exact provider call, the same
+event may include bucketed CPU duration; combined multi-source importers
+contribute that observation once. A command with exactly one
+provider/source-mode aggregate may also include the process-lifetime RSS
+high-water mark observed at completion. That field is explicitly not a
+provider-window peak and is omitted from multi-aggregate batches and
+long-lived daemon surfaces.
+`runtime_observation@1` is for low-frequency daemon or MCP lifecycle and
+liveness observations, not per-loop or per-request tracing. These three batch
+families are delivered to
 `https://cli.ctx.rs/functions/v1/analytics`; `file://` endpoints remain
 available as local test sinks. `install_stage@1` is produced only by the hosted
 shell and PowerShell installers and is sent as a standalone body to the hosted
@@ -634,8 +681,10 @@ SQL or search query text, result rows or snippets, source bodies, source or
 repository paths, target values, repository or branch names, native session
 IDs, command text or output, raw error strings, credentials, authorization
 headers, access tokens, secrets, usernames, hostnames, raw IP addresses, exact
-CPU or GPU names, serial numbers, hardware IDs, live utilization, or benchmark
-results.
+CPU or GPU names, serial numbers, hardware IDs, exact resource values, live
+utilization samples, or benchmark outputs. Referral codenames, opaque claims,
+identity, payout URLs, email, and
+identity-linked referral counts are also excluded.
 
 The data-root identifier lives in `install.json` and represents that local
 index even when analytics are disabled. The client-profile identifier is a

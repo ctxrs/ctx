@@ -59,6 +59,130 @@ fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
 }
 
 #[test]
+fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
+    let temp = tempdir();
+    let path_marker = "PRIVATE_USAGE_PATH_7d31";
+    let content_marker = "PRIVATE_USAGE_CONTENT_62af";
+    let raw_id_marker = "session-raw-id-9184";
+    let data_root = temp.path().join(path_marker);
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("status-analytics.jsonl");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::write(
+        data_root.join("config.toml"),
+        format!(
+            "# {content_marker} {raw_id_marker}\n\
+             [local_usage]\nenabled = true\n"
+        ),
+    )
+    .unwrap();
+
+    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("CTX_ANALYTICS_ENABLED", "false")
+        .assert()
+        .success();
+
+    let output = enabled(
+        ctx(&temp)
+            .args(["status", "--usage", "detail", "--json"])
+            .env("CTX_DATA_ROOT", &data_root)
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", &state)
+            .env("LOCALAPPDATA", &state)
+            .env("CTX_ANALYTICS_ENABLED", "true")
+            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path)),
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let local_usage = &status["local_usage"];
+    assert_eq!(local_usage["state"], "ready");
+
+    let install: serde_json::Value =
+        serde_json::from_slice(&fs::read(data_root.join("install.json")).unwrap()).unwrap();
+    let device: serde_json::Value =
+        serde_json::from_slice(&fs::read(expected_device_path(&home, &state)).unwrap()).unwrap();
+    let forbidden_values = [
+        data_root.to_string_lossy().into_owned(),
+        path_marker.to_owned(),
+        content_marker.to_owned(),
+        raw_id_marker.to_owned(),
+        install["install_id"].as_str().unwrap().to_owned(),
+        device["device_id"].as_str().unwrap().to_owned(),
+    ];
+    let encoded_usage = serde_json::to_string(local_usage).unwrap();
+    for forbidden in &forbidden_values {
+        assert!(
+            !encoded_usage.contains(forbidden),
+            "local usage report leaked {forbidden:?}: {encoded_usage}"
+        );
+    }
+    for forbidden_key in [
+        "data_root",
+        "database_path",
+        "store_path",
+        "query",
+        "session_id",
+        "event_id",
+        "citation_id",
+        "client_profile_id",
+        "data_root_id",
+    ] {
+        assert!(
+            !encoded_usage.contains(&format!("\"{forbidden_key}\"")),
+            "local usage report exposed {forbidden_key}: {local_usage:#}"
+        );
+    }
+
+    let payloads = read_analytics_events(&events_path);
+    assert_eq!(payloads.len(), 1);
+    assert_operation_event(&payloads[0], "status", "success");
+    let properties = analytics_event_properties(&payloads[0]);
+    assert_analytics_properties_are_allowlisted(properties);
+    let encoded_properties = serde_json::to_string(properties).unwrap();
+    for forbidden in &forbidden_values {
+        assert!(
+            !encoded_properties.contains(forbidden),
+            "status analytics properties leaked local usage data {forbidden:?}: \
+             {encoded_properties}"
+        );
+    }
+    for usage_key in [
+        "local_usage",
+        "usage_calls",
+        "active_days",
+        "ctx_versions",
+        "result_bearing_calls",
+        "empty_calls",
+        "not_applicable_calls",
+        "result_count",
+        "citation_count",
+        "mcp_response_bytes",
+        "pro_blame",
+    ] {
+        assert!(
+            !properties.contains_key(usage_key),
+            "status analytics attached local usage field {usage_key}: {properties:#?}"
+        );
+    }
+}
+
+#[test]
 fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
     let temp = tempdir();
 
@@ -128,6 +252,12 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
     enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
         .assert()
         .success();
+    let usage_path = temp.path().join("usage.sqlite");
+    let before_bytes = fs::read(&usage_path).unwrap();
+    let before_modified = fs::metadata(&usage_path).unwrap().modified().unwrap();
+    let wal_path = temp.path().join("usage.sqlite-wal");
+    let shm_path = temp.path().join("usage.sqlite-shm");
+    let before_auxiliaries = (wal_path.exists(), shm_path.exists());
     for _ in 0..3 {
         json_output(enabled(
             ctx(&temp).args(["status", "--usage", "detail", "--json"]),
@@ -137,6 +267,16 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
         ctx(&temp).args(["status", "--usage", "summary", "--json"]),
     ));
     assert_eq!(report["local_usage"]["summary"]["calls"], 1);
+    assert_eq!(fs::read(&usage_path).unwrap(), before_bytes);
+    assert_eq!(
+        fs::metadata(&usage_path).unwrap().modified().unwrap(),
+        before_modified
+    );
+    assert_eq!(
+        (wal_path.exists(), shm_path.exists()),
+        before_auxiliaries,
+        "read-only usage reports must not create SQLite auxiliaries"
+    );
 }
 
 #[test]
@@ -451,11 +591,13 @@ fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
         .success()
         .stdout(predicates::str::contains("usage_active_utc_days:"))
         .stdout(predicates::str::contains(
-            "usage_classified_result_sets: 2 nonempty, 1 empty",
+            "usage_mcp_pro_result_classification: 2 nonempty, 1 empty",
         ))
         .stdout(predicates::str::contains(
-            "usage_no_result_set_classification: 2 calls",
+            "usage_mcp_pro_result_classification_not_applicable: 2 calls",
         ))
+        .stdout(predicates::str::contains("usage_classified_result_sets").not())
+        .stdout(predicates::str::contains("usage_no_result_set_classification").not())
         .stdout(predicates::str::contains(
             "Pro returned produced attribution in 1 of 4 blame requests.",
         ))
@@ -464,6 +606,62 @@ fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
         ))
         .stdout(predicates::str::contains("produced-attribution 1"))
         .stdout(predicates::str::contains("cited provenance").not());
+}
+
+#[test]
+fn detailed_usage_operations_are_complete_deterministic_and_at_most_eighty_columns() {
+    let temp = tempdir();
+    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+        .assert()
+        .success();
+    let long_version = "v".repeat(64);
+    let calls = i64::MAX;
+    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE daily_usage \
+             SET ctx_version = ?1, operation = 'integrations', calls = ?2",
+            rusqlite::params![long_version, calls],
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = enabled(ctx(&temp).args(["status", "--usage", "detail"]))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    let operation_block = output
+        .lines()
+        .skip_while(|line| !line.starts_with("usage_operation:"))
+        .take_while(|line| !line.starts_with("usage_duration:"))
+        .collect::<Vec<_>>();
+    assert!(!operation_block.is_empty(), "{output}");
+    for line in &operation_block {
+        assert!(
+            line.len() <= 80,
+            "usage detail line is {} columns: {line}",
+            line.len()
+        );
+    }
+    assert_eq!(operation_block[0], "usage_operation: cli/integrations");
+    let flattened = operation_block.join(" ");
+    for field in [
+        format!("ctx_version={}", "v".repeat(64)),
+        format!("calls={calls}"),
+        format!("success={calls}"),
+        "failure=0".to_owned(),
+        "result=0".to_owned(),
+        "empty=0".to_owned(),
+        format!("not-applicable={calls}"),
+    ] {
+        assert!(
+            flattened.contains(&field),
+            "usage detail omitted {field}: {operation_block:#?}"
+        );
+    }
 }
 
 #[test]

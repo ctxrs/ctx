@@ -12,11 +12,12 @@ mod traversal;
 
 pub(crate) use dialect::native_jsonl_missing_reason;
 pub(crate) use native_path::{
-    import_antigravity_nativepath_tree, import_copilot_nativepath_tree,
-    import_cursor_nativepath_tree, import_factory_ai_droid_nativepath_tree,
-    import_gemini_nativepath_tree, import_qoder_nativepath_tree, import_qwen_code_nativepath_tree,
-    import_tabnine_nativepath_tree, import_windsurf_nativepath_tree,
-    qoder_complete_content_message_record, NativePathJsonlTreeImport,
+    direct_jsonl_complete_message_provider_event_hash, import_antigravity_nativepath_tree,
+    import_copilot_nativepath_tree, import_cursor_nativepath_tree,
+    import_factory_ai_droid_nativepath_tree, import_gemini_nativepath_tree,
+    import_qoder_nativepath_tree, import_qwen_code_nativepath_tree, import_tabnine_nativepath_tree,
+    import_windsurf_nativepath_tree, qoder_complete_content_message_record,
+    NativePathJsonlTreeImport,
 };
 pub(crate) use normalization::{
     native_jsonl_entry_type, native_jsonl_event_id, native_jsonl_event_text,

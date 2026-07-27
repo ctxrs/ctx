@@ -4,16 +4,28 @@ use std::{
 };
 
 use chrono::{TimeZone, Utc};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, Event, SyncCursor};
 use ctx_history_store::{decode_native_path_committed_cursor, Store};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
+use serde_json::json;
 use tempfile::TempDir;
+use uuid::Uuid;
 
+use super::position::{nanoclaw_message_locator, NanoClawMessageSource};
+use super::rows::NANOCLAW_NATIVE_MAX_RECORD_BYTES;
 use super::*;
-use crate::provider::importer::{provider_path_identity, provider_source_cursor_stream_for_path};
+use crate::complete_content::{
+    sqlite::CompleteContentSqliteQueryBudget, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+};
+use crate::native_source::NativePosition;
+use crate::provider::importer::{
+    provider_path_identity, provider_source_cursor_stream_for_path, timestamps,
+    BoundedParserCheckpoint, CertifiedProviderCursor,
+};
 use crate::{
     CaptureWorkLimit, ImportProfile, ProviderImportOptions, ProviderImportWorkResult,
-    NANOCLAW_SOURCE_FORMAT,
+    NANOCLAW_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
 };
 
 fn context(root: &Path) -> ProviderAdapterContext {
@@ -169,6 +181,74 @@ fn nanoclaw_event_count(store: &Store) -> usize {
         .count()
 }
 
+fn nanoclaw_events(store: &Store) -> Vec<Event> {
+    let archive = store.export_archive().unwrap();
+    let source_ids = archive
+        .capture_sources
+        .iter()
+        .filter(|source| source.descriptor.provider == CaptureProvider::NanoClaw)
+        .map(|source| source.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    archive
+        .events
+        .into_iter()
+        .filter(|event| {
+            event
+                .capture_source_id
+                .is_some_and(|source_id| source_ids.contains(&source_id))
+        })
+        .collect()
+}
+
+fn active_nanoclaw_events(store: &Store) -> Vec<Event> {
+    nanoclaw_events(store)
+        .into_iter()
+        .filter(|event| event.sync.deleted_at.is_none())
+        .collect()
+}
+
+fn event_containing(store: &Store, marker: &str) -> Event {
+    nanoclaw_events(store)
+        .into_iter()
+        .find(|event| serde_json::to_string(event).unwrap().contains(marker))
+        .unwrap()
+}
+
+fn provider_cursor(store: &Store, root: &Path) -> String {
+    let stored = store
+        .get_sync_cursor(None, "machine-nanoclaw-test", &cursor_stream(root))
+        .unwrap()
+        .unwrap();
+    decode_native_path_committed_cursor(&stored.cursor)
+        .unwrap()
+        .provider_cursor()
+        .to_owned()
+}
+
+fn install_released_cursor(store: &Store, root: &Path) {
+    let cursor = CertifiedProviderCursor::new(
+        "released-nanoclaw-source-revision",
+        NANOCLAW_CAPTURE_REVISION,
+        NANOCLAW_POLICY_REVISION,
+        NativePosition::new("nanoclaw-project-keyset-v1", vec![0]).unwrap(),
+        BoundedParserCheckpoint::from_serializable(&()).unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    store
+        .upsert_sync_cursor(&SyncCursor {
+            id: Uuid::new_v4(),
+            team_id: None,
+            device_id: "machine-nanoclaw-test".to_owned(),
+            stream: cursor_stream(root),
+            cursor,
+            last_synced_at: None,
+            timestamps: timestamps(chrono::DateTime::<Utc>::UNIX_EPOCH),
+        })
+        .unwrap();
+}
+
 #[test]
 fn nativepath_import_is_cursor_committed_and_idempotent() {
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -177,7 +257,8 @@ fn nativepath_import_is_cursor_committed_and_idempotent() {
     insert_inbound(&inbound, "in-1", 1, 1_000, "native-inbound-marker");
     insert_outbound(&outbound, "out-1", 2, 2_000, "native-outbound-marker");
     let stream = cursor_stream(&root);
-    let mut store = Store::open(temp.path().join("store.sqlite")).unwrap();
+    let store_path = temp.path().join("store.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
 
     let first = import_nanoclaw_nativepath(
         &root,
@@ -197,7 +278,9 @@ fn nativepath_import_is_cursor_committed_and_idempotent() {
         .provider_cursor()
         .starts_with("nanoclaw-nativepath-v1:"));
     assert!(committed.journal_checkpoint().is_some());
+    drop(store);
 
+    let mut store = Store::open(&store_path).unwrap();
     let replay = import_nanoclaw_nativepath(
         &root,
         &mut store,
@@ -302,4 +385,486 @@ fn nativepath_source_disappearance_retires_exact_route() {
     .unwrap();
     assert_eq!(reactivated.work_result(), ProviderImportWorkResult::Changed);
     assert_eq!(nanoclaw_event_count(&store), 1);
+}
+
+#[test]
+fn same_id_rewrite_updates_in_place_and_truncation_retires_the_omitted_tail() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "rewrite", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    let old_body = format!(
+        "rewriteoldmarker {}",
+        "o".repeat(PROVIDER_MAX_TEXT_CHARS + 32)
+    );
+    insert_inbound(&inbound, "stable-id", 1, 1_000, &old_body);
+    insert_inbound(&inbound, "tail-id", 2, 2_000, "truncated-tail-marker");
+    let mut store = Store::open(temp.path().join("rewrite.sqlite")).unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    let old = store
+        .get_event(event_containing(&store, "rewriteoldmarker").id)
+        .unwrap();
+    let tail = event_containing(&store, "truncated-tail-marker");
+    assert_eq!(
+        old.payload.pointer("/body/text_retention/truncated"),
+        Some(&json!(true)),
+        "{}",
+        old.payload
+    );
+    let old_locator = old.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].clone();
+
+    let connection = Connection::open(&inbound).unwrap();
+    connection
+        .execute(
+            "update messages_in set content = ?1 where id = 'stable-id'",
+            [json!({
+                "text": format!(
+                    "rewritenewmarker {} tailonlyalpha",
+                    "n".repeat(PROVIDER_MAX_TEXT_CHARS + 32)
+                )
+            })
+            .to_string()],
+        )
+        .unwrap();
+    connection
+        .execute("delete from messages_in where id = 'tail-id'", [])
+        .unwrap();
+    drop(connection);
+
+    let rewritten = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(rewritten.failed, 0, "{:?}", rewritten.failures);
+    let current = store
+        .get_event(event_containing(&store, "rewritenewmarker").id)
+        .unwrap();
+    assert_eq!(current.id, old.id);
+    assert_ne!(
+        current.sync.metadata["provider_event_hash"],
+        old.sync.metadata["provider_event_hash"]
+    );
+    assert_ne!(
+        current.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY], old_locator,
+        "old metadata: {}; current metadata: {}",
+        old.sync.metadata, current.sync.metadata,
+    );
+    assert_eq!(
+        current.sync.metadata["provider_event_hash_authority"],
+        json!("normalized_payload_fallback")
+    );
+    assert!(store
+        .search_event_hits("rewritenewmarker", 10)
+        .unwrap()
+        .iter()
+        .any(|hit| hit.event_id == current.id));
+    assert!(store
+        .search_event_hits("rewriteoldmarker", 10)
+        .unwrap()
+        .is_empty());
+
+    let current_locator = current.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY].clone();
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = ?1 where id = 'stable-id'",
+            [json!({
+                "text": format!(
+                    "rewritenewmarker {} tailonlybravo",
+                    "n".repeat(PROVIDER_MAX_TEXT_CHARS + 32)
+                )
+            })
+            .to_string()],
+        )
+        .unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    let tail_rewritten = store.get_event(current.id).unwrap();
+    assert_eq!(tail_rewritten.id, current.id);
+    assert_eq!(tail_rewritten.payload["body"], current.payload["body"]);
+    assert_ne!(
+        tail_rewritten.sync.metadata["provider_event_hash"],
+        current.sync.metadata["provider_event_hash"]
+    );
+    assert_ne!(
+        tail_rewritten.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+        current_locator
+    );
+    assert!(store
+        .search_event_hits("tailonlyalpha", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits("tailonlybravo", 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(active_nanoclaw_events(&store).len(), 1);
+    assert!(store.get_event(tail.id).unwrap().sync.deleted_at.is_some());
+}
+
+#[test]
+fn session_deletion_retires_only_the_omitted_session_and_events() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "session-delete", 2);
+    let (first, _) = create_message_stores(&root, "session-0000");
+    let (second, _) = create_message_stores(&root, "session-0001");
+    insert_inbound(&first, "first", 1, 1_000, "retained-session-marker");
+    insert_inbound(&second, "second", 1, 1_000, "deleted-session-marker");
+    let mut store = Store::open(temp.path().join("session-delete.sqlite")).unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    let deleted_event = event_containing(&store, "deleted-session-marker");
+    let deleted_session_id = deleted_event.session_id.unwrap();
+
+    Connection::open(root.join("data").join("v2.db"))
+        .unwrap()
+        .execute("delete from sessions where id = 'session-0001'", [])
+        .unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+
+    assert_eq!(active_nanoclaw_events(&store).len(), 1);
+    assert!(serde_json::to_string(&active_nanoclaw_events(&store))
+        .unwrap()
+        .contains("retained-session-marker"));
+    assert!(store
+        .get_event(deleted_event.id)
+        .unwrap()
+        .sync
+        .deleted_at
+        .is_some());
+    assert!(store
+        .get_session(deleted_session_id)
+        .unwrap()
+        .sync
+        .deleted_at
+        .is_some());
+}
+
+#[test]
+fn bounded_retirement_resumes_after_store_reopen() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "retirement-reopen", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    for index in 0..140 {
+        insert_inbound(
+            &inbound,
+            &format!("row-{index:03}"),
+            index,
+            1_000 + index,
+            &format!("restart-retirement-{index:03}"),
+        );
+    }
+    let store_path = temp.path().join("retirement-reopen.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    Connection::open(&inbound)
+        .unwrap()
+        .execute("delete from messages_in where id <> 'row-000'", [])
+        .unwrap();
+
+    for _ in 0..12 {
+        if provider_cursor(&store, &root).contains("\"retirement\"") {
+            break;
+        }
+        let partial = import_nanoclaw_nativepath(
+            &root,
+            &mut store,
+            context(&root),
+            import_options(CaptureWorkLimit::OneSafeGroup),
+        )
+        .unwrap();
+        assert!(partial.work_remaining);
+    }
+    assert!(provider_cursor(&store, &root).contains("\"retirement\""));
+    let partial_retirement = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::OneSafeGroup),
+    )
+    .unwrap();
+    assert!(partial_retirement.work_remaining);
+    assert!(provider_cursor(&store, &root).contains("\"retirement\""));
+    drop(store);
+
+    let mut reopened = Store::open(&store_path).unwrap();
+    let completed = import_nanoclaw_nativepath(
+        &root,
+        &mut reopened,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert!(!completed.work_remaining);
+    assert_eq!(active_nanoclaw_events(&reopened).len(), 1);
+    let cursor = provider_cursor(&reopened, &root);
+    assert!(cursor.contains("\"terminal\":true"));
+    assert!(!cursor.contains("\"retirement\""));
+}
+
+#[test]
+fn malformed_rows_are_bounded_rejections_and_advance_the_frontier() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "mixed-rejections", 2);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    Connection::open(root.join("data").join("v2.db"))
+        .unwrap()
+        .execute(
+            "update sessions set status = CAST(x'80ff' AS TEXT) where id = 'session-0001'",
+            [],
+        )
+        .unwrap();
+    insert_inbound(&inbound, "valid-1", 1, 1_000, "valid-before-rejection");
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "insert into messages_in values (
+                'invalid', 'not-an-integer', 'chat', 1500, 'done', 'message',
+                'chat-1', 'telegram', 'thread', x'80ff', null, 0
+            )",
+            [],
+        )
+        .unwrap();
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "insert into messages_in values (
+                'invalid-utf8', 2, 'chat', 1600, 'done', 'message',
+                'chat-1', 'telegram', 'thread', CAST(x'80ff' AS TEXT), null, 0
+            )",
+            [],
+        )
+        .unwrap();
+    insert_inbound(&inbound, "invalid-validation", -1, 1_700, "negative-seq");
+    insert_inbound(&inbound, "valid-2", 3, 2_000, "valid-after-rejection");
+    let store_path = temp.path().join("mixed-rejections.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    let mixed = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(mixed.failed, 4, "{:?}", mixed.failures);
+    assert_eq!(active_nanoclaw_events(&store).len(), 2);
+    assert!(provider_cursor(&store, &root).contains("\"terminal\":true"));
+    drop(store);
+
+    let mut reopened = Store::open(&store_path).unwrap();
+    let replay = import_nanoclaw_nativepath(
+        &root,
+        &mut reopened,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(active_nanoclaw_events(&reopened).len(), 2);
+
+    let all_invalid_root = create_project(&temp, "all-invalid", 1);
+    let (all_invalid, _) = create_message_stores(&all_invalid_root, "session-0000");
+    let connection = Connection::open(&all_invalid).unwrap();
+    connection
+        .execute(
+            "insert into messages_in values (
+                'bad-type', 'bad-seq', 'chat', 1000, 'done', 'message',
+                'chat-1', 'telegram', 'thread', x'80ff', null, 0
+            )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into messages_in values (
+                'too-large', 2, 'chat', 2000, 'done', 'message',
+                'chat-1', 'telegram', 'thread', ?1, null, 0
+            )",
+            ["x".repeat(NANOCLAW_NATIVE_MAX_RECORD_BYTES as usize + 1)],
+        )
+        .unwrap();
+    drop(connection);
+    let mut invalid_store = Store::open(temp.path().join("all-invalid.sqlite")).unwrap();
+    let invalid = import_nanoclaw_nativepath(
+        &all_invalid_root,
+        &mut invalid_store,
+        context(&all_invalid_root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(invalid.failed, 2, "{:?}", invalid.failures);
+    assert!(active_nanoclaw_events(&invalid_store).is_empty());
+    assert!(provider_cursor(&invalid_store, &all_invalid_root).contains("\"terminal\":true"));
+}
+
+#[test]
+fn exact_released_source_id_hash_migrates_in_place() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "legacy-hash", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "legacy-id", 1, 1_000, "legacy-migration-marker");
+    let store_path = temp.path().join("legacy-hash.sqlite");
+    let mut store = Store::open(&store_path).unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    let mut released = event_containing(&store, "legacy-migration-marker");
+    let released_id = released.id;
+    let legacy_hash = "inbound:legacy-id";
+    released.dedupe_key = Store::provider_event_dedupe_key_with_payload_hash(
+        released.dedupe_key.as_deref().unwrap(),
+        legacy_hash,
+    );
+    released.payload["provider_event_hash"] = json!(legacy_hash);
+    released.sync.metadata["provider_event_hash"] = json!(legacy_hash);
+    released.sync.metadata["provider_event_hash_authority"] = json!("provider_supplied");
+    drop(store);
+    let raw = Connection::open(&store_path).unwrap();
+    raw.create_scalar_function(
+        "ctx_projection_writer_authorized_v1",
+        0,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )
+    .unwrap();
+    raw.execute(
+        "update events set payload_json = ?1, dedupe_key = ?2, metadata_json = ?3 where id = ?4",
+        rusqlite::params![
+            serde_json::to_string(&released.payload).unwrap(),
+            released.dedupe_key,
+            serde_json::to_string(&released.sync.metadata).unwrap(),
+            released.id.to_string(),
+        ],
+    )
+    .unwrap();
+    drop(raw);
+
+    let mut store = Store::open(&store_path).unwrap();
+    install_released_cursor(&store, &root);
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    let migrated = store.get_event(released_id).unwrap();
+    assert_eq!(migrated.id, released_id);
+    assert_eq!(
+        migrated.sync.metadata["provider_event_hash_authority"],
+        json!("normalized_payload_fallback")
+    );
+    assert!(!migrated
+        .dedupe_key
+        .as_deref()
+        .unwrap()
+        .ends_with(legacy_hash));
+    assert_eq!(active_nanoclaw_events(&store).len(), 1);
+}
+
+#[test]
+fn compound_locator_recovers_exact_inbound_and_outbound_content_without_paths() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "locator", 1);
+    let (inbound, outbound) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "exact-inbound-content");
+    insert_outbound(&outbound, "outbound", 2, 2_000, "exact-outbound-content");
+    let inbound_locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    let outbound_locator = nanoclaw_message_locator(1, NanoClawMessageSource::Outbound, 1).unwrap();
+    let project = NanoClawCompleteProject::open(
+        &root,
+        &[inbound_locator.clone(), outbound_locator.clone()],
+        CompleteContentSqliteQueryBudget::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        project.resolve(&inbound_locator).unwrap().unwrap().text,
+        "exact-inbound-content"
+    );
+    assert_eq!(
+        project.resolve(&outbound_locator).unwrap().unwrap().text,
+        "exact-outbound-content"
+    );
+
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'mutated-content' where id = 'inbound'",
+            [],
+        )
+        .unwrap();
+    assert!(project.resolve(&inbound_locator).is_err());
+}
+
+#[test]
+fn core_projection_never_persists_or_indexes_the_complete_tail() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "privacy", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    let secret = "NANOCLAW_COMPLETE_TAIL_MUST_NOT_PERSIST";
+    let mut content = "p".repeat(PROVIDER_MAX_TEXT_CHARS + 256);
+    content.push_str(secret);
+    insert_inbound(&inbound, "private-tail", 1, 1_000, &content);
+    let mut store = Store::open(temp.path().join("privacy.sqlite")).unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert!(!serde_json::to_string(&store.export_archive().unwrap())
+        .unwrap()
+        .contains(secret));
+    assert!(store.search_event_hits(secret, 10).unwrap().is_empty());
+
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    let project = NanoClawCompleteProject::open(
+        &root,
+        std::slice::from_ref(&locator),
+        CompleteContentSqliteQueryBudget::new(),
+    )
+    .unwrap();
+    assert!(project
+        .resolve(&locator)
+        .unwrap()
+        .unwrap()
+        .text
+        .ends_with(secret));
 }

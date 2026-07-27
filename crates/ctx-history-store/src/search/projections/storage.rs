@@ -2,7 +2,6 @@ use ctx_history_core::{utc_now, Event, HistoryRecord};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::connection::collect_rows;
 use crate::native_path_group::BoundEncoding;
 use crate::records::{record_from_row, record_select_sql};
 use crate::schema::ddl::{table_exists, table_has_column};
@@ -16,12 +15,39 @@ use super::encoding::local_preview;
 use super::prepared::PreparedEventProjection;
 
 const SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY: &str = "semantic_searchable_lite_turn_items_v3";
+const STORED_EVENT_PROJECTION_QUERY: &str = r#"
+    SELECT e.id,
+           COALESCE(e.history_record_id, r.history_record_id, s.history_record_id, rs.history_record_id),
+           e.session_id,
+           e.role,
+           e.event_type,
+           e.payload_json,
+           'safe_preview',
+           e.visibility,
+           e.sync_state,
+           e.deleted_at_ms
+    FROM events e
+    LEFT JOIN runs r ON r.id = e.run_id
+    LEFT JOIN sessions s ON s.id = e.session_id
+    LEFT JOIN sessions rs ON rs.id = r.session_id
+    ORDER BY e.occurred_at_ms, e.seq, e.id
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EventSearchProjectionCapabilities {
     event_search: bool,
     event_lookup: bool,
     event_scriptgram: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SearchProjectionCounts {
+    pub(crate) history_search: usize,
+    pub(crate) history_scriptgram: usize,
+    pub(crate) event_search: usize,
+    pub(crate) event_lookup: usize,
+    pub(crate) event_scriptgram: usize,
+    pub(crate) artifact_search: usize,
 }
 
 impl Store {
@@ -68,18 +94,23 @@ impl Store {
         if !has_event_search && !has_event_lookup {
             return Ok(false);
         }
-        let events = table_row_count(&self.conn, "events")?;
-        Ok(events > 0
-            && ((has_event_search && table_row_count(&self.conn, "event_search")? == 0)
+        let events = validated_table_has_rows(&self.conn, "events")?;
+        Ok(events
+            && ((has_event_search && !validated_table_has_rows(&self.conn, "event_search")?)
                 || (has_event_lookup
-                    && table_row_count(&self.conn, "event_search_lookup")? == 0
-                    && event_search_lookup_candidate_count(&self.conn)? > 0)))
+                    && !validated_table_has_rows(&self.conn, "event_search_lookup")?
+                    && event_search_lookup_has_candidate(&self.conn)?)))
     }
 
     pub(crate) fn rebuild_search_projection(&self) -> Result<()> {
+        self.rebuild_search_projection_with_counts().map(|_| ())
+    }
+
+    pub(crate) fn rebuild_search_projection_with_counts(&self) -> Result<SearchProjectionCounts> {
         self.invalidate_event_search_projection_capabilities();
-        rebuild_search_projection(&self.conn)?;
-        self.initialize_event_search_projection_capabilities()
+        let counts = rebuild_search_projection_with_counts(&self.conn)?;
+        self.initialize_event_search_projection_capabilities()?;
+        Ok(counts)
     }
 
     pub(crate) fn ensure_search_projection_initialized(&self) -> Result<()> {
@@ -96,15 +127,24 @@ impl Store {
 }
 
 pub(crate) fn rebuild_search_projection(conn: &Connection) -> Result<()> {
-    super::super::atomic_rebuild::run(conn, || rebuild_search_projection_inner(conn))
+    rebuild_search_projection_with_counts(conn).map(|_| ())
 }
 
-fn rebuild_search_projection_inner(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "ctx_history_search")? {
-        return Ok(());
-    }
+fn rebuild_search_projection_with_counts(conn: &Connection) -> Result<SearchProjectionCounts> {
+    let mut counts = SearchProjectionCounts::default();
+    super::super::atomic_rebuild::run(conn, || {
+        counts = rebuild_search_projection_inner(conn)?;
+        Ok(())
+    })?;
+    Ok(counts)
+}
 
-    conn.execute("DELETE FROM ctx_history_search", [])?;
+fn rebuild_search_projection_inner(conn: &Connection) -> Result<SearchProjectionCounts> {
+    let mut counts = SearchProjectionCounts::default();
+    let has_record_search = table_exists(conn, "ctx_history_search")?;
+    if has_record_search {
+        conn.execute("DELETE FROM ctx_history_search", [])?;
+    }
     let has_record_scriptgram = record_scriptgram_table_ready(conn)?;
     if has_record_scriptgram {
         conn.execute("DELETE FROM ctx_history_search_scriptgram", [])?;
@@ -124,61 +164,72 @@ fn rebuild_search_projection_inner(conn: &Connection) -> Result<()> {
     if has_event_lookup {
         conn.execute("DELETE FROM event_search_lookup", [])?;
     }
-    if has_event_search || has_event_lookup {
-        populate_event_search_projection(
+    if has_event_search || has_event_lookup || has_event_scriptgram {
+        let event_counts = populate_event_search_projection(
             conn,
             has_event_search,
             has_event_lookup,
             has_event_scriptgram,
         )?;
+        counts.event_search = event_counts.event_search;
+        counts.event_lookup = event_counts.event_lookup;
+        counts.event_scriptgram = event_counts.event_scriptgram;
     }
     if table_exists(conn, "artifact_search")? {
         conn.execute("DELETE FROM artifact_search", [])?;
     }
 
-    let records = {
+    if has_record_search || has_record_scriptgram {
         let mut stmt = conn.prepare(record_select_sql("ORDER BY created_at DESC").as_str())?;
-        let rows = stmt.query_map([], record_from_row)?;
-        collect_rows(rows)?
-    };
-
-    let mut insert_record_search = conn.prepare(
-        r#"
-        INSERT INTO ctx_history_search
-        (record_id, title, summary, primary_user_text, decision_text, context_text, tag_text)
-        VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)
-        "#,
-    )?;
-    let mut insert_record_scriptgram = if has_record_scriptgram {
-        Some(conn.prepare(
-            r#"
-            INSERT INTO ctx_history_search_scriptgram
-            (record_id, token_text)
-            VALUES (?1, ?2)
-            "#,
-        )?)
-    } else {
-        None
-    };
-    for record in records {
-        insert_record_search.execute(params![
-            record.id.to_string(),
-            local_preview(&record.title, 512),
-            local_preview(&record.body, 2048),
-            local_preview(&record.body, 2048),
-            "",
-            local_preview(&record.tags.join(" "), 1024),
-        ])?;
-        if let Some(insert_record_scriptgram) = insert_record_scriptgram.as_mut() {
-            let token_text = scriptgram_index_text(&record_search_scriptgram_source(&record));
-            if !token_text.is_empty() {
-                insert_record_scriptgram.execute(params![record.id.to_string(), token_text])?;
+        let mut rows = stmt.query_map([], record_from_row)?;
+        let mut insert_record_search = if has_record_search {
+            Some(conn.prepare(
+                r#"
+                INSERT INTO ctx_history_search
+                (record_id, title, summary, primary_user_text, decision_text, context_text, tag_text)
+                VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)
+                "#,
+            )?)
+        } else {
+            None
+        };
+        let mut insert_record_scriptgram = if has_record_scriptgram {
+            Some(conn.prepare(
+                r#"
+                INSERT INTO ctx_history_search_scriptgram
+                (record_id, token_text)
+                VALUES (?1, ?2)
+                "#,
+            )?)
+        } else {
+            None
+        };
+        rows.try_for_each(|record| -> Result<()> {
+            let record = record?;
+            if let Some(insert_record_search) = insert_record_search.as_mut() {
+                insert_record_search.execute(params![
+                    record.id.to_string(),
+                    local_preview(&record.title, 512),
+                    local_preview(&record.body, 2048),
+                    local_preview(&record.body, 2048),
+                    "",
+                    local_preview(&record.tags.join(" "), 1024),
+                ])?;
+                counts.history_search = counts.history_search.saturating_add(1);
             }
-        }
+            if let Some(insert_record_scriptgram) = insert_record_scriptgram.as_mut() {
+                let token_text = scriptgram_index_text(&record_search_scriptgram_source(&record));
+                if !token_text.is_empty() {
+                    insert_record_scriptgram.execute(params![record.id.to_string(), token_text])?;
+                    counts.history_scriptgram = counts.history_scriptgram.saturating_add(1);
+                }
+            }
+            Ok(())
+        })?;
     }
 
     refresh_semantic_searchable_item_stats(conn)?;
-    Ok(())
+    Ok(counts)
 }
 
 pub(crate) fn upsert_record_search_projection(
@@ -209,10 +260,10 @@ pub(crate) fn upsert_record_search_projection(
         if !token_text.is_empty() {
             conn.execute(
                 r#"
-                INSERT INTO ctx_history_search_scriptgram
-                (record_id, token_text)
-                VALUES (?1, ?2)
-                "#,
+            INSERT INTO ctx_history_search_scriptgram
+            (record_id, token_text)
+            VALUES (?1, ?2)
+            "#,
                 params![record.id.to_string(), token_text],
             )?;
         }
@@ -237,7 +288,7 @@ pub(crate) fn delete_record_search_projection(conn: &Connection, record_id: Uuid
     Ok(())
 }
 
-fn record_search_scriptgram_source(record: &HistoryRecord) -> String {
+pub(super) fn record_search_scriptgram_source(record: &HistoryRecord) -> String {
     [
         local_preview(&record.title, 512),
         local_preview(&record.body, 2048),
@@ -289,26 +340,26 @@ fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    let mut projection_rows = table_row_count(conn, "ctx_history_search")?;
-    if table_exists(conn, "event_search")? {
-        projection_rows += table_row_count(conn, "event_search")?;
+    let mut has_projection_rows = validated_table_has_rows(conn, "ctx_history_search")?;
+    if !has_projection_rows && table_exists(conn, "event_search")? {
+        has_projection_rows = validated_table_has_rows(conn, "event_search")?;
     }
-    if event_scriptgram_table_ready(conn)? {
-        projection_rows += table_row_count(conn, "event_search_scriptgram")?;
+    if !has_projection_rows && event_scriptgram_table_ready(conn)? {
+        has_projection_rows = validated_table_has_rows(conn, "event_search_scriptgram")?;
     }
-    let event_lookup_rows = if event_search_lookup_table_ready(conn)? {
-        table_row_count(conn, "event_search_lookup")?
+    let event_lookup_has_rows = if event_search_lookup_table_ready(conn)? {
+        validated_table_has_rows(conn, "event_search_lookup")?
     } else {
-        0
+        false
     };
-    projection_rows += event_lookup_rows;
-    if table_exists(conn, "artifact_search")? {
-        projection_rows += table_row_count(conn, "artifact_search")?;
+    has_projection_rows |= event_lookup_has_rows;
+    if !has_projection_rows && table_exists(conn, "artifact_search")? {
+        has_projection_rows = validated_table_has_rows(conn, "artifact_search")?;
     }
-    if projection_rows > 0 {
+    if has_projection_rows {
         if event_search_lookup_table_ready(conn)?
-            && event_lookup_rows == 0
-            && event_search_lookup_candidate_count(conn)? > 0
+            && !event_lookup_has_rows
+            && event_search_lookup_has_candidate(conn)?
         {
             rebuild_event_search_lookup_projection(conn)?;
             return Ok(());
@@ -319,8 +370,8 @@ fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    if table_row_count(conn, "history_records")? > 0
-        || table_row_count(conn, "events")? > 0
+    if validated_table_has_rows(conn, "history_records")?
+        || validated_table_has_rows(conn, "events")?
         || linked_artifact_preview_count(conn)? > 0
     {
         rebuild_search_projection(conn)?;
@@ -329,7 +380,7 @@ fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
+fn validated_table_has_rows(conn: &Connection, table: &str) -> Result<bool> {
     match table {
         "artifacts"
         | "artifact_search"
@@ -342,7 +393,7 @@ fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
         | "ctx_history_search_scriptgram" => {}
         _ => unreachable!("invalid table {table}"),
     }
-    let sql = format!("SELECT COUNT(*) FROM {table}");
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)");
     Ok(conn.query_row(&sql, [], |row| row.get(0))?)
 }
 
@@ -356,35 +407,41 @@ fn event_search_lookup_table_malformed(conn: &Connection) -> Result<bool> {
     Ok(table_exists(conn, "event_search_lookup")? && !event_search_lookup_table_ready(conn)?)
 }
 
-fn event_search_lookup_candidate_count(conn: &Connection) -> Result<i64> {
-    if table_exists(conn, "event_search")? && table_row_count(conn, "event_search")? > 0 {
+fn event_search_lookup_has_candidate(conn: &Connection) -> Result<bool> {
+    if table_exists(conn, "event_search")? && validated_table_has_rows(conn, "event_search")? {
         return Ok(conn.query_row(
             r#"
-            SELECT COUNT(*)
-            FROM event_search
-            WHERE rank_bucket = 'message'
-              AND role IN ('user', 'assistant')
+            SELECT EXISTS(
+                SELECT 1
+                FROM event_search
+                WHERE rank_bucket = 'message'
+                  AND role IN ('user', 'assistant')
+                LIMIT 1
+            )
             "#,
             [],
-            |row| row.get::<_, i64>(0),
+            |row| row.get(0),
         )?);
     }
     if !table_exists(conn, "events")? {
-        return Ok(0);
+        return Ok(false);
     }
     Ok(conn.query_row(
         r#"
-        SELECT COUNT(*)
-        FROM events
-        WHERE event_type = 'message'
-          AND role IN ('user', 'assistant')
-          AND deleted_at_ms IS NULL
-          AND visibility != 'withheld'
-          AND sync_state != 'withheld'
-          AND length(trim(payload_json)) > 2
+        SELECT EXISTS(
+            SELECT 1
+            FROM events
+            WHERE event_type = 'message'
+              AND role IN ('user', 'assistant')
+              AND deleted_at_ms IS NULL
+              AND visibility != 'withheld'
+              AND sync_state != 'withheld'
+              AND length(trim(payload_json)) > 2
+            LIMIT 1
+        )
         "#,
         [],
-        |row| row.get::<_, i64>(0),
+        |row| row.get(0),
     )?)
 }
 
@@ -518,7 +575,7 @@ pub(crate) fn rebuild_event_search_lookup_projection(conn: &Connection) -> Resul
         return Ok(());
     }
     conn.execute("DELETE FROM event_search_lookup", [])?;
-    populate_event_search_projection(conn, false, true, false)
+    populate_event_search_projection(conn, false, true, false).map(|_| ())
 }
 
 fn populate_event_search_projection(
@@ -526,26 +583,10 @@ fn populate_event_search_projection(
     include_event_search: bool,
     include_event_lookup: bool,
     include_event_scriptgram: bool,
-) -> Result<()> {
-    populate_event_search_projection_from_query(
+) -> Result<SearchProjectionCounts> {
+    populate_event_search_projection_from_query_with_counts(
         conn,
-        r#"
-        SELECT e.id,
-               COALESCE(e.history_record_id, r.history_record_id, s.history_record_id, rs.history_record_id),
-               e.session_id,
-               e.role,
-               e.event_type,
-               e.payload_json,
-               'safe_preview',
-               e.visibility,
-               e.sync_state,
-               e.deleted_at_ms
-        FROM events e
-        LEFT JOIN runs r ON r.id = e.run_id
-        LEFT JOIN sessions s ON s.id = e.session_id
-        LEFT JOIN sessions rs ON rs.id = r.session_id
-        ORDER BY e.occurred_at_ms, e.seq, e.id
-        "#,
+        STORED_EVENT_PROJECTION_QUERY,
         include_event_search,
         include_event_lookup,
         include_event_scriptgram,
@@ -559,6 +600,24 @@ pub(crate) fn populate_event_search_projection_from_query(
     include_event_lookup: bool,
     include_event_scriptgram: bool,
 ) -> Result<()> {
+    populate_event_search_projection_from_query_with_counts(
+        conn,
+        query,
+        include_event_search,
+        include_event_lookup,
+        include_event_scriptgram,
+    )
+    .map(|_| ())
+}
+
+fn populate_event_search_projection_from_query_with_counts(
+    conn: &Connection,
+    query: &str,
+    include_event_search: bool,
+    include_event_lookup: bool,
+    include_event_scriptgram: bool,
+) -> Result<SearchProjectionCounts> {
+    let mut counts = SearchProjectionCounts::default();
     let mut stmt = conn.prepare(query)?;
     let mut rows = stmt.query([])?;
     let mut insert_event_search = if include_event_search {
@@ -609,6 +668,7 @@ pub(crate) fn populate_event_search_projection_from_query(
                 &projection.preview,
                 rank_bucket
             ])?;
+            counts.event_search = counts.event_search.saturating_add(1);
         }
         if let Some(insert_event_scriptgram) = insert_event_scriptgram.as_mut() {
             let token_text = scriptgram_index_text(&projection.preview);
@@ -621,6 +681,7 @@ pub(crate) fn populate_event_search_projection_from_query(
                     token_text,
                     rank_bucket
                 ])?;
+                counts.event_scriptgram = counts.event_scriptgram.saturating_add(1);
             }
         }
         if semantic_lookup_event_parts(projection.event_type, role) {
@@ -633,10 +694,11 @@ pub(crate) fn populate_event_search_projection_from_query(
                     &projection.preview,
                     rank_bucket
                 ])?;
+                counts.event_lookup = counts.event_lookup.saturating_add(1);
             }
         }
     }
-    Ok(())
+    Ok(counts)
 }
 
 pub(crate) fn insert_event_search_projection_for_event(
@@ -823,4 +885,79 @@ pub(crate) fn detect_event_search_projection_capabilities(
         event_lookup: table_exists(conn, "event_search_lookup")?,
         event_scriptgram: event_scriptgram_table_ready(conn)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use super::*;
+
+    #[test]
+    fn provider_projection_readiness_is_bounded_independent_of_event_cardinality() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "WITH RECURSIVE n(i) AS (
+                     VALUES(1)
+                     UNION ALL
+                     SELECT i + 1 FROM n WHERE i < 65536
+                 )
+                 INSERT INTO events
+                     (id, seq, event_type, role, occurred_at_ms, payload_json)
+                 SELECT printf('00000000-0000-4000-8000-%012d', i),
+                        i, 'message', 'user', i, json_object('text', i)
+                 FROM n;
+
+                 INSERT INTO event_search
+                     (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
+                 VALUES
+                     ('00000000-0000-4000-8000-000000000001',
+                      NULL, NULL, 'user', 'ready', 'message');
+
+                 INSERT INTO event_search_lookup
+                     (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
+                 VALUES
+                     ('00000000-0000-4000-8000-000000000001',
+                      NULL, NULL, 'user', 'ready', 'message');",
+            )
+            .unwrap();
+
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&callbacks);
+        store.conn.progress_handler(
+            100,
+            Some(move || observed.fetch_add(1, Ordering::Relaxed) >= 100),
+        );
+        let readiness = store.event_search_projection_needs_backfill();
+        store.conn.progress_handler(0, None::<fn() -> bool>);
+
+        assert!(!readiness.unwrap());
+        assert!(
+            callbacks.load(Ordering::Relaxed) < 100,
+            "readiness exceeded its bounded SQLite work allowance"
+        );
+        for table in ["events", "event_search", "event_search_lookup"] {
+            let mut statement = store
+                .conn
+                .prepare(&format!(
+                    "EXPLAIN SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"
+                ))
+                .unwrap();
+            let opcodes = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                !opcodes.iter().any(|opcode| opcode == "Count"),
+                "{table} readiness regressed to exact row counting: {opcodes:?}"
+            );
+        }
+    }
 }

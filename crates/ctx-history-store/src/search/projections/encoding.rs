@@ -1,7 +1,5 @@
 use ctx_history_core::{EventRole, EventType, RedactionState};
 
-use crate::result_storage::retained_failure_preview;
-
 pub(super) fn event_search_preview_from_payload(
     event_type: EventType,
     role: Option<EventRole>,
@@ -22,7 +20,7 @@ pub(super) fn event_search_preview_from_payload(
         EventType::ToolCall | EventType::CommandStarted | EventType::CommandFinished => {
             event_tool_call_preview(payload)
         }
-        EventType::ToolOutput | EventType::CommandOutput => retained_failure_preview(payload),
+        EventType::ToolOutput | EventType::CommandOutput => None,
         _ => None,
     }
     .unwrap_or_default();
@@ -109,5 +107,28 @@ fn non_blank(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn failed_output_preview_is_not_searchable() {
+        let payload = json!({
+            "result_outcome": "failure",
+            "exit_code": 1,
+            "output_preview": "private failed output"
+        });
+        assert!(event_search_preview_from_payload(
+            EventType::ToolOutput,
+            Some(EventRole::Tool),
+            &payload,
+            RedactionState::Redacted,
+        )
+        .is_empty());
     }
 }

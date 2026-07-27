@@ -37,6 +37,7 @@ pub(crate) fn lingma_complete_user_message(
         LingmaCompleteEvent {
             provider_event_index: event.provider_event_index,
             provider_event_hash: event.provider_event_hash,
+            released_provider_event_hash: event.released_provider_event_hash,
             cursor: event.cursor,
             event_type: event.event_type,
             payload: event.payload,
@@ -45,10 +46,11 @@ pub(crate) fn lingma_complete_user_message(
     ))
 }
 
-/// Migration-only fields needed to verify a released complete-content locator.
+/// Fields needed to verify current fallback and released provider-authority locators.
 pub(crate) struct LingmaCompleteEvent {
     pub(crate) provider_event_index: u64,
     pub(crate) provider_event_hash: String,
+    pub(crate) released_provider_event_hash: String,
     pub(crate) cursor: String,
     pub(crate) event_type: EventType,
     pub(crate) payload: Value,

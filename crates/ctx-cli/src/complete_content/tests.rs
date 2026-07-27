@@ -117,8 +117,22 @@ fn canonical_codex_message(truncated: Value) -> Event {
 }
 
 fn install_fixture_source(store: &Store, raw_source_path: &std::path::Path) -> Uuid {
-    let id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000020").unwrap();
-    let observation = fixture_source_observation(raw_source_path, "fixture-locator-1");
+    install_fixture_source_numbered(store, raw_source_path, 0)
+}
+
+fn install_fixture_source_numbered(
+    store: &Store,
+    raw_source_path: &std::path::Path,
+    number: u64,
+) -> Uuid {
+    let id = Uuid::from_u128(0x018f45d0000070008000000000000020 + u128::from(number));
+    let locator_identity = format!("fixture-locator-{}", number + 1);
+    let source_identity = format!("fixture-source-{}", number + 1);
+    let observation = fixture_source_observation_with_identity(
+        raw_source_path,
+        &locator_identity,
+        &source_identity,
+    );
     let resolution = store
         .reconcile_provider_source_locator(&observation)
         .unwrap();
@@ -136,7 +150,7 @@ fn install_fixture_source(store: &Store, raw_source_path: &std::path::Path) -> U
                 source_root: raw_source_path
                     .parent()
                     .map(|path| path.to_string_lossy().into_owned()),
-                source_identity: Some("fixture-source-1".to_owned()),
+                source_identity: Some(resolution.canonical_source_identity.clone()),
                 external_session_id: None,
             },
             started_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -154,17 +168,75 @@ fn fixture_source_observation(
     path: &std::path::Path,
     locator_identity: &str,
 ) -> ProviderSourceLocatorObservation {
+    fixture_source_observation_with_identity(path, locator_identity, "fixture-source-1")
+}
+
+fn fixture_source_observation_with_identity(
+    path: &std::path::Path,
+    locator_identity: &str,
+    source_identity: &str,
+) -> ProviderSourceLocatorObservation {
     ProviderSourceLocatorObservation {
         provider: CaptureProvider::Codex,
         source_format: "codex_session_jsonl".to_owned(),
         machine_id: "fixture-machine".to_owned(),
         locator_identity: locator_identity.to_owned(),
         cursor_stream: format!("fixture-cursor-{locator_identity}"),
-        proposed_source_identity: "fixture-source-1".to_owned(),
+        proposed_source_identity: source_identity.to_owned(),
         raw_source_path: Some(path.to_string_lossy().into_owned()),
         source_revision: "fixture-revision-1".to_owned(),
         observed_at_ms: 1,
     }
+}
+
+fn install_crush_source_numbered(
+    store: &Store,
+    raw_source_path: &std::path::Path,
+    number: u64,
+) -> Uuid {
+    let id = Uuid::from_u128(0x018f45d0000070008000000000000120 + u128::from(number));
+    let locator_identity = format!("crush-locator-{number}");
+    let source_identity = format!("crush-source-{number}");
+    let observation = ProviderSourceLocatorObservation {
+        provider: CaptureProvider::Crush,
+        source_format: "crush_sqlite".to_owned(),
+        machine_id: "fixture-machine".to_owned(),
+        locator_identity: locator_identity.clone(),
+        cursor_stream: format!("crush-cursor-{number}"),
+        proposed_source_identity: source_identity.clone(),
+        raw_source_path: Some(raw_source_path.to_string_lossy().into_owned()),
+        source_revision: "fixture-revision-1".to_owned(),
+        observed_at_ms: 1,
+    };
+    let resolution = store
+        .reconcile_provider_source_locator(&observation)
+        .unwrap();
+    store
+        .upsert_capture_source(&CaptureSource {
+            id,
+            descriptor: CaptureSourceDescriptor {
+                kind: CaptureSourceKind::ProviderImport,
+                provider: CaptureProvider::Crush,
+                machine_id: "fixture-machine".to_owned(),
+                process_id: None,
+                cwd: None,
+                raw_source_path: Some(raw_source_path.to_string_lossy().into_owned()),
+                source_format: Some("crush_sqlite".to_owned()),
+                source_root: raw_source_path
+                    .parent()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                source_identity: Some(resolution.canonical_source_identity.clone()),
+                external_session_id: None,
+            },
+            started_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            ended_at: None,
+            sync: SyncMetadata::default(),
+        })
+        .unwrap();
+    store
+        .bind_capture_source_provider_route(id, &resolution.route_binding())
+        .unwrap();
+    id
 }
 
 fn make_hydratable(
@@ -195,6 +267,40 @@ fn make_hydratable(
     event.sync.metadata = json!({
         VERIFIED_CONTENT_LOCATORS_METADATA_KEY: locators.to_metadata_value(),
         "provider_event_hash": format!("fixture-event-{ordinal}"),
+        "provider_event_hash_authority": "provider_supplied",
+        "source_record_ordinal": ordinal,
+        "source_record_subrecord_index": 0,
+    });
+    store.upsert_event(event).unwrap();
+}
+
+fn make_crush_hydratable(
+    store: &Store,
+    event: &mut Event,
+    source_id: Uuid,
+    ordinal: u64,
+    complete_text: &str,
+) {
+    event.id = Uuid::from_u128(0x018f45d0000070008000000000001010 + u128::from(ordinal));
+    event.seq = ordinal + 1;
+    event.capture_source_id = Some(source_id);
+    let mut address = vec![2];
+    address.extend_from_slice(&(ordinal ^ (1_u64 << 63)).to_be_bytes());
+    let locator = VerifiedContentLocatorV1::new(
+        VerifiedContentRole::MessageBody,
+        "crush-sqlite.message-body.v1",
+        ContentRef::from_bytes(complete_text.as_bytes()).unwrap(),
+        CompleteContentSourceFamily::Sqlite,
+        "crush-sqlite-row-v1",
+        &address,
+        format!("crush-native-{ordinal}"),
+        CompleteContentBodyDigest::from_text(&format!("crush-record-{ordinal}")),
+    )
+    .unwrap();
+    let locators = VerifiedContentLocatorsV1::singleton(locator).unwrap();
+    event.sync.metadata = json!({
+        VERIFIED_CONTENT_LOCATORS_METADATA_KEY: locators.to_metadata_value(),
+        "provider_event_hash": format!("crush-event-{ordinal}"),
         "provider_event_hash_authority": "provider_supplied",
         "source_record_ordinal": ordinal,
         "source_record_subrecord_index": 0,
@@ -451,6 +557,151 @@ fn complete_mode_hydrates_one_representative_fixture() {
 }
 
 #[test]
+fn complete_mode_admits_exactly_eight_distinct_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let complete_text = format!(
+        "{}tail",
+        "x".repeat(COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS)
+    );
+    let mut events = Vec::new();
+    for number in 0..COMPLETE_CONTENT_MAX_ADMITTED_SOURCES {
+        let path = temp.path().join(format!("session-{number}.fixture"));
+        std::fs::write(&path, b"fixture").unwrap();
+        let source_id =
+            install_fixture_source_numbered(&store, &path, u64::try_from(number).unwrap());
+        let mut item = event(true);
+        make_hydratable(
+            &store,
+            &mut item,
+            source_id,
+            u64::try_from(number).unwrap(),
+            &complete_text,
+        );
+        events.push(item);
+    }
+    let references = events.iter().collect::<Vec<_>>();
+    let mut registry = CompleteContentResolverRegistry::new();
+    registry.register(FileFixtureResolver);
+
+    let resolved = resolve_event_contents_with_registry(
+        &store,
+        &references,
+        ContentPolicy::Complete,
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        &registry,
+    )
+    .unwrap();
+
+    assert_eq!(resolved.events.len(), COMPLETE_CONTENT_MAX_ADMITTED_SOURCES);
+    assert!(events
+        .iter()
+        .all(|item| resolved.event(item).unwrap().text == complete_text));
+}
+
+#[test]
+fn complete_mode_rejects_ninth_source_before_opening_any_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let complete_text = format!(
+        "{}tail",
+        "x".repeat(COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS)
+    );
+    let mut events = Vec::new();
+    for number in 0..=COMPLETE_CONTENT_MAX_ADMITTED_SOURCES {
+        let path = temp.path().join(format!("missing-state-{number}.db"));
+        let source_id =
+            install_crush_source_numbered(&store, &path, u64::try_from(number).unwrap());
+        let mut item = event(true);
+        make_crush_hydratable(
+            &store,
+            &mut item,
+            source_id,
+            u64::try_from(number).unwrap(),
+            &complete_text,
+        );
+        events.push(item);
+    }
+    let references = events.iter().collect::<Vec<_>>();
+    let mut registry = CompleteContentResolverRegistry::new();
+    registry.register(FileFixtureResolver);
+
+    let error = resolve_event_contents_with_registry(
+        &store,
+        &references,
+        ContentPolicy::Complete,
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        &registry,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
+    assert_eq!(
+        error.event_id,
+        events[COMPLETE_CONTENT_MAX_ADMITTED_SOURCES].id
+    );
+}
+
+#[test]
+fn aggregate_snapshot_reservation_accepts_the_boundary_and_rejects_one_more_byte() {
+    let first_event = event(false).id;
+    let second_event = Uuid::from_u128(first_event.as_u128() + 1);
+    let mut aggregate = 0;
+
+    include_snapshot_reservation(
+        &mut aggregate,
+        COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES - 1,
+        first_event,
+    )
+    .unwrap();
+    include_snapshot_reservation(&mut aggregate, 1, second_event).unwrap();
+    assert_eq!(aggregate, COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES);
+
+    let error = include_snapshot_reservation(&mut aggregate, 1, second_event).unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
+    assert_eq!(error.event_id, second_event);
+}
+
+#[cfg(unix)]
+#[test]
+fn aggregate_sqlite_snapshot_overflow_fails_before_any_sparse_candidate_is_copied() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let complete_text = format!(
+        "{}tail",
+        "x".repeat(COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS)
+    );
+    let mut events = Vec::new();
+    for number in 0..2_u64 {
+        let path = temp.path().join(format!("sparse-state-{number}.db"));
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES / 2)
+            .unwrap();
+        if number == 1 {
+            std::fs::write(temp.path().join("sparse-state-1.db-wal"), b"x").unwrap();
+        }
+        let source_id = install_crush_source_numbered(&store, &path, number);
+        let mut item = event(true);
+        make_crush_hydratable(&store, &mut item, source_id, number, &complete_text);
+        events.push(item);
+    }
+    let references = events.iter().collect::<Vec<_>>();
+
+    let error = resolve_event_contents_with_registry(
+        &store,
+        &references,
+        ContentPolicy::Complete,
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        &CompleteContentResolverRegistry::new(),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
+    assert_eq!(error.event_id, events[1].id);
+}
+
+#[test]
 fn complete_mode_follows_the_current_locator_after_a_source_move() {
     let temp = tempfile::tempdir().unwrap();
     let old_root = temp.path().join("old-root");
@@ -539,6 +790,7 @@ fn complete_mode_enforces_the_aggregate_output_limit() {
     let source_id = install_fixture_source(&store, &raw_source_path);
     let mut event = event(true);
     make_hydratable(&store, &mut event, source_id, 0, &complete_text);
+    std::fs::remove_file(&raw_source_path).unwrap();
     let mut registry = CompleteContentResolverRegistry::new();
     registry.register(FileFixtureResolver);
 

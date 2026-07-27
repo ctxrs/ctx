@@ -1,8 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    thread,
     time::{Duration as StdDuration, Instant},
 };
 
@@ -11,8 +9,8 @@ use clap::ValueEnum;
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    discover_provider_sources_for_provider, CaptureError, CaptureWorkLimit, ImportProfile,
-    ProviderImportSummary, ProviderSourceStatus,
+    discover_provider_sources_for_provider, CaptureWorkLimit, ImportProfile, ProviderImportSummary,
+    ProviderSourceStatus,
 };
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
@@ -27,9 +25,8 @@ use crate::commands::import::{
     import_one_source_for_search_refresh_with_profile, import_totals_json,
     inventory_import_sources, one_line_error, output_inventory_can_finish,
     progress_canonical_pro_after_core_source_attempt, rejected_source_summary,
-    should_parallelize_import, CanonicalProSourceProgression, ImportFailureScope,
-    ImportSourceOutcome, ImportTotals, ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
-    SourceStats,
+    CanonicalProSourceProgression, ImportFailureScope, ImportTotals, ProviderRefreshCollector,
+    ProviderRefreshResourceObservation, ProviderRefreshRuntimeFacts, SourceStats,
 };
 use crate::commands::setup::{
     analytics_preflight, indexed_history_item_count, insert_db_size_bucket,
@@ -39,7 +36,7 @@ use crate::history_source_plugins::{
     discover_history_source_plugins, HistorySourcePluginRefresh, HistorySourcePluginSource,
 };
 use crate::output::{compact_json, print_json};
-use crate::progress::{ProgressArg, ProgressReporter, SourceProgressSnapshot};
+use crate::progress::{ProgressArg, ProgressReporter};
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{discovered_sources, home_dir, SourceInfo};
 use crate::search_filters::{
@@ -455,7 +452,6 @@ pub(crate) fn search_refresh_sources(provider: Option<ProviderArg>) -> Vec<Sourc
             source.exists
                 && source.import_support.is_auto_importable()
                 && source.status == ProviderSourceStatus::Available
-                && source.source_format != "codex_history_jsonl"
         })
         .collect()
 }
@@ -511,8 +507,13 @@ pub(crate) fn refresh_sources_for_search(
     let had_indexed_content = store.indexed_history_item_count()? > 0;
     let mut pro_output = crate::pro::ProOutputImport::begin_if_available(data_root);
     let pro_output_enabled = pro_output.is_some();
-    let inventory =
-        inventory_import_sources(&store, sources, pro_output_enabled, pro_output_enabled)?;
+    let inventory = inventory_import_sources(
+        &store,
+        sources,
+        pro_output_enabled,
+        pro_output_enabled,
+        false,
+    )?;
     let planned_sources = inventory.sources;
     let inventory_failures = inventory.failures;
     let planned_total_bytes = inventory.totals.source_bytes;
@@ -558,248 +559,108 @@ pub(crate) fn refresh_sources_for_search(
             one_line_error(&failure.error)
         ));
     }
-    if should_parallelize_import(&planned_sources) {
-        let source_states = Arc::new(Mutex::new(
-            planned_sources
-                .iter()
-                .map(|plan| SourceProgressSnapshot {
-                    completed_bytes: 0,
-                    total_bytes: plan.stats.bytes,
-                })
-                .collect::<Vec<_>>(),
-        ));
-        let handles = planned_sources
-            .into_iter()
-            .enumerate()
-            .map(|(index, plan)| {
-                let db_path = db_path.clone();
-                let progress_callback = progress.parallel_codex_import_callback(
-                    &plan.source,
-                    index,
-                    Arc::clone(&source_states),
+    let mut store = Store::open(&db_path)?;
+    let mut completed_source_bytes = 0u64;
+    for plan in planned_sources {
+        progress.message(
+            "refreshing",
+            format!("importing {}", plan.source.provider.as_str()),
+        );
+        let source_progress = progress.codex_import_callback(&plan.source, completed_source_bytes);
+        completed_source_bytes = completed_source_bytes.saturating_add(plan.stats.bytes);
+        let provider_resources = ProviderRefreshResourceObservation::begin();
+        let provider_started = Instant::now();
+        let import_result = if refresh == RefreshArg::Background {
+            import_one_source_for_background_refresh_with_profile(
+                &mut store,
+                &plan.source,
+                source_progress,
+                &plan.preinventory,
+                &import_profile,
+            )
+        } else {
+            import_one_source_for_search_refresh_with_profile(
+                &mut store,
+                &plan.source,
+                source_progress,
+                &plan.preinventory,
+                &import_profile,
+            )
+        };
+        progress_search_refresh_canonical_pro(pro_output.as_mut(), import_result.as_ref().ok());
+        match import_result {
+            Ok(summary) => {
+                warn_on_rejected_records(
+                    &progress,
+                    json_output,
+                    plan.source.provider.as_str(),
+                    &summary,
                 );
-                let join_source = plan.source.clone();
-                let join_stats = plan.stats;
-                let import_profile = import_profile.clone();
-                let handle =
-                    thread::spawn(move || -> (Result<ImportSourceOutcome>, StdDuration) {
-                        let provider_started = Instant::now();
-                        let mut result = (|| {
-                            let mut store = Store::open(&db_path)?;
-                            let summary = if refresh == RefreshArg::Background {
-                                import_one_source_for_background_refresh_with_profile(
-                                    &mut store,
-                                    &plan.source,
-                                    progress_callback,
-                                    &plan.preinventory,
-                                    &import_profile,
-                                )?
-                            } else {
-                                import_one_source_for_search_refresh_with_profile(
-                                    &mut store,
-                                    &plan.source,
-                                    progress_callback,
-                                    &plan.preinventory,
-                                    &import_profile,
-                                )?
-                            };
-                            Ok(ImportSourceOutcome {
-                                index,
-                                source: plan.source,
-                                stats: plan.stats,
-                                summary,
-                                runtime_facts: None,
-                            })
-                        })();
-                        let duration = provider_started.elapsed();
-                        if let Ok(outcome) = &mut result {
-                            outcome.runtime_facts =
-                                Some(ProviderRefreshRuntimeFacts::observed_success(
-                                    duration,
-                                    &outcome.summary,
-                                ));
-                        }
-                        (result, duration)
-                    });
-                (join_source, join_stats, handle)
-            })
-            .collect::<Vec<_>>();
-
-        let mut outcomes = Vec::with_capacity(handles.len());
-        for (source, stats, handle) in handles {
-            let (result, provider_duration) = match handle.join() {
-                Ok(result) => result,
-                Err(_) => {
-                    progress_search_refresh_canonical_pro(pro_output.as_mut(), None);
-                    provider_refreshes.record_failure(
-                        source.provider,
-                        ProviderRefreshTrigger::Search,
-                        ProviderRefreshSourceMode::Discovered,
-                        &stats,
-                        None,
-                    );
-                    return Err(CaptureError::WorkerPanicked("provider import").into());
-                }
-            };
-            progress_search_refresh_canonical_pro(
-                pro_output.as_mut(),
-                result.as_ref().ok().map(|outcome| &outcome.summary),
-            );
-            match result {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(err) if import_error_scope(&err) == ImportFailureScope::Source => {
-                    let failure_scope = import_error_scope(&err);
-                    let failure_type = crate::commands::import::import_failure_type(&err);
-                    refresh_failures.push(error_summary(&err));
-                    add_refresh_source_failure(&mut totals, &SourceStats::default(), &err);
-                    provider_refreshes.record_failure_with_facts(
-                        source.provider,
-                        ProviderRefreshTrigger::Search,
-                        ProviderRefreshSourceMode::Discovered,
-                        &stats,
-                        rejected_source_summary(&err).as_ref(),
-                        ProviderRefreshRuntimeFacts::observed_failure(
-                            provider_duration,
-                            failure_scope,
-                            failure_type,
-                        ),
-                    );
-                }
-                Err(err) => {
-                    let failure_scope = import_error_scope(&err);
-                    let failure_type = crate::commands::import::import_failure_type(&err);
-                    provider_refreshes.record_failure_with_facts(
-                        source.provider,
-                        ProviderRefreshTrigger::Search,
-                        ProviderRefreshSourceMode::Discovered,
-                        &stats,
-                        rejected_source_summary(&err).as_ref(),
-                        ProviderRefreshRuntimeFacts::observed_failure(
-                            provider_duration,
-                            failure_scope,
-                            failure_type,
-                        ),
-                    );
-                    return Err(err);
-                }
+                totals.add(&summary, &plan.stats);
+                provider_refreshes.record_success_with_facts(
+                    plan.source.provider,
+                    ProviderRefreshTrigger::Search,
+                    ProviderRefreshSourceMode::Discovered,
+                    &summary,
+                    &plan.stats,
+                    ProviderRefreshRuntimeFacts::observed_success(
+                        provider_started.elapsed(),
+                        &summary,
+                    )
+                    .with_resource_observation(provider_resources),
+                );
+                progress.done(
+                    "refreshing",
+                    format!("refreshed {}", plan.source.provider.as_str()),
+                    completed_source_bytes,
+                );
             }
-        }
-        outcomes.sort_by_key(|outcome| outcome.index);
-        for outcome in outcomes {
-            warn_on_rejected_records(
-                &progress,
-                json_output,
-                outcome.source.provider.as_str(),
-                &outcome.summary,
-            );
-            totals.add(&outcome.summary, &outcome.stats);
-            provider_refreshes.record_import_outcome(
-                ProviderRefreshTrigger::Search,
-                ProviderRefreshSourceMode::Discovered,
-                &outcome,
-            );
-        }
-    } else {
-        let mut store = Store::open(&db_path)?;
-        let mut completed_source_bytes = 0u64;
-        for plan in planned_sources {
-            progress.message(
-                "refreshing",
-                format!("importing {}", plan.source.provider.as_str()),
-            );
-            let source_progress =
-                progress.codex_import_callback(&plan.source, completed_source_bytes);
-            completed_source_bytes = completed_source_bytes.saturating_add(plan.stats.bytes);
-            let provider_started = Instant::now();
-            let import_result = if refresh == RefreshArg::Background {
-                import_one_source_for_background_refresh_with_profile(
-                    &mut store,
-                    &plan.source,
-                    source_progress,
-                    &plan.preinventory,
-                    &import_profile,
-                )
-            } else {
-                import_one_source_for_search_refresh_with_profile(
-                    &mut store,
-                    &plan.source,
-                    source_progress,
-                    &plan.preinventory,
-                    &import_profile,
-                )
-            };
-            progress_search_refresh_canonical_pro(pro_output.as_mut(), import_result.as_ref().ok());
-            match import_result {
-                Ok(summary) => {
-                    warn_on_rejected_records(
-                        &progress,
-                        json_output,
+            Err(err) if import_error_scope(&err) == ImportFailureScope::Source => {
+                let error = error_summary(&err);
+                refresh_failures.push(error.clone());
+                add_refresh_source_failure(&mut totals, &plan.stats, &err);
+                let failure_scope = import_error_scope(&err);
+                let failure_type = crate::commands::import::import_failure_type(&err);
+                provider_refreshes.record_failure_with_facts(
+                    plan.source.provider,
+                    ProviderRefreshTrigger::Search,
+                    ProviderRefreshSourceMode::Discovered,
+                    &plan.stats,
+                    rejected_source_summary(&err).as_ref(),
+                    ProviderRefreshRuntimeFacts::observed_failure(
+                        provider_started.elapsed(),
+                        failure_scope,
+                        failure_type,
+                    )
+                    .with_resource_observation(provider_resources),
+                );
+                progress.done(
+                    "refreshing",
+                    format!(
+                        "skipped {}: {}",
                         plan.source.provider.as_str(),
-                        &summary,
-                    );
-                    totals.add(&summary, &plan.stats);
-                    provider_refreshes.record_success_with_facts(
-                        plan.source.provider,
-                        ProviderRefreshTrigger::Search,
-                        ProviderRefreshSourceMode::Discovered,
-                        &summary,
-                        &plan.stats,
-                        ProviderRefreshRuntimeFacts::observed_success(
-                            provider_started.elapsed(),
-                            &summary,
-                        ),
-                    );
-                    progress.done(
-                        "refreshing",
-                        format!("refreshed {}", plan.source.provider.as_str()),
-                        completed_source_bytes,
-                    );
-                }
-                Err(err) if import_error_scope(&err) == ImportFailureScope::Source => {
-                    let error = error_summary(&err);
-                    refresh_failures.push(error.clone());
-                    add_refresh_source_failure(&mut totals, &plan.stats, &err);
-                    let failure_scope = import_error_scope(&err);
-                    let failure_type = crate::commands::import::import_failure_type(&err);
-                    provider_refreshes.record_failure_with_facts(
-                        plan.source.provider,
-                        ProviderRefreshTrigger::Search,
-                        ProviderRefreshSourceMode::Discovered,
-                        &plan.stats,
-                        rejected_source_summary(&err).as_ref(),
-                        ProviderRefreshRuntimeFacts::observed_failure(
-                            provider_started.elapsed(),
-                            failure_scope,
-                            failure_type,
-                        ),
-                    );
-                    progress.done(
-                        "refreshing",
-                        format!(
-                            "skipped {}: {}",
-                            plan.source.provider.as_str(),
-                            one_line_error(&error)
-                        ),
-                        completed_source_bytes,
-                    );
-                }
-                Err(err) => {
-                    let failure_scope = import_error_scope(&err);
-                    let failure_type = crate::commands::import::import_failure_type(&err);
-                    provider_refreshes.record_failure_with_facts(
-                        plan.source.provider,
-                        ProviderRefreshTrigger::Search,
-                        ProviderRefreshSourceMode::Discovered,
-                        &plan.stats,
-                        rejected_source_summary(&err).as_ref(),
-                        ProviderRefreshRuntimeFacts::observed_failure(
-                            provider_started.elapsed(),
-                            failure_scope,
-                            failure_type,
-                        ),
-                    );
-                    return Err(err);
-                }
+                        one_line_error(&error)
+                    ),
+                    completed_source_bytes,
+                );
+            }
+            Err(err) => {
+                let failure_scope = import_error_scope(&err);
+                let failure_type = crate::commands::import::import_failure_type(&err);
+                provider_refreshes.record_failure_with_facts(
+                    plan.source.provider,
+                    ProviderRefreshTrigger::Search,
+                    ProviderRefreshSourceMode::Discovered,
+                    &plan.stats,
+                    rejected_source_summary(&err).as_ref(),
+                    ProviderRefreshRuntimeFacts::observed_failure(
+                        provider_started.elapsed(),
+                        failure_scope,
+                        failure_type,
+                    )
+                    .with_resource_observation(provider_resources),
+                );
+                return Err(err);
             }
         }
     }
@@ -811,6 +672,7 @@ pub(crate) fn refresh_sources_for_search(
                 "refreshing",
                 format!("running history source plugin {}", plugin_source.label()),
             );
+            let provider_resources = ProviderRefreshResourceObservation::begin();
             let provider_started = Instant::now();
             let import_result = import_history_source_plugin(
                 &mut store,
@@ -840,7 +702,8 @@ pub(crate) fn refresh_sources_for_search(
                         ProviderRefreshRuntimeFacts::observed_success(
                             provider_started.elapsed(),
                             &summary,
-                        ),
+                        )
+                        .with_resource_observation(provider_resources),
                     );
                     progress.done(
                         "refreshing",
@@ -864,7 +727,8 @@ pub(crate) fn refresh_sources_for_search(
                             provider_started.elapsed(),
                             failure_scope,
                             failure_type,
-                        ),
+                        )
+                        .with_resource_observation(provider_resources),
                     );
                     progress.done(
                         "refreshing",
@@ -889,7 +753,8 @@ pub(crate) fn refresh_sources_for_search(
                             provider_started.elapsed(),
                             failure_scope,
                             failure_type,
-                        ),
+                        )
+                        .with_resource_observation(provider_resources),
                     );
                     return Err(err);
                 }
@@ -983,80 +848,4 @@ fn warn_on_rejected_records(
 }
 
 #[cfg(test)]
-mod canonical_pro_progression_tests {
-    use super::*;
-    use crate::commands::import::import_custom_history_with_canonical_pro_progression;
-
-    #[derive(Default)]
-    struct TestCanonicalProProgression {
-        frontier_checks: usize,
-    }
-
-    impl CanonicalProSourceProgression for TestCanonicalProProgression {
-        fn progress_to_committed_core_frontier(&mut self) {
-            self.frontier_checks += 1;
-        }
-    }
-
-    #[test]
-    fn search_refresh_progresses_after_changed_or_failed_core_attempts() {
-        let mut changed = ProviderImportSummary::default();
-        changed.imported = 1;
-        let no_op = ProviderImportSummary::default();
-        let mut progression = TestCanonicalProProgression::default();
-
-        progress_search_refresh_canonical_pro(Some(&mut progression), Some(&changed));
-        progress_search_refresh_canonical_pro(Some(&mut progression), Some(&no_op));
-        progress_search_refresh_canonical_pro(Some(&mut progression), None);
-
-        assert_eq!(progression.frontier_checks, 2);
-    }
-
-    #[test]
-    fn search_wait_plugin_refresh_drains_with_per_page_pro_progression() {
-        let mut progression = TestCanonicalProProgression::default();
-        let mut attempts = 0_usize;
-
-        let summary = import_custom_history_with_canonical_pro_progression(
-            history_source_plugin_work_limit(RefreshArg::Wait),
-            Some(&mut progression),
-            |work_limit| {
-                assert_eq!(work_limit, CaptureWorkLimit::OneSafeGroup);
-                attempts += 1;
-                let mut summary = ProviderImportSummary::default();
-                summary.imported = 1;
-                summary.work_remaining = attempts == 1;
-                Ok(summary)
-            },
-        )
-        .unwrap();
-
-        assert_eq!(attempts, 2);
-        assert_eq!(progression.frontier_checks, 2);
-        assert!(!summary.work_remaining);
-    }
-
-    #[test]
-    fn background_plugin_refresh_commits_one_page_for_daemon_followup() {
-        let mut progression = TestCanonicalProProgression::default();
-        let mut attempts = 0_usize;
-
-        let summary = import_custom_history_with_canonical_pro_progression(
-            history_source_plugin_work_limit(RefreshArg::Background),
-            Some(&mut progression),
-            |work_limit| {
-                assert_eq!(work_limit, CaptureWorkLimit::OneSafeGroup);
-                attempts += 1;
-                let mut summary = ProviderImportSummary::default();
-                summary.imported = 1;
-                summary.work_remaining = true;
-                Ok(summary)
-            },
-        )
-        .unwrap();
-
-        assert_eq!(attempts, 1);
-        assert_eq!(progression.frontier_checks, 1);
-        assert!(summary.work_remaining);
-    }
-}
+mod canonical_pro_progression_tests;

@@ -145,3 +145,88 @@ fn oversized_directories_exhaust_before_order_can_change_the_result() {
         BoundedProbe::BudgetExhausted
     );
 }
+
+#[test]
+fn cursor_probe_accepts_every_exact_layout_entry_point() {
+    let temp = tempdir();
+    let data_root = temp.path().join(".cursor");
+    let projects = data_root.join("projects");
+    let project = projects.join("project");
+    let transcripts = project.join("agent-transcripts");
+    let session = transcripts.join("session");
+    let transcript = session.join("session.jsonl");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(&transcript, b"{}\n").unwrap();
+
+    for input in [
+        data_root.as_path(),
+        projects.as_path(),
+        project.as_path(),
+        transcripts.as_path(),
+        session.as_path(),
+        transcript.as_path(),
+    ] {
+        assert_eq!(
+            has_cursor_agent_transcript(input),
+            BoundedProbe::Found,
+            "input {}",
+            input.display()
+        );
+    }
+}
+
+#[test]
+fn cursor_probe_rejects_mismatches_and_loose_nested_lookalikes() {
+    let temp = tempdir();
+    let projects = temp.path().join("projects");
+    let mismatch = projects.join("project/agent-transcripts/session/wrong.jsonl");
+    fs::create_dir_all(mismatch.parent().unwrap()).unwrap();
+    fs::write(&mismatch, b"{}\n").unwrap();
+    assert_eq!(
+        has_cursor_agent_transcript(&projects),
+        BoundedProbe::NotFound
+    );
+
+    let loose = temp
+        .path()
+        .join("loose/nested/project/agent-transcripts/session/session.jsonl");
+    fs::create_dir_all(loose.parent().unwrap()).unwrap();
+    fs::write(&loose, b"{}\n").unwrap();
+    assert_eq!(
+        has_cursor_agent_transcript(temp.path()),
+        BoundedProbe::NotFound
+    );
+}
+
+#[test]
+fn cursor_probe_preserves_discovery_budget_and_missing_error_types() {
+    const CURSOR_DIRECTORY_ENTRY_LIMIT: usize = 1_024;
+    let temp = tempdir();
+    let oversized = temp.path().join("oversized");
+    fs::create_dir(&oversized).unwrap();
+    for index in 0..=CURSOR_DIRECTORY_ENTRY_LIMIT {
+        fs::write(oversized.join(format!("entry-{index:04}")), b"").unwrap();
+    }
+    assert_eq!(
+        has_cursor_agent_transcript(&oversized),
+        BoundedProbe::BudgetExhausted
+    );
+    assert_eq!(
+        has_cursor_agent_transcript(&temp.path().join("missing")),
+        BoundedProbe::NotFound
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cursor_probe_maps_symlink_rejection_to_io_error() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let real = temp.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let linked = temp.path().join("linked");
+    symlink(&real, &linked).unwrap();
+
+    assert_eq!(has_cursor_agent_transcript(&linked), BoundedProbe::IoError);
+}

@@ -1,4 +1,4 @@
-use ctx_history_core::{compact_result_payload, ContentRef};
+use ctx_history_core::compact_result_payload;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -35,7 +35,6 @@ pub struct CanonicalResultIdentifier {
 pub struct CanonicalResultEvidence {
     pub outcome: CanonicalResultOutcome,
     pub identifiers: Vec<CanonicalResultIdentifier>,
-    pub content_ref: Option<ContentRef>,
 }
 
 pub(super) fn take_result_evidence(payload: &mut Value) -> CanonicalResultEvidence {
@@ -59,14 +58,12 @@ fn take_result_fields(
 ) -> Option<CanonicalResultEvidence> {
     let outcome_value = object.remove("result_outcome");
     let identifiers_value = object.remove("result_evidence");
-    let content_ref_value = object.remove("result_content_ref");
-    if outcome_value.is_none() && identifiers_value.is_none() && content_ref_value.is_none() {
+    if outcome_value.is_none() && identifiers_value.is_none() {
         return None;
     }
     let compact = compact_result_payload(&serde_json::json!({
         "result_outcome": outcome_value,
         "result_evidence": identifiers_value,
-        "result_content_ref": content_ref_value,
     }));
     let outcome = match compact.get("result_outcome").and_then(Value::as_str) {
         Some("success") => CanonicalResultOutcome::Success,
@@ -81,14 +78,9 @@ fn take_result_fields(
         .flatten()
         .filter_map(parse_identifier)
         .collect();
-    let content_ref = compact
-        .get("result_content_ref")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
     Some(CanonicalResultEvidence {
         outcome,
         identifiers,
-        content_ref,
     })
 }
 
@@ -130,22 +122,15 @@ mod tests {
                 {"kind": "git_oid", "value": "a".repeat(40)},
                 {"kind": "future", "value": "ignored"},
                 {"kind": "git_oid", "value": "NOT-HEX"}
-            ],
-            "result_content_ref": {
-                "sha256": "b".repeat(64),
-                "byte_len": 7
-            }
+            ]
         });
         let result = take_result_evidence(&mut payload);
         assert_eq!(result.outcome, CanonicalResultOutcome::Success);
         assert_eq!(result.identifiers.len(), 2);
-        assert_eq!(
-            result.content_ref.as_ref().map(ContentRef::byte_len),
-            Some(7)
-        );
         assert!(payload.get("result_outcome").is_none());
         assert!(payload.get("result_evidence").is_none());
-        assert!(payload.get("result_content_ref").is_none());
+        let serialized = serde_json::to_value(result).unwrap();
+        assert!(serialized.get("content_ref").is_none());
     }
 
     #[test]

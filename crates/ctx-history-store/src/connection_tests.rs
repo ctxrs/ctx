@@ -364,6 +364,44 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 #[test]
+fn writable_store_does_not_create_obsolete_spool_directory() {
+    let temp = tempdir();
+    let database = temp.path().join("work.sqlite");
+
+    let _store = Store::open(&database).unwrap();
+
+    assert!(temp.path().join(crate::object_store::OBJECTS_DIR).is_dir());
+    assert!(!temp.path().join("spool").exists());
+}
+
+#[test]
+fn released_spool_and_legacy_inbox_are_preserved_but_not_store_authority() {
+    let temp = tempdir();
+    let legacy_root = temp.path().join("work-record");
+    let legacy_inbox = legacy_root.join("inbox");
+    fs::create_dir_all(&legacy_inbox).unwrap();
+    let legacy_data = legacy_inbox.join("legacy-fragment");
+    fs::write(&legacy_data, b"legacy non-authoritative data").unwrap();
+    let released_spool = temp.path().join("spool");
+    fs::create_dir_all(&released_spool).unwrap();
+    let released_data = released_spool.join("released-fragment");
+    fs::write(&released_data, b"released non-authoritative data").unwrap();
+    drop(Connection::open(legacy_root.join("work.sqlite")).unwrap());
+
+    let _store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    assert!(temp.path().join("work.sqlite").is_file());
+    assert_eq!(
+        fs::read(&released_data).unwrap(),
+        b"released non-authoritative data"
+    );
+    assert_eq!(
+        fs::read(&legacy_data).unwrap(),
+        b"legacy non-authoritative data"
+    );
+}
+
+#[test]
 fn nested_write_batches_use_savepoints_and_preserve_outer_atomicity() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -515,7 +553,7 @@ fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
         set_fts_config(&store, table, "crisismerge", 32);
     }
 
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let guard = store.begin_event_search_bulk_mode_eager().unwrap();
     assert_eq!(bulk_mode_marker(&store), Some(1));
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&store, table, "automerge", 4), 0);
@@ -552,11 +590,41 @@ fn bulk_search_recovery_without_marker_preserves_custom_config() {
 }
 
 #[test]
+fn unused_lazy_bulk_mode_is_a_physical_store_noop() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    let observer = Connection::open(&db_path).unwrap();
+    let data_version = observer
+        .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+        .unwrap();
+    let total_changes = store.conn.total_changes();
+    let database_bytes = fs::read(&db_path).unwrap();
+    let wal_path = db_path.with_extension("sqlite-wal");
+    let wal_bytes = fs::read(&wal_path).ok();
+
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    assert_eq!(bulk_mode_marker(&store), None);
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+    drop(guard);
+
+    assert_eq!(store.conn.total_changes(), total_changes);
+    assert_eq!(
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        data_version
+    );
+    assert_eq!(fs::read(&db_path).unwrap(), database_bytes);
+    assert_eq!(fs::read(&wal_path).ok(), wal_bytes);
+}
+
+#[test]
 fn overlapping_bulk_search_mode_is_rejected_until_guard_releases() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let first = Store::open(&db_path).unwrap();
-    let guard = first.begin_event_search_bulk_mode().unwrap();
+    let guard = first.begin_event_search_bulk_mode_eager().unwrap();
     let second = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
 
     let error = second.begin_event_search_bulk_mode().err().unwrap();
@@ -594,7 +662,7 @@ fn nested_bulk_search_mode_finishes_only_at_outer_scope() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let first = Store::open(&db_path).unwrap();
-    let outer = first.begin_event_search_bulk_mode().unwrap();
+    let outer = first.begin_event_search_bulk_mode_eager().unwrap();
     let nested = first.begin_event_search_bulk_mode().unwrap();
     let second = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
 
@@ -625,7 +693,7 @@ fn nested_bulk_search_mode_enforces_the_outer_wal_bound() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
-    let outer = store.begin_event_search_bulk_mode().unwrap();
+    let outer = store.begin_event_search_bulk_mode_eager().unwrap();
     insert_bulk_search_events(&store, "nested-wal-bound", 8, 32);
     let wal_path = format!("{}-wal", db_path.display());
     assert!(
@@ -672,7 +740,7 @@ fn bulk_search_finish_defers_compaction_without_delaying_search_visibility() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let guard = store.begin_event_search_bulk_mode_eager().unwrap();
 
     let mut peak_wal_bytes = 0;
     for index in 0..8 {
@@ -751,7 +819,7 @@ fn repeated_bulk_groups_accumulate_durable_debt_without_strict_finalization() {
     let store = Store::open(&db_path).unwrap();
 
     for index in 0..7 {
-        let guard = store.begin_event_search_bulk_mode().unwrap();
+        let guard = store.begin_event_search_bulk_mode_eager().unwrap();
         insert_bulk_search_events(&store, &format!("deferred-{index}"), 1, 8);
         store.finish_event_search_bulk_mode(&guard).unwrap();
         drop(guard);
@@ -778,7 +846,7 @@ fn bulk_admission_rechecks_wal_after_due_maintenance_with_pinned_reader() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
-    let preparation = store.begin_event_search_bulk_mode().unwrap();
+    let preparation = store.begin_event_search_bulk_mode_eager().unwrap();
     insert_bulk_search_events(&store, "wal-maintenance-prep", 8, 32);
     store.finish_event_search_bulk_mode(&preparation).unwrap();
     drop(preparation);
@@ -798,7 +866,7 @@ fn bulk_admission_rechecks_wal_after_due_maintenance_with_pinned_reader() {
     let _limits = Store::event_search_bulk_test_limits(Some(1), None);
 
     let error = store
-        .begin_event_search_bulk_mode()
+        .begin_event_search_bulk_mode_eager()
         .err()
         .expect("post-maintenance WAL admission must fail");
     assert!(matches!(
@@ -843,7 +911,7 @@ fn bulk_admission_audits_legacy_segments_without_maintenance_debt() {
     let _limits = Store::event_search_bulk_test_limits(None, Some(1));
 
     let error = store
-        .begin_event_search_bulk_mode()
+        .begin_event_search_bulk_mode_eager()
         .err()
         .expect("legacy segment guard admission must fail");
     assert!(matches!(
@@ -882,7 +950,7 @@ fn writable_reopen_runs_only_due_or_stale_bulk_maintenance_slice() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let guard = store.begin_event_search_bulk_mode_eager().unwrap();
     insert_bulk_search_events(&store, "reopen-debt", 8, 8);
     store.finish_event_search_bulk_mode(&guard).unwrap();
     drop(guard);
@@ -911,7 +979,7 @@ fn bulk_search_crisis_guard_prevents_github_181_segment_exhaustion() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let guard = store.begin_event_search_bulk_mode_eager().unwrap();
 
     assert_eq!(fts_config(&store, "event_search", "automerge", 4), 0);
     assert_eq!(fts_config(&store, "event_search", "crisismerge", 16), 16);
@@ -963,14 +1031,14 @@ fn bulk_search_finish_preserves_preexisting_optimized_segment() {
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
 
-    let first_guard = store.begin_event_search_bulk_mode().unwrap();
+    let first_guard = store.begin_event_search_bulk_mode_eager().unwrap();
     insert_bulk_search_events(&store, "historic", 80, 512);
     store.finish_event_search_bulk_mode(&first_guard).unwrap();
     drop(first_guard);
     store.optimize_search_index().unwrap();
     assert_eq!(event_search_segment_count(&store), 1);
 
-    let second_guard = store.begin_event_search_bulk_mode().unwrap();
+    let second_guard = store.begin_event_search_bulk_mode_eager().unwrap();
     insert_bulk_search_events(&store, "new", 8, 128);
     let before_finish = event_search_segment_count(&store);
     assert_eq!(before_finish, 9);
@@ -999,7 +1067,7 @@ fn bulk_search_recovery_resumes_legacy_in_progress_full_merge() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let guard = store.begin_event_search_bulk_mode_eager().unwrap();
     insert_bulk_search_events(&store, "legacy-recovery", 40, 512);
     store
         .conn
@@ -1095,7 +1163,7 @@ fn pinned_reader_does_not_block_publication_or_bounded_recovery() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let guard = store.begin_event_search_bulk_mode_eager().unwrap();
     for index in 0..20 {
         store
             .conn
@@ -1171,7 +1239,7 @@ fn windows_store_replaces_permissive_inheritance_on_all_state_roots() {
 
     verify_private_directory(&root).unwrap();
     verify_private_directory(&root.join(crate::object_store::OBJECTS_DIR)).unwrap();
-    verify_private_directory(&root.join(crate::object_store::SPOOL_DIR)).unwrap();
+    assert!(!root.join("spool").exists());
     verify_private_file(&database).unwrap();
     for suffix in ["-wal", "-shm"] {
         let mut value = OsString::from(database.as_os_str());

@@ -24,5 +24,5 @@ javac --release 11 -d build/classes @build/tmp/main-sources.txt
 javac --release 11 -cp build/classes -d build/test-classes @build/tmp/test-sources.txt
 javac --release 11 -cp build/classes -d build/example-classes @build/tmp/example-sources.txt
 
-java -cp build/classes:build/test-classes rs.ctx.agenthistory.AgentHistoryClientTest
+CTX_ANALYTICS_ENABLED=true java -cp build/classes:build/test-classes rs.ctx.agenthistory.AgentHistoryClientTest
 java -cp build/classes:build/example-classes ToyAgentHistoryApp

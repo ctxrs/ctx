@@ -377,6 +377,7 @@ class LocalCliAdapter:
         env = os.environ.copy()
         if self.config.env:
             env.update(self.config.env)
+        env["CTX_ANALYTICS_ENABLED"] = "false"
         try:
             completed = subprocess.run(
                 command,

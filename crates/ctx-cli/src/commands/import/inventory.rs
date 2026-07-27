@@ -16,7 +16,10 @@ use ctx_history_store::{SourceImportFile, Store};
 use crate::commands::import::catalog::source_stats;
 use crate::commands::import::manifest::{
     bounded_source_root_stats, inventory_source_import_files, persist_source_import_files,
-    persist_source_import_page, source_uses_import_file_manifest,
+    persist_source_import_page, provider_owns_root_manifest, source_uses_import_file_manifest,
+};
+use crate::commands::import::requests::{
+    invalid_missing_explicit_path, missing_explicit_path_has_prior_route_authority,
 };
 use crate::commands::import::{
     error_summary, import_error_scope, import_failure_type, provider_path_text, system_time_ms,
@@ -39,10 +42,11 @@ pub(crate) fn inventory_import_sources(
     sources: Vec<SourceInfo>,
     force_inventory_reindex: bool,
     allow_incremental_codex_catalog: bool,
+    allow_missing_prior_routes: bool,
 ) -> Result<ImportInventory> {
     let _inventory_guard = store.acquire_source_inventory_lock()?;
     let mut inventory = ImportInventory::default();
-    for (index, source) in sources.into_iter().enumerate() {
+    for source in sources {
         inventory.totals.sources += 1;
         let failure_source = source.clone();
         let (plan, cataloged) = match inventory_import_source(
@@ -50,18 +54,16 @@ pub(crate) fn inventory_import_sources(
             source,
             force_inventory_reindex,
             allow_incremental_codex_catalog,
+            allow_missing_prior_routes,
         ) {
             Ok(inventoried) => inventoried,
             Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
                 inventory.failures.push(ImportSourceFailure {
-                    index,
                     source: failure_source,
                     stats: SourceStats::default(),
                     error: error_summary(&error),
-                    failure_scope: ImportFailureScope::Source,
                     failure_type: import_failure_type(&error),
                     rejected_summary: None,
-                    system_error: None,
                     runtime_facts: None,
                 });
                 continue;
@@ -97,16 +99,25 @@ pub(crate) fn inventory_available_sources(
     store: &Store,
     sources: &[SourceInfo],
 ) -> Result<ImportInventory> {
-    let available = sources
-        .iter()
-        .filter(|source| {
-            source.exists
-                && source.status == ProviderSourceStatus::Available
-                && source.import_support == ProviderImportSupport::Native
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    inventory_import_sources(store, available, false, false)
+    let mut available = Vec::new();
+    for source in sources {
+        if source.import_support != ProviderImportSupport::Native {
+            continue;
+        }
+        let is_available = source.exists && source.status == ProviderSourceStatus::Available;
+        let is_known_root = if provider_owns_root_manifest(source) {
+            store.source_import_file_history_exists(
+                source.provider,
+                provider_path_text(&source.path)?,
+            )?
+        } else {
+            false
+        };
+        if is_available || is_known_root {
+            available.push(source.clone());
+        }
+    }
+    inventory_import_sources(store, available, false, false, false)
 }
 
 fn inventory_import_source(
@@ -114,7 +125,22 @@ fn inventory_import_source(
     source: SourceInfo,
     force_inventory_reindex: bool,
     allow_incremental_codex_catalog: bool,
+    allow_missing_prior_routes: bool,
 ) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
+    if !source.exists {
+        return missing_explicit_path_plan(store, source, allow_missing_prior_routes);
+    }
+    match fs::symlink_metadata(&source.path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return missing_explicit_path_plan(store, source, allow_missing_prior_routes);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("stat import source {}", source.path.display()));
+        }
+    }
+
     if (!force_inventory_reindex || allow_incremental_codex_catalog)
         && is_incremental_codex_session_tree(&source)
     {
@@ -170,9 +196,17 @@ fn inventory_import_source(
         ));
     }
 
-    let root_metadata = fs::symlink_metadata(&source.path)
-        .with_context(|| format!("stat import source {}", source.path.display()))?;
     let source_root = provider_path_text(&source.path)?.to_owned();
+    let root_metadata = match fs::symlink_metadata(&source.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return missing_explicit_path_plan(store, source, allow_missing_prior_routes);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("stat import source {}", source.path.display()))
+        }
+    };
     let observed_at_ms = store.next_source_import_observed_at_ms(
         source.provider,
         &source_root,
@@ -198,6 +232,42 @@ fn inventory_import_source(
         },
         None,
     ))
+}
+
+fn missing_explicit_path_plan(
+    store: &Store,
+    source: SourceInfo,
+    allow_missing_prior_routes: bool,
+) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
+    if provider_owns_root_manifest(&source)
+        && store
+            .source_import_file_history_exists(source.provider, provider_path_text(&source.path)?)?
+    {
+        // Retire the root scheduling token, but still return a plan: the provider owns exact
+        // route retirement and must observe a known root's disappearance.
+        persist_source_import_files(store, &source, &[])?;
+        return Ok((
+            PlannedImportSource {
+                source,
+                stats: SourceStats::default(),
+                preinventory: SourcePreinventory::None,
+            },
+            None,
+        ));
+    }
+    if allow_missing_prior_routes
+        && missing_explicit_path_has_prior_route_authority(store, &source)?
+    {
+        return Ok((
+            PlannedImportSource {
+                source,
+                stats: SourceStats::default(),
+                preinventory: SourcePreinventory::None,
+            },
+            None,
+        ));
+    }
+    Err(invalid_missing_explicit_path(&source))
 }
 
 fn is_incremental_codex_session_tree(source: &SourceInfo) -> bool {

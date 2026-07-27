@@ -1,6 +1,7 @@
 use ctx_history_core::{EventRole, EventType};
-use rusqlite::Row;
+use rusqlite::{Connection, Row};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{
@@ -479,6 +480,146 @@ pub(crate) fn shelley_event_index(message: &ShelleyMessageRow) -> u64 {
         4_096,
     );
     sequence.saturating_mul(4_096).saturating_add(bucket)
+}
+
+/// Returns the bounded native identity used by locators and output records.
+///
+/// Shelley message IDs are not documented as globally unique, and the released
+/// event index deliberately compressed the conversation/message tuple. Keep
+/// the complete native tuple in this domain-separated digest instead of
+/// treating either lossy component as the native record identity.
+pub(crate) fn shelley_native_record_id(message: &ShelleyMessageRow) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-shelley-native-message-id-v1\0");
+    hash_identity_text(&mut digest, &message.conversation_id);
+    digest.update(message.sequence_id.to_be_bytes());
+    hash_identity_text(&mut digest, &message.message_id);
+    format!("shelley-message-v1:{:x}", digest.finalize())
+}
+
+/// Resolves the released compact event index, using a deterministic full-tuple
+/// alternate only when two distinct native messages actually collide.
+///
+/// The lexicographically first complete native tuple retains the released
+/// index on a fresh import. Every other collider gets an alternate that is
+/// independent of rowid and scan order. Publication separately honors an
+/// already-released event at the compact index.
+pub(crate) fn shelley_stable_event_index(
+    conn: &Connection,
+    message: &ShelleyMessageRow,
+    has_sequence_id: bool,
+) -> Result<u64> {
+    let released = shelley_event_index(message);
+    if !has_sequence_id {
+        return Ok(released);
+    }
+
+    let normalized_sequence = message.sequence_id.max(0) as u64;
+    let saturation_threshold = u64::MAX / 4_096;
+    let (predicate, bound) = if message.sequence_id <= 0 {
+        ("sequence_id <= ?2", 0_i64)
+    } else if normalized_sequence >= saturation_threshold {
+        (
+            "sequence_id >= ?2",
+            i64::try_from(saturation_threshold).unwrap_or(i64::MAX),
+        )
+    } else {
+        ("sequence_id = ?2", message.sequence_id)
+    };
+    let sql = format!(
+        "select sequence_id, cast(message_id as blob)
+         from messages
+         where typeof(conversation_id) = 'text'
+           and conversation_id = ?1
+           and typeof(sequence_id) = 'integer'
+           and typeof(message_id) = 'text'
+           and {predicate}
+         order by sequence_id, cast(message_id as blob), rowid"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let candidates = statement
+        .query_map(rusqlite::params![message.conversation_id, bound], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+    let mut colliders = std::collections::BTreeSet::new();
+    for candidate in candidates {
+        let (sequence_id, message_id) = candidate?;
+        let Ok(message_id) = std::str::from_utf8(&message_id) else {
+            // The scanner rejects this independently addressable row locally.
+            // It cannot claim a valid native identity in another row's group.
+            continue;
+        };
+        if shelley_released_event_index(&message.conversation_id, sequence_id, message_id)
+            == released
+        {
+            colliders.insert(shelley_native_identity_bytes(
+                &message.conversation_id,
+                sequence_id,
+                message_id,
+            ));
+        }
+    }
+    if colliders.len() <= 1 {
+        return Ok(released);
+    }
+    let current = shelley_native_identity_bytes(
+        &message.conversation_id,
+        message.sequence_id,
+        &message.message_id,
+    );
+    if colliders.first() == Some(&current) {
+        Ok(released)
+    } else {
+        Ok(shelley_collision_event_index(message, released))
+    }
+}
+
+pub(crate) fn shelley_collision_event_index(message: &ShelleyMessageRow, released: u64) -> u64 {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-shelley-native-message-collision-v1\0");
+    digest.update(shelley_native_identity_bytes(
+        &message.conversation_id,
+        message.sequence_id,
+        &message.message_id,
+    ));
+    let output = digest.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&output[..8]);
+    let mut alternate = u64::from_be_bytes(bytes) | (1_u64 << 63);
+    if alternate == released {
+        alternate ^= 1_u64 << 62;
+    }
+    alternate
+}
+
+fn shelley_released_event_index(conversation_id: &str, sequence_id: i64, message_id: &str) -> u64 {
+    let sequence = sequence_id.max(0) as u64;
+    let bucket = text_id_index(&format!("{conversation_id}:{message_id}"), 4_096);
+    sequence.saturating_mul(4_096).saturating_add(bucket)
+}
+
+fn shelley_native_identity_bytes(
+    conversation_id: &str,
+    sequence_id: i64,
+    message_id: &str,
+) -> Vec<u8> {
+    let mut identity = Vec::with_capacity(
+        conversation_id
+            .len()
+            .saturating_add(message_id.len())
+            .saturating_add(24),
+    );
+    identity.extend_from_slice(&(conversation_id.len() as u64).to_be_bytes());
+    identity.extend_from_slice(conversation_id.as_bytes());
+    identity.extend_from_slice(&sequence_id.to_be_bytes());
+    identity.extend_from_slice(&(message_id.len() as u64).to_be_bytes());
+    identity.extend_from_slice(message_id.as_bytes());
+    identity
+}
+
+fn hash_identity_text(digest: &mut Sha256, value: &str) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value.as_bytes());
 }
 
 fn shelley_value_has_tool_use(value: &Value) -> bool {

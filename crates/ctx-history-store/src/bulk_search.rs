@@ -168,8 +168,23 @@ impl Store {
         }
     }
 
-    /// Acquire the bulk-import lock and persist merge suppression.
+    /// Acquire the bulk-import lock without changing the Store until the first
+    /// bounded publication group is admitted.
     pub fn begin_event_search_bulk_mode(&self) -> Result<EventSearchBulkGuard> {
+        self.begin_event_search_bulk_mode_lazy()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_event_search_bulk_mode_eager(&self) -> Result<EventSearchBulkGuard> {
+        let guard = self.begin_event_search_bulk_mode_lazy()?;
+        self.activate_event_search_bulk_mode(&guard)?;
+        Ok(guard)
+    }
+
+    /// Acquire the bulk-import lock without changing the Store until the first
+    /// bounded publication group is admitted.
+    #[doc(hidden)]
+    pub fn begin_event_search_bulk_mode_lazy(&self) -> Result<EventSearchBulkGuard> {
         if self.native_path_group_token.get().is_some() {
             self.poison_native_path_group();
             return Err(StoreError::InvalidBulkSearchGuard);
@@ -208,6 +223,26 @@ impl Store {
             }
         };
         guard.depth_counted = true;
+        Ok(guard)
+    }
+
+    fn activate_event_search_bulk_mode(&self, guard: &EventSearchBulkGuard) -> Result<()> {
+        if self.native_path_group_token.get().is_some()
+            || guard.store_path != self.path
+            || !Arc::ptr_eq(&guard.depth, &self.event_search_bulk_depth)
+            || !Arc::ptr_eq(&guard.epoch, &self.event_search_bulk_epoch)
+            || guard.root_epoch.is_multiple_of(2)
+            || guard.epoch.load(Ordering::SeqCst) != guard.root_epoch
+            || !guard.depth_counted
+            || guard.depth.load(Ordering::SeqCst) == 0
+            || !self.conn.is_autocommit()
+        {
+            self.poison_native_path_group();
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
+        if bulk_mode_pending(self)? {
+            return Ok(());
+        }
         self.enforce_bulk_wal_bound()?;
         self.run_event_search_maintenance_if_due()?;
         // A due slice may itself grow the WAL, and legacy databases can reopen
@@ -246,7 +281,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        Ok(guard)
+        Ok(())
     }
 
     /// Audits the group/lineage boundary and returns a one-use admission token.
@@ -271,10 +306,10 @@ impl Store {
             || !guard.depth_counted
             || guard.depth.load(Ordering::SeqCst) == 0
             || !self.conn.is_autocommit()
-            || !bulk_mode_pending(self)?
         {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
+        self.activate_event_search_bulk_mode(guard)?;
         self.enforce_bulk_wal_bound()?;
         self.run_event_search_maintenance_if_due()?;
         self.ensure_event_search_segment_headroom()?;

@@ -138,8 +138,8 @@ pub use history_jsonl::{
     CtxHistoryJsonlSourceRecord, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
 pub use paths::{
-    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, inbox_dir,
-    logs_dir, object_dir, spool_dir,
+    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
+    object_dir,
 };
 pub use provider::{
     provider_support_matrix_schema_version, ProviderArtifactDescriptor, ProviderCursorCheckpoint,

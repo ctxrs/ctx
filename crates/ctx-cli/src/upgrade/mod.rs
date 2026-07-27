@@ -97,6 +97,10 @@ fn env_flag(key: &str) -> bool {
     })
 }
 
+pub(in crate::upgrade) const fn test_harness_enabled() -> bool {
+    cfg!(debug_assertions) || option_env!("CTX_UPGRADE_TEST_HARNESS").is_some()
+}
+
 fn version_gt(left: &str, right: &str) -> bool {
     version::version_gt(left, right)
 }

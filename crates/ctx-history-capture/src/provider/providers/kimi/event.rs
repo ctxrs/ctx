@@ -17,7 +17,7 @@ use crate::{KIMI_CODE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct KimiCoreEvent {
     pub(super) provider_event_index: u64,
-    pub(super) provider_event_hash: Option<String>,
+    pub(super) legacy_provider_event_hash: String,
     pub(super) cursor: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
@@ -39,35 +39,20 @@ pub(crate) fn kimi_event(
         .unwrap_or("unknown");
     let event_type = kimi_event_type(record_type, value);
     let role = kimi_event_role(record_type, value, event_type);
-    let text = kimi_event_text(record_type, value, event_type);
-    let retained_text = provider_policy_event_text(event_type, &text, value);
-    let retained_body = provider_policy_body(event_type, value);
-    let result_evidence = provider_result_identifier_evidence(event_type, &text, value);
-    let result_outcome = provider_result_outcome_evidence(event_type, value);
+    let payload = kimi_normalized_event_payload(record_type, value, event_type);
     KimiCoreEvent {
         provider_event_index: (line_number - 1) as u64,
-        provider_event_hash: Some(format!(
-            "{}:{}",
+        legacy_provider_event_hash: kimi_legacy_provider_event_hash(
             record_type,
-            value
-                .get("time")
-                .and_then(Value::as_i64)
-                .map(|time| time.to_string())
-                .unwrap_or_else(|| line_number.to_string())
-        )),
+            value,
+            line_number,
+        ),
         cursor: format!("{}:line:{line_number}", path.display()),
         event_type,
         role: Some(role),
         occurred_at,
         fidelity: Fidelity::Imported,
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-        }),
+        payload,
         metadata: json!({
             "source": "kimi_code_cli_wire_jsonl",
             "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
@@ -77,6 +62,42 @@ pub(crate) fn kimi_event(
             "usage": value.get("usage").cloned(),
         }),
     }
+}
+
+pub(super) fn kimi_legacy_provider_event_hash(
+    record_type: &str,
+    value: &Value,
+    line_number: usize,
+) -> String {
+    format!(
+        "{}:{}",
+        record_type,
+        value
+            .get("time")
+            .and_then(Value::as_i64)
+            .map(|time| time.to_string())
+            .unwrap_or_else(|| line_number.to_string())
+    )
+}
+
+pub(super) fn kimi_normalized_event_payload(
+    record_type: &str,
+    value: &Value,
+    event_type: EventType,
+) -> Value {
+    let text = kimi_event_text(record_type, value, event_type);
+    let retained_text = provider_policy_event_text(event_type, &text, value);
+    let retained_body = provider_policy_body(event_type, value);
+    let result_evidence = provider_result_identifier_evidence(event_type, &text, value);
+    let result_outcome = provider_result_outcome_evidence(event_type, value);
+    json!({
+        "text": retained_text.text,
+        "text_retention": retained_text.retention.as_json(),
+        "result_evidence": result_evidence,
+        "result_outcome": result_outcome,
+        "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
+        "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+    })
 }
 
 pub(crate) fn kimi_event_type(record_type: &str, value: &Value) -> EventType {
@@ -185,9 +206,9 @@ pub(crate) fn kimi_event_text(record_type: &str, value: &Value, event_type: Even
     }
 }
 
-/// Returns explicit Kimi loop-event result content without the tool-name
+/// Returns explicit Kimi loop-event output content without the tool-name
 /// fallback used for display text.
-pub(crate) fn kimi_result_content(value: &Value) -> Option<String> {
+pub(super) fn kimi_output_content(value: &Value) -> Option<String> {
     let record_type = value.get("type").and_then(Value::as_str)?;
     if kimi_event_type(record_type, value) != EventType::ToolOutput {
         return None;
@@ -230,13 +251,13 @@ pub(crate) fn kimi_record_timestamp(
 }
 
 #[cfg(test)]
-mod result_content_tests {
+mod output_content_tests {
     use serde_json::json;
 
-    use super::kimi_result_content;
+    use super::kimi_output_content;
 
     #[test]
-    fn profile_omits_tool_name_fallback_and_keeps_explicit_result() {
+    fn extraction_omits_tool_name_fallback_and_keeps_explicit_output() {
         let result = json!({
             "type": "context.append_loop_event",
             "event": {
@@ -249,7 +270,7 @@ mod result_content_tests {
             }
         });
         assert_eq!(
-            kimi_result_content(&result).as_deref(),
+            kimi_output_content(&result).as_deref(),
             Some("first\nsecond")
         );
 
@@ -257,12 +278,12 @@ mod result_content_tests {
             "type": "context.append_loop_event",
             "event": {"type": "tool.finish", "toolName": "shell"}
         });
-        assert_eq!(kimi_result_content(&label_only), None);
+        assert_eq!(kimi_output_content(&label_only), None);
 
         let call = json!({
             "type": "context.append_loop_event",
             "event": {"type": "tool.call", "content": "arguments"}
         });
-        assert_eq!(kimi_result_content(&call), None);
+        assert_eq!(kimi_output_content(&call), None);
     }
 }

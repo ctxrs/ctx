@@ -1,20 +1,18 @@
-//! Message and result recovery for bounded structured JSON and compound trees.
+//! Message recovery for bounded structured JSON and compound trees.
 //!
 //! The facade keeps the provider-facing resolver and locator API small. The
 //! implementation is divided by contract: locator construction/decoding,
-//! message recovery, result recovery, source admission, and shared bounds.
+//! message recovery, source admission, and shared bounds.
 
 mod contracts;
 mod message;
-mod result;
 pub(super) mod source_access;
-mod verification;
+pub(super) mod verification;
 
-pub(crate) use contracts::{decode_structured_locator, decode_structured_result_locator};
+pub(crate) use contracts::decode_structured_locator;
 use verification::StructuredBounds;
 
 pub const STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND: &str = "structured-message-v1";
-pub const STRUCTURED_RESULT_CONTENT_LOCATOR_KIND: &str = "structured-result-v1";
 
 /// Bounded resolver for single-JSON, one-record-file, and compound JSON trees.
 #[derive(Debug, Default)]
@@ -38,8 +36,7 @@ use super::{
     verified_content_profile, verified_content_route_supported, CompleteContentBodyDigest,
     CompleteContentError, CompleteContentErrorKind, CompleteContentHashAuthority,
     CompleteContentResolver, CompleteContentSourceFamily, CompleteMessage, CompleteMessageRequest,
-    ResultContentRequest, ResultContentResolver, VerifiedContentRole,
-    COMPLETE_CONTENT_MAX_BODY_BYTES, VERIFIED_CONTENT_ROUTES,
+    VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES, VERIFIED_CONTENT_ROUTES,
 };
 #[cfg(test)]
 use crate::provider::providers::openhands::decode_openhands_event;

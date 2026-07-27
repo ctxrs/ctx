@@ -29,14 +29,6 @@ pub fn blob_dir(root: PathBuf) -> PathBuf {
     object_dir(root)
 }
 
-pub fn spool_dir(root: PathBuf) -> PathBuf {
-    history_dir(root).join("spool")
-}
-
-pub fn inbox_dir(root: PathBuf) -> PathBuf {
-    spool_dir(root)
-}
-
 pub fn config_path(root: PathBuf) -> PathBuf {
     history_dir(root).join("config.toml")
 }

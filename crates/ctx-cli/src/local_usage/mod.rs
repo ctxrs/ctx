@@ -223,6 +223,7 @@ impl CliUsage {
                 Some(args.local_usage_operation()),
                 TargetType::NotApplicable,
             ),
+            CommandRoot::Referral(_) => (None, TargetType::NotApplicable),
             CommandRoot::Blame(_) => (Some("blame"), TargetType::NotApplicable),
             CommandRoot::Sql(_) => (Some("sql"), TargetType::NotApplicable),
             CommandRoot::Docs(_) => (Some("docs"), TargetType::NotApplicable),

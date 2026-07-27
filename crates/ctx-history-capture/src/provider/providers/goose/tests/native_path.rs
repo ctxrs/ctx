@@ -275,6 +275,108 @@ fn goose_nativepath_classifies_before_hydration_and_never_materializes_output_su
 }
 
 #[test]
+fn goose_nativepath_rejects_bad_rows_and_children_of_rejected_sessions_locally() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
+    let conn = create_native_database(&path);
+    insert_session(&conn, "accepted-parent");
+    conn.execute(
+        "insert into sessions(id, name) values ('rejected-parent', x'2a')",
+        [],
+    )
+    .unwrap();
+    insert_raw_message(
+        &conn,
+        1,
+        Some("malformed-before"),
+        "accepted-parent",
+        "user",
+        "{before",
+    );
+    insert_raw_message(
+        &conn,
+        2,
+        Some("retained-middle"),
+        "accepted-parent",
+        "user",
+        r#"[{"type":"text","text":"retained between malformed rows"}]"#,
+    );
+    insert_raw_message(
+        &conn,
+        3,
+        Some("malformed-after"),
+        "accepted-parent",
+        "user",
+        "{after",
+    );
+    insert_raw_message(
+        &conn,
+        4,
+        Some("rejected-parent-child"),
+        "rejected-parent",
+        "user",
+        r#"[{"type":"text","text":"must not publish"}]"#,
+    );
+    conn.execute(
+        "insert into messages (
+            id, message_id, session_id, role, content_json, created_timestamp
+         ) values (
+            5, 'wrong-storage-class', 'accepted-parent', 'user',
+            '[{\"type\":\"text\",\"text\":\"must reject locally\"}]', 'not-an-integer'
+         )",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let reader = native_reader(&path);
+    let (pages, summary) = collect_scan(&reader, GooseNativePageLimits::default());
+    let events = pages
+        .iter()
+        .flat_map(|page| page.events.iter())
+        .collect::<Vec<_>>();
+    let rejections = pages
+        .iter()
+        .flat_map(|page| page.rejections.iter())
+        .collect::<Vec<_>>();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].searchable_text, "retained between malformed rows");
+    assert_eq!(summary.metrics.native_sessions, 2);
+    assert_eq!(summary.metrics.native_messages, 5);
+    assert_eq!(summary.metrics.rejected_records, 5);
+    assert_eq!(
+        rejections
+            .iter()
+            .filter(|rejection| rejection.kind == GooseNativeRejectionKind::MalformedJson)
+            .count(),
+        2
+    );
+    assert_eq!(
+        rejections
+            .iter()
+            .filter(|rejection| {
+                rejection.kind == GooseNativeRejectionKind::UnsupportedStorageClass
+            })
+            .count(),
+        2
+    );
+    let rejected_child = rejections
+        .iter()
+        .find(|rejection| rejection.native_order == Some(4))
+        .unwrap();
+    assert_eq!(
+        rejected_child.kind,
+        GooseNativeRejectionKind::MissingSession
+    );
+    assert_eq!(
+        rejected_child.session_identity.as_deref(),
+        Some("rejected-parent")
+    );
+    assert!(!format!("{events:?}").contains("must not publish"));
+}
+
+#[test]
 fn goose_nativepath_duplicate_keys_share_one_fail_closed_visitor_policy() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("sessions.db");
@@ -477,6 +579,26 @@ fn goose_nativepath_capability_digest_tracks_schema_and_index_changes() {
     drop(conn);
     let changed = native_reader(&path);
     assert_ne!(changed.schema().capability_digest, baseline_digest);
+}
+
+#[test]
+fn goose_nativepath_reports_numeric_schema_mismatches_as_unsupported_schema() {
+    for version in [13_u32, 15_u32] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join(format!("sessions-v{version}.db"));
+        let conn = create_native_database(&path);
+        conn.execute("update schema_version set version = ?1", [version])
+            .unwrap();
+        drop(conn);
+
+        let error = match GooseNativePathReader::acquire(GooseNativeSourceSelection::exact(&path)) {
+            Ok(_) => panic!("schema version {version} unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::CaptureError::UnsupportedSchemaVersion(found) if found == version)
+        );
+    }
 }
 
 #[test]

@@ -15,6 +15,16 @@ pub const DAEMON_DEFAULT_ENABLED: bool = true;
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
 
+#[derive(Debug, thiserror::Error)]
+#[error("unknown config key `cloud.mode`: cloud history configuration is no longer supported")]
+struct RemovedCloudModeConfigError;
+
+pub(crate) fn is_removed_cloud_mode_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RemovedCloudModeConfigError>()
+        .is_some()
+}
+
 #[cfg(test)]
 pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -317,6 +327,7 @@ impl AppConfig {
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
                 }
+                "cloud.mode" => return Err(RemovedCloudModeConfigError.into()),
                 _ => bail!("unknown config key `{key}` at line {}", value.line),
             }
         }

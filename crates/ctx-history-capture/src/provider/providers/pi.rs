@@ -8,13 +8,11 @@ use crate::provider::normalization::{
 use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 pub(crate) const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
-pub(crate) const PI_RESULT_CONTENT_PROFILE: &str = "pi.result-body.v1";
 
 mod nativepath;
 mod text;
 
 pub(crate) use nativepath::import_pi_nativepath_history;
-pub(crate) use text::pi_result_content;
 use text::{pi_entry_text, pi_message_has_tool_call};
 
 pub(crate) fn pi_complete_content_message_record(

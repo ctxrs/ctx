@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn repeated_exact_catalog_completion_is_a_physical_noop() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let cataloged_at_ms = timestamp_ms(fixed_time());
+    let session = catalog_session(
+        "/home/user/.codex/sessions/2026/06/24/noop.jsonl",
+        "codex-session-noop",
+        cataloged_at_ms,
+    );
+    store
+        .upsert_catalog_sessions(std::slice::from_ref(&session))
+        .unwrap();
+    store
+        .mark_catalog_source_observation_indexed(
+            &session,
+            Some("same-prefix"),
+            Some(3),
+            cataloged_at_ms + 10,
+        )
+        .unwrap();
+    let before = store.conn.total_changes();
+
+    store
+        .mark_catalog_source_observation_indexed(
+            &session,
+            Some("same-prefix"),
+            Some(3),
+            cataloged_at_ms + 20,
+        )
+        .unwrap();
+
+    assert_eq!(store.conn.total_changes(), before);
+    assert_eq!(
+        store
+            .catalog_source_index_state(
+                CaptureProvider::Codex,
+                &session.source_root,
+                &session.source_path,
+            )
+            .unwrap()
+            .unwrap()
+            .last_imported_at_ms,
+        Some(cataloged_at_ms + 10)
+    );
+}
+
+#[test]
 fn catalog_import_planning_requires_current_index_state_and_matching_session() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

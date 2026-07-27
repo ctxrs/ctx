@@ -448,7 +448,7 @@ fn native_claude_manifested_file_crosses_a_batch_boundary_and_replays() {
 }
 
 #[test]
-fn native_claude_retains_core_text_in_its_provider_native_shape() {
+fn native_claude_caps_core_text_with_verified_retention() {
     let temp = tempdir();
     let root = temp.path().join("claude/projects/-workspace");
     fs::create_dir_all(&root).unwrap();
@@ -486,8 +486,16 @@ fn native_claude_retains_core_text_in_its_provider_native_shape() {
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 1);
     let payload = &events[0].payload;
-    assert_eq!(payload["body"].as_str().unwrap().chars().count(), 20_000);
+    assert_eq!(payload["body"].as_str().unwrap().chars().count(), 16_000);
     assert!(payload["body_sha256"].as_str().is_some());
+    assert_eq!(payload["text_retention"]["mode"], "bounded");
+    assert_eq!(payload["text_retention"]["limit_chars"], 16_000);
+    assert_eq!(payload["text_retention"]["truncated"], true);
+    assert!(events[0]
+        .sync
+        .metadata
+        .get("verified_content_locators_v1")
+        .is_some());
 }
 
 #[test]

@@ -51,6 +51,28 @@ fn daemon_capture_only_progress_keeps_followup_frontier_alive() {
 }
 
 #[test]
+fn daemon_history_rejections_fail_the_pass_without_hiding_completed_work() {
+    let totals = ImportTotals {
+        failed: 1,
+        imported_events: 2,
+        ..ImportTotals::default()
+    };
+    let job = daemon_history_refresh_job_json(
+        "completed",
+        1,
+        totals,
+        utc_now().timestamp_millis(),
+        None,
+        None,
+    );
+
+    assert_eq!(job["status"], "completed");
+    assert_eq!(job["totals"]["imported_events"], 2);
+    assert_eq!(job["totals"]["rejected_records"], 1);
+    assert!(daemon_history_job_failed(&job));
+}
+
+#[test]
 fn daemon_failure_drains_the_current_round_before_global_backoff() -> Result<()> {
     let mut runtime = DaemonRuntime::default();
     let mut failed_source = daemon_history_refresh_failed_job("source-a failed".to_owned());

@@ -10,8 +10,7 @@ pub use ctx_history_core::ContentRef;
 
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
 pub const PROTOCOL_VERSION: u16 = 1;
-/// Lowercase SHA-256 of `testdata/v1/inventory.json`'s canonical inventory.
-pub const PROTOCOL_FINGERPRINT: &str = include!("protocol_fingerprint.rs");
+include!("protocol_fingerprint.rs");
 pub const PROJECTION_CONTRACT_VERSION: u32 = 1;
 pub const FRAME_HEADER_BYTES: usize = FRAME_MAGIC.len() + 2 + 4;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
@@ -39,11 +38,12 @@ pub use frame::{read_frame, write_frame, FrameError};
 mod journal;
 pub use journal::{
     canonical_payload_bytes, initial_journal_digest, journal_record_digest,
-    journal_sync_envelope_bytes, sha256_hex, JournalCheckpoint, JournalEntityKind,
-    JournalEvidenceIdentity, JournalOperation, JournalPosition, JournalProvenanceIdentity,
-    JournalRecord, JournalSyncMode, JournalSyncRequest, JournalSyncResult,
-    MAX_AUTHORIZED_REPOSITORY_ROOTS, MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES,
-    MAX_AUTHORIZED_REPOSITORY_ROOT_BYTES, MAX_JOURNAL_EVIDENCE_PER_RECORD,
+    journal_sync_envelope_bytes, sha256_hex, JournalCheckpoint, JournalContextWindow,
+    JournalEntityKind, JournalEvidenceIdentity, JournalOperation, JournalPosition,
+    JournalProvenanceIdentity, JournalRecord, JournalSyncMode, JournalSyncRequest,
+    JournalSyncResult, MAX_AUTHORIZED_REPOSITORY_ROOTS,
+    MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES, MAX_AUTHORIZED_REPOSITORY_ROOT_BYTES,
+    MAX_JOURNAL_CONTEXT_BYTES, MAX_JOURNAL_CONTEXT_RECORDS, MAX_JOURNAL_EVIDENCE_PER_RECORD,
     MAX_JOURNAL_IDENTITY_BYTES, MAX_JOURNAL_PAYLOAD_BYTES, MAX_JOURNAL_RECORDS_PER_BATCH,
     MAX_JOURNAL_SYNC_ENVELOPE_BYTES,
 };

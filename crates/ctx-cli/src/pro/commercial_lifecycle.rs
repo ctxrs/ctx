@@ -22,8 +22,9 @@ use super::{
     },
     commercial_config::CommercialConfig,
     credential_vault::{
-        BoundedSignedEntitlement, CredentialRecord, CredentialRecordKind, CredentialVaultError,
-        PlatformCredentialVault, VaultInstallationChallengeSigner, WorkOsSessionMaterial,
+        AnonymousTrialMaterial, BoundedSignedEntitlement, CredentialRecord, CredentialRecordKind,
+        CredentialVaultError, PlatformCredentialVault, VaultInstallationChallengeSigner,
+        WorkOsSessionMaterial,
     },
     lifecycle::{ProLifecycleService, ProManagePlan, ProSetupPlan},
     workos_device::{WorkOsDeviceClient, WorkOsTokens},
@@ -42,6 +43,7 @@ const CHECKOUT_POLL_INITIAL_SECONDS: u64 = 3;
 const CHECKOUT_POLL_MAX_INTERVAL_SECONDS: u64 = 15;
 const CHECKOUT_POLL_PROGRESS_SECONDS: u64 = 60;
 const CHECKOUT_POLL_MAX_SECONDS: u64 = 30 * 60;
+const PAID_CHECKOUT_HEADING: &str = "Start ctx Pro for $20/month at:";
 
 impl CommercialLifecycleService {
     pub(super) fn production(data_root: &Path) -> Result<Self> {
@@ -103,7 +105,7 @@ impl CommercialLifecycleService {
         }
     }
 
-    fn access_token(&self) -> Result<String> {
+    pub(super) fn access_token(&self) -> Result<String> {
         match self.vault.load(CredentialRecordKind::WorkOsSession) {
             Ok(CredentialRecord::WorkOsSession(session)) => self.resume_session(session),
             Ok(_) => Err(anyhow!(
@@ -139,7 +141,7 @@ impl CommercialLifecycleService {
         }
     }
 
-    fn access_token_noninteractive(&self) -> Result<String> {
+    pub(super) fn access_token_noninteractive(&self) -> Result<String> {
         let session = match self.vault.load(CredentialRecordKind::WorkOsSession) {
             Ok(CredentialRecord::WorkOsSession(session)) => session,
             Ok(_) => bail!("key_store_unavailable: WorkOS session record mismatch"),
@@ -188,10 +190,14 @@ impl CommercialLifecycleService {
         Ok(access_token)
     }
 
-    fn active_state(&self, access_token: &str) -> Result<CommercialState> {
+    fn active_state(
+        &self,
+        access_token: &str,
+        referral_claim_token: Option<&str>,
+    ) -> Result<CommercialState> {
         resolve_active_state(
             || self.api.account(access_token),
-            || self.api.checkout(access_token),
+            || self.api.checkout(access_token, referral_claim_token),
             |state, checkout| self.await_checkout_access(access_token, state, checkout),
         )
     }
@@ -207,8 +213,7 @@ impl CommercialLifecycleService {
             .ok_or_else(|| anyhow!("invalid_response: Checkout result has no expiry"))?;
         if let Some(url) = checkout.url {
             validate_https_url(&url, "Checkout")?;
-            eprintln!("Start your 14-day ctx Pro trial at:");
-            eprintln!("  {url}");
+            eprintln!("{}", render_paid_checkout_prompt(&url));
             if open_browser(&url).is_err() {
                 eprintln!("A browser could not be opened; use the URL above.");
             }
@@ -263,6 +268,17 @@ impl CommercialLifecycleService {
         entitlement: SignedEntitlement,
         public_key: &[u8; INSTALLATION_PUBLIC_KEY_BYTES],
     ) -> Result<()> {
+        let entitlement = self.bound_entitlement(entitlement, public_key)?;
+        self.vault
+            .store(&CredentialRecord::SignedEntitlement(entitlement))
+            .map_err(vault_error)
+    }
+
+    fn bound_entitlement(
+        &self,
+        entitlement: SignedEntitlement,
+        public_key: &[u8; INSTALLATION_PUBLIC_KEY_BYTES],
+    ) -> Result<BoundedSignedEntitlement> {
         self.config
             .entitlement_trust
             .validate_identity(&entitlement.grant.issuer, &entitlement.grant.key_id)?;
@@ -270,17 +286,15 @@ impl CommercialLifecycleService {
         {
             bail!("invalid_response: entitlement is bound to another installation");
         }
-        let entitlement = BoundedSignedEntitlement::new(entitlement).map_err(vault_error)?;
-        self.vault
-            .store(&CredentialRecord::SignedEntitlement(entitlement))
-            .map_err(vault_error)
+        BoundedSignedEntitlement::new(entitlement).map_err(vault_error)
     }
 
-    pub(super) fn store_anonymous_entitlement(
+    pub(super) fn store_anonymous_state(
         &self,
         entitlement: SignedEntitlement,
         public_key: &[u8; INSTALLATION_PUBLIC_KEY_BYTES],
         trial_deadline_unix: i64,
+        trial: AnonymousTrialMaterial,
     ) -> Result<()> {
         if entitlement.grant.access_kind != EntitlementAccessKind::Trial
             || entitlement.grant.access_deadline_unix != trial_deadline_unix
@@ -289,7 +303,15 @@ impl CommercialLifecycleService {
         {
             bail!("invalid_response: anonymous entitlement exceeds the authoritative trial");
         }
-        self.store_entitlement(entitlement, public_key)
+        let entitlement = self.bound_entitlement(entitlement, public_key)?;
+        self.vault
+            .store_anonymous_trial_state(entitlement, trial)
+            .map_err(|error| match error {
+                CredentialVaultError::SecretTooLarge { .. } => {
+                    anyhow!("invalid_response: anonymous trial state exceeds portable vault bounds")
+                }
+                error => vault_error(error),
+            })
     }
 
     fn refresh_entitlement_noninteractive(&self) -> Result<()> {
@@ -357,50 +379,31 @@ impl ProLifecycleService for CommercialLifecycleService {
         Ok(self.config.release_trust)
     }
 
-    fn setup(&mut self, data_root: &Path, installed_version: Option<&str>) -> Result<ProSetupPlan> {
-        if !matches!(
-            self.vault.load(CredentialRecordKind::WorkOsSession),
-            Ok(CredentialRecord::WorkOsSession(_))
-        ) {
-            match anonymous_trial::setup(self, data_root, installed_version) {
-                Ok(plan) => return Ok(plan),
-                Err(error) if anonymous_trial_requires_conversion(&error) => {
-                    eprintln!(
-                        "The free Pro trial is unavailable for this device; sign in to continue with paid Pro."
-                    );
-                }
-                Err(error) => return Err(error),
+    fn setup(
+        &mut self,
+        data_root: &Path,
+        installed_version: Option<&str>,
+        trial_only: bool,
+        referral_codename: Option<&str>,
+    ) -> Result<ProSetupPlan> {
+        // A WorkOS session proves identity for referral management; it does not
+        // prove that this installation already consumed or converted its Pro
+        // trial. The anonymous-trial authority remains the source of truth.
+        let stored_access_kind = match self.vault.load(CredentialRecordKind::SignedEntitlement) {
+            Ok(CredentialRecord::SignedEntitlement(entitlement)) => {
+                Some(entitlement.as_inner().grant.access_kind)
             }
-        }
-        let mut access_token = self.access_token()?;
-        let result = (|| {
-            let state = self.active_state(&access_token)?;
-            let public_key = self.installation_public_key()?;
-            let entitlement = self
-                .api
-                .entitlement(&access_token, &base64url(&public_key))?;
-            if entitlement.grant.subject != state.subject
-                || entitlement.grant.account_id != state.account_id
-            {
-                bail!("invalid_response: entitlement identity does not match commercial account");
-            }
-            self.store_entitlement(entitlement, &public_key)?;
-            let artifact = fetch_latest(
-                data_root,
-                CommercialArtifactAuth {
-                    api_base_url: self.api.origin(),
-                    authorization: &format!("Bearer {access_token}"),
-                    release_trust: self.config.release_trust,
-                },
-                installed_version,
-            )?;
-            Ok(ProSetupPlan {
-                artifact: Some(artifact),
-                account_state: state.access_state,
-            })
-        })();
-        access_token.zeroize();
-        result
+            Ok(_) => bail!("key_store_unavailable: entitlement record mismatch"),
+            Err(CredentialVaultError::NotFound) => None,
+            Err(error) => return Err(vault_error(error)),
+        };
+        setup_with_access_policy(
+            trial_only,
+            referral_codename.is_some(),
+            stored_access_kind,
+            || anonymous_trial::setup(self, data_root, installed_version, referral_codename),
+            || self.setup_with_paid_access(data_root, installed_version),
+        )
     }
 
     fn manage(&mut self, _data_root: &Path) -> Result<ProManagePlan> {
@@ -430,6 +433,75 @@ impl ProLifecycleService for CommercialLifecycleService {
     }
 }
 
+fn setup_with_access_policy<T>(
+    trial_only: bool,
+    referral_requested: bool,
+    stored_access_kind: Option<EntitlementAccessKind>,
+    anonymous_setup: impl FnOnce() -> Result<T>,
+    paid_setup: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let anonymous_precedes_paid = anonymous_trial_precedes_paid_conversion(stored_access_kind);
+    if referral_requested && !anonymous_precedes_paid {
+        bail!("invalid_request: a referral can only start a new anonymous Pro trial");
+    }
+    if trial_only || referral_requested || anonymous_precedes_paid {
+        match anonymous_setup() {
+            Ok(plan) => return Ok(plan),
+            Err(error)
+                if !trial_only
+                    && !referral_requested
+                    && anonymous_trial_requires_conversion(&error) =>
+            {
+                eprintln!(
+                    "The free Pro trial is unavailable for this device; sign in to continue with paid Pro."
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    paid_setup()
+}
+
+impl CommercialLifecycleService {
+    fn setup_with_paid_access(
+        &self,
+        data_root: &Path,
+        installed_version: Option<&str>,
+    ) -> Result<ProSetupPlan> {
+        let mut access_token = self.access_token()?;
+        let mut referral_claim_token = self.checkout_referral_claim_token()?;
+        let result = (|| {
+            let state = self.active_state(&access_token, referral_claim_token.as_deref())?;
+            let public_key = self.installation_public_key()?;
+            let entitlement = self
+                .api
+                .entitlement(&access_token, &base64url(&public_key))?;
+            if entitlement.grant.subject != state.subject
+                || entitlement.grant.account_id != state.account_id
+            {
+                bail!("invalid_response: entitlement identity does not match commercial account");
+            }
+            self.store_entitlement(entitlement, &public_key)?;
+            let artifact = fetch_latest(
+                data_root,
+                CommercialArtifactAuth {
+                    api_base_url: self.api.origin(),
+                    authorization: &format!("Bearer {access_token}"),
+                    release_trust: self.config.release_trust,
+                },
+                installed_version,
+            )?;
+            Ok(ProSetupPlan {
+                artifact: Some(artifact),
+                account_state: state.access_state,
+            })
+        })();
+        referral_claim_token.zeroize();
+        access_token.zeroize();
+        result
+    }
+}
+
 fn anonymous_trial_requires_conversion(error: &anyhow::Error) -> bool {
     matches!(
         crate::pro::stable_error_code(error),
@@ -442,7 +514,27 @@ fn anonymous_trial_requires_conversion(error: &anyhow::Error) -> bool {
     )
 }
 
+fn anonymous_trial_precedes_paid_conversion(
+    stored_access_kind: Option<EntitlementAccessKind>,
+) -> bool {
+    matches!(
+        stored_access_kind,
+        None | Some(EntitlementAccessKind::Trial)
+    )
+}
+
 impl CommercialLifecycleService {
+    fn checkout_referral_claim_token(&self) -> Result<Option<String>> {
+        match self.vault.load(CredentialRecordKind::AnonymousTrial) {
+            Ok(CredentialRecord::AnonymousTrial(trial)) => {
+                Ok(trial.referral_claim_token().map(ToOwned::to_owned))
+            }
+            Ok(_) => bail!("key_store_unavailable: anonymous trial record mismatch"),
+            Err(CredentialVaultError::NotFound) => Ok(None),
+            Err(error) => Err(vault_error(error)),
+        }
+    }
+
     fn local_entitlement_deadlines(
         &self,
         state: &CommercialState,
@@ -583,7 +675,7 @@ fn checkout_poll_ended(expired: bool) -> anyhow::Error {
     }
 }
 
-fn open_browser(url: &str) -> Result<()> {
+pub(super) fn open_browser(url: &str) -> Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
         command.arg(url);
@@ -640,316 +732,10 @@ pub(super) fn unix_time() -> Result<i64> {
     .context("invalid_request: system time is invalid")
 }
 
-#[cfg(test)]
-mod tests {
-    use std::cell::{Cell, RefCell};
-
-    use crate::pro::commercial_api::BillingState;
-
-    use super::*;
-
-    fn elapsed_since(clock: &Cell<i64>, start: i64) -> Duration {
-        Duration::from_secs(u64::try_from(clock.get() - start).unwrap())
-    }
-
-    #[test]
-    fn only_terminal_anonymous_trial_states_enter_paid_conversion() {
-        for code in [
-            "anonymous_trial_already_consumed",
-            "anonymous_trial_identity_ambiguous",
-            "anonymous_trial_installation_limit",
-            "commercial_access_locked",
-        ] {
-            assert!(anonymous_trial_requires_conversion(&anyhow!(
-                "{code}: denied"
-            )));
-        }
-        for code in ["service_unavailable", "rate_limited", "invalid_response"] {
-            assert!(!anonymous_trial_requires_conversion(&anyhow!(
-                "{code}: failed"
-            )));
-        }
-    }
-
-    fn commercial_state(access_state: &str, access_deadline_unix: Option<i64>) -> CommercialState {
-        CommercialState {
-            subject: "user_123".to_owned(),
-            account_id: "org_123".to_owned(),
-            access_state: access_state.to_owned(),
-            access_deadline_unix,
-            billing: BillingState {
-                customer_associated: true,
-                subscription_status: None,
-                trial_end_unix: None,
-                current_period_end_unix: None,
-                cancel_at_period_end: false,
-                canceled_at_unix: None,
-                latest_invoice_status: None,
-                latest_payment_state: "unknown".to_owned(),
-            },
-        }
-    }
-
-    #[test]
-    fn already_subscribed_uses_embedded_state_without_a_second_account_request() {
-        let account_calls = Cell::new(0_u32);
-        let checkout_calls = Cell::new(0_u32);
-        let await_calls = Cell::new(0_u32);
-        let initial = commercial_state("none", None);
-        let subscribed = commercial_state("active", Some(2_000));
-
-        let state = resolve_active_state(
-            || {
-                account_calls.set(account_calls.get() + 1);
-                if account_calls.get() > 1 {
-                    bail!("unexpected second account request");
-                }
-                Ok(initial.clone())
-            },
-            || {
-                checkout_calls.set(checkout_calls.get() + 1);
-                Ok(CheckoutResult {
-                    kind: "already_subscribed".to_owned(),
-                    url: None,
-                    expires_at_unix: None,
-                    state: Some(subscribed.clone()),
-                })
-            },
-            |_, _| {
-                await_calls.set(await_calls.get() + 1);
-                bail!("Checkout polling must not run for an existing subscription")
-            },
-        )
-        .unwrap();
-
-        assert_eq!(state.access_state, "active");
-        assert_eq!(account_calls.get(), 1);
-        assert_eq!(checkout_calls.get(), 1);
-        assert_eq!(await_calls.get(), 0);
-    }
-
-    #[test]
-    fn url_less_pending_checkout_uses_the_polling_path() {
-        let await_calls = Cell::new(0_u32);
-        let initial = commercial_state("none", None);
-        let active = commercial_state("active", Some(2_000));
-
-        let state = resolve_active_state(
-            || Ok(initial.clone()),
-            || {
-                Ok(CheckoutResult {
-                    kind: "checkout_pending".to_owned(),
-                    url: None,
-                    expires_at_unix: Some(1_500),
-                    state: None,
-                })
-            },
-            |observed, checkout| {
-                await_calls.set(await_calls.get() + 1);
-                assert_eq!(observed.access_state, "none");
-                assert_eq!(checkout.kind, "checkout_pending");
-                assert!(checkout.url.is_none());
-                assert_eq!(checkout.expires_at_unix, Some(1_500));
-                Ok(active.clone())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(state.access_state, "active");
-        assert_eq!(await_calls.get(), 1);
-    }
-
-    #[test]
-    fn key_store_error_vocabulary_is_exact_and_does_not_expose_old_tokens() {
-        let cases = [
-            (
-                CredentialVaultError::Unavailable { platform: "linux" },
-                "key_store_unavailable:",
-            ),
-            (CredentialVaultError::Corrupt, "key_store_unavailable:"),
-            (CredentialVaultError::Locked, "key_store_locked:"),
-        ];
-        for (error, expected) in cases {
-            let rendered = vault_error(error).to_string();
-            assert!(rendered.starts_with(expected));
-            assert!(!rendered.contains("credential_vault_"));
-        }
-    }
-
-    #[test]
-    fn browser_urls_are_validated_before_launch() {
-        assert!(validate_https_url("file:///tmp/session", "Checkout").is_err());
-        assert!(validate_https_url("https://checkout.stripe.com/session", "Checkout").is_ok());
-    }
-
-    #[test]
-    fn checkout_poll_uses_bounded_adaptive_backoff_without_real_sleep() {
-        let clock = Cell::new(1_000_i64);
-        let sleeps = RefCell::new(Vec::new());
-        let attempts = Cell::new(0_u32);
-        let result = poll_checkout_access(
-            2_000,
-            || Ok(clock.get()),
-            || elapsed_since(&clock, 1_000),
-            |duration| {
-                sleeps.borrow_mut().push(duration);
-                clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
-            },
-            || {
-                let attempt = attempts.get() + 1;
-                attempts.set(attempt);
-                match attempt {
-                    1 => CheckoutPoll::Retryable(None),
-                    2..=5 => CheckoutPoll::Pending,
-                    _ => CheckoutPoll::Granted("active"),
-                }
-            },
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(result, "active");
-        assert_eq!(attempts.get(), 6);
-        assert_eq!(
-            sleeps.into_inner(),
-            [
-                Duration::from_secs(3),
-                Duration::from_secs(6),
-                Duration::from_secs(12),
-                Duration::from_secs(15),
-                Duration::from_secs(15),
-            ]
-        );
-    }
-
-    #[test]
-    fn checkout_poll_respects_retry_after_across_progress_wakes() {
-        let clock = Cell::new(1_000_i64);
-        let sleeps = RefCell::new(Vec::new());
-        let attempts = Cell::new(0_u32);
-        let result = poll_checkout_access(
-            2_000,
-            || Ok(clock.get()),
-            || elapsed_since(&clock, 1_000),
-            |duration| {
-                sleeps.borrow_mut().push(duration);
-                clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
-            },
-            || {
-                attempts.set(attempts.get() + 1);
-                if attempts.get() == 1 {
-                    CheckoutPoll::Retryable(Some(Duration::from_secs(120)))
-                } else {
-                    CheckoutPoll::Granted("active")
-                }
-            },
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(result, "active");
-        assert_eq!(attempts.get(), 2);
-        assert_eq!(
-            sleeps.into_inner(),
-            [Duration::from_secs(60), Duration::from_secs(60)]
-        );
-    }
-
-    #[test]
-    fn checkout_poll_stops_at_expiry_or_thirty_minutes() {
-        for (expires_at, expected_error, expected_elapsed) in [
-            (1_005, "checkout_expired:", 5_i64),
-            (
-                5_000,
-                "checkout_timeout:",
-                i64::try_from(CHECKOUT_POLL_MAX_SECONDS).unwrap(),
-            ),
-        ] {
-            let clock = Cell::new(1_000_i64);
-            let attempts = Cell::new(0_u32);
-            let error = poll_checkout_access::<()>(
-                expires_at,
-                || Ok(clock.get()),
-                || elapsed_since(&clock, 1_000),
-                |duration| {
-                    clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
-                },
-                || {
-                    attempts.set(attempts.get() + 1);
-                    CheckoutPoll::Pending
-                },
-                |_| {},
-            )
-            .unwrap_err();
-            assert!(error.to_string().starts_with(expected_error), "{error:#}");
-            assert!(error.to_string().contains("rerun `ctx pro`"));
-            assert_eq!(clock.get() - 1_000, expected_elapsed);
-            assert!(attempts.get() > 0);
-        }
-    }
-
-    #[test]
-    fn checkout_poll_rejects_a_grant_returned_after_the_deadline() {
-        let clock = Cell::new(1_000_i64);
-        let error = poll_checkout_access(
-            1_005,
-            || Ok(clock.get()),
-            || elapsed_since(&clock, 1_000),
-            |_| {},
-            || {
-                clock.set(1_005);
-                CheckoutPoll::Granted("late grant")
-            },
-            |_| {},
-        )
-        .unwrap_err();
-        assert!(error.to_string().starts_with("checkout_expired:"));
-    }
-
-    #[test]
-    fn checkout_poll_timeout_is_monotonic_when_the_wall_clock_moves_backward() {
-        let wall_clock = Cell::new(1_000_i64);
-        let elapsed = Cell::new(Duration::ZERO);
-        let error = poll_checkout_access::<()>(
-            5_000,
-            || Ok(wall_clock.get()),
-            || elapsed.get(),
-            |duration| {
-                elapsed.set(elapsed.get().saturating_add(duration));
-                wall_clock.set(wall_clock.get().saturating_sub(1));
-            },
-            || CheckoutPoll::Pending,
-            |_| {},
-        )
-        .unwrap_err();
-        assert!(error.to_string().starts_with("checkout_timeout:"));
-        assert_eq!(
-            elapsed.get(),
-            Duration::from_secs(CHECKOUT_POLL_MAX_SECONDS)
-        );
-    }
-
-    #[test]
-    fn checkout_poll_fails_closed_and_reports_bounded_progress() {
-        let clock = Cell::new(1_000_i64);
-        let progress = RefCell::new(Vec::new());
-        let error = poll_checkout_access::<()>(
-            2_000,
-            || Ok(clock.get()),
-            || elapsed_since(&clock, 1_000),
-            |duration| {
-                clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
-            },
-            || {
-                if clock.get() < 1_063 {
-                    CheckoutPoll::Pending
-                } else {
-                    CheckoutPoll::Fatal(anyhow!("authentication_required: sign in again"))
-                }
-            },
-            |elapsed| progress.borrow_mut().push(elapsed),
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "authentication_required: sign in again");
-        assert_eq!(progress.into_inner(), [60]);
-        assert_eq!(clock.get(), 1_066);
-    }
+fn render_paid_checkout_prompt(url: &str) -> String {
+    format!("{PAID_CHECKOUT_HEADING}\n  {url}")
 }
+
+#[cfg(test)]
+#[path = "commercial_lifecycle/tests.rs"]
+mod tests;

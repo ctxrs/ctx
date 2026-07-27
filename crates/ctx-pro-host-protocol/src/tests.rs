@@ -150,7 +150,18 @@ fn full_request(records: Vec<JournalRecord>) -> JournalSyncRequest {
                 sequence: 0,
             },
             contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
-            cumulative_digest: initial,
+            cumulative_digest: initial.clone(),
+        },
+        context: JournalContextWindow {
+            base_checkpoint: JournalCheckpoint {
+                position: JournalPosition {
+                    generation,
+                    sequence: 0,
+                },
+                contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+                cumulative_digest: initial,
+            },
+            records: Vec::new(),
         },
         frozen_through: frozen,
         authorized_repository_roots: Vec::new(),
@@ -395,6 +406,248 @@ fn journal_rejects_gaps_payload_mutation_and_tombstone_payloads() {
     tombstone.canonical_payload = Some(json!({}));
     let request = full_request(vec![tombstone]);
     assert_eq!(request.validate().unwrap_err().class, ErrorClass::Corrupt);
+}
+
+#[test]
+fn journal_context_is_a_bounded_digest_verified_prior_suffix() {
+    let generation = 10;
+    let initial = initial_journal_digest(generation);
+    let first = record(generation, 1, 1, JournalOperation::Upsert, &initial);
+    let second = record(
+        generation,
+        2,
+        2,
+        JournalOperation::Upsert,
+        &first.cumulative_digest,
+    );
+    let third = record(
+        generation,
+        3,
+        3,
+        JournalOperation::Upsert,
+        &second.cumulative_digest,
+    );
+    let fourth = record(
+        generation,
+        4,
+        4,
+        JournalOperation::Upsert,
+        &third.cumulative_digest,
+    );
+    let base = JournalCheckpoint {
+        position: JournalPosition {
+            generation,
+            sequence: 0,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: initial,
+    };
+    let prior = JournalCheckpoint {
+        position: JournalPosition {
+            generation,
+            sequence: 3,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: third.cumulative_digest.clone(),
+    };
+    let frozen = JournalCheckpoint {
+        position: JournalPosition {
+            generation,
+            sequence: 4,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: fourth.cumulative_digest.clone(),
+    };
+    let request = JournalSyncRequest {
+        mode: JournalSyncMode::Incremental,
+        canonical_schema_version: 47,
+        canonical_schema_identity: "ctx-store-schema-47-final-v3".to_owned(),
+        projection_contract_version: PROJECTION_CONTRACT_VERSION,
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        prior_checkpoint: prior.clone(),
+        context: JournalContextWindow {
+            base_checkpoint: base.clone(),
+            records: vec![first.clone(), second.clone(), third.clone()],
+        },
+        frozen_through: frozen,
+        authorized_repository_roots: Vec::new(),
+        records: vec![fourth],
+    };
+    request.validate().unwrap();
+    assert_eq!(request.committed_checkpoint().position.sequence, 4);
+
+    let mut context_only = request.clone();
+    context_only.frozen_through = prior.clone();
+    context_only.records.clear();
+    context_only.validate().unwrap();
+    assert_eq!(
+        context_only.committed_checkpoint(),
+        prior,
+        "detector context alone must not advance durable progress"
+    );
+
+    let mut missing = request.clone();
+    missing.context.records.remove(0);
+    assert_eq!(missing.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    let mut corrupt = request.clone();
+    corrupt.context.records[1].cumulative_digest = "0".repeat(64);
+    assert_eq!(corrupt.validate().unwrap_err().class, ErrorClass::Corrupt);
+
+    let mut oversized = request.clone();
+    while oversized.context.records.len() <= MAX_JOURNAL_CONTEXT_RECORDS {
+        oversized.context.records.push(third.clone());
+    }
+    assert_eq!(oversized.validate().unwrap_err().class, ErrorClass::Bounds);
+
+    let mut shorter = request;
+    shorter.context.base_checkpoint = JournalCheckpoint {
+        position: JournalPosition {
+            generation,
+            sequence: 1,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: first.cumulative_digest,
+    };
+    shorter.context.records = vec![second, third];
+    shorter.validate().unwrap();
+}
+
+#[test]
+fn journal_context_is_byte_bounded_independently_of_its_record_count() {
+    fn large_record(generation: u64, sequence: u64, prior_digest: &str) -> JournalRecord {
+        let mut value = record(
+            generation,
+            sequence,
+            1,
+            JournalOperation::Upsert,
+            prior_digest,
+        );
+        value.canonical_payload = Some(json!({
+            "body": "x".repeat(3 * 1024 * 1024),
+            "sequence": sequence,
+        }));
+        value.payload_sha256 = sha256_hex(
+            &canonical_payload_bytes(value.canonical_payload.as_ref().unwrap()).unwrap(),
+        );
+        value.cumulative_digest = journal_record_digest(prior_digest, &value).unwrap();
+        value
+    }
+
+    let generation = 11;
+    let initial = initial_journal_digest(generation);
+    let first = large_record(generation, 1, &initial);
+    let second = large_record(generation, 2, &first.cumulative_digest);
+    let third = large_record(generation, 3, &second.cumulative_digest);
+    let prior = JournalCheckpoint {
+        position: JournalPosition {
+            generation,
+            sequence: 3,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: third.cumulative_digest.clone(),
+    };
+    let request = JournalSyncRequest {
+        mode: JournalSyncMode::Incremental,
+        canonical_schema_version: 47,
+        canonical_schema_identity: "ctx-store-schema-47-final-v3".to_owned(),
+        projection_contract_version: PROJECTION_CONTRACT_VERSION,
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        prior_checkpoint: prior.clone(),
+        context: JournalContextWindow {
+            base_checkpoint: JournalCheckpoint {
+                position: JournalPosition {
+                    generation,
+                    sequence: 0,
+                },
+                contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+                cumulative_digest: initial,
+            },
+            records: vec![first, second, third],
+        },
+        frozen_through: prior,
+        authorized_repository_roots: Vec::new(),
+        records: Vec::new(),
+    };
+    assert_eq!(request.validate().unwrap_err().class, ErrorClass::Bounds);
+}
+
+#[test]
+fn maximum_bounded_context_leaves_room_for_one_near_maximum_current_record() {
+    fn sized_record(
+        generation: u64,
+        sequence: u64,
+        prior_digest: &str,
+        body_bytes: usize,
+    ) -> JournalRecord {
+        let mut value = record(
+            generation,
+            sequence,
+            1,
+            JournalOperation::Upsert,
+            prior_digest,
+        );
+        value.canonical_payload = Some(json!({
+            "body": "x".repeat(body_bytes),
+            "sequence": sequence,
+        }));
+        value.payload_sha256 = sha256_hex(
+            &canonical_payload_bytes(value.canonical_payload.as_ref().unwrap()).unwrap(),
+        );
+        value.cumulative_digest = journal_record_digest(prior_digest, &value).unwrap();
+        value
+    }
+
+    let generation = 12;
+    let initial = initial_journal_digest(generation);
+    let first = sized_record(generation, 1, &initial, 3_850_000);
+    let second = sized_record(generation, 2, &first.cumulative_digest, 3_850_000);
+    let current = sized_record(generation, 3, &second.cumulative_digest, 3_850_000);
+    let prior = JournalCheckpoint {
+        position: JournalPosition {
+            generation,
+            sequence: 2,
+        },
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        cumulative_digest: second.cumulative_digest.clone(),
+    };
+    let request = JournalSyncRequest {
+        mode: JournalSyncMode::Incremental,
+        canonical_schema_version: 47,
+        canonical_schema_identity: "ctx-store-schema-47-final-v3".to_owned(),
+        projection_contract_version: PROJECTION_CONTRACT_VERSION,
+        contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        prior_checkpoint: prior,
+        context: JournalContextWindow {
+            base_checkpoint: JournalCheckpoint {
+                position: JournalPosition {
+                    generation,
+                    sequence: 0,
+                },
+                contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+                cumulative_digest: initial,
+            },
+            records: vec![first, second],
+        },
+        frozen_through: JournalCheckpoint {
+            position: JournalPosition {
+                generation,
+                sequence: 3,
+            },
+            contract_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+            cumulative_digest: current.cumulative_digest.clone(),
+        },
+        authorized_repository_roots: (0..MAX_AUTHORIZED_REPOSITORY_ROOTS)
+            .map(|index| format!("/{index:03}/{}", "r".repeat(1_900)))
+            .collect(),
+        records: vec![current],
+    };
+    assert!(
+        serde_json::to_vec(&request.context.records).unwrap().len() <= MAX_JOURNAL_CONTEXT_BYTES
+    );
+    assert!(journal_sync_envelope_bytes(&request).unwrap() <= MAX_JOURNAL_SYNC_ENVELOPE_BYTES);
+    assert!(journal_sync_envelope_bytes(&request).unwrap() <= MAX_FRAME_PAYLOAD_BYTES);
+    request.validate().unwrap();
 }
 
 #[test]

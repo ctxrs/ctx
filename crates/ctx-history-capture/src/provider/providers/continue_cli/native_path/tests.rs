@@ -1008,13 +1008,14 @@ fn source_above_the_16mib_bound_has_explicit_source_addressable_failure() {
     .unwrap();
 
     let discovery = discover_continue_root(temp.path()).unwrap();
-    let prepared = collect(&discovery).unwrap();
-    assert!(prepared.outcomes.iter().any(|outcome| matches!(
-        outcome,
-        ContinueSourceOutcome::Failed(failure)
-            if failure.path == path
-                && failure.kind == ContinueSourceFailureKind::SourceTooLarge
-    )));
+    assert!(matches!(
+        collect(&discovery),
+        Err(ContinueNativePathError::SourceTooLarge {
+            path: failed_path,
+            limit: MAX_PROVIDER_JSONL_LINE_BYTES,
+            ..
+        }) if failed_path == path
+    ));
 }
 
 #[test]
