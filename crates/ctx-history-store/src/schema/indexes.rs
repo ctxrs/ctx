@@ -48,8 +48,18 @@ WHERE deleted_at_ms IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_events_history_record_occurred_at_ms ON events(history_record_id, occurred_at_ms);
 CREATE INDEX IF NOT EXISTS idx_events_session_occurred_at_ms ON events(session_id, occurred_at_ms);
-CREATE INDEX IF NOT EXISTS idx_events_history_record_id ON events(history_record_id);
-CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
+-- events(history_record_id) and events(session_id) are strict left prefixes of
+-- the two composite indexes above. SQLite serves every equality, covering, and
+-- grouping lookup from the wider index with the same access shape, so the
+-- narrow copies were pure per-insert B-tree maintenance. Create the composite
+-- indexes before dropping the prefixes so an interrupted reopen never leaves an
+-- existing Store without an access path for either column. Like the
+-- idx_events_seq and legacy role-index reconciliations above and below, this
+-- carries no schema identity: an older binary recreates both indexes on its
+-- own writable open and a newer one drops them again, so no store version is
+-- ever unreadable.
+DROP INDEX IF EXISTS idx_events_history_record_id;
+DROP INDEX IF EXISTS idx_events_session_id;
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 -- Semantic turn queries only inspect live message rows. Create the replacement
 -- indexes before dropping the legacy full indexes so an interrupted reopen

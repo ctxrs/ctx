@@ -316,11 +316,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("ctx.db")).unwrap();
 
+        // `events(session_id)` was a strict left prefix of
+        // `events(session_id, occurred_at_ms)` and has been dropped. The
+        // session-scoped branches are served by the composite index with the
+        // same `SEARCH … (session_id=?)` shape; the structural assertions
+        // below are what actually guard against the quadratic.
         let source_plan = explain(&store, SOURCE_EVENT_IMPACT_SQL);
         for index in [
             "idx_events_capture_source_id",
             "idx_sessions_capture_source_id",
-            "idx_events_session_id",
+            "idx_events_session_occurred_at_ms",
             "idx_runs_source_id",
             "idx_events_run_id",
         ] {
@@ -331,7 +336,7 @@ mod tests {
 
         let session_plan = explain(&store, SESSION_EVENT_IMPACT_SQL);
         for index in [
-            "idx_events_session_id",
+            "idx_events_session_occurred_at_ms",
             "idx_runs_session_id",
             "idx_events_run_id",
         ] {
@@ -342,7 +347,7 @@ mod tests {
 
         let file_touch_plan = explain(&store, SESSION_FILE_TOUCH_IMPACT_SQL);
         for index in [
-            "idx_events_session_id",
+            "idx_events_session_occurred_at_ms",
             "idx_files_touched_event_id",
             "idx_runs_session_id",
             "idx_events_run_id",
