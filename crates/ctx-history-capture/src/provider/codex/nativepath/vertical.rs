@@ -424,10 +424,6 @@ pub(super) struct CodexPublicationContext {
     source_revision: String,
     owner: CodexSessionRow,
     generation: u64,
-    checkpoint: CodexNativeCheckpoint,
-    rejected_records: u64,
-    retained_events: u64,
-    skipped_events: u64,
     stage_generation: bool,
 }
 
@@ -541,44 +537,6 @@ impl CodexNativeRootChunk {
         }
         expected.cursor.clone_from(&current.cursor);
         Ok(())
-    }
-
-    pub(super) fn split_at_page_boundary(mut self) -> VerticalResult<Option<(Self, Self)>> {
-        if self.pages.len() < 2 {
-            return Ok(None);
-        }
-        let right_pages = self.pages.split_off(self.pages.len() / 2);
-        let split_frontier = self
-            .pages
-            .last()
-            .map(|page| page.next_safe_frontier.clone())
-            .ok_or(CodexNativeVerticalError::CorruptFrontier(
-                "Codex journal split lost its certified page boundary",
-            ))?;
-        let split_cursor = build_context_store_cursor(
-            &self.context,
-            &split_frontier,
-            CodexNativeCursorPhase::Core,
-        )?;
-        let left = Self::new(
-            self.context.clone(),
-            self.pages,
-            self.expected_store_cursor,
-            split_cursor.clone(),
-            self.expected_frontier,
-            split_frontier.clone(),
-            false,
-        )?;
-        let right = Self::new(
-            self.context,
-            right_pages,
-            Some(split_cursor),
-            self.next_store_cursor,
-            split_frontier,
-            self.next_frontier,
-            self.terminal,
-        )?;
-        Ok(Some((left, right)))
     }
 }
 

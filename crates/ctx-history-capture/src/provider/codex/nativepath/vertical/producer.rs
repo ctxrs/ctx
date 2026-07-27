@@ -669,10 +669,6 @@ impl CodexNativeWindowProducer {
             source_revision: self.source_revision.clone(),
             owner,
             generation: self.generation,
-            checkpoint,
-            rejected_records,
-            retained_events,
-            skipped_events: authority_skipped_events,
             stage_generation: self.stage_generation,
         };
         let has_core_rows = !page.core_rows.is_empty();
