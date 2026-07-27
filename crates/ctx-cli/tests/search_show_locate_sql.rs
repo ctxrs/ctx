@@ -562,20 +562,8 @@ fn fresh_home_search_mvp_flow() {
     let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], true);
-    assert_eq!(doctor["progress"], "auto");
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
-
-    let doctor_progress = ctx(&temp)
-        .args(["doctor", "--format=json", "--progress", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stderr
-        .clone();
-    let doctor_progress = String::from_utf8(doctor_progress).unwrap();
-    assert!(doctor_progress.contains(r#""operation":"doctor""#));
-    assert!(doctor_progress.contains(r#""phase":"checking""#));
 }
 
 #[test]

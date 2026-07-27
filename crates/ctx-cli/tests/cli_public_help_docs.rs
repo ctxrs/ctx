@@ -507,10 +507,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Print expanded text details",
             ],
         ),
-        (
-            "doctor",
-            vec!["Usage: ctx doctor", "--format <FORMAT>", "--progress"],
-        ),
+        ("doctor", vec!["Usage: ctx doctor", "--format <FORMAT>"]),
     ] {
         let output = ctx(&temp)
             .args([command, "--help"])
@@ -596,6 +593,14 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unexpected argument '--json'"));
+
+    ctx(&temp)
+        .args(["doctor", "--progress", "none"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unexpected argument '--progress' found",
+        ));
 }
 
 #[test]

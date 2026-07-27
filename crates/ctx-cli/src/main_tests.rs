@@ -139,7 +139,7 @@ fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
         vec!["ctx", "daemon", "status"],
         vec!["ctx", "setup", "--progress", "json"],
         vec!["ctx", "import", "--progress", "json"],
-        vec!["ctx", "doctor", "--progress", "json"],
+        vec!["ctx", "doctor", "--format=json"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(!crate::dispatch::command_deprecation_warning_eligible(
@@ -150,7 +150,7 @@ fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
     for args in [
         vec!["ctx", "status"],
         vec!["ctx", "setup", "--progress", "plain"],
-        vec!["ctx", "doctor", "--progress", "none"],
+        vec!["ctx", "doctor"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(crate::dispatch::command_deprecation_warning_eligible(

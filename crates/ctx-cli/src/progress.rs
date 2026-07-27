@@ -496,15 +496,6 @@ pub(crate) fn plural(value: usize, singular: &'static str, plural: &'static str)
         plural
     }
 }
-pub(crate) fn progress_mode_name(progress: ProgressArg) -> &'static str {
-    match progress {
-        ProgressArg::Auto => "auto",
-        ProgressArg::Plain => "plain",
-        ProgressArg::Json => "json",
-        ProgressArg::None => "none",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

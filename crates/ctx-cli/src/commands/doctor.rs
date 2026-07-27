@@ -8,7 +8,6 @@ use ctx_history_core::database_path;
 use crate::analytics::{count_bucket, DoctorTelemetry};
 use crate::config::AppConfig;
 use crate::output::print_json;
-use crate::progress::{progress_mode_name, ProgressReporter};
 use crate::semantic::{daemon_report, semantic_health_findings, semantic_worker_report};
 use crate::store_util::open_existing_store_read_only;
 use crate::DoctorArgs;
@@ -19,8 +18,6 @@ pub(crate) fn run_doctor(
     telemetry: &mut DoctorTelemetry,
 ) -> Result<()> {
     let json_output = args.format.is_json();
-    let progress = ProgressReporter::new(args.progress, json_output, "doctor", 0);
-    progress.message("opening", "opening ctx store");
     let db_path = database_path(data_root.clone());
     let mut findings = Vec::new();
     if !data_root.exists() {
@@ -33,10 +30,6 @@ pub(crate) fn run_doctor(
         ));
     } else {
         let store = open_existing_store_read_only(&db_path, "ctx doctor")?;
-        progress.message(
-            "checking",
-            "running sqlite integrity and foreign key checks",
-        );
         findings.extend(store.validate()?);
     }
     findings.extend(semantic_health_findings(&data_root));
@@ -74,20 +67,10 @@ pub(crate) fn run_doctor(
     }
     telemetry.finding_count = Some(count_bucket(findings.len() as u64));
     telemetry.healthy = Some(findings.is_empty());
-    progress.done(
-        "done",
-        if findings.is_empty() {
-            "ctx doctor passed"
-        } else {
-            "ctx doctor found issues"
-        },
-        0,
-    );
     if json_output {
         print_json(json!({
             "schema_version": 1,
             "ok": findings.is_empty(),
-            "progress": progress_mode_name(args.progress),
             "findings": findings,
             "daemon": daemon,
             "upgrade": upgrade,
