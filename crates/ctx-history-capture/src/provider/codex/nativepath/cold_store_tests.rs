@@ -843,11 +843,78 @@ fn cold_store_installs_current_nativepath_store() {
     assert_no_live_stage(&temp);
 }
 
+/// A destination created but never projected into is rebuilt, not left on the
+/// ordinary writer. This is the state every install reaches after `ctx setup`
+/// or an import that admitted no content.
 #[test]
-fn cold_store_empty_target_requires_ordinary_writer_without_mutation() {
+fn cold_store_existing_empty_target_uses_the_cold_store() {
     let temp = TempDir::new().unwrap();
     let options = options(&temp);
     fs::File::create(&options.target_store_path).unwrap();
+
+    let outcome = build_codex_cold_store(options.clone()).unwrap();
+
+    let CodexColdStoreOutcome::Installed { summary, store, .. } = outcome else {
+        panic!("existing empty target did not use cold Store");
+    };
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(store.counts.sources, 1);
+    assert_eq!(store.counts.sessions, 1);
+    assert!(store.counts.events >= 1);
+    assert_no_live_stage(&temp);
+}
+
+/// A destination an earlier import already opened keeps its control records
+/// when the generation is rebuilt.
+#[test]
+fn cold_store_existing_empty_target_carries_prior_control_records() {
+    let temp = TempDir::new().unwrap();
+    let options = options(&temp);
+    let prior = HistoryRecord::new(
+        "prior agent history".to_owned(),
+        "Indexed local agent history from an earlier empty run".to_owned(),
+        vec!["agent-history".to_owned()],
+        "agent_history",
+        Some("/workspace".to_owned()),
+    );
+    let existing = ctx_history_store::Store::open(&options.target_store_path).unwrap();
+    existing.upsert_record(&prior).unwrap();
+    drop(existing);
+
+    let outcome = build_codex_cold_store(options.clone()).unwrap();
+
+    let CodexColdStoreOutcome::Installed { store, .. } = outcome else {
+        panic!("existing empty target did not use cold Store");
+    };
+    assert_eq!(store.counts.history_records, 1);
+    let installed = ctx_history_store::Store::open_read_only(&options.target_store_path).unwrap();
+    assert_eq!(installed.get_record(prior.id).unwrap().title, prior.title);
+    assert_eq!(installed.search_records("prior", 10).unwrap().len(), 1);
+    drop(installed);
+    assert_no_live_stage(&temp);
+}
+
+/// A destination that already owns provider content is never rebuilt. Its
+/// canonical rows, cursors, and file identity are untouched.
+#[test]
+fn cold_store_target_with_imported_content_requires_ordinary_writer() {
+    let temp = TempDir::new().unwrap();
+    let options = options(&temp);
+    let mut seeded = ctx_history_store::Store::open(&options.target_store_path).unwrap();
+    let seed = import_codex_native_session_root(
+        &options.source_path,
+        &mut seeded,
+        CodexSessionImportOptions {
+            machine_id: options.machine_id.clone(),
+            source_path: Some(options.source_path.clone()),
+            imported_at: options.imported_at,
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(seed.imported_sessions, 1);
+    drop(seeded);
+    let before = file_identity(&options.target_store_path);
 
     let outcome = build_codex_cold_store(options.clone()).unwrap();
 
@@ -855,7 +922,8 @@ fn cold_store_empty_target_requires_ordinary_writer_without_mutation() {
         outcome,
         CodexColdStoreOutcome::OrdinaryStoreRequired
     ));
-    assert_eq!(fs::read(&options.target_store_path).unwrap(), b"");
+    assert_eq!(file_identity(&options.target_store_path), before);
+    assert_eq!(session_count(&options.target_store_path), 1);
     assert_no_live_stage(&temp);
 }
 
@@ -873,6 +941,70 @@ fn cold_store_nonempty_target_requires_ordinary_writer_without_mutation() {
         fs::read(options.target_store_path).unwrap(),
         b"existing-store-bytes"
     );
+}
+
+/// The `9e7d1b4f6` overwrite race stays closed for an admitted empty
+/// generation: a concurrently recreated destination wins and is preserved
+/// byte-for-byte.
+#[test]
+fn cold_store_empty_target_race_preserves_the_concurrent_owner() {
+    let temp = TempDir::new().unwrap();
+    let options = options(&temp);
+    let target = options.target_store_path.clone();
+    fs::File::create(&target).unwrap();
+    let raced_target = target.clone();
+
+    let result = build_codex_cold_store_with_hooks(
+        options,
+        |_| Ok(()),
+        move |_| {
+            fs::remove_file(&raced_target)?;
+            fs::write(&raced_target, b"concurrent-owner")?;
+            Ok(())
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"concurrent-owner");
+    assert_no_live_stage(&temp);
+}
+
+/// A build that fails before publication leaves the admitted generation in
+/// place, with its own file identity and its own control records.
+#[test]
+fn cold_store_pre_install_failure_leaves_the_existing_target_intact() {
+    let temp = TempDir::new().unwrap();
+    let options = options(&temp);
+    let target = options.target_store_path.clone();
+    let prior = HistoryRecord::new(
+        "prior agent history".to_owned(),
+        "Indexed local agent history from an earlier empty run".to_owned(),
+        vec!["agent-history".to_owned()],
+        "agent_history",
+        Some("/workspace".to_owned()),
+    );
+    let existing = ctx_history_store::Store::open(&target).unwrap();
+    existing.upsert_record(&prior).unwrap();
+    drop(existing);
+    let before = file_identity(&target);
+
+    let result = build_codex_cold_store_with_hooks(
+        options,
+        |_| Ok(()),
+        |_| {
+            Err(crate::CaptureError::InvalidPayload(
+                "injected pre-install failure".to_owned(),
+            ))
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(file_identity(&target), before);
+    let preserved = ctx_history_store::Store::open_read_only(&target).unwrap();
+    assert_eq!(preserved.get_record(prior.id).unwrap().title, prior.title);
+    drop(preserved);
+    assert_eq!(session_count(&target), 0);
+    assert_no_live_stage(&temp);
 }
 
 #[test]
@@ -1090,6 +1222,30 @@ fn cold_core_publication_defers_journal_until_one_post_load_baseline() {
     let installed = ctx_history_store::Store::open_read_only(target).unwrap();
     let snapshot = installed.projection_journal_snapshot(None).unwrap();
     assert!(!snapshot.records.is_empty());
+}
+
+/// Stable file identity where the platform exposes one. Windows has no stable
+/// `(device, inode)` pair here, so the surrounding row assertions carry the
+/// preservation proof there.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).ok()?;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn session_count(target: &Path) -> i64 {
+    Connection::open(target)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .unwrap()
 }
 
 fn assert_no_live_stage(temp: &TempDir) {

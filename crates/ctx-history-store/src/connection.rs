@@ -21,6 +21,92 @@ use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
 
+/// Adjacent lease every writable Store holds for its lifetime.
+///
+/// It is deliberately not the cold-build lock: that one is held for a whole
+/// multi-second build and only serializes cold builders against each other.
+/// This lease is taken exclusively for the milliseconds a generation is being
+/// replaced, so ordinary writers are excluded exactly when it matters and are
+/// otherwise unaffected.
+pub(crate) const PUBLICATION_LEASE_SUFFIX: &str = ".ctx-store-publication.lock";
+
+pub(crate) fn publication_lease_path(path: &Path) -> PathBuf {
+    let mut value = OsString::from(path.as_os_str());
+    value.push(PUBLICATION_LEASE_SUFFIX);
+    PathBuf::from(value)
+}
+
+pub(crate) fn open_publication_lease(path: &Path) -> Result<fs::File> {
+    let lease_path = publication_lease_path(path);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lease_path)?;
+    restrict_private_file(&lease_path)?;
+    Ok(file)
+}
+
+/// How long a writable open waits for an in-flight publication to finish.
+///
+/// A publication holds the lease only for the install window, which is orders of
+/// magnitude shorter than this. The wait is bounded rather than indefinite
+/// because an advisory lock outlives the liveness of the process holding it: a
+/// `SIGSTOP`ped process, a frozen cgroup, an attached debugger, or a stalled
+/// filesystem all keep the lease held. An unbounded wait here would turn one
+/// stuck publication into a product-wide hang — daemon, import and search alike
+/// — with nothing to point at. The bound fails with an actionable error instead.
+pub(crate) const PUBLICATION_LEASE_OPEN_WAIT: Duration = Duration::from_secs(10);
+const PUBLICATION_LEASE_POLL: Duration = Duration::from_millis(20);
+
+pub(crate) fn lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+// Test-only override so the stuck-publication path can be exercised without
+// waiting out the production bound.
+#[cfg(test)]
+std::thread_local! {
+    static TEST_OPEN_LEASE_WAIT: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_shared_publication_lease_wait(wait: Duration) {
+    TEST_OPEN_LEASE_WAIT.with(|slot| slot.set(Some(wait)));
+}
+
+fn shared_publication_lease_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = TEST_OPEN_LEASE_WAIT.with(std::cell::Cell::get) {
+        return wait;
+    }
+    PUBLICATION_LEASE_OPEN_WAIT
+}
+
+fn acquire_shared_publication_lease(path: &Path) -> Result<fs::File> {
+    // Explicitly the `fs2` trait methods: the inherent `File::lock_shared` and
+    // `File::try_lock_shared` are newer than this crate's MSRV.
+    let file = open_publication_lease(path)?;
+    let deadline = std::time::Instant::now() + shared_publication_lease_wait();
+    loop {
+        match fs2::FileExt::try_lock_shared(&file) {
+            Ok(()) => return Ok(file),
+            Err(error) if lock_is_contended(&error) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(StoreError::StorePublicationLeaseUnavailable(
+                        publication_lease_path(path),
+                    ));
+                }
+                std::thread::sleep(PUBLICATION_LEASE_POLL);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 fn deny_quarantined_connection(_: AuthContext<'_>) -> Authorization {
     Authorization::Deny
 }
@@ -57,8 +143,32 @@ impl Store {
         Ok(store)
     }
 
+    /// Opens a writable Store under the shared publication lease.
+    ///
+    /// The lease is held for the lifetime of the Store. A cold rebuild takes the
+    /// same lease exclusively across its emptiness proof and its install, so a
+    /// writable Store can never exist — and therefore no write can be committed
+    /// — inside the window where a generation is being replaced.
     pub fn open_with_busy_timeout(path: impl AsRef<Path>, busy_timeout: Duration) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lease = acquire_shared_publication_lease(&path)?;
+        let mut store = Self::open_without_publication_lease(path, busy_timeout)?;
+        store.publication_lease = Some(lease);
+        Ok(store)
+    }
+
+    /// Opens a writable Store without taking the publication lease.
+    ///
+    /// Only the cold builder uses this, for the migrating open it performs while
+    /// it already owns the lease exclusively. Taking the shared lease there would
+    /// deadlock against its own exclusive hold.
+    pub(crate) fn open_without_publication_lease(
+        path: PathBuf,
+        busy_timeout: Duration,
+    ) -> Result<Self> {
         let mut migrated_legacy_layout = false;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -123,6 +233,7 @@ impl Store {
             object_dir,
             conn,
             busy_timeout,
+            publication_lease: None,
             event_search_bulk_depth: Default::default(),
             event_search_bulk_epoch: Default::default(),
             batch_depth: Default::default(),
