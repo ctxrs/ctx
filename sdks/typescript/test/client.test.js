@@ -50,22 +50,22 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
   assert.deepEqual(
     calls.map((call) => call.args),
     [
-      ["--data-root", "/tmp/ctx-sdk-test", "status", "--json"],
+      ["--data-root", "/tmp/ctx-sdk-test", "status", "--format=json"],
       [
         "--data-root",
         "/tmp/ctx-sdk-test",
         "setup",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
         "--catalog-only",
       ],
-      ["--data-root", "/tmp/ctx-sdk-test", "sources", "--json"],
+      ["--data-root", "/tmp/ctx-sdk-test", "sources", "--format=json"],
       [
         "--data-root",
         "/tmp/ctx-sdk-test",
         "import",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
         "--provider",
@@ -76,7 +76,7 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
         "--data-root",
         "/tmp/ctx-sdk-test",
         "import",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
         "--all",
@@ -232,7 +232,7 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     "--refresh",
     "off",
     "--include-current-session",
-    "--json",
+    "--format=json",
   ]);
 });
 

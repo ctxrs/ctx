@@ -249,7 +249,7 @@ try {
     $failure = $null
     try {
         Invoke-CtxChecked -FailureLabel "fixture import" -CommandArgs @(
-            "import", "--no-daemon", "--format", "ctx-history-jsonl-v1", "--path", $fixturePath
+            "import", "--no-daemon", "--input-format", "ctx-history-jsonl-v1", "--path", $fixturePath
         ) | Out-Null
     } catch {
         $failure = $_.Exception.Message

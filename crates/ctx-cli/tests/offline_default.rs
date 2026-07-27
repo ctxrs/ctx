@@ -73,7 +73,7 @@ fn local_import_status_and_daemon_are_network_inert_when_analytics_are_disabled(
     write_network_endpoints(&pro_root, &endpoint, Some(false));
     local_command(&temp, &pro_root)
         .env("CTX_CLOUD_API_BASE", &endpoint)
-        .args(["status", "--json"])
+        .args(["status", "--format=json"])
         .assert()
         .success();
     assert!(
@@ -85,7 +85,7 @@ fn local_import_status_and_daemon_are_network_inert_when_analytics_are_disabled(
     write_network_endpoints(&daemon_root, &endpoint, Some(false));
     local_command(&temp, &daemon_root)
         .env("CTX_CLOUD_API_BASE", &endpoint)
-        .args(["daemon", "disable", "--json"])
+        .args(["daemon", "disable", "--format=json"])
         .assert()
         .success();
     assert!(
@@ -116,7 +116,7 @@ fn explicit_analytics_opt_in_connects_to_configured_endpoint() {
     });
 
     local_command(&temp, &data_root)
-        .args(["doctor", "--json"])
+        .args(["doctor", "--format=json"])
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();

@@ -1,7 +1,7 @@
 use ctx_history_core::CaptureProvider;
 
 use crate::{
-    output::{LocateFormat, OutputFormat, SqlFormat},
+    output::{JsonOutputFormat, OutputFormat, SqlFormat},
     progress::ProgressArg,
     transcript::TranscriptMode,
 };
@@ -139,7 +139,7 @@ impl ImportTelemetry {
             resume: args.resume,
             all_sources: args.all,
             no_daemon: args.no_daemon,
-            source_mode: if args.format.is_some() {
+            source_mode: if args.input_format.is_some() {
                 ImportSourceMode::ExplicitFormat
             } else if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
                 ImportSourceMode::HistorySourcePlugin
@@ -177,12 +177,12 @@ impl ImportTelemetry {
             history_source: None,
             history_source_manifest: Vec::new(),
             reset_cursor: false,
-            format: None,
+            input_format: None,
             all: true,
             resume: false,
             partial: false,
             no_daemon,
-            json: false,
+            format: crate::output::JsonOutputFormat::Text,
             progress,
         });
         telemetry.source_mode = ImportSourceMode::AllDiscovered;
@@ -374,10 +374,10 @@ impl RenderFormat {
         }
     }
 
-    pub(crate) fn from_locate_format(value: LocateFormat) -> Self {
+    pub(crate) fn from_json_output_format(value: JsonOutputFormat) -> Self {
         match value {
-            LocateFormat::Text => Self::Text,
-            LocateFormat::Json => Self::Json,
+            JsonOutputFormat::Text => Self::Text,
+            JsonOutputFormat::Json => Self::Json,
         }
     }
 

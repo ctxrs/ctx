@@ -47,6 +47,7 @@ use crate::{
         ProHostOperationV1, ProLifecycleOperationV1, ProLifecycleTelemetryV1,
         ProMaterializationTelemetryV1, ProReconcileOutcomeV1, ProUninstallDataDispositionV1,
     },
+    output::JsonOutputFormat,
     pro::stable_error_code,
 };
 
@@ -54,8 +55,8 @@ use crate::{
 pub(crate) struct ProArgs {
     #[command(subcommand)]
     command: Option<ProCommand>,
-    #[arg(long, help = "Print machine-readable JSON")]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
     #[arg(
         long,
         value_parser = parse_referral_codename_unchecked,
@@ -76,8 +77,8 @@ enum ProCommand {
 
 #[derive(Debug, Args)]
 struct ProSetupArgs {
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
     #[arg(long, hide = true)]
     defer_materialization: bool,
     #[arg(long, hide = true)]
@@ -88,8 +89,8 @@ struct ProSetupArgs {
 struct ProManageArgs {
     #[arg(long, help = "Print the portal URL without opening a browser")]
     no_open: bool,
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -102,8 +103,8 @@ struct ProUninstallArgs {
         help = "Preserve local Pro data for later setup"
     )]
     keep_data: bool,
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 const UNINSTALL_DATA_PROMPT: &str =
@@ -134,11 +135,11 @@ impl ProArgs {
     }
 
     pub(crate) fn json_output(&self) -> bool {
-        self.json
+        self.format.is_json()
             || match &self.command {
-                Some(ProCommand::Setup(args)) => args.json,
-                Some(ProCommand::Manage(args)) => args.json,
-                Some(ProCommand::Uninstall(args)) => args.json,
+                Some(ProCommand::Setup(args)) => args.format.is_json(),
+                Some(ProCommand::Manage(args)) => args.format.is_json(),
+                Some(ProCommand::Uninstall(args)) => args.format.is_json(),
                 None => false,
             }
     }

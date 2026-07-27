@@ -81,13 +81,13 @@ pub(crate) fn run_status(
     telemetry: &mut StatusTelemetry,
 ) -> Result<()> {
     if args.usage.modifies_state() {
-        return run_usage_action(args.usage, &data_root, args.json, quiet);
+        return run_usage_action(args.usage, &data_root, args.format.is_json(), quiet);
     }
     let db_path = database_path(data_root.clone());
     let initialized = db_path.exists();
     let config_path = data_root.join(CONFIG_FILE);
     let Some(config) = load_status_config(&data_root) else {
-        return malformed_config_failure(args.json);
+        return malformed_config_failure(args.format.is_json());
     };
     let (
         records,
@@ -168,7 +168,7 @@ pub(crate) fn run_status(
         args.usage.detailed(),
     );
 
-    if args.json {
+    if args.format.is_json() {
         print_json(json!({
             "schema_version": 1,
             "initialized": initialized,

@@ -52,7 +52,7 @@ The preferred path for ongoing integrations is a history source plugin:
 The optional batch path is a file import:
 
 1. A tool writes `ctx-history-jsonl-v1` records to a file.
-2. The user or tool runs `ctx import --format ctx-history-jsonl-v1 --path ...`.
+2. The user or tool runs `ctx import --input-format ctx-history-jsonl-v1 --path ...`.
 3. ctx imports the file idempotently.
 
 The file path is useful for simple exporters, debugging, and one-time imports.

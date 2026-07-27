@@ -97,7 +97,7 @@ main() {
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
     CTX_ANALYTICS_ENABLED=false \
-    run "${ctx_bin}" integrations install skills --agent codex --json > "${install_json}"
+    run "${ctx_bin}" integrations install skills --agent codex --format json > "${install_json}"
   require_contains "${install_json}" '"agent":"codex"'
   require_contains "${install_json}" '"status":"current"'
   require_contains "${skill_path}" 'name: ctx-agent-history-search'

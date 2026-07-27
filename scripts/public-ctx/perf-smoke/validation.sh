@@ -290,7 +290,7 @@ def import_command(corpus_root: Path, resume: bool = False) -> list[str]:
         "--path",
         str(corpus_root),
         "--no-daemon",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]

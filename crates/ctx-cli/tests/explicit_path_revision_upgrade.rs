@@ -13,7 +13,7 @@ fn explicit_import(temp: &TempDir, provider: &str, path: &str) -> Value {
         "--no-daemon",
         "--progress",
         "none",
-        "--json",
+        "--format=json",
     ]))
 }
 
@@ -305,7 +305,7 @@ fn codex_automatic_and_explicit_same_spelling_share_ids_and_cursor_streams() {
         "--no-daemon",
         "--progress",
         "none",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(automatic["totals"]["imported_events"], 1, "{automatic:#}");
     assert_eq!(automatic["totals"]["skipped_events"], 1, "{automatic:#}");

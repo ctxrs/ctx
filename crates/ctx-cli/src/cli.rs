@@ -14,7 +14,7 @@ use crate::{
         sql::parse_sql_timeout,
     },
     docs, integrations, mcp,
-    output::{LocateFormat, SqlFormat},
+    output::{JsonOutputFormat, SqlFormat},
     pro,
     progress::ProgressArg,
     provider_args::{
@@ -106,22 +106,22 @@ pub(crate) struct SetupArgs {
     pub(crate) no_daemon: bool,
     #[arg(long, help = "Wait for foreground lexical indexing before returning")]
     pub(crate) wait: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
     pub(crate) progress: ProgressArg,
 }
 
 #[derive(Debug, Args, Clone)]
-pub(crate) struct JsonArgs {
-    #[arg(long)]
-    pub(crate) json: bool,
+pub(crate) struct FormatArgs {
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct StatusArgs {
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
         value_enum,
@@ -162,8 +162,8 @@ impl UsageStatusMode {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct SourcesArgs {
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
         value_parser = parse_provider_arg,
@@ -179,10 +179,8 @@ pub(crate) struct SourcesArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct DoctorArgs {
-    #[arg(long)]
-    pub(crate) json: bool,
-    #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
-    pub(crate) progress: ProgressArg,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -199,23 +197,29 @@ pub(crate) struct ImportArgs {
         help = "Import exactly this path; native provider paths require --provider"
     )]
     pub(crate) path: Option<PathBuf>,
-    #[arg(long = "history-source", conflicts_with_all = ["provider", "path", "format", "all"])]
+    #[arg(
+        long = "history-source",
+        conflicts_with_all = ["provider", "path", "input_format", "all"]
+    )]
     pub(crate) history_source: Option<String>,
     #[arg(
         long = "history-source-manifest",
-        conflicts_with_all = ["provider", "path", "format"]
+        conflicts_with_all = ["provider", "path", "input_format"]
     )]
     pub(crate) history_source_manifest: Vec<PathBuf>,
     #[arg(long = "reset-cursor")]
     pub(crate) reset_cursor: bool,
     #[arg(
-        long,
+        long = "input-format",
         value_enum,
         requires = "path",
         conflicts_with_all = ["provider", "all", "history_source"]
     )]
-    pub(crate) format: Option<ImportFormatArg>,
-    #[arg(long, conflicts_with_all = ["provider", "path", "format", "history_source"])]
+    pub(crate) input_format: Option<ImportFormatArg>,
+    #[arg(
+        long,
+        conflicts_with_all = ["provider", "path", "input_format", "history_source"]
+    )]
     pub(crate) all: bool,
     #[arg(long)]
     pub(crate) resume: bool,
@@ -223,8 +227,8 @@ pub(crate) struct ImportArgs {
     pub(crate) partial: bool,
     #[arg(long, help = "Do not start daemon maintenance after import")]
     pub(crate) no_daemon: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
     pub(crate) progress: ProgressArg,
 }
@@ -266,20 +270,16 @@ pub(crate) struct LocateSessionArgs {
     pub(crate) provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     pub(crate) provider_session: Option<String>,
-    #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
-    pub(crate) format: LocateFormat,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct LocateEventArgs {
     #[arg(help = "ctx event id or unambiguous id prefix")]
     pub(crate) id: String,
-    #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
-    pub(crate) format: LocateFormat,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -393,8 +393,8 @@ pub(crate) struct SearchArgs {
         help = "Include the active Codex session tree when CODEX_THREAD_ID is set"
     )]
     pub(crate) include_current_session: bool,
-    #[arg(long, help = "Print machine-readable JSON")]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
         help = "Print expanded text details such as full ids, provider ids, citations, and next commands"
@@ -430,11 +430,11 @@ pub(crate) enum DaemonCommand {
     #[command(about = "Run ctx background maintenance in the foreground")]
     Run(DaemonRunArgs),
     #[command(about = "Show ctx daemon status")]
-    Status(JsonArgs),
+    Status(FormatArgs),
     #[command(about = "Enable ctx daemon maintenance")]
-    Enable(JsonArgs),
+    Enable(FormatArgs),
     #[command(about = "Disable ctx daemon maintenance")]
-    Disable(JsonArgs),
+    Disable(FormatArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -457,8 +457,8 @@ pub(crate) struct DaemonRunArgs {
     pub(crate) start_mode: Option<DaemonStartModeArg>,
     #[arg(long, value_enum, hide = true)]
     pub(crate) trigger_command: Option<DaemonTriggerCommandArg>,
-    #[arg(long, help = "Print machine-readable JSON")]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -501,8 +501,6 @@ pub(crate) struct SqlArgs {
     pub(crate) file: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = SqlFormat::Table)]
     pub(crate) format: SqlFormat,
-    #[arg(long, help = "Alias for --format json")]
-    pub(crate) json: bool,
     #[arg(long, default_value_t = RAW_SQL_DEFAULT_MAX_ROWS)]
     pub(crate) max_rows: usize,
     #[arg(long, default_value_t = RAW_SQL_DEFAULT_MAX_COLUMNS)]
@@ -519,11 +517,7 @@ pub(crate) struct SqlArgs {
 
 impl SqlArgs {
     pub(crate) fn output_format(&self) -> SqlFormat {
-        if self.json {
-            SqlFormat::Json
-        } else {
-            self.format
-        }
+        self.format
     }
 }
 

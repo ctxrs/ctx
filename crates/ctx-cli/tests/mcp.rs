@@ -488,7 +488,7 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -779,7 +779,7 @@ fn mcp_sources_matches_cli_discovery_issues() {
     let cli = json_output(
         ctx(&temp)
             .env("CLAUDE_CONFIG_DIR", "relative-account")
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let responses = mcp_roundtrip_with_env(
         &temp,
@@ -830,7 +830,7 @@ fn mcp_sources_and_search_support_history_source_plugins() {
                 "import",
                 "--history-source",
                 "hermes/default",
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ]),
@@ -926,7 +926,7 @@ fn mcp_search_excludes_active_codex_session_by_default_when_available() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));

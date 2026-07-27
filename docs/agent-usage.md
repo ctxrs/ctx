@@ -4,8 +4,8 @@ Agents should query ctx before repeating investigation work.
 
 ## Recommended Flow
 
-1. Run `ctx status --json` to confirm the local store is readable.
-2. Run `ctx sources --json` to see which local provider paths currently exist.
+1. Run `ctx status --format json` to confirm the local store is readable.
+2. Run `ctx sources --format json` to see which local provider paths currently exist.
 3. Search narrowly with provider, workspace, file, or date filters.
 4. Use `ctx show event` for the best matching result before changing code.
 5. Cite ctx material in notes or final answers when it influenced the work.
@@ -81,7 +81,7 @@ Run `ctx import --all` when:
 - the current task depends on a previous session from another provider;
 - you have an explicit supported provider path to import.
 
-Use `ctx import --resume --json` as an idempotent-rescan marker. It is not a
+Use `ctx import --resume --format json` as an idempotent-rescan marker. It is not a
 guarantee that every provider has native cursor resume.
 
 ## JSON For Harnesses
@@ -91,10 +91,10 @@ JSON is for scripts, harnesses, `jq`, or exact field extraction; it is usually
 much larger and consumes more context.
 
 ```bash
-ctx status --json
-ctx sources --json
+ctx status --format json
+ctx sources --format json
 ctx search "release blocker"
-ctx search "release blocker" --json | jq '.results[0].ctx_event_id'
+ctx search "release blocker" --format json | jq '.results[0].ctx_event_id'
 ctx show event <ctx-event-id> --window 5 --format json
 ctx show session <ctx-session-id> --format json
 ```

@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::analytics::{count_bucket, IntegrationScope, IntegrationTelemetry, TargetSelection};
+use crate::output::JsonOutputFormat;
 
 mod format;
 mod operation;
@@ -30,8 +31,8 @@ pub(crate) struct McpInstallArgs {
         help = "Install into the current project's MCP config when supported"
     )]
     pub(crate) project: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
         help = "Overwrite an existing ctx MCP server entry with different command or args"
@@ -53,8 +54,8 @@ pub(crate) struct McpStatusArgs {
     pub(crate) all_agents: bool,
     #[arg(long, help = "Inspect the current project's MCP config when supported")]
     pub(crate) project: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 impl McpInstallArgs {

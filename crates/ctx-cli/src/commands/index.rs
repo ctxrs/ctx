@@ -6,14 +6,14 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 
 use ctx_history_core::database_path;
 
 use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry, WaitOutcome};
 use crate::config::{self, CONFIG_FILE};
-use crate::output::{compact_json, print_json};
+use crate::output::{compact_json, print_json, JsonOutputFormat};
 use crate::semantic::{
     daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
@@ -30,9 +30,9 @@ pub(crate) struct IndexArgs {
 impl IndexArgs {
     pub(crate) fn json_output(&self) -> bool {
         match &self.command {
-            IndexCommand::Status(args) => args.json,
-            IndexCommand::Watch(args) => args.json,
-            IndexCommand::Wait(args) => args.json,
+            IndexCommand::Status(args) => args.format.is_json(),
+            IndexCommand::Watch(args) => args.format == IndexWatchFormat::Jsonl,
+            IndexCommand::Wait(args) => args.format.is_json(),
         }
     }
 }
@@ -49,22 +49,22 @@ enum IndexCommand {
 
 #[derive(Debug, Args)]
 struct IndexStatusArgs {
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
 struct IndexWatchArgs {
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = IndexWatchFormat::Text)]
+    format: IndexWatchFormat,
     #[arg(long, default_value_t = 2, value_parser = parse_positive_seconds)]
     interval_seconds: u64,
 }
 
 #[derive(Debug, Args)]
 struct IndexWaitArgs {
-    #[arg(long)]
-    json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
     #[arg(long, help = "Wait for lexical SQLite indexing")]
     lexical: bool,
     #[arg(long, help = "Wait for semantic sidecar indexing")]
@@ -75,6 +75,12 @@ struct IndexWaitArgs {
     timeout_seconds: Option<u64>,
     #[arg(long, default_value_t = 2, value_parser = parse_positive_seconds)]
     interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum IndexWatchFormat {
+    Text,
+    Jsonl,
 }
 
 pub(crate) fn run_index(
@@ -107,7 +113,7 @@ fn run_index_status(
 ) -> Result<()> {
     let status = index_status_snapshot(data_root)?;
     record_index_telemetry(telemetry, &status);
-    if args.json {
+    if args.format.is_json() {
         print_json(status)?;
     } else if !quiet {
         print_index_status_human(&status);
@@ -123,13 +129,14 @@ fn run_index_watch(
 ) -> Result<()> {
     let interval = Duration::from_secs(args.interval_seconds);
     let stdout = io::stdout();
-    let interactive = !args.json && stdout.is_terminal();
+    let jsonl_output = args.format == IndexWatchFormat::Jsonl;
+    let interactive = !jsonl_output && stdout.is_terminal();
     let mut output = IndexWatchOutput::new(stdout.lock(), interactive);
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = IndexSelection::default_for(&status);
         record_index_telemetry(telemetry, &status);
-        if args.json {
+        if jsonl_output {
             output.print_json(&status)?;
         } else if !quiet {
             output.print_human(&status)?;
@@ -238,7 +245,7 @@ fn run_index_wait(
         record_index_telemetry(telemetry, &status);
         if index_ready(&status, selection) {
             telemetry.wait_outcome = Some(WaitOutcome::Ready);
-            if args.json {
+            if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "ready"))?;
             } else if !quiet {
                 print_index_status_human(&status);
@@ -247,7 +254,7 @@ fn run_index_wait(
         }
         if let Some(message) = index_terminal_error(&status, selection) {
             telemetry.wait_outcome = Some(WaitOutcome::Blocked);
-            if args.json {
+            if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "blocked"))?;
             }
             return Err(anyhow!(message));
@@ -257,14 +264,14 @@ fn run_index_wait(
             .is_some_and(|timeout| started.elapsed() >= Duration::from_secs(timeout))
         {
             telemetry.wait_outcome = Some(WaitOutcome::Timeout);
-            if args.json {
+            if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "timeout"))?;
             }
             return Err(anyhow!(
                 "ctx index wait timed out before indexing was ready"
             ));
         }
-        if !quiet && !args.json {
+        if !quiet && !args.format.is_json() {
             print_index_watch_human(&status);
             println!();
         }

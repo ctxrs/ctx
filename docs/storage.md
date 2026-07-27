@@ -296,7 +296,7 @@ local upsert as described above.
 | `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
 | `ctx status` | data root metadata, existing SQLite store, semantic sidecar/status metadata, ctx-owned daemon lock/status/job metadata, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate canonical history or local Pro graph data |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
 | `ctx show session` / `ctx show event` | SQLite index; with explicit `--content complete`, selected recorded provider source files | selected `--out` path for `show session` when provided |
 | `ctx locate` | SQLite index and raw source path metadata | none |
 | `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status files when eligible human-readable background refresh autostarts maintenance; semantic-enabled search may also create query endpoint files |
@@ -441,7 +441,7 @@ Re-import or update the index:
 ctx import --all
 ctx import --resume
 ctx import --provider codex --path ~/.codex/sessions
-ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ```
 
@@ -536,7 +536,7 @@ Inspect storage size:
 ```bash
 du -sh ~/.ctx
 du -h ~/.ctx/work.sqlite*
-ctx status --json
+ctx status --format json
 ```
 
 Delete all ctx data:

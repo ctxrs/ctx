@@ -80,11 +80,11 @@ Important reusable records:
 Current SDK local adapters call these private CLI JSON commands and normalize
 them into `agent-history-v1` wrappers:
 
-- `ctx status --json`
-- `ctx setup --json`
-- `ctx sources --json`
-- `ctx import --json`
-- `ctx search <query>|--term <term>|--file <path> --json`
+- `ctx status --format json`
+- `ctx setup --format json`
+- `ctx sources --format json`
+- `ctx import --format json`
+- `ctx search <query>|--term <term>|--file <path> --format json`
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
 - `ctx locate event ... --format json`

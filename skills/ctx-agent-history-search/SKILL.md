@@ -39,7 +39,7 @@ Use this skill in two modes:
    ctx sources
    ```
 
-   Use `ctx status --json` or `ctx sources --json` only when a script needs
+   Use `ctx status --format json` or `ctx sources --format json` only when a script needs
    exact fields.
 
 2. Search with normal language first. Add terms or filters when useful:
@@ -56,7 +56,7 @@ Use this skill in two modes:
    ctx search "<query>" --verbose
    ```
 
-   Use default text output for agent reading. Do not add `--json` for
+   Use default text output for agent reading. Do not add `--format json` for
    search, show, or locate unless you are piping it into `jq` or a script, or
    you need exact machine-readable fields. JSON output is much larger and can
    quickly consume the context window.

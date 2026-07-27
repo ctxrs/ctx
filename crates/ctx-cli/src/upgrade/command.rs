@@ -16,6 +16,7 @@ use crate::{
     },
     config::AppConfig,
     net,
+    output::JsonOutputFormat,
     semantic::{semantic_native_accelerator_target, SemanticNativeAcceleratorTarget},
 };
 
@@ -63,8 +64,8 @@ pub struct UpgradeArgs {
     pub channel: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
-    #[arg(long)]
-    pub json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub format: JsonOutputFormat,
     #[arg(long, hide = true)]
     pub replacement_helper: bool,
     #[arg(long, hide = true)]
@@ -91,26 +92,26 @@ pub enum UpgradeCommand {
 pub struct UpgradeCheckArgs {
     #[arg(long)]
     pub channel: Option<String>,
-    #[arg(long)]
-    pub json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub struct UpgradeStatusArgs {
-    #[arg(long)]
-    pub json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub format: JsonOutputFormat,
 }
 
 impl UpgradeArgs {
     pub fn json_output(&self) -> bool {
-        self.json
+        self.format.is_json()
             || matches!(
                 &self.command,
-                Some(UpgradeCommand::Check(args)) if args.json
+                Some(UpgradeCommand::Check(args)) if args.format.is_json()
             )
             || matches!(
                 &self.command,
-                Some(UpgradeCommand::Status(args)) if args.json
+                Some(UpgradeCommand::Status(args)) if args.format.is_json()
             )
             || self.replacement_helper
     }
@@ -212,11 +213,15 @@ pub fn run(
                 let channel = check.channel.as_deref().or(args.channel.as_deref());
                 let outcome = check_upgrade(&data_root, &config, channel, "upgrade_check")?;
                 insert_upgrade_outcome_analytics(telemetry, &outcome);
-                render_outcome(&outcome, check.json || args.json)
+                render_outcome(&outcome, check.format.is_json() || args.format.is_json())
             }
             Some(UpgradeCommand::Status(status)) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::StatusChecked);
-                render_status(&data_root, &config, status.json || args.json)
+                render_status(
+                    &data_root,
+                    &config,
+                    status.format.is_json() || args.format.is_json(),
+                )
             }
             Some(UpgradeCommand::Enable) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoEnabled);
@@ -230,7 +235,7 @@ pub fn run(
                 let outcome =
                     apply_upgrade(&data_root, &config, args.channel.as_deref(), args.dry_run)?;
                 insert_upgrade_outcome_analytics(telemetry, &outcome);
-                render_outcome(&outcome, args.json)
+                render_outcome(&outcome, args.format.is_json())
             }
         }
     })();

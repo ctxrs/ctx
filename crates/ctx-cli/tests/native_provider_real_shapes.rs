@@ -16,7 +16,7 @@ fn import_and_find_long_message(
         provider,
         "--path",
         path.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -29,7 +29,7 @@ fn import_and_find_long_message(
         "--events",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     let result = search["results"]
         .as_array()
@@ -336,7 +336,7 @@ fn claude_long_message_reopens_and_rejects_historical_rewrite() {
         "--events",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         tail_search["results"].as_array().unwrap().is_empty(),
@@ -377,7 +377,7 @@ fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
         "codebuddy",
         "--path",
         &path,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "codebuddy");
@@ -396,7 +396,7 @@ fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
         "codebuddy",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "codebuddy", query, 1, "message");
 }
@@ -589,7 +589,7 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "nanoclaw",
         "--path",
         &path,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_events"], 2);
@@ -617,7 +617,7 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "nanoclaw",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
 }
@@ -635,7 +635,7 @@ fn nanoclaw_complete_content_reopens_the_brokered_compound_snapshot() {
         "nanoclaw",
         "--path",
         &path,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["rejected_records"], 0);
 
@@ -646,7 +646,7 @@ fn nanoclaw_complete_content_reopens_the_brokered_compound_snapshot() {
         "nanoclaw",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     let event_id = search["results"][0]["ctx_event_id"].as_str().unwrap();
     let shown = json_output(ctx(&temp).args([
@@ -655,7 +655,7 @@ fn nanoclaw_complete_content_reopens_the_brokered_compound_snapshot() {
         event_id,
         "--content",
         "complete",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(

@@ -31,7 +31,7 @@ public class AgentHistoryClient {
     }
 
     public StatusResponse status() {
-        return new StatusResponse(executeEnvelope("status", list("status", "--json")));
+        return new StatusResponse(executeEnvelope("status", list("status", "--format=json")));
     }
 
     public InitResponse init() {
@@ -40,7 +40,7 @@ public class AgentHistoryClient {
 
     public InitResponse init(AgentHistoryOptions.Init options) {
         AgentHistoryOptions.Init safe = options == null ? AgentHistoryOptions.init() : options;
-        List<String> args = mutable("setup", "--json");
+        List<String> args = mutable("setup", "--format=json");
         if (safe.progress() != null) {
             args.add("--progress");
             args.add(safe.progress());
@@ -55,7 +55,7 @@ public class AgentHistoryClient {
     }
 
     public SourcesResponse sources() {
-        return new SourcesResponse(executeEnvelope("sources", list("sources", "--json")));
+        return new SourcesResponse(executeEnvelope("sources", list("sources", "--format=json")));
     }
 
     public ImportResponse importHistory() {
@@ -90,7 +90,7 @@ public class AgentHistoryClient {
         if (safe.query() != null && !safe.query().isEmpty()) {
             args.add(safe.query());
         }
-        args.add("--json");
+        args.add("--format=json");
         if (safe.limit() != null) {
             args.add("--limit");
             args.add(String.valueOf(safe.limit()));
@@ -230,7 +230,7 @@ public class AgentHistoryClient {
 
     private static List<String> importArgs(AgentHistoryOptions.ImportHistory options) {
         AgentHistoryOptions.ImportHistory safe = options == null ? AgentHistoryOptions.importHistory() : options;
-        List<String> args = mutable("import", "--json");
+        List<String> args = mutable("import", "--format=json");
         if (safe.progress() != null) {
             args.add("--progress");
             args.add(safe.progress());

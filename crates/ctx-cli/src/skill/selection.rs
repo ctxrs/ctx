@@ -98,7 +98,7 @@ pub(super) fn install_agent_selection(
             source: SkillSelectionSource::Explicit,
         });
     }
-    if args.json || !can_prompt() {
+    if args.format.is_json() || !can_prompt() {
         let (agents, source) = default_noninteractive_agents(context);
         return Ok(SkillAgentSelection { agents, source });
     }

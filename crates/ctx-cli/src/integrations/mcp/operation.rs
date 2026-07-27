@@ -88,7 +88,7 @@ pub(super) fn run_install(
     telemetry.modified_targets = Some(count_bucket(
         results.iter().filter(|result| result.modified).count() as u64,
     ));
-    if args.json {
+    if args.format.is_json() {
         let command = format::server_command();
         println!(
             "{}",
@@ -147,7 +147,7 @@ pub(super) fn run_status(
     } else {
         IntegrationResult::PartiallyCurrent
     });
-    if args.json {
+    if args.format.is_json() {
         let command = format::server_command();
         println!(
             "{}",

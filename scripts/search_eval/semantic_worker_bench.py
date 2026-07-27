@@ -428,7 +428,7 @@ def run_search(args, query: str, sidecar_path: str | None) -> tuple[dict[str, An
             args.refresh,
             "--limit",
             str(args.limit),
-            "--json",
+            "--format=json",
         ]
     )
     argv.extend(args.search_arg)
@@ -450,7 +450,7 @@ def run_search(args, query: str, sidecar_path: str | None) -> tuple[dict[str, An
 
 def capture_status(args, sidecar_path: str | None) -> tuple[dict[str, Any], str | None]:
     argv = ctx_base_argv(args.ctx_command, args.data_root)
-    argv.extend(["status", "--json"])
+    argv.extend(["status", "--format=json"])
     run = run_json(argv, args.cwd, args.timeout_seconds)
     semantic_doc = run["json"].get("semantic") if isinstance(run["json"], dict) else None
     sidecar_path = extract_sidecar_path(

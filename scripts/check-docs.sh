@@ -115,8 +115,8 @@ if ! grep -F -q 'ctx-agent-history-search' plugins/ctx-agent-history-search/comm
   exit 1
 fi
 
-if scan_docs 'ctx search "[^"]*" --json[[:space:]]*$' docs/agent-usage.md docs/getting-started.md docs/first-10-minutes.md skills/ctx-agent-history-search/SKILL.md plugins/ctx-agent-history-search/skills/ctx-agent-history-search/SKILL.md plugins/ctx-agent-history-search/commands/ctx-history.md; then
-  printf 'agent-facing docs should not recommend ctx search --json for normal reading\n' >&2
+if scan_docs 'ctx search "[^"]*" --format json[[:space:]]*$' docs/agent-usage.md docs/getting-started.md docs/first-10-minutes.md skills/ctx-agent-history-search/SKILL.md plugins/ctx-agent-history-search/skills/ctx-agent-history-search/SKILL.md plugins/ctx-agent-history-search/commands/ctx-history.md; then
+  printf 'agent-facing docs should not recommend ctx search --format json for normal reading\n' >&2
   exit 1
 fi
 

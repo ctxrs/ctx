@@ -22,13 +22,13 @@ import time
 
 
 DEFAULT_BACKENDS = {
-    "fts": "{ctx} {data_root_args} search {q} --backend lexical --refresh off --limit {limit} --json {search_args}",
-    "semantic": "{ctx} {data_root_args} search {q} --backend semantic --refresh background --limit {limit} --json {search_args}",
-    "hybrid": "{ctx} {data_root_args} search {q} --backend hybrid --refresh background --limit {limit} --json {search_args}",
+    "fts": "{ctx} {data_root_args} search {q} --backend lexical --refresh off --limit {limit} --format json {search_args}",
+    "semantic": "{ctx} {data_root_args} search {q} --backend semantic --refresh background --limit {limit} --format json {search_args}",
+    "hybrid": "{ctx} {data_root_args} search {q} --backend hybrid --refresh background --limit {limit} --format json {search_args}",
 }
 
-DEFAULT_PREFLIGHT_SEARCH_COMMAND = "{ctx} {data_root_args} daemon run --once --json"
-DEFAULT_PREFLIGHT_STATUS_COMMAND = "{ctx} {data_root_args} status --json"
+DEFAULT_PREFLIGHT_SEARCH_COMMAND = "{ctx} {data_root_args} daemon run --once --format json"
+DEFAULT_PREFLIGHT_STATUS_COMMAND = "{ctx} {data_root_args} status --format json"
 
 SAFE_DIAGNOSTIC_KEYS = {
     "query_embed_ms",
@@ -530,7 +530,7 @@ def main():
     parser.add_argument(
         "--scaffold-from-search-json",
         metavar="PATH",
-        help="read private ctx search --json output from PATH or '-' and emit only salted manifest hashes",
+        help="read private ctx search --format json output from PATH or '-' and emit only salted manifest hashes",
     )
     parser.add_argument(
         "--scaffold-limit",

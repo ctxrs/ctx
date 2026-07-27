@@ -30,7 +30,7 @@ pub(super) fn bound_blame_mcp_response(
         return response;
     }
 
-    let message = "blame response exceeds the MCP output limit; lower `limit` or use the CLI with `ctx blame ... --json`";
+    let message = "blame response exceeds the MCP output limit; lower `limit` or use the CLI with `ctx blame ... --format json`";
     let result = json!({
         "isError": true,
         "content": [{

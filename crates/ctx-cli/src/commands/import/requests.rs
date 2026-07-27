@@ -32,9 +32,9 @@ use crate::provider_sources::{
 use crate::{ImportArgs, MAX_HISTORY_SOURCE_PLUGIN_JSONL_LINE_BYTES};
 
 pub(crate) fn validate_import_args(args: &ImportArgs) -> Result<()> {
-    if args.path.is_some() && args.format.is_none() && args.provider.is_none() {
+    if args.path.is_some() && args.input_format.is_none() && args.provider.is_none() {
         return Err(anyhow!(
-            "ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --format ctx-history-jsonl-v1 --path <file>`"
+            "ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --input-format ctx-history-jsonl-v1 --path <file>`"
         ));
     }
     Ok(())

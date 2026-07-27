@@ -61,7 +61,7 @@ fn import_truncated_codex_message() -> ImportedMessage {
             .arg("import")
             .args(["--provider", "codex", "--path"])
             .arg(&source)
-            .args(["--no-daemon", "--json", "--progress", "none"]),
+            .args(["--no-daemon", "--format=json", "--progress", "none"]),
     );
     assert_eq!(report["totals"]["failed_sources"], 0);
     assert_eq!(report["totals"]["imported_events"], 1);
@@ -106,7 +106,7 @@ fn import_truncated_codex_message() -> ImportedMessage {
 }
 
 fn locate_event(fixture: &ImportedMessage) -> Value {
-    json_output(ctx(&fixture.temp).args(["locate", "event", &fixture.event_id, "--json"]))
+    json_output(ctx(&fixture.temp).args(["locate", "event", &fixture.event_id, "--format=json"]))
 }
 
 fn show_event(fixture: &ImportedMessage, content: &str) -> Value {
@@ -116,7 +116,7 @@ fn show_event(fixture: &ImportedMessage, content: &str) -> Value {
         &fixture.event_id,
         "--content",
         content,
-        "--json",
+        "--format=json",
     ]))
 }
 
@@ -132,7 +132,7 @@ fn show_session(fixture: &ImportedMessage, content: &str) -> Value {
         "full",
         "--content",
         content,
-        "--json",
+        "--format=json",
     ]))
 }
 
@@ -144,7 +144,7 @@ fn assert_complete_failure(fixture: &ImportedMessage, expected_error: &str) {
             &fixture.event_id,
             "--content",
             "complete",
-            "--json",
+            "--format=json",
         ])
         .output()
         .unwrap();
@@ -348,7 +348,7 @@ fn import_truncated_warp_message() -> ImportedMessage {
             .arg("import")
             .args(["--provider", "warp", "--path"])
             .arg(&source)
-            .args(["--no-daemon", "--json", "--progress", "none"]),
+            .args(["--no-daemon", "--format=json", "--progress", "none"]),
     );
     assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
     assert_eq!(report["totals"]["imported_events"], 1, "{report:#}");
