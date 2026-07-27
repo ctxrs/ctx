@@ -952,9 +952,12 @@ impl Drop for NativePathWriteScope<'_> {
         self.store
             .native_path_mutation_scope
             .store(false, Ordering::SeqCst);
-        if !self.store.native_cold_load_active.get() {
-            self.store.conn.flush_prepared_statement_cache();
-        }
+        // Leaving the scope deliberately retains the statements it prepared.
+        // Discarding them here would re-parse every canonical INSERT, search
+        // projection, and journal statement once per typed mutation. The
+        // authorizer stays enforced because `Store::with_atomic_write` flushes
+        // the cache before any out-of-route mutation, and every uncached
+        // `Connection::execute` re-prepares unconditionally.
     }
 }
 

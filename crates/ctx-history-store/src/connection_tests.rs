@@ -1250,3 +1250,69 @@ fn windows_store_replaces_permissive_inheritance_on_all_state_roots() {
         }
     }
 }
+
+/// `Store::with_atomic_write` is the choke point that keeps a NativePath
+/// group's authorizer enforceable while the group retains the prepared
+/// statements its typed mutations use.
+///
+/// SQLite evaluates an authorizer's write decision once, during
+/// `sqlite3_prepare_v2`, and bakes the result into the statement. A statement
+/// prepared inside the group's typed write scope therefore carries an "allow"
+/// decision that must never be replayed outside it. Repeating the *same*
+/// canonical mutation out of route is the exact case where a stale decision
+/// could be reused, so it must still be denied and must poison the group.
+#[test]
+fn unowned_repeat_of_a_cached_group_mutation_is_denied_and_poisons_the_group() {
+    use ctx_history_core::{
+        CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, SyncMetadata,
+    };
+
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let started_at: chrono::DateTime<chrono::Utc> = "2026-07-25T00:00:00Z".parse().unwrap();
+    let source = CaptureSource {
+        id: uuid::Uuid::from_u128(0x5150),
+        descriptor: CaptureSourceDescriptor {
+            kind: CaptureSourceKind::ProviderImport,
+            provider: CaptureProvider::Codex,
+            machine_id: "machine".to_owned(),
+            process_id: Some(42),
+            cwd: Some("/repo".to_owned()),
+            raw_source_path: Some("/repo/session.jsonl".to_owned()),
+            source_format: Some("codex-jsonl".to_owned()),
+            source_root: Some("/repo".to_owned()),
+            source_identity: Some("source-authorizer".to_owned()),
+            external_session_id: Some("session-authorizer".to_owned()),
+        },
+        started_at,
+        ended_at: None,
+        sync: SyncMetadata::default(),
+    };
+
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let admission = store.admit_event_search_bulk_group(&guard).unwrap();
+    let coordinator = crate::NativePathGroupAccounting::new(1, 1, 64).unwrap();
+    let mut group = store
+        .begin_native_path_publication_group(admission, coordinator)
+        .unwrap();
+
+    // Caches the canonical capture-source upsert under an "allow" decision.
+    group.upsert_capture_source(&source).unwrap();
+
+    // Same Store operation, same SQL, now outside the group's typed surface.
+    let unowned = CaptureSource {
+        started_at: started_at + chrono::TimeDelta::seconds(1),
+        ..source.clone()
+    };
+    assert!(store.upsert_capture_source(&unowned).is_err());
+
+    assert!(matches!(
+        group.commit(),
+        Err(StoreError::NativePathGroupPoisoned)
+    ));
+    assert!(matches!(
+        store.get_capture_source(source.id),
+        Err(StoreError::NotFound(_))
+    ));
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
