@@ -277,14 +277,26 @@ impl NativePathGroupReceipt {
         self.attempted_mutation_units
     }
 
+    /// Exact SQLite bind encoding of every canonical row this group wrote.
+    ///
+    /// Measured, not limited. Only the Store can compute it, and it is larger
+    /// than the provider-serialized page bytes admission bounds, so enforcing
+    /// it would reject groups the coordinator had no way to size.
     pub fn core_bound_value_bytes(&self) -> usize {
         self.core_bound_value_bytes
     }
 
+    /// Projection-journal records this group appended.
+    ///
+    /// Measured, not limited: one Core mutation re-journals every canonical
+    /// observation it changes, which depends on rows already in the Store.
     pub fn journal_records(&self) -> usize {
         self.journal_records
     }
 
+    /// Uncompressed encoding bytes of this group's projection-journal records.
+    ///
+    /// Measured, not limited, for the same reason as `journal_records`.
     pub fn journal_uncompressed_bytes(&self) -> usize {
         self.journal_uncompressed_bytes
     }

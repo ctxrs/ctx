@@ -109,8 +109,12 @@ impl NativePathPublicationGroup<'_> {
         Ok(NativePathCursorSetClassification::AllNextSameGroup { checkpoint })
     }
 
-    /// Flushes the group collector in bounded chunks and returns the exact
-    /// checkpoint from this still-open SQLite transaction.
+    /// Seals the group collector, writing its last partial chunk, and returns
+    /// the exact checkpoint from this still-open SQLite transaction.
+    ///
+    /// Earlier chunks were already written as they filled, so this reads back
+    /// totals rather than deciding anything: journal volume is measured, not
+    /// limited.
     pub fn prepare_journal_checkpoint(&mut self) -> Result<Option<JournalCheckpoint>> {
         self.ensure_open()?;
         if self.is_poisoned() {
