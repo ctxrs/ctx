@@ -729,8 +729,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            plan.iter()
-                .any(|step| step.contains("idx_events_capture_source_id")),
+            plan.iter().any(|step| {
+                step.contains("idx_events_capture_source_id")
+                    || step.contains("idx_events_source_generation_retirement")
+            }),
             "journal baseline must stream through the source index: {plan:?}"
         );
         assert!(

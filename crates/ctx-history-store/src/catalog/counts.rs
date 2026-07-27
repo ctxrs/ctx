@@ -33,6 +33,12 @@ pub struct IndexedHistoryCounts {
     pub events: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InventorySourceByteProgress {
+    pub completed: u64,
+    pub total: u64,
+}
+
 impl IndexedHistoryCounts {
     pub fn items(self) -> usize {
         self.sessions.saturating_add(self.events)
@@ -146,6 +152,70 @@ impl Store {
                 |row| row.get::<_, i64>(0).map(|exists| exists != 0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn inventory_source_byte_progress(&self) -> Result<InventorySourceByteProgress> {
+        let (catalog_total, catalog_completed) = self.conn.query_row(
+            r#"
+            SELECT
+                COALESCE(SUM(file_size_bytes), 0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN indexed_status = 'indexed'
+                         AND indexed_file_size_bytes = file_size_bytes
+                         AND indexed_file_modified_at_ms = file_modified_at_ms
+                        THEN file_size_bytes
+                        ELSE MIN(
+                            COALESCE(last_imported_file_size_bytes, 0),
+                            file_size_bytes
+                        )
+                    END
+                ), 0)
+            FROM catalog_sessions
+            WHERE is_stale = 0
+            "#,
+            [],
+            |row| {
+                Ok((
+                    nonnegative_i64_to_u64(row.get(0)?)?,
+                    nonnegative_i64_to_u64(row.get(1)?)?,
+                ))
+            },
+        )?;
+        let current_source = source_import_file_is_current_sql("source_import_files");
+        let (source_total, source_completed) = self.conn.query_row(
+            format!(
+                r#"
+                SELECT
+                    COALESCE(SUM(file_size_bytes), 0),
+                    COALESCE(SUM(
+                        CASE
+                            WHEN indexed_status = 'indexed'
+                             AND indexed_file_size_bytes = file_size_bytes
+                             AND indexed_file_modified_at_ms = file_modified_at_ms
+                            THEN file_size_bytes
+                            ELSE 0
+                        END
+                    ), 0)
+                FROM source_import_files
+                WHERE is_stale = 0
+                  AND {current_source}
+                "#
+            )
+            .as_str(),
+            [],
+            |row| {
+                Ok((
+                    nonnegative_i64_to_u64(row.get(0)?)?,
+                    nonnegative_i64_to_u64(row.get(1)?)?,
+                ))
+            },
+        )?;
+        let total = catalog_total.saturating_add(source_total);
+        let completed = catalog_completed
+            .saturating_add(source_completed)
+            .min(total);
+        Ok(InventorySourceByteProgress { completed, total })
     }
 
     pub fn catalog_session_count(&self) -> Result<usize> {

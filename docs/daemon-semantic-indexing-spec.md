@@ -115,7 +115,9 @@ ctx index wait --all
 ```
 
 `ctx index status` prints the latest known state once. `ctx index watch`
-refreshes until interrupted or complete. `ctx index wait` exits zero when the
+refreshes until interrupted or complete. On an interactive terminal, watch
+redraws one progress block in place; when redirected, it appends plain snapshots
+without terminal control sequences. `ctx index wait` exits zero when the
 requested readiness is reached and non-zero on timeout/error.
 
 Example watch output:

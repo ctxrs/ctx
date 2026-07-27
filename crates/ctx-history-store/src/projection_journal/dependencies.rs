@@ -4,8 +4,9 @@ use ctx_history_core::Session;
 use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
-use super::impact::query_ids;
-use super::impact::JournalCollector;
+use super::impact::{
+    query_ids, JournalCollector, SESSION_FILE_TOUCH_IMPACT_SQL, SESSION_VCS_CHANGE_IMPACT_SQL,
+};
 use super::records::append_entity;
 use super::{JournalEntityKind, Result, Store};
 use crate::connection::parse_optional_uuid;
@@ -100,30 +101,8 @@ pub(super) fn capture_session_dependencies(
     id: Uuid,
 ) -> Result<SessionJournalDependencies> {
     Ok(SessionJournalDependencies {
-        file_touch_ids: query_ids(
-            conn,
-            "SELECT DISTINCT f.id FROM files_touched f
-             LEFT JOIN events e ON e.id = f.event_id
-             LEFT JOIN runs fr ON fr.id = f.run_id
-             LEFT JOIN runs er ON er.id = e.run_id
-             LEFT JOIN sessions s ON s.id = ?1
-             WHERE e.session_id = ?1 OR er.session_id = ?1 OR fr.session_id = ?1
-                OR f.source_id = s.capture_source_id
-             ORDER BY f.id",
-            id,
-        )?,
-        vcs_change_ids: query_ids(
-            conn,
-            "SELECT DISTINCT v.id FROM vcs_changes v
-             LEFT JOIN sessions s ON s.id = ?1
-             LEFT JOIN history_record_links l
-               ON l.target_type = 'vcs_change' AND l.target_id = v.id
-              AND l.deleted_at_ms IS NULL
-             WHERE v.source_id = s.capture_source_id
-                OR l.history_record_id = s.history_record_id
-             ORDER BY v.id",
-            id,
-        )?,
+        file_touch_ids: query_ids(conn, SESSION_FILE_TOUCH_IMPACT_SQL, id)?,
+        vcs_change_ids: query_ids(conn, SESSION_VCS_CHANGE_IMPACT_SQL, id)?,
     })
 }
 

@@ -1,4 +1,5 @@
 use std::{
+    io::{self, IsTerminal as _},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -13,11 +14,12 @@ use ctx_history_core::database_path;
 use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry, WaitOutcome};
 use crate::config::{self, CONFIG_FILE};
 use crate::output::{compact_json, print_json};
-use crate::progress::format_count;
 use crate::semantic::{
     daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
 use crate::store_util::open_existing_store_read_only;
+
+use super::index_dashboard::{color_enabled, terminal_width, IndexDashboard};
 
 #[derive(Debug, Args)]
 pub(crate) struct IndexArgs {
@@ -120,15 +122,17 @@ fn run_index_watch(
     telemetry: &mut IndexTelemetry,
 ) -> Result<()> {
     let interval = Duration::from_secs(args.interval_seconds);
+    let stdout = io::stdout();
+    let interactive = !args.json && stdout.is_terminal();
+    let mut output = IndexWatchOutput::new(stdout.lock(), interactive);
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = IndexSelection::default_for(&status);
         record_index_telemetry(telemetry, &status);
         if args.json {
-            println!("{}", serde_json::to_string(&status)?);
+            output.print_json(&status)?;
         } else if !quiet {
-            print_index_watch_human(&status);
-            println!();
+            output.print_human(&status)?;
         }
         if index_ready(&status, selection) {
             break;
@@ -139,6 +143,82 @@ fn run_index_watch(
         thread::sleep(interval);
     }
     Ok(())
+}
+
+struct IndexWatchOutput<W> {
+    writer: W,
+    interactive: bool,
+    styled: bool,
+    rendered_lines: usize,
+    terminal_width_override: Option<usize>,
+    dashboard: IndexDashboard,
+}
+
+impl<W: io::Write> IndexWatchOutput<W> {
+    fn new(writer: W, interactive: bool) -> Self {
+        Self {
+            writer,
+            interactive,
+            styled: interactive && color_enabled(),
+            rendered_lines: 0,
+            terminal_width_override: None,
+            dashboard: IndexDashboard::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(writer: W, interactive: bool, terminal_width: usize) -> Self {
+        Self {
+            writer,
+            interactive,
+            styled: false,
+            rendered_lines: 0,
+            terminal_width_override: Some(terminal_width),
+            dashboard: IndexDashboard::default(),
+        }
+    }
+
+    fn print_json(&mut self, status: &Value) -> Result<()> {
+        writeln!(self.writer, "{}", serde_json::to_string(status)?)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn print_human(&mut self, status: &Value) -> io::Result<()> {
+        let width = self.terminal_width_override.unwrap_or_else(terminal_width);
+        let frame = self.dashboard.render(status, width, self.styled);
+        if !self.interactive {
+            writeln!(self.writer, "{frame}")?;
+            writeln!(self.writer)?;
+            return self.writer.flush();
+        }
+
+        let lines = frame.lines().collect::<Vec<_>>();
+        if self.rendered_lines == 0 {
+            writeln!(self.writer, "{frame}")?;
+            self.rendered_lines = lines.len();
+            return self.writer.flush();
+        }
+        write!(self.writer, "\u{1b}[{}A", self.rendered_lines)?;
+        let previous_lines = self.rendered_lines;
+        let height = self.rendered_lines.max(lines.len());
+        for row in 0..height {
+            write!(self.writer, "\r\u{1b}[2K")?;
+            if let Some(line) = lines.get(row) {
+                write!(self.writer, "{line}")?;
+            }
+            writeln!(self.writer)?;
+        }
+        if previous_lines > lines.len() {
+            write!(
+                self.writer,
+                "\u{1b}[{}A",
+                previous_lines.saturating_sub(lines.len())
+            )?;
+        }
+        self.rendered_lines = lines.len();
+        self.writer.flush()
+    }
 }
 
 fn run_index_wait(
@@ -229,6 +309,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         indexed_items,
         indexed_sessions,
         indexed_events,
+        completed_source_bytes,
+        total_source_bytes,
         inventory_units,
         pending_inventory_units,
         failed_inventory_units,
@@ -240,6 +322,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         let indexed_counts = store.indexed_history_counts()?;
         let catalog_counts = store.catalog_session_counts()?;
         let source_import_file_counts = store.source_import_file_counts()?;
+        let source_byte_progress = store.inventory_source_byte_progress()?;
         let inventory_units = catalog_counts
             .total
             .saturating_add(source_import_file_counts.total);
@@ -258,6 +341,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             indexed_counts.items(),
             indexed_counts.sessions,
             indexed_counts.events,
+            source_byte_progress.completed,
+            source_byte_progress.total,
             inventory_units,
             pending_inventory_units,
             failed_inventory_units,
@@ -276,6 +361,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             0,
             0,
             0,
+            0,
+            0,
             semantic_worker_report_configured_json(&config, &semantic_report),
             daemon,
         )
@@ -285,6 +372,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         indexed_items,
         inventory_units,
         pending_inventory_units,
+        failed_inventory_units,
     );
     Ok(compact_json(json!({
         "schema_version": 1,
@@ -297,6 +385,8 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             "indexed_items": indexed_items,
             "indexed_sessions": indexed_sessions,
             "indexed_events": indexed_events,
+            "completed_source_bytes": completed_source_bytes,
+            "total_source_bytes": total_source_bytes,
             "inventory_units": inventory_units,
             "pending_inventory_units": pending_inventory_units,
             "failed_inventory_units": failed_inventory_units,
@@ -314,9 +404,12 @@ fn lexical_index_status(
     indexed_items: usize,
     inventory_units: usize,
     pending_inventory_units: usize,
+    failed_inventory_units: usize,
 ) -> &'static str {
     if !initialized {
         "missing"
+    } else if failed_inventory_units > 0 {
+        "failed"
     } else if pending_inventory_units > 0 && indexed_items > 0 {
         "partial"
     } else if pending_inventory_units > 0 {
@@ -377,47 +470,8 @@ fn print_index_status_human(status: &Value) {
 }
 
 fn print_index_watch_human(status: &Value) {
-    let lexical_total = usize_at(status, &["lexical", "inventory_units"]);
-    let lexical_pending = usize_at(status, &["lexical", "pending_inventory_units"]);
-    let lexical_done = lexical_total.saturating_sub(lexical_pending);
-    let semantic_done = usize_at(status, &["semantic", "coverage", "embedded_items"]);
-    let semantic_total = usize_at(status, &["semantic", "coverage", "searchable_items"]);
-    println!(
-        "lexical  [{}] {}/{} units ({})",
-        progress_bar(lexical_done, lexical_total),
-        format_count(lexical_done),
-        format_count(lexical_total),
-        string_at(status, &["lexical", "status"], "unknown")
-    );
-    println!(
-        "semantic [{}] {}/{} events, {} chunks ({})",
-        progress_bar(semantic_done, semantic_total),
-        format_count(semantic_done),
-        format_count(semantic_total),
-        format_count(usize_at(
-            status,
-            &["semantic", "coverage", "embedded_chunks"]
-        )),
-        semantic_job_status(status)
-    );
-    println!(
-        "daemon   {} running={}",
-        string_at(status, &["daemon", "status"], "unknown"),
-        bool_at(status, &["daemon", "running"])
-    );
-    let daemon_reason = string_at(status, &["daemon", "reason"], "");
-    if !daemon_reason.is_empty() {
-        println!("         reason={daemon_reason}");
-    }
-}
-
-fn progress_bar(done: usize, total: usize) -> String {
-    const WIDTH: usize = 20;
-    if total == 0 {
-        return "-".repeat(WIDTH);
-    }
-    let filled = done.saturating_mul(WIDTH).saturating_div(total).min(WIDTH);
-    format!("{}{}", "#".repeat(filled), "-".repeat(WIDTH - filled))
+    let mut dashboard = IndexDashboard::default();
+    println!("{}", dashboard.render(status, 80, false));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -474,6 +528,15 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
     if selection.lexical && string_at(status, &["lexical", "status"], "unknown") == "missing" {
         return Some("ctx index does not exist yet; run `ctx setup` first".to_owned());
     }
+    if selection.lexical
+        && string_at(status, &["lexical", "status"], "unknown") == "failed"
+        && !bool_at(status, &["daemon", "running"])
+    {
+        return Some(
+            "one or more history files could not be indexed; run `ctx doctor` for details"
+                .to_owned(),
+        );
+    }
     if selection.semantic {
         let semantic_status = semantic_job_status(status);
         let reason = string_at(status, &["daemon", "jobs", "semantic_index", "reason"], "");
@@ -489,6 +552,15 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
         ) {
             return Some(format!("semantic indexing is {semantic_status}"));
         }
+    }
+    if !index_ready(status, selection)
+        && string_at(status, &["daemon", "status"], "unknown") == "failed"
+        && !bool_at(status, &["daemon", "running"])
+    {
+        return Some(
+            "background indexing stopped before the index was ready; run `ctx doctor` for details"
+                .to_owned(),
+        );
     }
     None
 }
@@ -553,3 +625,7 @@ fn parse_positive_seconds(value: &str) -> std::result::Result<u64, String> {
     }
     Ok(parsed)
 }
+
+#[cfg(test)]
+#[path = "index_tests.rs"]
+mod tests;

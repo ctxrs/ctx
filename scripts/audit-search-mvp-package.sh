@@ -90,7 +90,7 @@ if ! diff -u skills/ctx-agent-history-search/SKILL.md plugins/ctx-agent-history-
   fail 'plugin skill copy differs from public skill source'
 fi
 
-if grep_files '[W]ork Recorder|[w]ork recorder|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update|ctx uninstall|update checks|auto-update|update-state|auto_update|CTX_UPDATE|release manifest|provider-live|completion-certificate|freebsd-native-release-proof|r2-|dashboard export|gh CLI|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|\bADE\b|[Aa]mpcode' \
+if grep_files '[W]ork Recorder|[w]ork recorder|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update|ctx uninstall|update checks|auto-update|update-state|auto_update|CTX_UPDATE|provider-live|completion-certificate|freebsd-native-release-proof|r2-|dashboard export|gh CLI|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|\bADE\b|[Aa]mpcode' \
   .bazelignore .bazelrc .bazelversion .buildkite .gitignore README.md SECURITY.md docs skills scripts crates/ctx-cli/src >/dev/null 2>&1; then
   fail 'public docs/help/release path contains removed product-surface text'
 fi

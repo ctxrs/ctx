@@ -37,7 +37,8 @@ pub use canonical_observations::{
 };
 pub use catalog::{
     CatalogCounts, CatalogIndexedStatus, CatalogSession, CatalogSourceIndexState,
-    IndexedHistoryCounts, SourceImportFile, SourceImportFileCounts, SourceImportInventoryControl,
+    IndexedHistoryCounts, InventorySourceByteProgress, SourceImportFile, SourceImportFileCounts,
+    SourceImportInventoryControl,
 };
 #[doc(hidden)]
 pub use cold_store::{
