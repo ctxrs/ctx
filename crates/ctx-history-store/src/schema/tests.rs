@@ -2,6 +2,7 @@ mod entity_bounds;
 mod event_seq_index;
 mod fixtures;
 mod historical_released_stores;
+mod prefix_redundant_event_indexes;
 mod provider_allowlist;
 mod provider_identity;
 mod released_upgrades;
