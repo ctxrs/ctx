@@ -173,7 +173,7 @@ fn fixture_entitlement() -> SignedEntitlement {
     SignedEntitlement {
         grant: EntitlementGrant {
             schema_version: ENTITLEMENT_SCHEMA_VERSION,
-            issuer: "https://commercial.ctx.rs".to_owned(),
+            issuer: "https://pro.ctx.rs".to_owned(),
             key_id: "key-1".to_owned(),
             grant_id: "grant-1".to_owned(),
             subject: "subject-1".to_owned(),

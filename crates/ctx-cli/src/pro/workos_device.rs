@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::Deserialize;
+use serde::{de::Deserializer, Deserialize};
 use serde_json::Value;
 use url::Url;
 use zeroize::Zeroize as _;
@@ -23,6 +23,7 @@ const MAX_USER_PROFILE_DEPTH: usize = 8;
 const MAX_USER_PROFILE_NODES: usize = 256;
 const MAX_USER_PROFILE_STRING_BYTES: usize = 16 * 1024;
 const MAX_USER_PROFILE_KEY_BYTES: usize = 256;
+const REQUIRED_PERMISSION: &str = "ctx-pro:access";
 
 #[derive(Debug, Clone)]
 pub(super) struct WorkOsConfig {
@@ -46,7 +47,8 @@ pub(super) struct DeviceAuthorization {
 pub(super) struct WorkOsTokens {
     pub(super) access_token: String,
     pub(super) refresh_token: String,
-    pub(super) organization_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_present_string")]
+    pub(super) organization_id: Option<String>,
     #[serde(default)]
     authentication_method: Option<String>,
     user: WorkOsUser,
@@ -58,7 +60,7 @@ impl std::fmt::Debug for WorkOsTokens {
             .debug_struct("WorkOsTokens")
             .field("access_token", &"[REDACTED]")
             .field("refresh_token", &"[REDACTED]")
-            .field("organization_id", &self.organization_id)
+            .field("organization_id", &self.organization_id.as_deref())
             .finish_non_exhaustive()
     }
 }
@@ -97,7 +99,9 @@ struct OAuthError {
 struct AccessClaims {
     sub: String,
     sid: String,
-    org_id: String,
+    client_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_present_string")]
+    org_id: Option<String>,
     exp: i64,
     iat: i64,
     #[serde(default)]
@@ -106,6 +110,14 @@ struct AccessClaims {
     aud: Option<Value>,
     #[serde(default)]
     scope: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_permissions")]
+    permissions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkOsTokenDisposition {
+    BootstrapPending,
+    OrganizationBound,
 }
 
 pub(super) struct WorkOsDeviceClient {
@@ -191,21 +203,57 @@ impl WorkOsDeviceClient {
     }
 
     pub(super) fn refresh(&self, refresh_token: &str) -> Result<WorkOsTokens> {
+        let tokens = self.refresh_inner(refresh_token, None)?;
+        if self.validate_tokens(&tokens)? != WorkOsTokenDisposition::OrganizationBound {
+            bail!("authentication_invalid: WorkOS token refresh has no organization");
+        }
+        Ok(tokens)
+    }
+
+    pub(super) fn refresh_for_organization(
+        &self,
+        refresh_token: &str,
+        organization_id: &str,
+    ) -> Result<WorkOsTokens> {
+        validate_identifier(organization_id, "organization")?;
+        let tokens = self.refresh_inner(refresh_token, Some(organization_id))?;
+        self.validate_refreshed_organization(&tokens, organization_id)?;
+        Ok(tokens)
+    }
+
+    fn validate_refreshed_organization(
+        &self,
+        tokens: &WorkOsTokens,
+        organization_id: &str,
+    ) -> Result<()> {
+        if self.validate_tokens(&tokens)? != WorkOsTokenDisposition::OrganizationBound
+            || tokens.organization_id.as_deref() != Some(organization_id)
+        {
+            bail!("authentication_invalid: WorkOS token refresh selected another organization");
+        }
+        Ok(())
+    }
+
+    fn refresh_inner(
+        &self,
+        refresh_token: &str,
+        organization_id: Option<&str>,
+    ) -> Result<WorkOsTokens> {
         validate_secret(refresh_token, "refresh token")?;
         let url = self.endpoint("/user_management/authenticate")?;
+        let form = refresh_form(
+            refresh_token,
+            self.config.client_id.as_str(),
+            organization_id,
+        );
         let response = self
             .agent
             .post(url.as_str())
             .set("content-type", "application/x-www-form-urlencoded")
-            .send_form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token),
-                ("client_id", self.config.client_id.as_str()),
-            ])
+            .send_form(&form)
             .map_err(|error| safe_http_error(error, "WorkOS token refresh"))?;
         require_json(&response, "WorkOS token refresh")?;
         let tokens: WorkOsTokens = read_json(response, "WorkOS token refresh")?;
-        self.validate_tokens(&tokens)?;
         Ok(tokens)
     }
 
@@ -213,22 +261,16 @@ impl WorkOsDeviceClient {
         let claims = claims(access_token)?;
         validate_identifier(&claims.sub, "subject")?;
         validate_identifier(&claims.sid, "session")?;
-        validate_identifier(&claims.org_id, "organization")?;
-        let now = unix_time()?;
-        if claims.exp <= now - 60
-            || claims.iat > now + 60
-            || claims.nbf.is_some_and(|nbf| nbf > now + 60)
-        {
-            bail!("authentication_expired: WorkOS access token is expired or not active");
-        }
-        if claims
-            .aud
-            .as_ref()
-            .is_some_and(|aud| !audience_contains(aud, &self.config.client_id))
-        {
-            bail!("authentication_invalid: WorkOS access token audience does not match ctx");
-        }
-        validate_scope(claims.scope.as_ref())
+        validate_identifier(
+            claims
+                .org_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("authentication_invalid: WorkOS organization is missing"))?,
+            "organization",
+        )?;
+        validate_claim_time_and_audience(&claims, &self.config.client_id)?;
+        validate_scope(claims.scope.as_ref())?;
+        validate_permissions(claims.permissions.as_deref(), true)
     }
 
     pub(super) fn access_token_expiration(&self, access_token: &str) -> Result<i64> {
@@ -236,10 +278,16 @@ impl WorkOsDeviceClient {
         Ok(claims(access_token)?.exp)
     }
 
-    fn validate_tokens(&self, tokens: &WorkOsTokens) -> Result<()> {
+    pub(super) fn bootstrap_pending(&self, tokens: &WorkOsTokens) -> Result<bool> {
+        Ok(self.validate_tokens(tokens)? == WorkOsTokenDisposition::BootstrapPending)
+    }
+
+    fn validate_tokens(&self, tokens: &WorkOsTokens) -> Result<WorkOsTokenDisposition> {
         validate_secret(&tokens.access_token, "access token")?;
         validate_secret(&tokens.refresh_token, "refresh token")?;
-        validate_identifier(&tokens.organization_id, "organization")?;
+        if let Some(organization_id) = tokens.organization_id.as_deref() {
+            validate_identifier(organization_id, "organization")?;
+        }
         validate_identifier(&tokens.user.id, "user")?;
         if !tokens.user_profile_is_bounded() {
             bail!("authentication_invalid: WorkOS user profile is outside allowed bounds");
@@ -252,11 +300,24 @@ impl WorkOsDeviceClient {
             bail!("authentication_invalid: WorkOS authentication method is invalid");
         }
         let claims = claims(&tokens.access_token)?;
-        self.validate_access_token(&tokens.access_token)?;
-        if claims.org_id != tokens.organization_id || claims.sub != tokens.user.id {
+        validate_identifier(&claims.sub, "subject")?;
+        validate_identifier(&claims.sid, "session")?;
+        validate_claim_time_and_audience(&claims, &self.config.client_id)?;
+        validate_scope(claims.scope.as_ref())?;
+        if claims.sub != tokens.user.id || claims.org_id != tokens.organization_id {
             bail!("authentication_invalid: WorkOS token identity is inconsistent");
         }
-        Ok(())
+        match tokens.organization_id.as_deref() {
+            Some(organization_id) => {
+                validate_identifier(organization_id, "organization")?;
+                validate_permissions(claims.permissions.as_deref(), true)?;
+                Ok(WorkOsTokenDisposition::OrganizationBound)
+            }
+            None => {
+                validate_permissions(claims.permissions.as_deref(), false)?;
+                Ok(WorkOsTokenDisposition::BootstrapPending)
+            }
+        }
     }
 
     fn endpoint(&self, path: &str) -> Result<Url> {
@@ -265,6 +326,22 @@ impl WorkOsDeviceClient {
             .join(path)
             .context("invalid_request: invalid WorkOS route")
     }
+}
+
+fn refresh_form<'a>(
+    refresh_token: &'a str,
+    client_id: &'a str,
+    organization_id: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut form = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    if let Some(organization_id) = organization_id {
+        form.push(("organization_id", organization_id));
+    }
+    form
 }
 
 impl WorkOsTokens {
@@ -378,6 +455,57 @@ fn validate_scope(scope: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
+fn validate_claim_time_and_audience(claims: &AccessClaims, client_id: &str) -> Result<()> {
+    let now = unix_time()?;
+    if claims.exp <= now - 60
+        || claims.iat > now + 60
+        || claims.nbf.is_some_and(|nbf| nbf > now + 60)
+    {
+        bail!("authentication_expired: WorkOS access token is expired or not active");
+    }
+    // AuthKit access tokens bind the application with `client_id`; `aud` is
+    // optional. Require the documented client binding and, when present, a
+    // matching audience as defense in depth.
+    if claims.client_id != client_id
+        || claims
+        .aud
+        .as_ref()
+        .is_some_and(|aud| !audience_matches(aud, client_id))
+    {
+        bail!("authentication_invalid: WorkOS access token audience does not match ctx");
+    }
+    Ok(())
+}
+
+fn validate_permissions(permissions: Option<&[String]>, organization_bound: bool) -> Result<()> {
+    let permissions = permissions.unwrap_or_default();
+    if permissions.len() > 128
+        || permissions.iter().any(|permission| {
+            permission.len() < 3
+                || permission.len() > 128
+                || !permission
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_lowercase)
+                || !permission.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'.' | b':' | b'-')
+                })
+        })
+        || permissions
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != permissions.len()
+        || (organization_bound && !permissions.iter().any(|value| value == REQUIRED_PERMISSION))
+        || (!organization_bound && !permissions.is_empty())
+    {
+        bail!("authentication_invalid: WorkOS access token permissions are invalid");
+    }
+    Ok(())
+}
+
 fn valid_scope(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -386,13 +514,26 @@ fn valid_scope(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-/".contains(&byte))
 }
 
-fn audience_contains(value: &Value, expected: &str) -> bool {
+fn audience_matches(value: &Value, expected: &str) -> bool {
     value.as_str() == Some(expected)
-        || value.as_array().is_some_and(|items| {
-            items.len() <= 16
-                && items.iter().all(Value::is_string)
-                && items.iter().any(|item| item.as_str() == Some(expected))
-        })
+}
+
+fn deserialize_optional_present_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_permissions<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Some)
 }
 
 fn validate_identifier(value: &str, label: &str) -> Result<()> {
@@ -499,9 +640,24 @@ mod tests {
     fn parses_documented_token_response() {
         let tokens: WorkOsTokens = serde_json::from_value(token_response()).unwrap();
 
-        assert_eq!(tokens.organization_id, "org_123");
+        assert_eq!(tokens.organization_id.as_deref(), Some("org_123"));
         assert_eq!(tokens.user.id, "user_123");
         assert_eq!(tokens.ignored_fields(), 11);
+    }
+
+    #[test]
+    fn parses_a_bounded_zero_organization_bootstrap_response() {
+        let mut response = token_response();
+        response.as_object_mut().unwrap().remove("organization_id");
+        let tokens: WorkOsTokens = serde_json::from_value(response).unwrap();
+        assert!(tokens.organization_id.is_none());
+    }
+
+    #[test]
+    fn rejects_null_organization_instead_of_treating_it_as_bootstrap_pending() {
+        let mut response = token_response();
+        response["organization_id"] = Value::Null;
+        assert!(serde_json::from_value::<WorkOsTokens>(response).is_err());
     }
 
     #[test]
@@ -580,22 +736,146 @@ mod tests {
         let now = unix_time().unwrap();
         let token = jwt(serde_json::json!({
             "sub":"user_123", "sid":"session_123", "org_id":"org_123",
-            "iat":now, "exp":now+300, "aud":"client_123456", "scope":"openid profile"
+            "client_id":"client_123456",
+            "iat":now, "exp":now+300, "aud":"client_123456", "scope":"openid profile",
+            "permissions":[REQUIRED_PERMISSION]
         }));
         client.validate_access_token(&token).unwrap();
     }
 
     #[test]
-    fn rejects_wrong_audience_and_malformed_scope() {
+    fn distinguishes_bootstrap_pending_from_organization_bound_tokens() {
         let client = WorkOsDeviceClient::new(WorkOsConfig {
             api_origin: Url::parse("https://api.workos.com/").unwrap(),
             client_id: "client_123456".to_owned(),
         })
         .unwrap();
         let now = unix_time().unwrap();
+        let mut pending_response = token_response();
+        pending_response
+            .as_object_mut()
+            .unwrap()
+            .remove("organization_id");
+        pending_response["access_token"] = Value::String(jwt(serde_json::json!({
+            "sub":"user_123", "sid":"session_123",
+            "client_id":"client_123456",
+            "iat":now, "exp":now+300, "aud":"client_123456"
+        })));
+        let pending: WorkOsTokens = serde_json::from_value(pending_response).unwrap();
+        assert!(client.bootstrap_pending(&pending).unwrap());
+
+        let mut bound_response = token_response();
+        bound_response["access_token"] = Value::String(jwt(serde_json::json!({
+            "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
+            "iat":now, "exp":now+300, "aud":"client_123456",
+            "permissions":[REQUIRED_PERMISSION]
+        })));
+        let bound: WorkOsTokens = serde_json::from_value(bound_response).unwrap();
+        assert!(!client.bootstrap_pending(&bound).unwrap());
+    }
+
+    #[test]
+    fn bootstrap_pending_rejects_org_permissions_and_bound_tokens_require_access() {
+        let client = WorkOsDeviceClient::new(WorkOsConfig {
+            api_origin: Url::parse("https://api.workos.com/").unwrap(),
+            client_id: "client_123456".to_owned(),
+        })
+        .unwrap();
+        let now = unix_time().unwrap();
+        for permissions in [
+            serde_json::json!([REQUIRED_PERMISSION]),
+            serde_json::json!(["ctx-pro:other"]),
+        ] {
+            let mut response = token_response();
+            response.as_object_mut().unwrap().remove("organization_id");
+            response["access_token"] = Value::String(jwt(serde_json::json!({
+                "sub":"user_123", "sid":"session_123",
+                "client_id":"client_123456",
+                "iat":now, "exp":now+300, "aud":"client_123456",
+                "permissions":permissions
+            })));
+            let tokens: WorkOsTokens = serde_json::from_value(response).unwrap();
+            assert!(client.bootstrap_pending(&tokens).is_err());
+        }
+
+        let mut response = token_response();
+        response["access_token"] = Value::String(jwt(serde_json::json!({
+            "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
+            "iat":now, "exp":now+300, "aud":"client_123456",
+            "permissions":[]
+        })));
+        let tokens: WorkOsTokens = serde_json::from_value(response).unwrap();
+        assert!(client.bootstrap_pending(&tokens).is_err());
+    }
+
+    #[test]
+    fn organization_bootstrap_refresh_selects_the_server_returned_organization() {
+        assert_eq!(
+            refresh_form(
+                "refresh-secret",
+                "client_123456",
+                Some("org_server_selected")
+            ),
+            [
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "refresh-secret"),
+                ("client_id", "client_123456"),
+                ("organization_id", "org_server_selected"),
+            ]
+        );
+        assert_eq!(
+            refresh_form("refresh-secret", "client_123456", None),
+            [
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "refresh-secret"),
+                ("client_id", "client_123456"),
+            ]
+        );
+
+        let client = WorkOsDeviceClient::new(WorkOsConfig {
+            api_origin: Url::parse("https://api.workos.com/").unwrap(),
+            client_id: "client_123456".to_owned(),
+        })
+        .unwrap();
+        let now = unix_time().unwrap();
+        let mut response = token_response();
+        response["access_token"] = Value::String(jwt(serde_json::json!({
+            "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
+            "iat":now, "exp":now+300, "aud":"client_123456",
+            "permissions":[REQUIRED_PERMISSION]
+        })));
+        let tokens: WorkOsTokens = serde_json::from_value(response).unwrap();
+        client
+            .validate_refreshed_organization(&tokens, "org_123")
+            .unwrap();
+        assert!(client
+            .validate_refreshed_organization(&tokens, "org_other")
+            .is_err());
+    }
+
+    #[test]
+    fn accepts_undocumented_missing_audience_but_rejects_wrong_audience_and_malformed_scope() {
+        let client = WorkOsDeviceClient::new(WorkOsConfig {
+            api_origin: Url::parse("https://api.workos.com/").unwrap(),
+            client_id: "client_123456".to_owned(),
+        })
+        .unwrap();
+        let now = unix_time().unwrap();
+        client
+            .validate_access_token(&jwt(serde_json::json!({
+                "sub":"user_123","sid":"session_123","org_id":"org_123",
+                "client_id":"client_123456",
+                "iat":now,"exp":now+300,"permissions":[REQUIRED_PERMISSION]
+            })))
+            .unwrap();
         for claims in [
-            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","iat":now,"exp":now+300,"aud":"other_123"}),
-            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","iat":now,"exp":now+300,"scope":{"bad":true}}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"other_123","iat":now,"exp":now+300,"permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":"other_123","permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":["client_123456","other_123"],"permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":"client_123456","scope":{"bad":true},"permissions":[REQUIRED_PERMISSION]}),
         ] {
             assert!(client.validate_access_token(&jwt(claims)).is_err());
         }

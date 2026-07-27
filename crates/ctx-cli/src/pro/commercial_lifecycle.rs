@@ -14,7 +14,7 @@ use zeroize::Zeroize as _;
 
 use super::{
     anonymous_trial,
-    artifact_delivery::{fetch_latest, ArtifactDeliveryConfig},
+    artifact_delivery::{acquire_latest, ArtifactDeliveryConfig},
     authorization::InstallationChallengeSigner,
     commercial_api::{
         checkout_retry_after, is_retryable_checkout_failure, validate_https_url, CheckoutResult,
@@ -172,7 +172,20 @@ impl CommercialLifecycleService {
         if open_browser(&authorization.verification_uri_complete).is_err() {
             eprintln!("A browser could not be opened; use the URL and code above.");
         }
-        self.persist_tokens(self.workos.poll(&authorization)?)
+        self.complete_device_sign_in(self.workos.poll(&authorization)?)
+    }
+
+    fn complete_device_sign_in(&self, tokens: WorkOsTokens) -> Result<String> {
+        if !self.workos.bootstrap_pending(&tokens)? {
+            return self.persist_tokens(tokens);
+        }
+        let organization_id = self
+            .api
+            .bootstrap_workos_personal_organization(&tokens.access_token)?;
+        let refreshed = self
+            .workos
+            .refresh_for_organization(&tokens.refresh_token, &organization_id)?;
+        self.persist_tokens(refreshed)
     }
 
     fn persist_tokens(&self, tokens: WorkOsTokens) -> Result<String> {
@@ -482,13 +495,10 @@ impl CommercialLifecycleService {
                 bail!("invalid_response: entitlement identity does not match commercial account");
             }
             self.store_entitlement(entitlement, &public_key)?;
-            let artifact = fetch_latest(
+            let artifact = acquire_latest(
                 data_root,
                 installed_version,
-                ArtifactDeliveryConfig {
-                    release_origin: self.api.origin(),
-                    release_trust: self.config.release_trust,
-                },
+                ArtifactDeliveryConfig::new(self.api.config(), self.config.release_trust),
             )?;
             Ok(ProSetupPlan {
                 artifact: Some(artifact),

@@ -72,7 +72,16 @@ pub(crate) fn default_helper_path(data_root: &Path) -> PathBuf {
 }
 
 pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
-    #[cfg(any(debug_assertions, test))]
+    #[cfg(ctx_pro_qualification)]
+    if let Some(bundle) =
+        crate::pro::qualification_helper::QualificationHelperBundle::from_process_environment(
+            crate::pro::commercial_config::selected_channel()?,
+        )?
+    {
+        return Ok(bundle.source_path().to_path_buf());
+    }
+
+    #[cfg(any(test, ctx_pro_test_helper))]
     if let Some(value) = env::var_os("CTX_PRO_HELPER") {
         let path = PathBuf::from(value);
         if !path.is_absolute() {
@@ -85,7 +94,16 @@ pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
 }
 
 pub(super) fn helper_executable(data_root: &Path) -> Result<VerifiedHelperExecutable> {
-    #[cfg(any(debug_assertions, test))]
+    #[cfg(ctx_pro_qualification)]
+    if let Some(bundle) =
+        crate::pro::qualification_helper::QualificationHelperBundle::from_process_environment(
+            crate::pro::commercial_config::selected_channel()?,
+        )?
+    {
+        return VerifiedHelperExecutable::open_qualification(bundle);
+    }
+
+    #[cfg(any(test, ctx_pro_test_helper))]
     if let Some(value) = env::var_os("CTX_PRO_HELPER") {
         let path = PathBuf::from(value);
         if !path.is_absolute() {
@@ -144,7 +162,7 @@ fn git_executable_names() -> &'static [&'static str] {
     &["git"]
 }
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(test, ctx_pro_test_helper))]
 fn regular_helper_path(path: PathBuf) -> Result<PathBuf> {
     let metadata = fs::symlink_metadata(&path)
         .with_context(|| format!("pro_not_installed: no Pro helper at {}", path.display()))?;

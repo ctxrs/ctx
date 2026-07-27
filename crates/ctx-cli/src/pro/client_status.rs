@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use super::{
     default_helper_path, helper_status, protocol_error, support, AuthorizationProvider, ProClient,
-    HANDSHAKE_TIMEOUT,
+    VerifiedHelperExecutable, HANDSHAKE_TIMEOUT,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,12 +60,34 @@ pub(super) fn smoke_helper_at_path_with_authorization(
     path: &Path,
     authorization: Option<&dyn AuthorizationProvider>,
 ) -> Result<HelperSmoke> {
-    smoke_helper_at_path_with_authorization_observing_status(data_root, path, authorization, drop)
+    smoke_helper_at_path_with_authorization_observing_status(
+        data_root,
+        path,
+        None,
+        authorization,
+        drop,
+    )
+}
+
+#[cfg(ctx_pro_qualification)]
+pub(crate) fn smoke_qualification_helper(
+    data_root: &Path,
+    executable: VerifiedHelperExecutable,
+) -> Result<HelperSmoke> {
+    let path = executable.path().to_path_buf();
+    smoke_helper_at_path_with_authorization_observing_status(
+        data_root,
+        &path,
+        Some(executable),
+        None,
+        drop,
+    )
 }
 
 fn smoke_helper_at_path_with_authorization_observing_status(
     data_root: &Path,
     path: &Path,
+    execution_guard: Option<VerifiedHelperExecutable>,
     authorization: Option<&dyn AuthorizationProvider>,
     observe_status: impl FnOnce(StatusResult),
 ) -> Result<HelperSmoke> {
@@ -73,7 +95,7 @@ fn smoke_helper_at_path_with_authorization_observing_status(
     let mut client = ProClient::connect_to_path_with_authorization_mode(
         data_root,
         path,
-        None,
+        execution_guard,
         &required,
         authorization,
         true,
@@ -99,6 +121,7 @@ pub(super) fn smoke_helper_at_path_with_authorization_and_status(
     let smoke = smoke_helper_at_path_with_authorization_observing_status(
         data_root,
         path,
+        None,
         authorization,
         |status| observed_status = Some(status),
     )?;

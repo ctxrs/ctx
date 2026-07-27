@@ -17,8 +17,30 @@ use ctx_history_core::platform_security::{
 };
 use ctx_pro_host_protocol::ProFilesystemLayout;
 
-/// Holds the exact installed helper and its controlled directory chain open
-/// until `CreateProcess` has consumed the executable path.
+pub(super) struct PreparedHelperExecution {
+    program: PathBuf,
+    #[cfg(all(unix, ctx_pro_qualification))]
+    _qualification_descriptor:
+        Option<crate::pro::qualification_helper::QualificationDescriptorExecution>,
+}
+
+impl PreparedHelperExecution {
+    pub(super) fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub(super) fn configure_command(&self, command: &mut std::process::Command) {
+        #[cfg(all(unix, ctx_pro_qualification))]
+        if let Some(descriptor) = &self._qualification_descriptor {
+            descriptor.configure_command(command);
+        }
+        #[cfg(not(all(unix, ctx_pro_qualification)))]
+        let _ = command;
+    }
+}
+
+/// Holds the exact installed helper and its controlled directory chain for the
+/// complete helper process lifetime.
 pub(super) struct VerifiedHelperExecutable {
     path: PathBuf,
     #[cfg(windows)]
@@ -27,10 +49,14 @@ pub(super) struct VerifiedHelperExecutable {
     helper: fs::File,
     #[cfg(windows)]
     marker: fs::File,
+    // Keep this last so Windows execution handles close before its exact-path
+    // cleanup runs.
+    #[cfg(ctx_pro_qualification)]
+    qualification_bundle: Option<crate::pro::qualification_helper::QualificationHelperBundle>,
 }
 
 impl VerifiedHelperExecutable {
-    #[cfg(any(debug_assertions, test))]
+    #[cfg(any(test, ctx_pro_test_helper))]
     pub(super) fn open_developer(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
             .context("pro_not_installed: inspect developer Pro helper")?;
@@ -45,6 +71,8 @@ impl VerifiedHelperExecutable {
                 .context("pro_not_installed: clone developer Pro helper handle")?;
             Ok(Self {
                 path: path.to_path_buf(),
+                #[cfg(ctx_pro_qualification)]
+                qualification_bundle: None,
                 _directories: Vec::new(),
                 helper,
                 marker,
@@ -53,6 +81,39 @@ impl VerifiedHelperExecutable {
         #[cfg(not(windows))]
         Ok(Self {
             path: path.to_path_buf(),
+            #[cfg(ctx_pro_qualification)]
+            qualification_bundle: None,
+        })
+    }
+
+    #[cfg(ctx_pro_qualification)]
+    pub(super) fn open_qualification(
+        bundle: crate::pro::qualification_helper::QualificationHelperBundle,
+    ) -> Result<Self> {
+        let path = bundle.verified_path()?.to_path_buf();
+        let metadata = fs::symlink_metadata(&path)
+            .context("pro_not_installed: inspect qualification Pro helper")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("pro_not_installed: qualification Pro helper is not a regular file");
+        }
+        #[cfg(windows)]
+        {
+            let helper = open_locked_file(&path)?;
+            let marker = helper
+                .try_clone()
+                .context("pro_not_installed: clone qualification Pro helper handle")?;
+            Ok(Self {
+                path,
+                qualification_bundle: Some(bundle),
+                _directories: Vec::new(),
+                helper,
+                marker,
+            })
+        }
+        #[cfg(not(windows))]
+        Ok(Self {
+            path,
+            qualification_bundle: Some(bundle),
         })
     }
 
@@ -83,6 +144,8 @@ impl VerifiedHelperExecutable {
                 .context("invalid_response: installed Pro marker ACL is unsafe")?;
             Ok(Self {
                 path: path.to_path_buf(),
+                #[cfg(ctx_pro_qualification)]
+                qualification_bundle: None,
                 _directories: locked,
                 helper,
                 marker: marker_file,
@@ -102,6 +165,8 @@ impl VerifiedHelperExecutable {
                 .context("invalid_response: installed Pro marker permissions are unsafe")?;
             Ok(Self {
                 path: path.to_path_buf(),
+                #[cfg(ctx_pro_qualification)]
+                qualification_bundle: None,
             })
         }
     }
@@ -110,12 +175,37 @@ impl VerifiedHelperExecutable {
         &self.path
     }
 
-    /// Reopens the execution pathname and confirms it still resolves to the
-    /// exact helper handle retained since signature and ACL validation.
-    #[cfg(windows)]
+    pub(super) fn prepare_execution(&self) -> Result<PreparedHelperExecution> {
+        #[cfg(all(unix, ctx_pro_qualification))]
+        if let Some(bundle) = &self.qualification_bundle {
+            let descriptor = bundle.prepare_descriptor_execution()?;
+            return Ok(PreparedHelperExecution {
+                program: descriptor.program().to_path_buf(),
+                _qualification_descriptor: Some(descriptor),
+            });
+        }
+
+        self.verify_execution_identity()?;
+        Ok(PreparedHelperExecution {
+            program: self.path.clone(),
+            #[cfg(all(unix, ctx_pro_qualification))]
+            _qualification_descriptor: None,
+        })
+    }
+
+    /// Reopens the execution pathname immediately before spawn and confirms it
+    /// still resolves to the exact retained qualification or installed handle.
     pub(super) fn verify_execution_identity(&self) -> Result<()> {
-        let named = open_file_handle(&self.path)?;
-        verify_open_identity(&self.helper, &named, false)
+        #[cfg(ctx_pro_qualification)]
+        if let Some(bundle) = &self.qualification_bundle {
+            bundle.verified_path()?;
+        }
+        #[cfg(windows)]
+        {
+            let named = open_file_handle(&self.path)?;
+            verify_open_identity(&self.helper, &named, false)?;
+        }
+        Ok(())
     }
 
     pub(super) fn read_helper(&self, maximum: u64) -> Result<Vec<u8>> {
