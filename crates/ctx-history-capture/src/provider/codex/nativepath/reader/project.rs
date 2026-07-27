@@ -13,6 +13,15 @@ impl CodexNativeScanner {
             return Ok(CodexRecordProjection::default());
         }
 
+        // Records Core never materializes are the bulk of a Codex rollout. The
+        // prefilter answers from the raw bytes, so they never reach a parse,
+        // an allocation, or a payload hash.
+        if let CodexRecordAdmission::NoProjection(projection) = prefilter_codex_record(record) {
+            self.counters.prefiltered_records = self.counters.prefiltered_records.saturating_add(1);
+            self.project_without_parse(projection, start_byte, end_byte);
+            return Ok(CodexRecordProjection::default());
+        }
+
         self.counters.structural_json_parses =
             self.counters.structural_json_parses.saturating_add(1);
         let probe = match classify_codex_record(record) {
@@ -174,6 +183,32 @@ impl CodexNativeScanner {
             }
             CodexRecordClass::ExcludedResult(result_kind) => {
                 self.process_output(record, &probe, result_kind, start_byte, end_byte)
+            }
+        }
+    }
+
+    /// Applies the counter-only projection the prefilter proved sufficient.
+    ///
+    /// Each arm mirrors the corresponding arm of the parsed path exactly: the
+    /// ignored-record counter, or the two native-result counters that
+    /// [`Self::process_output`] advances before it consults the probe.
+    fn project_without_parse(
+        &mut self,
+        projection: CodexSkipProjection,
+        start_byte: u64,
+        end_byte: u64,
+    ) {
+        match projection {
+            CodexSkipProjection::Ignored => {
+                self.counters.ignored_records = self.counters.ignored_records.saturating_add(1);
+            }
+            CodexSkipProjection::NativeResult => {
+                self.counters.native_result_records =
+                    self.counters.native_result_records.saturating_add(1);
+                self.counters.native_result_record_bytes = self
+                    .counters
+                    .native_result_record_bytes
+                    .saturating_add(end_byte.saturating_sub(start_byte));
             }
         }
     }
