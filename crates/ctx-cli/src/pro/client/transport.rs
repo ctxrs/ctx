@@ -10,6 +10,7 @@ pub(crate) struct ProClient {
     pub(super) helper_version: String,
     pub(super) authorization_state: Option<EntitlementAccessState>,
     pub(super) entitlement_schedule: Option<EntitlementSchedule>,
+    pub(super) _execution_guard: Option<VerifiedHelperExecutable>,
 }
 
 impl ProClient {
@@ -80,14 +81,12 @@ impl ProClient {
         }
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(windows)]
         if let Some(executable) = execution_guard.as_ref() {
             executable.verify_execution_identity()?;
         }
         let mut child = command
             .spawn()
             .with_context(|| format!("helper_crashed: start Pro helper {}", path.display()))?;
-        drop(execution_guard);
         let stdin = child
             .stdin
             .take()
@@ -110,6 +109,7 @@ impl ProClient {
             helper_version: String::new(),
             authorization_state: None,
             entitlement_schedule: None,
+            _execution_guard: execution_guard,
         };
         let offered = BTreeSet::from([
             Capability::EntitlementAuthorization,

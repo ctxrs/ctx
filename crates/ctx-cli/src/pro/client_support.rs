@@ -78,7 +78,7 @@ pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
             crate::pro::commercial_config::selected_channel()?,
         )?
     {
-        return Ok(bundle.verified_path()?.to_path_buf());
+        return Ok(bundle.source_path().to_path_buf());
     }
 
     #[cfg(any(test, ctx_pro_test_helper))]
@@ -100,8 +100,7 @@ pub(super) fn helper_executable(data_root: &Path) -> Result<VerifiedHelperExecut
             crate::pro::commercial_config::selected_channel()?,
         )?
     {
-        let path = bundle.verified_path()?;
-        return VerifiedHelperExecutable::open_qualification(path);
+        return VerifiedHelperExecutable::open_qualification(bundle);
     }
 
     #[cfg(any(test, ctx_pro_test_helper))]

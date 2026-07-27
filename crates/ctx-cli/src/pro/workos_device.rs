@@ -99,6 +99,7 @@ struct OAuthError {
 struct AccessClaims {
     sub: String,
     sid: String,
+    client_id: String,
     #[serde(default, deserialize_with = "deserialize_optional_present_string")]
     org_id: Option<String>,
     exp: i64,
@@ -462,11 +463,11 @@ fn validate_claim_time_and_audience(claims: &AccessClaims, client_id: &str) -> R
     {
         bail!("authentication_expired: WorkOS access token is expired or not active");
     }
-    // WorkOS does not currently guarantee an `aud` claim for AuthKit access
-    // tokens. The token comes directly from the selected client flow and the
-    // commercial Worker verifies the client-specific issuer and JWKS. When
-    // WorkOS emits `aud`, still require it to bind to that selected client.
-    if claims
+    // AuthKit access tokens bind the application with `client_id`; `aud` is
+    // optional. Require the documented client binding and, when present, a
+    // matching audience as defense in depth.
+    if claims.client_id != client_id
+        || claims
         .aud
         .as_ref()
         .is_some_and(|aud| !audience_contains(aud, client_id))
@@ -740,6 +741,7 @@ mod tests {
         let now = unix_time().unwrap();
         let token = jwt(serde_json::json!({
             "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
             "iat":now, "exp":now+300, "aud":"client_123456", "scope":"openid profile",
             "permissions":[REQUIRED_PERMISSION]
         }));
@@ -761,6 +763,7 @@ mod tests {
             .remove("organization_id");
         pending_response["access_token"] = Value::String(jwt(serde_json::json!({
             "sub":"user_123", "sid":"session_123",
+            "client_id":"client_123456",
             "iat":now, "exp":now+300, "aud":"client_123456"
         })));
         let pending: WorkOsTokens = serde_json::from_value(pending_response).unwrap();
@@ -769,6 +772,7 @@ mod tests {
         let mut bound_response = token_response();
         bound_response["access_token"] = Value::String(jwt(serde_json::json!({
             "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
             "iat":now, "exp":now+300, "aud":"client_123456",
             "permissions":[REQUIRED_PERMISSION]
         })));
@@ -792,6 +796,7 @@ mod tests {
             response.as_object_mut().unwrap().remove("organization_id");
             response["access_token"] = Value::String(jwt(serde_json::json!({
                 "sub":"user_123", "sid":"session_123",
+                "client_id":"client_123456",
                 "iat":now, "exp":now+300, "aud":"client_123456",
                 "permissions":permissions
             })));
@@ -802,6 +807,7 @@ mod tests {
         let mut response = token_response();
         response["access_token"] = Value::String(jwt(serde_json::json!({
             "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
             "iat":now, "exp":now+300, "aud":"client_123456",
             "permissions":[]
         })));
@@ -842,6 +848,7 @@ mod tests {
         let mut response = token_response();
         response["access_token"] = Value::String(jwt(serde_json::json!({
             "sub":"user_123", "sid":"session_123", "org_id":"org_123",
+            "client_id":"client_123456",
             "iat":now, "exp":now+300, "aud":"client_123456",
             "permissions":[REQUIRED_PERMISSION]
         })));
@@ -865,12 +872,14 @@ mod tests {
         client
             .validate_access_token(&jwt(serde_json::json!({
                 "sub":"user_123","sid":"session_123","org_id":"org_123",
+                "client_id":"client_123456",
                 "iat":now,"exp":now+300,"permissions":[REQUIRED_PERMISSION]
             })))
             .unwrap();
         for claims in [
-            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","iat":now,"exp":now+300,"aud":"other_123","permissions":[REQUIRED_PERMISSION]}),
-            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","iat":now,"exp":now+300,"aud":"client_123456","scope":{"bad":true},"permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"other_123","iat":now,"exp":now+300,"permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":"other_123","permissions":[REQUIRED_PERMISSION]}),
+            serde_json::json!({"sub":"user_123","sid":"session_123","org_id":"org_123","client_id":"client_123456","iat":now,"exp":now+300,"aud":"client_123456","scope":{"bad":true},"permissions":[REQUIRED_PERMISSION]}),
         ] {
             assert!(client.validate_access_token(&jwt(claims)).is_err());
         }
